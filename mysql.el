@@ -829,59 +829,61 @@ SALT is the nonce, AUTH-PLUGIN is the current auth plugin name."
                   (mysql-connection-error
                    (signal 'mysql-auth-error
                            (list "Connection closed during authentication"))))))
-    (pcase (mysql--packet-type packet)
-      ('ok
-       ;; Authentication successful
-       (let ((ok-info (mysql--parse-ok-packet packet)))
-         (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
-      ('err
-       (let ((err-info (mysql--parse-err-packet packet)))
-         (signal 'mysql-auth-error
-                 (list (format "Authentication failed: [%d] %s"
-                               (plist-get err-info :code)
-                               (plist-get err-info :message))))))
-      ('eof
-       ;; AUTH_SWITCH_REQUEST (0xFE)
-       ;; New auth plugin name + auth data follow
-       (let* ((pos 1)
-              (nul-pos (cl-position 0 packet :start pos))
-              (new-plugin (substring packet pos nul-pos))
-              (new-salt (substring packet (1+ nul-pos)
-                                  (if (= (aref packet (1- (length packet))) 0)
-                                      (1- (length packet))
-                                    (length packet))))
-              (new-auth (mysql--compute-auth-response password new-salt new-plugin)))
-         (mysql--send-packet conn new-auth)
-         (mysql--handle-auth-response conn password new-salt new-plugin)))
-      (_
-       ;; Could be caching_sha2_password fast-auth success (0x01 0x03)
-       ;; or request for full authentication (0x01 0x04)
-       (when (and (> (length packet) 1)
-                  (= (aref packet 0) #x01))
-         (pcase (aref packet 1)
-           (#x03
-            ;; Fast auth success — read the OK packet that follows
-            (let ((ok-packet (mysql--read-packet conn)))
-              (pcase (mysql--packet-type ok-packet)
-                ('ok
-                 (let ((ok-info (mysql--parse-ok-packet ok-packet)))
-                   (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
-                ('err
-                 (let ((err-info (mysql--parse-err-packet ok-packet)))
-                   (signal 'mysql-auth-error
-                           (list (format "Auth failed after fast-auth: [%d] %s"
-                                         (plist-get err-info :code)
-                                         (plist-get err-info :message)))))))))
-           (#x04
-            ;; Full authentication required
-            (if (mysql-conn-tls conn)
-                ;; Over TLS: send cleartext password + NUL byte
-                (let ((cleartext (concat (encode-coding-string (or password "") 'utf-8)
+    ;; Dispatch on the first byte directly.  We cannot use
+    ;; `mysql--packet-type' here because AUTH_SWITCH_REQUEST also
+    ;; starts with 0xFE but can exceed 9 bytes, which would cause
+    ;; it to be misclassified as 'data instead of 'eof.
+    (let ((first (aref packet 0)))
+      (cond
+       ;; OK (0x00) — authentication successful
+       ((= first #x00)
+        (let ((ok-info (mysql--parse-ok-packet packet)))
+          (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
+       ;; ERR (0xFF)
+       ((= first #xff)
+        (let ((err-info (mysql--parse-err-packet packet)))
+          (signal 'mysql-auth-error
+                  (list (format "Authentication failed: [%d] %s"
+                                (plist-get err-info :code)
+                                (plist-get err-info :message))))))
+       ;; AUTH_SWITCH_REQUEST (0xFE) — any length
+       ((= first #xfe)
+        (let* ((pos 1)
+               (nul-pos (cl-position 0 packet :start pos))
+               (new-plugin (substring packet pos nul-pos))
+               (new-salt (substring packet (1+ nul-pos)
+                                    (if (= (aref packet (1- (length packet))) 0)
+                                        (1- (length packet))
+                                      (length packet))))
+               (new-auth (mysql--compute-auth-response password new-salt new-plugin)))
+          (mysql--send-packet conn new-auth)
+          (mysql--handle-auth-response conn password new-salt new-plugin)))
+       ;; AuthMoreData (0x01): caching_sha2_password fast-auth or full-auth
+       ((and (= first #x01) (> (length packet) 1))
+        (pcase (aref packet 1)
+          (#x03
+           ;; Fast auth success — read the OK packet that follows
+           (let ((ok-packet (mysql--read-packet conn)))
+             (pcase (mysql--packet-type ok-packet)
+               ('ok
+                (let ((ok-info (mysql--parse-ok-packet ok-packet)))
+                  (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
+               ('err
+                (let ((err-info (mysql--parse-err-packet ok-packet)))
+                  (signal 'mysql-auth-error
+                          (list (format "Auth failed after fast-auth: [%d] %s"
+                                        (plist-get err-info :code)
+                                        (plist-get err-info :message)))))))))
+          (#x04
+           ;; Full authentication required
+           (if (mysql-conn-tls conn)
+               ;; Over TLS: send cleartext password + NUL byte
+               (let ((cleartext (concat (encode-coding-string (or password "") 'utf-8)
                                         (unibyte-string 0))))
-                  (mysql--send-packet conn cleartext)
-                  (mysql--handle-auth-response conn password salt auth-plugin))
-              (signal 'mysql-auth-error
-                      (list "caching_sha2_password full authentication requires TLS"))))))))))
+                 (mysql--send-packet conn cleartext)
+                 (mysql--handle-auth-response conn password salt auth-plugin))
+             (signal 'mysql-auth-error
+                     (list "caching_sha2_password full authentication requires TLS"))))))))))
 
 ;;;; Query execution
 

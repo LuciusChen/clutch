@@ -28,6 +28,8 @@
 (defvar mysql-test-password nil
   "Set this to enable live integration tests.")
 (defvar mysql-test-database "mysql")
+(defvar mysql-test-tls-enabled nil
+  "Set this to enable TLS live tests.")
 
 ;;;; Unit tests — protocol helpers (no server needed)
 
@@ -644,6 +646,101 @@ Skips if `mysql-test-password' is nil."
         ;; Float comes back via text protocol
         (should (< (abs (- (nth 1 row) 3.14)) 0.001))
         (should (equal (nth 2 row) "hello"))))))
+
+;;;; Live tests — TLS (require mysql-test-tls-enabled)
+
+(defmacro mysql-test--with-tls-conn (var &rest body)
+  "Execute BODY with VAR bound to a TLS MySQL connection.
+Skips unless both `mysql-test-password' and `mysql-test-tls-enabled' are set."
+  (declare (indent 1))
+  `(if (or (null mysql-test-password) (null mysql-test-tls-enabled))
+       (ert-skip "Set mysql-test-password and mysql-test-tls-enabled for TLS tests")
+     (let ((mysql-tls-verify-server nil))
+       (let ((,var (mysql-connect :host mysql-test-host
+                                  :port mysql-test-port
+                                  :user mysql-test-user
+                                  :password mysql-test-password
+                                  :database mysql-test-database
+                                  :tls t)))
+         (unwind-protect
+             (progn ,@body)
+           (mysql-disconnect ,var))))))
+
+(ert-deftest mysql-test-live-tls-connect ()
+  :tags '(:mysql-live :mysql-tls)
+  "Test TLS connection and verify encryption is active."
+  (mysql-test--with-tls-conn conn
+    (should (mysql-conn-tls conn))
+    (let* ((result (mysql-query conn "SHOW STATUS LIKE 'Ssl_cipher'"))
+           (cipher (cadr (car (mysql-result-rows result)))))
+      (should (stringp cipher))
+      (should (not (string-empty-p cipher))))))
+
+(ert-deftest mysql-test-live-tls-query ()
+  :tags '(:mysql-live :mysql-tls)
+  "Test query execution over TLS."
+  (mysql-test--with-tls-conn conn
+    (let ((result (mysql-query conn "SELECT 42 AS v, 'tls-ok' AS msg")))
+      (let ((row (car (mysql-result-rows result))))
+        (should (= (car row) 42))
+        (should (equal (cadr row) "tls-ok"))))))
+
+(ert-deftest mysql-test-live-tls-prepared-statement ()
+  :tags '(:mysql-live :mysql-tls)
+  "Test prepared statements over TLS."
+  (mysql-test--with-tls-conn conn
+    (let ((stmt (mysql-prepare conn "SELECT ? + 1 AS v")))
+      (let ((result (mysql-execute stmt 99)))
+        (should (= (car (car (mysql-result-rows result))) 100)))
+      (mysql-stmt-close stmt))))
+
+(ert-deftest mysql-test-live-tls-caching-sha2-full-auth ()
+  :tags '(:mysql-live :mysql-tls)
+  "Test caching_sha2_password full auth over TLS (auth switch path)."
+  (if (or (null mysql-test-password) (null mysql-test-tls-enabled))
+      (ert-skip "Set mysql-test-password and mysql-test-tls-enabled for TLS tests")
+    (let ((mysql-tls-verify-server nil))
+      ;; Create a caching_sha2_password user and flush to force full auth
+      (let ((admin (mysql-connect :host mysql-test-host
+                                  :port mysql-test-port
+                                  :user mysql-test-user
+                                  :password mysql-test-password
+                                  :database mysql-test-database)))
+        (unwind-protect
+            (progn
+              (condition-case nil
+                  (mysql-query admin "DROP USER '_mysql_el_sha2test'@'%'")
+                (mysql-query-error nil))
+              (mysql-query admin
+                "CREATE USER '_mysql_el_sha2test'@'%' IDENTIFIED WITH caching_sha2_password BY 'testpw'")
+              (mysql-query admin "GRANT ALL ON *.* TO '_mysql_el_sha2test'@'%'")
+              (mysql-query admin "FLUSH PRIVILEGES"))
+          (mysql-disconnect admin)))
+      ;; Connect as the new user over TLS (full auth required)
+      (let ((conn (mysql-connect :host mysql-test-host
+                                 :port mysql-test-port
+                                 :user "_mysql_el_sha2test"
+                                 :password "testpw"
+                                 :database mysql-test-database
+                                 :tls t)))
+        (unwind-protect
+            (progn
+              (should (mysql-conn-tls conn))
+              (let ((result (mysql-query conn "SELECT CURRENT_USER()")))
+                (should (string-prefix-p "_mysql_el_sha2test"
+                                         (car (car (mysql-result-rows result)))))))
+          (mysql-disconnect conn)))
+      ;; Cleanup
+      (let ((admin (mysql-connect :host mysql-test-host
+                                  :port mysql-test-port
+                                  :user mysql-test-user
+                                  :password mysql-test-password
+                                  :database mysql-test-database)))
+        (unwind-protect
+            (condition-case nil
+                (mysql-query admin "DROP USER '_mysql_el_sha2test'@'%'")
+              (mysql-query-error nil))
+          (mysql-disconnect admin))))))
 
 (provide 'mysql-test)
 ;;; mysql-test.el ends here
