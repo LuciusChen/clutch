@@ -29,6 +29,7 @@
 (define-error 'mysql-auth-error "MySQL authentication error" 'mysql-error)
 (define-error 'mysql-query-error "MySQL query error" 'mysql-error)
 (define-error 'mysql-timeout "MySQL timeout" 'mysql-error)
+(define-error 'mysql-stmt-error "MySQL prepared statement error" 'mysql-error)
 
 (provide 'mysql-error)
 ;;; mysql-error.el ends here

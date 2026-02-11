@@ -15,7 +15,12 @@ in pure Elisp is entirely feasible.
 - MySQL wire protocol (HandshakeV10 + HandshakeResponse41)
 - =mysql_native_password= and =caching_sha2_password= authentication
 - =COM_QUERY= (text protocol) for executing SQL
-- Automatic type conversion (integers, floats, JSON, etc.)
+- Prepared statements (=COM_STMT_PREPARE= / =COM_STMT_EXECUTE= / =COM_STMT_CLOSE=) with binary protocol
+- TLS/SSL support via Emacs built-in GnuTLS (STARTTLS upgrade)
+- Extended type system: DATE, TIME, DATETIME, TIMESTAMP, BIT with structured parsing
+- Convenience macros: =with-mysql-connection=, =with-mysql-transaction=
+- Utilities: =mysql-ping=, =mysql-escape-identifier=, =mysql-escape-literal=, =mysql-connect/uri=
+- Extensible type parsing via =mysql-type-parsers=
 - Proper error signaling with structured error types
 
 * Requirements
@@ -54,6 +59,54 @@ Clone this repository and add it to your =load-path=:
 
 ;; Disconnect
 (mysql-disconnect conn)
+#+end_src
+
+** TLS Connection
+
+#+begin_src emacs-lisp
+(setq conn (mysql-connect :host "127.0.0.1"
+                           :port 3306
+                           :user "root"
+                           :password "secret"
+                           :database "mydb"
+                           :tls t))
+#+end_src
+
+** URI Connection
+
+#+begin_src emacs-lisp
+(setq conn (mysql-connect/uri "mysql://root:secret@127.0.0.1:3306/mydb"))
+#+end_src
+
+** Convenience Macros
+
+#+begin_src emacs-lisp
+;; Auto-close connection
+(with-mysql-connection conn (:host "127.0.0.1" :user "root"
+                             :password "secret" :database "mydb")
+  (mysql-query conn "SELECT 1"))
+
+;; Transaction with auto-rollback on error
+(with-mysql-transaction conn
+  (mysql-query conn "INSERT INTO users (name) VALUES ('alice')")
+  (mysql-query conn "INSERT INTO users (name) VALUES ('bob')"))
+#+end_src
+
+** Prepared Statements
+
+#+begin_src emacs-lisp
+(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (let ((result (mysql-execute stmt 42)))
+    (mysql-result-rows result))
+  (mysql-stmt-close stmt))
+#+end_src
+
+** Utilities
+
+#+begin_src emacs-lisp
+(mysql-ping conn)                          ;; => t
+(mysql-escape-identifier "my`table")       ;; => "`my``table`"
+(mysql-escape-literal "it's a \"test\"")   ;; => "'it\\'s a \\\"test\\\"'"
 #+end_src
 
 * Testing
