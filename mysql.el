@@ -71,14 +71,25 @@
 
 ;;;; TLS configuration
 
-(defvar mysql-tls-trustfiles nil
-  "List of CA certificate file paths for TLS verification.")
+(defgroup mysql nil
+  "Pure Elisp MySQL client."
+  :group 'comm
+  :prefix "mysql-")
 
-(defvar mysql-tls-keylist nil
-  "List of (CERT-FILE KEY-FILE) pairs for client certificates.")
+(defcustom mysql-tls-trustfiles nil
+  "List of CA certificate file paths for TLS verification."
+  :type '(repeat file)
+  :group 'mysql)
 
-(defvar mysql-tls-verify-server t
-  "Whether to verify the server certificate during TLS handshake.")
+(defcustom mysql-tls-keylist nil
+  "List of (CERT-FILE KEY-FILE) pairs for client certificates."
+  :type '(repeat (list file file))
+  :group 'mysql)
+
+(defcustom mysql-tls-verify-server t
+  "Whether to verify the server certificate during TLS handshake."
+  :type 'boolean
+  :group 'mysql)
 
 ;;;; Column type constants
 
@@ -312,118 +323,103 @@ Algorithm: SHA256(password) XOR SHA256(SHA256(SHA256(password)) + salt)"
 
 ;;;; Handshake
 
+(defun mysql--read-le-uint (packet pos n)
+  "Read an N-byte little-endian unsigned integer from PACKET at POS."
+  (let ((val 0))
+    (dotimes (i n val)
+      (setq val (logior val (ash (aref packet (+ pos i)) (* i 8)))))))
+
+(defun mysql--parse-handshake-salt (conn packet pos salt-part1 auth-data-len)
+  "Parse the second salt part and auth plugin from handshake PACKET at POS.
+CONN, SALT-PART1, and AUTH-DATA-LEN provide context.
+Returns a plist with :salt and :auth-plugin."
+  (let ((salt-part2 ""))
+    (when (not (zerop (logand (mysql-conn-capability-flags conn)
+                              mysql--cap-secure-connection)))
+      (let ((part2-len (max 13 (- auth-data-len 8))))
+        (setq salt-part2 (substring packet pos (+ pos part2-len)))
+        (cl-incf pos part2-len)
+        ;; Remove trailing NUL if present
+        (when (and (> (length salt-part2) 0)
+                   (= (aref salt-part2 (1- (length salt-part2))) 0))
+          (setq salt-part2 (substring salt-part2 0 -1)))))
+    (let ((auth-plugin nil))
+      (when (not (zerop (logand (mysql-conn-capability-flags conn)
+                                mysql--cap-plugin-auth)))
+        (when-let* ((nul-pos (cl-position 0 packet :start pos)))
+          (setq auth-plugin (substring packet pos nul-pos))))
+      (list :salt (concat salt-part1 salt-part2)
+            :auth-plugin (or auth-plugin "mysql_native_password")))))
+
 (defun mysql--parse-handshake (conn packet)
   "Parse a HandshakeV10 PACKET and update CONN with server info.
 Returns a plist with :salt and :auth-plugin."
-  (let* ((pos 0)
-         (protocol-version (aref packet pos)))
-    (unless (= protocol-version 10)
+  (let ((pos 0))
+    (unless (= (aref packet 0) 10)
       (signal 'mysql-protocol-error
-              (list (format "Unsupported protocol version: %d" protocol-version))))
+              (list (format "Unsupported protocol version: %d" (aref packet 0)))))
     (cl-incf pos)
     ;; server_version: NUL-terminated string
     (let ((nul-pos (cl-position 0 packet :start pos)))
       (setf (mysql-conn-server-version conn)
             (substring packet pos nul-pos))
       (setq pos (1+ nul-pos)))
-    ;; connection_id: 4 bytes LE
-    (setf (mysql-conn-connection-id conn)
-          (logior (aref packet pos)
-                  (ash (aref packet (+ pos 1)) 8)
-                  (ash (aref packet (+ pos 2)) 16)
-                  (ash (aref packet (+ pos 3)) 24)))
+    (setf (mysql-conn-connection-id conn) (mysql--read-le-uint packet pos 4))
     (cl-incf pos 4)
     ;; auth_plugin_data_part_1: 8 bytes
     (let ((salt-part1 (substring packet pos (+ pos 8))))
       (cl-incf pos 8)
-      ;; filler: 1 byte (0x00)
-      (cl-incf pos 1)
-      ;; capability_flags lower 2 bytes
-      (let ((cap-low (logior (aref packet pos)
-                             (ash (aref packet (+ pos 1)) 8))))
+      (cl-incf pos 1) ;; filler
+      (let ((cap-low (mysql--read-le-uint packet pos 2)))
         (cl-incf pos 2)
-        ;; character_set: 1 byte
         (setf (mysql-conn-character-set conn) (aref packet pos))
         (cl-incf pos 1)
-        ;; status_flags: 2 bytes
-        (setf (mysql-conn-status-flags conn)
-              (logior (aref packet pos)
-                      (ash (aref packet (+ pos 1)) 8)))
+        (setf (mysql-conn-status-flags conn) (mysql--read-le-uint packet pos 2))
         (cl-incf pos 2)
-        ;; capability_flags upper 2 bytes
-        (let ((cap-high (logior (aref packet pos)
-                                (ash (aref packet (+ pos 1)) 8))))
+        (let ((cap-high (mysql--read-le-uint packet pos 2)))
           (cl-incf pos 2)
-          (let ((server-caps (logior cap-low (ash cap-high 16))))
-            (setf (mysql-conn-capability-flags conn) server-caps))
-          ;; auth_plugin_data_len or 0
+          (setf (mysql-conn-capability-flags conn)
+                (logior cap-low (ash cap-high 16)))
           (let ((auth-data-len (aref packet pos)))
             (cl-incf pos 1)
-            ;; reserved: 10 bytes (all zeros)
-            (cl-incf pos 10)
-            ;; auth_plugin_data_part_2 (if cap SECURE_CONNECTION)
-            (let ((salt-part2 ""))
-              (when (not (zerop (logand (mysql-conn-capability-flags conn)
-                                       mysql--cap-secure-connection)))
-                (let ((part2-len (max 13 (- auth-data-len 8))))
-                  (setq salt-part2 (substring packet pos (+ pos part2-len)))
-                  (cl-incf pos part2-len)
-                  ;; Remove trailing NUL if present
-                  (when (and (> (length salt-part2) 0)
-                             (= (aref salt-part2 (1- (length salt-part2))) 0))
-                    (setq salt-part2 (substring salt-part2 0 -1)))))
-              ;; auth_plugin_name (NUL-terminated)
-              (let ((auth-plugin nil))
-                (when (not (zerop (logand (mysql-conn-capability-flags conn)
-                                         mysql--cap-plugin-auth)))
-                  (let ((nul-pos2 (cl-position 0 packet :start pos)))
-                    (when nul-pos2
-                      (setq auth-plugin (substring packet pos nul-pos2)))))
-                (list :salt (concat salt-part1 salt-part2)
-                      :auth-plugin (or auth-plugin "mysql_native_password"))))))))))
+            (cl-incf pos 10) ;; reserved
+            (mysql--parse-handshake-salt
+             conn packet pos salt-part1 auth-data-len)))))))
+
+(defun mysql--client-capabilities (conn)
+  "Compute the client capability flags for CONN."
+  (logior mysql--cap-long-password
+          mysql--cap-found-rows
+          mysql--cap-long-flag
+          mysql--cap-protocol-41
+          mysql--cap-transactions
+          mysql--cap-secure-connection
+          mysql--cap-plugin-auth
+          (if (mysql-conn-tls conn) mysql--cap-ssl 0)
+          (if (mysql-conn-database conn) mysql--cap-connect-with-db 0)))
 
 (defun mysql--build-handshake-response (conn password salt auth-plugin)
   "Build a HandshakeResponse41 packet for CONN.
 PASSWORD is the user password, SALT is the server nonce, AUTH-PLUGIN
 is the authentication plugin name."
-  (let* ((client-flags (logior mysql--cap-long-password
-                               mysql--cap-found-rows
-                               mysql--cap-long-flag
-                               mysql--cap-protocol-41
-                               mysql--cap-transactions
-                               mysql--cap-secure-connection
-                               mysql--cap-plugin-auth
-                               (if (mysql-conn-tls conn)
-                                   mysql--cap-ssl
-                                 0)
-                               (if (mysql-conn-database conn)
-                                   mysql--cap-connect-with-db
-                                 0)))
+  (let* ((client-flags (mysql--client-capabilities conn))
          (auth-response (mysql--compute-auth-response password salt auth-plugin))
          (parts nil))
     (setf (mysql-conn-capability-flags conn)
           (logand client-flags (mysql-conn-capability-flags conn)))
-    ;; client_flag: 4 bytes
     (push (mysql--int-le-bytes client-flags 4) parts)
-    ;; max_packet_size: 4 bytes
-    (push (mysql--int-le-bytes #x00ffffff 4) parts)
-    ;; character_set: 1 byte (utf8mb4 = 45)
-    (push (unibyte-string 45) parts)
-    ;; filler: 23 bytes of 0x00
-    (push (make-string 23 0) parts)
-    ;; username: NUL-terminated
+    (push (mysql--int-le-bytes #x00ffffff 4) parts)  ;; max_packet_size
+    (push (unibyte-string 45) parts)                  ;; charset: utf8mb4
+    (push (make-string 23 0) parts)                   ;; filler
     (push (concat (encode-coding-string (mysql-conn-user conn) 'utf-8)
                   (unibyte-string 0))
           parts)
-    ;; auth_response: length-prefixed
     (push (unibyte-string (length auth-response)) parts)
     (push auth-response parts)
-    ;; database: NUL-terminated (if connect-with-db)
     (when (mysql-conn-database conn)
       (push (concat (encode-coding-string (mysql-conn-database conn) 'utf-8)
                     (unibyte-string 0))
             parts))
-    ;; auth_plugin_name: NUL-terminated
     (push (concat (encode-coding-string auth-plugin 'utf-8)
                   (unibyte-string 0))
           parts)
@@ -446,57 +442,18 @@ PASSWORD is the plaintext password, SALT is the server nonce."
 (defun mysql--parse-ok-packet (packet)
   "Parse an OK_Packet from PACKET (first byte 0x00 already verified).
 Returns a plist with :affected-rows, :last-insert-id, :status-flags, :warnings."
-  (let ((pos 1)
-        affected-rows last-insert-id status-flags warnings)
-    ;; affected_rows: lenenc int
-    (pcase (aref packet pos)
-      ((and b (guard (< b #xfb)))
-       (setq affected-rows b)
-       (cl-incf pos 1))
-      (#xfc
-       (cl-incf pos 1)
-       (setq affected-rows (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
-       (cl-incf pos 2))
-      (#xfd
-       (cl-incf pos 1)
-       (setq affected-rows (logior (aref packet pos)
-                                   (ash (aref packet (+ pos 1)) 8)
-                                   (ash (aref packet (+ pos 2)) 16)))
-       (cl-incf pos 3))
-      (#xfe
-       (cl-incf pos 1)
-       (setq affected-rows 0)
-       (dotimes (i 8)
-         (setq affected-rows (logior affected-rows (ash (aref packet (+ pos i)) (* i 8)))))
-       (cl-incf pos 8)))
-    ;; last_insert_id: lenenc int
-    (pcase (aref packet pos)
-      ((and b (guard (< b #xfb)))
-       (setq last-insert-id b)
-       (cl-incf pos 1))
-      (#xfc
-       (cl-incf pos 1)
-       (setq last-insert-id (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
-       (cl-incf pos 2))
-      (#xfd
-       (cl-incf pos 1)
-       (setq last-insert-id (logior (aref packet pos)
-                                    (ash (aref packet (+ pos 1)) 8)
-                                    (ash (aref packet (+ pos 2)) 16)))
-       (cl-incf pos 3))
-      (#xfe
-       (cl-incf pos 1)
-       (setq last-insert-id 0)
-       (dotimes (i 8)
-         (setq last-insert-id (logior last-insert-id (ash (aref packet (+ pos i)) (* i 8)))))
-       (cl-incf pos 8)))
-    ;; status_flags: 2 bytes LE
-    (when (< (+ pos 1) (length packet))
-      (setq status-flags (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
-      (cl-incf pos 2))
-    ;; warnings: 2 bytes LE
-    (when (< (+ pos 1) (length packet))
-      (setq warnings (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8))))
+  (let* ((r1 (mysql--read-lenenc-int-from-string packet 1))
+         (affected-rows (car r1))
+         (r2 (mysql--read-lenenc-int-from-string packet (cdr r1)))
+         (last-insert-id (car r2))
+         (pos (cdr r2))
+         (status-flags (when (< (1+ pos) (length packet))
+                         (prog1 (logior (aref packet pos)
+                                        (ash (aref packet (+ pos 1)) 8))
+                           (cl-incf pos 2))))
+         (warnings (when (< (1+ pos) (length packet))
+                     (logior (aref packet pos)
+                             (ash (aref packet (+ pos 1)) 8)))))
     (list :affected-rows affected-rows
           :last-insert-id last-insert-id
           :status-flags status-flags
@@ -567,54 +524,33 @@ Returns (string . new-pos)."
 (defun mysql--parse-column-definition (packet)
   "Parse a Column Definition packet.
 Returns a plist with column metadata."
-  (let ((pos 0) catalog schema table org-table name org-name
-        character-set column-length column-type flags decimals)
-    ;; catalog (always "def")
-    (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-      (setq catalog (car r) pos (cdr r)))
-    ;; schema
-    (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-      (setq schema (car r) pos (cdr r)))
-    ;; table (virtual)
-    (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-      (setq table (car r) pos (cdr r)))
-    ;; org_table (physical)
-    (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-      (setq org-table (car r) pos (cdr r)))
-    ;; name (virtual)
-    (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-      (setq name (car r) pos (cdr r)))
-    ;; org_name (physical)
-    (let ((r (mysql--read-lenenc-string-from-string packet pos)))
-      (setq org-name (car r) pos (cdr r)))
-    ;; fixed-length fields marker (0x0c)
+  ;; Read the 6 lenenc-string fields: catalog, schema, table, org_table, name, org_name
+  (let ((pos 0)
+        (strings nil))
+    (dotimes (_ 6)
+      (let ((r (mysql--read-lenenc-string-from-string packet pos)))
+        (push (decode-coding-string (car r) 'utf-8) strings)
+        (setq pos (cdr r))))
+    (setq strings (nreverse strings))
+    ;; Skip fixed-length fields marker (0x0c)
     (cl-incf pos 1)
-    ;; character_set: 2 bytes LE
-    (setq character-set (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
-    (cl-incf pos 2)
-    ;; column_length: 4 bytes LE
-    (setq column-length (logior (aref packet pos)
-                                (ash (aref packet (+ pos 1)) 8)
-                                (ash (aref packet (+ pos 2)) 16)
-                                (ash (aref packet (+ pos 3)) 24)))
-    (cl-incf pos 4)
-    ;; column_type: 1 byte
-    (setq column-type (aref packet pos))
-    (cl-incf pos 1)
-    ;; flags: 2 bytes LE
-    (setq flags (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8)))
-    (cl-incf pos 2)
-    ;; decimals: 1 byte
-    (setq decimals (aref packet pos))
-    (list :catalog (decode-coding-string catalog 'utf-8)
-          :schema (decode-coding-string schema 'utf-8)
-          :table (decode-coding-string table 'utf-8)
-          :org-table (decode-coding-string org-table 'utf-8)
-          :name (decode-coding-string name 'utf-8)
-          :org-name (decode-coding-string org-name 'utf-8)
-          :character-set character-set
-          :column-length column-length :type column-type :flags flags
-          :decimals decimals)))
+    (let ((character-set (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8))))
+      (cl-incf pos 2)
+      (let ((column-length (logior (aref packet pos)
+                                   (ash (aref packet (+ pos 1)) 8)
+                                   (ash (aref packet (+ pos 2)) 16)
+                                   (ash (aref packet (+ pos 3)) 24))))
+        (cl-incf pos 4)
+        (let ((column-type (aref packet pos)))
+          (cl-incf pos 1)
+          (let ((flags (logior (aref packet pos) (ash (aref packet (+ pos 1)) 8))))
+            (cl-incf pos 2)
+            (list :catalog (nth 0 strings) :schema (nth 1 strings)
+                  :table (nth 2 strings) :org-table (nth 3 strings)
+                  :name (nth 4 strings) :org-name (nth 5 strings)
+                  :character-set character-set
+                  :column-length column-length :type column-type :flags flags
+                  :decimals (aref packet pos))))))))
 
 ;;;; Row parsing
 
@@ -773,6 +709,26 @@ Returns the converted Elisp value."
 
 ;;;; Connection
 
+(defun mysql--authenticate (conn password tls)
+  "Perform the MySQL handshake and authentication sequence on CONN.
+PASSWORD is the plaintext password; TLS non-nil means upgrade to TLS first."
+  (let* ((handshake-packet (mysql--read-packet conn))
+         (handshake-info (mysql--parse-handshake conn handshake-packet))
+         (salt (plist-get handshake-info :salt))
+         (auth-plugin (plist-get handshake-info :auth-plugin)))
+    (when tls
+      (unless (not (zerop (logand (mysql-conn-capability-flags conn)
+                                  mysql--cap-ssl)))
+        (signal 'mysql-connection-error
+                (list "Server does not support SSL")))
+      (setf (mysql-conn-sequence-id conn) 1)
+      (mysql--send-packet conn (mysql--build-ssl-request conn))
+      (mysql--upgrade-to-tls conn))
+    (setf (mysql-conn-sequence-id conn) (if tls 2 1))
+    (mysql--send-packet conn
+                        (mysql--build-handshake-response conn password salt auth-plugin))
+    (mysql--handle-auth-response conn password salt auth-plugin)))
+
 (cl-defun mysql-connect (&key (host "127.0.0.1") (port 3306) user password database tls)
   "Connect to a MySQL server and authenticate.
 Returns a `mysql-conn' struct on success.
@@ -804,36 +760,55 @@ When TLS is non-nil, upgrade the connection to TLS before authenticating."
                               (insert data))))
       (condition-case err
           (progn
-            ;; Read server handshake
-            (let* ((handshake-packet (mysql--read-packet conn))
-                   (handshake-info (mysql--parse-handshake conn handshake-packet))
-                   (salt (plist-get handshake-info :salt))
-                   (auth-plugin (plist-get handshake-info :auth-plugin)))
-              (when tls
-                ;; Verify server supports SSL
-                (unless (not (zerop (logand (mysql-conn-capability-flags conn)
-                                           mysql--cap-ssl)))
-                  (signal 'mysql-connection-error
-                          (list "Server does not support SSL")))
-                ;; Send SSL_REQUEST and upgrade
-                (setf (mysql-conn-sequence-id conn) 1)
-                (mysql--send-packet conn (mysql--build-ssl-request conn))
-                (mysql--upgrade-to-tls conn))
-              ;; Send handshake response
-              (setf (mysql-conn-sequence-id conn)
-                    (if tls 2 1))
-              (let ((response (mysql--build-handshake-response conn password salt auth-plugin)))
-                (mysql--send-packet conn response))
-              ;; Read auth result
-              (mysql--handle-auth-response conn password salt auth-plugin))
+            (mysql--authenticate conn password tls)
             conn)
         (error
-         ;; Clean up on failure
          (when (process-live-p proc)
            (delete-process proc))
          (when (buffer-live-p buf)
            (kill-buffer buf))
          (signal (car err) (cdr err)))))))
+
+(defun mysql--handle-auth-switch (conn password packet)
+  "Handle an AUTH_SWITCH_REQUEST in PACKET.
+Resend credentials with the new plugin and continue authentication."
+  (let* ((pos 1)
+         (nul-pos (cl-position 0 packet :start pos))
+         (new-plugin (substring packet pos nul-pos))
+         (new-salt (substring packet (1+ nul-pos)
+                              (if (= (aref packet (1- (length packet))) 0)
+                                  (1- (length packet))
+                                (length packet))))
+         (new-auth (mysql--compute-auth-response password new-salt new-plugin)))
+    (mysql--send-packet conn new-auth)
+    (mysql--handle-auth-response conn password new-salt new-plugin)))
+
+(defun mysql--handle-auth-more-data (conn password salt auth-plugin packet)
+  "Handle caching_sha2_password AuthMoreData in PACKET.
+Dispatches on fast-auth success vs full-auth requirement."
+  (pcase (aref packet 1)
+    (#x03
+     ;; Fast auth success -- read the OK packet that follows
+     (let ((ok-packet (mysql--read-packet conn)))
+       (pcase (mysql--packet-type ok-packet)
+         ('ok
+          (let ((ok-info (mysql--parse-ok-packet ok-packet)))
+            (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
+         ('err
+          (let ((err-info (mysql--parse-err-packet ok-packet)))
+            (signal 'mysql-auth-error
+                    (list (format "Auth failed after fast-auth: [%d] %s"
+                                  (plist-get err-info :code)
+                                  (plist-get err-info :message)))))))))
+    (#x04
+     ;; Full authentication required
+     (if (mysql-conn-tls conn)
+         (let ((cleartext (concat (encode-coding-string (or password "") 'utf-8)
+                                  (unibyte-string 0))))
+           (mysql--send-packet conn cleartext)
+           (mysql--handle-auth-response conn password salt auth-plugin))
+       (signal 'mysql-auth-error
+               (list "caching_sha2_password full authentication requires TLS"))))))
 
 (defun mysql--handle-auth-response (conn password salt auth-plugin)
   "Handle the authentication response from the server.
@@ -844,61 +819,23 @@ SALT is the nonce, AUTH-PLUGIN is the current auth plugin name."
                   (mysql-connection-error
                    (signal 'mysql-auth-error
                            (list "Connection closed during authentication"))))))
-    ;; Dispatch on the first byte directly.  We cannot use
-    ;; `mysql--packet-type' here because AUTH_SWITCH_REQUEST also
-    ;; starts with 0xFE but can exceed 9 bytes, which would cause
-    ;; it to be misclassified as 'data instead of 'eof.
-    (let ((first (aref packet 0)))
-      (cond
-       ;; OK (0x00) — authentication successful
-       ((= first #x00)
-        (let ((ok-info (mysql--parse-ok-packet packet)))
-          (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
-       ;; ERR (0xFF)
-       ((= first #xff)
-        (let ((err-info (mysql--parse-err-packet packet)))
-          (signal 'mysql-auth-error
-                  (list (format "Authentication failed: [%d] %s"
-                                (plist-get err-info :code)
-                                (plist-get err-info :message))))))
-       ;; AUTH_SWITCH_REQUEST (0xFE) — any length
-       ((= first #xfe)
-        (let* ((pos 1)
-               (nul-pos (cl-position 0 packet :start pos))
-               (new-plugin (substring packet pos nul-pos))
-               (new-salt (substring packet (1+ nul-pos)
-                                    (if (= (aref packet (1- (length packet))) 0)
-                                        (1- (length packet))
-                                      (length packet))))
-               (new-auth (mysql--compute-auth-response password new-salt new-plugin)))
-          (mysql--send-packet conn new-auth)
-          (mysql--handle-auth-response conn password new-salt new-plugin)))
-       ;; AuthMoreData (0x01): caching_sha2_password fast-auth or full-auth
-       ((and (= first #x01) (> (length packet) 1))
-        (pcase (aref packet 1)
-          (#x03
-           ;; Fast auth success — read the OK packet that follows
-           (let ((ok-packet (mysql--read-packet conn)))
-             (pcase (mysql--packet-type ok-packet)
-               ('ok
-                (let ((ok-info (mysql--parse-ok-packet ok-packet)))
-                  (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
-               ('err
-                (let ((err-info (mysql--parse-err-packet ok-packet)))
-                  (signal 'mysql-auth-error
-                          (list (format "Auth failed after fast-auth: [%d] %s"
-                                        (plist-get err-info :code)
-                                        (plist-get err-info :message)))))))))
-          (#x04
-           ;; Full authentication required
-           (if (mysql-conn-tls conn)
-               ;; Over TLS: send cleartext password + NUL byte
-               (let ((cleartext (concat (encode-coding-string (or password "") 'utf-8)
-                                        (unibyte-string 0))))
-                 (mysql--send-packet conn cleartext)
-                 (mysql--handle-auth-response conn password salt auth-plugin))
-             (signal 'mysql-auth-error
-                     (list "caching_sha2_password full authentication requires TLS"))))))))))
+    ;; Dispatch on first byte directly (not mysql--packet-type, because
+    ;; AUTH_SWITCH_REQUEST 0xFE can exceed 9 bytes).
+    (pcase (aref packet 0)
+      (#x00
+       (let ((ok-info (mysql--parse-ok-packet packet)))
+         (setf (mysql-conn-status-flags conn) (plist-get ok-info :status-flags))))
+      (#xff
+       (let ((err-info (mysql--parse-err-packet packet)))
+         (signal 'mysql-auth-error
+                 (list (format "Authentication failed: [%d] %s"
+                               (plist-get err-info :code)
+                               (plist-get err-info :message))))))
+      (#xfe
+       (mysql--handle-auth-switch conn password packet))
+      (#x01
+       (when (> (length packet) 1)
+         (mysql--handle-auth-more-data conn password salt auth-plugin packet))))))
 
 ;;;; Query execution
 
@@ -933,21 +870,12 @@ SQL is a string containing the query to execute."
        ;; Result set: first byte is column_count (lenenc int)
        (mysql--read-result-set conn packet)))))
 
-(defun mysql--read-result-set (conn first-packet)
-  "Read a full result set from CONN.
-FIRST-PACKET contains the column-count.  Returns a `mysql-result'."
-  (let* ((column-count (aref first-packet 0))
-         ;; For lenenc, handle multi-byte
-         (col-count
-          (cond
-           ((< column-count #xfb) column-count)
-           (t (car (mysql--read-lenenc-int-from-string first-packet 0)))))
-         (columns nil)
-         (rows nil))
-    ;; Read column definitions
+(defun mysql--read-column-definitions (conn col-count)
+  "Read COL-COUNT column definition packets from CONN.
+Returns a list of column plists.  Also consumes the EOF packet."
+  (let ((columns nil))
     (dotimes (_ col-count)
-      (let ((col-packet (mysql--read-packet conn)))
-        (push (mysql--parse-column-definition col-packet) columns)))
+      (push (mysql--parse-column-definition (mysql--read-packet conn)) columns))
     (setq columns (nreverse columns))
     ;; Read EOF after columns (unless CLIENT_DEPRECATE_EOF)
     (unless (not (zerop (logand (mysql-conn-capability-flags conn)
@@ -956,27 +884,40 @@ FIRST-PACKET contains the column-count.  Returns a `mysql-result'."
         (unless (eq (mysql--packet-type eof-packet) 'eof)
           (signal 'mysql-protocol-error
                   (list "Expected EOF packet after column definitions")))))
-    ;; Read rows
+    columns))
+
+(defun mysql--read-text-rows (conn col-count columns)
+  "Read text protocol rows from CONN until EOF.
+COL-COUNT and COLUMNS guide parsing.  Returns rows in order."
+  (let ((rows nil))
     (cl-loop
      (let ((row-packet (mysql--read-packet conn)))
        (pcase (mysql--packet-type row-packet)
-         ((or 'eof 'ok)
-          (cl-return nil))
+         ((or 'eof 'ok) (cl-return nil))
          ('err
           (let ((err-info (mysql--parse-err-packet row-packet)))
             (signal 'mysql-query-error
                     (list (format "[%d] %s"
                                   (plist-get err-info :code)
                                   (plist-get err-info :message))))))
-         (_
-          (let* ((raw-row (mysql--parse-result-row row-packet col-count))
-                 (typed-row (mysql--convert-row raw-row columns)))
-            (push typed-row rows))))))
+         (_ (push (mysql--convert-row
+                   (mysql--parse-result-row row-packet col-count) columns)
+                  rows)))))
+    (nreverse rows)))
+
+(defun mysql--read-result-set (conn first-packet)
+  "Read a full result set from CONN.
+FIRST-PACKET contains the column-count.  Returns a `mysql-result'."
+  (let* ((col-count (let ((b (aref first-packet 0)))
+                      (if (< b #xfb) b
+                        (car (mysql--read-lenenc-int-from-string first-packet 0)))))
+         (columns (mysql--read-column-definitions conn col-count))
+         (rows (mysql--read-text-rows conn col-count columns)))
     (make-mysql-result
      :connection conn
      :status "OK"
      :columns columns
-     :rows (nreverse rows))))
+     :rows rows)))
 
 ;;;; Disconnect
 
@@ -1223,54 +1164,33 @@ Binary row NULL bitmap has a 2-bit offset."
   "Decode a binary value from PACKET at POS for the given TYPE.
 Returns (value . new-pos)."
   (pcase type
-    ;; TINY: 1 byte
+    ;; Integer types
     ((pred (= mysql--type-tiny))
      (cons (aref packet pos) (1+ pos)))
-    ;; SHORT / YEAR: 2 bytes LE
-    ((or (pred (= mysql--type-short))
-         (pred (= mysql--type-year)))
-     (cons (logior (aref packet pos) (ash (aref packet (1+ pos)) 8))
-           (+ pos 2)))
-    ;; LONG / INT24: 4 bytes LE
-    ((or (pred (= mysql--type-long))
-         (pred (= mysql--type-int24)))
-     (cons (logior (aref packet pos)
-                   (ash (aref packet (+ pos 1)) 8)
-                   (ash (aref packet (+ pos 2)) 16)
-                   (ash (aref packet (+ pos 3)) 24))
-           (+ pos 4)))
-    ;; LONGLONG: 8 bytes LE
+    ((or (pred (= mysql--type-short)) (pred (= mysql--type-year)))
+     (cons (mysql--read-le-uint packet pos 2) (+ pos 2)))
+    ((or (pred (= mysql--type-long)) (pred (= mysql--type-int24)))
+     (cons (mysql--read-le-uint packet pos 4) (+ pos 4)))
     ((pred (= mysql--type-longlong))
-     (let ((val 0))
-       (dotimes (i 8)
-         (setq val (logior val (ash (aref packet (+ pos i)) (* i 8)))))
-       (cons val (+ pos 8))))
-    ;; FLOAT: 4 bytes IEEE 754
+     (cons (mysql--read-le-uint packet pos 8) (+ pos 8)))
+    ;; Floating point
     ((pred (= mysql--type-float))
-     (let ((val (mysql--ieee754-single-to-float packet pos)))
-       (cons val (+ pos 4))))
-    ;; DOUBLE: 8 bytes IEEE 754
+     (cons (mysql--ieee754-single-to-float packet pos) (+ pos 4)))
     ((pred (= mysql--type-double))
-     (let ((val (mysql--ieee754-double-to-float packet pos)))
-       (cons val (+ pos 8))))
-    ;; DATE / DATETIME / TIMESTAMP
+     (cons (mysql--ieee754-double-to-float packet pos) (+ pos 8)))
+    ;; Temporal types
     ((or (pred (= mysql--type-date))
          (pred (= mysql--type-datetime))
          (pred (= mysql--type-timestamp)))
      (mysql--decode-binary-datetime packet pos type))
-    ;; TIME
     ((pred (= mysql--type-time))
      (mysql--decode-binary-time packet pos))
-    ;; NULL (shouldn't reach here due to bitmap)
     ((pred (= mysql--type-null))
      (cons nil pos))
     ;; All string-like types: lenenc string
     (_
-     (let ((r (mysql--read-lenenc-int-from-string packet pos)))
-       (let* ((len (car r))
-              (start (cdr r)))
-         (cons (substring packet start (+ start len))
-               (+ start len)))))))
+     (pcase-let ((`(,len . ,start) (mysql--read-lenenc-int-from-string packet pos)))
+       (cons (substring packet start (+ start len)) (+ start len))))))
 
 (defun mysql--ieee754-single-to-float (data offset)
   "Decode a 4-byte IEEE 754 single-precision float from DATA at OFFSET."

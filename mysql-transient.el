@@ -53,10 +53,16 @@
 (transient-define-prefix mysql-result-dispatch ()
   "Dispatch menu for MySQL result buffer."
   ["Navigate"
+   ("RET" "Open record" mysql-result-open-record)
    ("c" "Go to column" mysql-result-goto-column)
-   ("v" "Vertical view" mysql-result-toggle-vertical)
-   ("n" "Load more"    mysql-result-load-more)
-   ("RET" "Follow FK"  mysql-result-follow-fk)]
+   ("n" "Load more"    mysql-result-load-more)]
+  ["Column Pages"
+   ("]" "Next page"     mysql-result-next-col-page)
+   ("[" "Prev page"     mysql-result-prev-col-page)
+   ("+" "Widen column"  mysql-result-widen-column)
+   ("-" "Narrow column" mysql-result-narrow-column)
+   ("p" "Pin column"    mysql-result-pin-column)
+   ("P" "Unpin column"  mysql-result-unpin-column)]
   ["Filter / Sort"
    ("W" "WHERE filter" mysql-result-apply-filter)
    ("s" "Sort ASC"  mysql-result-sort-by-column)
@@ -65,11 +71,28 @@
    ("e" "Edit cell"  mysql-result-edit-cell)
    ("C" "Commit"     mysql-result-commit)]
   ["Copy / Export"
-   ("y" "Yank cell"      mysql-result-yank-cell)
-   ("w" "Row as INSERT"  mysql-result-copy-row-as-insert)
-   ("E" "Export"         mysql-result-export)]
+   ("y" "Yank cell"       mysql-result-yank-cell)
+   ("w" "Row(s) as INSERT" mysql-result-copy-row-as-insert)
+   ("Y" "Row(s) as CSV"   mysql-result-copy-as-csv)
+   ("E" "Export"           mysql-result-export)]
   ["Other"
    ("g" "Re-execute" mysql-result-rerun)])
+
+;;;###autoload (autoload 'mysql-record-dispatch "mysql-transient" nil t)
+(transient-define-prefix mysql-record-dispatch ()
+  "Dispatch menu for MySQL record buffer."
+  ["Navigate"
+   ("n" "Next row"     mysql-record-next-row)
+   ("p" "Prev row"     mysql-record-prev-row)
+   ("RET" "Expand/FK"  mysql-record-toggle-expand)]
+  ["Edit"
+   ("C-c '" "Edit field" mysql-record-edit-field)]
+  ["Copy"
+   ("y" "Yank field"      mysql-record-yank-field)
+   ("w" "Row as INSERT"   mysql-record-copy-as-insert)]
+  ["Other"
+   ("g" "Refresh" mysql-record-refresh)
+   ("q" "Quit"    quit-window)])
 
 (provide 'mysql-transient)
 ;;; mysql-transient.el ends here

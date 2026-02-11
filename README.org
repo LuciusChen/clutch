@@ -109,6 +109,165 @@ Clone this repository and add it to your =load-path=:
 (mysql-escape-literal "it's a \"test\"")   ;; => "'it\\'s a \\\"test\\\"'"
 #+end_src
 
+* Interactive Client (mysql-interactive.el)
+
+交互式 SQL 客户端，提供 SQL 编辑、结果浏览、Schema 浏览、REPL 等功能。
+
+** 快速开始
+
+*** 1. 配置连接
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/repos/mysql.el")
+(require 'mysql-interactive)
+
+(setq mysql-connection-alist
+      '(("dev" . (:host "127.0.0.1" :port 3306
+                  :user "root" :password "test"
+                  :database "mydb"))))
+#+end_src
+
+*** 2. 打开 SQL 编辑 buffer
+
+#+begin_src
+M-x mysql-mode            ;; 新建一个 SQL 编辑 buffer
+;; 或者打开 .mysql 文件    ;; 自动激活 mysql-mode
+#+end_src
+
+*** 3. 连接数据库
+
+#+begin_src
+C-c C-e                   ;; 弹出 completing-read 选择连接
+                          ;; mode-line 显示 MySQL[root@127.0.0.1:3306/mydb]
+#+end_src
+
+*** 4. 写 SQL 并执行
+
+#+begin_src sql
+SELECT * FROM users LIMIT 10;
+#+end_src
+
+光标放在 SQL 语句上，按 =C-c C-c= 执行。结果显示在底部分屏的 result buffer 中。
+
+** SQL 编辑 (mysql-mode) 快捷键
+
+| 键位        | 功能             |
+|-------------+------------------|
+| =C-c C-c=   | 执行光标处的 SQL |
+| =C-c C-r=   | 执行选中区域     |
+| =C-c C-b=   | 执行整个 buffer  |
+| =C-c C-e=   | 连接 / 重连      |
+| =C-c C-t=   | 列出所有表       |
+| =C-c C-d=   | DESCRIBE 光标处表名 |
+| =C-c C-l=   | 查询历史         |
+| =C-c C-o=   | Transient 菜单   |
+| =TAB=       | 补全表名/列名    |
+
+** 结果浏览 (mysql-result-mode) 快捷键
+
+| 键位        | 功能                         |
+|-------------+------------------------------|
+| =RET=       | 跟随外键 / 显示完整 cell 值  |
+| =W=         | WHERE 过滤（再按清除）       |
+| =s= / =S=  | 按列排序 ASC / DESC          |
+| =c=         | 跳转到某列                   |
+| =v=         | 切换纵向视图                 |
+| =n=         | 加载更多行                   |
+| =g=         | 重新执行查询                 |
+| =C-c '=    | 编辑 cell 值                 |
+| =C-c C-c=  | 提交编辑（生成 UPDATE）      |
+| =y=         | 复制 cell 值                 |
+| =w=         | 复制行为 INSERT 语句（支持选区多行） |
+| =Y=         | 复制行为 CSV（支持选区多行） |
+| =e=         | 导出（org / csv）            |
+| =?=         | Transient 菜单               |
+
+** 典型工作流示例
+
+*** 查询 + 过滤 + 排序
+
+#+begin_src
+1. 写 SQL:  SELECT * FROM orders;
+2. C-c C-c  执行 → 结果显示在底部
+3. W        输入过滤条件: status = 'pending'
+            → 自动追加 WHERE status = 'pending' 重新查询
+4. s        选择列排序 (默认当前列)
+5. W        输入空字符串 → 清除过滤，恢复原始查询
+#+end_src
+
+*** 外键导航
+
+#+begin_src
+1. SELECT * FROM orders;     → C-c C-c 执行
+2. 光标移到 user_id 列的某个值上（外键列会有下划线高亮）
+3. RET                       → 自动执行 SELECT * FROM users WHERE id = <value>
+#+end_src
+
+*** 编辑数据
+
+#+begin_src
+1. SELECT * FROM users;      → C-c C-c 执行
+2. 光标移到要修改的 cell
+3. C-c '                     → 打开编辑 buffer
+4. 修改内容，C-c C-c 确认   （C-c C-k 取消）
+5. 可以编辑多个 cell，修改过的 cell 会高亮显示
+6. C-c C-c                   → 弹出确认，显示将执行的 UPDATE 语句
+#+end_src
+
+** REPL 模式
+
+#+begin_src
+M-x mysql-repl              ;; 打开 REPL buffer
+C-c C-e                     ;; 连接数据库
+mysql> SELECT * FROM users;  ;; 输入 SQL，以 ; 结尾后自动执行
+                             ;; 支持多行输入（续行提示 ->）
+                             ;; M-p / M-n 浏览历史
+#+end_src
+
+** Schema 浏览
+
+#+begin_src
+C-c C-t                     ;; 列出所有表
+RET                          ;; 在表名上按回车 → 查看表结构 (DESCRIBE)
+g                            ;; 刷新
+#+end_src
+
+** Transient 菜单
+
+需要安装 =transient= 包（Magit 自带）。
+
+#+begin_src emacs-lisp
+(require 'mysql-transient)
+#+end_src
+
+在 mysql-mode 中按 =C-c C-o= 或在 result buffer 中按 =?= 打开菜单。
+
+** Org-Babel 集成
+
+在 org 文件中直接执行 SQL，需要配置：
+
+#+begin_src emacs-lisp
+(require 'ob-mysql)
+(with-eval-after-load 'org
+  (add-to-list 'org-babel-load-languages '(mysql . t))
+  (org-babel-do-load-languages
+   'org-babel-load-languages org-babel-load-languages))
+#+end_src
+
+使用已存连接：
+
+: #+begin_src mysql :connection dev
+: SELECT * FROM users LIMIT 5;
+: #+end_src
+
+或内联连接参数：
+
+: #+begin_src mysql :host 127.0.0.1 :port 3306 :user root :password test :database mydb
+: SHOW TABLES;
+: #+end_src
+
+=C-c C-c= 执行代码块，结果自动插入为 org 表格。
+
 * Testing
 
 ** Unit tests (no server needed)
