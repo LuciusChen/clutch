@@ -476,6 +476,24 @@ Returns a string (with text properties)."
 
 ;;;; Column-paged renderer
 
+(defun data-lens--replace-edge-borders (str has-prev has-next)
+  "Replace edge border characters in STR with page indicators.
+When HAS-PREV is non-nil, replace the first `|' or `+' with `◂'.
+When HAS-NEXT is non-nil, replace the last `|' or `+' with `▸'.
+Preserves existing text properties."
+  (when has-prev
+    (let ((c (aref str 0)))
+      (when (or (= c ?|) (= c ?+))
+        (setq str (concat (propertize "◂" 'face 'data-lens-border-face)
+                          (substring str 1))))))
+  (when has-next
+    (let* ((len (length str))
+           (c (aref str (1- len))))
+      (when (or (= c ?|) (= c ?+))
+        (setq str (concat (substring str 0 (1- len))
+                           (propertize "▸" 'face 'data-lens-border-face))))))
+  str)
+
 (defun data-lens--render-separator (visible-cols widths)
   "Render a separator line for VISIBLE-COLS with WIDTHS."
   (let ((padding data-lens-column-padding)
@@ -588,8 +606,15 @@ Returns a propertized string."
          (page (seq-take data-lens--result-rows
                          data-lens--display-offset))
          (total (length data-lens--result-rows))
-         (sep (propertize (data-lens--render-separator visible-cols widths)
-                          'face 'data-lens-border-face)))
+         (num-pages (length data-lens--column-pages))
+         (cur-page data-lens--current-col-page)
+         (has-prev (> cur-page 0))
+         (has-next (< cur-page (1- num-pages)))
+         (edge (lambda (s) (data-lens--replace-edge-borders
+                            s has-prev has-next)))
+         (sep (funcall edge
+                       (propertize (data-lens--render-separator visible-cols widths)
+                                   'face 'data-lens-border-face))))
     (erase-buffer)
     (setq header-line-format nil)
     (when data-lens--pending-edits
@@ -599,17 +624,18 @@ Returns a propertized string."
                        (if (= (length data-lens--pending-edits) 1) "" "s"))
                'face 'data-lens-modified-face)))
     (insert sep "\n")
-    (insert (data-lens--render-header visible-cols widths) "\n")
+    (insert (funcall edge (data-lens--render-header visible-cols widths)) "\n")
     (insert sep "\n")
     (let ((ridx 0))
       (dolist (row page)
-        (insert (data-lens--render-row row ridx visible-cols widths) "\n")
+        (insert (funcall edge
+                         (data-lens--render-row row ridx visible-cols widths))
+                "\n")
         (cl-incf ridx)))
     (insert sep "\n")
     (insert (data-lens--render-footer
              total data-lens--display-offset
-             (length data-lens--column-pages)
-             (1+ data-lens--current-col-page))
+             num-pages (1+ cur-page))
             "\n")
     (goto-char (point-min))))
 
