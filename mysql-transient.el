@@ -55,8 +55,10 @@
   ["Navigate"
    ("c" "Go to column" mysql-result-goto-column)
    ("v" "Vertical view" mysql-result-toggle-vertical)
-   ("n" "Load more"    mysql-result-load-more)]
-  ["Sort"
+   ("n" "Load more"    mysql-result-load-more)
+   ("RET" "Follow FK"  mysql-result-follow-fk)]
+  ["Filter / Sort"
+   ("W" "WHERE filter" mysql-result-apply-filter)
    ("s" "Sort ASC"  mysql-result-sort-by-column)
    ("S" "Sort DESC" mysql-result-sort-by-column-desc)]
   ["Edit"

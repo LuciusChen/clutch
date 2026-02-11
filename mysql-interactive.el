@@ -71,6 +71,12 @@
   "Face for modified cell values."
   :group 'mysql-interactive)
 
+(defface mysql-fk-face
+  '((t :inherit font-lock-type-face :underline t))
+  "Face for foreign key column values.
+Underlined to indicate clickable (RET to follow)."
+  :group 'mysql-interactive)
+
 (defcustom mysql-connection-alist nil
   "Alist of saved MySQL connections.
 Each entry has the form:
@@ -134,6 +140,16 @@ NAME is a string used for `completing-read'."
 
 (defvar-local mysql-interactive--pending-edits nil
   "Alist of pending edits: ((ROW-IDX . COL-IDX) . NEW-VALUE).")
+
+(defvar-local mysql-interactive--fk-info nil
+  "Foreign key info for the current result.
+Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
+
+(defvar-local mysql-interactive--where-filter nil
+  "Current WHERE filter string, or nil if no filter active.")
+
+(defvar-local mysql-interactive--base-query nil
+  "The original unfiltered SQL query, used by WHERE filtering.")
 
 ;;;; History
 
@@ -334,6 +350,8 @@ After `org-table-align', extracts the header row into
                              'mysql-full-value (if edited (cdr edited) val)
                              'face (cond (edited 'mysql-modified-face)
                                          ((null val) 'mysql-null-face)
+                                         ((assq cidx mysql-interactive--fk-info)
+                                          'mysql-fk-face)
                                          (t nil)))))
                do (insert " | "))
       ;; fix trailing: replace last " | " with " |"
@@ -398,6 +416,7 @@ SQL is the query text, ELAPSED the time in seconds."
       (setq-local mysql-interactive--vertical-view nil)
       (setq-local mysql-interactive--display-offset 0)
       (setq-local mysql-interactive--pending-edits nil)
+      (mysql-interactive--load-fk-info)
       (let ((inhibit-read-only t)
             (page-size mysql-interactive-result-max-rows)
             (total (length rows)))
@@ -710,6 +729,8 @@ Key bindings:
     (define-key map "S" #'mysql-result-sort-by-column-desc)
     (define-key map "y" #'mysql-result-yank-cell)
     (define-key map "w" #'mysql-result-copy-row-as-insert)
+    (define-key map "W" #'mysql-result-apply-filter)
+    (define-key map (kbd "RET") #'mysql-result-follow-fk)
     (define-key map "?" #'mysql-result-dispatch)
     map)
   "Keymap for `mysql-result-mode'.")
@@ -718,6 +739,8 @@ Key bindings:
   "Mode for displaying MySQL query results.
 
 \\<mysql-result-mode-map>
+  \\[mysql-result-follow-fk]	Follow foreign key / show cell value
+  \\[mysql-result-apply-filter]	Apply WHERE filter
   \\[mysql-result-edit-cell]	Edit cell value
   \\[mysql-result-commit]	Commit edits as UPDATE
   \\[mysql-result-goto-column]	Jump to column by name
@@ -917,6 +940,34 @@ Returns table name string or nil."
                             pk-cols)))
       (mysql-error nil))))
 
+(defun mysql-interactive--load-fk-info ()
+  "Load foreign key info for the current result's source table.
+Populates `mysql-interactive--fk-info' with an alist mapping
+column indices to their referenced table and column."
+  (setq mysql-interactive--fk-info nil)
+  (when-let* ((conn mysql-interactive-connection)
+              (table (mysql-result--detect-table))
+              (col-names mysql-interactive--result-columns))
+    (condition-case nil
+        (let* ((sql (format
+                     "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
+AND REFERENCED_TABLE_NAME IS NOT NULL"
+                     (mysql-escape-literal table)))
+               (result (mysql-query conn sql))
+               (rows (mysql-result-rows result)))
+          (dolist (row rows)
+            (let* ((col-name (nth 0 row))
+                   (ref-table (nth 1 row))
+                   (ref-col (nth 2 row))
+                   (idx (cl-position col-name col-names :test #'string=)))
+              (when idx
+                (push (cons idx (list :ref-table ref-table
+                                      :ref-column ref-col))
+                      mysql-interactive--fk-info)))))
+      (mysql-error nil))))
+
 (defun mysql-result-commit ()
   "Generate and execute UPDATE statements for pending edits."
   (interactive)
@@ -1049,6 +1100,101 @@ Numbers sort numerically, nil sorts last, everything else as string."
   "Sort results descending by a column."
   (interactive)
   (mysql-result--sort (mysql-result--read-column) t))
+
+;;;; Foreign key navigation
+
+(defun mysql-result-follow-fk ()
+  "Follow the foreign key at point to the referenced row.
+If the cell is not a foreign key column, display its full value."
+  (interactive)
+  (let ((cell (mysql-result--cell-at-point)))
+    (unless cell
+      (user-error "No cell at point"))
+    (let* ((cidx (nth 1 cell))
+           (val (nth 2 cell))
+           (fk (cdr (assq cidx mysql-interactive--fk-info))))
+      (if (not fk)
+          ;; Not FK — show full value
+          (message "%s" (mysql-interactive--format-value val))
+        (when (null val)
+          (user-error "NULL value — cannot follow"))
+        (let* ((ref-table (plist-get fk :ref-table))
+               (ref-col (plist-get fk :ref-column))
+               (literal (cond
+                         ((numberp val) (number-to-string val))
+                         ((stringp val) (mysql-escape-literal val))
+                         (t (mysql-escape-literal
+                             (mysql-interactive--format-value val)))))
+               (sql (format "SELECT * FROM %s WHERE %s = %s"
+                            (mysql-escape-identifier ref-table)
+                            (mysql-escape-identifier ref-col)
+                            literal)))
+          (mysql-interactive--execute sql mysql-interactive-connection))))))
+
+;;;; WHERE filtering
+
+(defun mysql-interactive--apply-where (sql filter)
+  "Apply WHERE FILTER to SQL query string.
+If SQL already has a WHERE clause, appends FILTER with AND.
+Otherwise inserts WHERE before ORDER BY/GROUP BY/HAVING/LIMIT or at end."
+  (let* ((trimmed (string-trim-right
+                   (replace-regexp-in-string ";\\s-*\\'" "" sql)))
+         (case-fold-search t))
+    (if (string-match-p "\\bWHERE\\b" trimmed)
+        ;; Has WHERE — insert AND
+        (if (string-match
+             "\\b\\(ORDER[[:space:]]+BY\\|GROUP[[:space:]]+BY\\|HAVING\\|LIMIT\\)\\b"
+             trimmed)
+            (let ((pos (match-beginning 0)))
+              (concat (substring trimmed 0 pos)
+                      (format "AND (%s) " filter)
+                      (substring trimmed pos)))
+          (format "%s AND (%s)" trimmed filter))
+      ;; No WHERE — insert one
+      (if (string-match
+           "\\b\\(ORDER[[:space:]]+BY\\|GROUP[[:space:]]+BY\\|HAVING\\|LIMIT\\)\\b"
+           trimmed)
+          (let ((pos (match-beginning 0)))
+            (concat (substring trimmed 0 pos)
+                    (format "WHERE %s " filter)
+                    (substring trimmed pos)))
+        (format "%s WHERE %s" trimmed filter)))))
+
+(defun mysql-result-apply-filter ()
+  "Apply or clear a WHERE filter on the current result query.
+Prompts for a WHERE condition.  Enter empty string to clear."
+  (interactive)
+  (unless mysql-interactive--last-query
+    (user-error "No query to filter"))
+  (let* ((base (or mysql-interactive--base-query
+                   mysql-interactive--last-query))
+         (current mysql-interactive--where-filter)
+         (input (string-trim
+                 (read-string
+                  (if current
+                      (format "WHERE filter (current: %s, empty to clear): "
+                              current)
+                    "WHERE filter (e.g., age > 18): ")
+                  nil nil current))))
+    (if (string-empty-p input)
+        ;; Clear filter
+        (progn
+          (mysql-interactive--execute base mysql-interactive-connection)
+          (setq mysql-interactive--where-filter nil)
+          (setq mysql-interactive--base-query nil)
+          (message "Filter cleared"))
+      ;; Apply filter
+      (let ((filtered-sql (mysql-interactive--apply-where base input)))
+        (mysql-interactive--execute filtered-sql mysql-interactive-connection)
+        (setq mysql-interactive--base-query base)
+        (setq mysql-interactive--where-filter input)
+        ;; Append filter indicator to header-line
+        (when header-line-format
+          (setq header-line-format
+                (concat header-line-format
+                        (propertize (format "  [W: %s]" input)
+                                    'face 'font-lock-warning-face))))
+        (message "Filter applied: WHERE %s" input)))))
 
 ;;;; Yank cell / Copy row as INSERT
 
