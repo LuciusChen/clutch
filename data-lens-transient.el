@@ -77,7 +77,8 @@
    ("Y" "Row(s) as CSV"   data-lens-result-copy-as-csv)
    ("E" "Export"           data-lens-result-export)]
   ["Other"
-   ("g" "Re-execute" data-lens-result-rerun)])
+   ("g" "Re-execute" data-lens-result-rerun)
+   ("F" "Fullscreen"  data-lens-result-fullscreen-toggle)])
 
 ;;;###autoload (autoload 'data-lens-record-dispatch "data-lens-transient" nil t)
 (transient-define-prefix data-lens-record-dispatch ()
