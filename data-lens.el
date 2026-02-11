@@ -55,6 +55,11 @@
   "Face for column headers in result tables."
   :group 'data-lens)
 
+(defface data-lens-pinned-header-face
+  '((t :inherit data-lens-header-face :underline t))
+  "Face for pinned column headers."
+  :group 'data-lens)
+
 (defface data-lens-header-active-face
   '((((background light)) :background "#d0d0ff" :foreground "#000000"
      :weight bold)
@@ -176,6 +181,12 @@ NAME is a string used for `completing-read'."
 (defvar-local data-lens--fk-info nil
   "Foreign key info for the current result.
 Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
+
+(defvar-local data-lens--sort-column nil
+  "Column name currently sorted by, or nil.")
+
+(defvar-local data-lens--sort-descending nil
+  "Non-nil if the current sort is descending.")
 
 (defvar-local data-lens--where-filter nil
   "Current WHERE filter string, or nil if no filter active.")
@@ -521,22 +532,36 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
 (defun data-lens--render-header (visible-cols widths)
   "Render the header row string for VISIBLE-COLS with WIDTHS.
 Each column name carries a `data-lens-header-col' text property
-so the active-column overlay can find it."
+so the active-column overlay can find it.
+Pinned columns show a pin indicator, sorted column shows ▲/▼."
   (let ((padding data-lens-column-padding)
         (parts nil))
     (dolist (cidx visible-cols)
       (let* ((name (nth cidx data-lens--result-columns))
              (w (aref widths cidx))
+             (pinned-p (memq cidx data-lens--pinned-columns))
+             (sort-indicator
+              (when (and data-lens--sort-column
+                         (string= name data-lens--sort-column))
+                (if data-lens--sort-descending "▼" "▲")))
+             (suffix (concat (or sort-indicator "")
+                             (if pinned-p " ⊡" "")))
+             (label (if (string-empty-p suffix)
+                        name
+                      (concat name suffix)))
              (padded (string-pad
-                      (if (> (string-width name) w)
-                          (concat (truncate-string-to-width name (1- w)) "…")
-                        name)
+                      (if (> (string-width label) w)
+                          (concat (truncate-string-to-width label (1- w)) "…")
+                        label)
                       w))
+             (face (if pinned-p
+                       'data-lens-pinned-header-face
+                     'data-lens-header-face))
              (pad-str (make-string padding ?\s)))
         (push (concat (propertize "│" 'face 'data-lens-border-face)
                       pad-str
                       (propertize padded
-                                  'face 'data-lens-header-face
+                                  'face face
                                   'data-lens-header-col cidx)
                       pad-str)
               parts)))
@@ -638,7 +663,13 @@ Returns a propertized string."
                                              visible-cols widths 'bottom)
                                             'face bface))))
     (erase-buffer)
-    (setq header-line-format nil)
+    (setq header-line-format
+          (when data-lens--where-filter
+            (list " "
+                  (propertize " W " 'face '(:inherit warning :inverse-video t))
+                  " "
+                  (propertize data-lens--where-filter
+                              'face 'font-lock-warning-face))))
     (when data-lens--pending-edits
       (insert (propertize
                (format "-- %d pending edit%s\n"
@@ -781,6 +812,8 @@ SQL is the query text, ELAPSED the time in seconds."
       (setq-local data-lens--pending-edits nil)
       (setq-local data-lens--current-col-page 0)
       (setq-local data-lens--pinned-columns nil)
+      (setq-local data-lens--sort-column nil)
+      (setq-local data-lens--sort-descending nil)
       (if col-names
           (data-lens--display-select-result col-names rows columns)
         (data-lens--display-dml-result result sql elapsed))
@@ -789,12 +822,24 @@ SQL is the query text, ELAPSED the time in seconds."
 
 ;;;; Query execution engine
 
+(defun data-lens--destructive-query-p (sql)
+  "Return non-nil if SQL is a destructive operation."
+  (let ((trimmed (string-trim-left sql)))
+    (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
+                    (upcase trimmed))))
+
 (defun data-lens--execute (sql &optional conn)
   "Execute SQL on CONN (or current buffer connection).
-Records history, times execution, and displays results."
+Records history, times execution, and displays results.
+Prompts for confirmation on destructive operations."
   (let ((connection (or conn data-lens-connection)))
     (unless (data-lens--connection-alive-p connection)
       (user-error "Not connected.  Use C-c C-e to connect"))
+    (when (data-lens--destructive-query-p sql)
+      (unless (yes-or-no-p
+               (format "Execute destructive query?\n  %s\n"
+                       (truncate-string-to-width (string-trim sql) 80)))
+        (user-error "Query cancelled")))
     (setq data-lens--last-query sql)
     (data-lens--add-history sql)
     (let* ((start (float-time))
@@ -1182,15 +1227,29 @@ Key bindings:
     (define-key map "-" #'data-lens-result-narrow-column)
     (define-key map "p" #'data-lens-result-pin-column)
     (define-key map "P" #'data-lens-result-unpin-column)
+    (define-key map "F" #'data-lens-result-fullscreen-toggle)
     (define-key map "?" #'data-lens-result-dispatch)
     map)
   "Keymap for `data-lens-result-mode'.")
 
 (defun data-lens--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
+Also updates the mode-line position indicator.
 Uses an overlay so the buffer text is not modified."
   (when data-lens--column-widths
-    (let ((cidx (data-lens--col-idx-at-point)))
+    (let ((cidx (data-lens--col-idx-at-point))
+          (ridx (get-text-property (point) 'data-lens-row-idx)))
+      ;; Position indicator
+      (setq mode-line-position
+            (when ridx
+              (let* ((total (length data-lens--result-rows))
+                     (ncols (length data-lens--result-columns))
+                     (col-name (when cidx (nth cidx data-lens--result-columns))))
+                (format " R%d/%d C%d/%d%s"
+                        (1+ ridx) total
+                        (if cidx (1+ cidx) 0) ncols
+                        (if col-name (format " [%s]" col-name) "")))))
+      ;; Header highlight
       (unless (eql cidx data-lens--header-active-col)
         (setq data-lens--header-active-col cidx)
         (when data-lens--header-overlay
@@ -1532,6 +1591,8 @@ Numbers sort numerically, nil sorts last, everything else as string."
                     (if descending
                         (data-lens-result--compare vb va)
                       (data-lens-result--compare va vb))))))
+    (setq data-lens--sort-column col-name)
+    (setq data-lens--sort-descending descending)
     (setq data-lens--display-offset
           (min (length data-lens--result-rows)
                data-lens-result-max-rows))
@@ -1778,6 +1839,27 @@ Generates CSV directly from cached data."
         (data-lens--refresh-display)
         (message "Unpinned column %s" (nth cidx data-lens--result-columns)))
     (user-error "No column at point")))
+
+;;;; Fullscreen toggle
+
+(defvar-local data-lens--pre-fullscreen-config nil
+  "Window configuration saved before entering fullscreen.")
+
+(defun data-lens-result-fullscreen-toggle ()
+  "Toggle fullscreen display for the result buffer.
+Expands the result buffer to fill the frame, or restores the
+previous window layout."
+  (interactive)
+  (if data-lens--pre-fullscreen-config
+      (progn
+        (set-window-configuration data-lens--pre-fullscreen-config)
+        (setq data-lens--pre-fullscreen-config nil)
+        (message "Restored window layout"))
+    (setq data-lens--pre-fullscreen-config
+          (current-window-configuration))
+    (delete-other-windows)
+    (data-lens--refresh-display)
+    (message "Fullscreen (press F again to restore)")))
 
 ;;;; Record buffer
 
