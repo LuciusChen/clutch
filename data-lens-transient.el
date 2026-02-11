@@ -44,6 +44,7 @@
    ("x" "Query at point" data-lens-execute-query-at-point)
    ("r" "Region"         data-lens-execute-region)
    ("b" "Buffer"         data-lens-execute-buffer)
+   ("'" "Indirect edit"  data-lens-edit-indirect)
    ("l" "History"        data-lens-show-history)]
   ["Schema"
    ("t" "List tables"    data-lens-list-tables)

@@ -873,6 +873,89 @@ current line.  Uses the connection from any data-lens-mode buffer."
                   (user-error "No active MySQL connection.  Use M-x data-lens-mode then C-c C-e to connect"))))
     (data-lens--execute sql conn)))
 
+;;;; Indirect edit buffer
+
+(defun data-lens--string-at-point ()
+  "Return the string literal content at point, or nil.
+Uses `syntax-ppss' to detect string boundaries, so it works in
+any mode that has a proper syntax table (Java, Kotlin, Python,
+Go, Ruby, etc.)."
+  (let ((ppss (syntax-ppss)))
+    (when (nth 3 ppss)
+      (let ((str-start (nth 8 ppss)))
+        (save-excursion
+          (goto-char str-start)
+          (forward-sexp 1)
+          (buffer-substring-no-properties (1+ str-start) (1- (point))))))))
+
+(defvar data-lens-indirect-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c '") #'data-lens-indirect-execute)
+    (define-key map (kbd "C-c C-k") #'data-lens-indirect-abort)
+    map)
+  "Keymap for `data-lens-indirect-mode'.")
+
+(define-minor-mode data-lens-indirect-mode
+  "Minor mode active in indirect SQL edit buffers.
+\\<data-lens-indirect-mode-map>
+Key bindings:
+  \\[data-lens-indirect-execute]	Execute and close
+  \\[data-lens-indirect-abort]	Abort and close"
+  :lighter " Indirect")
+
+(defun data-lens-indirect-execute ()
+  "Execute the SQL in the indirect buffer, then close it."
+  (interactive)
+  (let ((sql (string-trim
+              (buffer-substring-no-properties (point-min) (point-max))))
+        (conn (or data-lens-connection
+                  (data-lens--find-connection))))
+    (when (string-empty-p sql)
+      (user-error "No SQL to execute"))
+    (unless conn
+      (user-error "No active MySQL connection"))
+    (quit-window 'kill)
+    (data-lens--execute sql conn)))
+
+(defun data-lens-indirect-abort ()
+  "Abort the indirect edit buffer."
+  (interactive)
+  (quit-window 'kill))
+
+;;;###autoload
+(defun data-lens-edit-indirect ()
+  "Open an indirect `data-lens-mode' buffer with SQL extracted from context.
+With an active region, use the region.  When point is inside a
+string literal (DAO code, etc.), extract the string content.
+Otherwise use the current line.
+
+The indirect buffer inherits the connection from any live
+`data-lens-mode' buffer.  Edit the SQL freely, then press
+\\<data-lens-indirect-mode-map>\\[data-lens-indirect-execute] \
+to execute or \\[data-lens-indirect-abort] to abort."
+  (interactive)
+  (let* ((text (string-trim
+                (cond
+                 ((use-region-p)
+                  (buffer-substring-no-properties
+                   (region-beginning) (region-end)))
+                 ((data-lens--string-at-point))
+                 (t
+                  (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position))))))
+         (conn (or (bound-and-true-p data-lens-connection)
+                   (data-lens--find-connection)))
+         (buf (generate-new-buffer "*data-lens: indirect*")))
+    (pop-to-buffer buf)
+    (data-lens-mode)
+    (when conn
+      (setq-local data-lens-connection conn)
+      (data-lens--update-mode-line))
+    (data-lens-indirect-mode 1)
+    (insert text)
+    (goto-char (point-min))
+    (message "Edit SQL, then C-c ' to execute, C-c C-k to abort")))
+
 ;;;; Schema cache + completion
 
 (defvar data-lens--schema-cache (make-hash-table :test 'equal)
