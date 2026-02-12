@@ -152,17 +152,24 @@
 (defun mysql--ensure-data (conn n)
   "Ensure at least N bytes are available in CONN's input buffer.
 Waits for data from the process, signaling `mysql-timeout' if
-`mysql-conn-read-timeout' seconds elapse."
-  (let ((proc (mysql-conn-process conn))
-        (buf (mysql-conn-buf conn))
-        (deadline (+ (float-time) (mysql-conn-read-timeout conn))))
+no new data arrives within `mysql-conn-read-timeout' seconds.
+The timeout resets each time data is received, so large result
+sets that stream continuously will not time out."
+  (let* ((proc (mysql-conn-process conn))
+         (buf (mysql-conn-buf conn))
+         (timeout (mysql-conn-read-timeout conn))
+         (deadline (+ (float-time) timeout)))
     (with-current-buffer buf
       (while (< (- (point-max) (point-min)) n)
-        (let ((remaining (- deadline (float-time))))
+        (let ((remaining (- deadline (float-time)))
+              (prev-size (- (point-max) (point-min))))
           (when (<= remaining 0)
             (signal 'mysql-timeout
                     (list (format "Timed out waiting for %d bytes" n))))
-          (unless (accept-process-output proc remaining nil t)
+          (if (accept-process-output proc remaining nil t)
+              ;; Data arrived — reset the idle deadline.
+              (when (> (- (point-max) (point-min)) prev-size)
+                (setq deadline (+ (float-time) timeout)))
             ;; No new output from proc.  If the process exited, flush
             ;; any remaining queued output from the OS before giving up.
             (when (not (process-live-p proc))
