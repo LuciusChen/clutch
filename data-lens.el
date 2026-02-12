@@ -87,17 +87,19 @@ Underlined to indicate clickable (RET to follow)."
   :group 'data-lens)
 
 (defcustom data-lens-connection-alist nil
-  "Alist of saved MySQL connections.
+  "Alist of saved database connections.
 Each entry has the form:
-  (NAME . (:host H :port P :user U :password P :database D))
-NAME is a string used for `completing-read'."
+  (NAME . (:host H :port P :user U :password P :database D [:sql-product SYM]))
+NAME is a string used for `completing-read'.
+:sql-product overrides `data-lens-sql-product' for this connection."
   :type '(alist :key-type string
                 :value-type (plist :options
                                    ((:host string)
                                     (:port integer)
                                     (:user string)
                                     (:password string)
-                                    (:database string))))
+                                    (:database string)
+                                    (:sql-product symbol))))
   :group 'data-lens)
 
 (defcustom data-lens-history-file
@@ -144,6 +146,9 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
 
 (defvar-local data-lens-connection nil
   "Current `mysql-conn' for this buffer.")
+
+(defvar-local data-lens--conn-sql-product nil
+  "SQL product for the current connection, or nil to use the default.")
 
 (defvar-local data-lens--last-query nil
   "Last executed SQL query string.")
@@ -314,13 +319,18 @@ If `data-lens-connection-alist' is non-empty, offer saved connections via
                   :password (read-passwd "Password: ")
                   :database (let ((db (read-string "Database (optional): ")))
                               (unless (string-empty-p db) db)))))
+         (product (plist-get conn-params :sql-product))
+         (mysql-params (cl-loop for (k v) on conn-params by #'cddr
+                                unless (eq k :sql-product)
+                                append (list k v)))
          (conn (condition-case err
-                   (apply #'mysql-connect conn-params)
+                   (apply #'mysql-connect mysql-params)
                  (mysql-error
                   (user-error "Connection failed: %s"
                               (error-message-string err))))))
     (mysql-query conn "SET NAMES utf8mb4")
     (setq data-lens-connection conn)
+    (setq data-lens--conn-sql-product product)
     (data-lens--update-mode-line)
     (data-lens--refresh-schema-cache conn)
     (message "Connected to %s" (data-lens--connection-key conn))))
@@ -1182,11 +1192,11 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
       (data-lens-schema-mode)
       (setq-local data-lens-connection conn)
       (require 'sql)
-      (setq-local font-lock-defaults
-                  (list (symbol-value
-                         (plist-get (cdr (assq data-lens-sql-product
-                                               sql-product-alist))
-                                    :font-lock))))
+      (let ((product (or data-lens--conn-sql-product data-lens-sql-product)))
+        (setq-local font-lock-defaults
+                    (list (symbol-value
+                           (plist-get (cdr (assq product sql-product-alist))
+                                      :font-lock)))))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert ddl)
