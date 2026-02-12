@@ -1189,20 +1189,15 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
          (ddl (nth 1 (car rows)))
          (buf (get-buffer-create (format "*mysql: %s*" table))))
     (with-current-buffer buf
-      (data-lens-schema-mode)
+      (sql-mode)
+      (sql-set-product (or data-lens--conn-sql-product data-lens-sql-product))
       (setq-local data-lens-connection conn)
-      (require 'sql)
-      (let ((product (or data-lens--conn-sql-product data-lens-sql-product)))
-        (setq-local font-lock-defaults
-                    (list (symbol-value
-                           (plist-get (cdr (assq product sql-product-alist))
-                                      :font-lock)))))
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert ddl)
-        (insert "\n")
-        (font-lock-ensure)
-        (goto-char (point-min))))
+      (erase-buffer)
+      (insert ddl)
+      (insert "\n")
+      (font-lock-ensure)
+      (setq buffer-read-only t)
+      (goto-char (point-min)))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
 (defun data-lens-describe-table-at-point ()
