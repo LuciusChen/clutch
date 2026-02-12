@@ -392,17 +392,21 @@ nil → \"NULL\", numbers unquoted, strings escaped."
     (245 "<JSON>")
     (_ "<BLOB>")))
 
-(defun data-lens--compute-column-widths (col-names rows column-defs)
+(defun data-lens--compute-column-widths (col-names rows column-defs
+                                                      &optional max-width)
   "Compute display width for each column.
 COL-NAMES is a list of header strings, ROWS is the data,
 COLUMN-DEFS is the column metadata list.
+MAX-WIDTH caps individual column width (default `data-lens-column-width-max').
+Pass a large value or nil to use the default.
 Returns a vector of integers."
   (let* ((ncols (length col-names))
-         (max-w data-lens-column-width-max)
+         (max-w (or max-width data-lens-column-width-max))
          (widths (make-vector ncols 0))
          (sample (seq-take rows 50)))
     (dotimes (i ncols)
-      (if (data-lens--long-field-type-p (nth i column-defs))
+      (if (and (data-lens--long-field-type-p (nth i column-defs))
+               (<= max-w data-lens-column-width-max))
           (aset widths i 10)
         (let ((header-w (string-width (nth i col-names)))
               (data-w 0))
@@ -474,7 +478,7 @@ Returns a string (with text properties)."
          (data-lens--fk-info nil)
          (ncols (length col-names))
          (all-cols (number-sequence 0 (1- ncols)))
-         (widths (data-lens--compute-column-widths col-names rows column-defs))
+         (widths (data-lens--compute-column-widths col-names rows column-defs 1000))
          (bface 'data-lens-border-face)
          (sep-top (propertize (data-lens--render-separator all-cols widths 'top)
                               'face bface))
