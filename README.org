@@ -32,10 +32,12 @@ in pure Elisp is entirely feasible.
 ** Interactive UI (data-lens.el)
 
 - Column-paged result display (no horizontal scrolling)
+- SQL pagination (=LIMIT/OFFSET=) with fixed header (=tab-line= + =header-line=)
+- Row numbers as a table column; sort/pin indicators via =nerd-icons= (with Unicode fallback)
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
 - Inline cell editing with UPDATE generation
-- WHERE filtering and column sorting
+- WHERE filtering and SQL =ORDER BY= sorting
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
 - Schema browser, SQL completion, query history
@@ -185,16 +187,18 @@ SELECT * FROM users LIMIT 10;
 | 键位        | 功能                             |
 |-------------+----------------------------------|
 | =RET=       | 打开 Record 视图                 |
+| =n= / =p=  | 下一页 / 上一页（SQL 分页）      |
+| =M->= / =M-<= | 最后一页 / 第一页            |
+| =#=         | 查询总行数                       |
 | =]=         | 下一列页                         |
 | =[=         | 上一列页                         |
 | =+=         | 加宽当前列                       |
 | =-=         | 缩窄当前列                       |
-| =p=         | 固定当前列                       |
-| =P=         | 取消固定                         |
+| =C-c p=     | 固定当前列                       |
+| =C-c P=     | 取消固定                         |
 | =W=         | WHERE 过滤（再按清除）           |
-| =s= / =S=  | 按列排序 ASC / DESC              |
+| =s= / =S=  | 按列排序 ASC / DESC（SQL ORDER BY） |
 | =c=         | 跳转到某列                       |
-| =n=         | 加载更多行                       |
 | =g=         | 重新执行查询                     |
 | =e=         | 编辑 cell 值                     |
 | =C-c C-c=  | 提交编辑（生成 UPDATE）          |
@@ -202,6 +206,7 @@ SELECT * FROM users LIMIT 10;
 | =w=         | 复制行为 INSERT 语句（支持选区） |
 | =Y=         | 复制行为 CSV（支持选区）         |
 | =E=         | 导出（org / csv）                |
+| =F=         | 全屏切换                         |
 | =?=         | Transient 菜单                   |
 
 ** Record 视图 (data-lens-record-mode) 快捷键
@@ -218,15 +223,17 @@ SELECT * FROM users LIMIT 10;
 
 ** 典型工作流示例
 
-*** 查询 + 过滤 + 排序
+*** 查询 + 分页 + 过滤 + 排序
 
 #+begin_src
 1. 写 SQL:  SELECT * FROM orders;
-2. C-c C-c  执行 → 结果显示在底部
-3. W        输入过滤条件: status = 'pending'
-            → 自动追加 WHERE status = 'pending' 重新查询
-4. s        选择列排序 (默认当前列)
-5. W        输入空字符串 → 清除过滤，恢复原始查询
+2. C-c C-c  执行 → 结果分页显示在底部（默认每页 500 行）
+3. n / p    翻到下一页 / 上一页
+4. #        查询总行数 → footer 显示 "rows 1-500 of 1234"
+5. W        输入过滤条件: status = 'pending'
+            → 自动追加 WHERE 重新查询，从第一页开始
+6. s        按当前列排序 (SQL ORDER BY)，从第一页开始
+7. W        输入空字符串 → 清除过滤，恢复原始查询
 #+end_src
 
 *** 外键导航

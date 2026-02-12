@@ -580,19 +580,48 @@ nerd-icons is not installed."
         (car fallback)
         "")))
 
+(defun data-lens--fixed-width-icon (spec fallback &optional face)
+  "Return icon with `string-width' matching actual display width.
+SPEC is (FAMILY . ICON-NAME) for `data-lens--icon'.
+FALLBACK is the Unicode char when nerd-icons is unavailable.
+Optional FACE is applied to the result.
+
+When `string-pixel-width' is available, measures the icon glyph
+pixel width and wraps it in a display property over the correct
+number of space characters.  This ensures `string-width' matches
+the real rendered width, preventing column misalignment."
+  (let* ((raw (data-lens--icon spec fallback))
+         (raw (if (string-empty-p raw) fallback raw))
+         (result
+          (if (and (fboundp 'string-pixel-width)
+                   (fboundp 'default-font-width)
+                   (display-graphic-p))
+              (let* ((pw (string-pixel-width raw))
+                     (fw (default-font-width))
+                     (cells (if (> fw 0)
+                                (max 1 (round (/ (float pw) fw)))
+                              (string-width raw))))
+                (if (= cells (string-width raw))
+                    raw
+                  (propertize (make-string cells ?\s) 'display raw)))
+            raw)))
+    (if face (propertize result 'face face) result)))
+
 (defun data-lens--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
 Prepends sort indicator and pin marker before the name."
   (let* ((hi 'font-lock-keyword-face)
          (sort (when (and data-lens--sort-column
                           (string= name data-lens--sort-column))
-                 (propertize (if data-lens--sort-descending
-                                 (data-lens--icon '(codicon . "nf-cod-arrow_down") "▼")
-                               (data-lens--icon '(codicon . "nf-cod-arrow_up") "▲"))
-                             'face hi)))
+                 (data-lens--fixed-width-icon
+                  (if data-lens--sort-descending
+                      '(codicon . "nf-cod-arrow_down")
+                    '(codicon . "nf-cod-arrow_up"))
+                  (if data-lens--sort-descending "▼" "▲")
+                  hi)))
          (pin (when (memq cidx data-lens--pinned-columns)
-                (propertize (data-lens--icon '(mdicon . "nf-md-pin") "")
-                            'face hi))))
+                (data-lens--fixed-width-icon
+                 '(mdicon . "nf-md-pin") "∎" hi))))
     (if (or sort pin)
         (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
       name)))
@@ -667,6 +696,31 @@ Returns a propertized string."
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'data-lens-border-face))))
 
+(defun data-lens--footer-row-range (first-row last-row total-rows)
+  "Return the row-range part of the footer.
+FIRST-ROW and LAST-ROW are 1-based; TOTAL-ROWS is nil or a number."
+  (let ((hi 'font-lock-keyword-face)
+        (dim 'font-lock-comment-face))
+    (concat (propertize "rows " 'face dim)
+            (propertize (format "%d-%d" first-row last-row) 'face hi)
+            (propertize " of " 'face dim)
+            (propertize (if total-rows (format "%d" total-rows) "?")
+                        'face hi))))
+
+(defun data-lens--footer-page-indicator (page-num page-size total-rows)
+  "Return the data-page part of the footer.
+PAGE-NUM is 0-based, PAGE-SIZE is rows per page, TOTAL-ROWS may be nil."
+  (let ((hi 'font-lock-keyword-face)
+        (dim 'font-lock-comment-face))
+    (if total-rows
+        (let ((total-pages (max 1 (ceiling total-rows (float page-size)))))
+          (concat (propertize " | Page " 'face dim)
+                  (propertize (format "%d/%d" (1+ page-num)
+                                      (truncate total-pages))
+                              'face hi)))
+      (concat (propertize " | Page " 'face dim)
+              (propertize (format "%d" (1+ page-num)) 'face hi)))))
+
 (defun data-lens--render-footer (row-count page-num page-size
                                            total-rows col-num-pages col-cur-page)
   "Return the footer string for pagination state.
@@ -675,35 +729,17 @@ PAGE-NUM is the current data page (0-based).
 PAGE-SIZE is `data-lens-result-max-rows'.
 TOTAL-ROWS is the known total or nil.
 COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
-  (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face)
-        (parts nil)
-        (first-row (1+ (* page-num page-size)))
-        (last-row (+ (* page-num page-size) row-count)))
-    ;; Row range
-    (push (concat (propertize "rows " 'face dim)
-                  (propertize (format "%d-%d" first-row last-row) 'face hi)
-                  (propertize " of " 'face dim)
-                  (propertize (if total-rows (format "%d" total-rows) "?")
-                              'face hi))
-          parts)
-    ;; Data page indicator
-    (if total-rows
-        (let ((total-pages (max 1 (ceiling total-rows (float page-size)))))
-          (push (concat (propertize " | Page " 'face dim)
-                        (propertize (format "%d/%d"
-                                            (1+ page-num)
-                                            (truncate total-pages))
-                                    'face hi))
-                parts))
-      (push (concat (propertize " | Page " 'face dim)
-                    (propertize (format "%d" (1+ page-num)) 'face hi))
-            parts))
-    ;; Column page indicator
+  (let* ((hi 'font-lock-keyword-face)
+         (dim 'font-lock-comment-face)
+         (first-row (1+ (* page-num page-size)))
+         (last-row (+ (* page-num page-size) row-count))
+         (parts (list (data-lens--footer-row-range first-row last-row total-rows)
+                      (data-lens--footer-page-indicator page-num page-size total-rows))))
     (when (> col-num-pages 1)
       (push (concat (propertize " | Col page " 'face dim)
-                    (propertize (format "%d" col-cur-page) 'face hi)
-                    (propertize (format "/%d | " col-num-pages) 'face dim)
+                    (propertize (format "%d/%d" col-cur-page col-num-pages)
+                                'face hi)
+                    (propertize " | " 'face dim)
                     (propertize "[" 'face hi)
                     (propertize "-prev/ " 'face dim)
                     (propertize "]" 'face hi)
@@ -716,125 +752,141 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
             parts))
     (apply #'concat (nreverse parts))))
 
+(defun data-lens--effective-widths ()
+  "Return column widths adjusted for header indicator icons.
+Columns with sort or pin indicators get wider to fit the label."
+  (let ((widths (copy-sequence data-lens--column-widths)))
+    (dotimes (cidx (length widths))
+      (let* ((name (nth cidx data-lens--result-columns))
+             (label (data-lens--header-label name cidx))
+             (label-w (string-width label)))
+        (when (> label-w (aref widths cidx))
+          (aset widths cidx label-w))))
+    widths))
+
+(defun data-lens--header-cell (cidx widths &optional active-cidx)
+  "Build a single header cell string for column CIDX.
+WIDTHS is the effective width vector.
+ACTIVE-CIDX is the highlighted column index, if any."
+  (let* ((name (nth cidx data-lens--result-columns))
+         (w (aref widths cidx))
+         (label (data-lens--header-label name cidx))
+         (padded (data-lens--string-pad
+                  (if (> (string-width label) w)
+                      (truncate-string-to-width label w)
+                    label)
+                  w))
+         (face (cond
+                ((eql cidx active-cidx) 'data-lens-header-active-face)
+                ((memq cidx data-lens--pinned-columns)
+                 'data-lens-pinned-header-face)
+                (t 'data-lens-header-face)))
+         (pad-str (make-string data-lens-column-padding ?\s)))
+    (concat (propertize "│" 'face 'data-lens-border-face)
+            pad-str
+            (propertize padded 'face face
+                        'data-lens-header-col cidx)
+            pad-str)))
+
 (defun data-lens--build-header-line (visible-cols widths nw
                                                   has-prev has-next
                                                   &optional active-cidx)
-  "Build the header-line-format string.
+  "Build the tab-line-format string for the column header row.
 VISIBLE-COLS, WIDTHS describe columns.
 NW is the digit width for the row number column.
 HAS-PREV/HAS-NEXT control edge border indicators.
 ACTIVE-CIDX highlights that column when non-nil."
   (let* ((edge (lambda (s) (data-lens--replace-edge-borders s has-prev has-next)))
-         (padding data-lens-column-padding)
          (bface 'data-lens-border-face)
-         (pad-str (make-string padding ?\s))
-         (parts nil))
-    (dolist (cidx visible-cols)
-      (let* ((name (nth cidx data-lens--result-columns))
-             (w (aref widths cidx))
-             (label (data-lens--header-label name cidx))
-             (padded (data-lens--string-pad
-                      (if (> (string-width label) w)
-                          (truncate-string-to-width label w)
-                        label)
-                      w))
-             (face (cond
-                    ((eql cidx active-cidx) 'data-lens-header-active-face)
-                    ((memq cidx data-lens--pinned-columns)
-                     'data-lens-pinned-header-face)
-                    (t 'data-lens-header-face))))
-        (push (concat (propertize "│" 'face bface)
-                      pad-str
-                      (propertize padded 'face face
-                                  'data-lens-header-col cidx)
-                      pad-str)
-              parts)))
-    ;; Data columns with edge indicators
-    (let ((data-header (funcall edge
-                                (concat (mapconcat #'identity (nreverse parts) "")
-                                        (propertize "│" 'face bface)))))
-      ;; (space :align-to 0) cancels Emacs header-line leading space
-      (concat (propertize " " 'display '(space :align-to 0))
-              ;; Row number column: blank header
-              (propertize "│" 'face bface)
-              pad-str (make-string nw ?\s) pad-str
-              ;; Data columns (starts with │ or ◂)
-              data-header))))
+         (pad-str (make-string data-lens-column-padding ?\s))
+         (cells (mapcar (lambda (cidx)
+                          (data-lens--header-cell cidx widths active-cidx))
+                        visible-cols))
+         (data-header (funcall edge
+                               (concat (apply #'concat cells)
+                                       (propertize "│" 'face bface)))))
+    (concat (propertize "│" 'face bface)
+            pad-str (make-string nw ?\s) pad-str
+            data-header)))
+
+(defun data-lens--build-separator (visible-cols widths position
+                                                   nw edge-fn)
+  "Build a table separator line with row-number column.
+VISIBLE-COLS and WIDTHS describe data columns.
+POSITION is \\='top, \\='middle, or \\='bottom.
+NW is the row-number digit width.
+EDGE-FN applies column-page edge indicators."
+  (let* ((bface 'data-lens-border-face)
+         (rn-dash (+ nw (* 2 data-lens-column-padding)))
+         (raw (data-lens--render-separator visible-cols widths position))
+         (cross (pcase position ('top "┬") ('bottom "┴") (_ "┼")))
+         (left (pcase position ('top "┌") ('bottom "└") (_ "├")))
+         (data-part (concat cross (substring raw 1)))
+         (data-edged (funcall edge-fn (propertize data-part 'face bface)))
+         (rn (propertize (concat left (make-string rn-dash ?─)) 'face bface)))
+    (concat rn data-edged)))
+
+(defun data-lens--insert-data-rows (rows visible-cols widths nw
+                                         global-first-row edge-fn)
+  "Insert data ROWS into the current buffer.
+VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
+GLOBAL-FIRST-ROW is the 0-based offset for numbering.
+EDGE-FN applies column-page edge indicators."
+  (let ((bface 'data-lens-border-face)
+        (pad-str (make-string data-lens-column-padding ?\s))
+        (ridx 0))
+    (dolist (row rows)
+      (let* ((data-row (funcall edge-fn
+                                (data-lens--render-row
+                                 row ridx visible-cols widths)))
+             (num-label (string-pad
+                         (number-to-string
+                          (1+ (+ global-first-row ridx)))
+                         nw nil t)))
+        (insert (propertize "│" 'face bface)
+                pad-str
+                (propertize num-label 'face 'shadow)
+                pad-str
+                data-row "\n"))
+      (cl-incf ridx))))
 
 (defun data-lens--render-result ()
   "Render the result buffer content using column paging."
   (let* ((inhibit-read-only t)
          (visible-cols (data-lens--visible-columns))
-         (widths data-lens--column-widths)
+         (widths (data-lens--effective-widths))
          (rows data-lens--result-rows)
-         (row-count (length rows))
          (col-num-pages (length data-lens--column-pages))
          (cur-page data-lens--current-col-page)
          (has-prev (> cur-page 0))
          (has-next (< cur-page (1- col-num-pages)))
-         (edge (lambda (s) (data-lens--replace-edge-borders
-                            s has-prev has-next)))
-         (bface 'data-lens-border-face)
-         (padding data-lens-column-padding)
-         (global-first-row (* data-lens--page-current
-                              data-lens-result-max-rows))
+         (edge-fn (lambda (s) (data-lens--replace-edge-borders
+                               s has-prev has-next)))
          (nw (data-lens--row-number-digits))
-         (rn-dash (+ nw (* 2 padding)))
-         ;; Build separator with row-num column spliced in.
-         ;; 1) render data-column separator
-         ;; 2) replace first char (left) with cross (for junction)
-         ;; 3) apply face, apply edge on data part
-         ;; 4) prepend row-num section
-         (make-sep
-          (lambda (position)
-            (let* ((raw (data-lens--render-separator
-                         visible-cols widths position))
-                   (cross (pcase position
-                            ('top "┬") ('bottom "┴") (_ "┼")))
-                   (left (pcase position
-                           ('top "┌") ('bottom "└") (_ "├")))
-                   ;; Data part: cross replaces first char
-                   (data-part (concat cross (substring raw 1)))
-                   (data-faced (propertize data-part 'face bface))
-                   (data-edged (funcall edge data-faced))
-                   ;; Row-num prefix
-                   (rn (propertize (concat left (make-string rn-dash ?─))
-                                   'face bface)))
-              (concat rn data-edged))))
-         (sep-top (funcall make-sep 'top))
-         (sep-bot (funcall make-sep 'bottom))
-         (pad-str (make-string padding ?\s)))
+         (global-first-row (* data-lens--page-current
+                              data-lens-result-max-rows)))
     (erase-buffer)
-    ;; Header lives in header-line-format — always visible
+    (setq tab-line-format
+          (concat (propertize " " 'display '(space :align-to 0))
+                  (data-lens--build-header-line visible-cols widths nw
+                                                has-prev has-next
+                                                data-lens--header-active-col)))
     (setq header-line-format
-          (data-lens--build-header-line visible-cols widths nw
-                                        has-prev has-next
-                                        data-lens--header-active-col))
+          (concat (propertize " " 'display '(space :align-to 0))
+                  (data-lens--build-separator
+                   visible-cols widths 'middle nw edge-fn)))
     (when data-lens--pending-edits
       (insert (propertize
                (format "-- %d pending edit%s\n"
                        (length data-lens--pending-edits)
                        (if (= (length data-lens--pending-edits) 1) "" "s"))
                'face 'data-lens-modified-face)))
-    (insert sep-top "\n")
-    (let ((ridx 0))
-      (dolist (row rows)
-        (let* ((data-row (funcall edge
-                                  (data-lens--render-row
-                                   row ridx visible-cols widths)))
-               (num-label (string-pad
-                           (number-to-string
-                            (1+ (+ global-first-row ridx)))
-                           nw nil t)))
-          (insert (propertize "│" 'face bface)
-                  pad-str
-                  (propertize num-label 'face 'shadow)
-                  pad-str
-                  data-row "\n"))
-        (cl-incf ridx)))
-    (insert sep-bot "\n")
+    (data-lens--insert-data-rows rows visible-cols widths nw
+                                 global-first-row edge-fn)
+    (insert (data-lens--build-separator
+             visible-cols widths 'bottom nw edge-fn) "\n")
     (insert (data-lens--render-footer
-             row-count data-lens--page-current
+             (length rows) data-lens--page-current
              data-lens-result-max-rows data-lens--page-total-rows
              col-num-pages (1+ cur-page))
             "\n")
@@ -883,7 +935,7 @@ Preserves cursor position (row + column) across the refresh."
            (width (- win-width 1 (* 2 data-lens-column-padding) nw)))
       (setq data-lens--column-pages
             (data-lens--compute-column-pages
-             data-lens--column-widths
+             (data-lens--effective-widths)
              data-lens--pinned-columns
              width))
       (let ((max-page (1- (length data-lens--column-pages))))
@@ -1048,6 +1100,56 @@ Signals an error if pagination is not available."
     (string-match-p "\\`\\(?:SELECT\\|WITH\\)\\b"
                     (upcase trimmed))))
 
+(defun data-lens--execute-select (sql connection)
+  "Execute a SELECT SQL query with pagination on CONNECTION.
+Returns the query result."
+  (let* ((page-size data-lens-result-max-rows)
+         (paged-sql (data-lens--build-paged-sql sql 0 page-size))
+         (result (condition-case err
+                     (mysql-query connection paged-sql)
+                   (mysql-error
+                    (user-error "Query error: %s"
+                                (error-message-string err)))))
+         (buf (get-buffer-create (data-lens--result-buffer-name)))
+         (columns (mysql-result-columns result))
+         (rows (mysql-result-rows result))
+         (col-names (data-lens--column-names columns)))
+    (with-current-buffer buf
+      (data-lens-result-mode)
+      (setq-local data-lens--last-query sql
+                  data-lens--base-query sql
+                  data-lens-connection connection
+                  data-lens--result-columns col-names
+                  data-lens--result-column-defs columns
+                  data-lens--result-rows rows
+                  data-lens--pending-edits nil
+                  data-lens--current-col-page 0
+                  data-lens--pinned-columns nil
+                  data-lens--sort-column nil
+                  data-lens--sort-descending nil
+                  data-lens--page-current 0
+                  data-lens--page-total-rows nil
+                  data-lens--order-by nil)
+      (when col-names
+        (data-lens--display-select-result col-names rows columns))
+      (data-lens--load-fk-info))
+    (display-buffer buf '(display-buffer-at-bottom))
+    result))
+
+(defun data-lens--execute-dml (sql connection)
+  "Execute a DML SQL query on CONNECTION and display results.
+Returns the query result."
+  (setq data-lens--last-query sql)
+  (let* ((start (float-time))
+         (result (condition-case err
+                     (mysql-query connection sql)
+                   (mysql-error
+                    (user-error "Query error: %s"
+                                (error-message-string err)))))
+         (elapsed (- (float-time) start)))
+    (data-lens--display-result result sql elapsed)
+    result))
+
 (defun data-lens--execute (sql &optional conn)
   "Execute SQL on CONN (or current buffer connection).
 Records history, times execution, and displays results.
@@ -1063,55 +1165,8 @@ Prompts for confirmation on destructive operations."
         (user-error "Query cancelled")))
     (data-lens--add-history sql)
     (if (data-lens--select-query-p sql)
-        ;; SELECT: use pagination
-        (let* ((page-size data-lens-result-max-rows)
-               (paged-sql (data-lens--build-paged-sql sql 0 page-size))
-               (result (condition-case err
-                           (mysql-query connection paged-sql)
-                         (mysql-error
-                          (user-error "Query error: %s"
-                                      (error-message-string err)))))
-               (buf-name (if (data-lens--connection-alive-p connection)
-                             (format "*mysql: %s*"
-                                     (or (mysql-conn-database connection)
-                                         "results"))
-                           "*mysql: results*"))
-               (buf (get-buffer-create buf-name))
-               (columns (mysql-result-columns result))
-               (rows (mysql-result-rows result))
-               (col-names (data-lens--column-names columns)))
-          (with-current-buffer buf
-            (data-lens-result-mode)
-            (setq-local data-lens--last-query sql)
-            (setq-local data-lens--base-query sql)
-            (setq-local data-lens-connection connection)
-            (setq-local data-lens--result-columns col-names)
-            (setq-local data-lens--result-column-defs columns)
-            (setq-local data-lens--result-rows rows)
-            (setq-local data-lens--pending-edits nil)
-            (setq-local data-lens--current-col-page 0)
-            (setq-local data-lens--pinned-columns nil)
-            (setq-local data-lens--sort-column nil)
-            (setq-local data-lens--sort-descending nil)
-            (setq-local data-lens--page-current 0)
-            (setq-local data-lens--page-total-rows nil)
-            (setq-local data-lens--order-by nil)
-            (when col-names
-              (data-lens--display-select-result col-names rows columns))
-            (data-lens--load-fk-info))
-          (display-buffer buf '(display-buffer-at-bottom))
-          result)
-      ;; DML: execute directly, no pagination
-      (setq data-lens--last-query sql)
-      (let* ((start (float-time))
-             (result (condition-case err
-                         (mysql-query connection sql)
-                       (mysql-error
-                        (user-error "Query error: %s"
-                                    (error-message-string err)))))
-             (elapsed (- (float-time) start)))
-        (data-lens--display-result result sql elapsed)
-        result))))
+        (data-lens--execute-select sql connection)
+      (data-lens--execute-dml sql connection))))
 
 ;;;; Query-at-point detection
 
@@ -1534,7 +1589,7 @@ Key bindings:
 
 (defun data-lens--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
-Rebuilds `header-line-format' with the active column highlighted."
+Rebuilds `tab-line-format' with the active column highlighted."
   (when data-lens--column-widths
     (data-lens--update-position-indicator)
     (data-lens--update-row-highlight)
@@ -1542,16 +1597,17 @@ Rebuilds `header-line-format' with the active column highlighted."
       (unless (eql cidx data-lens--header-active-col)
         (setq data-lens--header-active-col cidx)
         (let* ((visible-cols (data-lens--visible-columns))
-               (widths data-lens--column-widths)
+               (widths (data-lens--effective-widths))
                (col-num-pages (length data-lens--column-pages))
                (cur-page data-lens--current-col-page)
                (has-prev (> cur-page 0))
                (has-next (< cur-page (1- col-num-pages)))
                (nw (data-lens--row-number-digits)))
-          (setq header-line-format
-                (data-lens--build-header-line
-                 visible-cols widths nw
-                 has-prev has-next cidx)))))))
+          (setq tab-line-format
+                (concat (propertize " " 'display '(space :align-to 0))
+                        (data-lens--build-header-line
+                         visible-cols widths nw
+                         has-prev has-next cidx))))))))
 
 (define-derived-mode data-lens-result-mode special-mode "MySQL-Result"
   "Mode for displaying MySQL query results with SQL pagination.
@@ -1582,6 +1638,8 @@ Rebuilds `header-line-format' with the active column highlighted."
   \\[data-lens-result-export]	Export results"
   (setq truncate-lines t)
   (hl-line-mode 1)
+  ;; Overline on tab-line simulates the top border (sep-top)
+  (face-remap-add-relative 'tab-line :overline t)
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
@@ -1821,7 +1879,7 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
                 (push (cons idx (list :ref-table ref-table
                                       :ref-column ref-col))
                       data-lens--fk-info)))))
-      (error nil))))
+      (mysql-error nil))))
 
 (defun data-lens-result--group-edits-by-row (edits)
   "Group EDITS alist by row index into a hash-table.
