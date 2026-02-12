@@ -1039,7 +1039,7 @@ Otherwise shows DML summary (affected rows, etc.)."
             (data-lens--display-select-result col-names rows columns))
         ;; DML result
         (data-lens--display-dml-result result sql elapsed)))
-    (display-buffer buf '(display-buffer-at-bottom))))
+    (pop-to-buffer buf '(display-buffer-at-bottom))))
 
 ;;;; SQL pagination helpers
 
@@ -1149,7 +1149,7 @@ Returns the query result."
       (when col-names
         (data-lens--display-select-result col-names rows columns))
       (data-lens--load-fk-info))
-    (display-buffer buf '(display-buffer-at-bottom))
+    (pop-to-buffer buf '(display-buffer-at-bottom))
     result))
 
 (defun data-lens--execute-dml (sql connection)
@@ -2301,7 +2301,7 @@ previous window layout."
       (setq-local data-lens-record--row-idx ridx)
       (setq-local data-lens-record--expanded-fields nil)
       (data-lens-record--render))
-    (display-buffer buf '(display-buffer-at-bottom))))
+    (pop-to-buffer buf '(display-buffer-at-bottom))))
 
 (defun data-lens-record--render-field (name cidx val col-def ridx edits fk-info
                                         expanded-fields max-name-w)
