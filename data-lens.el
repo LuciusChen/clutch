@@ -939,16 +939,38 @@ Preserves cursor position (row + column) across the refresh."
     (goto-char (point-min))))
 
 (defun data-lens--display-result (result sql elapsed)
-  "Display a DML RESULT in the result buffer.
-SQL is the query text, ELAPSED the time in seconds."
+  "Display RESULT in the result buffer.
+SQL is the query text, ELAPSED the time in seconds.
+If the result has columns, shows a table (without pagination).
+Otherwise shows DML summary (affected rows, etc.)."
   (let* ((buf-name (data-lens--result-buffer-name))
-         (buf (get-buffer-create buf-name)))
+         (buf (get-buffer-create buf-name))
+         (columns (mysql-result-columns result))
+         (col-names (when columns (data-lens--column-names columns)))
+         (rows (mysql-result-rows result)))
     (with-current-buffer buf
       (data-lens-result-mode)
       (setq-local data-lens--last-query sql)
       (setq-local data-lens-connection
                   (mysql-result-connection result))
-      (data-lens--display-dml-result result sql elapsed))
+      (if col-names
+          ;; Tabular result (DESCRIBE, SHOW, EXPLAIN, etc.)
+          (progn
+            (setq-local data-lens--base-query nil)
+            (setq-local data-lens--result-columns col-names)
+            (setq-local data-lens--result-column-defs columns)
+            (setq-local data-lens--result-rows rows)
+            (setq-local data-lens--pending-edits nil)
+            (setq-local data-lens--current-col-page 0)
+            (setq-local data-lens--pinned-columns nil)
+            (setq-local data-lens--sort-column nil)
+            (setq-local data-lens--sort-descending nil)
+            (setq-local data-lens--page-current 0)
+            (setq-local data-lens--page-total-rows (length rows))
+            (setq-local data-lens--order-by nil)
+            (data-lens--display-select-result col-names rows columns))
+        ;; DML result
+        (data-lens--display-dml-result result sql elapsed)))
     (display-buffer buf '(display-buffer-at-bottom))))
 
 ;;;; SQL pagination helpers
@@ -979,9 +1001,12 @@ If BASE-SQL already has LIMIT, return it unchanged."
 
 (defun data-lens--execute-page (page-num)
   "Execute the query for PAGE-NUM and refresh the result buffer display.
-Uses `data-lens--base-query' as the base SQL."
+Uses `data-lens--base-query' as the base SQL.
+Signals an error if pagination is not available."
+  (unless data-lens--base-query
+    (user-error "Pagination not available for this query"))
   (let* ((conn data-lens-connection)
-         (base (or data-lens--base-query data-lens--last-query))
+         (base data-lens--base-query)
          (page-size data-lens-result-max-rows)
          (paged-sql (data-lens--build-paged-sql
                      base page-num page-size data-lens--order-by)))
