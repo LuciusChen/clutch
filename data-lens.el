@@ -400,15 +400,27 @@ nil → \"NULL\", numbers unquoted, strings escaped."
    ((stringp val) (mysql-escape-literal val))
    (t (mysql-escape-literal (data-lens--format-value val)))))
 
-(defun data-lens--string-pad (str width)
+(defun data-lens--string-pad (str width &optional right-align)
   "Pad STR with spaces to reach display WIDTH.
-Unlike `string-pad', this accounts for wide characters (CJK)."
+Unlike `string-pad', this accounts for wide characters (CJK).
+When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   (let ((sw (string-width str)))
     (if (>= sw width)
         str
-      (concat str (make-string (- width sw) ?\s)))))
+      (let ((spaces (make-string (- width sw) ?\s)))
+        (if right-align
+            (concat spaces str)
+          (concat str spaces))))))
 
 ;;;; Column width computation and paging
+
+(defun data-lens--numeric-type-p (col-def)
+  "Return non-nil if COL-DEF is a numeric column type."
+  (memq (plist-get col-def :type)
+        (list mysql--type-decimal mysql--type-tiny mysql--type-short
+              mysql--type-long mysql--type-float mysql--type-double
+              mysql--type-longlong mysql--type-int24 mysql--type-year
+              mysql--type-newdecimal)))
 
 (defun data-lens--long-field-type-p (col-def)
   "Return non-nil if COL-DEF is a long field type (JSON/BLOB/TEXT)."
@@ -679,7 +691,9 @@ Returns a propertized string."
              (truncated (if (> (string-width formatted) w)
                             (truncate-string-to-width formatted w)
                           formatted))
-             (padded (data-lens--string-pad truncated w))
+             (ralign (and (not (null val))
+                         (data-lens--numeric-type-p col-def)))
+             (padded (data-lens--string-pad truncated w ralign))
              (face (cond (edited 'data-lens-modified-face)
                          ((null val) 'data-lens-null-face)
                          ((assq cidx data-lens--fk-info) 'data-lens-fk-face)
@@ -1982,9 +1996,15 @@ Re-executes from the first page."
                      col-names nil t nil nil default)))
 
 (defun data-lens-result-sort-by-column ()
-  "Sort results ascending by a column."
+  "Sort results by a column.
+If the column is already sorted, toggle the direction."
   (interactive)
-  (data-lens-result--sort (data-lens-result--read-column) nil))
+  (let* ((col-name (data-lens-result--read-column))
+         (descending (if (and data-lens--sort-column
+                              (string= col-name data-lens--sort-column))
+                         (not data-lens--sort-descending)
+                       nil)))
+    (data-lens-result--sort col-name descending)))
 
 (defun data-lens-result-sort-by-column-desc ()
   "Sort results descending by a column."
