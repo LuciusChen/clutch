@@ -748,7 +748,11 @@ ACTIVE-CIDX highlights that column when non-nil."
                                   'data-lens-header-col cidx)
                       pad-str)
               parts)))
-    (concat num-blank
+    ;; Leading (space :align-to 0) cancels the extra space Emacs
+    ;; prepends to header-line-format, keeping columns aligned with
+    ;; buffer lines that use line-prefix.
+    (concat (propertize " " 'display '(space :align-to 0))
+            num-blank
             (funcall edge
                      (concat (mapconcat #'identity (nreverse parts) "")
                              (propertize "│" 'face 'data-lens-border-face))))))
@@ -769,15 +773,15 @@ ACTIVE-CIDX highlights that column when non-nil."
          (bface 'data-lens-border-face)
          (global-first-row (* data-lens--page-current
                               data-lens-result-max-rows))
-         (nw (max 3 (length (number-to-string
-                             (+ global-first-row row-count)))))
+         (num-w (data-lens--row-number-width))
+         (nw (1- num-w))
          (sep-top (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'top)
                                             'face bface)))
          (sep-bot (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'bottom)
                                             'face bface)))
-         (num-blank (propertize (make-string (+ nw 1) ?\s) 'face 'shadow)))
+         (num-blank (propertize (make-string num-w ?\s) 'face 'shadow)))
     (erase-buffer)
     ;; Header lives in header-line-format — always visible
     (setq header-line-format
@@ -840,6 +844,15 @@ Falls back to the same row (any column), then point-min."
           (goto-char (prop-match-beginning m))
         (goto-char (point-min))))))
 
+(defun data-lens--row-number-width ()
+  "Return the character width of the row number prefix.
+This is the number of digits plus one space."
+  (let* ((row-count (length data-lens--result-rows))
+         (global-last (+ (* data-lens--page-current
+                            data-lens-result-max-rows)
+                         row-count)))
+    (1+ (max 3 (length (number-to-string global-last))))))
+
 (defun data-lens--refresh-display ()
   "Recompute column pages for current window width and re-render.
 Preserves cursor position (row + column) across the refresh."
@@ -847,7 +860,9 @@ Preserves cursor position (row + column) across the refresh."
     (let* ((save-ridx (get-text-property (point) 'data-lens-row-idx))
            (save-cidx (get-text-property (point) 'data-lens-col-idx))
            (win (get-buffer-window (current-buffer)))
-           (width (if win (window-body-width win) 80)))
+           (win-width (if win (window-body-width win) 80))
+           (num-w (data-lens--row-number-width))
+           (width (- win-width num-w)))
       (setq data-lens--column-pages
             (data-lens--compute-column-pages
              data-lens--column-widths
@@ -856,7 +871,7 @@ Preserves cursor position (row + column) across the refresh."
       (let ((max-page (1- (length data-lens--column-pages))))
         (setq data-lens--current-col-page
               (max 0 (min data-lens--current-col-page max-page))))
-      (setq data-lens--last-window-width width)
+      (setq data-lens--last-window-width win-width)
       (setq data-lens--header-active-col nil)
       (when data-lens--row-overlay
         (delete-overlay data-lens--row-overlay)
@@ -1489,13 +1504,9 @@ Rebuilds `header-line-format' with the active column highlighted."
                (cur-page data-lens--current-col-page)
                (has-prev (> cur-page 0))
                (has-next (< cur-page (1- col-num-pages)))
-               (row-count (length data-lens--result-rows))
-               (global-first-row (* data-lens--page-current
-                                    data-lens-result-max-rows))
-               (nw (max 3 (length (number-to-string
-                                   (+ global-first-row row-count)))))
-               (num-blank (propertize (make-string (+ nw 1) ?\s)
-                                      'face 'shadow)))
+               (num-blank (propertize
+                           (make-string (data-lens--row-number-width) ?\s)
+                           'face 'shadow)))
           (setq header-line-format
                 (data-lens--build-header-line
                  visible-cols widths num-blank
