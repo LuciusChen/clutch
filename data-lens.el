@@ -531,13 +531,13 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
 
 (defun data-lens--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
-Appends sort indicator (▲/▼) and pin marker (⊡) as appropriate."
+Prepends sort indicator (▲/▼) and pin marker (⊡) before the name."
   (let ((sort (when (and data-lens--sort-column
                          (string= name data-lens--sort-column))
                 (if data-lens--sort-descending "▼" "▲")))
         (pin (when (memq cidx data-lens--pinned-columns) "⊡")))
     (if (or sort pin)
-        (concat name (or sort "") (when pin (concat " " pin)))
+        (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
       name)))
 
 (defun data-lens--render-header (visible-cols widths)
