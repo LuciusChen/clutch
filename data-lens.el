@@ -131,6 +131,15 @@ NAME is a string used for `completing-read'."
   :type 'natnum
   :group 'data-lens)
 
+(defcustom data-lens-sql-product 'mysql
+  "SQL product used for syntax highlighting.
+Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
+  :type '(choice (const :tag "MySQL" mysql)
+                 (const :tag "PostgreSQL" postgres)
+                 (const :tag "MariaDB" mariadb)
+                 (symbol :tag "Other"))
+  :group 'data-lens)
+
 ;;;; Buffer-local variables
 
 (defvar-local data-lens-connection nil
@@ -1174,7 +1183,10 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
       (setq-local data-lens-connection conn)
       (require 'sql)
       (setq-local font-lock-defaults
-                  (list sql-mode-mysql-font-lock-keywords))
+                  (list (symbol-value
+                         (plist-get (cdr (assq data-lens-sql-product
+                                               sql-product-alist))
+                                    :font-lock))))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert ddl)
