@@ -682,8 +682,7 @@ Returns a propertized string."
          (sep-bot (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'bottom)
                                             'face bface)))
-         (num-blank (propertize (make-string (+ nw 1) ?\s) 'face 'shadow))
-         (num-sep-h (propertize (make-string (+ nw 1) ?\s) 'face 'shadow)))
+         (num-blank (propertize (make-string (+ nw 1) ?\s) 'face 'shadow)))
     (erase-buffer)
     (setq header-line-format
           (when data-lens--where-filter
@@ -698,21 +697,30 @@ Returns a propertized string."
                        (length data-lens--pending-edits)
                        (if (= (length data-lens--pending-edits) 1) "" "s"))
                'face 'data-lens-modified-face)))
-    (insert num-sep-h sep-top "\n")
-    (insert num-blank (funcall edge (data-lens--render-header visible-cols widths)) "\n")
-    (insert num-sep-h sep-mid "\n")
+    (let ((start (point)))
+      (insert sep-top "\n")
+      (put-text-property start (point) 'line-prefix num-blank))
+    (let ((start (point)))
+      (insert (funcall edge (data-lens--render-header visible-cols widths)) "\n")
+      (put-text-property start (point) 'line-prefix num-blank))
+    (let ((start (point)))
+      (insert sep-mid "\n")
+      (put-text-property start (point) 'line-prefix num-blank))
     (let ((ridx 0))
       (dolist (row page)
-        (let ((num-str (propertize
+        (let ((start (point))
+              (num-str (propertize
                         (concat (string-pad (number-to-string (1+ ridx)) nw)
                                 " ")
                         'face 'shadow)))
-          (insert num-str
-                  (funcall edge
+          (insert (funcall edge
                            (data-lens--render-row row ridx visible-cols widths))
-                  "\n"))
+                  "\n")
+          (put-text-property start (point) 'line-prefix num-str))
         (cl-incf ridx)))
-    (insert num-sep-h sep-bot "\n")
+    (let ((start (point)))
+      (insert sep-bot "\n")
+      (put-text-property start (point) 'line-prefix num-blank))
     (insert (data-lens--render-footer
              total data-lens--display-offset
              num-pages (1+ cur-page))
