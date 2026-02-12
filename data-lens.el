@@ -1157,27 +1157,24 @@ Fetches via SHOW COLUMNS if not yet cached.  Returns column list."
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
 (defun data-lens-describe-table (table)
-  "Show the structure of TABLE using DESCRIBE."
+  "Show the DDL of TABLE using SHOW CREATE TABLE."
   (interactive
    (list (if-let* ((schema (data-lens--schema-for-connection)))
              (completing-read "Table: " (hash-table-keys schema) nil t)
            (read-string "Table: "))))
   (data-lens--ensure-connection)
   (let* ((conn data-lens-connection)
-         (result (mysql-query conn (format "DESCRIBE %s"
+         (result (mysql-query conn (format "SHOW CREATE TABLE %s"
                                            (mysql-escape-identifier table))))
-         (columns (mysql-result-columns result))
-         (col-names (data-lens--column-names columns))
          (rows (mysql-result-rows result))
+         (ddl (nth 1 (car rows)))
          (buf (get-buffer-create (format "*mysql: %s*" table))))
     (with-current-buffer buf
       (data-lens-schema-mode)
       (setq-local data-lens-connection conn)
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (propertize (format "-- Structure of %s\n\n" table)
-                            'face 'font-lock-comment-face))
-        (insert (data-lens--render-static-table col-names rows columns))
+        (insert ddl)
         (insert "\n")
         (goto-char (point-min))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
