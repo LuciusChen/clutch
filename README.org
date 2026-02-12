@@ -34,10 +34,11 @@ in pure Elisp is entirely feasible.
 - Column-paged result display (no horizontal scrolling)
 - SQL pagination (=LIMIT/OFFSET=) with fixed header (=tab-line= + =header-line=)
 - Row numbers as a table column; sort/pin indicators via =nerd-icons= (with Unicode fallback)
+- Right-aligned numeric columns
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
 - Inline cell editing with UPDATE generation
-- WHERE filtering and SQL =ORDER BY= sorting
+- WHERE filtering and SQL =ORDER BY= sorting (toggle direction with =s=)
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
 - Schema browser, SQL completion, query history
@@ -133,9 +134,9 @@ Clone this repository and add it to your =load-path=:
 
 * Interactive Client
 
-** 快速开始
+** Quick Start
 
-*** 1. 配置连接
+*** 1. Configure a connection
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "~/repos/data-lens")
@@ -147,146 +148,147 @@ Clone this repository and add it to your =load-path=:
                   :database "mydb"))))
 #+end_src
 
-*** 2. 打开 SQL 编辑 buffer
+*** 2. Open a SQL editing buffer
 
 #+begin_src
-M-x data-lens-mode        ;; 新建一个 SQL 编辑 buffer
+M-x data-lens-mode
 #+end_src
 
-*** 3. 连接数据库
+*** 3. Connect to the database
 
 #+begin_src
-C-c C-e                   ;; 弹出 completing-read 选择连接
-                          ;; mode-line 显示 MySQL[root@127.0.0.1:3306/mydb]
+C-c C-e                   ;; Select a connection via completing-read
+                          ;; Mode-line shows MySQL[root@127.0.0.1:3306/mydb]
 #+end_src
 
-*** 4. 写 SQL 并执行
+*** 4. Write and execute SQL
 
 #+begin_src sql
 SELECT * FROM users LIMIT 10;
 #+end_src
 
-光标放在 SQL 语句上，按 =C-c C-c= 执行。结果显示在底部分屏的 result buffer 中。
+Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appear in a split result buffer below.
 
-** SQL 编辑 (data-lens-mode) 快捷键
+** SQL Editing (data-lens-mode) Key Bindings
 
-| 键位        | 功能             |
-|-------------+------------------|
-| =C-c C-c=   | 执行光标处的 SQL |
-| =C-c C-r=   | 执行选中区域     |
-| =C-c C-b=   | 执行整个 buffer  |
-| =C-c C-e=   | 连接 / 重连      |
-| =C-c C-t=   | 列出所有表       |
-| =C-c C-d=   | DESCRIBE 光标处表名 |
-| =C-c C-l=   | 查询历史         |
-| =C-c C-o=   | Transient 菜单   |
-| =TAB=       | 补全表名/列名    |
+| Key         | Action                     |
+|-------------+----------------------------|
+| =C-c C-c=   | Execute SQL at point       |
+| =C-c C-r=   | Execute selected region    |
+| =C-c C-b=   | Execute entire buffer      |
+| =C-c C-e=   | Connect / reconnect        |
+| =C-c C-t=   | List all tables            |
+| =C-c C-d=   | DESCRIBE table at point    |
+| =C-c C-l=   | Query history              |
+| =C-c C-o=   | Transient menu             |
+| =TAB=       | Complete table/column name |
 
-** 结果浏览 (data-lens-result-mode) 快捷键
+** Result Browser (data-lens-result-mode) Key Bindings
 
-| 键位        | 功能                             |
-|-------------+----------------------------------|
-| =RET=       | 打开 Record 视图                 |
-| =n= / =p=  | 下一页 / 上一页（SQL 分页）      |
-| =M->= / =M-<= | 最后一页 / 第一页            |
-| =#=         | 查询总行数                       |
-| =]=         | 下一列页                         |
-| =[=         | 上一列页                         |
-| =+=         | 加宽当前列                       |
-| =-=         | 缩窄当前列                       |
-| =C-c p=     | 固定当前列                       |
-| =C-c P=     | 取消固定                         |
-| =W=         | WHERE 过滤（再按清除）           |
-| =s= / =S=  | 按列排序 ASC / DESC（SQL ORDER BY） |
-| =c=         | 跳转到某列                       |
-| =g=         | 重新执行查询                     |
-| =e=         | 编辑 cell 值                     |
-| =C-c C-c=  | 提交编辑（生成 UPDATE）          |
-| =y=         | 复制 cell 值                     |
-| =w=         | 复制行为 INSERT 语句（支持选区） |
-| =Y=         | 复制行为 CSV（支持选区）         |
-| =E=         | 导出（org / csv）                |
-| =F=         | 全屏切换                         |
-| =?=         | Transient 菜单                   |
+| Key            | Action                                        |
+|----------------+-----------------------------------------------|
+| =RET=          | Open record view                              |
+| =n= / =p=     | Next page / previous page (SQL pagination)    |
+| =M->= / =M-<= | Last page / first page                       |
+| =#=            | Query total row count                         |
+| =]=            | Next column page                              |
+| =[=            | Previous column page                          |
+| =+=            | Widen current column                          |
+| =-=            | Narrow current column                         |
+| =C-c p=        | Pin current column                            |
+| =C-c P=        | Unpin column                                  |
+| =W=            | WHERE filter (press again to clear)           |
+| =s=            | Sort by column (toggles ASC/DESC on repeat)   |
+| =S=            | Sort descending                               |
+| =c=            | Jump to column                                |
+| =g=            | Re-execute query                              |
+| =e=            | Edit cell value                               |
+| =C-c C-c=     | Commit edits (generates UPDATE)               |
+| =y=            | Copy cell value                               |
+| =w=            | Copy row(s) as INSERT (supports region)       |
+| =Y=            | Copy row(s) as CSV (supports region)          |
+| =E=            | Export (org / csv)                             |
+| =F=            | Toggle fullscreen                             |
+| =?=            | Transient menu                                |
 
-** Record 视图 (data-lens-record-mode) 快捷键
+** Record View (data-lens-record-mode) Key Bindings
 
-| 键位        | 功能                             |
-|-------------+----------------------------------|
-| =RET=       | 展开长字段 / 跟随外键           |
-| =n= / =p=  | 下一行 / 上一行                  |
-| =C-c '=    | 编辑字段                         |
-| =y=         | 复制字段值                       |
-| =w=         | 复制行为 INSERT                  |
-| =g=         | 刷新                             |
-| =q=         | 关闭                             |
+| Key         | Action                        |
+|-------------+-------------------------------|
+| =RET=       | Expand long field / follow FK |
+| =n= / =p=  | Next row / previous row       |
+| =C-c '=    | Edit field                    |
+| =y=         | Copy field value              |
+| =w=         | Copy row as INSERT            |
+| =g=         | Refresh                       |
+| =q=         | Quit                          |
 
-** 典型工作流示例
+** Typical Workflows
 
-*** 查询 + 分页 + 过滤 + 排序
-
-#+begin_src
-1. 写 SQL:  SELECT * FROM orders;
-2. C-c C-c  执行 → 结果分页显示在底部（默认每页 500 行）
-3. n / p    翻到下一页 / 上一页
-4. #        查询总行数 → footer 显示 "rows 1-500 of 1234"
-5. W        输入过滤条件: status = 'pending'
-            → 自动追加 WHERE 重新查询，从第一页开始
-6. s        按当前列排序 (SQL ORDER BY)，从第一页开始
-7. W        输入空字符串 → 清除过滤，恢复原始查询
-#+end_src
-
-*** 外键导航
+*** Query + Pagination + Filter + Sort
 
 #+begin_src
-1. SELECT * FROM orders;     → C-c C-c 执行
-2. 光标移到 user_id 列的某个值上（外键列会有下划线高亮）
-3. RET → 打开 Record 视图
-4. 在 FK 字段上按 RET → 自动执行 SELECT * FROM users WHERE id = <value>
+1. Write SQL:  SELECT * FROM orders;
+2. C-c C-c    Execute → results displayed with pagination (default 500 rows/page)
+3. n / p      Next page / previous page
+4. #          Query total rows → footer shows "rows 1-500 of 1234"
+5. W          Enter filter: status = 'pending'
+              → Appends WHERE clause, re-queries from page 1
+6. s          Sort by current column (SQL ORDER BY), re-queries from page 1
+7. W          Enter empty string → clears filter, restores original query
 #+end_src
 
-*** 编辑数据
+*** Foreign Key Navigation
 
 #+begin_src
-1. SELECT * FROM users;      → C-c C-c 执行
-2. 光标移到要修改的 cell
-3. e                          → 打开编辑 buffer
-4. 修改内容，C-c C-c 确认   （C-c C-k 取消）
-5. 可以编辑多个 cell，修改过的 cell 会高亮显示
-6. C-c C-c                   → 弹出确认，显示将执行的 UPDATE 语句
+1. SELECT * FROM orders;     → C-c C-c to execute
+2. Move cursor to a value in the user_id column (FK columns are underlined)
+3. RET → opens record view
+4. Press RET on an FK field → automatically runs SELECT * FROM users WHERE id = <value>
 #+end_src
 
-** REPL 模式
+*** Editing Data
 
 #+begin_src
-M-x data-lens-repl          ;; 打开 REPL buffer
-C-c C-e                     ;; 连接数据库
-mysql> SELECT * FROM users;  ;; 输入 SQL，以 ; 结尾后自动执行
-                             ;; 支持多行输入（续行提示 ->）
-                             ;; M-p / M-n 浏览历史
+1. SELECT * FROM users;      → C-c C-c to execute
+2. Move cursor to the cell to modify
+3. e                          → opens edit buffer
+4. Edit the value, C-c C-c to confirm (C-c C-k to cancel)
+5. Edit multiple cells — modified cells are highlighted
+6. C-c C-c                   → confirmation prompt showing the UPDATE statements
 #+end_src
 
-** Schema 浏览
+** REPL Mode
 
 #+begin_src
-C-c C-t                     ;; 列出所有表
-RET                          ;; 在表名上按回车 → 查看表结构 (DESCRIBE)
-g                            ;; 刷新
+M-x data-lens-repl          ;; Open REPL buffer
+C-c C-e                     ;; Connect to database
+mysql> SELECT * FROM users;  ;; Type SQL, auto-executes on ;
+                             ;; Multi-line input supported (continuation prompt ->)
+                             ;; M-p / M-n to browse history
 #+end_src
 
-** Transient 菜单
+** Schema Browser
 
-需要安装 =transient= 包（Magit 自带）。
+#+begin_src
+C-c C-t                     ;; List all tables
+RET                          ;; Press enter on a table → view structure (DESCRIBE)
+g                            ;; Refresh
+#+end_src
+
+** Transient Menus
+
+Requires the =transient= package (bundled with Magit).
 
 #+begin_src emacs-lisp
 (require 'data-lens-transient)
 #+end_src
 
-在 data-lens-mode 中按 =C-c C-o= 或在 result buffer 中按 =?= 打开菜单。
+Press =C-c C-o= in data-lens-mode or =?= in the result buffer to open the menu.
 
-** Org-Babel 集成
+** Org-Babel Integration
 
-在 org 文件中直接执行 SQL，需要配置：
+Execute SQL directly in org files. Configuration:
 
 #+begin_src emacs-lisp
 (require 'ob-mysql)
@@ -296,19 +298,19 @@ g                            ;; 刷新
    'org-babel-load-languages org-babel-load-languages))
 #+end_src
 
-使用已存连接：
+Using a saved connection:
 
 : #+begin_src mysql :connection dev
 : SELECT * FROM users LIMIT 5;
 : #+end_src
 
-或内联连接参数：
+Or with inline connection parameters:
 
 : #+begin_src mysql :host 127.0.0.1 :port 3306 :user root :password test :database mydb
 : SHOW TABLES;
 : #+end_src
 
-=C-c C-c= 执行代码块，结果自动插入为 org 表格。
+=C-c C-c= executes the source block; results are inserted as an org table.
 
 * Testing
 
