@@ -169,6 +169,9 @@ NAME is a string used for `completing-read'."
 (defvar-local data-lens--header-overlay nil
   "Overlay used to highlight the active column header.")
 
+(defvar-local data-lens--row-overlay nil
+  "Overlay used to highlight the current row.")
+
 (defvar-local data-lens--display-offset 0
   "Number of rows currently displayed (for load-more paging).")
 
@@ -664,6 +667,7 @@ Returns a propertized string."
          (edge (lambda (s) (data-lens--replace-edge-borders
                             s has-prev has-next)))
          (bface 'data-lens-border-face)
+         (nw (max 3 (length (number-to-string (length page)))))
          (sep-top (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'top)
                                             'face bface)))
@@ -672,7 +676,9 @@ Returns a propertized string."
                                             'face bface)))
          (sep-bot (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'bottom)
-                                            'face bface))))
+                                            'face bface)))
+         (num-blank (propertize (make-string (+ nw 1) ?\s) 'face 'shadow))
+         (num-sep-h (propertize (make-string (+ nw 1) ?\s) 'face 'shadow)))
     (erase-buffer)
     (setq header-line-format
           (when data-lens--where-filter
@@ -687,16 +693,21 @@ Returns a propertized string."
                        (length data-lens--pending-edits)
                        (if (= (length data-lens--pending-edits) 1) "" "s"))
                'face 'data-lens-modified-face)))
-    (insert sep-top "\n")
-    (insert (funcall edge (data-lens--render-header visible-cols widths)) "\n")
-    (insert sep-mid "\n")
+    (insert num-sep-h sep-top "\n")
+    (insert num-blank (funcall edge (data-lens--render-header visible-cols widths)) "\n")
+    (insert num-sep-h sep-mid "\n")
     (let ((ridx 0))
       (dolist (row page)
-        (insert (funcall edge
-                         (data-lens--render-row row ridx visible-cols widths))
-                "\n")
+        (let ((num-str (propertize
+                        (concat (string-pad (number-to-string (1+ ridx)) nw)
+                                " ")
+                        'face 'shadow)))
+          (insert num-str
+                  (funcall edge
+                           (data-lens--render-row row ridx visible-cols widths))
+                  "\n"))
         (cl-incf ridx)))
-    (insert sep-bot "\n")
+    (insert num-sep-h sep-bot "\n")
     (insert (data-lens--render-footer
              total data-lens--display-offset
              num-pages (1+ cur-page))
@@ -749,6 +760,9 @@ Preserves cursor position (row + column) across the refresh."
       (when data-lens--header-overlay
         (delete-overlay data-lens--header-overlay)
         (setq data-lens--header-overlay nil))
+      (when data-lens--row-overlay
+        (delete-overlay data-lens--row-overlay)
+        (setq data-lens--row-overlay nil))
       (data-lens--render-result)
       (cond
        (save-ridx
@@ -1258,11 +1272,24 @@ Key bindings:
                       (if cidx (1+ cidx) 0) ncols
                       (if col-name (format " [%s]" col-name) "")))))))
 
+(defun data-lens--update-row-highlight ()
+  "Highlight the entire row under the cursor."
+  (when data-lens--row-overlay
+    (delete-overlay data-lens--row-overlay)
+    (setq data-lens--row-overlay nil))
+  (when (get-text-property (point) 'data-lens-row-idx)
+    (let ((ov (make-overlay (line-beginning-position)
+                            (line-end-position))))
+      (overlay-put ov 'face 'data-lens-header-active-face)
+      (overlay-put ov 'priority -1)
+      (setq data-lens--row-overlay ov))))
+
 (defun data-lens--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
 Uses an overlay so the buffer text is not modified."
   (when data-lens--column-widths
     (data-lens--update-position-indicator)
+    (data-lens--update-row-highlight)
     (let ((cidx (data-lens--col-idx-at-point)))
       (unless (eql cidx data-lens--header-active-col)
         (setq data-lens--header-active-col cidx)
