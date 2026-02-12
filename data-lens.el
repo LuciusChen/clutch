@@ -539,7 +539,7 @@ When HAS-PREV is non-nil, replace the first border char with `◂'.
 When HAS-NEXT is non-nil, replace the last border char with `▸'."
   (when has-prev
     (let ((c (aref str 0)))
-      (when (memq c '(?│ ?┌ ?├ ?└))
+      (when (memq c '(?│ ?┌ ?├ ?└ ?┬ ?┼ ?┴))
         (setq str (concat (propertize "◂" 'face 'data-lens-border-face)
                           (substring str 1))))))
   (when has-next
@@ -716,16 +716,18 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
             parts))
     (apply #'concat (nreverse parts))))
 
-(defun data-lens--build-header-line (visible-cols widths num-blank
+(defun data-lens--build-header-line (visible-cols widths nw
                                                   has-prev has-next
                                                   &optional active-cidx)
   "Build the header-line-format string.
 VISIBLE-COLS, WIDTHS describe columns.
-NUM-BLANK is the line-prefix space.
+NW is the digit width for the row number column.
 HAS-PREV/HAS-NEXT control edge border indicators.
 ACTIVE-CIDX highlights that column when non-nil."
   (let* ((edge (lambda (s) (data-lens--replace-edge-borders s has-prev has-next)))
          (padding data-lens-column-padding)
+         (bface 'data-lens-border-face)
+         (pad-str (make-string padding ?\s))
          (parts nil))
     (dolist (cidx visible-cols)
       (let* ((name (nth cidx data-lens--result-columns))
@@ -740,22 +742,24 @@ ACTIVE-CIDX highlights that column when non-nil."
                     ((eql cidx active-cidx) 'data-lens-header-active-face)
                     ((memq cidx data-lens--pinned-columns)
                      'data-lens-pinned-header-face)
-                    (t 'data-lens-header-face)))
-             (pad-str (make-string padding ?\s)))
-        (push (concat (propertize "│" 'face 'data-lens-border-face)
+                    (t 'data-lens-header-face))))
+        (push (concat (propertize "│" 'face bface)
                       pad-str
                       (propertize padded 'face face
                                   'data-lens-header-col cidx)
                       pad-str)
               parts)))
-    ;; Leading (space :align-to 0) cancels the extra space Emacs
-    ;; prepends to header-line-format, keeping columns aligned with
-    ;; buffer lines that use line-prefix.
-    (concat (propertize " " 'display '(space :align-to 0))
-            num-blank
-            (funcall edge
-                     (concat (mapconcat #'identity (nreverse parts) "")
-                             (propertize "│" 'face 'data-lens-border-face))))))
+    ;; Data columns with edge indicators
+    (let ((data-header (funcall edge
+                                (concat (mapconcat #'identity (nreverse parts) "")
+                                        (propertize "│" 'face bface)))))
+      ;; (space :align-to 0) cancels Emacs header-line leading space
+      (concat (propertize " " 'display '(space :align-to 0))
+              ;; Row number column: blank header
+              (propertize "│" 'face bface)
+              pad-str (make-string nw ?\s) pad-str
+              ;; Data columns (starts with │ or ◂)
+              data-header))))
 
 (defun data-lens--render-result ()
   "Render the result buffer content using column paging."
@@ -771,21 +775,39 @@ ACTIVE-CIDX highlights that column when non-nil."
          (edge (lambda (s) (data-lens--replace-edge-borders
                             s has-prev has-next)))
          (bface 'data-lens-border-face)
+         (padding data-lens-column-padding)
          (global-first-row (* data-lens--page-current
                               data-lens-result-max-rows))
-         (num-w (data-lens--row-number-width))
-         (nw (1- num-w))
-         (sep-top (funcall edge (propertize (data-lens--render-separator
-                                             visible-cols widths 'top)
-                                            'face bface)))
-         (sep-bot (funcall edge (propertize (data-lens--render-separator
-                                             visible-cols widths 'bottom)
-                                            'face bface)))
-         (num-blank (propertize (make-string num-w ?\s) 'face 'shadow)))
+         (nw (data-lens--row-number-digits))
+         (rn-dash (+ nw (* 2 padding)))
+         ;; Build separator with row-num column spliced in.
+         ;; 1) render data-column separator
+         ;; 2) replace first char (left) with cross (for junction)
+         ;; 3) apply face, apply edge on data part
+         ;; 4) prepend row-num section
+         (make-sep
+          (lambda (position)
+            (let* ((raw (data-lens--render-separator
+                         visible-cols widths position))
+                   (cross (pcase position
+                            ('top "┬") ('bottom "┴") (_ "┼")))
+                   (left (pcase position
+                           ('top "┌") ('bottom "└") (_ "├")))
+                   ;; Data part: cross replaces first char
+                   (data-part (concat cross (substring raw 1)))
+                   (data-faced (propertize data-part 'face bface))
+                   (data-edged (funcall edge data-faced))
+                   ;; Row-num prefix
+                   (rn (propertize (concat left (make-string rn-dash ?─))
+                                   'face bface)))
+              (concat rn data-edged))))
+         (sep-top (funcall make-sep 'top))
+         (sep-bot (funcall make-sep 'bottom))
+         (pad-str (make-string padding ?\s)))
     (erase-buffer)
     ;; Header lives in header-line-format — always visible
     (setq header-line-format
-          (data-lens--build-header-line visible-cols widths num-blank
+          (data-lens--build-header-line visible-cols widths nw
                                         has-prev has-next
                                         data-lens--header-active-col))
     (when data-lens--pending-edits
@@ -794,26 +816,23 @@ ACTIVE-CIDX highlights that column when non-nil."
                        (length data-lens--pending-edits)
                        (if (= (length data-lens--pending-edits) 1) "" "s"))
                'face 'data-lens-modified-face)))
-    (let ((start (point)))
-      (insert sep-top "\n")
-      (put-text-property start (point) 'line-prefix num-blank))
+    (insert sep-top "\n")
     (let ((ridx 0))
       (dolist (row rows)
-        (let ((start (point))
-              (num-str (propertize
-                        (concat (string-pad
-                                 (number-to-string (1+ (+ global-first-row ridx)))
-                                 nw)
-                                " ")
-                        'face 'shadow)))
-          (insert (funcall edge
-                           (data-lens--render-row row ridx visible-cols widths))
-                  "\n")
-          (put-text-property start (point) 'line-prefix num-str))
+        (let* ((data-row (funcall edge
+                                  (data-lens--render-row
+                                   row ridx visible-cols widths)))
+               (num-label (string-pad
+                           (number-to-string
+                            (1+ (+ global-first-row ridx)))
+                           nw nil t)))
+          (insert (propertize "│" 'face bface)
+                  pad-str
+                  (propertize num-label 'face 'shadow)
+                  pad-str
+                  data-row "\n"))
         (cl-incf ridx)))
-    (let ((start (point)))
-      (insert sep-bot "\n")
-      (put-text-property start (point) 'line-prefix num-blank))
+    (insert sep-bot "\n")
     (insert (data-lens--render-footer
              row-count data-lens--page-current
              data-lens-result-max-rows data-lens--page-total-rows
@@ -844,14 +863,13 @@ Falls back to the same row (any column), then point-min."
           (goto-char (prop-match-beginning m))
         (goto-char (point-min))))))
 
-(defun data-lens--row-number-width ()
-  "Return the character width of the row number prefix.
-This is the number of digits plus one space."
+(defun data-lens--row-number-digits ()
+  "Return the digit width needed for row numbers."
   (let* ((row-count (length data-lens--result-rows))
          (global-last (+ (* data-lens--page-current
                             data-lens-result-max-rows)
                          row-count)))
-    (1+ (max 3 (length (number-to-string global-last))))))
+    (max 3 (length (number-to-string global-last)))))
 
 (defun data-lens--refresh-display ()
   "Recompute column pages for current window width and re-render.
@@ -861,8 +879,8 @@ Preserves cursor position (row + column) across the refresh."
            (save-cidx (get-text-property (point) 'data-lens-col-idx))
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
-           (num-w (data-lens--row-number-width))
-           (width (- win-width num-w)))
+           (nw (data-lens--row-number-digits))
+           (width (- win-width 1 (* 2 data-lens-column-padding) nw)))
       (setq data-lens--column-pages
             (data-lens--compute-column-pages
              data-lens--column-widths
@@ -1504,12 +1522,10 @@ Rebuilds `header-line-format' with the active column highlighted."
                (cur-page data-lens--current-col-page)
                (has-prev (> cur-page 0))
                (has-next (< cur-page (1- col-num-pages)))
-               (num-blank (propertize
-                           (make-string (data-lens--row-number-width) ?\s)
-                           'face 'shadow)))
+               (nw (data-lens--row-number-digits)))
           (setq header-line-format
                 (data-lens--build-header-line
-                 visible-cols widths num-blank
+                 visible-cols widths nw
                  has-prev has-next cidx)))))))
 
 (define-derived-mode data-lens-result-mode special-mode "MySQL-Result"
