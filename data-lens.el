@@ -56,7 +56,7 @@
   :group 'data-lens)
 
 (defface data-lens-pinned-header-face
-  '((t :inherit data-lens-header-face :underline t))
+  '((t :inherit data-lens-header-face))
   "Face for pinned column headers."
   :group 'data-lens)
 
