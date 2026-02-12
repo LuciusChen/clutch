@@ -54,16 +54,20 @@
 (transient-define-prefix data-lens-result-dispatch ()
   "Dispatch menu for data-lens result buffer."
   ["Navigate"
-   ("RET" "Open record" data-lens-result-open-record)
-   ("c" "Go to column" data-lens-result-goto-column)
-   ("n" "Load more"    data-lens-result-load-more)]
+   ("RET" "Open record"  data-lens-result-open-record)
+   ("c" "Go to column"   data-lens-result-goto-column)
+   ("n" "Next page"      data-lens-result-next-page)
+   ("p" "Prev page"      data-lens-result-prev-page)
+   ("M-<" "First page"   data-lens-result-first-page)
+   ("M->" "Last page"    data-lens-result-last-page)
+   ("#" "Count total"    data-lens-result-count-total)]
   ["Column Pages"
-   ("]" "Next page"     data-lens-result-next-col-page)
-   ("[" "Prev page"     data-lens-result-prev-col-page)
-   ("=" "Widen column"  data-lens-result-widen-column)
-   ("-" "Narrow column" data-lens-result-narrow-column)
-   ("p" "Pin column"    data-lens-result-pin-column)
-   ("P" "Unpin column"  data-lens-result-unpin-column)]
+   ("]" "Next col page"  data-lens-result-next-col-page)
+   ("[" "Prev col page"  data-lens-result-prev-col-page)
+   ("=" "Widen column"   data-lens-result-widen-column)
+   ("-" "Narrow column"  data-lens-result-narrow-column)
+   ("C-c p" "Pin column"   data-lens-result-pin-column)
+   ("C-c P" "Unpin column" data-lens-result-unpin-column)]
   ["Filter / Sort"
    ("W" "WHERE filter" data-lens-result-apply-filter)
    ("s" "Sort ASC"  data-lens-result-sort-by-column)

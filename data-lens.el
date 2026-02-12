@@ -42,6 +42,8 @@
 
 (declare-function data-lens-dispatch "data-lens-transient")
 (declare-function data-lens-result-dispatch "data-lens-transient")
+(declare-function nerd-icons-mdicon "nerd-icons")
+(declare-function nerd-icons-codicon "nerd-icons")
 
 ;;;; Customization
 
@@ -177,14 +179,18 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
 (defvar-local data-lens--header-active-col nil
   "Col-idx currently highlighted in the header, or nil.")
 
-(defvar-local data-lens--header-overlay nil
-  "Overlay used to highlight the active column header.")
-
 (defvar-local data-lens--row-overlay nil
   "Overlay used to highlight the current row.")
 
-(defvar-local data-lens--display-offset 0
-  "Number of rows currently displayed (for load-more paging).")
+(defvar-local data-lens--page-current 0
+  "Current data page number (0-based).")
+
+(defvar-local data-lens--page-total-rows nil
+  "Total row count from COUNT(*), or nil if not yet queried.")
+
+(defvar-local data-lens--order-by nil
+  "Current ORDER BY state as (COL-NAME . DIRECTION) or nil.
+DIRECTION is \"ASC\" or \"DESC\".")
 
 (defvar-local data-lens--result-column-defs nil
   "Full column definition plists from the last result.")
@@ -560,16 +566,33 @@ POSITION is `top', `middle', or `bottom' (default `middle')."
     (let ((line (concat (mapconcat #'identity (nreverse parts) "") right)))
       (concat left (substring line 1)))))
 
+(defun data-lens--icon (name &rest fallback)
+  "Return a nerd-icons icon for NAME, or FALLBACK string.
+NAME is a cons (FAMILY . ICON-NAME) where FAMILY is one of
+`mdicon', `codicon', etc.  Falls back gracefully when
+nerd-icons is not installed."
+  (let ((family (car name))
+        (icon-name (cdr name)))
+    (or (and (require 'nerd-icons nil t)
+             (pcase family
+               ('mdicon (nerd-icons-mdicon icon-name))
+               ('codicon (nerd-icons-codicon icon-name))))
+        (car fallback)
+        "")))
+
 (defun data-lens--header-label (name cidx)
   "Build the display label for column NAME at index CIDX.
-Prepends sort indicator (▲/▼) and pin marker () before the name."
+Prepends sort indicator and pin marker before the name."
   (let* ((hi 'font-lock-keyword-face)
          (sort (when (and data-lens--sort-column
                           (string= name data-lens--sort-column))
-                 (propertize (if data-lens--sort-descending "▼" "▲")
+                 (propertize (if data-lens--sort-descending
+                                 (data-lens--icon '(codicon . "nf-cod-arrow_down") "▼")
+                               (data-lens--icon '(codicon . "nf-cod-arrow_up") "▲"))
                              'face hi)))
          (pin (when (memq cidx data-lens--pinned-columns)
-                (propertize "" 'face hi))))
+                (propertize (data-lens--icon '(mdicon . "nf-md-pin") "")
+                            'face hi))))
     (if (or sort pin)
         (concat (or sort "") (or pin "") (if (or sort pin) " " "") name)
       name)))
@@ -644,26 +667,43 @@ Returns a propertized string."
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'data-lens-border-face))))
 
-(defun data-lens--render-footer (total offset num-pages cur-page)
-  "Return the footer string for TOTAL rows, OFFSET shown, page CUR-PAGE/NUM-PAGES."
+(defun data-lens--render-footer (row-count page-num page-size
+                                           total-rows col-num-pages col-cur-page)
+  "Return the footer string for pagination state.
+ROW-COUNT is the number of rows on the current page.
+PAGE-NUM is the current data page (0-based).
+PAGE-SIZE is `data-lens-result-max-rows'.
+TOTAL-ROWS is the known total or nil.
+COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
   (let ((hi 'font-lock-keyword-face)
         (dim 'font-lock-comment-face)
-        (parts nil))
-    (push (concat (propertize (format "row%s " (if (= total 1) "" "s"))
-                              'face dim)
-                  (propertize (format "%d" total) 'face hi))
+        (parts nil)
+        (first-row (1+ (* page-num page-size)))
+        (last-row (+ (* page-num page-size) row-count)))
+    ;; Row range
+    (push (concat (propertize "rows " 'face dim)
+                  (propertize (format "%d-%d" first-row last-row) 'face hi)
+                  (propertize " of " 'face dim)
+                  (propertize (if total-rows (format "%d" total-rows) "?")
+                              'face hi))
           parts)
-    (when (< offset total)
-      (push (concat (propertize " (showing " 'face dim)
-                    (propertize (format "%d" offset) 'face hi)
-                    (propertize ", " 'face dim)
-                    (propertize "n" 'face hi)
-                    (propertize ": load more)" 'face dim))
+    ;; Data page indicator
+    (if total-rows
+        (let ((total-pages (max 1 (ceiling total-rows (float page-size)))))
+          (push (concat (propertize " | Page " 'face dim)
+                        (propertize (format "%d/%d"
+                                            (1+ page-num)
+                                            (truncate total-pages))
+                                    'face hi))
+                parts))
+      (push (concat (propertize " | Page " 'face dim)
+                    (propertize (format "%d" (1+ page-num)) 'face hi))
             parts))
-    (when (> num-pages 1)
+    ;; Column page indicator
+    (when (> col-num-pages 1)
       (push (concat (propertize " | Col page " 'face dim)
-                    (propertize (format "%d" cur-page) 'face hi)
-                    (propertize (format "/%d | " num-pages) 'face dim)
+                    (propertize (format "%d" col-cur-page) 'face hi)
+                    (propertize (format "/%d | " col-num-pages) 'face dim)
                     (propertize "[" 'face hi)
                     (propertize "-prev/ " 'face dim)
                     (propertize "]" 'face hi)
@@ -676,40 +716,74 @@ Returns a propertized string."
             parts))
     (apply #'concat (nreverse parts))))
 
+(defun data-lens--build-header-line (visible-cols widths num-blank
+                                                  has-prev has-next
+                                                  &optional active-cidx)
+  "Build the header-line-format string.
+VISIBLE-COLS, WIDTHS describe columns.
+NUM-BLANK is the line-prefix space.
+HAS-PREV/HAS-NEXT control edge border indicators.
+ACTIVE-CIDX highlights that column when non-nil."
+  (let* ((edge (lambda (s) (data-lens--replace-edge-borders s has-prev has-next)))
+         (padding data-lens-column-padding)
+         (parts nil))
+    (dolist (cidx visible-cols)
+      (let* ((name (nth cidx data-lens--result-columns))
+             (w (aref widths cidx))
+             (label (data-lens--header-label name cidx))
+             (padded (data-lens--string-pad
+                      (if (> (string-width label) w)
+                          (truncate-string-to-width label w)
+                        label)
+                      w))
+             (face (cond
+                    ((eql cidx active-cidx) 'data-lens-header-active-face)
+                    ((memq cidx data-lens--pinned-columns)
+                     'data-lens-pinned-header-face)
+                    (t 'data-lens-header-face)))
+             (pad-str (make-string padding ?\s)))
+        (push (concat (propertize "│" 'face 'data-lens-border-face)
+                      pad-str
+                      (propertize padded 'face face
+                                  'data-lens-header-col cidx)
+                      pad-str)
+              parts)))
+    (concat num-blank
+            (funcall edge
+                     (concat (mapconcat #'identity (nreverse parts) "")
+                             (propertize "│" 'face 'data-lens-border-face))))))
+
 (defun data-lens--render-result ()
   "Render the result buffer content using column paging."
   (let* ((inhibit-read-only t)
          (visible-cols (data-lens--visible-columns))
          (widths data-lens--column-widths)
-         (page (seq-take data-lens--result-rows
-                         data-lens--display-offset))
-         (total (length data-lens--result-rows))
-         (num-pages (length data-lens--column-pages))
+         (rows data-lens--result-rows)
+         (row-count (length rows))
+         (col-num-pages (length data-lens--column-pages))
          (cur-page data-lens--current-col-page)
          (has-prev (> cur-page 0))
-         (has-next (< cur-page (1- num-pages)))
+         (has-next (< cur-page (1- col-num-pages)))
          (edge (lambda (s) (data-lens--replace-edge-borders
                             s has-prev has-next)))
          (bface 'data-lens-border-face)
-         (nw (max 3 (length (number-to-string (length page)))))
+         (global-first-row (* data-lens--page-current
+                              data-lens-result-max-rows))
+         (nw (max 3 (length (number-to-string
+                             (+ global-first-row row-count)))))
          (sep-top (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'top)
-                                            'face bface)))
-         (sep-mid (funcall edge (propertize (data-lens--render-separator
-                                             visible-cols widths 'middle)
                                             'face bface)))
          (sep-bot (funcall edge (propertize (data-lens--render-separator
                                              visible-cols widths 'bottom)
                                             'face bface)))
          (num-blank (propertize (make-string (+ nw 1) ?\s) 'face 'shadow)))
     (erase-buffer)
+    ;; Header lives in header-line-format — always visible
     (setq header-line-format
-          (when data-lens--where-filter
-            (list " "
-                  (propertize " W " 'face '(:inherit warning :inverse-video t))
-                  " "
-                  (propertize data-lens--where-filter
-                              'face 'font-lock-warning-face))))
+          (data-lens--build-header-line visible-cols widths num-blank
+                                        has-prev has-next
+                                        data-lens--header-active-col))
     (when data-lens--pending-edits
       (insert (propertize
                (format "-- %d pending edit%s\n"
@@ -719,17 +793,13 @@ Returns a propertized string."
     (let ((start (point)))
       (insert sep-top "\n")
       (put-text-property start (point) 'line-prefix num-blank))
-    (let ((start (point)))
-      (insert (funcall edge (data-lens--render-header visible-cols widths)) "\n")
-      (put-text-property start (point) 'line-prefix num-blank))
-    (let ((start (point)))
-      (insert sep-mid "\n")
-      (put-text-property start (point) 'line-prefix num-blank))
     (let ((ridx 0))
-      (dolist (row page)
+      (dolist (row rows)
         (let ((start (point))
               (num-str (propertize
-                        (concat (string-pad (number-to-string (1+ ridx)) nw)
+                        (concat (string-pad
+                                 (number-to-string (1+ (+ global-first-row ridx)))
+                                 nw)
                                 " ")
                         'face 'shadow)))
           (insert (funcall edge
@@ -741,15 +811,15 @@ Returns a propertized string."
       (insert sep-bot "\n")
       (put-text-property start (point) 'line-prefix num-blank))
     (insert (data-lens--render-footer
-             total data-lens--display-offset
-             num-pages (1+ cur-page))
+             row-count data-lens--page-current
+             data-lens-result-max-rows data-lens--page-total-rows
+             col-num-pages (1+ cur-page))
             "\n")
     (goto-char (point-min))))
 
 (defun data-lens--col-idx-at-point ()
-  "Return the column index at point, from data cells or the header."
-  (or (get-text-property (point) 'data-lens-col-idx)
-      (get-text-property (point) 'data-lens-header-col)))
+  "Return the column index at point, from data cells."
+  (get-text-property (point) 'data-lens-col-idx))
 
 (defun data-lens--goto-cell (ridx cidx)
   "Move point to the cell at ROW-IDX RIDX and COL-IDX CIDX.
@@ -776,7 +846,6 @@ Preserves cursor position (row + column) across the refresh."
   (when data-lens--column-widths
     (let* ((save-ridx (get-text-property (point) 'data-lens-row-idx))
            (save-cidx (get-text-property (point) 'data-lens-col-idx))
-           (save-hcol (get-text-property (point) 'data-lens-header-col))
            (win (get-buffer-window (current-buffer)))
            (width (if win (window-body-width win) 80)))
       (setq data-lens--column-pages
@@ -789,21 +858,12 @@ Preserves cursor position (row + column) across the refresh."
               (max 0 (min data-lens--current-col-page max-page))))
       (setq data-lens--last-window-width width)
       (setq data-lens--header-active-col nil)
-      (when data-lens--header-overlay
-        (delete-overlay data-lens--header-overlay)
-        (setq data-lens--header-overlay nil))
       (when data-lens--row-overlay
         (delete-overlay data-lens--row-overlay)
         (setq data-lens--row-overlay nil))
       (data-lens--render-result)
-      (cond
-       (save-ridx
-        (data-lens--goto-cell save-ridx save-cidx))
-       (save-hcol
-        (goto-char (point-min))
-        (when-let* ((m (text-property-search-forward
-                        'data-lens-header-col save-hcol #'eq)))
-          (goto-char (prop-match-beginning m))))))))
+      (when save-ridx
+        (data-lens--goto-cell save-ridx save-cidx)))))
 
 (defun data-lens--window-size-change (frame)
   "Handle window size changes for result buffers in FRAME."
@@ -818,14 +878,10 @@ Preserves cursor position (row + column) across the refresh."
 
 (defun data-lens--display-select-result (col-names rows columns)
   "Render a SELECT result with COL-NAMES, ROWS, and COLUMNS metadata."
-  (let* ((inhibit-read-only t)
-         (page-size data-lens-result-max-rows)
-         (total (length rows)))
+  (let ((inhibit-read-only t))
     (setq-local data-lens--column-widths
                 (data-lens--compute-column-widths
                  col-names rows columns))
-    (setq-local data-lens--display-offset
-                (min page-size total))
     (data-lens--refresh-display)
     (add-hook 'window-size-change-functions
               #'data-lens--window-size-change)))
@@ -850,32 +906,75 @@ Preserves cursor position (row + column) across the refresh."
     (goto-char (point-min))))
 
 (defun data-lens--display-result (result sql elapsed)
-  "Display RESULT in the result buffer.
+  "Display a DML RESULT in the result buffer.
 SQL is the query text, ELAPSED the time in seconds."
   (let* ((buf-name (data-lens--result-buffer-name))
-         (buf (get-buffer-create buf-name))
-         (columns (mysql-result-columns result))
-         (rows (mysql-result-rows result))
-         (col-names (data-lens--column-names columns)))
+         (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
       (data-lens-result-mode)
       (setq-local data-lens--last-query sql)
       (setq-local data-lens-connection
                   (mysql-result-connection result))
+      (data-lens--display-dml-result result sql elapsed))
+    (display-buffer buf '(display-buffer-at-bottom))))
+
+;;;; SQL pagination helpers
+
+(defun data-lens--sql-has-limit-p (sql)
+  "Return non-nil if SQL already contains a LIMIT clause."
+  (let ((case-fold-search t))
+    (string-match-p "\\bLIMIT\\b" sql)))
+
+(defun data-lens--build-paged-sql (base-sql page-num page-size &optional order-by)
+  "Build a paged SQL query wrapping BASE-SQL.
+PAGE-NUM is 0-based, PAGE-SIZE is the row limit.
+ORDER-BY is a cons (COL-NAME . DIRECTION) or nil.
+If BASE-SQL already has LIMIT, return it unchanged."
+  (if (data-lens--sql-has-limit-p base-sql)
+      base-sql
+    (let* ((trimmed (string-trim-right
+                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+           (offset (* page-num page-size))
+           (order-clause (when order-by
+                           (format " ORDER BY %s %s"
+                                   (mysql-escape-identifier (car order-by))
+                                   (cdr order-by)))))
+      (format "SELECT * FROM (%s) AS _dl_t%s LIMIT %d OFFSET %d"
+              trimmed
+              (or order-clause "")
+              page-size offset))))
+
+(defun data-lens--execute-page (page-num)
+  "Execute the query for PAGE-NUM and refresh the result buffer display.
+Uses `data-lens--base-query' as the base SQL."
+  (let* ((conn data-lens-connection)
+         (base (or data-lens--base-query data-lens--last-query))
+         (page-size data-lens-result-max-rows)
+         (paged-sql (data-lens--build-paged-sql
+                     base page-num page-size data-lens--order-by)))
+    (unless (data-lens--connection-alive-p conn)
+      (user-error "Not connected"))
+    (let* ((start (float-time))
+           (result (condition-case err
+                       (mysql-query conn paged-sql)
+                     (mysql-error
+                      (user-error "Query error: %s"
+                                  (error-message-string err)))))
+           (elapsed (- (float-time) start))
+           (columns (mysql-result-columns result))
+           (rows (mysql-result-rows result))
+           (col-names (data-lens--column-names columns)))
       (setq-local data-lens--result-columns col-names)
       (setq-local data-lens--result-column-defs columns)
       (setq-local data-lens--result-rows rows)
-      (setq-local data-lens--display-offset 0)
+      (setq-local data-lens--page-current page-num)
       (setq-local data-lens--pending-edits nil)
-      (setq-local data-lens--current-col-page 0)
-      (setq-local data-lens--pinned-columns nil)
-      (setq-local data-lens--sort-column nil)
-      (setq-local data-lens--sort-descending nil)
-      (if col-names
-          (data-lens--display-select-result col-names rows columns)
-        (data-lens--display-dml-result result sql elapsed))
-      (data-lens--load-fk-info))
-    (display-buffer buf '(display-buffer-at-bottom))))
+      (setq-local data-lens--column-widths
+                  (data-lens--compute-column-widths col-names rows columns))
+      (data-lens--refresh-display)
+      (message "Page %d loaded (%.3fs, %d row%s)"
+               (1+ page-num) elapsed (length rows)
+               (if (= (length rows) 1) "" "s")))))
 
 ;;;; Query execution engine
 
@@ -885,9 +984,16 @@ SQL is the query text, ELAPSED the time in seconds."
     (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
                     (upcase trimmed))))
 
+(defun data-lens--select-query-p (sql)
+  "Return non-nil if SQL is a SELECT query."
+  (let ((trimmed (string-trim-left sql)))
+    (string-match-p "\\`\\(?:SELECT\\|WITH\\)\\b"
+                    (upcase trimmed))))
+
 (defun data-lens--execute (sql &optional conn)
   "Execute SQL on CONN (or current buffer connection).
 Records history, times execution, and displays results.
+For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (let ((connection (or conn data-lens-connection)))
     (unless (data-lens--connection-alive-p connection)
@@ -897,16 +1003,57 @@ Prompts for confirmation on destructive operations."
                (format "Execute destructive query?\n  %s\n"
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
-    (setq data-lens--last-query sql)
     (data-lens--add-history sql)
-    (let* ((start (float-time))
-           (result (condition-case err
-                       (mysql-query connection sql)
-                     (mysql-error
-                      (user-error "Query error: %s" (error-message-string err)))))
-           (elapsed (- (float-time) start)))
-      (data-lens--display-result result sql elapsed)
-      result)))
+    (if (data-lens--select-query-p sql)
+        ;; SELECT: use pagination
+        (let* ((page-size data-lens-result-max-rows)
+               (paged-sql (data-lens--build-paged-sql sql 0 page-size))
+               (result (condition-case err
+                           (mysql-query connection paged-sql)
+                         (mysql-error
+                          (user-error "Query error: %s"
+                                      (error-message-string err)))))
+               (buf-name (if (data-lens--connection-alive-p connection)
+                             (format "*mysql: %s*"
+                                     (or (mysql-conn-database connection)
+                                         "results"))
+                           "*mysql: results*"))
+               (buf (get-buffer-create buf-name))
+               (columns (mysql-result-columns result))
+               (rows (mysql-result-rows result))
+               (col-names (data-lens--column-names columns)))
+          (with-current-buffer buf
+            (data-lens-result-mode)
+            (setq-local data-lens--last-query sql)
+            (setq-local data-lens--base-query sql)
+            (setq-local data-lens-connection connection)
+            (setq-local data-lens--result-columns col-names)
+            (setq-local data-lens--result-column-defs columns)
+            (setq-local data-lens--result-rows rows)
+            (setq-local data-lens--pending-edits nil)
+            (setq-local data-lens--current-col-page 0)
+            (setq-local data-lens--pinned-columns nil)
+            (setq-local data-lens--sort-column nil)
+            (setq-local data-lens--sort-descending nil)
+            (setq-local data-lens--page-current 0)
+            (setq-local data-lens--page-total-rows nil)
+            (setq-local data-lens--order-by nil)
+            (when col-names
+              (data-lens--display-select-result col-names rows columns))
+            (data-lens--load-fk-info))
+          (display-buffer buf '(display-buffer-at-bottom))
+          result)
+      ;; DML: execute directly, no pagination
+      (setq data-lens--last-query sql)
+      (let* ((start (float-time))
+             (result (condition-case err
+                         (mysql-query connection sql)
+                       (mysql-error
+                        (user-error "Query error: %s"
+                                    (error-message-string err)))))
+             (elapsed (- (float-time) start)))
+        (data-lens--display-result result sql elapsed)
+        result))))
 
 ;;;; Query-at-point detection
 
@@ -1271,7 +1418,11 @@ Key bindings:
     (define-key map "g" #'data-lens-result-rerun)
     (define-key map "e" #'data-lens-result-export)
     (define-key map "c" #'data-lens-result-goto-column)
-    (define-key map "n" #'data-lens-result-load-more)
+    (define-key map "n" #'data-lens-result-next-page)
+    (define-key map "p" #'data-lens-result-prev-page)
+    (define-key map (kbd "M->") #'data-lens-result-last-page)
+    (define-key map (kbd "M-<") #'data-lens-result-first-page)
+    (define-key map "#" #'data-lens-result-count-total)
     (define-key map "s" #'data-lens-result-sort-by-column)
     (define-key map "S" #'data-lens-result-sort-by-column-desc)
     (define-key map "y" #'data-lens-result-yank-cell)
@@ -1283,8 +1434,8 @@ Key bindings:
     (define-key map "[" #'data-lens-result-prev-col-page)
     (define-key map "=" #'data-lens-result-widen-column)
     (define-key map "-" #'data-lens-result-narrow-column)
-    (define-key map "p" #'data-lens-result-pin-column)
-    (define-key map "P" #'data-lens-result-unpin-column)
+    (define-key map (kbd "C-c p") #'data-lens-result-pin-column)
+    (define-key map (kbd "C-c P") #'data-lens-result-unpin-column)
     (define-key map "F" #'data-lens-result-fullscreen-toggle)
     (define-key map "?" #'data-lens-result-dispatch)
     map)
@@ -1296,14 +1447,20 @@ Key bindings:
         (ridx (get-text-property (point) 'data-lens-row-idx)))
     (setq mode-line-position
           (when ridx
-            (let ((total (length data-lens--result-rows))
-                  (ncols (length data-lens--result-columns))
-                  (col-name (when cidx
-                              (nth cidx data-lens--result-columns))))
-              (format " R%d/%d C%d/%d%s"
-                      (1+ ridx) total
+            (let* ((page-offset (* data-lens--page-current
+                                   data-lens-result-max-rows))
+                   (global-row (+ page-offset ridx))
+                   (ncols (length data-lens--result-columns))
+                   (col-name (when cidx
+                               (nth cidx data-lens--result-columns))))
+              (format " R%d/%s C%d/%d%s (pg %d)"
+                      (1+ global-row)
+                      (if data-lens--page-total-rows
+                          (number-to-string data-lens--page-total-rows)
+                        "?")
                       (if cidx (1+ cidx) 0) ncols
-                      (if col-name (format " [%s]" col-name) "")))))))
+                      (if col-name (format " [%s]" col-name) "")
+                      (1+ data-lens--page-current)))))))
 
 (defun data-lens--update-row-highlight ()
   "Highlight the entire row under the cursor."
@@ -1319,38 +1476,49 @@ Key bindings:
 
 (defun data-lens--update-header-highlight ()
   "Highlight the header cell for the column under the cursor.
-Uses an overlay so the buffer text is not modified."
+Rebuilds `header-line-format' with the active column highlighted."
   (when data-lens--column-widths
     (data-lens--update-position-indicator)
     (data-lens--update-row-highlight)
     (let ((cidx (data-lens--col-idx-at-point)))
       (unless (eql cidx data-lens--header-active-col)
         (setq data-lens--header-active-col cidx)
-        (when data-lens--header-overlay
-          (delete-overlay data-lens--header-overlay))
-        (when cidx
-          (save-excursion
-            (goto-char (point-min))
-            (when-let* ((m (text-property-search-forward
-                            'data-lens-header-col cidx #'eq)))
-              (let ((ov (make-overlay (prop-match-beginning m)
-                                      (prop-match-end m))))
-                (overlay-put ov 'face 'data-lens-header-active-face)
-                (setq data-lens--header-overlay ov)))))))))
+        (let* ((visible-cols (data-lens--visible-columns))
+               (widths data-lens--column-widths)
+               (col-num-pages (length data-lens--column-pages))
+               (cur-page data-lens--current-col-page)
+               (has-prev (> cur-page 0))
+               (has-next (< cur-page (1- col-num-pages)))
+               (row-count (length data-lens--result-rows))
+               (global-first-row (* data-lens--page-current
+                                    data-lens-result-max-rows))
+               (nw (max 3 (length (number-to-string
+                                   (+ global-first-row row-count)))))
+               (num-blank (propertize (make-string (+ nw 1) ?\s)
+                                      'face 'shadow)))
+          (setq header-line-format
+                (data-lens--build-header-line
+                 visible-cols widths num-blank
+                 has-prev has-next cidx)))))))
 
 (define-derived-mode data-lens-result-mode special-mode "MySQL-Result"
-  "Mode for displaying MySQL query results.
+  "Mode for displaying MySQL query results with SQL pagination.
 
 \\<data-lens-result-mode-map>
   \\[data-lens-result-open-record]	Open record view for row
+  \\[data-lens-result-next-page]	Next data page
+  \\[data-lens-result-prev-page]	Previous data page
+  \\[data-lens-result-first-page]	First data page
+  \\[data-lens-result-last-page]	Last data page
+  \\[data-lens-result-count-total]	Query total row count
   \\[data-lens-result-apply-filter]	Apply WHERE filter
   \\[data-lens-result-edit-cell]	Edit cell value
   \\[data-lens-result-commit]	Commit edits as UPDATE
   \\[data-lens-result-goto-column]	Jump to column by name
   \\[data-lens-result-next-col-page]	Next column page
   \\[data-lens-result-prev-col-page]	Previous column page
-  \\[data-lens-result-sort-by-column]	Sort ascending
-  \\[data-lens-result-sort-by-column-desc]	Sort descending
+  \\[data-lens-result-sort-by-column]	Sort ascending (SQL ORDER BY)
+  \\[data-lens-result-sort-by-column-desc]	Sort descending (SQL ORDER BY)
   \\[data-lens-result-widen-column]	Widen column
   \\[data-lens-result-narrow-column]	Narrow column
   \\[data-lens-result-pin-column]	Pin column
@@ -1358,7 +1526,6 @@ Uses an overlay so the buffer text is not modified."
   \\[data-lens-result-yank-cell]	Copy cell value
   \\[data-lens-result-copy-row-as-insert]	Copy row(s) as INSERT
   \\[data-lens-result-copy-as-csv]	Copy row(s) as CSV
-  \\[data-lens-result-load-more]	Load more rows
   \\[data-lens-result-rerun]	Re-execute the query
   \\[data-lens-result-export]	Export results"
   (setq truncate-lines t)
@@ -1366,22 +1533,68 @@ Uses an overlay so the buffer text is not modified."
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
-(defun data-lens-result-load-more ()
-  "Load the next page of rows into the result display."
+(defun data-lens-result-next-page ()
+  "Go to the next data page."
   (interactive)
-  (let* ((total (length data-lens--result-rows))
-         (offset data-lens--display-offset)
-         (page-size data-lens-result-max-rows))
-    (when (>= offset total)
-      (user-error "All %d rows already displayed" total))
-    (setq-local data-lens--display-offset
-                (min (+ offset page-size) total))
-    (data-lens--refresh-display)))
+  (let ((rows-on-page (length data-lens--result-rows)))
+    (when (< rows-on-page data-lens-result-max-rows)
+      (user-error "Already on last page (fewer rows than page size)"))
+    (data-lens--execute-page (1+ data-lens--page-current))))
+
+(defun data-lens-result-prev-page ()
+  "Go to the previous data page."
+  (interactive)
+  (when (<= data-lens--page-current 0)
+    (user-error "Already on first page"))
+  (data-lens--execute-page (1- data-lens--page-current)))
+
+(defun data-lens-result-first-page ()
+  "Go to the first data page."
+  (interactive)
+  (when (= data-lens--page-current 0)
+    (user-error "Already on first page"))
+  (data-lens--execute-page 0))
+
+(defun data-lens-result-last-page ()
+  "Go to the last data page.
+Triggers a COUNT(*) query if total rows are not yet known."
+  (interactive)
+  (unless data-lens--page-total-rows
+    (data-lens-result-count-total))
+  (when data-lens--page-total-rows
+    (let* ((page-size data-lens-result-max-rows)
+           (last-page (max 0 (1- (ceiling data-lens--page-total-rows
+                                           (float page-size))))))
+      (if (= data-lens--page-current (truncate last-page))
+          (user-error "Already on last page")
+        (data-lens--execute-page (truncate last-page))))))
+
+(defun data-lens-result-count-total ()
+  "Query the total row count for the current base query."
+  (interactive)
+  (let* ((conn data-lens-connection)
+         (base (or data-lens--base-query data-lens--last-query)))
+    (unless (data-lens--connection-alive-p conn)
+      (user-error "Not connected"))
+    (let* ((count-sql (format "SELECT COUNT(*) FROM (%s) AS _dl_cnt"
+                              (string-trim-right
+                               (replace-regexp-in-string ";\\s-*\\'" "" base))))
+           (result (condition-case err
+                       (mysql-query conn count-sql)
+                     (mysql-error
+                      (user-error "COUNT query error: %s"
+                                  (error-message-string err)))))
+           (count-val (car (car (mysql-result-rows result)))))
+      (setq-local data-lens--page-total-rows
+                  (if (numberp count-val) count-val
+                    (string-to-number (format "%s" count-val))))
+      (data-lens--refresh-display)
+      (message "Total rows: %d" data-lens--page-total-rows))))
 
 (defun data-lens-result-rerun ()
   "Re-execute the last query that produced this result buffer."
   (interactive)
-  (if-let* ((sql data-lens--last-query))
+  (if-let* ((sql (or data-lens--base-query data-lens--last-query)))
       (data-lens--execute sql data-lens-connection)
     (user-error "No query to re-execute")))
 
@@ -1630,48 +1843,23 @@ COL-NAMES are column names, PK-INDICES are primary key column indices."
 
 ;;;; Sort
 
-(defun data-lens-result--sort-key (val)
-  "Return a comparison key for VAL.
-Numbers sort numerically, nil sorts last, everything else as string."
-  (cond
-   ((null val) nil)
-   ((numberp val) val)
-   ((stringp val) val)
-   ;; date/time plists — format to string for comparison
-   (t (data-lens--format-value val))))
-
-(defun data-lens-result--compare (a b)
-  "Compare two sort keys A and B.  nils sort last."
-  (cond
-   ((and (null a) (null b)) nil)
-   ((null a) nil)  ; a (nil) goes after b
-   ((null b) t)    ; b (nil) goes after a
-   ((and (numberp a) (numberp b)) (< a b))
-   (t (string< (format "%s" a) (format "%s" b)))))
-
 (defun data-lens-result--sort (col-name descending)
-  "Sort result rows by COL-NAME.  If DESCENDING, reverse order."
+  "Sort result rows by COL-NAME using SQL ORDER BY.
+If DESCENDING, sort in descending order.
+Re-executes from the first page."
   (unless data-lens--result-columns
     (user-error "No result data"))
   (let* ((col-names data-lens--result-columns)
          (idx (cl-position col-name col-names :test #'string=)))
     (unless idx
       (user-error "Column %s not found" col-name))
-    (setq data-lens--result-rows
-          (sort data-lens--result-rows
-                (lambda (a b)
-                  (let ((va (data-lens-result--sort-key (nth idx a)))
-                        (vb (data-lens-result--sort-key (nth idx b))))
-                    (if descending
-                        (data-lens-result--compare vb va)
-                      (data-lens-result--compare va vb))))))
-    (setq data-lens--sort-column col-name)
-    (setq data-lens--sort-descending descending)
-    (setq data-lens--display-offset
-          (min (length data-lens--result-rows)
-               data-lens-result-max-rows))
-    (data-lens--refresh-display)
-    (message "Sorted by %s %s" col-name (if descending "DESC" "ASC"))))
+    (let ((direction (if descending "DESC" "ASC")))
+      (setq data-lens--sort-column col-name)
+      (setq data-lens--sort-descending descending)
+      (setq data-lens--order-by (cons col-name direction))
+      (setq data-lens--page-current 0)
+      (data-lens--execute-page 0)
+      (message "Sorted by %s %s" col-name direction))))
 
 (defun data-lens-result--read-column ()
   "Read a column name, defaulting to column at point."
