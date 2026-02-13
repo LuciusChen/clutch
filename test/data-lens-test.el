@@ -184,12 +184,33 @@
   (should-not (data-lens--sql-has-limit-p "SELECT * FROM t"))
   (should-not (data-lens--sql-has-limit-p "SELECT * FROM t WHERE limitation = 1")))
 
+(ert-deftest data-lens-test-strip-leading-comments ()
+  "Test stripping leading SQL comments."
+  (should (equal (data-lens--strip-leading-comments "SELECT 1") "SELECT 1"))
+  (should (equal (data-lens--strip-leading-comments "  SELECT 1") "SELECT 1"))
+  ;; Single-line comment
+  (should (equal (data-lens--strip-leading-comments "-- hello\nSELECT 1")
+                 "SELECT 1"))
+  ;; Multiple single-line comments
+  (should (equal (data-lens--strip-leading-comments "-- a\n-- b\nSELECT 1")
+                 "SELECT 1"))
+  ;; Multi-line comment
+  (should (equal (data-lens--strip-leading-comments "/* foo */SELECT 1")
+                 "SELECT 1"))
+  ;; Mixed
+  (should (equal (data-lens--strip-leading-comments "/* foo */\n-- bar\nSELECT 1")
+                 "SELECT 1"))
+  ;; Only comments
+  (should (equal (data-lens--strip-leading-comments "-- nothing") "")))
+
 (ert-deftest data-lens-test-destructive-query-p ()
   "Test destructive query detection."
   (should (data-lens--destructive-query-p "DROP TABLE users"))
   (should (data-lens--destructive-query-p "TRUNCATE users"))
   (should (data-lens--destructive-query-p "DELETE FROM users"))
   (should (data-lens--destructive-query-p "delete from users where id=1"))
+  ;; With leading comment
+  (should (data-lens--destructive-query-p "-- cleanup\nDROP TABLE users"))
   (should-not (data-lens--destructive-query-p "SELECT * FROM users"))
   (should-not (data-lens--destructive-query-p "UPDATE users SET name='x'")))
 
@@ -199,6 +220,10 @@
   (should (data-lens--select-query-p "select id from users"))
   (should (data-lens--select-query-p "  SELECT * FROM t"))
   (should (data-lens--select-query-p "WITH cte AS (SELECT 1) SELECT * FROM cte"))
+  ;; With leading comments — previously broke SELECT detection
+  (should (data-lens--select-query-p "-- get users\nSELECT * FROM users"))
+  (should (data-lens--select-query-p "/* all */\nSELECT * FROM users"))
+  (should (data-lens--select-query-p "-- a\n-- b\nSELECT 1"))
   ;; Note: SHOW/DESCRIBE/EXPLAIN are not recognized as SELECT
   (should-not (data-lens--select-query-p "SHOW TABLES"))
   (should-not (data-lens--select-query-p "DESCRIBE users"))

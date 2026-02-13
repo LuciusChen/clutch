@@ -219,6 +219,12 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
                                               :ref-column (nth 2 row)))))
     (mysql-error nil)))
 
+;;;; Re-entrancy guard
+
+(cl-defmethod data-lens-db-busy-p ((conn mysql-conn))
+  "Return non-nil if MySQL CONN is executing a query."
+  (mysql-conn-busy conn))
+
 ;;;; Metadata methods
 
 (cl-defmethod data-lens-db-user ((conn mysql-conn))
