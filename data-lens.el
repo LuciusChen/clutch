@@ -1208,8 +1208,6 @@ Prompts for confirmation on destructive operations."
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
     (data-lens--add-history sql)
-    (message "Executing: %s"
-             (truncate-string-to-width (string-trim sql) 120))
     (if (data-lens--select-query-p sql)
         (data-lens--execute-select sql connection)
       (data-lens--execute-dml sql connection))))
