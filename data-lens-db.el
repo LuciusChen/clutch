@@ -99,6 +99,12 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
   "Return foreign key info for TABLE on CONN.
 Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")
 
+(cl-defgeneric data-lens-db-column-details (conn table)
+  "Return detailed column info for TABLE on CONN.
+Returns a list of plists with keys:
+  :name STR  :type STR  :nullable BOOL
+  :primary-key BOOL  :foreign-key PLIST-OR-NIL")
+
 ;; Re-entrancy guard
 
 (cl-defgeneric data-lens-db-busy-p (conn)

@@ -224,6 +224,15 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 (defvar-local data-lens--marked-rows nil
   "List of marked row indices (dired-style selection).")
 
+(defvar-local data-lens--query-elapsed nil
+  "Elapsed time in seconds for the last query execution.")
+
+(defvar-local data-lens--filter-pattern nil
+  "Current client-side filter string, or nil.")
+
+(defvar-local data-lens--filtered-rows nil
+  "Filtered subset of `data-lens--result-rows', or nil when unfiltered.")
+
 (defvar-local data-lens-record--result-buffer nil
   "Reference to the parent result buffer (Record buffer local).")
 
@@ -763,6 +772,15 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
                     (propertize data-lens--where-filter
                                 'face 'font-lock-warning-face))
             parts))
+    (when data-lens--filter-pattern
+      (push (concat (propertize " | /: " 'face 'font-lock-string-face)
+                    (propertize data-lens--filter-pattern
+                                'face 'font-lock-string-face))
+            parts))
+    (when data-lens--query-elapsed
+      (push (propertize (format " | %.3fs" data-lens--query-elapsed)
+                        'face dim)
+            parts))
     (apply #'concat (nreverse parts))))
 
 (defun data-lens--effective-widths ()
@@ -873,7 +891,7 @@ EDGE-FN applies column-page edge indicators."
   (let* ((inhibit-read-only t)
          (visible-cols (data-lens--visible-columns))
          (widths (data-lens--effective-widths))
-         (rows data-lens--result-rows)
+         (rows (or data-lens--filtered-rows data-lens--result-rows))
          (col-num-pages (length data-lens--column-pages))
          (cur-page data-lens--current-col-page)
          (has-prev (> cur-page 0))
@@ -1102,6 +1120,9 @@ Signals an error if pagination is not available."
       (setq-local data-lens--page-current page-num)
       (setq-local data-lens--pending-edits nil)
       (setq-local data-lens--marked-rows nil)
+      (setq-local data-lens--query-elapsed elapsed)
+      (setq-local data-lens--filter-pattern nil)
+      (setq-local data-lens--filtered-rows nil)
       (setq-local data-lens--column-widths
                   (data-lens--compute-column-widths col-names rows columns))
       (data-lens--refresh-display)
@@ -1148,11 +1169,13 @@ Leading SQL comments are stripped before checking."
 Returns the query result."
   (let* ((page-size data-lens-result-max-rows)
          (paged-sql (data-lens-db-build-paged-sql connection sql 0 page-size))
+         (start (float-time))
          (result (condition-case err
                      (data-lens-db-query connection paged-sql)
                    (data-lens-db-error
                     (user-error "Query error: %s"
                                 (error-message-string err)))))
+         (elapsed (- (float-time) start))
          (buf (get-buffer-create (data-lens--result-buffer-name)))
          (columns (data-lens-db-result-columns result))
          (rows (data-lens-db-result-rows result))
@@ -1173,7 +1196,10 @@ Returns the query result."
                   data-lens--sort-descending nil
                   data-lens--page-current 0
                   data-lens--page-total-rows nil
-                  data-lens--order-by nil)
+                  data-lens--order-by nil
+                  data-lens--query-elapsed elapsed
+                  data-lens--filter-pattern nil
+                  data-lens--filtered-rows nil)
       (when col-names
         (data-lens--display-select-result col-names rows columns))
       (data-lens--load-fk-info))
@@ -1439,22 +1465,102 @@ when completion triggers during an in-flight query)."
 
 ;;;; Schema browser
 
+(defvar-local data-lens-schema--expanded-tables nil
+  "List of table names currently expanded in the schema browser.")
+
+(defvar-local data-lens-schema--tables nil
+  "Cached list of table names for the schema browser.")
+
 (defvar data-lens-schema-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (define-key map "g" #'data-lens-schema-refresh)
     (define-key map (kbd "RET") #'data-lens-schema-describe-at-point)
+    (define-key map (kbd "TAB") #'data-lens-schema-toggle-expand)
+    (define-key map "E" #'data-lens-schema-expand-all)
+    (define-key map "C" #'data-lens-schema-collapse-all)
     map)
   "Keymap for `data-lens-schema-mode'.")
 
 (define-derived-mode data-lens-schema-mode special-mode "DB-Schema"
-  "Mode for browsing database schema."
+  "Mode for browsing database schema.
+
+\\<data-lens-schema-mode-map>
+  \\[data-lens-schema-toggle-expand]	Expand/collapse table columns
+  \\[data-lens-schema-expand-all]	Expand all tables
+  \\[data-lens-schema-collapse-all]	Collapse all tables
+  \\[data-lens-schema-describe-at-point]	Show DDL for table
+  \\[data-lens-schema-refresh]	Refresh"
   (setq truncate-lines t)
   (setq-local revert-buffer-function #'data-lens-schema--revert))
 
 (defun data-lens-schema--revert (_ignore-auto _noconfirm)
   "Revert function for schema browser."
   (data-lens-schema-refresh))
+
+(defun data-lens-schema--table-at-point ()
+  "Return the table name at the current line, or nil."
+  (get-text-property (line-beginning-position) 'data-lens-schema-table))
+
+(defun data-lens-schema--column-annotation (col)
+  "Return the annotation suffix for column detail plist COL."
+  (let ((pk (plist-get col :primary-key))
+        (fk (plist-get col :foreign-key)))
+    (concat (when pk " PK")
+            (when fk
+              (format " FK → %s.%s"
+                      (plist-get fk :ref-table)
+                      (plist-get fk :ref-column))))))
+
+(defun data-lens-schema--insert-columns (conn tbl)
+  "Insert indented column detail lines for TBL using CONN."
+  (condition-case nil
+      (let ((details (data-lens-db-column-details conn tbl)))
+        (when details
+          (let ((last-idx (1- (length details))))
+            (cl-loop for col in details
+                     for i from 0
+                     for branch = (if (= i last-idx) "└── " "├── ")
+                     do (insert
+                         (propertize
+                          (format "  %s%-20s %s%s\n"
+                                  branch
+                                  (plist-get col :name)
+                                  (plist-get col :type)
+                                  (data-lens-schema--column-annotation col))
+                          'data-lens-schema-table tbl
+                          'face 'font-lock-comment-face))))))
+    (data-lens-db-error nil)))
+
+(defun data-lens-schema--insert-table (conn tbl expanded-p)
+  "Insert a table line for TBL.
+If EXPANDED-P, also insert column detail lines using CONN."
+  (let* ((arrow (if expanded-p "▾" "▸"))
+         (line (propertize (format "%s %s" arrow tbl)
+                           'data-lens-schema-table tbl)))
+    (insert-text-button line
+                        'action (lambda (_btn)
+                                  (data-lens-describe-table tbl))
+                        'follow-link t)
+    (insert "\n")
+    (when expanded-p
+      (data-lens-schema--insert-columns conn tbl))))
+
+(defun data-lens-schema--render ()
+  "Render the schema browser content."
+  (let* ((inhibit-read-only t)
+         (conn data-lens-connection)
+         (tables data-lens-schema--tables)
+         (expanded data-lens-schema--expanded-tables))
+    (erase-buffer)
+    (insert (propertize
+             (format "-- Tables in %s (%d)\n\n"
+                     (or (data-lens-db-database conn) "?")
+                     (length tables))
+             'face 'font-lock-comment-face))
+    (dolist (tbl tables)
+      (data-lens-schema--insert-table
+       conn tbl (member tbl expanded)))))
 
 (defun data-lens-list-tables ()
   "Show a list of tables in the current database."
@@ -1467,23 +1573,44 @@ when completion triggers during an in-flight query)."
                        (or (data-lens-db-database conn) "?")))))
     (with-current-buffer buf
       (data-lens-schema-mode)
-      (setq-local data-lens-connection conn)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize
-                 (format "-- Tables in %s (%d)\n\n"
-                         (or (data-lens-db-database conn) "?")
-                         (length tables))
-                 'face 'font-lock-comment-face))
-        (dolist (tbl tables)
-          (insert-text-button tbl
-                              'action (lambda (btn)
-                                        (data-lens-describe-table
-                                         (button-label btn)))
-                              'follow-link t)
-          (insert "\n"))
-        (goto-char (point-min))))
+      (setq-local data-lens-connection conn
+                  data-lens-schema--tables tables)
+      (data-lens-schema--render)
+      (goto-char (point-min)))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
+
+(defun data-lens-schema-toggle-expand ()
+  "Toggle column expansion for the table at point."
+  (interactive)
+  (if-let* ((tbl (data-lens-schema--table-at-point)))
+      (let ((line (line-number-at-pos)))
+        (if (member tbl data-lens-schema--expanded-tables)
+            (setq data-lens-schema--expanded-tables
+                  (delete tbl data-lens-schema--expanded-tables))
+          (push tbl data-lens-schema--expanded-tables))
+        (data-lens-schema--render)
+        (goto-char (point-min))
+        (forward-line (1- line)))
+    (user-error "No table at point")))
+
+(defun data-lens-schema-expand-all ()
+  "Expand all tables in the schema browser."
+  (interactive)
+  (setq data-lens-schema--expanded-tables
+        (copy-sequence data-lens-schema--tables))
+  (let ((line (line-number-at-pos)))
+    (data-lens-schema--render)
+    (goto-char (point-min))
+    (forward-line (1- line))))
+
+(defun data-lens-schema-collapse-all ()
+  "Collapse all tables in the schema browser."
+  (interactive)
+  (setq data-lens-schema--expanded-tables nil)
+  (let ((line (line-number-at-pos)))
+    (data-lens-schema--render)
+    (goto-char (point-min))
+    (forward-line (1- (min line (line-number-at-pos (point-max)))))))
 
 (defun data-lens-describe-table (table)
   "Show the DDL of TABLE using SHOW CREATE TABLE."
@@ -1530,7 +1657,12 @@ when completion triggers during an in-flight query)."
   (interactive)
   (data-lens--ensure-connection)
   (data-lens--refresh-schema-cache data-lens-connection)
-  (data-lens-list-tables))
+  (setq data-lens-schema--tables
+        (data-lens-db-list-tables data-lens-connection))
+  (let ((line (line-number-at-pos)))
+    (data-lens-schema--render)
+    (goto-char (point-min))
+    (forward-line (1- line))))
 
 ;;;; data-lens-mode (SQL editing major mode)
 
@@ -1693,6 +1825,11 @@ Preserves the window scroll position relative to the target row."
     (define-key map "m" #'data-lens-result-toggle-mark)
     (define-key map "u" #'data-lens-result-unmark-row)
     (define-key map "U" #'data-lens-result-unmark-all)
+    ;; Client-side filter
+    (define-key map "/" #'data-lens-result-filter)
+    ;; Delete / Insert
+    (define-key map "d" #'data-lens-result-delete-rows)
+    (define-key map "o" #'data-lens-result-insert-row)
     map)
   "Keymap for `data-lens-result-mode'.")
 
@@ -2093,6 +2230,165 @@ COL-NAMES are column names, PK-INDICES are primary key column indices."
         (data-lens--execute data-lens--last-query
                                     data-lens-connection)))))
 
+;;;; Delete rows
+
+(defun data-lens-result--build-delete-stmt (table row col-names pk-indices)
+  "Build a DELETE statement for TABLE.
+ROW is the row data, COL-NAMES are column names,
+PK-INDICES are primary key column indices."
+  (let* ((conn data-lens-connection)
+         (where-parts
+          (mapcar (lambda (pki)
+                    (let ((v (nth pki row)))
+                      (format "%s %s"
+                              (data-lens-db-escape-identifier
+                               conn (nth pki col-names))
+                              (if (null v) "IS NULL"
+                                (format "= %s"
+                                        (data-lens--value-to-literal v))))))
+                  pk-indices)))
+    (format "DELETE FROM %s WHERE %s"
+            (data-lens-db-escape-identifier conn table)
+            (mapconcat #'identity where-parts " AND "))))
+
+(defun data-lens-result-delete-rows ()
+  "Delete marked rows (or current row) from the database.
+Detects table and primary key, builds DELETE statements,
+and prompts for confirmation before executing."
+  (interactive)
+  (let* ((indices (or (data-lens-result--marked-row-indices)
+                      (user-error "No row at point")))
+         (table (or (data-lens-result--detect-table)
+                    (user-error "Cannot detect source table")))
+         (pk-indices (or (data-lens-result--detect-primary-key)
+                         (user-error "Cannot detect primary key for %s" table)))
+         (col-names data-lens--result-columns)
+         (rows data-lens--result-rows)
+         (statements
+          (mapcar (lambda (ridx)
+                    (data-lens-result--build-delete-stmt
+                     table (nth ridx rows) col-names pk-indices))
+                  indices))
+         (sql-text (mapconcat (lambda (s) (concat s ";"))
+                              statements "\n")))
+    (when (yes-or-no-p
+           (format "Execute %d DELETE statement%s?\n\n%s\n\n"
+                   (length statements)
+                   (if (= (length statements) 1) "" "s")
+                   sql-text))
+      (dolist (stmt statements)
+        (condition-case err
+            (data-lens-db-query data-lens-connection stmt)
+          (data-lens-db-error
+           (user-error "DELETE failed: %s" (error-message-string err)))))
+      (setq data-lens--marked-rows nil)
+      (message "%d row%s deleted"
+               (length statements)
+               (if (= (length statements) 1) "" "s"))
+      (data-lens--execute data-lens--last-query
+                          data-lens-connection))))
+
+;;;; Insert row
+
+(defvar data-lens-result-insert-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'data-lens-result-insert-commit)
+    (define-key map (kbd "C-c C-k") #'data-lens-result-insert-cancel)
+    map)
+  "Keymap for the INSERT edit buffer.")
+
+(define-minor-mode data-lens-result-insert-mode
+  "Minor mode for editing a new row to INSERT.
+\\<data-lens-result-insert-mode-map>
+  \\[data-lens-result-insert-commit]	Execute INSERT
+  \\[data-lens-result-insert-cancel]	Cancel"
+  :lighter " DB-Insert"
+  :keymap data-lens-result-insert-mode-map)
+
+(defvar-local data-lens-result-insert--result-buffer nil
+  "Reference to the parent result buffer (Insert buffer local).")
+
+(defvar-local data-lens-result-insert--table nil
+  "Table name for the INSERT (Insert buffer local).")
+
+(defun data-lens-result-insert-row ()
+  "Open an edit buffer to INSERT a new row into the current table."
+  (interactive)
+  (let* ((table (or (data-lens-result--detect-table)
+                    (user-error "Cannot detect source table")))
+         (col-names data-lens--result-columns)
+         (result-buf (current-buffer))
+         (buf (get-buffer-create (format "*data-lens-insert: %s*" table))))
+    (with-current-buffer buf
+      (erase-buffer)
+      (data-lens-result-insert-mode 1)
+      (setq-local data-lens-result-insert--result-buffer result-buf
+                  data-lens-result-insert--table table
+                  header-line-format
+                  (format " INSERT into %s  |  C-c C-c: execute  C-c C-k: cancel"
+                          table))
+      (dolist (col col-names)
+        (insert (propertize col 'face 'data-lens-header-face)
+                ": \n"))
+      (goto-char (point-min))
+      (end-of-line))
+    (pop-to-buffer buf)))
+
+(defun data-lens-result-insert--parse-fields ()
+  "Parse the insert buffer into an alist of (COLUMN . VALUE).
+Skips columns with empty values."
+  (let (fields)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position))))
+          (when (string-match "\\`\\(.+?\\): \\(.*\\)\\'" line)
+            (let ((col (match-string 1 line))
+                  (val (match-string 2 line)))
+              (unless (string-empty-p val)
+                (push (cons col val) fields)))))
+        (forward-line 1)))
+    (nreverse fields)))
+
+(defun data-lens-result-insert-commit ()
+  "Build and execute the INSERT statement from the edit buffer."
+  (interactive)
+  (let* ((fields (data-lens-result-insert--parse-fields))
+         (table data-lens-result-insert--table)
+         (result-buf data-lens-result-insert--result-buffer))
+    (unless fields
+      (user-error "No values entered"))
+    (unless (buffer-live-p result-buf)
+      (user-error "Result buffer no longer exists"))
+    (let* ((conn (buffer-local-value 'data-lens-connection result-buf))
+           (cols (mapconcat (lambda (f)
+                              (data-lens-db-escape-identifier conn (car f)))
+                            fields ", "))
+           (vals (mapconcat (lambda (f)
+                              (let ((v (cdr f)))
+                                (if (string= (upcase v) "NULL") "NULL"
+                                  (data-lens-db-escape-literal conn v))))
+                            fields ", "))
+           (sql (format "INSERT INTO %s (%s) VALUES (%s)"
+                        (data-lens-db-escape-identifier conn table)
+                        cols vals)))
+      (when (yes-or-no-p (format "Execute?\n\n%s\n\n" sql))
+        (condition-case err
+            (data-lens-db-query conn sql)
+          (data-lens-db-error
+           (user-error "INSERT failed: %s" (error-message-string err))))
+        (quit-window 'kill)
+        (when (buffer-live-p result-buf)
+          (with-current-buffer result-buf
+            (data-lens--execute data-lens--last-query conn)))
+        (message "Row inserted into %s" table)))))
+
+(defun data-lens-result-insert-cancel ()
+  "Cancel the INSERT and close the edit buffer."
+  (interactive)
+  (quit-window 'kill))
+
 ;;;; Sort
 
 (defun data-lens-result--sort (col-name descending)
@@ -2183,6 +2479,46 @@ Prompts for a WHERE condition.  Enter empty string to clear."
     (message (if filtered-sql
                  (format "Filter applied: WHERE %s" input)
                "Filter cleared"))))
+
+;;;; Client-side filter
+
+(defun data-lens-result-filter ()
+  "Filter visible rows by substring match (client-side).
+Prompts for a pattern; enter empty string to clear."
+  (interactive)
+  (let ((input (string-trim
+                (read-string
+                 (if data-lens--filter-pattern
+                     (format "Filter (current: %s, empty to clear): "
+                             data-lens--filter-pattern)
+                   "Filter (empty to clear): ")))))
+    (if (string-empty-p input)
+        (progn
+          (setq data-lens--filter-pattern nil
+                data-lens--filtered-rows nil
+                data-lens--marked-rows nil)
+          (data-lens--render-result)
+          (message "Filter cleared"))
+      (let* ((pattern (downcase input))
+             (matching
+              (cl-loop for row in data-lens--result-rows
+                       when (cl-some
+                             (lambda (val)
+                               (and val
+                                    (string-match-p
+                                     (regexp-quote pattern)
+                                     (downcase
+                                      (data-lens--format-value val)))))
+                             row)
+                       collect row)))
+        (setq data-lens--filter-pattern input
+              data-lens--filtered-rows matching
+              data-lens--marked-rows nil)
+        (data-lens--render-result)
+        (message "Filter: %d/%d rows match \"%s\""
+                 (length matching)
+                 (length data-lens--result-rows)
+                 input)))))
 
 ;;;; Yank cell / Copy row as INSERT
 
@@ -2777,12 +3113,15 @@ Accumulates input until a semicolon is found, then executes."
     ("]" "Next col page"   data-lens-result-next-col-page)
     ("[" "Prev col page"   data-lens-result-prev-col-page)]
    ["Filter / Sort"
+    ("/" "Filter rows"     data-lens-result-filter)
     ("W" "WHERE filter"    data-lens-result-apply-filter)
     ("s" "Sort ASC"        data-lens-result-sort-by-column)
     ("S" "Sort DESC"       data-lens-result-sort-by-column-desc)]]
   [["Edit"
     ("C-c '" "Edit cell"   data-lens-result-edit-cell)
-    ("C-c C-c" "Commit"    data-lens-result-commit)]
+    ("C-c C-c" "Commit"    data-lens-result-commit)
+    ("o" "Insert row"      data-lens-result-insert-row)
+    ("d" "Delete row(s)"   data-lens-result-delete-rows)]
    ["Copy (C-u = select cols)"
     ("y" "Yank cell"       data-lens-result-yank-cell)
     ("w" "Row(s) INSERT"   data-lens-result-copy-row-as-insert)

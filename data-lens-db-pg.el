@@ -245,6 +245,35 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                                      :ref-column (nth 2 row)))))
     (pg-error nil)))
 
+;;;; Column details
+
+(cl-defmethod data-lens-db-column-details ((conn pg-conn) table)
+  "Return detailed column info for TABLE on PostgreSQL CONN."
+  (condition-case _err
+      (let* ((col-result
+              (pg-query
+               conn
+               (format "SELECT column_name, data_type, is_nullable \
+FROM information_schema.columns \
+WHERE table_name = %s AND table_schema = current_schema() \
+ORDER BY ordinal_position"
+                       (pg-escape-literal table))))
+             (col-rows (pg-result-rows col-result))
+             (pk-cols (data-lens-db-primary-key-columns conn table))
+             (fks (data-lens-db-foreign-keys conn table)))
+        (mapcar
+         (lambda (row)
+           (let* ((name (nth 0 row))
+                  (type (nth 1 row))
+                  (nullable (string= (nth 2 row) "YES"))
+                  (pk-p (member name pk-cols))
+                  (fk (cdr (assoc name fks))))
+             (list :name name :type type :nullable nullable
+                   :primary-key (and pk-p t)
+                   :foreign-key fk)))
+         col-rows))
+    (pg-error nil)))
+
 ;;;; Re-entrancy guard
 
 (cl-defmethod data-lens-db-busy-p ((conn pg-conn))
