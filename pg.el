@@ -108,7 +108,8 @@
   pid secret-key
   (parameters nil)
   (read-timeout 10)
-  tls)
+  tls
+  (busy nil))
 
 (cl-defstruct pg-result
   "A PostgreSQL query result."
@@ -791,25 +792,33 @@ Returns (TAG . AFFECTED-ROWS) where AFFECTED-ROWS may be nil."
 
 (defun pg-query (conn sql)
   "Execute SQL query on CONN using the simple query protocol.
-Returns a `pg-result'."
-  (pg--send-message conn ?Q (pg--encode-string sql))
-  (let ((columns nil) (rows nil) (affected-rows nil) (status nil) (done nil))
-    (while (not done)
-      (pcase-let ((`(,msg-type . ,payload) (pg--read-message conn)))
-        (pcase msg-type
-          (?T (setq columns (pg--parse-row-description payload)))
-          (?D (push (pg--parse-data-row payload columns) rows))
-          (?C (pcase-let ((`(,tag . ,n) (pg--parse-command-complete payload)))
-                (setq status tag affected-rows n)))
-          (?Z (setq done t))
-          (?E (pg--handle-query-error conn payload))
-          (_ nil))))
-    (make-pg-result
-     :connection conn
-     :status (or status "OK")
-     :columns columns
-     :rows (nreverse rows)
-     :affected-rows affected-rows)))
+Returns a `pg-result'.
+Signals `pg-error' if the connection is busy (re-entrant call)."
+  (when (pg-conn-busy conn)
+    (signal 'pg-error
+            (list "Connection busy — cannot send query while another is in progress")))
+  (setf (pg-conn-busy conn) t)
+  (unwind-protect
+      (progn
+        (pg--send-message conn ?Q (pg--encode-string sql))
+        (let ((columns nil) (rows nil) (affected-rows nil) (status nil) (done nil))
+          (while (not done)
+            (pcase-let ((`(,msg-type . ,payload) (pg--read-message conn)))
+              (pcase msg-type
+                (?T (setq columns (pg--parse-row-description payload)))
+                (?D (push (pg--parse-data-row payload columns) rows))
+                (?C (pcase-let ((`(,tag . ,n) (pg--parse-command-complete payload)))
+                      (setq status tag affected-rows n)))
+                (?Z (setq done t))
+                (?E (pg--handle-query-error conn payload))
+                (_ nil))))
+          (make-pg-result
+           :connection conn
+           :status (or status "OK")
+           :columns columns
+           :rows (nreverse rows)
+           :affected-rows affected-rows)))
+    (setf (pg-conn-busy conn) nil)))
 
 ;;;; Ping
 

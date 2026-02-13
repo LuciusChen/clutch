@@ -747,8 +747,8 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
          (dim 'font-lock-comment-face)
          (first-row (1+ (* page-num page-size)))
          (last-row (+ (* page-num page-size) row-count))
-         (parts (list (data-lens--footer-row-range first-row last-row total-rows)
-                      (data-lens--footer-page-indicator page-num page-size total-rows))))
+         (parts (list (data-lens--footer-page-indicator page-num page-size total-rows)
+                      (data-lens--footer-row-range first-row last-row total-rows))))
     (when (> col-num-pages 1)
       (push (concat (propertize " | Col page " 'face dim)
                     (propertize (format "%d/%d" col-cur-page col-num-pages)
@@ -911,6 +911,15 @@ EDGE-FN applies column-page edge indicators."
              data-lens-result-max-rows data-lens--page-total-rows
              col-num-pages (1+ cur-page))
             "\n")
+    (when data-lens--last-query
+      (insert (propertize
+               (truncate-string-to-width
+                (replace-regexp-in-string
+                 "[\n\r]+" " "
+                 (string-trim data-lens--last-query))
+                120 nil nil t)
+               'face 'font-lock-comment-face)
+              "\n"))
     (goto-char (point-min))))
 
 (defun data-lens--col-idx-at-point ()
@@ -1103,15 +1112,35 @@ Signals an error if pagination is not available."
 
 ;;;; Query execution engine
 
+(defun data-lens--strip-leading-comments (sql)
+  "Strip leading SQL comments and whitespace from SQL.
+Handles single-line (--) and multi-line (/* */) comments."
+  (let ((s (string-trim-left sql)))
+    (while (or (string-prefix-p "--" s)
+               (string-prefix-p "/*" s))
+      (setq s (string-trim-left
+               (cond
+                ((string-prefix-p "--" s)
+                 (if-let* ((nl (string-search "\n" s)))
+                     (substring s (1+ nl))
+                   ""))
+                ((string-prefix-p "/*" s)
+                 (if-let* ((end (string-search "*/" s)))
+                     (substring s (+ end 2))
+                   ""))))))
+    s))
+
 (defun data-lens--destructive-query-p (sql)
-  "Return non-nil if SQL is a destructive operation."
-  (let ((trimmed (string-trim-left sql)))
+  "Return non-nil if SQL is a destructive operation.
+Leading SQL comments are stripped before checking."
+  (let ((trimmed (data-lens--strip-leading-comments sql)))
     (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
                     (upcase trimmed))))
 
 (defun data-lens--select-query-p (sql)
-  "Return non-nil if SQL is a SELECT query."
-  (let ((trimmed (string-trim-left sql)))
+  "Return non-nil if SQL is a SELECT query.
+Leading SQL comments are stripped before checking."
+  (let ((trimmed (data-lens--strip-leading-comments sql)))
     (string-match-p "\\`\\(?:SELECT\\|WITH\\)\\b"
                     (upcase trimmed))))
 
@@ -1180,6 +1209,8 @@ Prompts for confirmation on destructive operations."
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
     (data-lens--add-history sql)
+    (message "Executing: %s"
+             (truncate-string-to-width (string-trim sql) 120))
     (if (data-lens--select-query-p sql)
         (data-lens--execute-select sql connection)
       (data-lens--execute-dml sql connection))))
@@ -1372,7 +1403,9 @@ Fetches from the backend if not yet cached.  Returns column list."
              data-lens--schema-cache)))
 
 (defun data-lens-completion-at-point ()
-  "Completion-at-point function for SQL identifiers."
+  "Completion-at-point function for SQL identifiers.
+Skips column loading if the connection is busy (prevents re-entrancy
+when completion triggers during an in-flight query)."
   (when-let* ((schema (data-lens--schema-for-connection))
               (conn data-lens-connection)
               (bounds (bounds-of-thing-at-point 'symbol)))
@@ -1385,8 +1418,9 @@ Fetches from the backend if not yet cached.  Returns column list."
             (string-match-p
              "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
              (upcase line-before)))
+           (busy (data-lens-db-busy-p conn))
            (candidates
-            (if table-context-p
+            (if (or table-context-p busy)
                 (hash-table-keys schema)
               ;; Combine table names and lazily-loaded column names
               (let ((all (copy-sequence (hash-table-keys schema))))

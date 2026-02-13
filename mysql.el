@@ -135,7 +135,8 @@
   status-flags
   (read-timeout 10)
   (sequence-id 0)
-  tls)
+  tls
+  (busy nil))
 
 (cl-defstruct mysql-result
   "A MySQL query result."
@@ -848,34 +849,42 @@ SALT is the nonce, AUTH-PLUGIN is the current auth plugin name."
 
 (defun mysql-query (conn sql)
   "Execute SQL query on CONN and return a `mysql-result'.
-SQL is a string containing the query to execute."
-  (setf (mysql-conn-sequence-id conn) 0)
-  (mysql--send-packet conn (concat (unibyte-string #x03)
-                                   (encode-coding-string sql 'utf-8)))
-  (let ((packet (mysql--read-packet conn)))
-    (pcase (mysql--packet-type packet)
-      ('ok
-       (let ((ok-info (mysql--parse-ok-packet packet)))
-         (setf (mysql-conn-status-flags conn)
-               (plist-get ok-info :status-flags))
-         (make-mysql-result
-          :connection conn
-          :status "OK"
-          :affected-rows (plist-get ok-info :affected-rows)
-          :last-insert-id (plist-get ok-info :last-insert-id)
-          :warnings (plist-get ok-info :warnings))))
-      ('err
-       (let ((err-info (mysql--parse-err-packet packet)))
-         (signal 'mysql-query-error
-                 (list (format "[%d] %s%s"
-                               (plist-get err-info :code)
-                               (if (plist-get err-info :state)
-                                   (format "(%s) " (plist-get err-info :state))
-                                 "")
-                               (plist-get err-info :message))))))
-      (_
-       ;; Result set: first byte is column_count (lenenc int)
-       (mysql--read-result-set conn packet)))))
+SQL is a string containing the query to execute.
+Signals `mysql-error' if the connection is busy (re-entrant call)."
+  (when (mysql-conn-busy conn)
+    (signal 'mysql-error
+            (list "Connection busy — cannot send query while another is in progress")))
+  (setf (mysql-conn-busy conn) t)
+  (unwind-protect
+      (progn
+        (setf (mysql-conn-sequence-id conn) 0)
+        (mysql--send-packet conn (concat (unibyte-string #x03)
+                                         (encode-coding-string sql 'utf-8)))
+        (let ((packet (mysql--read-packet conn)))
+          (pcase (mysql--packet-type packet)
+            ('ok
+             (let ((ok-info (mysql--parse-ok-packet packet)))
+               (setf (mysql-conn-status-flags conn)
+                     (plist-get ok-info :status-flags))
+               (make-mysql-result
+                :connection conn
+                :status "OK"
+                :affected-rows (plist-get ok-info :affected-rows)
+                :last-insert-id (plist-get ok-info :last-insert-id)
+                :warnings (plist-get ok-info :warnings))))
+            ('err
+             (let ((err-info (mysql--parse-err-packet packet)))
+               (signal 'mysql-query-error
+                       (list (format "[%d] %s%s"
+                                     (plist-get err-info :code)
+                                     (if (plist-get err-info :state)
+                                         (format "(%s) " (plist-get err-info :state))
+                                       "")
+                                     (plist-get err-info :message))))))
+            (_
+             ;; Result set: first byte is column_count (lenenc int)
+             (mysql--read-result-set conn packet)))))
+    (setf (mysql-conn-busy conn) nil)))
 
 (defun mysql--read-column-definitions (conn col-count)
   "Read COL-COUNT column definition packets from CONN.

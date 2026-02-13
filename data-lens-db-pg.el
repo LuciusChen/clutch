@@ -245,6 +245,12 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                                      :ref-column (nth 2 row)))))
     (pg-error nil)))
 
+;;;; Re-entrancy guard
+
+(cl-defmethod data-lens-db-busy-p ((conn pg-conn))
+  "Return non-nil if PostgreSQL CONN is executing a query."
+  (pg-conn-busy conn))
+
 ;;;; Metadata methods
 
 (cl-defmethod data-lens-db-user ((conn pg-conn))
