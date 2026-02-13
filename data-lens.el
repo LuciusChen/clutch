@@ -1943,6 +1943,9 @@ Edit:
   (hl-line-mode 1)
   ;; Make tab-line use default background so footer renders cleanly
   (face-remap-add-relative 'tab-line :inherit 'default)
+  ;; Add underline to header-line so header and data stay visually separated
+  ;; even when the in-buffer separator line scrolls out of view
+  (face-remap-add-relative 'header-line :underline t)
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
