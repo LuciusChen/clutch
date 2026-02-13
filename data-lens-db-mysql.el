@@ -219,6 +219,31 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
                                               :ref-column (nth 2 row)))))
     (mysql-error nil)))
 
+;;;; Column details
+
+(cl-defmethod data-lens-db-column-details ((conn mysql-conn) table)
+  "Return detailed column info for TABLE on MySQL CONN."
+  (condition-case _err
+      (let* ((col-result (mysql-query
+                          conn
+                          (format "SHOW COLUMNS FROM %s"
+                                  (mysql-escape-identifier table))))
+             (col-rows (mysql-result-rows col-result))
+             (pk-cols (data-lens-db-primary-key-columns conn table))
+             (fks (data-lens-db-foreign-keys conn table)))
+        (mapcar
+         (lambda (row)
+           (let* ((name (nth 0 row))
+                  (type (nth 1 row))
+                  (nullable (string= (nth 2 row) "YES"))
+                  (pk-p (member name pk-cols))
+                  (fk (cdr (assoc name fks))))
+             (list :name name :type type :nullable nullable
+                   :primary-key (and pk-p t)
+                   :foreign-key fk)))
+         col-rows))
+    (mysql-error nil)))
+
 ;;;; Re-entrancy guard
 
 (cl-defmethod data-lens-db-busy-p ((conn mysql-conn))
