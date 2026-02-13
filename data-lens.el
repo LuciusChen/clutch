@@ -718,76 +718,6 @@ Returns a propertized string."
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'data-lens-border-face))))
 
-(defun data-lens--footer-row-range (first-row last-row total-rows)
-  "Return the row-range part of the footer.
-FIRST-ROW and LAST-ROW are 1-based; TOTAL-ROWS is nil or a number."
-  (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face))
-    (concat (propertize "rows " 'face dim)
-            (propertize (format "%d-%d" first-row last-row) 'face hi)
-            (propertize " of " 'face dim)
-            (propertize (if total-rows (format "%d" total-rows) "?")
-                        'face hi))))
-
-(defun data-lens--footer-page-indicator (page-num page-size total-rows)
-  "Return the data-page part of the footer.
-PAGE-NUM is 0-based, PAGE-SIZE is rows per page, TOTAL-ROWS may be nil."
-  (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face))
-    (if total-rows
-        (let ((total-pages (max 1 (ceiling total-rows (float page-size)))))
-          (concat (propertize " | Page " 'face dim)
-                  (propertize (format "%d/%d" (1+ page-num)
-                                      (truncate total-pages))
-                              'face hi)))
-      (concat (propertize " | Page " 'face dim)
-              (propertize (format "%d" (1+ page-num)) 'face hi)))))
-
-(defun data-lens--render-footer (row-count page-num page-size
-                                           total-rows col-num-pages col-cur-page)
-  "Return the footer string for pagination state.
-ROW-COUNT is the number of rows on the current page.
-PAGE-NUM is the current data page (0-based).
-PAGE-SIZE is `data-lens-result-max-rows'.
-TOTAL-ROWS is the known total or nil.
-COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
-  (let* ((hi 'font-lock-keyword-face)
-         (dim 'font-lock-comment-face)
-         (first-row (1+ (* page-num page-size)))
-         (last-row (+ (* page-num page-size) row-count))
-         (parts (list (data-lens--footer-page-indicator page-num page-size total-rows)
-                      (data-lens--footer-row-range first-row last-row total-rows))))
-    (when (> col-num-pages 1)
-      (push (concat (propertize " | Col page " 'face dim)
-                    (propertize (format "%d/%d" col-cur-page col-num-pages)
-                                'face hi)
-                    (propertize " | " 'face dim)
-                    (propertize "[" 'face hi)
-                    (propertize "-prev/ " 'face dim)
-                    (propertize "]" 'face hi)
-                    (propertize "-next" 'face dim))
-            parts))
-    (when data-lens--where-filter
-      (push (concat (propertize " | W: " 'face 'font-lock-warning-face)
-                    (propertize data-lens--where-filter
-                                'face 'font-lock-warning-face))
-            parts))
-    (when data-lens--filter-pattern
-      (push (concat (propertize " | /: " 'face 'font-lock-string-face)
-                    (propertize data-lens--filter-pattern
-                                'face 'font-lock-string-face))
-            parts))
-    (when data-lens--query-elapsed
-      (push (propertize
-             (format " | %s"
-                     (if (< data-lens--query-elapsed 1.0)
-                         (format "%dms"
-                                 (round (* data-lens--query-elapsed 1000)))
-                       (format "%.3fs" data-lens--query-elapsed)))
-             'face dim)
-            parts))
-    (apply #'concat (nreverse parts))))
-
 (defun data-lens--effective-widths ()
   "Return column widths adjusted for header indicator icons.
 Columns with sort or pin indicators get wider to fit the label."
@@ -909,17 +839,13 @@ EDGE-FN applies column-page edge indicators."
     (erase-buffer)
     (setq tab-line-format
           (concat (propertize " " 'display '(space :align-to 0))
-                  (data-lens--render-footer
-                   (length rows) data-lens--page-current
-                   data-lens-result-max-rows data-lens--page-total-rows
-                   col-num-pages (1+ cur-page))))
+                  (data-lens--build-separator
+                   visible-cols widths 'top nw edge-fn)))
     (setq header-line-format
           (concat (propertize " " 'display '(space :align-to 0))
                   (data-lens--build-header-line visible-cols widths nw
                                                 has-prev has-next
                                                 data-lens--header-active-col)))
-    (insert (data-lens--build-separator
-             visible-cols widths 'top nw edge-fn) "\n")
     (insert (data-lens--build-separator
              visible-cols widths 'middle nw edge-fn) "\n")
     (when data-lens--pending-edits
@@ -1038,9 +964,7 @@ Preserves cursor position (row + column) across the refresh."
                 ((> w 0)))
       (insert (format "Warnings: %s\n" w)))
     (insert (propertize (format "\nCompleted in %s\n"
-                                (if (< elapsed 1.0)
-                                    (format "%dms" (round (* elapsed 1000)))
-                                  (format "%.3fs" elapsed)))
+                                (data-lens--format-elapsed elapsed))
                         'face 'font-lock-comment-face))
     (goto-char (point-min))))
 
@@ -1135,9 +1059,7 @@ Signals an error if pagination is not available."
       (data-lens--refresh-display)
       (message "Page %d loaded (%s, %d row%s)"
                (1+ page-num)
-               (if (< elapsed 1.0)
-                   (format "%dms" (round (* elapsed 1000)))
-                 (format "%.3fs" elapsed))
+               (data-lens--format-elapsed elapsed)
                (length rows)
                (if (= (length rows) 1) "" "s")))))
 
@@ -1503,7 +1425,11 @@ when completion triggers during an in-flight query)."
   \\[data-lens-schema-describe-at-point]	Show DDL for table
   \\[data-lens-schema-refresh]	Refresh"
   (setq truncate-lines t)
-  (setq-local revert-buffer-function #'data-lens-schema--revert))
+  (setq-local revert-buffer-function #'data-lens-schema--revert)
+  ;; Ensure bindings exist even if defvar was cached from an older version
+  (define-key data-lens-schema-mode-map (kbd "TAB") #'data-lens-schema-toggle-expand)
+  (define-key data-lens-schema-mode-map "E" #'data-lens-schema-expand-all)
+  (define-key data-lens-schema-mode-map "C" #'data-lens-schema-collapse-all))
 
 (defun data-lens-schema--revert (_ignore-auto _noconfirm)
   "Revert function for schema browser."
@@ -1844,6 +1770,12 @@ Preserves the window scroll position relative to the target row."
     map)
   "Keymap for `data-lens-result-mode'.")
 
+(defun data-lens--format-elapsed (seconds)
+  "Format SECONDS as a human-readable duration."
+  (if (< seconds 1.0)
+      (format "%dms" (round (* seconds 1000)))
+    (format "%.3fs" seconds)))
+
 (defun data-lens--update-position-indicator ()
   "Update mode-line with current cursor position in the result grid."
   (let ((cidx (data-lens--col-idx-at-point))
@@ -1853,20 +1785,33 @@ Preserves the window scroll position relative to the target row."
             (let* ((page-offset (* data-lens--page-current
                                    data-lens-result-max-rows))
                    (global-row (+ page-offset ridx))
+                   (rows (or data-lens--filtered-rows data-lens--result-rows))
+                   (row-count (length rows))
                    (ncols (length data-lens--result-columns))
                    (col-name (when cidx
-                               (nth cidx data-lens--result-columns))))
-              (let ((mark-info (when data-lens--marked-rows
-                                 (format " *%d" (length data-lens--marked-rows)))))
-                (format " R%d/%s C%d/%d%s (pg %d)%s"
-                        (1+ global-row)
-                        (if data-lens--page-total-rows
-                            (number-to-string data-lens--page-total-rows)
-                          "?")
-                        (if cidx (1+ cidx) 0) ncols
-                        (if col-name (format " [%s]" col-name) "")
-                        (1+ data-lens--page-current)
-                        (or mark-info ""))))))))
+                               (nth cidx data-lens--result-columns)))
+                   (parts nil))
+              ;; Build from right to left, then reverse
+              (push (format "R%d/%s C%d/%d"
+                            (1+ global-row)
+                            (if data-lens--page-total-rows
+                                (number-to-string data-lens--page-total-rows)
+                              (number-to-string row-count))
+                            (if cidx (1+ cidx) 0) ncols)
+                    parts)
+              (when col-name
+                (push (format "[%s]" col-name) parts))
+              (push (format "pg %d" (1+ data-lens--page-current)) parts)
+              (when data-lens--query-elapsed
+                (push (data-lens--format-elapsed data-lens--query-elapsed)
+                      parts))
+              (when data-lens--filter-pattern
+                (push (format "/:%s" data-lens--filter-pattern) parts))
+              (when data-lens--where-filter
+                (push (format "W:%s" data-lens--where-filter) parts))
+              (when data-lens--marked-rows
+                (push (format "*%d" (length data-lens--marked-rows)) parts))
+              (format " %s" (mapconcat #'identity parts " | ")))))))
 
 (defun data-lens--update-row-highlight ()
   "Highlight the entire row under the cursor."
