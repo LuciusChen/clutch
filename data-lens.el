@@ -1619,25 +1619,35 @@ Priority: marked rows > current row."
       (when-let* ((ridx (data-lens-result--row-idx-at-line)))
         (list ridx))))
 
+(defun data-lens-result--rerender-and-goto (ridx cidx)
+  "Re-render the result buffer and move to cell at RIDX, CIDX.
+Preserves the window scroll position relative to the target row."
+  (let ((win (selected-window))
+        (line-offset (count-lines (window-start) (point))))
+    (data-lens--render-result)
+    (data-lens--goto-cell ridx cidx)
+    (set-window-start win (save-excursion
+                            (forward-line (- line-offset))
+                            (point))
+                       t)))
+
 (defun data-lens-result-toggle-mark ()
   "Toggle mark on the row at point and move to next row."
   (interactive)
-  (when-let* ((ridx (data-lens-result--row-idx-at-line)))
+  (when-let* ((ridx (data-lens-result--row-idx-at-line))
+              (cidx (or (data-lens--col-idx-at-point) 0)))
     (if (memq ridx data-lens--marked-rows)
         (setq data-lens--marked-rows (delq ridx data-lens--marked-rows))
       (push ridx data-lens--marked-rows))
-    (data-lens--render-result)
-    (data-lens--goto-cell (1+ ridx)
-                          (or (data-lens--col-idx-at-point) 0))))
+    (data-lens-result--rerender-and-goto (1+ ridx) cidx)))
 
 (defun data-lens-result-unmark-row ()
   "Unmark the row at point and move to next row."
   (interactive)
-  (when-let* ((ridx (data-lens-result--row-idx-at-line)))
+  (when-let* ((ridx (data-lens-result--row-idx-at-line))
+              (cidx (or (data-lens--col-idx-at-point) 0)))
     (setq data-lens--marked-rows (delq ridx data-lens--marked-rows))
-    (data-lens--render-result)
-    (data-lens--goto-cell (1+ ridx)
-                          (or (data-lens--col-idx-at-point) 0))))
+    (data-lens-result--rerender-and-goto (1+ ridx) cidx)))
 
 (defun data-lens-result-unmark-all ()
   "Remove all row marks."
