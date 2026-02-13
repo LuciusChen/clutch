@@ -797,9 +797,16 @@ Signals `pg-error' if the connection is busy (re-entrant call)."
   (when (pg-conn-busy conn)
     (signal 'pg-error
             (list "Connection busy — cannot send query while another is in progress")))
+  ;; Flush any stale data left from previously interrupted queries.
+  (with-current-buffer (pg-conn-buf conn)
+    (erase-buffer))
   (setf (pg-conn-busy conn) t)
   (unwind-protect
-      (progn
+      ;; Bind throw-on-input to nil so that `while-no-input' (used by
+      ;; completion frameworks like corfu/company) cannot abort us
+      ;; mid-response, which would leave partial data in the buffer and
+      ;; corrupt subsequent queries.
+      (let ((throw-on-input nil))
         (pg--send-message conn ?Q (pg--encode-string sql))
         (let ((columns nil) (rows nil) (affected-rows nil) (status nil) (done nil))
           (while (not done)
