@@ -1401,6 +1401,15 @@ Fetches from the backend if not yet cached.  Returns column list."
     (gethash (data-lens--connection-key data-lens-connection)
              data-lens--schema-cache)))
 
+(defun data-lens--tables-in-buffer (schema)
+  "Return table names from SCHEMA that appear in the current buffer."
+  (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+        (tables nil))
+    (dolist (tbl (hash-table-keys schema))
+      (when (string-match-p (regexp-quote tbl) text)
+        (push tbl tables)))
+    tables))
+
 (defun data-lens-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
@@ -1421,9 +1430,9 @@ when completion triggers during an in-flight query)."
            (candidates
             (if (or table-context-p busy)
                 (hash-table-keys schema)
-              ;; Combine table names and lazily-loaded column names
+              ;; Load columns only for tables mentioned in the buffer
               (let ((all (copy-sequence (hash-table-keys schema))))
-                (dolist (tbl (hash-table-keys schema))
+                (dolist (tbl (data-lens--tables-in-buffer schema))
                   (when-let* ((cols (data-lens--ensure-columns
                                      conn schema tbl)))
                     (setq all (nconc all (copy-sequence cols)))))
