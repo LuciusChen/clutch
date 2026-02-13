@@ -854,9 +854,16 @@ Signals `mysql-error' if the connection is busy (re-entrant call)."
   (when (mysql-conn-busy conn)
     (signal 'mysql-error
             (list "Connection busy — cannot send query while another is in progress")))
+  ;; Flush any stale data left from previously interrupted queries.
+  (with-current-buffer (mysql-conn-buf conn)
+    (erase-buffer))
   (setf (mysql-conn-busy conn) t)
   (unwind-protect
-      (progn
+      ;; Bind throw-on-input to nil so that `while-no-input' (used by
+      ;; completion frameworks like corfu/company) cannot abort us
+      ;; mid-response, which would leave partial data in the buffer and
+      ;; corrupt subsequent queries.
+      (let ((throw-on-input nil))
         (setf (mysql-conn-sequence-id conn) 0)
         (mysql--send-packet conn (concat (unibyte-string #x03)
                                          (encode-coding-string sql 'utf-8)))
