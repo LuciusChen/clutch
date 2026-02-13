@@ -79,11 +79,11 @@
     ;; MySQL backend
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'data-lens-db-mysql))
-    (should (eq (plist-get mysql-features :connect-fn) 'data-lens-db-mysql--connect))
+    (should (eq (plist-get mysql-features :connect-fn) 'data-lens-db-mysql-connect))
     ;; PostgreSQL backend
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'data-lens-db-pg))
-    (should (eq (plist-get pg-features :connect-fn) 'data-lens-db-pg--connect))))
+    (should (eq (plist-get pg-features :connect-fn) 'data-lens-db-pg-connect))))
 
 (ert-deftest data-lens-db-test-unknown-backend ()
   "Test that connecting with unknown backend signals error."
@@ -98,29 +98,29 @@
   (require 'data-lens-db-mysql)
   (require 'mysql)
   ;; Numeric types
-  (should (eq (data-lens-db-mysql--type-category mysql--type-long) 'numeric))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-float) 'numeric))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-double) 'numeric))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-decimal) 'numeric))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-longlong) 'numeric))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-long) 'numeric))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-float) 'numeric))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-double) 'numeric))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-decimal) 'numeric))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-longlong) 'numeric))
   ;; Date/time types
-  (should (eq (data-lens-db-mysql--type-category mysql--type-date) 'date))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-time) 'time))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-datetime) 'datetime))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-timestamp) 'datetime))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-date) 'date))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-time) 'time))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-datetime) 'datetime))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-timestamp) 'datetime))
   ;; BLOB/JSON
-  (should (eq (data-lens-db-mysql--type-category mysql--type-blob) 'blob))
-  (should (eq (data-lens-db-mysql--type-category mysql--type-json) 'json))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-blob) 'blob))
+  (should (eq (data-lens-db-mysql-type-category mysql-type-json) 'json))
   ;; Unknown type defaults to text
-  (should (eq (data-lens-db-mysql--type-category 9999) 'text)))
+  (should (eq (data-lens-db-mysql-type-category 9999) 'text)))
 
 (ert-deftest data-lens-db-test-mysql-convert-columns ()
   "Test MySQL column conversion."
   (require 'data-lens-db-mysql)
   (require 'mysql)
-  (let* ((mysql-cols (list (list :name "id" :type mysql--type-long)
-                           (list :name "data" :type mysql--type-json)
-                           (list :name "created" :type mysql--type-datetime)))
+  (let* ((mysql-cols (list (list :name "id" :type mysql-type-long)
+                           (list :name "data" :type mysql-type-json)
+                           (list :name "created" :type mysql-type-datetime)))
          (converted (data-lens-db-mysql--convert-columns mysql-cols)))
     (should (= (length converted) 3))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
@@ -137,19 +137,19 @@
   (require 'data-lens-db-pg)
   (require 'pg)
   ;; Numeric types
-  (should (eq (data-lens-db-pg--type-category pg--oid-int4) 'numeric))
-  (should (eq (data-lens-db-pg--type-category pg--oid-int8) 'numeric))
-  (should (eq (data-lens-db-pg--type-category pg--oid-float8) 'numeric))
-  (should (eq (data-lens-db-pg--type-category pg--oid-numeric) 'numeric))
+  (should (eq (data-lens-db-pg--type-category pg-oid-int4) 'numeric))
+  (should (eq (data-lens-db-pg--type-category pg-oid-int8) 'numeric))
+  (should (eq (data-lens-db-pg--type-category pg-oid-float8) 'numeric))
+  (should (eq (data-lens-db-pg--type-category pg-oid-numeric) 'numeric))
   ;; Date/time types
-  (should (eq (data-lens-db-pg--type-category pg--oid-date) 'date))
-  (should (eq (data-lens-db-pg--type-category pg--oid-time) 'time))
-  (should (eq (data-lens-db-pg--type-category pg--oid-timestamp) 'datetime))
-  (should (eq (data-lens-db-pg--type-category pg--oid-timestamptz) 'datetime))
+  (should (eq (data-lens-db-pg--type-category pg-oid-date) 'date))
+  (should (eq (data-lens-db-pg--type-category pg-oid-time) 'time))
+  (should (eq (data-lens-db-pg--type-category pg-oid-timestamp) 'datetime))
+  (should (eq (data-lens-db-pg--type-category pg-oid-timestamptz) 'datetime))
   ;; BLOB/JSON
-  (should (eq (data-lens-db-pg--type-category pg--oid-bytea) 'blob))
-  (should (eq (data-lens-db-pg--type-category pg--oid-json) 'json))
-  (should (eq (data-lens-db-pg--type-category pg--oid-jsonb) 'json))
+  (should (eq (data-lens-db-pg--type-category pg-oid-bytea) 'blob))
+  (should (eq (data-lens-db-pg--type-category pg-oid-json) 'json))
+  (should (eq (data-lens-db-pg--type-category pg-oid-jsonb) 'json))
   ;; Unknown OID defaults to text
   (should (eq (data-lens-db-pg--type-category 999999) 'text)))
 
@@ -157,9 +157,9 @@
   "Test PostgreSQL column conversion."
   (require 'data-lens-db-pg)
   (require 'pg)
-  (let* ((pg-cols (list (list :name "id" :type-oid pg--oid-int4)
-                        (list :name "data" :type-oid pg--oid-jsonb)
-                        (list :name "created" :type-oid pg--oid-timestamp)))
+  (let* ((pg-cols (list (list :name "id" :type-oid pg-oid-int4)
+                        (list :name "data" :type-oid pg-oid-jsonb)
+                        (list :name "created" :type-oid pg-oid-timestamp)))
          (converted (data-lens-db-pg--convert-columns pg-cols)))
     (should (= (length converted) 3))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
