@@ -29,31 +29,31 @@
 
 ;;;; Type-category mapping
 
-(defconst data-lens-db-mysql--type-category-alist
-  `((,mysql--type-decimal    . numeric)
-    (,mysql--type-tiny       . numeric)
-    (,mysql--type-short      . numeric)
-    (,mysql--type-long       . numeric)
-    (,mysql--type-float      . numeric)
-    (,mysql--type-double     . numeric)
-    (,mysql--type-longlong   . numeric)
-    (,mysql--type-int24      . numeric)
-    (,mysql--type-year       . numeric)
-    (,mysql--type-newdecimal . numeric)
-    (,mysql--type-json       . json)
-    (,mysql--type-blob       . blob)
-    (,mysql--type-tiny-blob  . blob)
-    (,mysql--type-medium-blob . blob)
-    (,mysql--type-long-blob  . blob)
-    (,mysql--type-date       . date)
-    (,mysql--type-time       . time)
-    (,mysql--type-datetime   . datetime)
-    (,mysql--type-timestamp  . datetime))
+(defconst data-lens-db-mysql-type-category-alist
+  `((,mysql-type-decimal    . numeric)
+    (,mysql-type-tiny       . numeric)
+    (,mysql-type-short      . numeric)
+    (,mysql-type-long       . numeric)
+    (,mysql-type-float      . numeric)
+    (,mysql-type-double     . numeric)
+    (,mysql-type-longlong   . numeric)
+    (,mysql-type-int24      . numeric)
+    (,mysql-type-year       . numeric)
+    (,mysql-type-newdecimal . numeric)
+    (,mysql-type-json       . json)
+    (,mysql-type-blob       . blob)
+    (,mysql-type-tiny-blob  . blob)
+    (,mysql-type-medium-blob . blob)
+    (,mysql-type-long-blob  . blob)
+    (,mysql-type-date       . date)
+    (,mysql-type-time       . time)
+    (,mysql-type-datetime   . datetime)
+    (,mysql-type-timestamp  . datetime))
   "Alist mapping MySQL type codes to type-category symbols.")
 
-(defun data-lens-db-mysql--type-category (mysql-type)
+(defun data-lens-db-mysql-type-category (mysql-type)
   "Map a MySQL type code MYSQL-TYPE to a type-category symbol."
-  (or (alist-get mysql-type data-lens-db-mysql--type-category-alist)
+  (or (alist-get mysql-type data-lens-db-mysql-type-category-alist)
       'text))
 
 (defun data-lens-db-mysql--convert-columns (mysql-columns)
@@ -61,7 +61,7 @@
 Each output plist has :name and :type-category."
   (mapcar (lambda (col)
             (list :name (plist-get col :name)
-                  :type-category (data-lens-db-mysql--type-category
+                  :type-category (data-lens-db-mysql-type-category
                                   (plist-get col :type))))
           mysql-columns))
 
@@ -78,7 +78,7 @@ Each output plist has :name and :type-category."
 
 ;;;; Connect function
 
-(defun data-lens-db-mysql--connect (params)
+(defun data-lens-db-mysql-connect (params)
   "Connect to MySQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls."
   (condition-case err

@@ -48,7 +48,7 @@ ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
-;;;; Generic interface — 14 methods dispatched on connection type
+;;;; Generic interface — 18 methods dispatched on connection type
 
 ;; Lifecycle
 
@@ -126,8 +126,8 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 ;;;; Connect dispatcher
 
 (defvar data-lens-db--backend-features
-  '((mysql . (:require data-lens-db-mysql :connect-fn data-lens-db-mysql--connect))
-    (pg    . (:require data-lens-db-pg    :connect-fn data-lens-db-pg--connect)))
+  '((mysql . (:require data-lens-db-mysql :connect-fn data-lens-db-mysql-connect))
+    (pg    . (:require data-lens-db-pg    :connect-fn data-lens-db-pg-connect)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load) and :connect-fn
 \(a function taking a plist of connection params and returning a conn).")

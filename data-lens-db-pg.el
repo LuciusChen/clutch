@@ -30,20 +30,20 @@
 ;;;; OID → type-category mapping
 
 (defconst data-lens-db-pg--type-category-alist
-  `((,pg--oid-int2      . numeric)
-    (,pg--oid-int4      . numeric)
-    (,pg--oid-int8      . numeric)
-    (,pg--oid-float4    . numeric)
-    (,pg--oid-float8    . numeric)
-    (,pg--oid-numeric   . numeric)
-    (,pg--oid-bool      . numeric)
-    (,pg--oid-json      . json)
-    (,pg--oid-jsonb     . json)
-    (,pg--oid-bytea     . blob)
-    (,pg--oid-date      . date)
-    (,pg--oid-time      . time)
-    (,pg--oid-timestamp . datetime)
-    (,pg--oid-timestamptz . datetime))
+  `((,pg-oid-int2      . numeric)
+    (,pg-oid-int4      . numeric)
+    (,pg-oid-int8      . numeric)
+    (,pg-oid-float4    . numeric)
+    (,pg-oid-float8    . numeric)
+    (,pg-oid-numeric   . numeric)
+    (,pg-oid-bool      . numeric)
+    (,pg-oid-json      . json)
+    (,pg-oid-jsonb     . json)
+    (,pg-oid-bytea     . blob)
+    (,pg-oid-date      . date)
+    (,pg-oid-time      . time)
+    (,pg-oid-timestamp . datetime)
+    (,pg-oid-timestamptz . datetime))
   "Alist mapping PostgreSQL OIDs to type-category symbols.")
 
 (defun data-lens-db-pg--type-category (oid)
@@ -72,7 +72,7 @@
 
 ;;;; Connect function
 
-(defun data-lens-db-pg--connect (params)
+(defun data-lens-db-pg-connect (params)
   "Connect to PostgreSQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls."
   (condition-case err

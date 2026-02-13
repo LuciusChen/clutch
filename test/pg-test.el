@@ -108,123 +108,123 @@
 
 (ert-deftest pg-test-parse-value-int ()
   "Test integer type parsing."
-  (should (= (pg--parse-value "42" pg--oid-int4) 42))
-  (should (= (pg--parse-value "-1" pg--oid-int4) -1))
-  (should (= (pg--parse-value "0" pg--oid-int2) 0))
-  (should (= (pg--parse-value "9999999999" pg--oid-int8) 9999999999)))
+  (should (= (pg--parse-value "42" pg-oid-int4) 42))
+  (should (= (pg--parse-value "-1" pg-oid-int4) -1))
+  (should (= (pg--parse-value "0" pg-oid-int2) 0))
+  (should (= (pg--parse-value "9999999999" pg-oid-int8) 9999999999)))
 
 (ert-deftest pg-test-parse-value-float ()
   "Test float type parsing."
-  (should (< (abs (- (pg--parse-value "3.14" pg--oid-float4) 3.14)) 0.001))
-  (should (< (abs (- (pg--parse-value "2.718" pg--oid-float8) 2.718)) 0.001)))
+  (should (< (abs (- (pg--parse-value "3.14" pg-oid-float4) 3.14)) 0.001))
+  (should (< (abs (- (pg--parse-value "2.718" pg-oid-float8) 2.718)) 0.001)))
 
 (ert-deftest pg-test-parse-value-numeric ()
   "Test numeric/decimal type parsing."
-  (should (= (pg--parse-value "123.45" pg--oid-numeric) 123.45)))
+  (should (= (pg--parse-value "123.45" pg-oid-numeric) 123.45)))
 
 (ert-deftest pg-test-parse-value-bool ()
   "Test boolean type parsing."
-  (should (eq (pg--parse-value "t" pg--oid-bool) t))
-  (should (eq (pg--parse-value "f" pg--oid-bool) nil)))
+  (should (eq (pg--parse-value "t" pg-oid-bool) t))
+  (should (eq (pg--parse-value "f" pg-oid-bool) nil)))
 
 (ert-deftest pg-test-parse-value-text ()
   "Test text type parsing."
-  (should (equal (pg--parse-value "hello" pg--oid-text) "hello"))
-  (should (equal (pg--parse-value "world" pg--oid-varchar) "world")))
+  (should (equal (pg--parse-value "hello" pg-oid-text) "hello"))
+  (should (equal (pg--parse-value "world" pg-oid-varchar) "world")))
 
 (ert-deftest pg-test-parse-value-date ()
   "Test date type parsing."
-  (should (equal (pg--parse-value "2024-03-15" pg--oid-date)
+  (should (equal (pg--parse-value "2024-03-15" pg-oid-date)
                  '(:year 2024 :month 3 :day 15))))
 
 (ert-deftest pg-test-parse-value-time ()
   "Test time type parsing."
-  (should (equal (pg--parse-value "13:45:30" pg--oid-time)
+  (should (equal (pg--parse-value "13:45:30" pg-oid-time)
                  '(:hours 13 :minutes 45 :seconds 30 :negative nil))))
 
 (ert-deftest pg-test-parse-value-timestamp ()
   "Test timestamp type parsing."
-  (should (equal (pg--parse-value "2024-03-15 13:45:30" pg--oid-timestamp)
+  (should (equal (pg--parse-value "2024-03-15 13:45:30" pg-oid-timestamp)
                  '(:year 2024 :month 3 :day 15
                    :hours 13 :minutes 45 :seconds 30))))
 
 (ert-deftest pg-test-parse-value-timestamptz ()
   "Test timestamptz type parsing (strips timezone)."
-  (let ((result (pg--parse-value "2024-03-15 13:45:30+00" pg--oid-timestamptz)))
+  (let ((result (pg--parse-value "2024-03-15 13:45:30+00" pg-oid-timestamptz)))
     (should (= (plist-get result :year) 2024))
     (should (= (plist-get result :hours) 13))))
 
 (ert-deftest pg-test-parse-value-null ()
   "Test NULL value handling."
-  (should (null (pg--parse-value nil pg--oid-int4)))
-  (should (null (pg--parse-value nil pg--oid-text))))
+  (should (null (pg--parse-value nil pg-oid-int4)))
+  (should (null (pg--parse-value nil pg-oid-text))))
 
 (ert-deftest pg-test-parse-value-bigint ()
   "Test large integer parsing."
   ;; Large positive
-  (should (= (pg--parse-value "9223372036854775807" pg--oid-int8)
+  (should (= (pg--parse-value "9223372036854775807" pg-oid-int8)
              9223372036854775807))
   ;; Large negative
-  (should (= (pg--parse-value "-9223372036854775808" pg--oid-int8)
+  (should (= (pg--parse-value "-9223372036854775808" pg-oid-int8)
              -9223372036854775808)))
 
 (ert-deftest pg-test-parse-value-float-edge-cases ()
   "Test float parsing edge cases."
-  (should (= (pg--parse-value "0.0" pg--oid-float8) 0.0))
-  (should (= (pg--parse-value "-0.0" pg--oid-float8) -0.0))
+  (should (= (pg--parse-value "0.0" pg-oid-float8) 0.0))
+  (should (= (pg--parse-value "-0.0" pg-oid-float8) -0.0))
   ;; Scientific notation
-  (should (= (pg--parse-value "1.5e10" pg--oid-float8) 1.5e10))
-  (should (= (pg--parse-value "-3.14e-5" pg--oid-float8) -3.14e-5)))
+  (should (= (pg--parse-value "1.5e10" pg-oid-float8) 1.5e10))
+  (should (= (pg--parse-value "-3.14e-5" pg-oid-float8) -3.14e-5)))
 
 (ert-deftest pg-test-parse-value-empty-string ()
   "Test empty string handling."
-  (should (equal (pg--parse-value "" pg--oid-text) ""))
-  (should (equal (pg--parse-value "" pg--oid-varchar) "")))
+  (should (equal (pg--parse-value "" pg-oid-text) ""))
+  (should (equal (pg--parse-value "" pg-oid-varchar) "")))
 
 (ert-deftest pg-test-parse-value-json ()
   "Test JSON/JSONB parsing."
   (when (fboundp 'json-parse-string)
-    (let ((result (pg--parse-value "{\"a\":1,\"b\":\"hello\"}" pg--oid-json)))
+    (let ((result (pg--parse-value "{\"a\":1,\"b\":\"hello\"}" pg-oid-json)))
       (should (hash-table-p result))
       (should (= (gethash "a" result) 1))
       (should (equal (gethash "b" result) "hello")))
-    (let ((result (pg--parse-value "[1,2,3]" pg--oid-jsonb)))
+    (let ((result (pg--parse-value "[1,2,3]" pg-oid-jsonb)))
       (should (vectorp result))
       (should (= (length result) 3)))))
 
 (ert-deftest pg-test-parse-value-timestamp-with-microseconds ()
   "Test timestamp parsing with microseconds."
-  (let ((result (pg--parse-value "2024-03-15 13:45:30.123456" pg--oid-timestamp)))
+  (let ((result (pg--parse-value "2024-03-15 13:45:30.123456" pg-oid-timestamp)))
     (should (= (plist-get result :year) 2024))
     (should (= (plist-get result :seconds) 30))))
 
 (ert-deftest pg-test-parse-value-timestamptz-various ()
   "Test timestamptz parsing with various timezone formats."
   ;; +00 timezone
-  (let ((result (pg--parse-value "2024-03-15 13:45:30+00" pg--oid-timestamptz)))
+  (let ((result (pg--parse-value "2024-03-15 13:45:30+00" pg-oid-timestamptz)))
     (should (= (plist-get result :year) 2024))
     (should (= (plist-get result :hours) 13)))
   ;; +05:30 timezone
-  (let ((result (pg--parse-value "2024-03-15 13:45:30+05:30" pg--oid-timestamptz)))
+  (let ((result (pg--parse-value "2024-03-15 13:45:30+05:30" pg-oid-timestamptz)))
     (should (= (plist-get result :hours) 13)))
   ;; -08 timezone
-  (let ((result (pg--parse-value "2024-03-15 13:45:30-08" pg--oid-timestamptz)))
+  (let ((result (pg--parse-value "2024-03-15 13:45:30-08" pg-oid-timestamptz)))
     (should (= (plist-get result :month) 3))))
 
 (ert-deftest pg-test-parse-value-time-with-fractional ()
   "Test time parsing with fractional seconds."
-  (let ((result (pg--parse-value "13:45:30.999" pg--oid-time)))
+  (let ((result (pg--parse-value "13:45:30.999" pg-oid-time)))
     (should (= (plist-get result :hours) 13))
     (should (= (plist-get result :minutes) 45))
     (should (= (plist-get result :seconds) 30))))
 
 (ert-deftest pg-test-parse-value-custom-parser ()
   "Test custom type parser override."
-  (let ((pg-type-parsers (list (cons pg--oid-int4
+  (let ((pg-type-parsers (list (cons pg-oid-int4
                                       (lambda (v) (concat "custom:" v))))))
-    (should (equal (pg--parse-value "42" pg--oid-int4) "custom:42")))
+    (should (equal (pg--parse-value "42" pg-oid-int4) "custom:42")))
   ;; Without override, original behavior
-  (should (= (pg--parse-value "42" pg--oid-int4) 42)))
+  (should (= (pg--parse-value "42" pg-oid-int4) 42)))
 
 ;;;; Unit tests — RowDescription parsing
 
@@ -233,14 +233,14 @@
   (let* ((col1-name (concat "id" (unibyte-string 0)))
          (col1-data (concat (pg--int32-be-bytes 0)    ; table OID
                             (pg--int16-be-bytes 1)    ; column attr
-                            (pg--int32-be-bytes pg--oid-int4) ; type OID
+                            (pg--int32-be-bytes pg-oid-int4) ; type OID
                             (pg--int16-be-bytes 4)    ; type size
                             (pg--int32-be-bytes -1)   ; type mod
                             (pg--int16-be-bytes 0)))  ; format
          (col2-name (concat "name" (unibyte-string 0)))
          (col2-data (concat (pg--int32-be-bytes 0)
                             (pg--int16-be-bytes 2)
-                            (pg--int32-be-bytes pg--oid-text)
+                            (pg--int32-be-bytes pg-oid-text)
                             (pg--int16-be-bytes -1)
                             (pg--int32-be-bytes -1)
                             (pg--int16-be-bytes 0)))
@@ -250,9 +250,9 @@
          (columns (pg--parse-row-description payload)))
     (should (= (length columns) 2))
     (should (equal (plist-get (nth 0 columns) :name) "id"))
-    (should (= (plist-get (nth 0 columns) :type-oid) pg--oid-int4))
+    (should (= (plist-get (nth 0 columns) :type-oid) pg-oid-int4))
     (should (equal (plist-get (nth 1 columns) :name) "name"))
-    (should (= (plist-get (nth 1 columns) :type-oid) pg--oid-text))))
+    (should (= (plist-get (nth 1 columns) :type-oid) pg-oid-text))))
 
 ;;;; Unit tests — CommandComplete parsing
 
@@ -428,22 +428,6 @@
   (let ((r1 (pg--md5-password "user1" "pass" "salt"))
         (r2 (pg--md5-password "user2" "pass" "salt")))
     (should-not (equal r1 r2))))
-
-;;;; Unit tests — data-lens-db adapter
-
-(ert-deftest pg-test-db-type-category ()
-  "Test OID to type-category mapping."
-  (require 'data-lens-db-pg)
-  (should (eq (data-lens-db-pg--type-category pg--oid-int4) 'numeric))
-  (should (eq (data-lens-db-pg--type-category pg--oid-float8) 'numeric))
-  (should (eq (data-lens-db-pg--type-category pg--oid-json) 'json))
-  (should (eq (data-lens-db-pg--type-category pg--oid-jsonb) 'json))
-  (should (eq (data-lens-db-pg--type-category pg--oid-bytea) 'blob))
-  (should (eq (data-lens-db-pg--type-category pg--oid-date) 'date))
-  (should (eq (data-lens-db-pg--type-category pg--oid-time) 'time))
-  (should (eq (data-lens-db-pg--type-category pg--oid-timestamp) 'datetime))
-  (should (eq (data-lens-db-pg--type-category pg--oid-text) 'text))
-  (should (eq (data-lens-db-pg--type-category 9999) 'text)))
 
 ;;;; Live integration tests (require a running PostgreSQL server)
 

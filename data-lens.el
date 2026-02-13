@@ -1895,7 +1895,7 @@ Scans text properties across the line."
         (forward-line 1)))
     (sort indices #'<)))
 
-(defvar data-lens-result--edit-callback nil
+(defvar-local data-lens-result--edit-callback nil
   "Callback for the cell edit buffer: (lambda (new-value) ...).")
 
 (defvar data-lens-result-edit-mode-map
@@ -2747,7 +2747,6 @@ Accumulates input until a semicolon is found, then executes."
     ("t" "List tables"    data-lens-list-tables)
     ("D" "Describe table" data-lens-describe-table-at-point)]])
 
-;;;###autoload
 (transient-define-prefix data-lens-result-dispatch ()
   "Dispatch menu for data-lens result buffer."
   [["Navigate"
@@ -2789,7 +2788,6 @@ Accumulates input until a semicolon is found, then executes."
     ("g" "Re-execute"      data-lens-result-rerun)
     ("F" "Fullscreen"      data-lens-result-fullscreen-toggle)]])
 
-;;;###autoload
 (transient-define-prefix data-lens-record-dispatch ()
   "Dispatch menu for data-lens record buffer."
   [["Navigate"
