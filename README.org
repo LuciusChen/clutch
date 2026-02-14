@@ -36,16 +36,20 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 ** Interactive UI (data-lens.el)
 
 - Column-paged result display (no horizontal scrolling)
-- SQL pagination (=LIMIT/OFFSET=) with fixed header (=tab-line= + =header-line=)
+- SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
+  - =tab-line=: row count, page, elapsed time, SQL query (with =nerd-icons=, Unicode fallback)
+  - =header-line=: column names with =│= borders and underlined labels
 - Row numbers as a table column; sort/pin indicators via =nerd-icons= (with Unicode fallback)
 - Right-aligned numeric columns
 - Record buffer for single-row detail view
 - Foreign key detection and navigation
 - Inline cell editing with UPDATE generation
-- WHERE filtering and SQL =ORDER BY= sorting (toggle direction with =s=)
+- Inline INSERT (=o=) and DELETE (=d=) rows with confirmation
+- WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
-- Schema browser, SQL completion, query history
+- Schema browser with expandable column details (=TAB= to expand/collapse)
+- SQL completion, query history
 - REPL mode (comint-based)
 
 * Requirements
@@ -268,11 +272,16 @@ Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appe
 | =C-c p=        | Pin current column                            |
 | =C-c P=        | Unpin column                                  |
 | =W=            | WHERE filter (press again to clear)           |
+| =/=            | Client-side fuzzy filter (empty to clear)     |
 | =s=            | Sort by column (toggles ASC/DESC on repeat)   |
 | =S=            | Sort descending                               |
 | =c=            | Jump to column                                |
 | =g=            | Re-execute query                              |
 | =e=            | Edit cell value                               |
+| =o=            | Insert new row                                |
+| =d=            | Delete row(s) (supports marks)                |
+| =m=            | Toggle mark on row                            |
+| =u=            | Unmark row                                    |
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
 | =y=            | Copy cell value                               |
 | =w=            | Copy row(s) as INSERT (supports region)       |
@@ -300,12 +309,14 @@ Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appe
 #+begin_src
 1. Write SQL:  SELECT * FROM orders;
 2. C-c C-c    Execute → results displayed with pagination (default 500 rows/page)
+              → tab-line shows: Σ 500 of ? rows • 1 / 1 • ⏱ 42ms • select * from orders
 3. n / p      Next page / previous page
-4. #          Query total rows → footer shows "rows 1-500 of 1234"
+4. #          Query total rows → tab-line shows "Σ 500 of 1234 rows"
 5. W          Enter filter: status = 'pending'
               → Appends WHERE clause, re-queries from page 1
-6. s          Sort by current column (SQL ORDER BY), re-queries from page 1
-7. W          Enter empty string → clears filter, restores original query
+6. /          Client-side filter: type a pattern to narrow visible rows instantly
+7. s          Sort by current column (SQL ORDER BY), re-queries from page 1
+8. W          Enter empty string → clears filter, restores original query
 #+end_src
 
 *** Foreign Key Navigation
@@ -328,6 +339,16 @@ Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appe
 6. C-c C-c                   → confirmation prompt showing the UPDATE statements
 #+end_src
 
+*** Insert / Delete Rows
+
+#+begin_src
+1. SELECT * FROM users;      → C-c C-c to execute
+2. o                          → opens insert buffer with all column fields
+3. Fill values, C-c C-c to commit INSERT (C-c C-k to cancel)
+4. d                          → delete row at point (or marked rows with m)
+5. Confirmation shows the DELETE SQL before executing
+#+end_src
+
 ** REPL Mode
 
 #+begin_src
@@ -342,7 +363,9 @@ mysql> SELECT * FROM users;  ;; Type SQL, auto-executes on ;
 
 #+begin_src
 C-c C-t                     ;; List all tables
-RET                          ;; Press enter on a table → view structure (DESCRIBE)
+TAB                          ;; Expand/collapse table columns (type, PK, FK)
+E / C                        ;; Expand all / Collapse all
+RET                          ;; Show DDL for table at point
 g                            ;; Refresh
 #+end_src
 
