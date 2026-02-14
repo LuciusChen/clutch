@@ -201,16 +201,6 @@ Clone this repository and add it to your =load-path=:
   (pg-query conn "INSERT INTO users (name) VALUES ('bob')"))
 #+end_src
 
-** Features
-
-- Pure Elisp — no =libpq= or external CLI needed
-- PostgreSQL wire protocol v3
-- SCRAM-SHA-256 (SASL) and MD5 authentication
-- TLS/SSL support via Emacs built-in GnuTLS
-- OID-based type parsing (int, float, numeric, bool, date/time, json/jsonb, bytea)
-- Convenience macros: =with-pg-connection=, =with-pg-transaction=
-- Utilities: =pg-ping=, =pg-escape-identifier=, =pg-escape-literal=
-
 * Interactive Client
 
 ** Quick Start
