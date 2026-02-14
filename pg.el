@@ -6,7 +6,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: databases, postgresql, comm
-;; URL: https://github.com/LuciusChen/mysql.el
+;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
