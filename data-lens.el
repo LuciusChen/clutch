@@ -799,11 +799,10 @@ ACTIVE-CIDX is the highlighted column index, if any."
   (let* ((name (nth cidx data-lens--result-columns))
          (w (aref widths cidx))
          (label (data-lens--header-label name cidx))
-         (padded (data-lens--string-pad
-                  (if (> (string-width label) w)
-                      (truncate-string-to-width label w)
-                    label)
-                  w))
+         (truncated (if (> (string-width label) w)
+                        (truncate-string-to-width label w)
+                      label))
+         (trail (make-string (max 0 (- w (string-width truncated))) ?\s))
          (face (cond
                 ((eql cidx active-cidx) 'data-lens-header-active-face)
                 ((memq cidx data-lens--pinned-columns)
@@ -812,8 +811,9 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (pad-str (make-string data-lens-column-padding ?\s)))
     (concat (propertize "│" 'face 'data-lens-border-face)
             pad-str
-            (propertize padded 'face (list :inherit face :underline t)
+            (propertize truncated 'face (list :inherit face :underline t)
                         'data-lens-header-col cidx)
+            (propertize trail 'face face)
             pad-str)))
 
 (defun data-lens--build-header-line (visible-cols widths nw
