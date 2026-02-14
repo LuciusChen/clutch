@@ -1425,6 +1425,30 @@ Fetches from the backend if not yet cached.  Returns column list."
         (push tbl tables)))
     tables))
 
+(defconst clutch--sql-keywords
+  '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"
+    "BETWEEN" "EXISTS" "CASE" "WHEN" "THEN" "ELSE" "END" "AS" "ON"
+    "USING" "JOIN" "INNER" "LEFT" "RIGHT" "OUTER" "CROSS" "FULL"
+    "INSERT" "INTO" "VALUES" "UPDATE" "SET" "DELETE"
+    "CREATE" "ALTER" "DROP" "TABLE" "INDEX" "VIEW" "DATABASE"
+    "GROUP" "BY" "ORDER" "ASC" "DESC" "HAVING" "LIMIT" "OFFSET"
+    "UNION" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
+    "IF" "IFNULL" "COALESCE" "CAST" "CONCAT" "SUBSTRING"
+    "PRIMARY" "KEY" "FOREIGN" "REFERENCES" "CONSTRAINT" "DEFAULT"
+    "UNIQUE" "CHECK" "AUTO_INCREMENT"
+    "TRUNCATE" "EXPLAIN" "SHOW" "DESCRIBE"
+    "BEGIN" "COMMIT" "ROLLBACK" "TRANSACTION"
+    "GRANT" "REVOKE" "WITH" "RECURSIVE" "TEMPORARY" "TEMP")
+  "SQL keywords for completion.")
+
+(defun clutch-sql-keyword-completion-at-point ()
+  "Completion-at-point function for SQL keywords.
+Works without a database connection."
+  (when-let* ((bounds (bounds-of-thing-at-point 'symbol)))
+    (list (car bounds) (cdr bounds)
+          clutch--sql-keywords
+          :exclusive 'no)))
+
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
@@ -1679,6 +1703,8 @@ Key bindings:
   \\[clutch-show-history]	Show query history"
   (add-hook 'completion-at-point-functions
             #'clutch-completion-at-point nil t)
+  (add-hook 'completion-at-point-functions
+            #'clutch-sql-keyword-completion-at-point nil t)
   (clutch--update-mode-line))
 
 ;;;###autoload
@@ -2996,7 +3022,9 @@ MAX-NAME-W is the label column width."
   (setq comint-prompt-regexp "^db> \\|^    -> ")
   (setq comint-input-sender #'clutch-repl--input-sender)
   (add-hook 'completion-at-point-functions
-            #'clutch-completion-at-point nil t))
+            #'clutch-completion-at-point nil t)
+  (add-hook 'completion-at-point-functions
+            #'clutch-sql-keyword-completion-at-point nil t))
 
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.

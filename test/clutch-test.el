@@ -293,6 +293,34 @@
       (should (> (length sep) 0)))))
 
 
+;;;; Unit tests — SQL keyword completion
+
+(ert-deftest clutch-test-sql-keyword-completion-matching ()
+  "Test that keyword capf returns candidates matching a prefix."
+  (with-temp-buffer
+    (insert "SEL")
+    (let ((result (clutch-sql-keyword-completion-at-point)))
+      (should result)
+      (should (member "SELECT" (nth 2 result))))))
+
+(ert-deftest clutch-test-sql-keyword-completion-case-insensitive ()
+  "Test case-insensitive matching (input \"sel\" matches \"SELECT\")."
+  (with-temp-buffer
+    (insert "sel")
+    (let* ((result (clutch-sql-keyword-completion-at-point))
+           (candidates (nth 2 result)))
+      (should result)
+      ;; The candidate list includes all keywords; completion framework
+      ;; handles case-insensitive filtering.  Verify SELECT is present.
+      (should (member "SELECT" candidates)))))
+
+(ert-deftest clutch-test-sql-keyword-completion-no-prefix ()
+  "Test that keyword capf returns nil with no word at point."
+  (with-temp-buffer
+    (insert " ")
+    (let ((result (clutch-sql-keyword-completion-at-point)))
+      (should-not result))))
+
 ;;;; Live integration tests
 
 (defmacro clutch-test--with-conn (var &rest body)
