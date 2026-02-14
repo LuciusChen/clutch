@@ -371,7 +371,7 @@ g                            ;; Refresh
 
 ** Transient Menus
 
-Requires the =transient= package (bundled with Magit).
+Requires the =transient= package (built-in since Emacs 28.1).
 
 Press =C-c C-o= in data-lens-mode or =?= in the result buffer to open the menu.
 
