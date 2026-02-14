@@ -778,6 +778,13 @@ COL-NUM-PAGES and COL-CUR-PAGE are for column page display."
                     (propertize data-lens--filter-pattern
                                 'face 'font-lock-string-face))
             parts))
+    (when data-lens--last-query
+      (let ((sql (truncate-string-to-width
+                  (replace-regexp-in-string
+                   "[\n\r]+" " "
+                   (string-trim data-lens--last-query))
+                  60 nil nil t)))
+        (push (propertize sql 'face dim) parts)))
     (mapconcat #'identity (nreverse parts) sep)))
 
 (defun data-lens--effective-widths ()
@@ -920,20 +927,6 @@ EDGE-FN applies column-page edge indicators."
                                  global-first-row edge-fn)
     (insert (data-lens--build-separator
              visible-cols widths 'bottom nw edge-fn) "\n")
-    (insert (data-lens--render-footer
-             (length rows) data-lens--page-current
-             data-lens-result-max-rows data-lens--page-total-rows
-             col-num-pages (1+ cur-page))
-            "\n")
-    (when data-lens--last-query
-      (insert (propertize
-               (truncate-string-to-width
-                (replace-regexp-in-string
-                 "[\n\r]+" " "
-                 (string-trim data-lens--last-query))
-                120 nil nil t)
-               'face 'font-lock-comment-face)
-              "\n"))
     (goto-char (point-min))))
 
 (defun data-lens--col-idx-at-point ()
