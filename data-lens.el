@@ -812,7 +812,7 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (pad-str (make-string data-lens-column-padding ?\s)))
     (concat (propertize "│" 'face 'data-lens-border-face)
             pad-str
-            (propertize padded 'face face
+            (propertize padded 'face (list :inherit face :underline t)
                         'data-lens-header-col cidx)
             pad-str)))
 
@@ -920,6 +920,11 @@ EDGE-FN applies column-page edge indicators."
                                  global-first-row edge-fn)
     (insert (data-lens--build-separator
              visible-cols widths 'bottom nw edge-fn) "\n")
+    (insert (data-lens--render-footer
+             (length rows) data-lens--page-current
+             data-lens-result-max-rows data-lens--page-total-rows
+             col-num-pages (1+ cur-page))
+            "\n")
     (when data-lens--last-query
       (insert (propertize
                (truncate-string-to-width
@@ -1941,9 +1946,6 @@ Edit:
   (hl-line-mode 1)
   ;; Make tab-line use default background so footer renders cleanly
   (face-remap-add-relative 'tab-line :inherit 'default)
-  ;; Add underline to header-line so header and data stay visually separated
-  ;; even when the in-buffer separator line scrolls out of view
-  (face-remap-add-relative 'header-line :underline t)
   (add-hook 'post-command-hook
             #'data-lens--update-header-highlight nil t))
 
