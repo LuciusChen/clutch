@@ -126,7 +126,7 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls."
                                              page-num page-size
                                              &optional order-by)
   "Build a paginated SQL query for MySQL.
-Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
+Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
   (let ((case-fold-search t))
     (if (string-match-p "\\bLIMIT\\b" base-sql)
         base-sql
@@ -137,7 +137,7 @@ Wraps BASE-SQL with LIMIT/OFFSET.  ORDER-BY is (COL . DIR) or nil."
                              (format " ORDER BY %s %s"
                                      (mysql-escape-identifier (car order-by))
                                      (cdr order-by)))))
-        (format "SELECT * FROM (%s) AS _dl_t%s LIMIT %d OFFSET %d"
+        (format "%s%s LIMIT %d OFFSET %d"
                 trimmed (or order-clause "") page-size offset)))))
 
 ;;;; SQL dialect methods
