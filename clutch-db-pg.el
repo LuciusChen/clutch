@@ -115,7 +115,8 @@ No special init needed — encoding is set in startup message.")
 (cl-defmethod clutch-db-build-paged-sql ((_conn pg-conn) base-sql
                                              page-num page-size
                                              &optional order-by)
-  "Build a paginated SQL query for PostgreSQL."
+  "Build a paginated SQL query for PostgreSQL.
+Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
   (let ((case-fold-search t))
     (if (string-match-p "\\bLIMIT\\b" base-sql)
         base-sql
@@ -126,7 +127,7 @@ No special init needed — encoding is set in startup message.")
                              (format " ORDER BY %s %s"
                                      (pg-escape-identifier (car order-by))
                                      (cdr order-by)))))
-        (format "SELECT * FROM (%s) AS _dl_t%s LIMIT %d OFFSET %d"
+        (format "%s%s LIMIT %d OFFSET %d"
                 trimmed (or order-clause "") page-size offset)))))
 
 ;;;; SQL dialect methods
