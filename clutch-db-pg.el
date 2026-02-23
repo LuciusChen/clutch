@@ -280,25 +280,31 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
       (let* ((col-result
               (pg-query
                conn
-               (format "SELECT column_name, data_type, is_nullable, \
-character_maximum_length, numeric_precision, numeric_scale \
-FROM information_schema.columns \
-WHERE table_name = %s AND table_schema = current_schema() \
-ORDER BY ordinal_position"
+               (format "SELECT c.column_name, c.data_type, c.is_nullable, \
+c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
+col_description(pc.oid, a.attnum) \
+FROM information_schema.columns c \
+JOIN pg_class pc ON pc.relname = c.table_name \
+JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
+  AND pn.nspname = c.table_schema \
+JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name \
+WHERE c.table_name = %s AND c.table_schema = current_schema() \
+ORDER BY c.ordinal_position"
                        (pg-escape-literal table))))
              (col-rows (pg-result-rows col-result))
              (pk-cols (clutch-db-primary-key-columns conn table))
              (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale) row))
+           (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale ,comment) row))
              (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
                     (nullable (string= nullable-str "YES"))
                     (pk-p     (member name pk-cols))
                     (fk       (cdr (assoc name fks))))
                (list :name name :type type :nullable nullable
                      :primary-key (and pk-p t)
-                     :foreign-key fk))))
+                     :foreign-key fk
+                     :comment (and comment (not (string-empty-p comment)) comment)))))
          col-rows))
     (pg-error nil)))
 

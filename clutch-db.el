@@ -106,7 +106,7 @@ Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")
   "Return detailed column info for TABLE on CONN.
 Returns a list of plists with keys:
   :name STR  :type STR  :nullable BOOL
-  :primary-key BOOL  :foreign-key PLIST-OR-NIL")
+  :primary-key BOOL  :foreign-key PLIST-OR-NIL  :comment STR-OR-NIL")
 
 ;; Re-entrancy guard
 

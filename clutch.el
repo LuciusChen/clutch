@@ -1490,6 +1490,7 @@ Returns a string or nil."
            (nullable (plist-get col :nullable))
            (pk       (plist-get col :primary-key))
            (fk       (plist-get col :foreign-key))
+           (comment  (plist-get col :comment))
            (extras   (string-join
                       (delq nil
                             (list (when (not nullable)
@@ -1509,7 +1510,9 @@ Returns a string or nil."
       (string-join
        (delq nil (list header
                        (propertize type 'face 'font-lock-type-face)
-                       (unless (string-empty-p extras) extras)))
+                       (unless (string-empty-p extras) extras)
+                       (when comment
+                         (propertize (format "— %s" comment) 'face 'shadow))))
        "  "))))
 
 (defun clutch--schema-for-connection ()
