@@ -203,6 +203,22 @@ ORDER BY ordinal_position"
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(cl-defmethod clutch-db-table-comment ((conn pg-conn) table)
+  "Return the comment for TABLE on PostgreSQL CONN, or nil if none."
+  (condition-case _err
+      (let* ((result (pg-query
+                      conn
+                      (format "SELECT obj_description(c.oid) \
+FROM pg_class c \
+JOIN pg_namespace n ON n.oid = c.relnamespace \
+WHERE c.relname = %s AND n.nspname = current_schema()"
+                              (pg-escape-literal table))))
+             (row (car (pg-result-rows result)))
+             (comment (car row)))
+        (when (and comment (not (string-empty-p comment)))
+          comment))
+    (pg-error nil)))
+
 (cl-defmethod clutch-db-primary-key-columns ((conn pg-conn) table)
   "Return primary key column names for TABLE on PostgreSQL CONN."
   (condition-case _err
@@ -245,13 +261,27 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
 
 ;;;; Column details
 
+(defun clutch-db-pg--format-type (data-type max-len num-prec num-scale)
+  "Build a concise type string from PostgreSQL information_schema fields."
+  (cond
+   ((member data-type '("character varying" "varchar"))
+    (if max-len (format "varchar(%s)" max-len) "varchar"))
+   ((member data-type '("character" "char"))
+    (if max-len (format "char(%s)" max-len) "char"))
+   ((string= data-type "numeric")
+    (cond ((and num-prec num-scale) (format "numeric(%s,%s)" num-prec num-scale))
+          (num-prec                 (format "numeric(%s)" num-prec))
+          (t                        "numeric")))
+   (t data-type)))
+
 (cl-defmethod clutch-db-column-details ((conn pg-conn) table)
   "Return detailed column info for TABLE on PostgreSQL CONN."
   (condition-case _err
       (let* ((col-result
               (pg-query
                conn
-               (format "SELECT column_name, data_type, is_nullable \
+               (format "SELECT column_name, data_type, is_nullable, \
+character_maximum_length, numeric_precision, numeric_scale \
 FROM information_schema.columns \
 WHERE table_name = %s AND table_schema = current_schema() \
 ORDER BY ordinal_position"
@@ -261,10 +291,11 @@ ORDER BY ordinal_position"
              (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,name ,type ,nullable-str . ,_) row))
-             (let* ((nullable (string= nullable-str "YES"))
-                    (pk-p (member name pk-cols))
-                    (fk (cdr (assoc name fks))))
+           (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale) row))
+             (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
+                    (nullable (string= nullable-str "YES"))
+                    (pk-p     (member name pk-cols))
+                    (fk       (cdr (assoc name fks))))
                (list :name name :type type :nullable nullable
                      :primary-key (and pk-p t)
                      :foreign-key fk))))

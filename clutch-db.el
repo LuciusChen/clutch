@@ -92,6 +92,9 @@ the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
 (cl-defgeneric clutch-db-show-create-table (conn table)
   "Return the DDL string for TABLE on CONN.")
 
+(cl-defgeneric clutch-db-table-comment (conn table)
+  "Return the comment string for TABLE on CONN, or nil if none.")
+
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")
 

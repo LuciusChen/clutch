@@ -187,6 +187,21 @@ Appends LIMIT/OFFSET directly to BASE-SQL.  ORDER-BY is (COL . DIR) or nil."
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
+(cl-defmethod clutch-db-table-comment ((conn mysql-conn) table)
+  "Return the comment for TABLE on MySQL CONN, or nil if empty."
+  (condition-case _err
+      (let* ((result (mysql-query
+                      conn
+                      (format "SELECT TABLE_COMMENT \
+FROM INFORMATION_SCHEMA.TABLES \
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
+                              (mysql-escape-literal table))))
+             (row (car (mysql-result-rows result)))
+             (comment (car row)))
+        (when (and comment (not (string-empty-p comment)))
+          comment))
+    (mysql-error nil)))
+
 (cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table)
   "Return primary key column names for TABLE on MySQL CONN."
   (condition-case _err

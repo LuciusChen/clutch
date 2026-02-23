@@ -1409,6 +1409,15 @@ to execute or \\[clutch-indirect-abort] to abort."
   "Global schema cache.  Keys are connection-key strings.
 Values are hash-tables mapping table-name → list of column-name strings.")
 
+(defvar clutch--column-details-cache (make-hash-table :test 'equal)
+  "Cache for full column details.  Keys are connection-key strings.
+Values are hash-tables mapping table-name → list of column-detail plists
+as returned by `clutch-db-column-details'.")
+
+(defvar clutch--table-comment-cache (make-hash-table :test 'equal)
+  "Cache for table comments.  Keys are connection-key strings.
+Values are hash-tables mapping table-name → comment string or nil.")
+
 (defun clutch--refresh-schema-cache (conn)
   "Refresh schema cache for CONN.
 Only loads table names (fast).  Column info is loaded lazily."
@@ -1419,6 +1428,8 @@ Only loads table names (fast).  Column info is loaded lazily."
         (dolist (tbl table-names)
           (puthash tbl nil schema))
         (puthash key schema clutch--schema-cache)
+        (remhash key clutch--column-details-cache)
+        (remhash key clutch--table-comment-cache)
         (message "Connected — %d tables" (hash-table-count schema)))
     (clutch-db-error nil)))
 
@@ -1433,6 +1444,73 @@ Fetches from the backend if not yet cached.  Returns column list."
                 (puthash table col-names schema)
                 col-names)
             (clutch-db-error nil))))))
+
+(defun clutch--ensure-column-details (conn table)
+  "Return column details for TABLE on CONN, loading lazily if needed.
+Returns a list of plists with :name :type :nullable :primary-key :foreign-key,
+or nil on error."
+  (let* ((key (clutch--connection-key conn))
+         (cache (or (gethash key clutch--column-details-cache)
+                    (let ((h (make-hash-table :test 'equal)))
+                      (puthash key h clutch--column-details-cache)
+                      h)))
+         (cached (gethash table cache 'missing)))
+    (if (not (eq cached 'missing))
+        cached
+      (condition-case nil
+          (let ((details (clutch-db-column-details conn table)))
+            (puthash table details cache)
+            details)
+        (clutch-db-error nil)))))
+
+(defun clutch--ensure-table-comment (conn table)
+  "Return the comment for TABLE on CONN, loading lazily if needed.
+Returns a string or nil."
+  (let* ((key (clutch--connection-key conn))
+         (cache (or (gethash key clutch--table-comment-cache)
+                    (let ((h (make-hash-table :test 'equal)))
+                      (puthash key h clutch--table-comment-cache)
+                      h)))
+         (cached (gethash table cache 'missing)))
+    (if (not (eq cached 'missing))
+        cached
+      (let ((comment (condition-case nil
+                         (clutch-db-table-comment conn table)
+                       (clutch-db-error nil))))
+        (puthash table comment cache)
+        comment))))
+
+(defun clutch--eldoc-column-string (conn table col-name)
+  "Format an eldoc string for COL-NAME in TABLE using CONN."
+  (when-let* ((details (clutch--ensure-column-details conn table))
+              (col (cl-find col-name details
+                            :key (lambda (d) (plist-get d :name))
+                            :test #'string=)))
+    (let* ((type     (plist-get col :type))
+           (nullable (plist-get col :nullable))
+           (pk       (plist-get col :primary-key))
+           (fk       (plist-get col :foreign-key))
+           (extras   (string-join
+                      (delq nil
+                            (list (when (not nullable)
+                                    (propertize "NOT NULL" 'face 'font-lock-keyword-face))
+                                  (when pk
+                                    (propertize "PK" 'face 'font-lock-builtin-face))
+                                  (when fk
+                                    (propertize
+                                     (format "FK→%s.%s"
+                                             (plist-get fk :ref-table)
+                                             (plist-get fk :ref-column))
+                                     'face 'font-lock-constant-face))))
+                      "  "))
+           (header   (concat (propertize table    'face 'font-lock-type-face)
+                             "."
+                             (propertize col-name 'face 'font-lock-variable-name-face))))
+      (string-join
+       (delq nil (list header
+                       (propertize type 'face 'font-lock-type-face)
+                       (unless (string-empty-p extras) extras)))
+       "  "))))
 
 (defun clutch--schema-for-connection ()
   "Return the schema hash-table for the current connection, or nil."
@@ -1508,16 +1586,20 @@ Returns a documentation string for the SQL identifier at point."
               ((not (clutch-db-busy-p conn)))
               (sym (thing-at-point 'symbol t)))
     (cond
-     ((gethash sym schema)
-      (let ((cols (clutch--ensure-columns conn schema sym)))
-        (if cols
-            (format "Table %s: %s" sym (string-join cols ", "))
-          (format "Table %s" sym))))
+     ((not (eq (gethash sym schema 'missing) 'missing))
+      (let* ((cols    (clutch--ensure-columns conn schema sym))
+             (n       (length cols))
+             (comment (clutch--ensure-table-comment conn sym)))
+        (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
+                (propertize sym 'face 'font-lock-type-face)
+                (propertize (format "  (%d col%s)" n (if (= n 1) "" "s")) 'face 'shadow)
+                (when comment
+                  (propertize (format "  — %s" comment) 'face 'shadow)))))
      (t
-      (cl-loop for tbl in (hash-table-keys schema)
-               for cols = (gethash tbl schema)
+      (cl-loop for tbl in (clutch--tables-in-buffer schema)
+               for cols = (clutch--ensure-columns conn schema tbl)
                when (and cols (member sym cols))
-               return (format "%s.%s" tbl sym))))))
+               return (clutch--eldoc-column-string conn tbl sym))))))
 
 ;;;; Schema browser
 
