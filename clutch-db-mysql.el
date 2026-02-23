@@ -242,20 +242,25 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
   (condition-case _err
       (let* ((col-result (mysql-query
                           conn
-                          (format "SHOW COLUMNS FROM %s"
-                                  (mysql-escape-identifier table))))
+                          (format "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
+COLUMN_COMMENT \
+FROM INFORMATION_SCHEMA.COLUMNS \
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
+ORDER BY ORDINAL_POSITION"
+                                  (mysql-escape-literal table))))
              (col-rows (mysql-result-rows col-result))
              (pk-cols (clutch-db-primary-key-columns conn table))
              (fks (clutch-db-foreign-keys conn table)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,name ,type ,nullable-str . ,_) row))
+           (pcase-let ((`(,name ,type ,nullable-str ,comment) row))
              (let* ((nullable (string= nullable-str "YES"))
                     (pk-p (member name pk-cols))
                     (fk (cdr (assoc name fks))))
                (list :name name :type type :nullable nullable
                      :primary-key (and pk-p t)
-                     :foreign-key fk))))
+                     :foreign-key fk
+                     :comment (and comment (not (string-empty-p comment)) comment)))))
          col-rows))
     (mysql-error nil)))
 
