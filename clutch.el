@@ -372,6 +372,51 @@ If `clutch-connection-alist' is non-empty, offer saved connections via
   (setq clutch-connection nil)
   (clutch--update-mode-line))
 
+;;;; Query console
+
+;;;###autoload
+(defun clutch-query-console (name)
+  "Open or switch to the query console for saved connection NAME.
+Creates a dedicated buffer *clutch: NAME* with `clutch-mode' enabled
+and connects automatically if not already connected.
+Repeated calls with the same NAME switch to the existing buffer."
+  (interactive
+   (list (if clutch-connection-alist
+             (completing-read "Console: "
+                              (mapcar #'car clutch-connection-alist)
+                              nil t)
+           (user-error "No saved connections.  Populate `clutch-connection-alist' first"))))
+  (let ((buf (get-buffer-create (format "*clutch: %s*" name))))
+    (switch-to-buffer buf)
+    (unless (eq major-mode 'clutch-mode)
+      (clutch-mode))
+    (unless (clutch--connection-alive-p clutch-connection)
+      (when-let* ((params  (cdr (assoc name clutch-connection-alist)))
+                  (backend (or (plist-get params :backend) 'mysql))
+                  (db-params (cl-loop for (k v) on params by #'cddr
+                                      unless (memq k '(:sql-product :backend))
+                                      append (list k v)))
+                  (conn (condition-case err
+                            (clutch-db-connect backend db-params)
+                          (clutch-db-error
+                           (user-error "Connection failed: %s"
+                                       (error-message-string err))))))
+        (setq clutch-connection conn)
+        (setq clutch--conn-sql-product (plist-get params :sql-product))
+        (clutch--update-mode-line)
+        (clutch--refresh-schema-cache conn)))))
+
+;;;###autoload
+(defun clutch-switch-console ()
+  "Switch to an open clutch query console using `completing-read'."
+  (interactive)
+  (let ((consoles (cl-loop for buf in (buffer-list)
+                            when (string-prefix-p "*clutch: " (buffer-name buf))
+                            collect (buffer-name buf))))
+    (if consoles
+        (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
+      (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
+
 ;;;; Value formatting
 
 (defun clutch--format-value (val)
