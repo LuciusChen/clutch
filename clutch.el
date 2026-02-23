@@ -567,9 +567,9 @@ Pinned columns come first, followed by the current page's columns."
 (defun clutch--result-buffer-name ()
   "Return the result buffer name based on current connection."
   (if (clutch--connection-alive-p clutch-connection)
-      (format "*clutch: %s*"
+      (format "*clutch-result: %s*"
               (or (clutch-db-database clutch-connection) "results"))
-    "*clutch: results*"))
+    "*clutch-result: results*"))
 
 (defun clutch--render-static-table (col-names rows &optional column-defs)
   "Render a table string from COL-NAMES and ROWS.
