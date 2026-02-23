@@ -60,7 +60,8 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 - Pin/unpin columns, adjust column widths
 - CSV/Org export, copy as INSERT
 - Schema browser with expandable column details (=TAB= to expand/collapse)
-- SQL completion, query history
+- SQL completion (table/column names, keywords), query history
+- Eldoc: hover over a table name shows database, column count, and table comment; hover over a column name shows =table.column=, type, nullability, PK/FK references
 - REPL mode (comint-based)
 
 * Requirements
