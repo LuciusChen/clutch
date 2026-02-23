@@ -1871,7 +1871,82 @@ Returns a string or nil."
                ("WITH"         "WITH name [(cols)] AS (subquery) SELECT …"
                 "Common Table Expression (CTE); prefix WITH RECURSIVE for recursive CTEs")
                ("RETURNING"    "INSERT/UPDATE/DELETE … RETURNING col, …"
-                "Return values of modified rows  [PG]")))
+                "Return values of modified rows  [PG]")
+               ;; CASE expression
+               ("CASE"         "CASE WHEN cond THEN val … [ELSE default] END"
+                "Conditional expression; simple form: CASE expr WHEN val THEN res … [ELSE def] END")
+               ("WHEN"         "WHEN condition THEN result"
+                "Branch condition inside CASE expression")
+               ("THEN"         "THEN result"
+                "Result value for a matched CASE/WHEN branch")
+               ("ELSE"         "ELSE default"
+                "Fallback value when no CASE/WHEN branch matches")
+               ("END"          "END"
+                "Terminates a CASE expression")
+               ;; Membership / set
+               ("IN"           "expr IN (val1, val2, …) or expr IN (subquery)"
+                "TRUE if expr equals any value in the list or subquery")
+               ("NOT"          "NOT expr"
+                "Logical negation")
+               ("ANY"          "expr op ANY (subquery)"
+                "TRUE if comparison holds for at least one subquery row")
+               ("ALL"          "expr op ALL (subquery)"
+                "TRUE if comparison holds for every subquery row")
+               ;; JOIN keywords
+               ("JOIN"         "table JOIN other ON condition"
+                "INNER JOIN — return rows with matches in both tables")
+               ("INNER"        "INNER JOIN table ON condition"
+                "Return only rows with matches in both tables (default JOIN)")
+               ("LEFT"         "LEFT [OUTER] JOIN table ON condition"
+                "Return all left rows; NULL-fill unmatched right rows")
+               ("RIGHT"        "RIGHT [OUTER] JOIN table ON condition"
+                "Return all right rows; NULL-fill unmatched left rows")
+               ("FULL"         "FULL [OUTER] JOIN table ON condition"
+                "Return all rows from both sides, NULL-fill unmatched  [PG]")
+               ("CROSS"        "CROSS JOIN table"
+                "Cartesian product of both tables — no ON clause")
+               ("ON"           "ON condition"
+                "Join condition: ON t1.col = t2.col")
+               ("USING"        "USING (col1, col2, …)"
+                "Join on identically-named columns; equivalent to ON t1.col = t2.col")
+               ;; Set operations
+               ("UNION"        "query UNION [ALL] query"
+                "Combine rows; ALL keeps duplicates; without ALL deduplicates")
+               ("INTERSECT"    "query INTERSECT [ALL] query"
+                "Rows present in both result sets  [PG/MySQL 8.0.31+]")
+               ("EXCEPT"       "query EXCEPT [ALL] query"
+                "Rows in first set not in second  [PG]; MySQL: EXCEPT")
+               ("MINUS"        "query MINUS query"
+                "Rows in first set not in second (Oracle/older MySQL synonym for EXCEPT)")
+               ;; DML clause keywords
+               ("INTO"         "INSERT INTO table (cols) VALUES (…)"
+                "Target table for INSERT")
+               ("VALUES"       "VALUES (val1, val2, …) [, (…)]"
+                "Row value list for INSERT")
+               ("SET"          "UPDATE table SET col = val, …"
+                "Assignment list for UPDATE")
+               ("FROM"         "FROM table [alias] [JOIN …]"
+                "Source table(s) for SELECT / DELETE")
+               ("WHERE"        "WHERE condition"
+                "Filter rows; applied before GROUP BY")
+               ("GROUP"        "GROUP BY col1, col2, …"
+                "Aggregate rows into groups")
+               ("HAVING"       "HAVING condition"
+                "Filter groups after GROUP BY; may reference aggregates")
+               ("ORDER"        "ORDER BY col [ASC|DESC] [NULLS FIRST|LAST]"
+                "Sort result rows")
+               ("LIMIT"        "LIMIT n [OFFSET m]"
+                "Return at most n rows, skip m rows")
+               ("OFFSET"       "OFFSET n"
+                "Skip n rows before returning results")
+               ("DISTINCT"     "SELECT DISTINCT col, …"
+                "Eliminate duplicate rows from result set")
+               ("ASC"          "ORDER BY col ASC"
+                "Sort ascending (default)")
+               ("DESC"         "ORDER BY col DESC"
+                "Sort descending")
+               ("NULLS"        "ORDER BY col NULLS FIRST|LAST"
+                "Control NULL sort position  [PG/MySQL 8+]")))
       (puthash (car entry)
                (list :sig (cadr entry) :desc (caddr entry))
                ht))
