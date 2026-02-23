@@ -62,6 +62,7 @@ PostgreSQL support is functional and compatible, but has not been tested as exte
 - Schema browser with expandable column details (=TAB= to expand/collapse)
 - SQL completion (table/column names, keywords), query history
 - Eldoc: hover over a table name shows database, column count, and table comment; hover over a column name shows =table.column=, type, nullability, PK/FK references, and column comment
+- Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=)
 - REPL mode (comint-based)
 
 * Requirements
@@ -359,6 +360,22 @@ C-c C-e                     ;; Connect to database
 mysql> SELECT * FROM users;  ;; Type SQL, auto-executes on ;
                              ;; Multi-line input supported (continuation prompt ->)
                              ;; M-p / M-n to browse history
+#+end_src
+
+** Query Console
+
+=clutch-query-console= opens a dedicated buffer =*clutch: NAME*= for a saved
+connection, enables =clutch-mode=, and connects automatically.  Repeated calls
+with the same name switch to the existing buffer rather than creating a new one.
+
+=clutch-switch-console= lists all open console buffers via =completing-read= for
+fast switching between active connections.
+
+Suggested global bindings:
+
+#+begin_src emacs-lisp
+(global-set-key (kbd "C-c d") #'clutch-query-console)
+(global-set-key (kbd "C-c D") #'clutch-switch-console)
 #+end_src
 
 ** Schema Browser
