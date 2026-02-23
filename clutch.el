@@ -261,9 +261,10 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
     (setq clutch--history (make-ring clutch-history-length))
     (when (file-readable-p clutch-history-file)
       (let ((entries (split-string
-                      (with-temp-buffer
-                        (insert-file-contents clutch-history-file)
-                        (buffer-string))
+                      (let ((coding-system-for-read 'utf-8))
+                        (with-temp-buffer
+                          (insert-file-contents clutch-history-file)
+                          (buffer-string)))
                       "\0" t)))
         (dolist (entry (nreverse entries))
           (ring-insert clutch--history entry))))
@@ -275,8 +276,9 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
         (len (ring-length clutch--history)))
     (dotimes (i (min len clutch-history-length))
       (push (ring-ref clutch--history i) entries))
-    (with-temp-file clutch-history-file
-      (insert (mapconcat #'identity entries "\0")))))
+    (let ((coding-system-for-write 'utf-8-unix))
+      (with-temp-file clutch-history-file
+        (insert (mapconcat #'identity entries "\0"))))))
 
 (defun clutch--add-history (sql)
   "Add SQL to history ring, avoiding duplicates at head."
@@ -1872,7 +1874,7 @@ Key bindings:
   \\[clutch-list-tables]	List tables
   \\[clutch-describe-table-at-point]	Describe table at point
   \\[clutch-show-history]	Show query history"
-  (set-buffer-file-coding-system 'utf-8-unix)
+  (set-buffer-file-coding-system 'utf-8-unix nil t)
   (add-hook 'completion-at-point-functions
             #'clutch-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
@@ -2139,7 +2141,6 @@ Edit:
   \\[clutch-result-pin-column]	Pin column
   \\[clutch-result-unpin-column]	Unpin column
   \\[clutch-result-rerun]	Re-execute the query"
-  (set-buffer-file-coding-system 'utf-8-unix)
   (setq truncate-lines t)
   (hl-line-mode 1)
   ;; Make tab-line use default background so footer renders cleanly
