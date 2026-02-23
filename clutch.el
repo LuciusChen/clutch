@@ -901,8 +901,11 @@ EDGE-FN applies column-page edge indicators."
                         data-row "\n"))))
 
 (defun clutch--render-result ()
-  "Render the result buffer content using column paging."
-  (let* ((inhibit-read-only t)
+  "Render the result buffer content using column paging.
+Preserves point position (row + column) across the render."
+  (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+         (save-cidx (get-text-property (point) 'clutch-col-idx))
+         (inhibit-read-only t)
          (visible-cols (clutch--visible-columns))
          (widths (clutch--effective-widths))
          (rows (or clutch--filtered-rows clutch--result-rows))
@@ -935,7 +938,9 @@ EDGE-FN applies column-page edge indicators."
                'face 'clutch-modified-face)))
     (clutch--insert-data-rows rows visible-cols widths nw
                                  global-first-row edge-fn)
-    (goto-char (point-min))))
+    (if save-ridx
+        (clutch--goto-cell save-ridx save-cidx)
+      (goto-char (point-min)))))
 
 (defun clutch--col-idx-at-point ()
   "Return the column index at point, from data cells."
@@ -1495,6 +1500,25 @@ when completion triggers during an in-flight query)."
                 (delete-dups all)))))
       (list beg end candidates :exclusive 'no))))
 
+(defun clutch--eldoc-function (&rest _)
+  "Eldoc backend for `clutch-mode'.
+Returns a documentation string for the SQL identifier at point."
+  (when-let* ((schema (clutch--schema-for-connection))
+              (conn clutch-connection)
+              ((not (clutch-db-busy-p conn)))
+              (sym (thing-at-point 'symbol t)))
+    (cond
+     ((gethash sym schema)
+      (let ((cols (clutch--ensure-columns conn schema sym)))
+        (if cols
+            (format "Table %s: %s" sym (string-join cols ", "))
+          (format "Table %s" sym))))
+     (t
+      (cl-loop for tbl in (hash-table-keys schema)
+               for cols = (gethash tbl schema)
+               when (and cols (member sym cols))
+               return (format "%s.%s" tbl sym))))))
+
 ;;;; Schema browser
 
 (defvar-local clutch-schema--expanded-tables nil
@@ -1524,11 +1548,29 @@ when completion triggers during an in-flight query)."
   \\[clutch-schema-describe-at-point]	Show DDL for table
   \\[clutch-schema-refresh]	Refresh"
   (setq truncate-lines t)
-  (setq-local revert-buffer-function #'clutch-schema--revert))
+  (setq-local revert-buffer-function #'clutch-schema--revert)
+  (setq-local imenu-create-index-function #'clutch-schema--imenu-index))
 
 (defun clutch-schema--revert (_ignore-auto _noconfirm)
   "Revert function for schema browser."
   (clutch-schema-refresh))
+
+(defun clutch-schema--imenu-index ()
+  "Build an imenu index from `clutch-schema-table' text properties."
+  (let ((index nil)
+        (seen nil))
+    (save-excursion
+      (goto-char (point-min))
+      (let (m)
+        (while (setq m (text-property-search-forward
+                        'clutch-schema-table nil
+                        (lambda (_ v) v)))
+          (let ((name (prop-match-value m)))
+            (unless (member name seen)
+              (push name seen)
+              (push (cons name (copy-marker (prop-match-beginning m)))
+                    index))))))
+    (nreverse index)))
 
 (defun clutch-schema--table-at-point ()
   "Return the table name at the current line, or nil."
@@ -1722,6 +1764,8 @@ Key bindings:
             #'clutch-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
             #'clutch-sql-keyword-completion-at-point nil t)
+  (add-hook 'eldoc-documentation-functions
+            #'clutch--eldoc-function nil t)
   (clutch--update-mode-line))
 
 ;;;###autoload
@@ -1859,7 +1903,7 @@ Preserves the window scroll position relative to the target row."
     (define-key map "/" #'clutch-result-filter)
     ;; Delete / Insert
     (define-key map "d" #'clutch-result-delete-rows)
-    (define-key map "o" #'clutch-result-insert-row)
+    (define-key map "i" #'clutch-result-insert-row)
     map)
   "Keymap for `clutch-result-mode'.")
 
@@ -1986,6 +2030,7 @@ Edit:
   (hl-line-mode 1)
   ;; Make tab-line use default background so footer renders cleanly
   (face-remap-add-relative 'tab-line :inherit 'default)
+  (setq-local revert-buffer-function #'clutch-result--revert)
   (add-hook 'post-command-hook
             #'clutch--update-header-highlight nil t)
   (add-hook 'window-size-change-functions
@@ -2098,6 +2143,10 @@ derived tables.  Falls back to subquery wrapping otherwise."
   (if-let* ((sql (or clutch--base-query clutch--last-query)))
       (clutch--execute sql clutch-connection)
     (user-error "No query to re-execute")))
+
+(defun clutch-result--revert (_ignore-auto _noconfirm)
+  "Revert function for result buffer — re-executes the query."
+  (clutch-result-rerun))
 
 ;;;; Cell editing (C-c ')
 
@@ -3215,7 +3264,7 @@ Accumulates input until a semicolon is found, then executes."
   [["Edit"
     ("C-c '" "Edit cell"   clutch-result-edit-cell)
     ("C-c C-c" "Commit"    clutch-result-commit)
-    ("o" "Insert row"      clutch-result-insert-row)
+    ("i" "Insert row"      clutch-result-insert-row)
     ("d" "Delete row(s)"   clutch-result-delete-rows)]
    ["Copy (C-u = select cols)"
     ("y" "Yank cell"       clutch-result-yank-cell)
