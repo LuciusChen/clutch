@@ -302,23 +302,12 @@ The pass store reveals only =mysql/dev-mysql= — no host or username.
 Use =:pass-entry "other-name"= to override the suffix when the entry
 name must differ from the connection name.
 
-*** pass example — host-based entry name (standard auth-source)
+*** Fallback: standard auth-source lookup
 
-If you prefer standard =auth-source= matching without =:pass-entry=,
-=auth-source-pass= tries these path suffixes in order (most to least
-specific) for =:host "127.0.0.1" :user "root" :port 3306=:
-
-#+begin_src
-root@127.0.0.1:3306      ← user@host:port  (most specific)
-127.0.0.1:3306/root      ← host:port/user
-root@127.0.0.1           ← user@host
-127.0.0.1/root           ← host/user
-127.0.0.1:3306           ← host:port
-127.0.0.1                ← host only
-#+end_src
-
-Matching is on the path suffix, so =mysql/127.0.0.1/root= also matches
-=127.0.0.1/root=.
+If no pass entry matches the connection name, clutch falls back to
+standard =auth-source-search= by =:host=, =:user=, and =:port=.  This
+covers =~/.authinfo=, =~/.authinfo.gpg=, and pass entries named after
+the host.  See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][auth-source manual]] for details.
 
 ** Working with SQL files
 
