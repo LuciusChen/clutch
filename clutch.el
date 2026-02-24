@@ -3920,7 +3920,9 @@ MAX-NAME-W is the label column width."
 (defun clutch-record-view-json ()
   "Display the JSON field value at point in a formatted buffer."
   (interactive)
-  (clutch--view-json-value (get-text-property (point) 'clutch-full-value)))
+  (clutch--view-json-value
+   (or (get-text-property (point) 'clutch-full-value)
+       (user-error "No field at point"))))
 
 (defun clutch-record-yank-field ()
   "Copy the field value at point to the kill ring."
