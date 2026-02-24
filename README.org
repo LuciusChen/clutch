@@ -281,8 +281,26 @@ SELECT * FROM users LIMIT 10;
 
 Place the cursor on a SQL statement and press =C-c C-c= to execute. Results appear in a split result buffer below.
 
-Alternatively, open a plain SQL editing buffer with =M-x clutch-mode= and
-connect manually with =C-c C-e=.
+** Working with SQL files
+
+You can also open any =.sql= file, enable =clutch-mode=, and connect
+manually — the query console is not required.
+
+#+begin_src
+1. Open a .sql file
+2. M-x clutch-mode        — enable clutch (inherits sql-mode syntax/fontification)
+3. C-c C-e                 — select a saved connection or enter params manually
+                             Mode-line shows MySQL[root@127.0.0.1:3306/mydb]
+4. C-c C-c                 — execute query at point
+#+end_src
+
+To activate =clutch-mode= automatically for =.sql= files, add to your config:
+
+#+begin_src emacs-lisp
+(add-to-list 'auto-mode-alist '("\\.sql\\'" . clutch-mode))
+#+end_src
+
+=.mysql= files activate =clutch-mode= automatically without any configuration.
 
 ** SQL Editing (clutch-mode) Key Bindings
 
