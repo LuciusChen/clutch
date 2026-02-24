@@ -633,6 +633,29 @@ Pinned columns come first, followed by the current page's columns."
 
 ;;;; Result display
 
+(defun clutch--result-window ()
+  "Return the window currently showing a clutch result buffer, or nil.
+Searches all windows on the current frame."
+  (cl-find-if (lambda (w)
+                (string-prefix-p "*clutch-result:"
+                                 (buffer-name (window-buffer w))))
+              (window-list nil 'no-minibuf)))
+
+(defun clutch--show-result-buffer (buf)
+  "Display BUF in the result window slot.
+Reuses the existing result window when one is visible, replacing its
+buffer in place.  Creates a new window below `clutch--source-window'
+when no result window exists yet."
+  (let ((result-win (clutch--result-window)))
+    (if result-win
+        (progn
+          (set-window-buffer result-win buf)
+          (select-window result-win))
+      (pop-to-buffer buf `(display-buffer-in-direction
+                           (window . ,(or clutch--source-window
+                                          (selected-window)))
+                           (direction . below))))))
+
 (defun clutch--result-buffer-name ()
   "Return the result buffer name based on current connection.
 Uses the full connection key so each console gets its own result buffer."
@@ -1187,9 +1210,7 @@ Otherwise shows DML summary (affected rows, etc.)."
             (clutch--display-select-result col-names rows columns))
         ;; DML result
         (clutch--display-dml-result result sql elapsed)))
-    (pop-to-buffer buf `(display-buffer-in-direction
-                         (window . ,(or clutch--source-window (selected-window)))
-                         (direction . below)))))
+    (clutch--show-result-buffer buf)))
 
 ;;;; SQL pagination helpers
 
@@ -1334,9 +1355,7 @@ Returns the query result."
         (when col-names
           (clutch--display-select-result col-names rows columns)))
       (clutch--load-fk-info))
-    (pop-to-buffer buf `(display-buffer-in-direction
-                         (window . ,(or clutch--source-window (selected-window)))
-                         (direction . below)))
+    (clutch--show-result-buffer buf)
     result))
 
 (defun clutch--execute-dml (sql connection)
