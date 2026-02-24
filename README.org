@@ -277,32 +277,48 @@ Connection entry without hardcoded password:
 ("dev-mysql" . (:host "127.0.0.1" :port 3306 :user "root" :database "mydb"))
 #+end_src
 
-*** pass example
+*** pass example — opaque entry name (recommended)
+
+Use =:pass-entry= to name the pass entry whatever you like, keeping
+host and user off the filesystem:
 
 #+begin_src emacs-lisp
 ;; Enable auth-source-pass (built into Emacs 26+)
 (require 'auth-source-pass)
-(auth-source-pass-enable)
+
+(setq clutch-connection-alist
+      '(("zj_test@225" . (:backend mysql
+                           :host "192.168.1.225" :port 3306
+                           :user "cjh_test_225" :database "zj_test"
+                           :pass-entry "zj_test@225"))))
 #+end_src
 
-Store the password with =pass=.  =auth-source-pass= tries these path
-suffixes in order, from most to least specific:
+Store the password (first line only):
+
+#+begin_src sh
+pass insert zj_test@225
+#+end_src
+
+clutch looks up the entry by name directly, so the pass store reveals
+only =zj_test@225= — no IP address or username in the file path.
+
+*** pass example — host-based entry name (standard auth-source)
+
+If you prefer standard =auth-source= matching without =:pass-entry=,
+=auth-source-pass= tries these path suffixes in order (most to least
+specific) for =:host "127.0.0.1" :user "root" :port 3306=:
 
 #+begin_src
 root@127.0.0.1:3306      ← user@host:port  (most specific)
 127.0.0.1:3306/root      ← host:port/user
 root@127.0.0.1           ← user@host
-127.0.0.1/root           ← host/user  (recommended minimum)
+127.0.0.1/root           ← host/user
 127.0.0.1:3306           ← host:port
 127.0.0.1                ← host only
 #+end_src
 
-Matching is on the path suffix, so =databases/mysql/127.0.0.1/root= also
-matches the suffix =127.0.0.1/root=.  Recommended:
-
-#+begin_src sh
-pass insert 127.0.0.1/root
-#+end_src
+Matching is on the path suffix, so =mysql/127.0.0.1/root= also matches
+=127.0.0.1/root=.
 
 ** Working with SQL files
 

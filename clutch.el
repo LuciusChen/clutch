@@ -104,14 +104,19 @@ Underlined to indicate clickable (RET to follow)."
   "Alist of saved database connections.
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
-           [:backend SYM] [:sql-product SYM]))
+           [:backend SYM] [:sql-product SYM] [:pass-entry STR]))
 NAME is a string used for `completing-read'.
-:backend is a symbol (\\='mysql or \\='pg, default \\='mysql).
+:backend is a symbol (\\='mysql, \\='pg, or \\='sqlite, default \\='mysql).
 :sql-product overrides `clutch-sql-product' for this connection.
-:password is optional.  When absent or nil, the password is looked up
-via `auth-source' (supports ~/.authinfo, ~/.authinfo.gpg, and pass
-when `auth-source-pass' is enabled).  The auth-source entry should
-match :host, :user, and :port."
+
+Password resolution order:
+  1. :password — used as-is when present.
+  2. :pass-entry STR — looks up the named pass entry directly, ignoring
+     host/user/port.  Use this to store passwords under an opaque name,
+     e.g. \\='zj_test@225\\=', with the password on the first line of the
+     pass entry.  Requires (require \\='auth-source-pass).
+  3. auth-source-search — searches ~/.authinfo / ~/.authinfo.gpg / pass
+     by :host, :user, and :port (standard auth-source matching)."
   :type '(alist :key-type string
                 :value-type (plist :options
                                    ((:host string)
@@ -120,7 +125,8 @@ match :host, :user, and :port."
                                     (:password string)
                                     (:database string)
                                     (:backend symbol)
-                                    (:sql-product symbol))))
+                                    (:sql-product symbol)
+                                    (:pass-entry string))))
   :group 'clutch)
 
 (defcustom clutch-history-file
@@ -383,19 +389,29 @@ when consult is unavailable."
 
 (defun clutch--resolve-password (params)
   "Return the password for connection PARAMS.
-Uses :password from PARAMS directly when it is a non-empty string.
-Otherwise queries `auth-source' with :host, :user, and :port.
+Checks in order:
+  1. :password key (non-empty string) — used as-is.
+  2. :pass-entry key — looked up directly in the pass store by name
+     via `auth-source-pass-parse-entry' (requires auth-source-pass).
+  3. auth-source-search by :host/:user/:port (authinfo or pass with
+     host-based entry names).
 Returns nil when nothing is found (caller should prompt if needed)."
-  (let ((pw (plist-get params :password)))
-    (if (and (stringp pw) (not (string-empty-p pw)))
-        pw
-      (when-let* ((found (car (auth-source-search
-                               :host (plist-get params :host)
-                               :user (plist-get params :user)
-                               :port (plist-get params :port)
-                               :max 1)))
+  (let ((pw    (plist-get params :password))
+        (entry (plist-get params :pass-entry)))
+    (cond
+     ((and (stringp pw) (not (string-empty-p pw))) pw)
+     ((and entry (fboundp 'auth-source-pass-parse-entry))
+      (when-let* ((data   (auth-source-pass-parse-entry entry))
+                  (secret (cdr (assq 'secret data))))
+        secret))
+     (t
+      (when-let* ((found  (car (auth-source-search
+                                :host (plist-get params :host)
+                                :user (plist-get params :user)
+                                :port (plist-get params :port)
+                                :max 1)))
                   (secret (plist-get found :secret)))
-        (if (functionp secret) (funcall secret) secret)))))
+        (if (functionp secret) (funcall secret) secret))))))
 
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
@@ -403,7 +419,7 @@ Returns a live connection object or signals a `user-error'."
   (let* ((backend  (or (plist-get params :backend) 'mysql))
          (password (clutch--resolve-password params))
          (db-params (cl-loop for (k v) on params by #'cddr
-                             unless (memq k '(:sql-product :backend :password))
+                             unless (memq k '(:sql-product :backend :password :pass-entry))
                              append (list k v)))
          (db-params (if password
                         (append db-params (list :password password))
