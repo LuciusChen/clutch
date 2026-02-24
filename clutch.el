@@ -265,36 +265,52 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 
 ;;;; History
 
-(defvar clutch--history (make-ring 500)
-  "Ring buffer of executed SQL queries.")
+(defvar-local clutch--history nil
+  "Ring buffer of SQL queries for this buffer's connection.
+Nil until first loaded.  Each console buffer maintains its own ring
+so history is scoped to the connection that produced it.")
 
-(defvar clutch--history-loaded nil
-  "Non-nil if history has been loaded from disk.")
+(defvar-local clutch--history-loaded nil
+  "Non-nil when history has been loaded from disk for this buffer.")
+
+(defun clutch--history-file ()
+  "Return the history file path for the current buffer's connection.
+Uses a per-connection filename derived from the connection key so
+each console has isolated history.  Falls back to `clutch-history-file'
+when no connection is active."
+  (if (clutch--connection-alive-p clutch-connection)
+      (let* ((key      (clutch--connection-key clutch-connection))
+             (safe-key (replace-regexp-in-string "[/:*?\"<>|\\\\]" "-" key))
+             (dir      (file-name-directory (expand-file-name clutch-history-file))))
+        (expand-file-name (concat "clutch-history-" safe-key) dir))
+    clutch-history-file))
 
 (defun clutch--load-history ()
-  "Load history from `clutch-history-file'."
+  "Load history from the connection-specific history file."
   (unless clutch--history-loaded
     (setq clutch--history (make-ring clutch-history-length))
-    (when (file-readable-p clutch-history-file)
-      (let ((entries (split-string
-                      (let ((coding-system-for-read 'utf-8))
-                        (with-temp-buffer
-                          (insert-file-contents clutch-history-file)
-                          (buffer-string)))
-                      "\0" t)))
-        (dolist (entry (nreverse entries))
-          (ring-insert clutch--history entry))))
+    (let ((file (clutch--history-file)))
+      (when (file-readable-p file)
+        (let ((entries (split-string
+                        (let ((coding-system-for-read 'utf-8))
+                          (with-temp-buffer
+                            (insert-file-contents file)
+                            (buffer-string)))
+                        "\0" t)))
+          (dolist (entry (nreverse entries))
+            (ring-insert clutch--history entry)))))
     (setq clutch--history-loaded t)))
 
 (defun clutch--save-history ()
-  "Save history to `clutch-history-file'."
-  (let ((entries nil)
-        (len (ring-length clutch--history)))
-    (dotimes (i (min len clutch-history-length))
-      (push (ring-ref clutch--history i) entries))
-    (let ((coding-system-for-write 'utf-8-unix))
-      (with-temp-file clutch-history-file
-        (insert (mapconcat #'identity entries "\0"))))))
+  "Save history to the connection-specific history file."
+  (when clutch--history
+    (let ((entries nil)
+          (len (ring-length clutch--history)))
+      (dotimes (i (min len clutch-history-length))
+        (push (ring-ref clutch--history i) entries))
+      (let ((coding-system-for-write 'utf-8-unix))
+        (with-temp-file (clutch--history-file)
+          (insert (mapconcat #'identity entries "\0")))))))
 
 (defun clutch--add-history (sql)
   "Add SQL to history ring, avoiding duplicates at head."
@@ -433,8 +449,10 @@ params; see `clutch-connection-alist' for details."
   (let* ((params  (clutch--read-connection-params))
          (product (plist-get params :sql-product))
          (conn    (clutch--build-conn params)))
-    (setq clutch-connection conn)
-    (setq clutch--conn-sql-product product)
+    (setq clutch-connection conn
+          clutch--conn-sql-product product
+          clutch--history nil
+          clutch--history-loaded nil)
     (clutch--update-mode-line)
     (clutch--refresh-schema-cache conn)
     (message "Connected to %s" (clutch--connection-key conn))))
@@ -469,8 +487,10 @@ Repeated calls with the same NAME switch to the existing buffer."
     (unless (clutch--connection-alive-p clutch-connection)
       (when-let* ((params (cdr (assoc name clutch-connection-alist)))
                   (conn   (clutch--build-conn params)))
-        (setq clutch-connection conn)
-        (setq clutch--conn-sql-product (plist-get params :sql-product))
+        (setq clutch-connection conn
+              clutch--conn-sql-product (plist-get params :sql-product)
+              clutch--history nil
+              clutch--history-loaded nil)
         (clutch--update-mode-line)
         (clutch--refresh-schema-cache conn)))))
 
