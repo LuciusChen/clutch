@@ -44,6 +44,8 @@
 
 (declare-function nerd-icons-mdicon "nerd-icons")
 (declare-function nerd-icons-codicon "nerd-icons")
+(declare-function consult--read "consult")
+(declare-function consult--lookup-candidate "consult")
 
 ;;;; Customization
 
@@ -165,6 +167,15 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
 
 (defvar-local clutch-connection nil
   "Current database connection for this buffer.")
+
+(defvar-local clutch--executing-p nil
+  "Non-nil while a query is executing in this buffer.
+Used to update the mode-line with a spinner during execution.")
+
+(defvar clutch--source-window nil
+  "Window that initiated the current query execution.
+Dynamically bound by `clutch--execute' so result buffers open
+adjacent to the correct console window.")
 
 (defvar-local clutch--conn-sql-product nil
   "SQL product for the current connection, or nil to use the default.")
@@ -305,6 +316,24 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
          (choice (completing-read "SQL history: " entries nil t)))
     (insert choice)))
 
+(defun clutch-consult-history ()
+  "Browse SQL history with consult and insert the selection at point.
+Requires the `consult' package.  Falls back to `clutch-show-history'
+when consult is unavailable."
+  (interactive)
+  (unless (require 'consult nil t)
+    (user-error "consult is not available; use `clutch-show-history' instead"))
+  (clutch--load-history)
+  (when (ring-empty-p clutch--history)
+    (user-error "No history entries"))
+  (let* ((entries (ring-elements clutch--history))
+         (choice (consult--read entries
+                                :prompt "SQL: "
+                                :sort nil
+                                :require-match t
+                                :lookup #'consult--lookup-candidate)))
+    (insert choice)))
+
 ;;;; Connection management
 
 (defun clutch--connection-key (conn)
@@ -327,11 +356,16 @@ Alist of (COL-IDX . (:ref-table TABLE :ref-column COLUMN)).")
 (defun clutch--update-mode-line ()
   "Update mode-line lighter with connection status."
   (setq mode-name
-        (if (clutch--connection-alive-p clutch-connection)
-            (format "%s[%s]"
-                    (clutch-db-display-name clutch-connection)
-                    (clutch--connection-key clutch-connection))
-          "DB[disconnected]"))
+        (cond
+         ((and clutch--executing-p (clutch--connection-alive-p clutch-connection))
+          (format "%s[%s …]"
+                  (clutch-db-display-name clutch-connection)
+                  (clutch--connection-key clutch-connection)))
+         ((clutch--connection-alive-p clutch-connection)
+          (format "%s[%s]"
+                  (clutch-db-display-name clutch-connection)
+                  (clutch--connection-key clutch-connection)))
+         (t "DB[disconnected]")))
   (force-mode-line-update))
 
 (defun clutch--resolve-password (params)
@@ -600,10 +634,10 @@ Pinned columns come first, followed by the current page's columns."
 ;;;; Result display
 
 (defun clutch--result-buffer-name ()
-  "Return the result buffer name based on current connection."
+  "Return the result buffer name based on current connection.
+Uses the full connection key so each console gets its own result buffer."
   (if (clutch--connection-alive-p clutch-connection)
-      (format "*clutch-result: %s*"
-              (or (clutch-db-database clutch-connection) "results"))
+      (format "*clutch-result: %s*" (clutch--connection-key clutch-connection))
     "*clutch-result: results*"))
 
 (defun clutch--render-static-table (col-names rows &optional column-defs)
@@ -1153,7 +1187,9 @@ Otherwise shows DML summary (affected rows, etc.)."
             (clutch--display-select-result col-names rows columns))
         ;; DML result
         (clutch--display-dml-result result sql elapsed)))
-    (pop-to-buffer buf '(display-buffer-at-bottom))))
+    (pop-to-buffer buf `(display-buffer-in-direction
+                         (window . ,(or clutch--source-window (selected-window)))
+                         (direction . below)))))
 
 ;;;; SQL pagination helpers
 
@@ -1298,7 +1334,9 @@ Returns the query result."
         (when col-names
           (clutch--display-select-result col-names rows columns)))
       (clutch--load-fk-info))
-    (pop-to-buffer buf '(display-buffer-at-bottom))
+    (pop-to-buffer buf `(display-buffer-in-direction
+                         (window . ,(or clutch--source-window (selected-window)))
+                         (direction . below)))
     result))
 
 (defun clutch--execute-dml (sql connection)
@@ -1329,9 +1367,16 @@ Prompts for confirmation on destructive operations."
                        (truncate-string-to-width (string-trim sql) 80)))
         (user-error "Query cancelled")))
     (clutch--add-history sql)
-    (if (clutch--select-query-p sql)
-        (clutch--execute-select sql connection)
-      (clutch--execute-dml sql connection))))
+    (setq clutch--executing-p t)
+    (clutch--update-mode-line)
+    (redisplay t)
+    (unwind-protect
+        (let ((clutch--source-window (selected-window)))
+          (if (clutch--select-query-p sql)
+              (clutch--execute-select sql connection)
+            (clutch--execute-dml sql connection)))
+      (setq clutch--executing-p nil)
+      (clutch--update-mode-line))))
 
 ;;;; Query-at-point detection
 
