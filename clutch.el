@@ -466,12 +466,24 @@ params; see `clutch-connection-alist' for details."
 
 ;;;; Query console
 
+(defun clutch--console-window-for (buf)
+  "Return the best window to display BUF.
+Priority: (1) window already showing BUF; (2) any visible clutch
+console window; (3) nil, meaning use the selected window."
+  (or (get-buffer-window buf)
+      (cl-find-if (lambda (w)
+                    (string-prefix-p "*clutch: "
+                                     (buffer-name (window-buffer w))))
+                  (window-list))))
+
 ;;;###autoload
 (defun clutch-query-console (name)
   "Open or switch to the query console for saved connection NAME.
 Creates a dedicated buffer *clutch: NAME* with `clutch-mode' enabled
 and connects automatically if not already connected.
-Repeated calls with the same NAME switch to the existing buffer."
+Repeated calls with the same NAME switch to the existing buffer.
+When called from outside a clutch buffer, reuses any visible clutch
+window rather than replacing the current window."
   (interactive
    (list (if clutch-connection-alist
              (completing-read "Console: "
@@ -479,6 +491,7 @@ Repeated calls with the same NAME switch to the existing buffer."
                               nil t)
            (user-error "No saved connections.  Populate `clutch-connection-alist' first"))))
   (let ((buf (get-buffer-create (format "*clutch: %s*" name))))
+    (select-window (or (clutch--console-window-for buf) (selected-window)))
     (switch-to-buffer buf)
     (unless (eq major-mode 'clutch-mode)
       (clutch-mode))
