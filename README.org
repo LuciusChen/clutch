@@ -277,30 +277,30 @@ Connection entry without hardcoded password:
 ("dev-mysql" . (:host "127.0.0.1" :port 3306 :user "root" :database "mydb"))
 #+end_src
 
-*** pass example — opaque entry name (recommended)
+*** pass example — connection name as entry name (recommended)
 
-Use =:pass-entry= to name the pass entry whatever you like, keeping
-host and user off the filesystem:
+When =auth-source-pass= is loaded, clutch automatically tries a pass
+entry named after the connection (the key in =clutch-connection-alist=).
+No extra config needed:
 
 #+begin_src emacs-lisp
-;; Enable auth-source-pass (built into Emacs 26+)
 (require 'auth-source-pass)
 
 (setq clutch-connection-alist
-      '(("zj_test@225" . (:backend mysql
-                           :host "192.168.1.225" :port 3306
-                           :user "cjh_test_225" :database "zj_test"
-                           :pass-entry "zj_test@225"))))
+      '(("dev-mysql" . (:backend mysql
+                         :host "db.example.com" :port 3306
+                         :user "alice" :database "mydb"))))
 #+end_src
 
-Store the password (first line only):
+Store the password (first line of the entry):
 
 #+begin_src sh
-pass insert zj_test@225
+pass insert dev-mysql
 #+end_src
 
-clutch looks up the entry by name directly, so the pass store reveals
-only =zj_test@225= — no IP address or username in the file path.
+The pass store contains only =dev-mysql= — no host or username in the
+file path.  Use =:pass-entry "other-name"= to override the entry name
+when it must differ from the connection name.
 
 *** pass example — host-based entry name (standard auth-source)
 

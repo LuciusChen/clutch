@@ -111,10 +111,10 @@ NAME is a string used for `completing-read'.
 
 Password resolution order:
   1. :password — used as-is when present.
-  2. :pass-entry STR — looks up the named pass entry directly, ignoring
-     host/user/port.  Use this to store passwords under an opaque name,
-     e.g. \\='zj_test@225\\=', with the password on the first line of the
-     pass entry.  Requires (require \\='auth-source-pass).
+  2. Pass store by connection name — when `auth-source-pass' is loaded,
+     clutch automatically looks up a pass entry whose name matches NAME
+     (the car of this alist entry).  The password is on the first line.
+     Use :pass-entry STR to override the entry name if it differs.
   3. auth-source-search — searches ~/.authinfo / ~/.authinfo.gpg / pass
      by :host, :user, and :port (standard auth-source matching)."
   :type '(alist :key-type string
@@ -391,27 +391,28 @@ when consult is unavailable."
   "Return the password for connection PARAMS.
 Checks in order:
   1. :password key (non-empty string) — used as-is.
-  2. :pass-entry key — looked up directly in the pass store by name
-     via `auth-source-pass-parse-entry' (requires auth-source-pass).
-  3. auth-source-search by :host/:user/:port (authinfo or pass with
-     host-based entry names).
+  2. :pass-entry key — looked up by name via `auth-source-pass-parse-entry'.
+     Automatically set to the connection name by callers; can be overridden
+     in `clutch-connection-alist'.  Falls through when the entry is absent.
+  3. auth-source-search by :host/:user/:port (authinfo / pass).
 Returns nil when nothing is found (caller should prompt if needed)."
   (let ((pw    (plist-get params :password))
         (entry (plist-get params :pass-entry)))
     (cond
      ((and (stringp pw) (not (string-empty-p pw))) pw)
-     ((and entry (fboundp 'auth-source-pass-parse-entry))
-      (when-let* ((data   (auth-source-pass-parse-entry entry))
-                  (secret (cdr (assq 'secret data))))
-        secret))
      (t
-      (when-let* ((found  (car (auth-source-search
-                                :host (plist-get params :host)
-                                :user (plist-get params :user)
-                                :port (plist-get params :port)
-                                :max 1)))
-                  (secret (plist-get found :secret)))
-        (if (functionp secret) (funcall secret) secret))))))
+      (or (and entry
+               (fboundp 'auth-source-pass-parse-entry)
+               (when-let* ((data   (auth-source-pass-parse-entry entry))
+                           (secret (cdr (assq 'secret data))))
+                 secret))
+          (when-let* ((found  (car (auth-source-search
+                                    :host (plist-get params :host)
+                                    :user (plist-get params :user)
+                                    :port (plist-get params :port)
+                                    :max 1)))
+                      (secret (plist-get found :secret)))
+            (if (functionp secret) (funcall secret) secret)))))))
 
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
@@ -429,16 +430,24 @@ Returns a live connection object or signals a `user-error'."
       (clutch-db-error
        (user-error "Connection failed: %s" (error-message-string err))))))
 
+(defun clutch--inject-entry-name (params name)
+  "Return PARAMS with :pass-entry defaulting to NAME.
+Leaves PARAMS unchanged when :password or :pass-entry is already set."
+  (if (or (plist-get params :pass-entry) (plist-get params :password))
+      params
+    (append params (list :pass-entry name))))
+
 (defun clutch--read-connection-params ()
   "Prompt the user for connection parameters and return a params plist.
 Offers saved connections from `clutch-connection-alist' when non-empty,
 otherwise prompts for host/port/user/password/database individually.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
   (if clutch-connection-alist
-      (cdr (assoc (completing-read "Connection: "
-                                   (mapcar #'car clutch-connection-alist)
-                                   nil t)
-                  clutch-connection-alist))
+      (let* ((name   (completing-read "Connection: "
+                                      (mapcar #'car clutch-connection-alist)
+                                      nil t))
+             (params (cdr (assoc name clutch-connection-alist))))
+        (clutch--inject-entry-name params name))
     (let* ((host          (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
            (port          (read-number "Port (3306): " 3306))
            (user          (read-string "User: "))
@@ -512,7 +521,8 @@ window rather than replacing the current window."
     (unless (eq major-mode 'clutch-mode)
       (clutch-mode))
     (unless (clutch--connection-alive-p clutch-connection)
-      (when-let* ((params (cdr (assoc name clutch-connection-alist)))
+      (when-let* ((params (clutch--inject-entry-name
+                           (cdr (assoc name clutch-connection-alist)) name))
                   (conn   (clutch--build-conn params)))
         (setq clutch-connection conn
               clutch--conn-sql-product (plist-get params :sql-product)
