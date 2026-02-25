@@ -66,7 +66,7 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
 - Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
 - Per-connection query history: each console maintains its own history ring, persisted to a connection-specific file on disk
-- Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=)
+- Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - JSON cell viewer (=v=): pretty-prints JSON/JSONB cell values in a dedicated buffer with =json-ts-mode=
 - REPL mode (comint-based)
@@ -460,6 +460,13 @@ with the same name switch to the existing buffer rather than creating a new one.
 
 =clutch-switch-console= lists all open console buffers via =completing-read= for
 fast switching between active connections.
+
+*** Console persistence
+
+Buffer content is automatically saved to =clutch-console-directory=
+(default: =~/.emacs.d/clutch/consoles/=) and restored the next time the same
+console is opened.  Each connection gets its own file (e.g. =dev-mysql.sql=).
+Content is saved when the buffer is killed or when Emacs exits.
 
 Suggested global bindings:
 
