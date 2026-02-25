@@ -130,7 +130,7 @@ Password resolution order:
   :group 'clutch)
 
 (defcustom clutch-history-file
-  (expand-file-name "clutch-history" user-emacs-directory)
+  (expand-file-name "clutch/history" user-emacs-directory)
   "File for persisting SQL query history."
   :type 'file
   :group 'clutch)
@@ -138,6 +138,12 @@ Password resolution order:
 (defcustom clutch-history-length 500
   "Maximum number of history entries to keep."
   :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-console-directory
+  (expand-file-name "clutch/consoles" user-emacs-directory)
+  "Directory for persisting query console buffer content."
+  :type 'directory
   :group 'clutch)
 
 (defcustom clutch-result-max-rows 1000
@@ -284,6 +290,10 @@ so history is scoped to the connection that produced it.")
 Stored at connect time so the connection can be re-established
 automatically when it drops.")
 
+(defvar-local clutch--console-name nil
+  "Connection name if this buffer is a query console, nil otherwise.
+Set by `clutch-query-console'; used to save/restore buffer content.")
+
 (defun clutch--history-file ()
   "Return the history file path for the current buffer's connection.
 Uses a per-connection filename derived from the connection key so
@@ -330,6 +340,23 @@ when no connection is active."
                 (not (string= trimmed (ring-ref clutch--history 0))))
         (ring-insert clutch--history trimmed))
       (clutch--save-history))))
+
+;;;; Console persistence
+
+(defun clutch--console-file (name)
+  "Return the persistence file path for console NAME."
+  (expand-file-name
+   (concat (replace-regexp-in-string "[/:\\*?\"<>|]" "_" name) ".sql")
+   clutch-console-directory))
+
+(defun clutch--save-console ()
+  "Save console buffer content to its persistence file."
+  (when clutch--console-name
+    (make-directory clutch-console-directory t)
+    (let ((coding-system-for-write 'utf-8-unix))
+      (write-region (point-min) (point-max)
+                    (clutch--console-file clutch--console-name)
+                    nil 'silent))))
 
 (defun clutch-show-history ()
   "Select a query from history and insert it at point."
@@ -547,11 +574,18 @@ window rather than replacing the current window."
                               (mapcar #'car clutch-connection-alist)
                               nil t)
            (user-error "No saved connections.  Populate `clutch-connection-alist' first"))))
-  (let ((buf (get-buffer-create (format "*clutch: %s*" name))))
+  (let* ((buf     (get-buffer-create (format "*clutch: %s*" name)))
+         (is-new  (zerop (buffer-size buf))))
     (select-window (or (clutch--console-window-for buf) (selected-window)))
     (switch-to-buffer buf)
     (unless (eq major-mode 'clutch-mode)
       (clutch-mode))
+    (setq-local clutch--console-name name)
+    (when is-new
+      (let* ((file (clutch--console-file name))
+             (coding-system-for-read 'utf-8))
+        (when (file-readable-p file)
+          (insert-file-contents file))))
     (unless (clutch--connection-alive-p clutch-connection)
       (when-let* ((params (clutch--inject-entry-name
                            (cdr (assoc name clutch-connection-alist)) name))
@@ -2565,6 +2599,7 @@ Key bindings:
   \\[clutch-describe-table-at-point]	Describe table at point
   \\[clutch-show-history]	Show query history"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
+  (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
   (add-hook 'completion-at-point-functions
             #'clutch-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
