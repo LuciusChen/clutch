@@ -3106,22 +3106,29 @@ Scans text properties across the line."
         (if existing
             (setcdr existing new-value)
           (push (cons key new-value) clutch--pending-edits)))))
-  (clutch--refresh-display))
+  (clutch--refresh-display)
+  (if clutch--pending-edits
+      (message "%d pending edit%s — C-c C-c to commit"
+               (length clutch--pending-edits)
+               (if (= (length clutch--pending-edits) 1) "" "s"))
+    (message "Edit reverted to original")))
 
 ;;;; Commit edits
 
+(defun clutch-result--table-from-sql (sql)
+  "Extract the first unqualified table name from the FROM clause of SQL.
+Returns a string or nil.  Handles optional quoting with \", `, or []."
+  (let ((case-fold-search t))
+    (when (string-match
+           "\\bFROM\\s-+[`\"[]?\\([A-Za-z_][A-Za-z0-9_]*\\)[`\"]]?"
+           sql)
+      (match-string 1 sql))))
+
 (defun clutch-result--detect-table ()
-  "Try to detect the source table from query or column metadata.
+  "Try to detect the source table from the last query.
 Returns table name string or nil."
-  ;; Try column metadata first — :org-table is the physical table
-  (when-let* ((defs clutch--result-column-defs)
-              (tables (delete-dups
-                       (delq nil (mapcar (lambda (c) (plist-get c :org-table))
-                                         defs))))
-              ;; single table only
-              ((= (length tables) 1))
-              ((not (string-empty-p (car tables)))))
-    (car tables)))
+  (when clutch--last-query
+    (clutch-result--table-from-sql clutch--last-query)))
 
 (defun clutch-result--detect-primary-key ()
   "Return a list of column indices that form the primary key, or nil."
