@@ -3042,6 +3042,9 @@ Scans text properties across the line."
 (defvar-local clutch-result--edit-callback nil
   "Callback for the cell edit buffer: (lambda (new-value) ...).")
 
+(defvar-local clutch-result--edit-result-buffer nil
+  "The result buffer to commit edits to after clutch-result-edit-finish.")
+
 (defvar clutch-result-edit-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'clutch-result-edit-finish)
@@ -3072,22 +3075,28 @@ Scans text properties across the line."
       (goto-char (point-min))
       (clutch-result-edit-mode 1)
       (setq-local header-line-format
-                  (format " Editing row %d, column \"%s\"  |  C-c C-c: accept  C-c C-k: cancel"
+                  (format " Editing row %d, column \"%s\"  |  C-c C-c: commit  C-c C-k: cancel"
                           ridx col-name))
       (setq-local clutch-result--edit-callback
                   (lambda (new-value)
                     (with-current-buffer result-buf
-                      (clutch-result--apply-edit ridx cidx new-value)))))
+                      (clutch-result--apply-edit ridx cidx new-value))))
+      (setq-local clutch-result--edit-result-buffer result-buf))
     (pop-to-buffer edit-buf)))
 
 (defun clutch-result-edit-finish ()
-  "Accept the edit and return to the result buffer."
+  "Accept the edit, stage it, and commit to the database."
   (interactive)
   (let ((new-value (string-trim-right (buffer-string)))
-        (cb clutch-result--edit-callback))
+        (cb clutch-result--edit-callback)
+        (result-buf clutch-result--edit-result-buffer))
     (quit-window 'kill)
     (when cb
-      (funcall cb (if (string= new-value "NULL") nil new-value)))))
+      (funcall cb (if (string= new-value "NULL") nil new-value)))
+    (when (and result-buf (buffer-live-p result-buf))
+      (with-current-buffer result-buf
+        (when clutch--pending-edits
+          (clutch-result-commit))))))
 
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
@@ -3106,23 +3115,25 @@ Scans text properties across the line."
         (if existing
             (setcdr existing new-value)
           (push (cons key new-value) clutch--pending-edits)))))
-  (clutch--refresh-display)
-  (if clutch--pending-edits
-      (message "%d pending edit%s — C-c C-c to commit"
-               (length clutch--pending-edits)
-               (if (= (length clutch--pending-edits) 1) "" "s"))
-    (message "Edit reverted to original")))
+  (clutch--refresh-display))
 
 ;;;; Commit edits
 
 (defun clutch-result--table-from-sql (sql)
-  "Extract the first unqualified table name from the FROM clause of SQL.
-Returns a string or nil.  Handles optional quoting with \", `, or []."
+  "Extract the first table name from the FROM clause of SQL.
+Handles backtick, double-quote, and unquoted identifiers, with an
+optional schema prefix (schema.table).  Returns a string or nil."
   (let ((case-fold-search t))
-    (when (string-match
-           "\\bFROM\\s-+[`\"[]?\\([A-Za-z_][A-Za-z0-9_]*\\)[`\"]]?"
-           sql)
-      (match-string 1 sql))))
+    (cond
+     ;; backtick-quoted: FROM `schema`.`table`  or  FROM `table`
+     ((string-match "\\bFROM\\s-+\\(?:`[^`]+`\\.\\)?`\\([^`]+\\)`" sql)
+      (match-string 1 sql))
+     ;; double-quoted: FROM "schema"."table"  or  FROM "table"
+     ((string-match "\\bFROM\\s-+\\(?:\"[^\"]+\"\\.\\)?\"\\([^\"]+\\)\"" sql)
+      (match-string 1 sql))
+     ;; unquoted (including CJK): FROM schema.table  or  FROM table
+     ((string-match "\\bFROM\\s-+\\(?:[^[:space:],();.]+\\.\\)?\\([^[:space:],();]+\\)" sql)
+      (match-string 1 sql)))))
 
 (defun clutch-result--detect-table ()
   "Try to detect the source table from the last query.
@@ -3941,7 +3952,7 @@ MAX-NAME-W is the label column width."
           (goto-char (point-min))
           (clutch-result-edit-mode 1)
           (setq-local header-line-format
-                      (format " Editing row %d, column \"%s\"  |  C-c C-c: accept  C-c C-k: cancel"
+                      (format " Editing row %d, column \"%s\"  |  C-c C-c: commit  C-c C-k: cancel"
                               ridx col-name))
           (setq-local clutch-result--edit-callback
                       (lambda (new-value)
@@ -3949,7 +3960,8 @@ MAX-NAME-W is the label column width."
                           (clutch-result--apply-edit ridx cidx new-value))
                         (when (buffer-live-p record-buf)
                           (with-current-buffer record-buf
-                            (clutch-record--render))))))
+                            (clutch-record--render)))))
+          (setq-local clutch-result--edit-result-buffer result-buf))
         (pop-to-buffer edit-buf))
     (user-error "No field at point")))
 
