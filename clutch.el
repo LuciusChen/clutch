@@ -150,6 +150,13 @@ Password resolution order:
   :type 'directory
   :group 'clutch)
 
+(defcustom clutch-result-window-height 0.33
+  "Height of the result window as a fraction of the frame height.
+A float between 0.0 and 1.0.  Only applies when creating a new result
+window; an existing result window is reused at its current height."
+  :type 'float
+  :group 'clutch)
+
 (defcustom clutch-result-max-rows 1000
   "Maximum number of rows to display in result tables."
   :type 'natnum
@@ -795,7 +802,8 @@ when no result window exists yet."
       (pop-to-buffer buf `(display-buffer-in-direction
                            (window . ,(or clutch--source-window
                                           (selected-window)))
-                           (direction . below))))))
+                           (direction . below)
+                           (window-height . ,clutch-result-window-height))))))
 
 (defun clutch--result-buffer-name ()
   "Return the result buffer name based on current connection.
