@@ -427,9 +427,10 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 1. SELECT * FROM users;      → C-c C-c to execute
 2. Move cursor to the cell to modify
 3. e                          → opens edit buffer
-4. Edit the value, C-c C-c to confirm (C-c C-k to cancel)
-5. Edit multiple cells — modified cells are highlighted
-6. C-c C-c                   → confirmation prompt showing the UPDATE statements
+4. Edit the value, C-c C-c to stage (C-c C-k to cancel)
+                               echo area shows "N pending edits — C-c C-c to commit"
+5. Repeat for other cells — modified cells are highlighted
+6. C-c C-c in result buffer  → confirmation prompt showing the UPDATE statements
 #+end_src
 
 *** Insert / Delete Rows
