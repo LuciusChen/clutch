@@ -3075,7 +3075,7 @@ Scans text properties across the line."
       (goto-char (point-min))
       (clutch-result-edit-mode 1)
       (setq-local header-line-format
-                  (format " Editing row %d, column \"%s\"  |  C-c C-c: commit  C-c C-k: cancel"
+                  (format " Editing row %d, column \"%s\"  |  C-c C-c: stage  C-c C-k: cancel"
                           ridx col-name))
       (setq-local clutch-result--edit-callback
                   (lambda (new-value)
@@ -3085,18 +3085,14 @@ Scans text properties across the line."
     (pop-to-buffer edit-buf)))
 
 (defun clutch-result-edit-finish ()
-  "Accept the edit, stage it, and commit to the database."
+  "Stage the edit and return to the result buffer.
+Use C-c C-c in the result buffer to commit all staged edits."
   (interactive)
   (let ((new-value (string-trim-right (buffer-string)))
-        (cb clutch-result--edit-callback)
-        (result-buf clutch-result--edit-result-buffer))
+        (cb clutch-result--edit-callback))
     (quit-window 'kill)
     (when cb
-      (funcall cb (if (string= new-value "NULL") nil new-value)))
-    (when (and result-buf (buffer-live-p result-buf))
-      (with-current-buffer result-buf
-        (when clutch--pending-edits
-          (clutch-result-commit))))))
+      (funcall cb (if (string= new-value "NULL") nil new-value)))))
 
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
@@ -3115,7 +3111,12 @@ Scans text properties across the line."
         (if existing
             (setcdr existing new-value)
           (push (cons key new-value) clutch--pending-edits)))))
-  (clutch--refresh-display))
+  (clutch--refresh-display)
+  (if clutch--pending-edits
+      (message "%d pending edit%s — C-c C-c to commit"
+               (length clutch--pending-edits)
+               (if (= (length clutch--pending-edits) 1) "" "s"))
+    (message "Edit reverted to original")))
 
 ;;;; Commit edits
 
@@ -3952,7 +3953,7 @@ MAX-NAME-W is the label column width."
           (goto-char (point-min))
           (clutch-result-edit-mode 1)
           (setq-local header-line-format
-                      (format " Editing row %d, column \"%s\"  |  C-c C-c: commit  C-c C-k: cancel"
+                      (format " Editing row %d, column \"%s\"  |  C-c C-c: stage  C-c C-k: cancel"
                               ridx col-name))
           (setq-local clutch-result--edit-callback
                       (lambda (new-value)
