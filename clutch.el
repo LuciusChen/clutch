@@ -1578,6 +1578,14 @@ Queries are delimited by semicolons or blank lines."
   (clutch--ensure-connection)
   (clutch--execute (clutch--query-at-point)))
 
+(defun clutch-execute-dwim (beg end)
+  "Execute region if active, otherwise execute query at point."
+  (interactive "r")
+  (clutch--ensure-connection)
+  (if (use-region-p)
+      (clutch--execute (string-trim (buffer-substring-no-properties beg end)))
+    (clutch--execute (clutch--query-at-point))))
+
 (defun clutch-execute-region (beg end)
   "Execute SQL in the region from BEG to END."
   (interactive "r")
@@ -2588,7 +2596,7 @@ If EXPANDED-P, also insert column detail lines using CONN."
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
-    (define-key map (kbd "C-c C-c") #'clutch-execute-query-at-point)
+    (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
     (define-key map (kbd "C-c C-r") #'clutch-execute-region)
     (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
