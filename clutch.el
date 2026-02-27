@@ -104,6 +104,15 @@ Underlined to indicate clickable (RET to follow)."
   "Face for marked rows in result buffer."
   :group 'clutch)
 
+(defface clutch-executed-sql-face
+  '((((class color) (background light))
+     :background "#eaf5e9")
+    (((class color) (background dark))
+     :background "#223526")
+    (t :inherit highlight))
+  "Face for the last successfully executed SQL text."
+  :group 'clutch)
+
 (defcustom clutch-connection-alist nil
   "Alist of saved database connections.
 Each entry has the form:
@@ -194,6 +203,9 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
 Used to update the mode-line with a spinner during execution.")
+
+(defvar-local clutch--executed-sql-overlay nil
+  "Overlay highlighting the last successfully executed SQL region.")
 
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
@@ -1315,6 +1327,37 @@ Preserves cursor position (row + column) across the refresh."
             (with-current-buffer buf
               (clutch--refresh-display))))))))
 
+(defvar clutch--window-size-hook-enabled nil
+  "Non-nil when `clutch--window-size-change' is installed globally.")
+
+(defun clutch--enable-window-size-hook ()
+  "Ensure `clutch--window-size-change' is installed once."
+  (unless clutch--window-size-hook-enabled
+    (add-hook 'window-size-change-functions #'clutch--window-size-change)
+    (setq clutch--window-size-hook-enabled t)))
+
+(defun clutch--has-live-result-buffer-p (&optional ignore-buffer)
+  "Return non-nil if any live result buffer exists.
+IGNORE-BUFFER, when non-nil, is excluded from the check."
+  (cl-some (lambda (buf)
+             (and (buffer-live-p buf)
+                  (not (eq buf ignore-buffer))
+                  (with-current-buffer buf
+                    (derived-mode-p 'clutch-result-mode))))
+           (buffer-list)))
+
+(defun clutch--disable-window-size-hook-if-unused (&optional ignore-buffer)
+  "Remove global window-size hook when no result buffers remain.
+IGNORE-BUFFER is excluded from liveness checks."
+  (when (and clutch--window-size-hook-enabled
+             (not (clutch--has-live-result-buffer-p ignore-buffer)))
+    (remove-hook 'window-size-change-functions #'clutch--window-size-change)
+    (setq clutch--window-size-hook-enabled nil)))
+
+(defun clutch--result-buffer-cleanup ()
+  "Cleanup hook state when a result buffer is being removed."
+  (clutch--disable-window-size-hook-if-unused (current-buffer)))
+
 (defun clutch--display-select-result (col-names rows columns)
   "Render a SELECT result with COL-NAMES, ROWS, and COLUMNS metadata."
   (let ((inhibit-read-only t))
@@ -1545,7 +1588,8 @@ Records history, times execution, and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (clutch--ensure-connection)
-  (let ((connection (or conn clutch-connection)))
+  (let ((connection (or conn clutch-connection))
+        (source-win (selected-window)))
     (when (clutch--destructive-query-p sql)
       (unless (yes-or-no-p
                (format "Execute destructive query?\n  %s\n"
@@ -1556,39 +1600,69 @@ Prompts for confirmation on destructive operations."
     (clutch--update-mode-line)
     (redisplay t)
     (unwind-protect
-        (let ((clutch--source-window (selected-window)))
+        (let ((clutch--source-window source-win))
           (if (clutch--select-query-p sql)
               (clutch--execute-select sql connection)
             (clutch--execute-dml sql connection)))
+      (when (window-live-p source-win)
+        (select-window source-win))
       (setq clutch--executing-p nil)
       (clutch--update-mode-line))))
 
+(defun clutch--trim-sql-bounds (beg end)
+  "Return (BEG . END) trimmed to non-whitespace between BEG and END."
+  (save-excursion
+    (goto-char beg)
+    (skip-chars-forward " \t\r\n" end)
+    (let ((tbeg (point)))
+      (goto-char end)
+      (skip-chars-backward " \t\r\n" beg)
+      (let ((tend (point)))
+        (when (< tbeg tend)
+          (cons tbeg tend))))))
+
+(defun clutch--mark-executed-sql-region (beg end)
+  "Highlight the last successfully executed SQL region BEG..END."
+  (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
+              (tbeg (car trimmed))
+              (tend (cdr trimmed)))
+    (when (overlayp clutch--executed-sql-overlay)
+      (delete-overlay clutch--executed-sql-overlay))
+    (setq clutch--executed-sql-overlay (make-overlay tbeg tend))
+    (overlay-put clutch--executed-sql-overlay 'face 'clutch-executed-sql-face)
+    (overlay-put clutch--executed-sql-overlay 'priority 1000)
+    (overlay-put clutch--executed-sql-overlay 'evaporate t)))
+
+(defun clutch--execute-and-mark (sql beg end &optional conn)
+  "Execute SQL and mark BEG..END on success."
+  (clutch--execute sql conn)
+  (clutch--mark-executed-sql-region beg end))
+
 ;;;; Query-at-point detection
 
-(defun clutch--query-at-point ()
-  "Return the SQL query around point.
-Queries are delimited by semicolons or blank lines."
-  (let* ((delimiter "\\(;\\|^[[:space:]]*$\\)")
-         (beg (save-excursion
-                (if (re-search-backward delimiter nil t)
-                    (match-end 0)
-                  (point-min))))
-         (end (save-excursion
-                (if (re-search-forward delimiter nil t)
-                    (match-beginning 0)
-                  (point-max))))
-         (query (string-trim (buffer-substring-no-properties beg end))))
-    (when (string-empty-p query)
-      (user-error "No query at point"))
-    query))
+(defun clutch--query-bounds-at-point ()
+  "Return the SQL statement bounds around point as (BEG . END)."
+  (let ((delimiter "\\(;\\|^[[:space:]]*$\\)"))
+    (cons (save-excursion
+            (if (re-search-backward delimiter nil t)
+                (match-end 0)
+              (point-min)))
+          (save-excursion
+            (if (re-search-forward delimiter nil t)
+                (match-beginning 0)
+              (point-max))))))
 
 ;;;; Interactive commands
 
 (defun clutch-execute-query-at-point ()
   "Execute the SQL query at point."
   (interactive)
-  (clutch--ensure-connection)
-  (clutch--execute (clutch--query-at-point)))
+  (pcase-let* ((`(,beg . ,end) (clutch--query-bounds-at-point))
+               (sql (string-trim (buffer-substring-no-properties beg end))))
+    (when (string-empty-p sql)
+      (user-error "No query at point"))
+    (clutch--ensure-connection)
+    (clutch--execute-and-mark sql beg end)))
 
 (defun clutch--split-statements (sql)
   "Split SQL into individual statements on unquoted semicolons.
@@ -1650,29 +1724,38 @@ result buffer.  Stops and reports on the first error."
   "Execute region if active, otherwise execute query at point.
 When the region contains multiple semicolon-separated statements,
 they are executed sequentially."
-  (interactive "r")
+  (interactive
+   (if (use-region-p)
+       (list (region-beginning) (region-end))
+     (list (point) (point))))
   (clutch--ensure-connection)
   (if (use-region-p)
       (let* ((sql   (string-trim (buffer-substring-no-properties beg end)))
              (stmts (clutch--split-statements sql)))
         (if (cdr stmts)
             (clutch--execute-statements stmts)
-          (clutch--execute sql)))
-    (clutch--execute (clutch--query-at-point))))
+          (clutch--execute-and-mark sql beg end)))
+    (pcase-let* ((`(,qb . ,qe) (clutch--query-bounds-at-point))
+                 (sql (string-trim (buffer-substring-no-properties qb qe))))
+      (when (string-empty-p sql)
+        (user-error "No query at point"))
+      (clutch--execute-and-mark sql qb qe))))
 
 (defun clutch-execute-region (beg end)
   "Execute SQL in the region from BEG to END."
   (interactive "r")
   (clutch--ensure-connection)
-  (clutch--execute
-   (string-trim (buffer-substring-no-properties beg end))))
+  (clutch--execute-and-mark
+   (string-trim (buffer-substring-no-properties beg end))
+   beg end))
 
 (defun clutch-execute-buffer ()
   "Execute the entire buffer as a SQL query."
   (interactive)
   (clutch--ensure-connection)
-  (clutch--execute
-   (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
+  (clutch--execute-and-mark
+   (string-trim (buffer-substring-no-properties (point-min) (point-max)))
+   (point-min) (point-max)))
 
 (defun clutch--find-connection ()
   "Find a live database connection from any clutch-mode buffer.
@@ -1695,10 +1778,12 @@ current line.  Uses the connection from any clutch-mode buffer."
              (line-beginning-position) (line-end-position))))))
   (when (string-empty-p sql)
     (user-error "No SQL to execute"))
-  (let ((conn (or clutch-connection
-                  (clutch--find-connection)
-                  (user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect"))))
-    (clutch--execute sql conn)))
+  (let* ((conn (or clutch-connection
+                   (clutch--find-connection)
+                   (user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
+         (beg (if (use-region-p) (region-beginning) (line-beginning-position)))
+         (end (if (use-region-p) (region-end) (line-end-position))))
+    (clutch--execute-and-mark sql beg end conn)))
 
 ;;;; Indirect edit buffer
 
@@ -2968,8 +3053,9 @@ Edit:
   (setq-local revert-buffer-function #'clutch-result--revert)
   (add-hook 'post-command-hook
             #'clutch--update-header-highlight nil t)
-  (add-hook 'window-size-change-functions
-            #'clutch--window-size-change))
+  (add-hook 'kill-buffer-hook #'clutch--result-buffer-cleanup nil t)
+  (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
+  (clutch--enable-window-size-hook))
 
 (defun clutch-result-next-page ()
   "Go to the next data page."
