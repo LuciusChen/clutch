@@ -267,9 +267,8 @@ SQLite connections only require =:database= (the file path); no host, port, or u
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
 =:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
 For MySQL/PostgreSQL, =:read-timeout= (seconds) can be set per connection entry.
-TLS can be enabled per entry with =:tls t=; by default TLS verifies both
-certificate chain and hostname.  For private PKI, set
-=mysql-tls-trustfiles= / =pg-tls-trustfiles= to CA files.
+TLS can be enabled per entry with =:tls t=; see backend TLS sections above for
+verification defaults and CA trustfile configuration.
 
 *** 2. Open a query console
 
