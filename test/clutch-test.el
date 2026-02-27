@@ -321,6 +321,34 @@
              "^SELECT COUNT(\\*) FROM (SELECT DISTINCT user_id FROM visits) AS _clutch_count\\'"
              result))))
 
+(ert-deftest clutch-test-build-count-sql-keeps-inner-order-by ()
+  "Count SQL should not remove ORDER BY inside nested subqueries."
+  (let* ((sql "SELECT * FROM (SELECT id FROM t ORDER BY created_at DESC) s ORDER BY id")
+         (result (clutch--build-count-sql sql)))
+    (should (string-match-p "SELECT id FROM t ORDER BY created_at DESC" result))
+    (should (string-match-p "AS _clutch_count\\'" result))
+    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
+
+(ert-deftest clutch-test-build-count-sql-with-union-top-order ()
+  "Count SQL should drop only top-level ORDER BY for UNION queries."
+  (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b) ORDER BY id")
+         (result (clutch--build-count-sql sql)))
+    (should (string-match-p "UNION ALL" result))
+    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
+
+(ert-deftest clutch-test-build-count-sql-strips-trailing-semicolon ()
+  "Count SQL should normalize trailing semicolons."
+  (let ((result (clutch--build-count-sql "SELECT * FROM users;")))
+    (should-not (string-match-p ";\\s-*) AS _clutch_count\\'" result))
+    (should (string-match-p "SELECT \\* FROM users" result))))
+
+(ert-deftest clutch-test-build-count-sql-strips-leading-comments ()
+  "Count SQL should ignore leading SQL comments."
+  (let* ((sql "-- comment\n/* block */\nSELECT id FROM t ORDER BY id")
+         (result (clutch--build-count-sql sql)))
+    (should (string-prefix-p "SELECT COUNT(*) FROM (SELECT id FROM t)" result))
+    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
+
 ;;;; Unit tests — separator rendering
 
 (ert-deftest clutch-test-render-separator ()
