@@ -190,7 +190,14 @@
       (should (string-match-p "ASC" sql)))
     ;; Already has LIMIT — no modification
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t LIMIT 5" 0 10)))
-      (should (equal sql "SELECT * FROM t LIMIT 5")))))
+      (should (equal sql "SELECT * FROM t LIMIT 5")))
+    ;; Nested LIMIT should not disable outer pagination
+    (let ((sql (clutch-db-build-paged-sql
+                conn
+                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub"
+                0 10)))
+      (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
+      (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
 
 (ert-deftest clutch-db-test-pg-build-paged-sql ()
   "Test PostgreSQL paged SQL generation."
@@ -213,7 +220,14 @@
     ;; Query with trailing semicolon
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t;" 0 10)))
       (should (string-match-p "LIMIT 10" sql))
-      (should-not (string-match-p ";\\s*LIMIT" sql)))))
+      (should-not (string-match-p ";\\s*LIMIT" sql)))
+    ;; Nested LIMIT should not disable outer pagination
+    (let ((sql (clutch-db-build-paged-sql
+                conn
+                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub"
+                0 10)))
+      (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
+      (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
 
 ;;;; Unit tests — SQL escaping
 
