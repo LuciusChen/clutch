@@ -116,7 +116,20 @@ Clone this repository and add it to your =load-path=:
 
 ** TLS Connection
 
+When =:tls t= is used, certificate and hostname verification are enabled by
+default (secure-by-default).  If verification fails, connection setup aborts
+with an error; it does not silently downgrade to insecure mode.
+
+To trust private/internal CAs, configure:
+
+- =mysql-tls-trustfiles= (list of CA certificate files)
+- =mysql-tls-verify-server= (defaults to =t=; set to =nil= only for local/dev)
+- =mysql-tls-keylist= for client certificates when required
+
 #+begin_src emacs-lisp
+;; Example: custom CA for private PKI
+(setq mysql-tls-trustfiles '("/etc/ssl/certs/internal-ca.pem"))
+
 (setq conn (mysql-connect :host "127.0.0.1"
                            :port 3306
                            :user "root"
@@ -189,7 +202,20 @@ Clone this repository and add it to your =load-path=:
 
 ** TLS Connection
 
+When =:tls t= is used, certificate and hostname verification are enabled by
+default (secure-by-default).  If verification fails, connection setup aborts
+with an error; it does not silently downgrade to insecure mode.
+
+To trust private/internal CAs, configure:
+
+- =pg-tls-trustfiles= (list of CA certificate files)
+- =pg-tls-verify-server= (defaults to =t=; set to =nil= only for local/dev)
+- =pg-tls-keylist= for client certificates when required
+
 #+begin_src emacs-lisp
+;; Example: custom CA for private PKI
+(setq pg-tls-trustfiles '("/etc/ssl/certs/internal-ca.pem"))
+
 (setq conn (pg-connect :host "127.0.0.1"
                         :port 5432
                         :user "postgres"
@@ -241,6 +267,9 @@ SQLite connections only require =:database= (the file path); no host, port, or u
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
 =:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
 For MySQL/PostgreSQL, =:read-timeout= (seconds) can be set per connection entry.
+TLS can be enabled per entry with =:tls t=; by default TLS verifies both
+certificate chain and hostname.  For private PKI, set
+=mysql-tls-trustfiles= / =pg-tls-trustfiles= to CA files.
 
 *** 2. Open a query console
 
