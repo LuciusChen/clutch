@@ -52,6 +52,8 @@ SQLite support requires Emacs 29+ (built-in =sqlite-*= functions); no external d
 - SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
   - =tab-line=: row count, page, elapsed time, SQL query (with =nerd-icons=, Unicode fallback)
   - =header-line=: column names with =│= borders and underlined labels
+- After execution, focus stays in the SQL buffer while results refresh below
+- Last successfully executed SQL region is highlighted in the editor
 - Row numbers as a table column; sort/pin indicators via =nerd-icons= (with Unicode fallback)
 - Right-aligned numeric columns
 - Record buffer for single-row detail view
