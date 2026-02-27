@@ -240,6 +240,7 @@ Omitting =:backend= defaults to =mysql=, but explicit is clearer.
 SQLite connections only require =:database= (the file path); no host, port, or user.
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
 =:password= is optional for network backends — see [[*Password Management]] for auth-source integration.
+For MySQL/PostgreSQL, =:read-timeout= (seconds) can be set per connection entry.
 
 *** 2. Open a query console
 
@@ -536,7 +537,19 @@ Generic form with explicit backend:
 : SELECT version();
 : #+end_src
 
+Compatibility entry files:
+- =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= are thin language entry points.
+- Core execution logic lives in =ob-clutch.el=.
+
 =C-c C-c= executes the source block; results are inserted as an org table.
+
+** Query Timeout and Interrupt
+
+- =clutch-query-timeout-seconds= controls query I/O idle timeout (default: 30s).
+- MySQL/PostgreSQL connections can override timeout via connection plist key =:read-timeout=.
+- During long-running queries, press =C-g= to interrupt.
+  - clutch will drop the current connection to avoid protocol desync.
+  - the next command auto-reconnects when saved connection params are available.
 
 * Testing
 

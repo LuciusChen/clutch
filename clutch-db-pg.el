@@ -74,12 +74,16 @@
 
 (defun clutch-db-pg-connect (params)
   "Connect to PostgreSQL using PARAMS plist.
-PARAMS keys: :host, :port, :user, :password, :database, :tls."
+PARAMS keys: :host, :port, :user, :password, :database, :tls, :read-timeout."
   (condition-case err
-      (apply #'pg-connect
-             (cl-loop for (k v) on params by #'cddr
-                      unless (memq k '(:sql-product :backend))
-                      append (list k v)))
+      (let* ((read-timeout (plist-get params :read-timeout))
+             (conn (apply #'pg-connect
+                          (cl-loop for (k v) on params by #'cddr
+                                   unless (memq k '(:sql-product :backend :read-timeout))
+                                   append (list k v)))))
+        (when read-timeout
+          (setf (pg-conn-read-timeout conn) read-timeout))
+        conn)
     (pg-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))

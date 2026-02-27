@@ -117,7 +117,8 @@ Underlined to indicate clickable (RET to follow)."
   "Alist of saved database connections.
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
-           [:backend SYM] [:sql-product SYM] [:pass-entry STR]))
+           [:backend SYM] [:sql-product SYM] [:pass-entry STR]
+           [:read-timeout N]))
 NAME is a string used for `completing-read'.
 :backend is a symbol (\\='mysql, \\='pg, or \\='sqlite, default \\='mysql).
 :sql-product overrides `clutch-sql-product' for this connection.
@@ -139,7 +140,8 @@ Password resolution order:
                                     (:database string)
                                     (:backend symbol)
                                     (:sql-product symbol)
-                                    (:pass-entry string))))
+                                    (:pass-entry string)
+                                    (:read-timeout natnum))))
   :group 'clutch)
 
 (defcustom clutch-history-file
@@ -193,6 +195,12 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
                  (const :tag "PostgreSQL" postgres)
                  (const :tag "MariaDB" mariadb)
                  (symbol :tag "Other"))
+  :group 'clutch)
+
+(defcustom clutch-query-timeout-seconds 30
+  "Idle timeout in seconds while waiting for query I/O.
+Applies to MySQL and PostgreSQL connections.  SQLite ignores this setting."
+  :type 'natnum
   :group 'clutch)
 
 ;;;; Buffer-local variables
@@ -519,6 +527,10 @@ Returns a live connection object or signals a `user-error'."
                              append (list k v)))
          (db-params (if password
                         (append db-params (list :password password))
+                      db-params))
+         (db-params (if (memq backend '(mysql pg))
+                        (append db-params
+                                (list :read-timeout clutch-query-timeout-seconds))
                       db-params)))
     (condition-case err
         (clutch-db-connect backend db-params)
@@ -1628,10 +1640,19 @@ Prompts for confirmation on destructive operations."
     (clutch--update-mode-line)
     (redisplay t)
     (unwind-protect
-        (let ((clutch--source-window source-win))
-          (if (clutch--select-query-p sql)
-              (clutch--execute-select sql connection)
-            (clutch--execute-dml sql connection)))
+        (condition-case nil
+            (let ((clutch--source-window source-win))
+              (if (clutch--select-query-p sql)
+                  (clutch--execute-select sql connection)
+                (clutch--execute-dml sql connection)))
+          (quit
+           ;; A quit during network read can leave protocol state indeterminate.
+           ;; Drop the connection so the next command reconnects cleanly.
+           (when (clutch--connection-alive-p connection)
+             (clutch-db-disconnect connection))
+           (when (eq connection clutch-connection)
+             (setq clutch-connection nil))
+           (user-error "Query interrupted")))
       (when (window-live-p source-win)
         (select-window source-win))
       (setq clutch--executing-p nil)
@@ -1732,6 +1753,11 @@ result buffer.  Stops and reports on the first error."
     (dolist (stmt before-last)
       (condition-case err
           (progn (clutch-db-query clutch-connection stmt) (cl-incf done))
+        (quit
+         (when (clutch--connection-alive-p clutch-connection)
+           (clutch-db-disconnect clutch-connection))
+         (setq clutch-connection nil)
+         (user-error "Query interrupted"))
         (clutch-db-error
          (user-error "Statement %d failed: %s" (1+ done)
                      (error-message-string err)))))
@@ -1744,6 +1770,11 @@ result buffer.  Stops and reports on the first error."
           (progn (clutch-db-query clutch-connection last) (cl-incf done)
                  (message "%d statement%s executed"
                           done (if (= done 1) "" "s")))
+        (quit
+         (when (clutch--connection-alive-p clutch-connection)
+           (clutch-db-disconnect clutch-connection))
+         (setq clutch-connection nil)
+         (user-error "Query interrupted"))
         (clutch-db-error
          (user-error "Statement %d failed: %s" (1+ done)
                      (error-message-string err)))))))
