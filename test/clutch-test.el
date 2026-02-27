@@ -292,6 +292,56 @@
       (should (stringp sep))
       (should (> (length sep) 0)))))
 
+;;;; Unit tests — connection timeout / interruption handling
+
+(ert-deftest clutch-test-build-conn-includes-read-timeout-for-network-backends ()
+  "Test that `clutch--build-conn' passes :read-timeout to mysql/pg."
+  (let ((clutch-query-timeout-seconds 42)
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq captured params)
+                 'fake-conn)))
+      (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306 :user "u"))
+      (should (equal (plist-get captured :read-timeout) 42))
+      (clutch--build-conn '(:backend pg :host "127.0.0.1" :port 5432 :user "u"))
+      (should (equal (plist-get captured :read-timeout) 42)))))
+
+(ert-deftest clutch-test-build-conn-skips-read-timeout-for-sqlite ()
+  "Test that `clutch--build-conn' does not pass :read-timeout to sqlite."
+  (let ((clutch-query-timeout-seconds 42)
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq captured params)
+                 'fake-conn)))
+      (clutch--build-conn '(:backend sqlite :database ":memory:"))
+      (should-not (plist-member captured :read-timeout)))))
+
+(ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
+  "Test `clutch--execute' converts quit into recoverable interruption."
+  (let ((disconnected nil)
+        (clutch-connection 'fake-conn)
+        (clutch--executing-p nil))
+    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
+              ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+              ((symbol-function 'clutch--add-history) (lambda (_sql) nil))
+              ((symbol-function 'clutch--update-mode-line) (lambda () nil))
+              ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+              ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
+              ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq disconnected t))))
+      (should-error (clutch--execute "SELECT 1" clutch-connection)
+                    :type 'user-error)
+      (should disconnected)
+      (should-not clutch-connection)
+      (should-not clutch--executing-p))))
+
 
 ;;;; Unit tests — SQL keyword completion
 
