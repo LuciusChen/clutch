@@ -1465,9 +1465,8 @@ If the result has columns, shows a table; otherwise shows DML summary."
 ;;;; SQL pagination helpers
 
 (defun clutch--sql-has-limit-p (sql)
-  "Return non-nil if SQL already contains a LIMIT clause."
-  (let ((case-fold-search t))
-    (string-match-p "\\bLIMIT\\b" sql)))
+  "Return non-nil if SQL has a top-level LIMIT clause."
+  (clutch-db-sql-has-top-level-limit-p sql))
 
 (defun clutch--build-paged-sql (base-sql page-num page-size &optional order-by)
   "Build a paged SQL query wrapping BASE-SQL.
@@ -3156,23 +3155,7 @@ Triggers a COUNT(*) query if total rows are not yet known."
   "Return the start position of PATTERN at parenthesis depth 0 in SQL.
 PATTERN is matched case-insensitively with word boundaries.  START
 defaults to 0.  Returns nil if not found."
-  (let ((pos (or start 0))
-        (depth 0)
-        (len (length sql))
-        (case-fold-search t)
-        (re (format "\\b%s\\b" pattern))
-        found)
-    (while (and (< pos len) (not found))
-      (let ((ch (aref sql pos)))
-        (cond
-         ((= ch ?\() (cl-incf depth) (cl-incf pos))
-         ((= ch ?\)) (cl-decf depth) (cl-incf pos))
-         ((and (= depth 0)
-               (string-match re sql pos)
-               (= (match-beginning 0) pos))
-          (setq found pos))
-         (t (cl-incf pos)))))
-    found))
+  (clutch-db-sql-find-top-level-clause sql pattern start))
 
 (defun clutch--sql-normalize-for-rewrite (sql)
   "Return SQL trimmed for rewrite operations."

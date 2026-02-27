@@ -147,19 +147,18 @@ Use \":memory:\" for a transient in-memory database."
                                           base-sql page-num page-size
                                           &optional order-by)
   "Build a paginated SQL query for SQLite."
-  (let ((case-fold-search t))
-    (if (string-match-p "\\bLIMIT\\b" base-sql)
-        base-sql
-      (let* ((trimmed (string-trim-right
-                       (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
-             (offset (* page-num page-size))
-             (order-clause
-              (when order-by
-                (format " ORDER BY \"%s\" %s"
-                        (replace-regexp-in-string "\"" "\"\"" (car order-by))
-                        (cdr order-by)))))
-        (format "%s%s LIMIT %d OFFSET %d"
-                trimmed (or order-clause "") page-size offset)))))
+  (if (clutch-db-sql-has-top-level-limit-p base-sql)
+      base-sql
+    (let* ((trimmed (string-trim-right
+                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+           (offset (* page-num page-size))
+           (order-clause
+            (when order-by
+              (format " ORDER BY \"%s\" %s"
+                      (replace-regexp-in-string "\"" "\"\"" (car order-by))
+                      (cdr order-by)))))
+      (format "%s%s LIMIT %d OFFSET %d"
+              trimmed (or order-clause "") page-size offset))))
 
 ;;;; SQL dialect methods
 

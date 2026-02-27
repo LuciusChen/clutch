@@ -181,6 +181,10 @@
   (should (clutch--sql-has-limit-p "SELECT * FROM t LIMIT 10"))
   (should (clutch--sql-has-limit-p "select * from t limit 10"))
   (should (clutch--sql-has-limit-p "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"))
+  (should-not (clutch--sql-has-limit-p
+               "SELECT * FROM (SELECT * FROM t LIMIT 5) AS s"))
+  (should-not (clutch--sql-has-limit-p
+               "WITH x AS (SELECT * FROM t LIMIT 3) SELECT * FROM x"))
   (should-not (clutch--sql-has-limit-p "SELECT * FROM t"))
   (should-not (clutch--sql-has-limit-p "SELECT * FROM t WHERE limitation = 1")))
 

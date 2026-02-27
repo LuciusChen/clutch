@@ -48,6 +48,38 @@ ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
+;;;; SQL helpers (top-level clause detection)
+
+(defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)
+  "Return start position of top-level PATTERN in SQL, or nil.
+PATTERN is matched case-insensitively with word boundaries.
+START defaults to 0."
+  (let ((pos (or start 0))
+        (depth 0)
+        (len (length sql))
+        (case-fold-search t)
+        (re (format "\\b%s\\b" pattern))
+        found)
+    (while (and (< pos len) (not found))
+      (let ((ch (aref sql pos)))
+        (cond
+         ((= ch ?\() (cl-incf depth) (cl-incf pos))
+         ((= ch ?\)) (cl-decf depth) (cl-incf pos))
+         ((and (= depth 0)
+               (string-match re sql pos)
+               (= (match-beginning 0) pos))
+          (setq found pos))
+         (t (cl-incf pos)))))
+    found))
+
+(defun clutch-db-sql-has-top-level-clause-p (sql pattern &optional start)
+  "Return non-nil when SQL has top-level PATTERN."
+  (not (null (clutch-db-sql-find-top-level-clause sql pattern start))))
+
+(defun clutch-db-sql-has-top-level-limit-p (sql)
+  "Return non-nil when SQL has a top-level LIMIT clause."
+  (clutch-db-sql-has-top-level-clause-p sql "LIMIT"))
+
 ;;;; Generic interface — 18 methods dispatched on connection type
 
 ;; Lifecycle
