@@ -181,8 +181,12 @@
   (should (clutch--sql-has-limit-p "SELECT * FROM t LIMIT 10"))
   (should (clutch--sql-has-limit-p "select * from t limit 10"))
   (should (clutch--sql-has-limit-p "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"))
+  (should (clutch--sql-has-limit-p
+           "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 20"))
   (should-not (clutch--sql-has-limit-p
                "SELECT * FROM (SELECT * FROM t LIMIT 5) AS s"))
+  (should-not (clutch--sql-has-limit-p
+               "(SELECT id FROM a LIMIT 1) UNION ALL (SELECT id FROM b)"))
   (should-not (clutch--sql-has-limit-p
                "WITH x AS (SELECT * FROM t LIMIT 3) SELECT * FROM x"))
   (should-not (clutch--sql-has-limit-p "SELECT * FROM t"))
@@ -260,17 +264,8 @@
   (should (equal (clutch--strip-leading-comments "-- nothing") "")))
 
 (ert-deftest clutch-test-selected-row-indices-priority ()
-  "Selection priority should be marked > region > current row."
+  "Selection priority should be region > current row."
   (with-temp-buffer
-    (setq-local clutch--marked-rows '(7 9))
-    (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-              ((symbol-function 'clutch-result--rows-in-region)
-               (lambda (_beg _end) '(2 3)))
-              ((symbol-function 'clutch-result--row-idx-at-line)
-               (lambda () 1)))
-      (should (equal (clutch-result--selected-row-indices) '(7 9)))))
-  (with-temp-buffer
-    (setq-local clutch--marked-rows nil)
     (cl-letf (((symbol-function 'use-region-p) (lambda () t))
               ((symbol-function 'clutch-result--rows-in-region)
                (lambda (_beg _end) '(2 3)))
@@ -280,7 +275,6 @@
               ((symbol-function 'region-end) (lambda () 20)))
       (should (equal (clutch-result--selected-row-indices) '(2 3)))))
   (with-temp-buffer
-    (setq-local clutch--marked-rows nil)
     (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
               ((symbol-function 'clutch-result--row-idx-at-line)
                (lambda () 4)))
@@ -380,6 +374,15 @@
     (should (string-match-p "^SELECT \\* FROM (.*UNION ALL.*) AS _clutch_filter" result))
     (should (string-match-p "WHERE id > 10\\'" result))))
 
+(ert-deftest clutch-test-apply-where-normalizes-comments-and-semicolon ()
+  "WHERE rewrite should strip leading comments and trailing semicolons."
+  (let* ((sql "-- head comment\n/* block */\nSELECT id FROM t;")
+         (result (clutch--apply-where sql "id > 10")))
+    (should (string-prefix-p
+             "SELECT * FROM (SELECT id FROM t) AS _clutch_filter WHERE id > 10"
+             result))
+    (should-not (string-match-p ";\\s-*) AS _clutch_filter" result))))
+
 (ert-deftest clutch-test-build-count-sql-strips-order-and-limit ()
   "Count SQL should strip top-level ORDER BY / LIMIT / OFFSET clauses."
   (let ((result (clutch--build-count-sql
@@ -418,6 +421,20 @@
          (result (clutch--build-count-sql sql)))
     (should (string-match-p "UNION ALL" result))
     (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
+
+(ert-deftest clutch-test-build-count-sql-with-union-limit-offset ()
+  "Count SQL should strip top-level LIMIT/OFFSET on UNION queries."
+  (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 50 OFFSET 100")
+         (result (clutch--build-count-sql sql)))
+    (should (string-match-p "UNION ALL" result))
+    (should-not (string-match-p "LIMIT 50\\s-+OFFSET 100\\s-*) AS _clutch_count\\'" result))))
+
+(ert-deftest clutch-test-build-count-sql-keeps-window-order-by ()
+  "Count SQL should keep ORDER BY inside window OVER clauses."
+  (let* ((sql "SELECT row_number() OVER (ORDER BY created_at DESC) AS rn FROM t ORDER BY rn LIMIT 5")
+         (result (clutch--build-count-sql sql)))
+    (should (string-match-p "OVER (ORDER BY created_at DESC)" result))
+    (should-not (string-match-p "ORDER BY rn\\s-+LIMIT 5\\s-*) AS _clutch_count\\'" result))))
 
 (ert-deftest clutch-test-build-count-sql-strips-trailing-semicolon ()
   "Count SQL should normalize trailing semicolons."
