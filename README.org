@@ -409,7 +409,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =v=            | View JSON cell (pretty-printed in new buffer) |
 | =w=            | Copy row(s) as INSERT (supports region)       |
 | =Y=            | Copy row(s) as CSV (supports region)          |
-| =E=            | Export (csv / csv-all / csv-file / csv-all-file / copy) |
+| =e=            | Export (csv / csv-all / csv-file / csv-all-file / copy) |
 | =F=            | Toggle fullscreen                             |
 | =?=            | Transient menu                                |
 
