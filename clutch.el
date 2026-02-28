@@ -2898,74 +2898,15 @@ Key bindings:
               ((> ridx 0)))
     (clutch--goto-cell (1- ridx) cidx)))
 
-;;;; Row marking (dired-style)
-
-(defun clutch-result--marked-row-indices ()
-  "Return explicitly marked row indices, or nil when no marks."
-  clutch--marked-rows)
+;;;; Row selection (region-based)
 
 (defun clutch-result--selected-row-indices ()
   "Return row indices for row-oriented batch operations.
-Priority: marked rows > region rows > current row."
-  (or (clutch-result--marked-row-indices)
-      (when (use-region-p)
+Priority: region rows > current row."
+  (or (when (use-region-p)
         (clutch-result--rows-in-region (region-beginning) (region-end)))
       (when-let* ((ridx (clutch-result--row-idx-at-line)))
         (list ridx))))
-
-(defun clutch-result--set-row-mark-visual (ridx marked-p)
-  "Update visual mark for row RIDX based on MARKED-P without full re-render."
-  (save-excursion
-    (goto-char (point-min))
-    (when-let* ((m (text-property-search-forward 'clutch-row-idx ridx #'eq)))
-      (let* ((inhibit-read-only t)
-             (bol (save-excursion
-                    (goto-char (prop-match-beginning m))
-                    (line-beginning-position)))
-             (mark-pos (1+ bol))
-             (num-start (1+ mark-pos))
-             (num-end (+ num-start (clutch--row-number-digits)))
-             (face (if marked-p 'clutch-marked-face 'shadow)))
-        (delete-region mark-pos (1+ mark-pos))
-        (insert (propertize (if marked-p "*" " ") 'face face))
-        (put-text-property num-start num-end 'face face)))))
-
-(defun clutch-result--move-to-next-row-same-col (ridx cidx)
-  "Move to row RIDX+1 at column CIDX when available."
-  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
-         (next-ridx (1+ ridx)))
-    (when (< next-ridx (length rows))
-      (clutch--goto-cell next-ridx cidx))))
-
-(defun clutch-result-toggle-mark ()
-  "Toggle mark on the row at point and move to next row."
-  (interactive)
-  (when-let* ((ridx (clutch-result--row-idx-at-line))
-              (cidx (or (clutch--col-idx-at-point) 0)))
-    (if (memq ridx clutch--marked-rows)
-        (progn
-          (setq clutch--marked-rows (delq ridx clutch--marked-rows))
-          (clutch-result--set-row-mark-visual ridx nil))
-      (push ridx clutch--marked-rows)
-      (clutch-result--set-row-mark-visual ridx t))
-    (clutch-result--move-to-next-row-same-col ridx cidx)))
-
-(defun clutch-result-unmark-row ()
-  "Unmark the row at point and move to next row."
-  (interactive)
-  (when-let* ((ridx (clutch-result--row-idx-at-line))
-              (cidx (or (clutch--col-idx-at-point) 0)))
-    (setq clutch--marked-rows (delq ridx clutch--marked-rows))
-    (clutch-result--set-row-mark-visual ridx nil)
-    (clutch-result--move-to-next-row-same-col ridx cidx)))
-
-(defun clutch-result-unmark-all ()
-  "Remove all row marks."
-  (interactive)
-  (when clutch--marked-rows
-    (dolist (ridx clutch--marked-rows)
-      (clutch-result--set-row-mark-visual ridx nil))
-    (setq clutch--marked-rows nil)))
 
 ;;;; clutch-result-mode
 
@@ -3007,10 +2948,6 @@ Priority: marked rows > region rows > current row."
     (define-key map (kbd "M-n") #'clutch-result-down-cell)
     (define-key map (kbd "M-p") #'clutch-result-up-cell)
     ;; n/p are down/up cell (special-mode convention); M-n/M-p are aliases
-    ;; Row marking
-    (define-key map "m" #'clutch-result-toggle-mark)
-    (define-key map "u" #'clutch-result-unmark-row)
-    (define-key map "U" #'clutch-result-unmark-all)
     ;; Client-side filter
     (define-key map "/" #'clutch-result-filter)
     ;; Delete / Insert
@@ -3049,8 +2986,6 @@ Priority: marked rows > region rows > current row."
       (push (format "/:%s" clutch--filter-pattern) parts))
     (when clutch--where-filter
       (push (format "W:%s" clutch--where-filter) parts))
-    (when clutch--marked-rows
-      (push (format "*%d" (length clutch--marked-rows)) parts))
     (format " %s" (mapconcat #'identity parts " | "))))
 
 (defun clutch--update-position-indicator ()
@@ -3105,10 +3040,6 @@ Navigate:
   \\[clutch-result-up-cell]	Up in same column
   \\[clutch-result-open-record]	Open record view for row
   \\[clutch-result-goto-column]	Jump to column by name
-Mark:
-  \\[clutch-result-toggle-mark]	Toggle mark on row
-  \\[clutch-result-unmark-row]	Unmark row
-  \\[clutch-result-unmark-all]	Unmark all rows
 Pages:
   \\[clutch-result-next-page]	Next data page
   \\[clutch-result-prev-page]	Previous data page
@@ -3556,7 +3487,7 @@ PK-INDICES are primary key column indices."
 
 (defun clutch-result-delete-rows ()
   "Delete selected rows from the database.
-Selection priority: marked rows > region rows > current row.
+Selection priority: region rows > current row.
 Detects table and primary key, builds DELETE statements,
 and prompts for confirmation before executing."
   (interactive)
@@ -4515,10 +4446,6 @@ Accumulates input until a semicolon is found, then executes."
     ("p" "Up row"          clutch-result-up-cell)
     ("RET" "Open record"   clutch-result-open-record)
     ("c" "Go to column"    clutch-result-goto-column)]
-   ["Mark"
-    ("m" "Toggle mark"     clutch-result-toggle-mark)
-    ("u" "Unmark row"      clutch-result-unmark-row)
-    ("U" "Unmark all"      clutch-result-unmark-all)]
    ["Pages"
     ("N" "Next page"       clutch-result-next-page)
     ("P" "Prev page"       clutch-result-prev-page)
