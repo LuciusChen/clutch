@@ -188,6 +188,58 @@
   (should-not (clutch--sql-has-limit-p "SELECT * FROM t"))
   (should-not (clutch--sql-has-limit-p "SELECT * FROM t WHERE limitation = 1")))
 
+(ert-deftest clutch-test-collect-all-export-rows-paged ()
+  "Collect all export rows by paging when base query has no top-level LIMIT."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local clutch--base-query "SELECT id FROM t")
+    (setq-local clutch--last-query "SELECT id FROM t")
+    (setq-local clutch--where-filter nil)
+    (setq-local clutch--order-by nil)
+    (let ((clutch-result-max-rows 2))
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--build-paged-sql)
+                 (lambda (_sql page-num _page-size _order-by)
+                   (format "SELECT id FROM t -- page:%d" page-num)))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn sql)
+                   (let ((rows (cond ((string-match-p "page:0\\'" sql) '((1) (2)))
+                                     ((string-match-p "page:1\\'" sql) '((3)))
+                                     (t nil))))
+                     (make-clutch-db-result :rows rows)))))
+        (should (equal (clutch-result--collect-all-export-rows)
+                       '((1) (2) (3))))))))
+
+(ert-deftest clutch-test-collect-all-export-rows-with-top-level-limit ()
+  "Collect export rows with top-level LIMIT via single query."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local clutch--base-query "SELECT id FROM t LIMIT 2")
+    (setq-local clutch--last-query "SELECT id FROM t LIMIT 2")
+    (setq-local clutch--where-filter nil)
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--build-paged-sql)
+                 (lambda (&rest _args)
+                   (error "should not paginate")))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn _sql)
+                   (cl-incf calls)
+                   (make-clutch-db-result :rows '((1) (2))))))
+        (should (equal (clutch-result--collect-all-export-rows) '((1) (2))))
+        (should (= calls 1))))))
+
+(ert-deftest clutch-test-csv-content-escaping ()
+  "CSV content should include header and escaped values."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name"))
+    (let ((csv (clutch--csv-content '((1 "a,b") (2 "x\"y")))))
+      (should (string-match-p "^id,name\n" csv))
+      (should (string-match-p "1,\"a,b\"" csv))
+      (should (string-match-p "2,\"x\"\"y\"" csv)))))
+
 (ert-deftest clutch-test-strip-leading-comments ()
   "Test stripping leading SQL comments."
   (should (equal (clutch--strip-leading-comments "SELECT 1") "SELECT 1"))
