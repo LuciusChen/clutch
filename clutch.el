@@ -168,7 +168,7 @@ window; an existing result window is reused at its current height."
   :type 'float
   :group 'clutch)
 
-(defcustom clutch-result-max-rows 1000
+(defcustom clutch-result-max-rows 500
   "Maximum number of rows to display in result tables."
   :type 'natnum
   :group 'clutch)
