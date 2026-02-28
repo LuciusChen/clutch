@@ -333,6 +333,28 @@
       (should (string-match-p "varchar" annotation))
       (should (string-match-p "user name" annotation)))))
 
+(ert-deftest clutch-test-yank-cell-default ()
+  "Yank cell should copy current cell value without prefix arg."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                 (lambda () '(0 1 "hello"))))
+        (clutch-result-yank-cell nil)
+        (should (equal (current-kill 0) "hello"))))))
+
+(ert-deftest clutch-test-yank-cell-with-prefix-selects-columns ()
+  "Yank cell with prefix should copy selected column values from current row."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name" "city"))
+    (setq-local clutch--result-rows '((1 "alice" "shanghai")))
+    (let (kill-ring kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+                 (lambda () '(0 1 "alice")))
+                ((symbol-function 'clutch-result--select-columns)
+                 (lambda () '(0 2))))
+        (clutch-result-yank-cell t)
+        (should (equal (current-kill 0) "1\tshanghai"))))))
+
 (ert-deftest clutch-test-destructive-query-p ()
   "Test destructive query detection."
   (should (clutch--destructive-query-p "DROP TABLE users"))
