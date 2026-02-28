@@ -203,6 +203,14 @@ Applies to MySQL and PostgreSQL connections.  SQLite ignores this setting."
   :type 'natnum
   :group 'clutch)
 
+(defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
+  "Default coding system when exporting CSV files."
+  :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
+                 (const :tag "UTF-8" utf-8)
+                 (const :tag "GBK" gbk)
+                 (coding-system :tag "Other coding system"))
+  :group 'clutch)
+
 ;;;; Buffer-local variables
 
 (defvar-local clutch-connection nil
@@ -3908,33 +3916,139 @@ Includes a header row with column names."
 
 (defun clutch-result-export ()
   "Export the current result.
-Prompts for format: csv (new buffer) or copy (kill ring)."
+Prompts for format:
+- csv: current page rows to new buffer
+- csv-all: all rows (auto-paged query) to new buffer
+- csv-file: current page rows to CSV file
+- csv-all-file: all rows to CSV file
+- copy: current buffer text to kill ring."
   (interactive)
-  (let ((fmt (completing-read "Export format: " '("csv" "copy") nil t)))
+  (let ((fmt (completing-read "Export format: "
+                              '("csv" "csv-all" "csv-file" "csv-all-file" "copy")
+                              nil t)))
     (pcase fmt
       ("csv" (clutch--export-csv))
+      ("csv-all" (clutch--export-csv-all))
+      ("csv-file" (clutch--export-csv-file))
+      ("csv-all-file" (clutch--export-csv-all-file))
       ("copy"
        (kill-ring-save (point-min) (point-max))
        (message "Buffer content copied to kill ring")))))
 
-(defun clutch--export-csv ()
-  "Export the current result as CSV into a new buffer.
-Generates CSV directly from cached data."
-  (let* ((col-names clutch--result-columns)
-         (rows clutch--result-rows)
-         (csv-escape (lambda (val)
-                       (let ((s (clutch--format-value val)))
-                         (if (string-match-p "[,\"\n]" s)
-                             (format "\"%s\""
-                                     (replace-regexp-in-string "\"" "\"\"" s))
-                           s))))
-         (csv-buf (generate-new-buffer "*clutch: export.csv*")))
+(defun clutch--csv-escape (val)
+  "Return CSV-escaped string for VAL."
+  (let ((s (clutch--format-value val)))
+    (if (string-match-p "[,\"\n]" s)
+        (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
+      s)))
+
+(defun clutch--csv-content (rows)
+  "Return CSV text for ROWS using current result columns."
+  (let ((header (mapconcat #'clutch--csv-escape clutch--result-columns ","))
+        (body (mapconcat (lambda (row)
+                           (mapconcat #'clutch--csv-escape row ","))
+                         rows "\n")))
+    (if (string-empty-p body)
+        (concat header "\n")
+      (concat header "\n" body "\n"))))
+
+(defun clutch--csv-export-coding-choices ()
+  "Return alist of CSV export coding labels to coding systems."
+  (let ((pairs '(("utf-8-bom" . utf-8-with-signature)
+                 ("utf-8" . utf-8)
+                 ("gbk" . gbk)
+                 ("cp936" . cp936))))
+    (cl-loop for (label . coding) in pairs
+             when (coding-system-p coding)
+             collect (cons label coding))))
+
+(defun clutch--read-csv-export-coding-system ()
+  "Read coding system for CSV file export."
+  (let* ((choices (clutch--csv-export-coding-choices))
+         (default (if (coding-system-p clutch-csv-export-default-coding-system)
+                      clutch-csv-export-default-coding-system
+                    'utf-8-with-signature))
+         (default-label (car (rassoc default choices)))
+         (label (completing-read
+                 (format "CSV encoding (default %s): "
+                         (or default-label (symbol-name default)))
+                 (mapcar #'car choices) nil t nil nil default-label)))
+    (or (cdr (assoc label choices)) default)))
+
+(defun clutch--export-csv-rows (rows)
+  "Export ROWS as CSV into a new buffer using current columns."
+  (let ((csv-buf (generate-new-buffer "*clutch: export.csv*")))
     (with-current-buffer csv-buf
-      (insert (mapconcat #'identity col-names ",") "\n")
-      (dolist (row rows)
-        (insert (mapconcat csv-escape row ",") "\n"))
+      (insert (clutch--csv-content rows))
       (goto-char (point-min)))
     (pop-to-buffer csv-buf)))
+
+(defun clutch--export-csv-rows-to-file (rows)
+  "Export ROWS as CSV to a file."
+  (let* ((path (read-file-name "Export CSV to file: " nil nil nil "export.csv"))
+         (coding (clutch--read-csv-export-coding-system))
+         (coding-system-for-write coding))
+    (with-temp-buffer
+      (insert (clutch--csv-content rows))
+      (write-region (point-min) (point-max) path nil 'silent))
+    (message "Exported %d row%s to %s (%s)"
+             (length rows) (if (= (length rows) 1) "" "s")
+             path coding)))
+
+(defun clutch-result--effective-export-query ()
+  "Return effective SQL used for exporting all rows."
+  (let ((base (or clutch--base-query clutch--last-query)))
+    (if (and base clutch--where-filter)
+        (clutch--apply-where base clutch--where-filter)
+      base)))
+
+(defun clutch-result--collect-all-export-rows ()
+  "Return all rows for current result by auto-paging when needed."
+  (unless (clutch--connection-alive-p clutch-connection)
+    (user-error "Not connected"))
+  (let ((effective-sql (clutch-result--effective-export-query)))
+    (cond
+     ((null effective-sql)
+      clutch--result-rows)
+     ((or (null clutch--base-query)
+          (clutch--sql-has-limit-p effective-sql))
+      (clutch-db-result-rows
+       (clutch-db-query clutch-connection effective-sql)))
+     (t
+      (let ((page-num 0)
+            (page-size clutch-result-max-rows)
+            (rows nil)
+            done)
+        (while (not done)
+          (let* ((paged-sql (clutch--build-paged-sql
+                             effective-sql page-num page-size clutch--order-by))
+                 (result (clutch-db-query clutch-connection paged-sql))
+                 (batch (clutch-db-result-rows result)))
+            (setq rows (nconc rows (copy-sequence batch)))
+            (if (< (length batch) page-size)
+                (setq done t)
+              (cl-incf page-num))))
+        rows)))))
+
+(defun clutch--export-csv ()
+  "Export the current page result as CSV into a new buffer."
+  (clutch--export-csv-rows clutch--result-rows))
+
+(defun clutch--export-csv-all ()
+  "Export all query rows as CSV into a new buffer."
+  (let* ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-csv-rows rows)
+    (message "Exported %d row%s as CSV"
+             (length rows) (if (= (length rows) 1) "" "s"))))
+
+(defun clutch--export-csv-file ()
+  "Export current page rows as CSV to a file."
+  (clutch--export-csv-rows-to-file clutch--result-rows))
+
+(defun clutch--export-csv-all-file ()
+  "Export all query rows as CSV to a file."
+  (let ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-csv-rows-to-file rows)))
 
 ;;;; Column page navigation and width adjustment
 
