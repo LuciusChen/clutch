@@ -3730,14 +3730,27 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
-(defun clutch-result-yank-cell ()
-  "Copy the full value of the cell at point to the kill ring."
-  (interactive)
-  (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
-                                           (user-error "No cell at point")))
-               (text (clutch--format-value val)))
-    (kill-new text)
-    (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
+(defun clutch-result-yank-cell (&optional select-cols)
+  "Copy value at point to the kill ring.
+With prefix arg SELECT-COLS, select columns and copy values from
+the current row as a TAB-separated line."
+  (interactive "P")
+  (pcase-let* ((`(,ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
+                                          (user-error "No cell at point"))))
+    (if select-cols
+        (let* ((row (or (nth ridx clutch--result-rows)
+                        (user-error "No row at point")))
+               (col-indices (clutch-result--select-columns))
+               (text (mapconcat (lambda (i)
+                                  (clutch--format-value (nth i row)))
+                                col-indices "\t")))
+          (kill-new text)
+          (message "Copied %d column value%s from current row"
+                   (length col-indices)
+                   (if (= (length col-indices) 1) "" "s")))
+      (let ((text (clutch--format-value val)))
+        (kill-new text)
+        (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
@@ -3796,8 +3809,12 @@ Finish with empty input (RET)."
     (while (and remaining (not done))
       (let* ((completion-extra-properties
               `(:annotation-function ,annotation-fn))
+             (prompt (if selected
+                         (format "Columns [%s] (RET to finish): "
+                                 (string-join (reverse selected) ", "))
+                       "Columns (RET to finish): "))
              (choice (string-trim
-                      (completing-read "Columns (RET to finish): "
+                      (completing-read prompt
                                        remaining nil nil))))
         (cond
          ((string-empty-p choice)
@@ -3807,7 +3824,7 @@ Finish with empty input (RET)."
           (setq remaining (delete choice remaining)))
          (t
           (user-error "Choose a column from completion list")))))
-    (or (cl-loop for name in (nreverse selected)
+    (or (cl-loop for name in (reverse selected)
                  for idx = (cl-position name col-names :test #'string=)
                  when idx collect idx)
         (user-error "No valid columns selected"))))
@@ -4505,7 +4522,7 @@ Accumulates input until a semicolon is found, then executes."
     ("i" "Insert row"      clutch-result-insert-row)
     ("d" "Delete row(s)"   clutch-result-delete-rows)]
    ["Copy (rows: point/region; cols: all/C-u)"
-    ("Y" "Yank cell"       clutch-result-yank-cell)
+    ("Y" "Yank cell (C-u: cols)" clutch-result-yank-cell)
     ("w" "Rows -> INSERT"  clutch-result-copy-row-as-insert)
     ("y" "Rows -> CSV"     clutch-result-copy-as-csv)
     ("e" "Export"           clutch-result-export)]
