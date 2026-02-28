@@ -3738,19 +3738,27 @@ the current row as a TAB-separated line."
   (pcase-let* ((`(,ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
                                           (user-error "No cell at point"))))
     (if select-cols
-        (let* ((row (or (nth ridx clutch--result-rows)
-                        (user-error "No row at point")))
-               (col-indices (clutch-result--select-columns))
-               (text (mapconcat (lambda (i)
-                                  (clutch--format-value (nth i row)))
-                                col-indices "\t")))
-          (kill-new text)
-          (message "Copied %d column value%s from current row"
-                   (length col-indices)
-                   (if (= (length col-indices) 1) "" "s")))
-      (let ((text (clutch--format-value val)))
-        (kill-new text)
-        (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))))
+        (clutch-result--yank-row-selected-columns ridx)
+      (clutch-result--yank-cell-value val))))
+
+(defun clutch-result--yank-cell-value (val)
+  "Copy VAL to kill ring and show a compact preview message."
+  (let ((text (clutch--format-value val)))
+    (kill-new text)
+    (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
+
+(defun clutch-result--yank-row-selected-columns (ridx)
+  "Copy selected column values from row RIDX as a TAB-separated line."
+  (let* ((row (or (nth ridx clutch--result-rows)
+                  (user-error "No row at point")))
+         (col-indices (clutch-result--select-columns))
+         (text (mapconcat (lambda (i)
+                            (clutch--format-value (nth i row)))
+                          col-indices "\t")))
+    (kill-new text)
+    (message "Copied %d column value%s from current row"
+             (length col-indices)
+             (if (= (length col-indices) 1) "" "s"))))
 
 (defun clutch--view-json-value (val)
   "Display VAL as formatted JSON in a pop-up buffer."
@@ -3776,46 +3784,56 @@ the current row as a TAB-separated line."
                                           (user-error "No cell at point"))))
     (clutch--view-json-value val)))
 
+(defun clutch-result--column-details-by-name ()
+  "Return hash table mapping column name to detail plist, or nil."
+  (when-let* ((conn clutch-connection)
+              (table (clutch-result--detect-table))
+              ((clutch--connection-alive-p conn))
+              (details (clutch--ensure-column-details conn table)))
+    (let ((ht (make-hash-table :test 'equal)))
+      (dolist (col details)
+        (puthash (plist-get col :name) col ht))
+      ht)))
+
+(defun clutch-result--column-annotation-function (col-names details-by-name)
+  "Return completion annotation function for COL-NAMES and DETAILS-BY-NAME."
+  (lambda (candidate)
+    (let* ((idx (cl-position candidate col-names :test #'string=))
+           (col-def (and idx (nth idx clutch--result-column-defs)))
+           (detail (and details-by-name
+                        (gethash candidate details-by-name)))
+           (type (or (plist-get detail :type)
+                     (when-let* ((cat (plist-get col-def :type-category)))
+                       (symbol-name cat))))
+           (comment (plist-get detail :comment))
+           (parts (delq nil (list type comment))))
+      (if parts
+          (propertize (format "  %s" (string-join parts " | "))
+                      'face 'shadow)
+        ""))))
+
+(defun clutch-result--read-one-column (remaining selected annotation-fn)
+  "Read one column from REMAINING with SELECTED state and ANNOTATION-FN."
+  (let* ((completion-extra-properties
+          `(:annotation-function ,annotation-fn))
+         (chosen (if selected
+                     (string-join (reverse selected) ", ")
+                   "none"))
+         (prompt (format "Columns [selected: %s] (RET to finish): " chosen)))
+    (string-trim (completing-read prompt remaining nil nil))))
+
 (defun clutch-result--select-columns ()
   "Prompt user to select columns one by one with shrinking candidates.
 Finish with empty input (RET)."
   (let* ((col-names clutch--result-columns)
-         (details-by-name
-          (when-let* ((conn clutch-connection)
-                      (table (clutch-result--detect-table))
-                      ((clutch--connection-alive-p conn))
-                      (details (clutch--ensure-column-details conn table)))
-            (let ((ht (make-hash-table :test 'equal)))
-              (dolist (col details)
-                (puthash (plist-get col :name) col ht))
-              ht)))
-         (annotation-fn
-          (lambda (candidate)
-            (let* ((idx (cl-position candidate col-names :test #'string=))
-                   (col-def (and idx (nth idx clutch--result-column-defs)))
-                   (detail (and details-by-name
-                                (gethash candidate details-by-name)))
-                   (type (or (plist-get detail :type)
-                             (when-let* ((cat (plist-get col-def :type-category)))
-                               (symbol-name cat))))
-                   (comment (plist-get detail :comment))
-                   (parts (delq nil (list type comment))))
-              (if parts
-                  (propertize (format "  %s" (string-join parts " | "))
-                              'face 'shadow)
-                ""))))
+         (details-by-name (clutch-result--column-details-by-name))
+         (annotation-fn (clutch-result--column-annotation-function
+                         col-names details-by-name))
          (remaining (copy-sequence col-names))
          selected done)
     (while (and remaining (not done))
-      (let* ((completion-extra-properties
-              `(:annotation-function ,annotation-fn))
-             (chosen (if selected
-                         (string-join (reverse selected) ", ")
-                       "none"))
-             (prompt (format "Columns [selected: %s] (RET to finish): " chosen))
-             (choice (string-trim
-                      (completing-read prompt
-                                       remaining nil nil))))
+      (let ((choice (clutch-result--read-one-column
+                     remaining selected annotation-fn)))
         (cond
          ((string-empty-p choice)
           (setq done t))
