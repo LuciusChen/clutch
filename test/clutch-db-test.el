@@ -89,7 +89,7 @@
   "Test that connecting with unknown backend signals error."
   (should-error
    (clutch-db-connect 'unknown '(:host "localhost"))
-   :type 'clutch-db-error))
+   :type 'user-error))
 
 ;;;; Unit tests — MySQL type category mapping
 
@@ -98,21 +98,21 @@
   (require 'clutch-db-mysql)
   (require 'mysql)
   ;; Numeric types
-  (should (eq (clutch-db-mysql-type-category mysql-type-long) 'numeric))
-  (should (eq (clutch-db-mysql-type-category mysql-type-float) 'numeric))
-  (should (eq (clutch-db-mysql-type-category mysql-type-double) 'numeric))
-  (should (eq (clutch-db-mysql-type-category mysql-type-decimal) 'numeric))
-  (should (eq (clutch-db-mysql-type-category mysql-type-longlong) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-type-long) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-type-float) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-type-double) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-type-decimal) 'numeric))
+  (should (eq (clutch-db-mysql--type-category mysql-type-longlong) 'numeric))
   ;; Date/time types
-  (should (eq (clutch-db-mysql-type-category mysql-type-date) 'date))
-  (should (eq (clutch-db-mysql-type-category mysql-type-time) 'time))
-  (should (eq (clutch-db-mysql-type-category mysql-type-datetime) 'datetime))
-  (should (eq (clutch-db-mysql-type-category mysql-type-timestamp) 'datetime))
+  (should (eq (clutch-db-mysql--type-category mysql-type-date) 'date))
+  (should (eq (clutch-db-mysql--type-category mysql-type-time) 'time))
+  (should (eq (clutch-db-mysql--type-category mysql-type-datetime) 'datetime))
+  (should (eq (clutch-db-mysql--type-category mysql-type-timestamp) 'datetime))
   ;; BLOB/JSON
-  (should (eq (clutch-db-mysql-type-category mysql-type-blob) 'blob))
-  (should (eq (clutch-db-mysql-type-category mysql-type-json) 'json))
+  (should (eq (clutch-db-mysql--type-category mysql-type-blob) 'blob))
+  (should (eq (clutch-db-mysql--type-category mysql-type-json) 'json))
   ;; Unknown type defaults to text
-  (should (eq (clutch-db-mysql-type-category 9999) 'text)))
+  (should (eq (clutch-db-mysql--type-category 9999) 'text)))
 
 (ert-deftest clutch-db-test-mysql-convert-columns ()
   "Test MySQL column conversion."
