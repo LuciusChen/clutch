@@ -81,3 +81,21 @@ Before releasing, ensure:
 - `(byte-compile-file "clutch.el")` produces no warnings.
 - All public functions have docstrings.
 - Every file starts with `;;; -*- lexical-binding: t; -*-` and ends with `(provide 'pkg)` / `;;; pkg.el ends here`.
+
+## SQL Rewrite Guardrails
+
+- Do not rewrite SQL by brittle raw string insertion of `WHERE` / `ORDER BY` / `LIMIT`.
+- Prefer top-level clause-aware transformations with safe fallback behavior.
+- For complex queries (CTE / UNION / DISTINCT / window functions), prioritize semantic correctness over aggressive rewriting.
+- Keep AST-level rewriting on the roadmap; do not force full AST complexity into small fixes.
+
+## Docs Consistency
+
+- Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
+- If code and docs diverge, treat code as source of truth and fix docs immediately.
+
+## Export and Encoding
+
+- Export features that write files must provide explicit encoding behavior and sensible defaults.
+- Document Excel compatibility guidance clearly (prefer UTF-8 with BOM; use GBK/CP936 only for legacy workflows).
+- Any export-path change must include regression tests for content correctness, and at least one encoding-related path.
