@@ -2828,7 +2828,7 @@ If EXPANDED-P, also insert column detail lines using CONN."
     (define-key map (kbd "C-c C-t") #'clutch-list-tables)
     (define-key map (kbd "C-c C-d") #'clutch-describe-table-at-point)
     (define-key map (kbd "C-c C-l") #'clutch-show-history)
-    (define-key map (kbd "C-c C-o") #'clutch-dispatch)
+    (define-key map (kbd "C-c ?") #'clutch-dispatch)
     map)
   "Keymap for `clutch-mode'.")
 
@@ -2946,7 +2946,7 @@ Priority: region rows > current row."
     (define-key map (kbd "C-c p") #'clutch-result-pin-column)
     (define-key map (kbd "C-c P") #'clutch-result-unpin-column)
     (define-key map "f" #'clutch-result-fullscreen-toggle)
-    (define-key map "?" #'clutch-result-dispatch)
+    (define-key map (kbd "C-c ?") #'clutch-result-dispatch)
     ;; Cell navigation
     (define-key map (kbd "TAB") #'clutch-result-next-cell)
     (define-key map (kbd "<backtab>") #'clutch-result-prev-cell)
@@ -4184,7 +4184,7 @@ previous window layout."
     (define-key map "v" #'clutch-record-view-json)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
-    (define-key map "?" #'clutch-record-dispatch)
+    (define-key map (kbd "C-c ?") #'clutch-record-dispatch)
     map)
   "Keymap for `clutch-record-mode'.")
 

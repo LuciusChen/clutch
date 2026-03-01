@@ -376,7 +376,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =C-c C-d=   | DESCRIBE table at point    |
 | =C-c C-l=   | Query history              |
 | =M-x clutch-consult-history= | Browse history with consult (insert selection at point) |
-| =C-c C-o=   | Transient menu             |
+| =C-c ?=     | Transient menu             |
 | =TAB=       | Complete table/column name |
 
 ** Result Browser (clutch-result-mode) Key Bindings
@@ -408,7 +408,7 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =v=            | View JSON cell (pretty-printed in new buffer) |
 | =e=            | Export all rows (copy / file)                     |
 | =f=            | Toggle fullscreen                             |
-| =?=            | Transient menu                                |
+| =C-c ?=        | Transient menu                                |
 
 Tip: =c= supports both regular region and rectangular selection
 (=C-x SPC=, =rectangle-mark-mode=).
@@ -422,6 +422,7 @@ Tip: =c= supports both regular region and rectangular selection
 | =v=         | View JSON field               |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
+| =C-c ?=     | Transient menu                |
 
 ** Typical Workflows
 
@@ -454,7 +455,7 @@ Tip: =c= supports both regular region and rectangular selection
 #+begin_src
 1. SELECT * FROM users;      → C-c C-c to execute
 2. Move cursor to the cell to modify
-3. e                          → opens edit buffer
+3. C-c '                      → opens edit buffer
 4. Edit the value, C-c C-c to stage (C-c C-k to cancel)
                                echo area shows "N pending edits — C-c C-c to commit"
 5. Repeat for other cells — modified cells are highlighted
@@ -519,7 +520,7 @@ g                            ;; Refresh
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c C-o= in clutch-mode or =?= in the result buffer to open the menu.
+Press =C-c ?= to open the transient menu.
 
 ** Org-Babel Integration
 
