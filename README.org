@@ -403,11 +403,14 @@ To activate =clutch-mode= automatically for =.sql= files, add to your config:
 | =o=            | Insert new row                                |
 | =d=            | Delete row(s) (supports region)               |
 | =C-c C-c=     | Commit edits (generates UPDATE)               |
-| =c=            | Copy... (choose format: tsv / csv / insert; prefix =C-u= applies mode-specific behavior) |
+| =c=            | Copy... (choose format: tsv / csv / insert; region = selected block, no region = current cell) |
 | =v=            | View JSON cell (pretty-printed in new buffer) |
-| =e=            | Export (csv / csv-all / csv-file / csv-all-file) |
+| =e=            | Export all rows (copy / file)                     |
 | =f= / =F=      | Toggle fullscreen                             |
 | =?=            | Transient menu                                |
+
+Tip: =c= supports both regular region and rectangular selection
+(=C-x SPC=, =rectangle-mark-mode=).
 
 ** Record View (clutch-record-mode) Key Bindings
 

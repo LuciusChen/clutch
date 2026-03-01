@@ -235,6 +235,32 @@
         (should (equal (clutch-result--collect-all-export-rows) '((1) (2))))
         (should (= calls 1))))))
 
+(ert-deftest clutch-test-export-command-dispatches-copy ()
+  "Export command should dispatch to all-rows clipboard export."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "copy"))
+                ((symbol-function 'clutch--export-csv-all-to-clipboard)
+                 (lambda () (setq called 'copy)))
+                ((symbol-function 'clutch--export-csv-all-file)
+                 (lambda () (setq called 'file))))
+        (clutch-result-export)
+        (should (eq called 'copy))))))
+
+(ert-deftest clutch-test-export-command-dispatches-file ()
+  "Export command should dispatch to all-rows file export."
+  (with-temp-buffer
+    (let (called)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "file"))
+                ((symbol-function 'clutch--export-csv-all-to-clipboard)
+                 (lambda () (setq called 'copy)))
+                ((symbol-function 'clutch--export-csv-all-file)
+                 (lambda () (setq called 'file))))
+        (clutch-result-export)
+        (should (eq called 'file))))))
+
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
   (with-temp-buffer
@@ -310,31 +336,19 @@
                        (2 1 r2c1)))))))
 
 (ert-deftest clutch-test-yank-cell-default ()
-  "Yank cell should copy current cell value without prefix arg."
+  "Yank cell should copy current cell value."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'clutch-result--cell-at-point)
                  (lambda () '(0 1 "hello"))))
-        (clutch-result-yank-cell nil)
+        (clutch-result-yank-cell)
         (should (equal (current-kill 0) "hello"))))))
 
-(ert-deftest clutch-test-yank-cell-with-prefix-requires-region ()
-  "Yank cell with prefix should require region for multi-cell copying."
-  (with-temp-buffer
-    (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-               (lambda () '(0 1 "alice")))
-              ((symbol-function 'use-region-p)
-               (lambda () nil)))
-      (should-error (clutch-result-yank-cell t)
-                    :type 'user-error))))
-
-(ert-deftest clutch-test-yank-cell-with-prefix-copies-region-cells ()
-  "Yank cell with prefix should copy multiple region cells as TSV lines."
+(ert-deftest clutch-test-yank-cell-with-region-copies-region-cells ()
+  "Yank cell should copy region cells as TSV when region is active."
   (with-temp-buffer
     (let (kill-ring kill-ring-yank-pointer)
-      (cl-letf (((symbol-function 'clutch-result--cell-at-point)
-                 (lambda () '(0 1 "alice")))
-                ((symbol-function 'use-region-p)
+      (cl-letf (((symbol-function 'use-region-p)
                  (lambda () t))
                 ((symbol-function 'region-beginning)
                  (lambda () 10))
@@ -343,8 +357,19 @@
                 ((symbol-function 'clutch-result--region-cells)
                  (lambda ()
                    '((0 0 1) (0 2 "shanghai") (1 1 "bob")))))
-        (clutch-result-yank-cell t)
+        (clutch-result-yank-cell)
         (should (equal (current-kill 0) "1\tshanghai\nbob"))))))
+
+(ert-deftest clutch-test-yank-cell-without-region-copies-point-cell ()
+  "Yank cell should ignore region logic when region is not active."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'use-region-p)
+                 (lambda () nil))
+                ((symbol-function 'clutch-result--cell-at-point)
+                 (lambda () '(2 3 "alice"))))
+        (clutch-result-yank-cell)
+        (should (equal (current-kill 0) "alice"))))))
 
 (ert-deftest clutch-test-copy-command-dispatches-to-csv ()
   "Copy command should dispatch to CSV copier when csv is selected."
@@ -353,10 +378,10 @@
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _args) "csv"))
                 ((symbol-function 'clutch-result-copy)
-                 (lambda (fmt select-cols)
-                   (setq called (list fmt select-cols)))))
-        (clutch-result-copy-command t)
-        (should (equal called '(csv t)))))))
+                 (lambda (fmt)
+                   (setq called fmt))))
+        (clutch-result-copy-command)
+        (should (equal called 'csv))))))
 
 (ert-deftest clutch-test-copy-command-defaults-to-tsv ()
   "Copy command should default to TSV format."
@@ -365,10 +390,10 @@
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _args) "tsv"))
                 ((symbol-function 'clutch-result-copy)
-                 (lambda (fmt select-cols)
-                   (setq called (list fmt select-cols)))))
-        (clutch-result-copy-command nil)
-        (should (equal called '(tsv nil)))))))
+                 (lambda (fmt)
+                   (setq called fmt))))
+        (clutch-result-copy-command)
+        (should (equal called 'tsv))))))
 
 (ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
   "Unified CSV copy should use rectangle row/column bounds when region is active."
@@ -376,20 +401,23 @@
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch--result-columns '("c0" "c1" "c2"))
       (setq-local clutch--result-rows '((a0 a1 a2) (b0 b1 b2) (c0 c1 c2)))
-      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+        (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1) 1 2))))
-        (clutch-result-copy 'csv nil)
+        (clutch-result-copy 'csv)
         (should (equal (current-kill 0) "c1,c2\na1,a2\nb1,b2"))))))
 
-(ert-deftest clutch-test-copy-csv-with-prefix-requires-region ()
-  "Unified CSV copy with prefix should require region rectangle."
+(ert-deftest clutch-test-copy-csv-without-region-copies-current-cell ()
+  "Unified CSV copy should use current cell when region is inactive."
   (with-temp-buffer
     (setq-local clutch--result-columns '("c0" "c1"))
     (setq-local clutch--result-rows '((a0 a1)))
-    (cl-letf (((symbol-function 'use-region-p) (lambda () nil)))
-      (should-error (clutch-result-copy 'csv t)
-                    :type 'user-error))))
+    (let (kill-ring kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+                ((symbol-function 'clutch-result--cell-at-point)
+                 (lambda () '(0 1 a1))))
+        (clutch-result-copy 'csv)
+        (should (equal (current-kill 0) "c1\na1"))))))
 
 (ert-deftest clutch-test-copy-insert-via-unified-entry-uses-region-rectangle ()
   "Unified INSERT copy should use rectangle row/column bounds when region is active."
@@ -398,7 +426,7 @@
       (setq-local clutch-connection 'fake-conn)
       (setq-local clutch--result-columns '("id" "name" "age"))
       (setq-local clutch--result-rows '((1 "a" 10) (2 "b" 20)))
-      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+        (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1) 0 1)))
                 ((symbol-function 'clutch-result--detect-table)
@@ -407,20 +435,31 @@
                  (lambda (_conn s) (format "\"%s\"" s)))
                 ((symbol-function 'clutch--value-to-literal)
                  (lambda (v) (format "'%s'" v))))
-        (clutch-result-copy 'insert nil)
+        (clutch-result-copy 'insert)
         (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('1', 'a');"
                                 (current-kill 0)))
         (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('2', 'b');"
                                 (current-kill 0)))))))
 
-(ert-deftest clutch-test-copy-insert-with-prefix-requires-region ()
-  "Unified INSERT copy with prefix should require region rectangle."
+(ert-deftest clutch-test-copy-insert-without-region-copies-current-cell ()
+  "Unified INSERT copy should use current cell when region is inactive."
   (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--result-columns '("id" "name"))
     (setq-local clutch--result-rows '((1 "a")))
-    (cl-letf (((symbol-function 'use-region-p) (lambda () nil)))
-      (should-error (clutch-result-copy 'insert t)
-                    :type 'user-error))))
+    (let (kill-ring kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+                ((symbol-function 'clutch-result--cell-at-point)
+                 (lambda () '(0 1 "a")))
+                ((symbol-function 'clutch-result--detect-table)
+                 (lambda () "t"))
+                ((symbol-function 'clutch-db-escape-identifier)
+                 (lambda (_conn s) (format "\"%s\"" s)))
+                ((symbol-function 'clutch--value-to-literal)
+                 (lambda (v) (format "'%s'" v))))
+        (clutch-result-copy 'insert)
+        (should (equal (current-kill 0)
+                       "INSERT INTO \"t\" (\"name\") VALUES ('a');"))))))
 
 (ert-deftest clutch-test-destructive-query-p ()
   "Test destructive query detection."
