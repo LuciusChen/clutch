@@ -3734,26 +3734,27 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
-(defun clutch-result-copy (format &optional select-cols)
+(defun clutch-result-copy (format &optional use-region-rect)
   "Unified copy entry point for result buffer.
 FORMAT is one of symbols: `tsv', `csv', `insert'.
-For `tsv', prefix arg SELECT-COLS means region-cell copy.
-For `csv' and `insert', prefix arg SELECT-COLS means choose columns."
+For `tsv', prefix arg USE-REGION-RECT means region-cell copy.
+For `csv' and `insert', prefix arg USE-REGION-RECT requires an active
+region and copies using rectangle row/column bounds."
   (pcase format
     ('tsv
-     (if select-cols
+     (if use-region-rect
          (clutch-result--yank-region-cells)
        (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
                                                (user-error "No cell at point"))))
          (clutch-result--yank-cell-value val))))
     ('csv
-     (clutch-result--copy-rows-as-csv select-cols))
+     (clutch-result--copy-rows-as-csv use-region-rect))
     ('insert
-     (clutch-result--copy-rows-as-insert select-cols))
+     (clutch-result--copy-rows-as-insert use-region-rect))
     (_
      (user-error "Unsupported copy format: %s" format))))
 
-(defun clutch-result-copy-command (&optional select-cols)
+(defun clutch-result-copy-command (&optional use-region-rect)
   "Prompt for copy FORMAT and dispatch to `clutch-result-copy'."
   (interactive "P")
   (let* ((choice (completing-read "Copy format: " '("tsv" "csv" "insert")
@@ -3763,14 +3764,14 @@ For `csv' and `insert', prefix arg SELECT-COLS means choose columns."
                    ("csv" 'csv)
                    ("insert" 'insert)
                    (_ 'tsv))))
-    (clutch-result-copy format select-cols)))
+    (clutch-result-copy format use-region-rect)))
 
-(defun clutch-result-yank-cell (&optional select-cols)
+(defun clutch-result-yank-cell (&optional use-region-rect)
   "Copy value at point to the kill ring.
-With prefix arg SELECT-COLS, copy multiple cell values from region.
+With prefix arg USE-REGION-RECT, copy multiple cell values from region.
 Region output is TAB-separated within a row and newline-separated across rows."
   (interactive "P")
-  (clutch-result-copy 'tsv select-cols))
+  (clutch-result-copy 'tsv use-region-rect))
 
 (defun clutch-result--yank-cell-value (val)
   "Copy VAL to kill ring and show a compact preview message."
@@ -3891,10 +3892,10 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
                              cols
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
 
-(defun clutch-result--copy-rows-as-insert (&optional select-cols)
+(defun clutch-result--copy-rows-as-insert (&optional use-region-rect)
   "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows: region > current.  With SELECT-COLS, require region rectangle."
-  (when (and select-cols (not (use-region-p)))
+Rows: region > current.  With USE-REGION-RECT, require region rectangle."
+  (when (and use-region-rect (not (use-region-p)))
     (user-error "Set a region to choose rows and columns"))
   (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
          (indices (or (car-safe rect)
@@ -3925,11 +3926,11 @@ Rows: region > current.  With SELECT-COLS, require region rectangle."
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat csv-escape vals ",")))))
 
-(defun clutch-result--copy-rows-as-csv (&optional select-cols)
+(defun clutch-result--copy-rows-as-csv (&optional use-region-rect)
   "Copy row(s) as CSV to the kill ring.
-Rows: region > current.  With SELECT-COLS, require region rectangle.
+Rows: region > current.  With USE-REGION-RECT, require region rectangle.
 Includes a header row with column names."
-  (when (and select-cols (not (use-region-p)))
+  (when (and use-region-rect (not (use-region-p)))
     (user-error "Set a region to choose rows and columns"))
   (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
          (indices (or (car-safe rect)
