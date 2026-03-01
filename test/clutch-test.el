@@ -423,6 +423,40 @@
         (clutch-result-copy-command nil)
         (should (equal called '(tsv nil)))))))
 
+(ert-deftest clutch-test-copy-csv-uses-region-rectangle ()
+  "CSV copy should use rectangle row/column bounds when region is active."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (setq-local clutch--result-columns '("c0" "c1" "c2"))
+      (setq-local clutch--result-rows '((a0 a1 a2) (b0 b1 b2) (c0 c1 c2)))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'clutch-result--region-rectangle-indices)
+                 (lambda () '((0 1) 1 2))))
+        (clutch-result-copy-as-csv nil)
+        (should (equal (current-kill 0) "c1,c2\na1,a2\nb1,b2"))))))
+
+(ert-deftest clutch-test-copy-insert-uses-region-rectangle ()
+  "INSERT copy should use rectangle row/column bounds when region is active."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (setq-local clutch-connection 'fake-conn)
+      (setq-local clutch--result-columns '("id" "name" "age"))
+      (setq-local clutch--result-rows '((1 "a" 10) (2 "b" 20)))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'clutch-result--region-rectangle-indices)
+                 (lambda () '((0 1) 0 1)))
+                ((symbol-function 'clutch-result--detect-table)
+                 (lambda () "t"))
+                ((symbol-function 'clutch-db-escape-identifier)
+                 (lambda (_conn s) (format "\"%s\"" s)))
+                ((symbol-function 'clutch--value-to-literal)
+                 (lambda (v) (format "'%s'" v))))
+        (clutch-result-copy-row-as-insert nil)
+        (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('1', 'a');"
+                                (current-kill 0)))
+        (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('2', 'b');"
+                                (current-kill 0)))))))
+
 (ert-deftest clutch-test-destructive-query-p ()
   "Test destructive query detection."
   (should (clutch--destructive-query-p "DROP TABLE users"))

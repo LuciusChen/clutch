@@ -2925,7 +2925,7 @@ Priority: region rows > current row."
     (define-key map (kbd "C-c C-c") #'clutch-result-commit)
     (define-key map "g" #'clutch-result-rerun)
     (define-key map "e" #'clutch-result-export)
-    (define-key map "c" #'clutch-result-goto-column)
+    (define-key map "C" #'clutch-result-goto-column)
     (define-key map "n" #'clutch-result-down-cell)
     (define-key map "p" #'clutch-result-up-cell)
     (define-key map "N" #'clutch-result-next-page)
@@ -2935,11 +2935,8 @@ Priority: region rows > current row."
     (define-key map "#" #'clutch-result-count-total)
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
-    (define-key map "Y" #'clutch-result-yank-cell)
-    (define-key map "C" #'clutch-result-copy-command)
+    (define-key map "c" #'clutch-result-copy-command)
     (define-key map "v" #'clutch-result-view-json)
-    (define-key map "w" #'clutch-result-copy-row-as-insert)
-    (define-key map "y" #'clutch-result-copy-as-csv)
     (define-key map "W" #'clutch-result-apply-filter)
     (define-key map (kbd "RET") #'clutch-result-open-record)
     (define-key map "]" #'clutch-result-next-col-page)
@@ -3061,10 +3058,7 @@ Navigate (row):
   \\[clutch-result-next-col-page]	Next column page
   \\[clutch-result-prev-col-page]	Previous column page
 Copy:
-  \\[clutch-result-yank-cell]	Copy cell value (C-u: copy region cells)
   \\[clutch-result-copy-command]	Copy... (tsv/csv/insert)
-  \\[clutch-result-copy-row-as-insert]	Copy row(s) as INSERT (C-u: choose columns)
-  \\[clutch-result-copy-as-csv]	Copy row(s) as CSV (C-u: choose columns)
   \\[clutch-result-export]	Export results
 Edit:
   \\[clutch-result-edit-cell]	Edit cell value
@@ -3814,6 +3808,23 @@ Region output is TAB-separated within a row and newline-separated across rows."
                (cl-loop for cidx from col-min to col-max
                         collect (list ridx cidx (nth cidx row)))))))
 
+(defun clutch-result--region-rectangle-indices ()
+  "Return rectangle row/column indices from active region.
+Result is a cons cell (ROW-INDICES . COL-INDICES)."
+  (unless (use-region-p)
+    (user-error "Set a region to select rows and columns"))
+  (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch-result--cell-at-or-near (region-beginning))
+                                    (user-error "No cell at region start")))
+               (`(,r2 ,c2 ,_v2) (or (clutch-result--cell-at-or-near
+                                     (max (point-min) (1- (region-end))))
+                                    (user-error "No cell at region end")))
+               (row-min (min r1 r2))
+               (row-max (max r1 r2))
+               (col-min (min c1 c2))
+               (col-max (max c1 c2)))
+    (cons (cl-loop for ridx from row-min to row-max collect ridx)
+          (cl-loop for cidx from col-min to col-max collect cidx))))
+
 (defun clutch-result--yank-region-cells ()
   "Copy cell values from region as TSV-like text."
   (unless (use-region-p)
@@ -3949,11 +3960,15 @@ Finish with empty input (RET)."
 (defun clutch-result--copy-rows-as-insert (&optional select-cols)
   "Copy row(s) as INSERT statement(s) to the kill ring.
 Rows: region > current.  With SELECT-COLS, prompt to choose columns."
-  (let* ((indices (or (clutch-result--selected-row-indices)
+  (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
+         (indices (or (car-safe rect)
+                      (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
-         (col-indices (if select-cols
-                          (clutch-result--select-columns)
-                        (cl-loop for i below (length clutch--result-columns) collect i)))
+         (col-indices (or (cdr-safe rect)
+                          (if select-cols
+                              (clutch-result--select-columns)
+                            (cl-loop for i below (length clutch--result-columns)
+                                     collect i))))
          (table (or (clutch-result--detect-table) "TABLE"))
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
@@ -3987,11 +4002,15 @@ With prefix arg SELECT-COLS, prompt to choose columns."
   "Copy row(s) as CSV to the kill ring.
 Rows: region > current.  With SELECT-COLS, prompt to choose columns.
 Includes a header row with column names."
-  (let* ((indices (or (clutch-result--selected-row-indices)
+  (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
+         (indices (or (car-safe rect)
+                      (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
-         (col-indices (if select-cols
-                          (clutch-result--select-columns)
-                        (cl-loop for i below (length clutch--result-columns) collect i)))
+         (col-indices (or (cdr-safe rect)
+                          (if select-cols
+                              (clutch-result--select-columns)
+                            (cl-loop for i below (length clutch--result-columns)
+                                     collect i))))
          (lines (clutch-result--build-csv-lines indices col-indices)))
     (kill-new (mapconcat #'identity lines "\n"))
     (message "Copied %d row%s as CSV (%d col%s)"
@@ -4611,7 +4630,7 @@ Accumulates input until a semicolon is found, then executes."
     ("n" "Down row"        clutch-result-down-cell)
     ("p" "Up row"          clutch-result-up-cell)
     ("RET" "Open record"   clutch-result-open-record)
-    ("c" "Go to column"    clutch-result-goto-column)]
+    ("C" "Go to column"    clutch-result-goto-column)]
    ["Pages"
     ("N" "Next page"       clutch-result-next-page)
     ("P" "Prev page"       clutch-result-prev-page)
@@ -4630,11 +4649,8 @@ Accumulates input until a semicolon is found, then executes."
     ("C-c C-c" "Commit"    clutch-result-commit)
     ("i" "Insert row"      clutch-result-insert-row)
     ("d" "Delete row(s)"   clutch-result-delete-rows)]
-   ["Copy (Y: cell/region; w,y: rows C-u cols)"
-    ("C" "Copy..."          clutch-result-copy-command)
-    ("Y" "Yank cell (C-u: region)" clutch-result-yank-cell)
-    ("w" "Rows -> INSERT"  clutch-result-copy-row-as-insert)
-    ("y" "Rows -> CSV"     clutch-result-copy-as-csv)
+   ["Copy"
+    ("c" "Copy..."          clutch-result-copy-command)
     ("e" "Export"           clutch-result-export)]
    ["Other"
     ("=" "Widen column"    clutch-result-widen-column)
