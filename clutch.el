@@ -3734,29 +3734,28 @@ Prompts for a pattern; enter empty string to clear."
 
 ;;;; Yank cell / Copy row as INSERT
 
-(defun clutch-result-copy (format &optional use-region-rect)
+(defun clutch-result-copy (format)
   "Unified copy entry point for result buffer.
 FORMAT is one of symbols: `tsv', `csv', `insert'.
-For `tsv', prefix arg USE-REGION-RECT means region-cell copy.
-For `csv' and `insert', prefix arg USE-REGION-RECT requires an active
-region and copies using rectangle row/column bounds."
+If region is active, copy rectangle bounds from region endpoints.
+Otherwise, copy the current cell."
   (pcase format
     ('tsv
-     (if use-region-rect
+     (if (use-region-p)
          (clutch-result--yank-region-cells)
-       (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
+         (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch-result--cell-at-point)
                                                (user-error "No cell at point"))))
-         (clutch-result--yank-cell-value val))))
+           (clutch-result--yank-cell-value val))))
     ('csv
-     (clutch-result--copy-rows-as-csv use-region-rect))
+     (clutch-result--copy-rows-as-csv))
     ('insert
-     (clutch-result--copy-rows-as-insert use-region-rect))
+     (clutch-result--copy-rows-as-insert))
     (_
      (user-error "Unsupported copy format: %s" format))))
 
-(defun clutch-result-copy-command (&optional use-region-rect)
+(defun clutch-result-copy-command ()
   "Prompt for copy FORMAT and dispatch to `clutch-result-copy'."
-  (interactive "P")
+  (interactive)
   (let* ((choice (completing-read "Copy format: " '("tsv" "csv" "insert")
                                   nil t nil nil "tsv"))
          (format (pcase choice
@@ -3764,14 +3763,13 @@ region and copies using rectangle row/column bounds."
                    ("csv" 'csv)
                    ("insert" 'insert)
                    (_ 'tsv))))
-    (clutch-result-copy format use-region-rect)))
+    (clutch-result-copy format)))
 
-(defun clutch-result-yank-cell (&optional use-region-rect)
+(defun clutch-result-yank-cell ()
   "Copy value at point to the kill ring.
-With prefix arg USE-REGION-RECT, copy multiple cell values from region.
-Region output is TAB-separated within a row and newline-separated across rows."
-  (interactive "P")
-  (clutch-result-copy 'tsv use-region-rect))
+If region is active, copy region cells as TSV text."
+  (interactive)
+  (clutch-result-copy 'tsv))
 
 (defun clutch-result--yank-cell-value (val)
   "Copy VAL to kill ring and show a compact preview message."
@@ -3892,12 +3890,15 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
                              cols
                              (mapconcat #'clutch--value-to-literal vals ", ")))))
 
-(defun clutch-result--copy-rows-as-insert (&optional use-region-rect)
+(defun clutch-result--copy-rows-as-insert ()
   "Copy row(s) as INSERT statement(s) to the kill ring.
-Rows: region > current.  With USE-REGION-RECT, require region rectangle."
-  (when (and use-region-rect (not (use-region-p)))
-    (user-error "Set a region to choose rows and columns"))
-  (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
+Rows/columns: region rectangle > current cell."
+  (let* ((rect (if (use-region-p)
+                   (clutch-result--region-rectangle-indices)
+                 (pcase-let ((`(,ridx ,cidx ,_v)
+                              (or (clutch-result--cell-at-point)
+                                  (user-error "No cell at point"))))
+                   (cons (list ridx) (list cidx)))))
          (indices (or (car-safe rect)
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
@@ -3926,13 +3927,16 @@ Rows: region > current.  With USE-REGION-RECT, require region rectangle."
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat csv-escape vals ",")))))
 
-(defun clutch-result--copy-rows-as-csv (&optional use-region-rect)
+(defun clutch-result--copy-rows-as-csv ()
   "Copy row(s) as CSV to the kill ring.
-Rows: region > current.  With USE-REGION-RECT, require region rectangle.
+Rows/columns: region rectangle > current cell.
 Includes a header row with column names."
-  (when (and use-region-rect (not (use-region-p)))
-    (user-error "Set a region to choose rows and columns"))
-  (let* ((rect (when (use-region-p) (clutch-result--region-rectangle-indices)))
+  (let* ((rect (if (use-region-p)
+                   (clutch-result--region-rectangle-indices)
+                 (pcase-let ((`(,ridx ,cidx ,_v)
+                              (or (clutch-result--cell-at-point)
+                                  (user-error "No cell at point"))))
+                   (cons (list ridx) (list cidx)))))
          (indices (or (car-safe rect)
                       (clutch-result--selected-row-indices)
                       (user-error "No row at point")))
@@ -3976,19 +3980,15 @@ Includes a header row with column names."
 (defun clutch-result-export ()
   "Export the current result.
 Prompts for format:
-- csv: current page rows to new buffer
-- csv-all: all rows (auto-paged query) to new buffer
-- csv-file: current page rows to CSV file
-- csv-all-file: all rows to CSV file."
+- copy: all rows to clipboard as CSV text
+- file: all rows to CSV file."
   (interactive)
   (let ((fmt (completing-read "Export format: "
-                              '("csv" "csv-all" "csv-file" "csv-all-file")
+                              '("copy" "file")
                               nil t)))
     (pcase fmt
-      ("csv" (clutch--export-csv))
-      ("csv-all" (clutch--export-csv-all))
-      ("csv-file" (clutch--export-csv-file))
-      ("csv-all-file" (clutch--export-csv-all-file)))))
+      ("copy" (clutch--export-csv-all-to-clipboard))
+      ("file" (clutch--export-csv-all-file)))))
 
 (defun clutch--csv-escape (val)
   "Return CSV-escaped string for VAL."
@@ -4030,14 +4030,6 @@ Prompts for format:
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
-(defun clutch--export-csv-rows (rows)
-  "Export ROWS as CSV into a new buffer using current columns."
-  (let ((csv-buf (generate-new-buffer "*clutch: export.csv*")))
-    (with-current-buffer csv-buf
-      (insert (clutch--csv-content rows))
-      (goto-char (point-min)))
-    (pop-to-buffer csv-buf)))
-
 (defun clutch--export-csv-rows-to-file (rows)
   "Export ROWS as CSV to a file."
   (let* ((path (read-file-name "Export CSV to file: " nil nil nil "export.csv"))
@@ -4049,6 +4041,12 @@ Prompts for format:
     (message "Exported %d row%s to %s (%s)"
              (length rows) (if (= (length rows) 1) "" "s")
              path coding)))
+
+(defun clutch--export-csv-rows-to-clipboard (rows)
+  "Copy ROWS as CSV to the kill ring."
+  (kill-new (clutch--csv-content rows))
+  (message "Copied %d row%s as CSV"
+           (length rows) (if (= (length rows) 1) "" "s")))
 
 (defun clutch-result--effective-export-query ()
   "Return effective SQL used for exporting all rows."
@@ -4085,25 +4083,15 @@ Prompts for format:
               (cl-incf page-num))))
         rows)))))
 
-(defun clutch--export-csv ()
-  "Export the current page result as CSV into a new buffer."
-  (clutch--export-csv-rows clutch--result-rows))
-
-(defun clutch--export-csv-all ()
-  "Export all query rows as CSV into a new buffer."
-  (let* ((rows (clutch-result--collect-all-export-rows)))
-    (clutch--export-csv-rows rows)
-    (message "Exported %d row%s as CSV"
-             (length rows) (if (= (length rows) 1) "" "s"))))
-
-(defun clutch--export-csv-file ()
-  "Export current page rows as CSV to a file."
-  (clutch--export-csv-rows-to-file clutch--result-rows))
-
 (defun clutch--export-csv-all-file ()
   "Export all query rows as CSV to a file."
   (let ((rows (clutch-result--collect-all-export-rows)))
     (clutch--export-csv-rows-to-file rows)))
+
+(defun clutch--export-csv-all-to-clipboard ()
+  "Copy all query rows as CSV text to the kill ring."
+  (let ((rows (clutch-result--collect-all-export-rows)))
+    (clutch--export-csv-rows-to-clipboard rows)))
 
 ;;;; Column page navigation and width adjustment
 
@@ -4569,7 +4557,7 @@ Accumulates input until a semicolon is found, then executes."
     ("C-c C-c" "Commit"    clutch-result-commit)
     ("i" "Insert row"      clutch-result-insert-row)
     ("d" "Delete row(s)"   clutch-result-delete-rows)]
-   ["Copy"
+   ["Copy (region/rect: C-x SPC)"
     ("c" "Copy..."          clutch-result-copy-command)
     ("e" "Export"           clutch-result-export)]
    ["Other"
