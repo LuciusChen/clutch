@@ -204,6 +204,8 @@ Use =":memory:"= for a transient in-memory database (data is lost when disconnec
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
 accept =:query-timeout= and =:rpc-timeout=.
+Query-console contents are persisted by connection parameters rather than saved
+connection alias, so renaming a saved connection keeps the same console SQL.
 TLS can be enabled per entry with =:tls t= as a shorthand; clutch normalizes
 that convenience form to backend-native settings.  For MySQL, prefer
 =:ssl-mode disabled= when you want plaintext; =off= remains accepted as a

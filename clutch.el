@@ -988,6 +988,10 @@ automatically when it drops.")
   "Connection name if this buffer is a query console, nil otherwise.
 Set by `clutch-query-console'; used to save/restore buffer content.")
 
+(defvar-local clutch--console-storage-name nil
+  "Stable persistence name for this query console, or nil.
+When nil, console persistence falls back to `clutch--console-name'.")
+
 (defun clutch--console-buffer-base-name (name)
   "Return canonical buffer name for console NAME."
   (format "*clutch: %s*" name))
@@ -1087,6 +1091,44 @@ Returns non-nil on success, nil on failure."
 
 ;;;; Console persistence
 
+(defun clutch--console-redacted-url (url)
+  "Return URL with obvious password parameters redacted."
+  (when url
+    (replace-regexp-in-string
+     "\\([?&;]\\(?:password\\|passwd\\|pwd\\)=\\)[^&;]+"
+     "\\1REDACTED"
+     url)))
+
+(defun clutch--console-identity-from-params (params)
+  "Return a stable query-console persistence identity from PARAMS."
+  (when params
+    (let* ((backend (or (plist-get params :backend)
+                        (plist-get params :driver)))
+           (url (clutch--console-redacted-url (plist-get params :url)))
+           (host (plist-get params :host))
+           (port (plist-get params :port))
+           (database (plist-get params :database))
+           (schema (plist-get params :schema))
+           (user (plist-get params :user))
+           (ssh-host (plist-get params :ssh-host))
+           (parts
+            (delq nil
+                  (list
+                   (and backend (format "backend=%s" backend))
+                   (and user (format "user=%s" user))
+                   (and host (format "host=%s" host))
+                   (and port (format "port=%s" port))
+                   (and database (format "database=%s" database))
+                   (and schema (format "schema=%s" schema))
+                   (and url (format "url=%s" url))
+                   (and ssh-host (format "ssh=%s" ssh-host))))))
+      (and parts (string-join parts "|")))))
+
+(defun clutch--console-persistence-name (name &optional params)
+  "Return stable persistence name for console NAME and PARAMS."
+  (or (clutch--console-identity-from-params params)
+      name))
+
 (defun clutch--console-file (name)
   "Return the persistence file path for console NAME."
   (expand-file-name
@@ -1099,9 +1141,11 @@ Returns non-nil on success, nil on failure."
     (condition-case err
         (progn
           (make-directory clutch-console-directory t)
-          (let ((coding-system-for-write 'utf-8-unix))
+          (let ((coding-system-for-write 'utf-8-unix)
+                (storage-name (or clutch--console-storage-name
+                                  clutch--console-name)))
             (write-region (point-min) (point-max)
-                          (clutch--console-file clutch--console-name)
+                          (clutch--console-file storage-name)
                           nil 'silent)))
       (error
        (message "Failed to save console %s: %s"

@@ -49,6 +49,7 @@
 (defvar clutch--base-query)
 (defvar clutch--connection-params)
 (defvar clutch--console-name)
+(defvar clutch--console-storage-name)
 (defvar clutch--source-window)
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
@@ -92,6 +93,7 @@
 (declare-function clutch-result--table-from-sql "clutch-edit" (sql))
 (declare-function clutch--find-console-buffer "clutch" (name))
 (declare-function clutch--update-console-buffer-name "clutch" ())
+(declare-function clutch--console-persistence-name "clutch" (name &optional params))
 (declare-function clutch--console-file "clutch" (name))
 (declare-function clutch--effective-sql-product "clutch" (params))
 (declare-function clutch--set-schema-status "clutch" (conn state &optional table-count error-message))
@@ -190,6 +192,7 @@ window rather than replacing the current window."
       (let* ((params (or (clutch--saved-connection-params name)
                          (user-error "No saved connection named %s" name)))
              (product (clutch--effective-sql-product params))
+             (storage-name (clutch--console-persistence-name name params))
              (conn (if (and existing
                             (buffer-local-value 'clutch-connection existing)
                             (not (clutch--connection-alive-p
@@ -205,12 +208,18 @@ window rather than replacing the current window."
         (unless (eq major-mode 'clutch-mode)
           (clutch-mode))
         (setq-local clutch--console-name name)
+        (setq-local clutch--console-storage-name storage-name)
         (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
         (when is-new
-          (let ((coding-system-for-read 'utf-8)
-                (file (clutch--console-file name)))
-            (when (file-readable-p file)
-              (insert-file-contents file))))
+          (let* ((coding-system-for-read 'utf-8)
+                 (file (clutch--console-file storage-name))
+                 (legacy-file (clutch--console-file name))
+                 (read-file (if (or (file-readable-p file)
+                                    (equal file legacy-file))
+                                file
+                              legacy-file)))
+            (when (file-readable-p read-file)
+              (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
         (clutch--update-console-buffer-name)))))
 
