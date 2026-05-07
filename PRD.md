@@ -147,7 +147,8 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 | `clutch--executing-p` | Query execution in progress flag |
 | `clutch--executing-sql-start/end` | Region markers for current query |
 | `clutch--last-query` | Last executed SQL string |
-| `clutch--console-name` | Name for persisting console to disk |
+| `clutch--console-name` | Saved connection alias used for console display and reconnect prompts |
+| `clutch--console-storage-name` | Hash of the connection identity used for console buffer reuse and persistence |
 | `clutch--tables-in-buffer-cache` | Cached `(tick . tables)` for completion |
 | `clutch--tables-in-query-cache` | Cached `(tick beg end . tables)` |
 
@@ -575,6 +576,10 @@ user-facing `defcustom`s.
 |----------|---------|------|-------------|
 | `clutch-console-directory` | `~/.emacs.d/clutch/` | directory | Directory for persisting query console buffers |
 | `clutch-console-yank-cleanup` | `t` | boolean | Clean whitespace in pasted region after yank in query consoles |
+
+Query console buffers and files are keyed by a hash of the connection identity,
+not by saved connection alias.  Alias-keyed files remain readable as a
+migration fallback when the identity-keyed file has not been created yet.
 
 ### Export
 
@@ -1069,7 +1074,22 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 ---
 
-## 18. Known Limitations
+## 18. Current Capabilities
+
+- Result mutations use row identity candidates, so tables without primary keys
+  can still be edited or deleted when a non-null unique key or backend row
+  locator is available.
+- Query console buffers and persistence are keyed by stable connection identity
+  rather than saved connection aliases, so renames keep the same console SQL.
+- Deferred metadata loading now keeps MySQL/PostgreSQL schema and object warmup
+  off the initial UI hot path via idle-time cache preheat on the main thread.
+- Result buffers support per-table/per-column displayers through
+  `clutch-register-column-displayer`.
+- Result buffers can pipe the current cell through a shell command with `|`.
+
+---
+
+## 19. Known Limitations
 
 ### Open Issues (Confirmed, Not Yet Fixed)
 
@@ -1090,18 +1110,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
 | **Cancel/interrupt** | `C-g` is recoverable for JDBC and native PostgreSQL; backends without explicit interrupt support still fall back to disconnect/reconnect |
 
-### Branch Features
-
-- Result mutations use row identity candidates, so tables without primary keys
-  can still be edited or deleted when a non-null unique key or backend row
-  locator is available.
-- Deferred metadata loading now keeps MySQL/PostgreSQL schema and object warmup
-  off the initial UI hot path via idle-time cache preheat on the main thread.
-- Result buffers support per-table/per-column displayers through
-  `clutch-register-column-displayer`.
-- Result buffers can pipe the current cell through a shell command with `|`.
-
-## 19. Development Guidelines
+## 20. Development Guidelines
 
 See `AGENTS.md` in both repos for full rules. Key points:
 
@@ -1122,7 +1131,7 @@ See `AGENTS.md` in both repos for full rules. Key points:
 
 ---
 
-## 20. Entry Points
+## 21. Entry Points
 
 ```elisp
 ;; Open a named query console
@@ -1152,4 +1161,4 @@ C-c C-l
 
 ---
 
-*Last updated: 2026-03-20*
+*Last updated: 2026-05-07*

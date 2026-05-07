@@ -204,8 +204,9 @@ Use =":memory:"= for a transient in-memory database (data is lost when disconnec
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
 accept =:query-timeout= and =:rpc-timeout=.
-Query-console contents are persisted by connection parameters rather than saved
-connection alias, so renaming a saved connection keeps the same console SQL.
+clutch saves query-console SQL under a hash of the connection identity, not the
+saved connection name, so renaming a saved connection keeps the same console
+SQL.
 TLS can be enabled per entry with =:tls t= as a shorthand; clutch normalizes
 that convenience form to backend-native settings.  For MySQL, prefer
 =:ssl-mode disabled= when you want plaintext; =off= remains accepted as a
@@ -431,7 +432,7 @@ staged-commit lifecycle (row-identity based edit/insert/delete, discard, commit
 ordering), object workflow and schema refresh state, SQL keyword completion
 (CAPF), and REPL behavior.
 
-=test/clutch-db-test.el= — database backend layer, 183 tests covering: JDBC
+=test/clutch-db-test.el= — database backend layer, covering JDBC
 connection and timeout mapping, query-timeout clamping, transaction
 (commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
 installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,

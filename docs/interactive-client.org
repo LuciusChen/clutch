@@ -355,7 +355,10 @@ Disable with =(setq clutch-console-yank-cleanup nil)=.
 
 Buffer content is automatically saved to =clutch-console-directory=
 (default: =~/.emacs.d/clutch/=) and restored the next time the same
-console is opened.  Each connection gets its own file (e.g. =dev-mysql.sql=).
+connection is opened.  clutch saves console SQL under a hash of the connection
+identity, not the saved connection name.  Renaming a saved connection reuses
+the open console buffer and keeps the same saved SQL.  If no identity-keyed file
+exists yet, clutch reads the old alias-keyed file as a migration fallback.
 Content is saved when the buffer is killed or when Emacs exits.
 
 Suggested global bindings:

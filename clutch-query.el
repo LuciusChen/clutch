@@ -91,7 +91,7 @@
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch-result--table-from-sql "clutch-edit" (sql))
-(declare-function clutch--find-console-buffer "clutch" (name))
+(declare-function clutch--find-console-buffer "clutch" (name &optional storage-name))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--console-persistence-name "clutch" (name &optional params))
 (declare-function clutch--console-file "clutch" (name))
@@ -180,20 +180,25 @@ Repeated calls with the same NAME switch to the existing buffer.
 When called from outside a clutch buffer, reuses any visible clutch
 window rather than replacing the current window."
   (interactive (list (clutch--read-query-console-name)))
-  (let ((existing (clutch--find-console-buffer name)))
+  (let* ((params (or (clutch--saved-connection-params name)
+                     (user-error "No saved connection named %s" name)))
+         (product (clutch--effective-sql-product params))
+         (storage-name (clutch--console-persistence-name name params))
+         (existing (clutch--find-console-buffer name storage-name)))
     (if (and existing
              (buffer-local-value 'clutch-connection existing)
              (clutch--connection-alive-p
               (buffer-local-value 'clutch-connection existing)))
         (progn
+          (with-current-buffer existing
+            (setq-local clutch--console-name name)
+            (setq-local clutch--console-storage-name storage-name)
+            (clutch--bind-connection-context clutch-connection params product)
+            (clutch--update-console-buffer-name))
           (select-window
            (or (clutch--console-window-for existing) (selected-window)))
           (switch-to-buffer existing))
-      (let* ((params (or (clutch--saved-connection-params name)
-                         (user-error "No saved connection named %s" name)))
-             (product (clutch--effective-sql-product params))
-             (storage-name (clutch--console-persistence-name name params))
-             (conn (if (and existing
+      (let* ((conn (if (and existing
                             (buffer-local-value 'clutch-connection existing)
                             (not (clutch--connection-alive-p
                                   (buffer-local-value 'clutch-connection existing))))

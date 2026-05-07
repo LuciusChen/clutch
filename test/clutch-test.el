@@ -7888,6 +7888,7 @@ This applies when the buffer owns the connection."
   "Query console should reuse an existing connected console buffer."
   (let* ((name "alpha")
          (existing (get-buffer-create " *clutch-query-console-existing*"))
+         (clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
          built)
     (unwind-protect
         (with-current-buffer existing
@@ -7895,9 +7896,11 @@ This applies when the buffer owns the connection."
           (setq-local clutch--console-name name)
           (setq-local clutch-connection 'live-conn)
           (cl-letf (((symbol-function 'clutch--find-console-buffer)
-                     (lambda (_name) existing))
+                     (lambda (&rest _args) existing))
                     ((symbol-function 'clutch--connection-alive-p)
                      (lambda (conn) (eq conn 'live-conn)))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     (lambda () nil))
                     ((symbol-function 'clutch--build-conn)
                      (lambda (_params)
                        (setq built t)
@@ -7907,6 +7910,122 @@ This applies when the buffer owns the connection."
             (should (eq (current-buffer) existing))))
       (when (buffer-live-p existing)
         (kill-buffer existing)))))
+
+(ert-deftest clutch-test-query-console-rename-reuses-open-buffer-by-storage-identity ()
+  "Renaming a saved connection should keep using the open console buffer."
+  (let* ((old-name "alpha")
+         (new-name "beta")
+         (params '(:backend mysql
+                   :host "db.internal"
+                   :port 3306
+                   :user "app"
+                   :database "prod"))
+         (storage-name (clutch--console-persistence-name old-name params))
+         (existing (get-buffer-create " *clutch-query-console-renamed*"))
+         (clutch-connection-alist `((,new-name . ,params)))
+         built
+         renamed-to)
+    (unwind-protect
+        (with-current-buffer existing
+          (clutch-mode)
+          (setq-local clutch--console-name old-name)
+          (setq-local clutch--console-storage-name storage-name)
+          (setq-local clutch-connection 'live-conn)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (eq conn 'live-conn)))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (_params)
+                       (setq built t)
+                       'unexpected-conn))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     (lambda ()
+                       (setq renamed-to clutch--console-name))))
+            (clutch-query-console new-name)
+            (should-not built)
+            (should (eq (current-buffer) existing))
+            (should (equal clutch--console-name new-name))
+            (should (equal clutch--console-storage-name storage-name))
+            (should (equal renamed-to new-name))))
+      (when (buffer-live-p existing)
+        (kill-buffer existing)))))
+
+(ert-deftest clutch-test-find-console-buffer-prefers-storage-identity-over-alias ()
+  "Console lookup should prefer stable identity over a stale alias match."
+  (let* ((name "beta")
+         (storage-name "console-stable")
+         (wrong (get-buffer-create " *clutch-query-console-wrong-alias*"))
+         (right (get-buffer-create " *clutch-query-console-right-storage*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer wrong
+            (clutch-mode)
+            (setq-local clutch--console-name name)
+            (setq-local clutch--console-storage-name "console-other"))
+          (with-current-buffer right
+            (clutch-mode)
+            (setq-local clutch--console-name "alpha")
+            (setq-local clutch--console-storage-name storage-name))
+          (should (eq (clutch--find-console-buffer name storage-name) right)))
+      (when (buffer-live-p wrong)
+        (kill-buffer wrong))
+      (when (buffer-live-p right)
+        (kill-buffer right)))))
+
+(ert-deftest clutch-test-find-console-buffer-ignores-alias-with-different-storage-identity ()
+  "Alias fallback should not reuse a console for a different connection identity."
+  (let ((buf (get-buffer-create " *clutch-query-console-different-storage*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (clutch-mode)
+            (setq-local clutch--console-name "alpha")
+            (setq-local clutch--console-storage-name "console-old"))
+          (should-not (clutch--find-console-buffer "alpha" "console-new")))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-find-console-buffer-matches-legacy-buffer-by-params ()
+  "Open legacy console buffers without storage state should still match by params."
+  (let* ((params '(:backend mysql
+                   :host "db.internal"
+                   :port 3306
+                   :user "app"
+                   :database "prod"))
+         (storage-name (clutch--console-persistence-name "beta" params))
+         (buf (get-buffer-create " *clutch-query-console-legacy-buffer*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (clutch-mode)
+            (setq-local clutch--console-name "alpha")
+            (setq-local clutch--connection-params params))
+          (should (eq (clutch--find-console-buffer "beta" storage-name) buf)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-find-console-buffer-ignores-legacy-alias-with-different-params ()
+  "Legacy alias fallback should not override a known connection identity."
+  (let* ((old-params '(:backend mysql
+                       :host "db-a.internal"
+                       :port 3306
+                       :user "app"
+                       :database "prod"))
+         (new-params '(:backend mysql
+                       :host "db-b.internal"
+                       :port 3306
+                       :user "app"
+                       :database "prod"))
+         (storage-name (clutch--console-persistence-name "alpha" new-params))
+         (buf (get-buffer-create " *clutch-query-console-legacy-mismatch*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (clutch-mode)
+            (setq-local clutch--console-name "alpha")
+            (setq-local clutch--connection-params old-params))
+          (should-not (clutch--find-console-buffer "alpha" storage-name)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (ert-deftest clutch-test-query-console-reconnects-dead-existing-buffer ()
   "Query console should reconnect an existing dead console before switching."
@@ -7921,7 +8040,7 @@ This applies when the buffer owns the connection."
           (setq-local clutch--console-name name)
           (setq-local clutch-connection 'dead-conn)
           (cl-letf (((symbol-function 'clutch--find-console-buffer)
-                     (lambda (_name) existing))
+                     (lambda (&rest _args) existing))
                     ((symbol-function 'clutch--connection-alive-p)
                      (lambda (_conn) nil))
                     ((symbol-function 'clutch--effective-sql-product)
@@ -7944,7 +8063,7 @@ This applies when the buffer owns the connection."
       (when (buffer-live-p existing)
         (kill-buffer existing)))))
 
-(ert-deftest clutch-test-query-console-loads-legacy-alias-file-when-param-file-missing ()
+(ert-deftest clutch-test-query-console-loads-legacy-alias-file-when-identity-file-missing ()
   "Query console should migrate smoothly from alias-based persistence."
   (let* ((name "alpha")
          (dir (make-temp-file "clutch-console-" t))
@@ -7971,6 +8090,39 @@ This applies when the buffer owns the connection."
             (clutch-query-console name)
             (should (equal (buffer-string) "SELECT legacy;"))
             (should-not (equal clutch--console-storage-name name))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-test-query-console-prefers-identity-file-over-legacy-alias-file ()
+  "Existing identity-keyed console files should win over legacy alias files."
+  (let* ((name "alpha")
+         (dir (make-temp-file "clutch-console-" t))
+         (buffer-name (clutch--console-buffer-base-name name))
+         (params '(:backend mysql
+                   :host "db.internal"
+                   :port 3306
+                   :user "app"
+                   :database "prod"))
+         (storage-name (clutch--console-persistence-name name params))
+         (clutch-console-directory dir)
+         (clutch-connection-alist `((,name . ,params))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "alpha.sql" dir)
+            (insert "SELECT legacy;"))
+          (with-temp-file (clutch--console-file storage-name)
+            (insert "SELECT stable;"))
+          (cl-letf (((symbol-function 'clutch--effective-sql-product)
+                     (lambda (_params) 'mysql))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (_params) 'conn))
+                    ((symbol-function 'clutch--activate-current-buffer-connection)
+                     (lambda (_conn _params _product) nil))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     (lambda () nil)))
+            (clutch-query-console name)
+            (should (equal (buffer-string) "SELECT stable;"))))
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf))
       (delete-directory dir t))))
@@ -9188,8 +9340,9 @@ This applies when the buffer owns the connection."
                   :database "prod")))
     (should (equal (clutch--console-persistence-name "old-name" params)
                    (clutch--console-persistence-name "new-name" params)))
-    (should (equal (clutch--console-persistence-name "old-name" params)
-                   "backend=mysql|user=app|host=db.internal|port=3306|database=prod"))))
+    (let ((name (clutch--console-persistence-name "old-name" params)))
+      (should (string-prefix-p "console-" name))
+      (should-not (string-match-p "db\\.internal\\|app\\|prod" name)))))
 
 (ert-deftest clutch-test-console-persistence-name-changes-with-endpoint ()
   "Different connection endpoints should get different persistence names."
@@ -9199,16 +9352,38 @@ This applies when the buffer owns the connection."
           (clutch--console-persistence-name
            "prod" '(:backend mysql :host "db-b" :port 3306 :database "app")))))
 
+(ert-deftest clutch-test-console-persistence-name-changes-with-oracle-sid ()
+  "Oracle SID-style connections should not collide with service-name peers."
+  (should-not
+   (equal (clutch--console-persistence-name
+           "oracle-a" '(:backend oracle :host "db" :port 1521 :sid "SID1"))
+          (clutch--console-persistence-name
+           "oracle-b" '(:backend oracle :host "db" :port 1521 :sid "SID2")))))
+
 (ert-deftest clutch-test-console-persistence-name-redacts-url-passwords ()
   "URL password parameters should not leak into console persistence names."
-  (let ((name (clutch--console-persistence-name
-               "prod"
-               '(:backend mysql
-                 :url "jdbc:mysql://db/prod?user=app&password=secret;pwd=other"))))
-    (should (string-match-p "password=REDACTED" name))
-    (should (string-match-p "pwd=REDACTED" name))
-    (should-not (string-match-p "secret" name))
-    (should-not (string-match-p "other" name))))
+  (let ((name-a (clutch--console-persistence-name
+                 "prod"
+                 '(:backend mysql
+                   :url "jdbc:mysql://db/prod?user=app&Password=secret;pwd=other")))
+        (name-b (clutch--console-persistence-name
+                 "prod"
+                 '(:backend mysql
+                   :url "jdbc:mysql://db/prod?user=app&Password=changed;pwd=changed"))))
+    (should (equal name-a name-b))
+    (should-not (string-match-p "secret\\|other\\|changed\\|Password\\|pwd\\|db/prod" name-a))))
+
+(ert-deftest clutch-test-console-persistence-name-ignores-non-identity-params ()
+  "Display names, credentials, and timeouts should not affect console identity."
+  (should
+   (equal (clutch--console-persistence-name
+           "a" '(:backend mysql :host "db" :port 3306 :user "app"
+                 :password "one" :pass-entry "old" :display-name "Old"
+                 :connect-timeout 1 :read-idle-timeout 2))
+          (clutch--console-persistence-name
+           "b" '(:backend mysql :host "db" :port 3306 :user "app"
+                 :password "two" :pass-entry "new" :display-name "New"
+                 :connect-timeout 9 :read-idle-timeout 8)))))
 
 (ert-deftest clutch-test-save-console-writes-buffer-to-file ()
   "Saving a named console should write its current contents to disk."

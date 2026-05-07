@@ -985,11 +985,11 @@ Stored at connect time so the connection can be re-established
 automatically when it drops.")
 
 (defvar-local clutch--console-name nil
-  "Connection name if this buffer is a query console, nil otherwise.
-Set by `clutch-query-console'; used to save/restore buffer content.")
+  "Saved connection alias if this buffer is a query console, nil otherwise.
+Set by `clutch-query-console'; used for buffer display and reconnect prompts.")
 
 (defvar-local clutch--console-storage-name nil
-  "Stable persistence name for this query console, or nil.
+  "Stable storage identity for this query console, or nil.
 When nil, console persistence falls back to `clutch--console-name'.")
 
 (defun clutch--console-buffer-base-name (name)
@@ -1011,15 +1011,38 @@ When nil, console persistence falls back to `clutch--console-name'.")
                    (_ ""))))
     (concat base suffix)))
 
-(defun clutch--find-console-buffer (name)
-  "Return the live console buffer for NAME, or nil."
-  (cl-find-if
-   (lambda (buf)
-     (and (buffer-live-p buf)
-          (with-current-buffer buf
-            (and (eq major-mode 'clutch-mode)
-                 (equal clutch--console-name name)))))
-   (buffer-list)))
+(defun clutch--console-buffer-storage-match-p (storage-name)
+  "Return non-nil when the current console buffer matches STORAGE-NAME."
+  (and storage-name
+       (or (equal clutch--console-storage-name storage-name)
+           (and (not clutch--console-storage-name)
+                clutch--connection-params
+                (equal (clutch--console-persistence-name
+                        clutch--console-name
+                        clutch--connection-params)
+                       storage-name)))))
+
+(defun clutch--find-console-buffer (name &optional storage-name)
+  "Return the live console buffer for NAME or STORAGE-NAME, or nil."
+  (or (and storage-name
+           (cl-find-if
+            (lambda (buf)
+              (and (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (and (eq major-mode 'clutch-mode)
+                          (clutch--console-buffer-storage-match-p
+                           storage-name)))))
+            (buffer-list)))
+      (cl-find-if
+       (lambda (buf)
+         (and (buffer-live-p buf)
+              (with-current-buffer buf
+                (and (eq major-mode 'clutch-mode)
+                     (equal clutch--console-name name)
+                     (or (not storage-name)
+                         (and (not clutch--console-storage-name)
+                              (not clutch--connection-params)))))))
+       (buffer-list))))
 
 (defun clutch--update-console-buffer-name ()
   "Rename the current console buffer to reflect schema status."
@@ -1091,41 +1114,47 @@ Returns non-nil on success, nil on failure."
 
 ;;;; Console persistence
 
+(defconst clutch--console-url-secret-param-regexp
+  (concat "\\([?&;]"
+          (regexp-opt '("access_token" "pass" "password" "passwd"
+                        "private_key" "private-key" "pwd" "secret" "token"))
+          "=\\)[^&;]*")
+  "Regexp matching URL parameters that must not affect console identity.")
+
+(defconst clutch--console-identity-param-keys
+  '(:user :host :port :database :schema :sid :ssh-host)
+  "Connection params that distinguish query console identity.")
+
 (defun clutch--console-redacted-url (url)
   "Return URL with obvious password parameters redacted."
   (when url
-    (replace-regexp-in-string
-     "\\([?&;]\\(?:password\\|passwd\\|pwd\\)=\\)[^&;]+"
-     "\\1REDACTED"
-     url)))
+    (let ((case-fold-search t))
+      (replace-regexp-in-string
+       clutch--console-url-secret-param-regexp
+       "\\1REDACTED"
+       url))))
+
+(defun clutch--console-identity-pairs (params)
+  "Return canonical non-secret identity pairs for connection PARAMS."
+  (when params
+    (let ((backend (or (plist-get params :backend)
+                       (plist-get params :driver)))
+          (url (clutch--console-redacted-url (plist-get params :url))))
+      (append
+       (and backend (list (cons :backend backend)))
+       (cl-loop for key in clutch--console-identity-param-keys
+                when (plist-member params key)
+                collect (cons key (plist-get params key)))
+       (and url (list (cons :url url)))))))
 
 (defun clutch--console-identity-from-params (params)
   "Return a stable query-console persistence identity from PARAMS."
-  (when params
-    (let* ((backend (or (plist-get params :backend)
-                        (plist-get params :driver)))
-           (url (clutch--console-redacted-url (plist-get params :url)))
-           (host (plist-get params :host))
-           (port (plist-get params :port))
-           (database (plist-get params :database))
-           (schema (plist-get params :schema))
-           (user (plist-get params :user))
-           (ssh-host (plist-get params :ssh-host))
-           (parts
-            (delq nil
-                  (list
-                   (and backend (format "backend=%s" backend))
-                   (and user (format "user=%s" user))
-                   (and host (format "host=%s" host))
-                   (and port (format "port=%s" port))
-                   (and database (format "database=%s" database))
-                   (and schema (format "schema=%s" schema))
-                   (and url (format "url=%s" url))
-                   (and ssh-host (format "ssh=%s" ssh-host))))))
-      (and parts (string-join parts "|")))))
+  (when-let* ((pairs (clutch--console-identity-pairs params)))
+    (concat "console-"
+            (secure-hash 'sha256 (prin1-to-string pairs)))))
 
 (defun clutch--console-persistence-name (name &optional params)
-  "Return stable persistence name for console NAME and PARAMS."
+  "Return storage identity for console NAME and PARAMS."
   (or (clutch--console-identity-from-params params)
       name))
 
