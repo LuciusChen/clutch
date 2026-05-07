@@ -74,6 +74,15 @@
           :indices indices
           :source-indices indices)))
 
+(defun clutch-test--completion-candidates (capf &optional prefix)
+  "Return CAPF completion candidates matching PREFIX.
+When PREFIX is nil, use the text between CAPF's bounds, matching the real
+`completion-at-point' filtering path."
+  (all-completions
+   (or prefix
+       (buffer-substring-no-properties (nth 0 capf) (nth 1 capf)))
+   (nth 2 capf)))
+
 ;;;; Rendering — value formatting
 
 (ert-deftest clutch-test-format-value-nil ()
@@ -1705,7 +1714,7 @@ It should not always resolve to the first occurrence."
                  (lambda (&rest _args)
                    (ert-fail "should not queue async loads when branch columns are cached"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (member "title" candidates))
           (should-not (member "name" candidates)))))))
@@ -1736,7 +1745,7 @@ It should not always resolve to the first occurrence."
                  (lambda (&rest _args)
                    (ert-fail "should not queue async loads when branch columns are cached"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (member "title" candidates))
           (should-not (member "name" candidates)))))))
@@ -2801,24 +2810,31 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 
 ;;;; Completion — SQL keywords
 
-(ert-deftest clutch-test-sql-keyword-completion-matching ()
-  "Test that keyword capf returns candidates matching a prefix."
-  (with-temp-buffer
-    (insert "SEL")
-    (let ((result (clutch-sql-keyword-completion-at-point)))
-      (should result)
-      (should (member "SELECT" (nth 2 result))))))
-
 (ert-deftest clutch-test-sql-keyword-completion-case-insensitive ()
   "Test case-insensitive matching (input \"sel\" matches \"SELECT\")."
   (with-temp-buffer
     (insert "sel")
     (let* ((result (clutch-sql-keyword-completion-at-point))
-           (candidates (nth 2 result)))
+           (candidates (clutch-test--completion-candidates result)))
       (should result)
-      ;; The candidate list includes all keywords; completion framework
-      ;; handles case-insensitive filtering.  Verify SELECT is present.
       (should (member "SELECT" candidates)))))
+
+(ert-deftest clutch-test-sql-keyword-completion-chain-case-insensitive ()
+  "The installed CAPF chain should complete lowercase keyword prefixes."
+  (with-temp-buffer
+    (insert "sele")
+    (let (captured)
+      (setq-local completion-at-point-functions nil)
+      (clutch--install-completion-capfs)
+      (cl-letf ((completion-in-region-function
+                 (lambda (start end collection &optional predicate)
+                   (setq captured
+                         (all-completions
+                          (buffer-substring-no-properties start end)
+                          collection predicate))
+                   t)))
+        (should (completion-at-point))
+        (should (member "SELECT" captured))))))
 
 (ert-deftest clutch-test-sql-keyword-completion-no-prefix ()
   "Test that keyword capf returns nil with no word at point."
@@ -2833,7 +2849,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
     (with-temp-buffer
       (insert "sel")
       (let* ((result (clutch-sql-keyword-completion-at-point))
-             (candidates (nth 2 result)))
+             (candidates (clutch-test--completion-candidates result)))
         (should result)
         (should (member "select" candidates))
         (should-not (member "SELECT" candidates))))))
@@ -2966,7 +2982,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                    (setq called t)
                    '("id"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (member "xaccounts" candidates))
           (should-not called))))))
@@ -2996,7 +3012,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                  (lambda (&rest _args)
                    (ert-fail "sync completion should not queue async column loads"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf "")))
           (should capf)
           (should (equal loaded "orders"))
           (should (member "id" candidates))
@@ -3026,7 +3042,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (puthash "users" '("user_id" "user_name") schema)
         (puthash "posts" '("post_id" "user_id") schema)
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf "")))
           (should capf)
           (should (member "users" candidates))
           (should (member "posts" candidates))
@@ -3057,7 +3073,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                  (lambda (&rest _args)
                    (ert-fail "sync completion should not queue async column loads"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf "")))
           (should capf)
           (should (equal loaded "users"))
           (should (member "id" candidates))
@@ -3083,7 +3099,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                  (lambda (&rest _args)
                    (ert-fail "should not queue async loads when alias target is cached"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf "")))
           (should capf)
           (should (member "name" candidates))
           (should (member "nickname" candidates))
@@ -3106,7 +3122,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                    (should (equal prefix "zj_"))
                    '("ZJ_NCBUSINESSDATA" "ZJ_SYS_PARA"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (member "ZJ_NCBUSINESSDATA" candidates))
           (should (member "ZJ_SYS_PARA" candidates)))))))
@@ -3123,7 +3139,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 (ert-deftest clutch-test-completion-at-point-prefers-table-candidates-in-from-context ()
   "FROM/JOIN table completion should not be shadowed by SQL keyword completion."
   (with-temp-buffer
-    (insert "SELECT * FROM OR")
+    (insert "select * from or")
     (let ((schema (make-hash-table :test 'equal))
           (clutch-connection 'fake)
           captured)
@@ -3145,7 +3161,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                                             collection predicate)))
                    t)))
         (should (completion-at-point))
-        (should (equal (plist-get captured :input) "OR"))
+        (should (equal (plist-get captured :input) "or"))
         (should (equal (plist-get captured :candidates) '("ORDERS")))))))
 
 (ert-deftest clutch-test-completion-at-point-defers-to-keywords-for-keyword-prefixes ()
@@ -3161,10 +3177,64 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                  (lambda (_conn) nil)))
         (should-not (clutch-completion-at-point))
         (let* ((capf (clutch-sql-keyword-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (member "SELECT" candidates))
           (should-not (member "SELECT_LOG" candidates)))))))
+
+(ert-deftest clutch-test-completion-at-point-keeps-keywords-with-statement-context ()
+  "Identifier completion should not hide keyword candidates in statement context."
+  (with-temp-buffer
+    (insert "sele from users")
+    (goto-char (point-min))
+    (search-forward "sele")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "users" '("id" "name") schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--tables-in-current-statement)
+                 (lambda (_schema) '("users"))))
+        (let* ((capf (clutch-completion-at-point))
+               (prefix-candidates (clutch-test--completion-candidates capf))
+               (all-candidates (clutch-test--completion-candidates capf "")))
+          (should capf)
+          (should (member "SELECT" prefix-candidates))
+          (should (member "id" all-candidates)))))))
+
+(ert-deftest clutch-test-completion-at-point-chain-keeps-keywords-with-statement-context ()
+  "The installed CAPF chain should still offer keywords with statement tables."
+  (with-temp-buffer
+    (insert "sele from users")
+    (goto-char (point-min))
+    (search-forward "sele")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          captured)
+      (puthash "users" '("id" "name") schema)
+      (setq-local completion-at-point-functions nil)
+      (clutch--install-completion-capfs)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--tables-in-current-statement)
+                 (lambda (_schema) '("users")))
+                (completion-in-region-function
+                 (lambda (start end collection &optional predicate)
+                   (setq captured
+                         (all-completions
+                          (buffer-substring-no-properties start end)
+                          collection predicate))
+                   t)))
+        (should (completion-at-point))
+        (should (member "SELECT" captured))))))
 
 (ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
   "Direct backend column completion should avoid synchronous ensure-columns."
@@ -3190,7 +3260,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                    (should (equal prefix "pa"))
                    '("PARA_ID" "PARA_NAME"))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (member "PARA_ID" candidates))
           (should (member "PARA_NAME" candidates)))))))
@@ -3224,7 +3294,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                      ("ZJ_LOG" '("PAYLOAD"))
                      (_ nil)))))
         (let* ((capf (clutch-completion-at-point))
-               (candidates (nth 2 capf)))
+               (candidates (clutch-test--completion-candidates capf)))
           (should capf)
           (should (equal seen '("ZJ_SYS_PARA")))
           (should (member "PARA_ID" candidates))
@@ -3257,7 +3327,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                      (should (equal prefix "pa"))
                      '("PARA_ID" "PARA_NAME"))))
           (let* ((capf (clutch-completion-at-point))
-                 (candidates (nth 2 capf)))
+                 (candidates (clutch-test--completion-candidates capf "")))
             (should capf)
             (should (member "zj_sys_para" candidates))
             (should (member "para_id" candidates))
@@ -8416,7 +8486,8 @@ This applies when the buffer owns the connection."
              :problem '(:summary "pre-debug")))
           (clutch-debug-mode 1)
           (with-current-buffer source
-            (should clutch--buffer-error-details)))
+            (should (equal (plist-get clutch--buffer-error-details :summary)
+                           "pre-debug"))))
       (when clutch-debug-mode
         (clutch-debug-mode -1))
       (when (buffer-live-p source)
@@ -8810,7 +8881,8 @@ This applies when the buffer owns the connection."
                  (lambda (result sql _elapsed)
                    (setq rendered (list result sql)))))
         (should (clutch--execute-dml "UPDATE demo SET enabled = 1" 'fake-conn))
-        (should rendered)))))
+        (should (equal (cadr rendered) "UPDATE demo SET enabled = 1"))
+        (should (= (clutch-db-result-affected-rows (car rendered)) 1))))))
 
 (ert-deftest clutch-test-count-total-ensures-connection-before-query ()
   "COUNT should use the shared reconnect path before querying."
@@ -9265,12 +9337,12 @@ This applies when the buffer owns the connection."
               ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
               ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
               ((symbol-function 'clutch--require-risky-dml-confirmation)
-               (lambda (_sql) (setq called t)))
+               (lambda (sql) (setq called sql)))
               ((symbol-function 'clutch--update-mode-line) (lambda () nil))
               ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
               ((symbol-function 'clutch--execute-select) (lambda (&rest _args) 'ok)))
       (clutch--execute "UPDATE users SET x=1" clutch-connection)
-      (should called))))
+      (should (equal called "UPDATE users SET x=1")))))
 
 ;;;; Console — yank cleanup and save
 

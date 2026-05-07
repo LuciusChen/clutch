@@ -2232,7 +2232,6 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
   (delete-dups
    (mapcar #'clutch--apply-sql-completion-case-style candidates)))
 
-
 (defun clutch--sql-keyword-prefix-p (prefix)
   "Return non-nil when PREFIX matches the start of any SQL keyword."
   (let ((upcase-prefix (upcase prefix)))
@@ -2246,7 +2245,8 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
 Works without a database connection."
   (when-let* ((bounds (bounds-of-thing-at-point 'symbol)))
     (list (car bounds) (cdr bounds)
-          (clutch--sql-keyword-completion-candidates)
+          (completion-table-case-fold
+           (clutch--sql-keyword-completion-candidates))
           :exclusive 'no
           :exit-function (lambda (_str status)
                            (when (and (clutch--completion-finished-status-p status)
@@ -2323,22 +2323,30 @@ when completion triggers during an in-flight query)."
            (context-tables
             (clutch--completion-context-tables
              schema qualified-table prefix-len table-context-p busy))
+           (keyword-candidates
+            (and context-tables
+                 (not table-context-p)
+                 (clutch--sql-keyword-prefix-p prefix)
+                 (clutch--sql-keyword-completion-candidates)))
            (prefer-keyword-p
             (and (not table-context-p)
                  (null context-tables)
                  (clutch--sql-keyword-prefix-p prefix)))
            (candidates nil))
       (setq candidates
-              (if prefer-keyword-p
-                  nil
-                (if context-tables
-                    (clutch--completion-column-candidates
-                     conn schema context-tables qualified-table prefix sync-columns-p)
-                  (clutch--sql-identifier-completion-candidates
-                   (append direct-table-candidates
-                           (and schema (hash-table-keys schema)))))))
+            (append
+             keyword-candidates
+             (if prefer-keyword-p
+                 nil
+               (if context-tables
+                   (clutch--completion-column-candidates
+                    conn schema context-tables qualified-table prefix sync-columns-p)
+                 (clutch--sql-identifier-completion-candidates
+                  (append direct-table-candidates
+                          (and schema (hash-table-keys schema))))))))
       (when candidates
-        (list beg end candidates
+        (list beg end
+              (completion-table-case-fold candidates)
               :exclusive 'no
               :exit-function
               (lambda (str status)
