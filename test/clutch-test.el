@@ -416,6 +416,31 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (equal (plist-get prep :sql)
                      "SELECT name, \"id\" AS \"clutch__rid_0\" FROM users WHERE active = 1")))))
 
+(ert-deftest clutch-test-row-identity-prep-oracle-select-star-qualifies-star ()
+  "Oracle SELECT * row identity injection should avoid SELECT *, expr syntax."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'row-locator
+                           :name "ROWID"
+                           :select-expressions '("ROWID")
+                           :where-sql "ROWID = ?"))))
+            ((symbol-function 'clutch--connection-oracle-jdbc-p)
+             (lambda (_conn) t))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (dolist (case '(("SELECT * FROM users WHERE active = 1"
+                     "SELECT users.*, ROWID AS \"clutch__rid_0\" FROM users WHERE active = 1")
+                    ("SELECT * FROM users WHERE users.active = 1"
+                     "SELECT users.*, ROWID AS \"clutch__rid_0\" FROM users WHERE users.active = 1")
+                    ("SELECT * FROM users;"
+                     "SELECT users.*, ROWID AS \"clutch__rid_0\" FROM users")
+                    ("SELECT * FROM users u WHERE active = 1"
+                     "SELECT u.*, ROWID AS \"clutch__rid_0\" FROM users u WHERE active = 1")))
+      (let ((prep (clutch--prepare-row-identity-query
+                   'oracle-conn (car case))))
+        (should (plist-get prep :augmented))
+        (should (equal (plist-get prep :sql) (cadr case)))))))
+
 (ert-deftest clutch-test-row-identity-prep-preserves-ordinal-order-by ()
   "Hidden identity expressions should not change ORDER BY ordinals."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)

@@ -2262,6 +2262,41 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
   (add-hook 'completion-at-point-functions
             #'clutch-sql-keyword-completion-at-point t t))
 
+(defun clutch--completion-table-context-p (beg)
+  "Return non-nil when BEG is in a SQL table-name completion context."
+  (string-match-p
+   "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
+   (upcase (buffer-substring-no-properties (line-beginning-position) beg))))
+
+(defun clutch--completion-context-tables (schema qualified-table prefix-len
+                                                 table-context-p busy)
+  "Return tables whose columns are useful completion candidates."
+  (unless (or table-context-p busy
+              (< prefix-len clutch--schema-inline-min-prefix-length))
+    (let ((tables (or (and qualified-table (list qualified-table))
+                      (and schema (clutch--tables-in-current-statement schema))
+                      (clutch--statement-table-identifiers))))
+      (when (and tables
+                 (<= (length tables) clutch--schema-inline-table-limit))
+        tables))))
+
+(defun clutch--completion-column-candidates (conn schema tables qualified-table
+                                                  prefix sync-columns-p)
+  "Return column completion candidates for TABLES."
+  (let ((all (unless qualified-table (copy-sequence tables))))
+    (dolist (tbl tables)
+      (let ((cols
+             (if sync-columns-p
+                 (or (clutch--cached-columns schema tbl)
+                     (and schema (clutch--ensure-columns conn schema tbl)))
+               (or (clutch--cached-columns schema tbl)
+                   (clutch--safe-completion-call
+                    (lambda ()
+                      (clutch-db-complete-columns conn tbl prefix)))))))
+        (when cols
+          (setq all (nconc all (copy-sequence cols))))))
+    (clutch--sql-identifier-completion-candidates all)))
+
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
@@ -2275,12 +2310,7 @@ when completion triggers during an in-flight query)."
            (schema (clutch--schema-for-connection))
            (qualifier (and schema
                            (clutch--qualified-identifier-qualifier beg)))
-           (line-before (buffer-substring-no-properties
-                         (line-beginning-position) beg))
-           (table-context-p
-            (string-match-p
-             "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
-             (upcase line-before)))
+           (table-context-p (clutch--completion-table-context-p beg))
            (busy (clutch-db-busy-p conn))
            (sync-columns-p (clutch-db-completion-sync-columns-p conn))
            (direct-table-candidates
@@ -2291,41 +2321,22 @@ when completion triggers during an in-flight query)."
            (qualified-table (and qualifier
                                  (clutch--qualified-identifier-table schema beg)))
            (context-tables
-            (unless (or table-context-p busy
-                        (< prefix-len clutch--schema-inline-min-prefix-length))
-              (let ((tables (or (and qualified-table (list qualified-table))
-                                (and schema (clutch--tables-in-current-statement schema))
-                                (clutch--statement-table-identifiers))))
-                (when (and tables
-                           (<= (length tables) clutch--schema-inline-table-limit))
-                  tables))))
+            (clutch--completion-context-tables
+             schema qualified-table prefix-len table-context-p busy))
            (prefer-keyword-p
             (and (not table-context-p)
                  (null context-tables)
                  (clutch--sql-keyword-prefix-p prefix)))
            (candidates nil))
       (setq candidates
-            (if prefer-keyword-p
-                nil
-              (if context-tables
-                (let ((all (unless qualified-table
-                             (copy-sequence context-tables))))
-                  (dolist (tbl context-tables)
-                    (let ((cols
-                           (if sync-columns-p
-                               (or (clutch--cached-columns schema tbl)
-                                   (and schema
-                                        (clutch--ensure-columns conn schema tbl)))
-                             (or (clutch--cached-columns schema tbl)
-                                 (clutch--safe-completion-call
-                                  (lambda ()
-                                    (clutch-db-complete-columns conn tbl prefix)))))))
-                      (when cols
-                        (setq all (nconc all (copy-sequence cols))))))
-                  (clutch--sql-identifier-completion-candidates all))
-                (clutch--sql-identifier-completion-candidates
-                 (append direct-table-candidates
-                         (and schema (hash-table-keys schema)))))))
+              (if prefer-keyword-p
+                  nil
+                (if context-tables
+                    (clutch--completion-column-candidates
+                     conn schema context-tables qualified-table prefix sync-columns-p)
+                  (clutch--sql-identifier-completion-candidates
+                   (append direct-table-candidates
+                           (and schema (hash-table-keys schema)))))))
       (when candidates
         (list beg end candidates
               :exclusive 'no
@@ -2969,6 +2980,41 @@ If the column is already sorted, toggle the direction."
 
 ;;;; WHERE filtering
 
+(defun clutch--where-filter-column-expression (column condition)
+  "Return a WHERE fragment for COLUMN and user-entered CONDITION."
+  (let ((expr (if (string-match-p
+                  "\\`\\(?:[=<>!]\\|IN\\b\\|IS\\b\\|NOT\\b\\|LIKE\\b\\|BETWEEN\\b\\)"
+                  (upcase condition))
+                  condition
+                (concat "= " condition))))
+    (format "%s %s" column expr)))
+
+(defun clutch--read-where-filter (current columns default-col)
+  "Read a WHERE filter string from CURRENT state, COLUMNS, and DEFAULT-COL."
+  (if (and columns (not current))
+      (let* ((col (completing-read
+                   (if default-col
+                       (format "Filter column (default %s, empty for raw): "
+                               default-col)
+                     "Filter column (empty for raw): ")
+                   columns nil nil nil nil default-col))
+             (condition
+              (string-trim
+               (read-string
+                (if (string-empty-p col)
+                    "WHERE filter (e.g., age > 18): "
+                  (format "%s (e.g., 42, 'foo', > 18, IS NULL): " col))))))
+        (cond
+         ((string-empty-p condition) "")
+         ((string-empty-p col) condition)
+         (t (clutch--where-filter-column-expression col condition))))
+    (string-trim
+     (read-string
+      (if current
+          (format "WHERE filter (current: %s, empty to clear): " current)
+        "WHERE filter (e.g., age > 18): ")
+      nil nil current))))
+
 ;;;###autoload
 (defun clutch-result-apply-filter ()
   "Apply or clear a WHERE filter on the current result query.
@@ -2986,38 +3032,7 @@ empty string at the condition prompt to clear the filter."
                           (clutch--visible-columns)))
          (default-col (and columns clutch--header-active-col
                            (nth clutch--header-active-col columns)))
-         (input
-          (if (and columns (not current))
-              (let* ((col (completing-read
-                           (if default-col
-                               (format "Filter column (default %s, empty for raw): "
-                                       default-col)
-                             "Filter column (empty for raw): ")
-                           columns nil nil nil nil default-col))
-                     (cond-str
-                      (if (string-empty-p col)
-                          (string-trim
-                           (read-string "WHERE filter (e.g., age > 18): "))
-                        (string-trim
-                         (read-string
-                          (format "%s (e.g., 42, 'foo', > 18, IS NULL): " col))))))
-                (if (string-empty-p cond-str)
-                    ""
-                  (if (string-empty-p col)
-                      cond-str
-                    (let ((expr (if (string-match-p
-                                    "\\`\\(?:[=<>!]\\|IN\\b\\|IS\\b\\|NOT\\b\\|LIKE\\b\\|BETWEEN\\b\\)"
-                                    (upcase cond-str))
-                                   cond-str
-                                 (concat "= " cond-str))))
-                      (format "%s %s" col expr)))))
-            (string-trim
-             (read-string
-              (if current
-                  (format "WHERE filter (current: %s, empty to clear): "
-                          current)
-                "WHERE filter (e.g., age > 18): ")
-              nil nil current))))
+         (input (clutch--read-where-filter current columns default-col))
          (filtered-sql (unless (string-empty-p input)
                          (clutch--apply-where base input))))
     (clutch--execute (or filtered-sql base)

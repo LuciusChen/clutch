@@ -304,6 +304,50 @@ minibuffer has been quit.")
              (1+ (clutch--object-warmup-generation conn key))
              clutch--object-warmup-generations)))
 
+(defun clutch--object-warmup-current-p (conn key generation)
+  "Return non-nil when CONN still owns warmup KEY and GENERATION."
+  (and conn
+       (clutch--object-connection-alive-p conn)
+       (= generation (clutch--object-warmup-generation conn key))))
+
+(defun clutch--object-warmup-debug-event (conn phase backend category summary)
+  "Record an object warmup debug event for CATEGORY on CONN."
+  (when clutch-debug-mode
+    (clutch--remember-debug-event
+     :connection conn
+     :op "object-warmup"
+     :phase phase
+     :backend backend
+     :summary summary
+     :context (list :object-category category))))
+
+(defun clutch--object-warmup-stale-debug-event (conn backend category what)
+  "Record a stale object warmup debug event for CATEGORY and WHAT."
+  (clutch--object-warmup-debug-event
+   conn "stale-drop" backend category
+   (format "Ignored stale %s warmup %s" category what)))
+
+(defun clutch--object-warmup-success (conn key generation backend category type entries)
+  "Handle successful warmup ENTRIES for CATEGORY."
+  (if (clutch--object-warmup-current-p conn key generation)
+      (progn
+        (clutch--object-warmup-debug-event
+         conn "success" backend category
+         (format "Loaded %d %s entries" (length entries) category))
+        (clutch--store-object-cache-type-entries conn type entries)
+        (clutch--schedule-object-warmup conn))
+    (clutch--object-warmup-stale-debug-event conn backend category "result")))
+
+(defun clutch--object-warmup-error (conn key generation backend category message)
+  "Handle a warmup error MESSAGE for CATEGORY."
+  (if (clutch--object-warmup-current-p conn key generation)
+      (progn
+        (clutch--object-warmup-debug-event
+         conn "error" backend category
+         (or message (format "%s warmup failed" category)))
+        (clutch--schedule-object-warmup conn))
+    (clutch--object-warmup-stale-debug-event conn backend category "error")))
+
 (defun clutch--schedule-object-warmup (conn)
   "Warm non-table object categories for CONN during idle time."
   (let* ((key (clutch--object-cache-key conn))
@@ -330,9 +374,7 @@ minibuffer has been quit.")
        clutch-object-warmup-idle-delay-seconds nil
         (lambda ()
           (remhash key clutch--object-warmup-timers)
-          (when (and conn
-                     (clutch--object-connection-alive-p conn)
-                     (= generation (clutch--object-warmup-generation conn key)))
+          (when (clutch--object-warmup-current-p conn key generation)
             (condition-case err
                 (if (clutch-db-busy-p conn)
                     (clutch--schedule-object-warmup conn)
@@ -343,65 +385,16 @@ minibuffer has been quit.")
                                     (clutch-db-list-objects-async
                                      conn next
                                      (lambda (entries)
-                                       (if (and conn
-                                                (clutch--object-connection-alive-p conn)
-                                                (= generation
-                                                   (clutch--object-warmup-generation conn key)))
-                                           (progn
-                                             (when clutch-debug-mode
-                                               (clutch--remember-debug-event
-                                                :connection conn
-                                                :op "object-warmup"
-                                                :phase "success"
-                                                :backend backend
-                                                :summary (format "Loaded %d %s entries"
-                                                                 (length entries) next)
-                                                :context (list :object-category next)))
-                                             (clutch--store-object-cache-type-entries conn type entries)
-                                             (clutch--schedule-object-warmup conn))
-                                         (when clutch-debug-mode
-                                           (clutch--remember-debug-event
-                                            :connection conn
-                                            :op "object-warmup"
-                                            :phase "stale-drop"
-                                            :backend backend
-                                            :summary (format "Ignored stale %s warmup result"
-                                                             next)
-                                            :context (list :object-category next)))))
+                                       (clutch--object-warmup-success
+                                        conn key generation backend next type entries))
                                      (lambda (message)
-                                       (if (and conn
-                                                (clutch--object-connection-alive-p conn)
-                                                (= generation
-                                                   (clutch--object-warmup-generation conn key)))
-                                           (progn
-                                             (when clutch-debug-mode
-                                               (clutch--remember-debug-event
-                                                :connection conn
-                                                :op "object-warmup"
-                                                :phase "error"
-                                                :backend backend
-                                                :summary (or message
-                                                             (format "%s warmup failed" next))
-                                                :context (list :object-category next)))
-                                             (clutch--schedule-object-warmup conn))
-                                         (when clutch-debug-mode
-                                           (clutch--remember-debug-event
-                                            :connection conn
-                                            :op "object-warmup"
-                                            :phase "stale-drop"
-                                            :backend backend
-                                            :summary (format "Ignored stale %s warmup error"
-                                                             next)
-                                            :context (list :object-category next))))))))
+                                       (clutch--object-warmup-error
+                                        conn key generation backend next message)))))
                                (when (and started clutch-debug-mode)
-                                 (clutch--remember-debug-event
-                                  :connection conn
-                                  :op "object-warmup"
-                                  :phase "submit"
-                                  :backend backend
-                                  :summary (format "Queued background object warmup for %s"
-                                                   next)
-                                  :context (list :object-category next)))
+                                 (clutch--object-warmup-debug-event
+                                  conn "submit" backend next
+                                  (format "Queued background object warmup for %s"
+                                          next)))
                                started))
                       (progn
                         (when type

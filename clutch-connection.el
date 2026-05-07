@@ -699,53 +699,35 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 ;;;; Timeout normalization
 
+(defun clutch--apply-timeout-defaults (params defaults)
+  "Return PARAMS with timeout DEFAULTS filled in."
+  (cl-loop with normalized = (copy-sequence params)
+           for (key . value) in defaults
+           do (setq normalized
+                    (plist-put normalized key
+                               (or (plist-get normalized key) value)))
+           finally return normalized))
+
 (defun clutch--normalize-timeout-params (backend params)
   "Return PARAMS with unified timeout defaults for BACKEND.
 Signals a `user-error' when removed timeout keys are present."
   (when (plist-member params :read-timeout)
     (user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
-  (let ((normalized (copy-sequence params)))
-    (cond
-     ((eq backend 'mysql)
-      (setq normalized
-            (plist-put normalized :connect-timeout
-                       (or (plist-get normalized :connect-timeout)
-                           clutch-connect-timeout-seconds)))
-      (setq normalized
-            (plist-put normalized :read-idle-timeout
-                       (or (plist-get normalized :read-idle-timeout)
-                           clutch-read-idle-timeout-seconds))))
-     ((eq backend 'pg)
-      (setq normalized
-            (plist-put normalized :connect-timeout
-                       (or (plist-get normalized :connect-timeout)
-                           clutch-connect-timeout-seconds)))
-      (setq normalized
-            (plist-put normalized :read-idle-timeout
-                       (or (plist-get normalized :read-idle-timeout)
-                           clutch-read-idle-timeout-seconds)))
-      (setq normalized
-            (plist-put normalized :query-timeout
-                       (or (plist-get normalized :query-timeout)
-                           clutch-query-timeout-seconds))))
-     ((clutch--jdbc-backend-p backend)
-      (setq normalized
-            (plist-put normalized :connect-timeout
-                       (or (plist-get normalized :connect-timeout)
-                           clutch-connect-timeout-seconds)))
-      (setq normalized
-            (plist-put normalized :read-idle-timeout
-                       (or (plist-get normalized :read-idle-timeout)
-                           clutch-read-idle-timeout-seconds)))
-      (setq normalized
-            (plist-put normalized :query-timeout
-                       (or (plist-get normalized :query-timeout)
-                           clutch-query-timeout-seconds)))
-      (setq normalized
-            (plist-put normalized :rpc-timeout
-                       (or (plist-get normalized :rpc-timeout)
-                           clutch-jdbc-rpc-timeout-seconds)))))
-    normalized))
+  (clutch--apply-timeout-defaults
+   params
+   (cond
+    ((eq backend 'mysql)
+     `((:connect-timeout . ,clutch-connect-timeout-seconds)
+       (:read-idle-timeout . ,clutch-read-idle-timeout-seconds)))
+    ((eq backend 'pg)
+     `((:connect-timeout . ,clutch-connect-timeout-seconds)
+       (:read-idle-timeout . ,clutch-read-idle-timeout-seconds)
+       (:query-timeout . ,clutch-query-timeout-seconds)))
+    ((clutch--jdbc-backend-p backend)
+     `((:connect-timeout . ,clutch-connect-timeout-seconds)
+       (:read-idle-timeout . ,clutch-read-idle-timeout-seconds)
+       (:query-timeout . ,clutch-query-timeout-seconds)
+       (:rpc-timeout . ,clutch-jdbc-rpc-timeout-seconds))))))
 
 ;;;; Password resolution and connection building
 

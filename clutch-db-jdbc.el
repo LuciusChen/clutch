@@ -444,6 +444,23 @@ Defaults to 8 lines.  Return nil when stderr is empty."
     (process-send-string clutch-jdbc--agent-process (concat msg "\n"))
     id))
 
+(defun clutch-jdbc--take-queued-response (id)
+  "Remove and return queued response matching ID, preserving other responses."
+  (let (response remaining)
+    (while (and (not response) clutch-jdbc--response-queue)
+      (let ((parsed (pop clutch-jdbc--response-queue)))
+        (cond
+         ((and parsed
+               (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
+          (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
+         ((and parsed (eql (plist-get parsed :id) id))
+          (setq response parsed))
+         (t
+          (push parsed remaining)))))
+    (setq clutch-jdbc--response-queue
+          (nconc (nreverse remaining) clutch-jdbc--response-queue))
+    response))
+
 (defun clutch-jdbc--recv-response (id &optional timeout-seconds op)
   "Wait for and return the response with matching ID as a plist.
 TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'.
@@ -455,19 +472,7 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
     (while (and (not response) (< (float-time) deadline))
       ;; Drain any queued responses while preserving unmatched entries.
       (when clutch-jdbc--response-queue
-        (let (remaining)
-          (while (and (not response) clutch-jdbc--response-queue)
-            (let ((parsed (pop clutch-jdbc--response-queue)))
-              (cond
-               ((and parsed
-                     (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
-                (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
-               ((and parsed (eql (plist-get parsed :id) id))
-                (setq response parsed))
-               (t
-                (push parsed remaining)))))
-          (setq clutch-jdbc--response-queue
-                (nconc (nreverse remaining) clutch-jdbc--response-queue))))
+        (setq response (clutch-jdbc--take-queued-response id)))
       (unless response
         (if (and clutch-jdbc--agent-process
                  (not (process-live-p clutch-jdbc--agent-process)))
@@ -512,19 +517,7 @@ Unlike `clutch-jdbc--recv-response', this never kills the agent process."
                   (< (float-time) deadline))
         ;; Drain any queued responses while preserving unmatched entries.
         (when clutch-jdbc--response-queue
-          (let (remaining)
-            (while (and (not response) clutch-jdbc--response-queue)
-              (let ((parsed (pop clutch-jdbc--response-queue)))
-                (cond
-                 ((and parsed
-                       (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
-                  (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
-                 ((and parsed (eql (plist-get parsed :id) id))
-                  (setq response parsed))
-                 (t
-                  (push parsed remaining)))))
-            (setq clutch-jdbc--response-queue
-                  (nconc (nreverse remaining) clutch-jdbc--response-queue))))
+          (setq response (clutch-jdbc--take-queued-response id)))
         (unless response
           (if (or (null clutch-jdbc--agent-process)
                   (not (process-live-p clutch-jdbc--agent-process)))

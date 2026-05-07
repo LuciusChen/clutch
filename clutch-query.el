@@ -456,20 +456,11 @@ Returns a vector of integers."
 (defun clutch--row-identity-single-from-table-p (sql)
   "Return non-nil when SQL has a single top-level FROM table segment."
   (when-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
-    (let* ((start (+ from-pos 4))
-           (end (or (car (sort (delq nil
-                                      (mapcar
-                                       (lambda (clause)
-                                         (clutch-db-sql-find-top-level-clause
-                                          sql clause start))
-                                       '("WHERE" "GROUP" "HAVING" "ORDER\\s-+BY"
-                                         "LIMIT" "OFFSET" "FETCH" "UNION"
-                                         "INTERSECT" "EXCEPT")))
-                              #'<))
-                    (length sql)))
-           (from-segment (string-trim-left (substring sql start end))))
-      (and (not (string-prefix-p "(" from-segment))
-           (not (clutch--row-identity-top-level-comma-p sql start end))))))
+    (pcase-let ((`(,start ,end)
+                 (clutch--row-identity-from-body-range sql from-pos)))
+      (let ((from-segment (string-trim-left (substring sql start end))))
+        (and (not (string-prefix-p "(" from-segment))
+             (not (clutch--row-identity-top-level-comma-p sql start end)))))))
 
 (defun clutch--row-identity-direct-select-p (sql)
   "Return non-nil when SQL starts with a direct SELECT."
@@ -489,23 +480,82 @@ Returns a vector of integers."
        (not (clutch-db-sql-find-top-level-clause sql "EXCEPT"))
        (not (clutch-db-sql-find-top-level-clause sql "JOIN"))))
 
+(defun clutch--row-identity-from-body-range (sql from-pos)
+  "Return `(START END)' for the top-level FROM body after FROM-POS."
+  (let ((start (+ from-pos 4)))
+    (list start
+          (or (cl-loop for clause in '("WHERE" "GROUP" "HAVING" "ORDER\\s-+BY"
+                                       "LIMIT" "OFFSET" "FETCH" "UNION"
+                                       "INTERSECT" "EXCEPT")
+                       for pos = (clutch-db-sql-find-top-level-clause
+                                  sql clause start)
+                       when pos minimize pos)
+              (length sql)))))
+
+(defun clutch--row-identity-from-body-parts (body)
+  "Return `(TABLE ALIAS)' from simple FROM BODY."
+  (let ((case-fold-search t)
+        (pattern (concat "\\`\\s-*"
+                         "\\(\\(?:\\(?:\"[^\"]+\"\\.\\)?\"[^\"]+\"\\|[^[:space:]]+\\)\\)"
+                         "\\(?:\\s-+\\(?:AS\\s-+\\)?\\(\"[^\"]+\"\\|[^[:space:]]+\\)\\)?"
+                         "\\s-*\\'")))
+    (and (string-match pattern body)
+         (list (match-string 1 body)
+               (match-string 2 body)))))
+
+(defun clutch--row-identity-table-qualifier (table)
+  "Return the exposed table qualifier from TABLE."
+  (cond
+   ((string-match "\\.\\(\"[^\"]+\"\\)\\'" table)
+    (match-string 1 table))
+   ((string-match "\\.\\([^.\"]+\\)\\'" table)
+    (match-string 1 table))
+   (t table)))
+
+(defun clutch--row-identity-oracle-star-rewrite (sql from-pos)
+  "Return Oracle-safe SQL and star qualifier for SELECT * SQL.
+The return value is `(SQL QUALIFIER)'.  QUALIFIER is nil when SQL did not need
+rewriting."
+  (let ((select-list (string-trim (substring sql 0 from-pos))))
+    (when (string-match-p "\\`\\s-*SELECT\\s-+\\*\\s-*\\'" select-list)
+      (pcase-let* ((`(,body-start ,body-end)
+                    (clutch--row-identity-from-body-range sql from-pos))
+                   (body (substring sql body-start body-end))
+                   (parts (clutch--row-identity-from-body-parts body)))
+        (when parts
+          (let* ((table (car parts))
+                 (alias (cadr parts))
+                 (qualifier (or alias
+                                (clutch--row-identity-table-qualifier table))))
+            (list sql (format "%s.*" qualifier))))))))
+
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
 CONN supplies identifier escaping for the hidden aliases."
-  (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
-      (let ((hidden (mapconcat
-                     #'identity
-                     (cl-mapcar
-                      (lambda (expr alias)
-                        (format "%s AS %s"
-                                expr
-                                (clutch-db-escape-identifier conn alias)))
-                      expressions aliases)
-                     ", ")))
-        (concat (string-trim-right (substring sql 0 from-pos))
+  (let ((sql (string-trim-right
+              (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+    (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+      (let* ((oracle-star
+              (and (clutch--connection-oracle-jdbc-p conn)
+                   (clutch--row-identity-oracle-star-rewrite sql from-pos)))
+             (effective-sql (or (car oracle-star) sql))
+             (select-head
+              (if-let* ((qualified-star (cadr oracle-star)))
+                  (format "SELECT %s" qualified-star)
+                (string-trim-right (substring effective-sql 0 from-pos))))
+             (hidden (mapconcat
+                      #'identity
+                      (cl-mapcar
+                       (lambda (expr alias)
+                         (format "%s AS %s"
+                                 expr
+                                 (clutch-db-escape-identifier conn alias)))
+                       expressions aliases)
+                      ", ")))
+        (concat select-head
                 ", " hidden " "
-                (string-trim-left (substring sql from-pos))))
-    sql))
+                (string-trim-left (substring effective-sql from-pos))))
+      sql)))
 
 (defun clutch--prepare-row-identity-query (conn sql)
   "Return a row identity preparation plist for executing SQL on CONN.
@@ -872,6 +922,38 @@ hidden row identity columns in COLUMNS.  Returns column names."
     (format "Affected %s row(s)"
             (or (clutch-db-result-affected-rows result) 0))))
 
+(defun clutch--execute-source-buffer ()
+  "Return the source buffer for the current execution."
+  (if (window-live-p clutch--source-window)
+      (window-buffer clutch--source-window)
+    (current-buffer)))
+
+(defun clutch--remember-execute-debug-event (connection phase sql
+                                                        &optional buffer summary
+                                                        elapsed context)
+  "Record an execute debug event for CONNECTION, PHASE, and SQL."
+  (when clutch-debug-mode
+    (apply #'clutch--remember-debug-event
+           (append (when buffer (list :buffer buffer))
+                   (list :connection connection
+                         :op "execute"
+                         :phase phase
+                         :backend (clutch--backend-key-from-conn connection)
+                         :sql sql)
+                   (when summary (list :summary summary))
+                   (when elapsed (list :elapsed elapsed))
+                   (when context (list :context context))))))
+
+(defun clutch--abort-execution-on-db-error (source-buffer connection sql err)
+  "Record ERR for SQL on CONNECTION and abort the current execution."
+  (let* ((failure (clutch--remember-execute-error
+                   source-buffer connection sql err))
+         (message (car failure))
+         (summary (cdr failure)))
+    (clutch--mark-sql-error source-buffer sql message)
+    (message "%s" (clutch--debug-workflow-message summary))
+    (throw 'clutch--execution-aborted nil)))
+
 (defun clutch--execute-select (sql connection)
   "Execute a SELECT SQL query with pagination on CONNECTION.
 Returns the query result."
@@ -881,45 +963,24 @@ Returns the query result."
          (identity-sql (plist-get row-identity-prep :sql))
          (paged-sql (clutch-db-build-paged-sql connection identity-sql 0 page-size))
          (start (float-time))
-         (source-buffer
-          (if (window-live-p clutch--source-window)
-              (window-buffer clutch--source-window)
-            (current-buffer)))
+         (source-buffer (clutch--execute-source-buffer))
          (_debug-start
-          (when clutch-debug-mode
-            (clutch--remember-debug-event
-             :buffer source-buffer
-             :connection connection
-             :op "execute"
-             :phase "start"
-             :backend (clutch--backend-key-from-conn connection)
-             :sql sql
-             :context (list :paged-sql (clutch--debug-sql-preview paged-sql)))))
+          (clutch--remember-execute-debug-event
+           connection "start" sql source-buffer nil nil
+           (list :paged-sql (clutch--debug-sql-preview paged-sql))))
          (result (condition-case err
                      (clutch--run-db-query connection paged-sql)
                    (clutch-db-error
-                    (let* ((failure (clutch--remember-execute-error
-                                     source-buffer connection sql err))
-                           (message (car failure))
-                           (summary (cdr failure)))
-                      (clutch--mark-sql-error source-buffer sql message)
-                      (message "%s" (clutch--debug-workflow-message summary))
-                      (throw 'clutch--execution-aborted nil)))))
+                    (clutch--abort-execution-on-db-error
+                     source-buffer connection sql err))))
          (elapsed (- (float-time) start))
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch--apply-row-identity-column-metadata
                    (clutch-db-result-columns result) row-identity-prep))
          (rows (clutch-db-result-rows result)))
-    (when clutch-debug-mode
-      (clutch--remember-debug-event
-       :buffer source-buffer
-       :connection connection
-       :op "execute"
-       :phase "success"
-       :backend (clutch--backend-key-from-conn connection)
-       :summary (clutch--query-debug-summary result)
-       :sql sql
-       :elapsed elapsed))
+    (clutch--remember-execute-debug-event
+     connection "success" sql source-buffer
+     (clutch--query-debug-summary result) elapsed)
     (with-current-buffer buf
       (clutch-result-mode)
       (let ((col-names (clutch--init-result-state
@@ -938,37 +999,15 @@ Returns the query result."
   (setq clutch--last-query sql)
   (let* ((start (float-time))
          (_debug-start
-          (when clutch-debug-mode
-            (clutch--remember-debug-event
-             :connection connection
-             :op "execute"
-             :phase "start"
-             :backend (clutch--backend-key-from-conn connection)
-             :sql sql)))
+          (clutch--remember-execute-debug-event connection "start" sql))
          (result (condition-case err
                      (clutch--run-db-query connection sql)
                    (clutch-db-error
-                    (let* ((source-buffer
-                            (if (window-live-p clutch--source-window)
-                                (window-buffer clutch--source-window)
-                              (current-buffer)))
-                           (failure (clutch--remember-execute-error
-                                     source-buffer connection sql err))
-                           (message (car failure))
-                           (summary (cdr failure)))
-                      (clutch--mark-sql-error source-buffer sql message)
-                      (message "%s" (clutch--debug-workflow-message summary))
-                      (throw 'clutch--execution-aborted nil)))))
+                    (clutch--abort-execution-on-db-error
+                     (clutch--execute-source-buffer) connection sql err))))
          (elapsed (- (float-time) start)))
-    (when clutch-debug-mode
-      (clutch--remember-debug-event
-       :connection connection
-       :op "execute"
-       :phase "success"
-       :backend (clutch--backend-key-from-conn connection)
-       :summary (clutch--query-debug-summary result)
-       :sql sql
-       :elapsed elapsed))
+    (clutch--remember-execute-debug-event
+     connection "success" sql nil (clutch--query-debug-summary result) elapsed)
     (when (clutch--schema-affecting-query-p sql)
       (if (clutch-db-eager-schema-refresh-p connection)
           (clutch--set-schema-status connection 'stale)
