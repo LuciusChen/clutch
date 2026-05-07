@@ -77,6 +77,20 @@ For backend-specific notes, see
 - Per-table/per-column result displayers can override cell text via =clutch-register-column-displayer= or =clutch-column-displayers= while keeping the raw cell value, value viewers (=v= / =V=), and cell face logic unchanged
 - REPL mode (comint-based)
 
+Row identity support for staged =UPDATE= / =DELETE=:
+
+| Backend | No-primary-key support |
+|---------+------------------------|
+| MySQL native | non-null unique keys; no physical row-locator fallback |
+| PostgreSQL native | non-null unique keys, then =ctid= for ordinary heap tables |
+| SQLite native | non-null unique keys, then =rowid= for tables not declared =WITHOUT ROWID= |
+| Oracle JDBC | non-null unique keys, then =ROWID= |
+| Other JDBC backends | non-null unique keys only |
+
+Joined, grouped, derived, or otherwise ambiguous result sets remain read-only
+for staged =UPDATE= / =DELETE= unless clutch can identify a single source table
+and inject or read a matching row identity.
+
 * Documentation
 
 - [[file:docs/interactive-client.org][Interactive client guide]] — key bindings, result workflows, object actions, REPL, transient menus, faces, timeouts, and customization.
@@ -448,10 +462,11 @@ See =AGENTS.md= §Pre-Commit Checklist for exact test commands.
 
 * Roadmap
 
-- SQL rewrite engine (AST-based) for safer, semantics-aware transformations
-  across complex queries (CTE/UNION/nested SELECT) and dialect differences.
-  Current filtering uses a safe derived-table wrapper; full AST rewriting is
-  planned for future iterations.
+- AST-based SQL rewriting is deferred, not planned as a near-term feature.
+  The current top-level clause scanner plus derived-table fallback covers known
+  WHERE/filter/count/pagination cases across CTE, UNION, nested SELECT, and
+  window-function queries.  Revisit a full parser only if concrete rewrite bugs
+  or optimization features justify the added complexity.
 
 * License
 
