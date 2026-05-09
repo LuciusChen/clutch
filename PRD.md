@@ -1086,6 +1086,9 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 - Result buffers support per-table/per-column displayers through
   `clutch-register-column-displayer`.
 - Result buffers can pipe the current cell through a shell command with `|`.
+- Native MySQL/PostgreSQL live coverage is available through
+  `test/run-native-live-tests.sh`, which exercises UI-level result workflows and
+  backend-level adapter behavior against real local containers.
 
 ---
 

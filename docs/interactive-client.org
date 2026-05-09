@@ -76,6 +76,8 @@ support is backend-specific: PostgreSQL tables can use =ctid=, SQLite rowid
 tables can use =rowid=, and Oracle JDBC tables can use =ROWID=.  Physical row
 locators may change after UPDATE, so refresh order is still controlled only by
 the SQL query; use an explicit =ORDER BY= when row order matters.
+Aggregate or grouped result sets, such as =SELECT count(1) ...=, do not receive
+hidden row-identity columns and remain read-only for row mutation commands.
 Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
 header visible; busy state temporarily replaces the elapsed-time segment in the
 footer with a spinner instead of replacing the table header with the query-console

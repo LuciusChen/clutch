@@ -458,7 +458,27 @@ The pure protocol packages (=mysql= and =pg=) and the Org-Babel bridge
 (=ob-clutch=) now live in separate repositories and carry their own focused test
 suites.
 
-See =AGENTS.md= §Pre-Commit Checklist for exact test commands.
+Default ERT runs intentionally skip live tests when database credentials are not
+set.  Treat those runs as unit/regression coverage, not as proof that real
+database workflows still work.
+
+** Native live tests
+
+=test/run-native-live-tests.sh= runs the MySQL and PostgreSQL live suites against
+local Docker/OrbStack containers.  It covers both the UI-level result workflows
+and backend-level native adapter tests:
+
+#+begin_src sh
+./test/run-native-live-tests.sh
+#+end_src
+
+The live runner validates real SELECT execution, pagination/sort/filter/count,
+export collection, object describe metadata, staged insert/update/delete commit,
+aggregate SELECT row-identity behavior, PostgreSQL =ctid= row locators, and MySQL
+index-detail scoping.  JDBC live suites for Oracle, SQL Server, and ClickHouse
+remain credential-driven and are skipped by default.
+
+See =AGENTS.md= §Pre-Commit Checklist for exact unit and live test commands.
 
 * Roadmap
 

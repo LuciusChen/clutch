@@ -46,6 +46,7 @@
 (defvar clutch--error-banner-overlay)
 (defvar clutch--conn-sql-product)
 (defvar clutch--last-query)
+(defvar clutch--last-result-buffer)
 (defvar clutch--base-query)
 (defvar clutch--connection-params)
 (defvar clutch--console-name)
@@ -467,11 +468,135 @@ Returns a vector of integers."
   (let ((case-fold-search t))
     (string-match-p "\\`\\s-*select\\b" sql)))
 
+(defconst clutch--row-identity-aggregate-functions
+  '("ARRAY_AGG" "AVG" "BIT_AND" "BIT_OR" "BIT_XOR" "BOOL_AND" "BOOL_OR"
+    "COLLECT" "CORR" "COUNT" "COVAR_POP" "COVAR_SAMP" "EVERY"
+    "GROUP_CONCAT" "JSON_AGG" "JSON_OBJECT_AGG" "JSONB_AGG"
+    "JSONB_OBJECT_AGG" "LISTAGG" "MAX" "MEDIAN" "MIN"
+    "PERCENTILE_CONT" "PERCENTILE_DISC" "REGR_COUNT" "STDDEV"
+    "STDDEV_POP" "STDDEV_SAMP" "STRING_AGG" "SUM" "VAR_POP"
+    "VAR_SAMP" "VARIANCE" "XMLAGG")
+  "Aggregate function names that make row identity injection unsafe.")
+
+(defun clutch--row-identity-ident-char-p (char)
+  "Return non-nil when CHAR can be part of a SQL identifier."
+  (and char
+       (or (and (>= char ?A) (<= char ?Z))
+           (and (>= char ?a) (<= char ?z))
+           (and (>= char ?0) (<= char ?9))
+           (= char ?_)
+           (= char ?$))))
+
+(defun clutch--row-identity-skip-space (sql pos)
+  "Return position after whitespace in SQL starting at POS."
+  (let ((len (length sql)))
+    (while (and (< pos len)
+                (memq (aref sql pos) '(?\s ?\t ?\r ?\n)))
+      (cl-incf pos))
+    pos))
+
+(defun clutch--row-identity-looking-at-keyword-p (sql pos keyword)
+  "Return non-nil when SQL at POS starts with KEYWORD as a token."
+  (let* ((len (length sql))
+         (end (+ pos (length keyword)))
+         (case-fold-search t))
+    (and (<= end len)
+         (string= (upcase (substring sql pos end)) keyword)
+         (not (clutch--row-identity-ident-char-p
+               (and (< end len) (aref sql end)))))))
+
+(defun clutch--row-identity-matching-paren-pos (sql open-pos)
+  "Return the matching close-paren position for OPEN-POS in SQL, or nil."
+  (let ((pos open-pos)
+        (len (length sql))
+        (depth 0)
+        close)
+    (while (and (< pos len) (not close))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+          (setq pos skip)
+        (let ((char (aref sql pos)))
+          (cond
+           ((= char ?\()
+            (cl-incf depth)
+            (cl-incf pos))
+           ((= char ?\))
+            (cl-decf depth)
+            (if (= depth 0)
+                (setq close pos)
+              (cl-incf pos)))
+           (t
+            (cl-incf pos))))))
+    close))
+
+(defun clutch--row-identity-window-aggregate-call-p (sql open-pos)
+  "Return non-nil when aggregate call at OPEN-POS is used as a window function."
+  (when-let* ((close-pos (clutch--row-identity-matching-paren-pos sql open-pos)))
+    (let ((pos (clutch--row-identity-skip-space sql (1+ close-pos))))
+      (when (clutch--row-identity-looking-at-keyword-p sql pos "FILTER")
+        (setq pos (clutch--row-identity-skip-space
+                   sql (+ pos (length "FILTER"))))
+        (when (and (< pos (length sql))
+                   (= (aref sql pos) ?\())
+          (when-let* ((filter-close
+                       (clutch--row-identity-matching-paren-pos sql pos)))
+            (setq pos (clutch--row-identity-skip-space
+                       sql (1+ filter-close))))))
+      (clutch--row-identity-looking-at-keyword-p sql pos "OVER"))))
+
+(defun clutch--row-identity-select-list-has-aggregate-p (sql)
+  "Return non-nil when SQL's outer SELECT list contains a non-window aggregate."
+  (let ((case-fold-search t))
+    (when (string-match "\\`\\s-*select\\b" sql)
+      (let* ((start (match-end 0))
+             (end (clutch-db-sql-find-top-level-clause sql "FROM")))
+        (when end
+          (let ((select-list (substring sql start end))
+                (pos 0)
+                (len (- end start)))
+            (catch 'aggregate
+              (while (< pos len)
+                (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
+                                 select-list pos)))
+                    (setq pos skip)
+                  (let ((char (aref select-list pos)))
+                    (cond
+                     ((= char ?\()
+                      (let ((inner (clutch--row-identity-skip-space
+                                    select-list (1+ pos))))
+                        (if (or (clutch--row-identity-looking-at-keyword-p
+                                 select-list inner "SELECT")
+                                (clutch--row-identity-looking-at-keyword-p
+                                 select-list inner "WITH"))
+                            (setq pos (if-let* ((close (clutch--row-identity-matching-paren-pos
+                                                        select-list pos)))
+                                          (1+ close)
+                                        len))
+                          (cl-incf pos))))
+                     ((clutch--row-identity-ident-char-p char)
+                      (let ((ident-start pos))
+                        (while (and (< pos len)
+                                    (clutch--row-identity-ident-char-p
+                                     (aref select-list pos)))
+                          (cl-incf pos))
+                        (let* ((ident (upcase (substring select-list ident-start pos)))
+                               (call-pos (clutch--row-identity-skip-space
+                                          select-list pos)))
+                          (when (and (member ident clutch--row-identity-aggregate-functions)
+                                     (< call-pos len)
+                                     (= (aref select-list call-pos) ?\()
+                                     (not (clutch--row-identity-window-aggregate-call-p
+                                           select-list call-pos)))
+                            (throw 'aggregate t)))))
+                     (t
+                      (cl-incf pos))))))
+              nil)))))))
+
 (defun clutch--row-identity-augmentable-sql-p (sql table)
   "Return non-nil when SQL for TABLE may receive hidden identity columns."
   (and table
        (clutch--row-identity-direct-select-p sql)
        (clutch--row-identity-single-from-table-p sql)
+       (not (clutch--row-identity-select-list-has-aggregate-p sql))
        (not (clutch-db-sql-find-top-level-clause sql "DISTINCT"))
        (not (clutch-db-sql-find-top-level-clause sql "GROUP"))
        (not (clutch-db-sql-find-top-level-clause sql "HAVING"))
@@ -988,8 +1113,10 @@ Returns the query result."
                         row-identity-prep)))
         (clutch--load-fk-info)
         (when col-names
-          (clutch--display-select-result col-names rows columns)))
-      )
+          (clutch--display-select-result col-names rows columns))))
+    (when (buffer-live-p source-buffer)
+      (with-current-buffer source-buffer
+        (setq-local clutch--last-result-buffer buf)))
     (clutch--show-result-buffer buf)
     result))
 

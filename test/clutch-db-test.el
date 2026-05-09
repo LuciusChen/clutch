@@ -10,7 +10,11 @@
 ;; ERT tests for the clutch-db generic database interface.
 ;;
 ;; Unit tests run without a database server.
-;; Live tests require both MySQL and PostgreSQL:
+;; Native live tests require MySQL and PostgreSQL.  The live runner starts or
+;; reuses local Docker/OrbStack containers:
+;;   ./test/run-native-live-tests.sh
+;;
+;; Manual live setup:
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
 ;;
@@ -24,7 +28,7 @@
 ;;   Emacs -batch -L .. -l ert -l clutch-db-test \
 ;;     -f ert-run-tests-batch-and-exit
 ;;
-;; Run live tests:
+;; Run native live tests manually:
 ;;   Emacs -batch -L .. -l ert -l clutch-db-test \
 ;;     --eval '(setq clutch-db-test-mysql-password "test")' \
 ;;     --eval '(setq clutch-db-test-pg-password "test")' \
@@ -2353,6 +2357,44 @@ Skips if `clutch-db-test-mysql-password' is nil."
         (ignore-errors
           (clutch-db-query
            conn "SET SESSION sql_generate_invisible_primary_key=OFF"))))))
+
+(ert-deftest clutch-db-test-mysql-live-index-details-filter-by-target-table ()
+  :tags '(:db-live :mysql-live)
+  "MySQL index details should stay scoped to the target table."
+  (clutch-db-test--with-mysql conn
+    (let* ((suffix (emacs-pid))
+           (table-a (format "clutch_idx_a_%d" suffix))
+           (table-b (format "clutch_idx_b_%d" suffix))
+           (drop-a (format "DROP TABLE IF EXISTS %s" table-a))
+           (drop-b (format "DROP TABLE IF EXISTS %s" table-b))
+           (create-a
+            (format "CREATE TABLE %s (id INT PRIMARY KEY, code INT, KEY idx_same (code))"
+                    table-a))
+           (create-b
+            (format "CREATE TABLE %s (id INT PRIMARY KEY, other_code INT, KEY idx_same (other_code))"
+                    table-b)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-a)
+            (clutch-db-query conn drop-b)
+            (clutch-db-query conn create-a)
+            (clutch-db-query conn create-b)
+            (let ((details-a (clutch-db-object-details
+                              conn
+                              (list :name "idx_same" :type "INDEX"
+                                    :target-table table-a)))
+                  (details-b (clutch-db-object-details
+                              conn
+                              (list :name "idx_same" :type "INDEX"
+                                    :target-table table-b))))
+              (should (equal (mapcar (lambda (col) (plist-get col :name))
+                                     details-a)
+                             '("code")))
+              (should (equal (mapcar (lambda (col) (plist-get col :name))
+                                     details-b)
+                             '("other_code")))))
+        (ignore-errors (clutch-db-query conn drop-a))
+        (ignore-errors (clutch-db-query conn drop-b))))))
 
 (ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
   "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
