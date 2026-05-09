@@ -29,14 +29,16 @@ emacs -Q --batch -L . -l ert -l test/mysql-test.el \
   --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
 ```
 
-Run clutch native adapter live tests for MySQL and PostgreSQL:
+Run clutch native adapter live tests for MySQL and PostgreSQL from the `clutch`
+checkout:
 
 ```sh
-emacs -Q --batch -L . -L ../mysql.el -L ../pg-el -l ert -l test/clutch-db-test.el \
-  --eval '(setq clutch-db-test-mysql-password "test")' \
-  --eval '(setq clutch-db-test-pg-password "test")' \
-  --eval "(ert-run-tests-batch-and-exit '(tag :db-live))"
+./test/run-native-live-tests.sh
 ```
+
+The runner starts or reuses local Docker/OrbStack containers and executes both
+UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live`
+tests.  Default ERT runs skip those live tags unless credentials are provided.
 
 Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and
 MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake,

@@ -38,6 +38,8 @@
 (declare-function clutch--execute "clutch-query" (sql &optional conn))
 (declare-function clutch--format-value "clutch-query" (value))
 (declare-function clutch--json-value-to-string "clutch-query" (value))
+(declare-function clutch-result--source-table "clutch-query" ())
+(declare-function clutch--result-source-table-or-user-error "clutch-query" (op))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
 (declare-function clutch--sql-normalize-for-rewrite "clutch-query" (sql))
 (declare-function clutch--string-pad "clutch-query" (s width &optional pad-left numeric))
@@ -152,7 +154,7 @@ Scans text properties across the line."
 (defun clutch-result--column-detail (result-buf col-name)
   "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
   (with-current-buffer result-buf
-    (when-let* ((table (clutch-result--detect-table))
+    (when-let* ((table (clutch-result--source-table))
                 (details (clutch--ensure-column-details clutch-connection table t)))
       (cl-find-if (lambda (detail)
                     (equal (plist-get detail :name) col-name))
@@ -413,7 +415,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
          (iidx (- ridx nrows)))
     (unless (and (>= iidx 0) (< iidx (length clutch--pending-inserts)))
       (user-error "No staged insert at this row"))
-    (let ((table (or (clutch-result--detect-table)
+    (let ((table (or (clutch-result--source-table)
                      (user-error "Cannot detect source table")))
           (fields (nth iidx clutch--pending-inserts)))
       (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
@@ -514,34 +516,6 @@ Refresh the affected row and footer in place when possible."
 
 ;;;; Commit staged changes
 
-(defun clutch-result--table-from-sql (sql)
-  "Extract the first table name from the FROM clause of SQL.
-Handles backtick, double-quote, and unquoted identifiers, with an
-optional schema prefix (schema.table).  Returns a string or nil."
-  (let ((case-fold-search t))
-    (cond
-     ;; backtick-quoted: FROM `schema`.`table`  or  FROM `table`
-     ((string-match "\\bFROM\\s-+\\(?:`[^`]+`\\.\\)?`\\([^`]+\\)`" sql)
-      (match-string 1 sql))
-     ;; double-quoted: FROM "schema"."table"  or  FROM "table"
-     ((string-match "\\bFROM\\s-+\\(?:\"[^\"]+\"\\.\\)?\"\\([^\"]+\\)\"" sql)
-      (match-string 1 sql))
-     ;; unquoted (including CJK): FROM schema.table  or  FROM table
-     ((string-match "\\bFROM\\s-+\\(?:[^[:space:],();.]+\\.\\)?\\([^[:space:],();]+\\)" sql)
-      (match-string 1 sql)))))
-
-(defun clutch-result--detect-table ()
-  "Try to detect the source table from the last query.
-Returns table name string or nil."
-  (when clutch--last-query
-    (clutch-result--table-from-sql clutch--last-query)))
-
-(defun clutch--result-source-table-or-user-error (op)
-  "Return source table for current result, or signal user-error for OP."
-  (or (clutch-result--detect-table)
-      (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
-                  op)))
-
 (defun clutch-result--current-row-identity (&optional table)
   "Return current row identity metadata.
 TABLE is accepted for callers that already know the result source table."
@@ -560,7 +534,7 @@ Populates `clutch--fk-info' with an alist mapping
 column indices to their referenced table and column."
   (setq clutch--fk-info nil)
   (when-let* ((conn clutch-connection)
-              (table (clutch-result--detect-table))
+              (table (clutch-result--source-table))
               (col-names clutch--result-columns))
     (condition-case nil
         (let ((fks (clutch-db-foreign-keys conn table)))
@@ -664,7 +638,7 @@ WHERE predicate."
 
 (defun clutch-result--build-pending-insert-statements ()
   "Build INSERT statement specs from staged inserts."
-  (let ((table (or (clutch-result--detect-table)
+  (let ((table (or (clutch-result--source-table)
                    (user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
               (clutch-result-insert--build-sql clutch-connection table fields))
@@ -673,17 +647,56 @@ WHERE predicate."
 (defun clutch-result--build-pending-delete-statements ()
   "Build DELETE statement specs from staged deletes."
   (let* ((table (clutch--result-source-table-or-user-error "Build DELETE"))
-         (row-identity (clutch-result--row-identity-or-user-error table "Build DELETE"))
-         (conn clutch-connection))
+         (row-identity (clutch-result--row-identity-or-user-error
+                        table "Build DELETE")))
     (mapcar (lambda (identity-vec)
-              (let ((where-spec
-                     (clutch--row-identity-where-parts
-                      conn row-identity identity-vec)))
-                (cons (format "DELETE FROM %s WHERE %s"
-                              (clutch-db-escape-identifier conn table)
-                              (mapconcat #'identity (car where-spec) " AND "))
-                      (cdr where-spec))))
+              (clutch-result--build-delete-stmt-for-identity
+               table identity-vec row-identity))
             clutch--pending-deletes)))
+
+(defun clutch-result--pending-sql-statements ()
+  "Return the staged SQL statements that would run on commit."
+  (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
+    (user-error "No staged SQL"))
+  (clutch-result--render-statements
+   (append
+    (when clutch--pending-inserts
+      (clutch-result--build-pending-insert-statements))
+    (when clutch--pending-edits
+      (clutch-result--build-update-statements))
+    (when clutch--pending-deletes
+      (clutch-result--build-pending-delete-statements)))))
+
+(defun clutch-result--pending-sql-content (&optional stmts)
+  "Return STMTS as a trailing-newline-terminated staged SQL batch string.
+When STMTS is nil, build statements from the current staged state."
+  (let ((stmts (or stmts (clutch-result--pending-sql-statements))))
+    (if stmts
+        (concat (mapconcat (lambda (s) (concat s ";")) stmts "\n") "\n")
+      "")))
+
+;;;###autoload
+(defun clutch-result-copy-pending-sql ()
+  "Copy the staged SQL batch to the kill ring."
+  (interactive)
+  (let ((stmts (clutch-result--pending-sql-statements)))
+    (kill-new (clutch-result--pending-sql-content stmts))
+    (message "Copied %d staged SQL statement%s"
+             (length stmts) (if (= (length stmts) 1) "" "s"))))
+
+;;;###autoload
+(defun clutch-result-save-pending-sql ()
+  "Save the staged SQL batch to a file."
+  (interactive)
+  (let* ((stmts (clutch-result--pending-sql-statements))
+         (sql (clutch-result--pending-sql-content stmts))
+         (path (read-file-name "Save staged SQL to file: " nil nil nil "staged.sql")))
+    (with-temp-buffer
+      (insert sql)
+      (write-region (point-min) (point-max) path nil 'silent))
+    (message "Saved %d staged SQL statement%s to %s"
+             (length stmts) (if (= (length stmts) 1) "" "s")
+             path)))
 
 (defun clutch-result--execute-mutation-stmt (stmt &optional require-single-row)
   "Execute mutation STMT.
@@ -751,11 +764,17 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
 (defun clutch-result--build-delete-stmt (table row _col-names row-identity)
   "Build a DELETE statement spec for TABLE.
 ROW is the row data and ROW-IDENTITY describes the WHERE predicate."
+  (clutch-result--build-delete-stmt-for-identity
+   table
+   (clutch-result--extract-row-identity-vec row row-identity)
+   row-identity))
+
+(defun clutch-result--build-delete-stmt-for-identity
+    (table identity-vec row-identity)
+  "Build a DELETE statement spec for TABLE using IDENTITY-VEC."
   (let* ((conn clutch-connection)
-         (identity-values (clutch-result--extract-row-identity-vec
-                           row row-identity))
          (where-spec (clutch--row-identity-where-parts
-                      conn row-identity identity-values)))
+                      conn row-identity identity-vec)))
     (cons (format "DELETE FROM %s WHERE %s"
                   (clutch-db-escape-identifier conn table)
                   (mapconcat #'identity (car where-spec) " AND "))
@@ -1672,7 +1691,7 @@ fields until the user expands to all columns."
 (defun clutch-result-insert-row ()
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
-  (let* ((table (or (clutch-result--detect-table)
+  (let* ((table (or (clutch-result--source-table)
                     (user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
@@ -1714,7 +1733,7 @@ fields until the user expands to all columns."
 (defun clutch-result-insert--clone-fields-from-result-row (result-buf ridx)
   "Return prefilled insert fields for result row RIDX in RESULT-BUF."
   (with-current-buffer result-buf
-    (let* ((table (or (clutch-result--detect-table)
+    (let* ((table (or (clutch-result--source-table)
                       (user-error "Cannot detect source table")))
            (nrows (length clutch--result-rows)))
       (if (>= ridx nrows)
@@ -1747,7 +1766,7 @@ fields until the user expands to all columns."
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (let* ((table (with-current-buffer result-buf
-                    (or (clutch-result--detect-table)
+                    (or (clutch-result--source-table)
                         (user-error "Cannot detect source table"))))
            (fields
             (if record-source-p

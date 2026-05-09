@@ -72,6 +72,8 @@
 (defvar clutch--marked-rows)
 (defvar clutch--order-by)
 (defvar clutch--page-current)
+(defvar clutch--page-has-more)
+(defvar clutch--page-offset)
 (defvar clutch--page-total-rows)
 (defvar clutch--pending-deletes)
 (defvar clutch--pending-edits)
@@ -91,13 +93,12 @@
 (declare-function clutch--debug-sql-preview "clutch" (sql))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--remember-problem-record "clutch" (&rest args))
-(declare-function clutch-result--table-from-sql "clutch-edit" (sql))
 (declare-function clutch--find-console-buffer "clutch" (name &optional storage-name))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--console-persistence-name "clutch" (name &optional params))
 (declare-function clutch--console-file "clutch" (name))
 (declare-function clutch--effective-sql-product "clutch" (params))
-(declare-function clutch--set-schema-status "clutch" (conn state &optional table-count error-message))
+(declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))
 (declare-function clutch--sql-rewrite "clutch" (sql op &optional arg))
 
 ;; Forward declarations — functions from clutch-connection.el
@@ -130,10 +131,7 @@
 (declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
 (declare-function clutch--display-result "clutch-ui" (result sql elapsed))
 (declare-function clutch--load-fk-info "clutch-edit" ())
-(declare-function clutch-result--build-pending-insert-statements "clutch-edit" ())
-(declare-function clutch-result--build-update-statements "clutch-edit" ())
-(declare-function clutch-result--build-pending-delete-statements "clutch-edit" ())
-(declare-function clutch-result--render-statements "clutch-edit" (statements))
+(declare-function clutch-result--pending-sql-content "clutch-edit" (&optional stmts))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
@@ -418,6 +416,39 @@ Returns a vector of integers."
   (cl-loop for i below (length clutch--result-columns)
            unless (plist-get (nth i clutch--result-column-defs) :hidden)
            collect i))
+
+(defun clutch-result--table-from-sql (sql)
+  "Extract the first table name from the FROM clause of SQL.
+Handles backtick, double-quote, and unquoted identifiers, with an
+optional schema prefix (schema.table).  Returns a string or nil."
+  (let ((case-fold-search t))
+    (cond
+     ;; backtick-quoted: FROM `schema`.`table` or FROM `table`
+     ((string-match "\\bFROM\\s-+\\(?:`[^`]+`\\.\\)?`\\([^`]+\\)`" sql)
+      (match-string 1 sql))
+     ;; double-quoted: FROM \"schema\".\"table\" or FROM \"table\"
+     ((string-match "\\bFROM\\s-+\\(?:\"[^\"]+\"\\.\\)?\"\\([^\"]+\\)\"" sql)
+      (match-string 1 sql))
+     ;; unquoted (including CJK): FROM schema.table or FROM table
+     ((string-match "\\bFROM\\s-+\\(?:[^[:space:],();.]+\\.\\)?\\([^[:space:],();]+\\)" sql)
+      (match-string 1 sql)))))
+
+(defun clutch-result--detect-table ()
+  "Try to detect the source table from the last query.
+Returns table name string or nil."
+  (when clutch--last-query
+    (clutch-result--table-from-sql clutch--last-query)))
+
+(defun clutch-result--source-table ()
+  "Return the current result source table from state or SQL detection."
+  (or clutch--result-source-table
+      (clutch-result--detect-table)))
+
+(defun clutch--result-source-table-or-user-error (op)
+  "Return source table for current result, or signal user-error for OP."
+  (or (clutch-result--source-table)
+      (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
+                  op)))
 
 (defconst clutch--row-identity-hidden-prefix "clutch__rid_"
   "Prefix used for hidden row identity result columns.")
@@ -838,10 +869,12 @@ Oracle does not accept AS before a subquery alias."
       (replace-regexp-in-string "\\`_+" "" alias)
     (format "AS %s" alias)))
 
-(defun clutch--build-paged-sql (base-sql page-num page-size &optional order-by)
+(defun clutch--build-paged-sql (base-sql page-num page-size
+                                         &optional order-by page-offset)
   "Build a paged SQL query wrapping BASE-SQL.
 PAGE-NUM is 0-based, PAGE-SIZE is the row limit.
 ORDER-BY is a cons (COL-NAME . DIRECTION) or nil.
+PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM.
 If BASE-SQL already has a top-level LIMIT/OFFSET, pagination and sorting
 operate on that result set via an outer wrapper query."
   (let ((effective-base
@@ -852,23 +885,43 @@ operate on that result set via an outer wrapper query."
                      (clutch--sql-derived-table-alias "_clutch_page"))
            base-sql)))
     (clutch-db-build-paged-sql clutch-connection effective-base
-                               page-num page-size order-by)))
+                               page-num page-size order-by page-offset)))
+
+(defun clutch--page-current-from-offset (page-offset page-size)
+  "Return the zero-based logical page number for PAGE-OFFSET and PAGE-SIZE."
+  (if (and page-size (> page-size 0))
+      (floor (max 0 page-offset) page-size)
+    0))
+
+(defun clutch--split-page-lookahead-rows (rows page-size)
+  "Return (VISIBLE-ROWS . HAS-MORE) after removing one lookahead row."
+  (let ((has-more (> (length rows) page-size)))
+    (cons (if has-more
+              (cl-subseq rows 0 page-size)
+            rows)
+          has-more)))
 
 (defun clutch--update-page-state (columns rows elapsed page-num
-                                          &optional row-identity-prep)
+                                          &optional row-identity-prep
+                                          page-offset page-has-more)
   "Update buffer-local state for a new page of results.
 COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page.
-ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS."
+ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS.
+PAGE-OFFSET is the zero-based row offset for ROWS, and PAGE-HAS-MORE records
+whether a lookahead row proved there are later rows."
   (let* ((columns (clutch--apply-row-identity-column-metadata
                    columns row-identity-prep))
          (row-identity (clutch--finalize-row-identity
                         row-identity-prep columns))
-         (col-names (clutch--column-names columns)))
+         (col-names (clutch--column-names columns))
+         (offset (or page-offset (* page-num clutch-result-max-rows))))
     (setq-local clutch--result-columns col-names
                 clutch--result-column-defs columns
                 clutch--row-identity row-identity
                 clutch--result-rows rows
                 clutch--page-current page-num
+                clutch--page-offset offset
+                clutch--page-has-more page-has-more
                 clutch--cached-pk-indices
                 (and (eq (plist-get row-identity :kind) 'primary-key)
                      (or (plist-get row-identity :source-indices)
@@ -883,12 +936,16 @@ ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS."
                 clutch--column-widths
                 (clutch--compute-column-widths col-names rows columns))))
 
-(defun clutch--execute-page (page-num)
+(defun clutch--execute-page (page-num &optional page-offset)
   "Execute the query for PAGE-NUM and refresh the result buffer display.
 Uses the current effective result SQL, including active WHERE filters.
+PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination.
 Signals an error if pagination is not available."
   (let* ((source-buffer (current-buffer))
-         (effective-sql (clutch-result--effective-query)))
+         (effective-sql (clutch-result--effective-query))
+         (page-size clutch-result-max-rows)
+         (offset (or page-offset (* page-num page-size)))
+         (fetch-size (1+ page-size)))
     (unless effective-sql
       (user-error "Pagination not available for this query"))
     (clutch--ensure-connection)
@@ -901,8 +958,8 @@ Signals an error if pagination is not available."
             (clutch--prepare-row-identity-query clutch-connection effective-sql))
            (identity-sql (plist-get row-identity-prep :sql))
            (paged-sql (clutch--build-paged-sql
-                       identity-sql page-num
-                       clutch-result-max-rows clutch--order-by))
+                       identity-sql page-num fetch-size clutch--order-by
+                       offset))
            (start (float-time))
            (result (condition-case err
                        (clutch--run-db-query clutch-connection paged-sql)
@@ -914,21 +971,35 @@ Signals an error if pagination is not available."
                                effective-sql
                                err
                                (list :page-num page-num
+                                     :page-offset offset
                                      :paged-sql
                                      (clutch--debug-sql-preview paged-sql))))
                              (summary (cdr failure)))
                         (user-error "%s" (clutch--debug-workflow-message summary))))))
            (elapsed (- (float-time) start))
-           (rows (clutch-db-result-rows result)))
+           (page (clutch--split-page-lookahead-rows
+                  (clutch-db-result-rows result) page-size))
+           (rows (car page))
+           (has-more (cdr page)))
       (clutch--update-page-state
-       (clutch-db-result-columns result) rows elapsed page-num
-       row-identity-prep)
+       (clutch-db-result-columns result) rows elapsed
+       page-num
+       row-identity-prep offset has-more)
       (clutch--refresh-display)
-      (message "Page %d loaded (%s, %d row%s)"
-               (1+ page-num)
+      (message "Rows %d-%d loaded (%s, %d row%s)"
+               (if rows (1+ offset) 0)
+               (+ offset (length rows))
                (clutch--format-elapsed elapsed)
                (length rows)
                (if (= (length rows) 1) "" "s")))))
+
+(defun clutch--execute-page-at-offset (page-offset &optional page-num)
+  "Execute the result page whose first row starts at PAGE-OFFSET.
+PAGE-NUM records the logical page index for navigation when provided."
+  (clutch--execute-page
+   (or page-num
+       (clutch--page-current-from-offset page-offset clutch-result-max-rows))
+   page-offset))
 
 ;;;; Query execution engine
 
@@ -1004,11 +1075,14 @@ Leading SQL comments are stripped before checking."
      (upcase trimmed))))
 
 (defun clutch--init-result-state (conn sql columns rows elapsed
-                                       &optional row-identity-prep)
+                                       &optional row-identity-prep
+                                       page-offset page-has-more)
   "Initialize buffer-local state for a fresh query result.
 CONN is the connection, SQL the original query, COLUMNS and ROWS
 the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
-hidden row identity columns in COLUMNS.  Returns column names."
+hidden row identity columns in COLUMNS.  PAGE-OFFSET is the zero-based row
+offset for ROWS, and PAGE-HAS-MORE records one-row lookahead.  Returns column
+names."
   (let* ((columns (clutch--apply-row-identity-column-metadata
                    columns row-identity-prep))
          (row-identity (clutch--finalize-row-identity
@@ -1032,6 +1106,8 @@ hidden row identity columns in COLUMNS.  Returns column names."
                 clutch--sort-column nil
                 clutch--sort-descending nil
                 clutch--page-current 0
+                clutch--page-offset (or page-offset 0)
+                clutch--page-has-more page-has-more
                 clutch--page-total-rows nil
                 clutch--order-by nil
                 clutch--query-elapsed elapsed
@@ -1083,10 +1159,12 @@ hidden row identity columns in COLUMNS.  Returns column names."
   "Execute a SELECT SQL query with pagination on CONNECTION.
 Returns the query result."
   (let* ((page-size clutch-result-max-rows)
+         (fetch-size (1+ page-size))
          (row-identity-prep
           (clutch--prepare-row-identity-query connection sql))
          (identity-sql (plist-get row-identity-prep :sql))
-         (paged-sql (clutch-db-build-paged-sql connection identity-sql 0 page-size))
+         (paged-sql (clutch-db-build-paged-sql
+                     connection identity-sql 0 fetch-size nil 0))
          (start (float-time))
          (source-buffer (clutch--execute-source-buffer))
          (_debug-start
@@ -1102,7 +1180,10 @@ Returns the query result."
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch--apply-row-identity-column-metadata
                    (clutch-db-result-columns result) row-identity-prep))
-         (rows (clutch-db-result-rows result)))
+         (page (clutch--split-page-lookahead-rows
+                (clutch-db-result-rows result) page-size))
+         (rows (car page))
+         (has-more (cdr page)))
     (clutch--remember-execute-debug-event
      connection "success" sql source-buffer
      (clutch--query-debug-summary result) elapsed)
@@ -1110,7 +1191,7 @@ Returns the query result."
       (clutch-result-mode)
       (let ((col-names (clutch--init-result-state
                         connection sql columns rows elapsed
-                        row-identity-prep)))
+                        row-identity-prep 0 has-more)))
         (clutch--load-fk-info)
         (when col-names
           (clutch--display-select-result col-names rows columns))))
@@ -1564,16 +1645,7 @@ Semicolons inside strings, line comments, and block comments do not count."
            (if (or clutch--pending-inserts
                    clutch--pending-edits
                    clutch--pending-deletes)
-               (mapconcat (lambda (s) (concat s ";"))
-                          (clutch-result--render-statements
-                           (append
-                            (when clutch--pending-inserts
-                              (clutch-result--build-pending-insert-statements))
-                            (when clutch--pending-edits
-                              (clutch-result--build-update-statements))
-                            (when clutch--pending-deletes
-                              (clutch-result--build-pending-delete-statements))))
-                          "\n")
+               (string-trim-right (clutch-result--pending-sql-content))
              (clutch-result--effective-query)))
           ((use-region-p)
            (string-trim (buffer-substring-no-properties

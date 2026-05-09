@@ -62,6 +62,11 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Current ORDER BY state as (COL-NAME . DIRECTION) or nil.")
 (defvar-local clutch--page-current 0
   "Current data page number (0-based).")
+(defvar-local clutch--page-has-more nil
+  "Non-nil when one-row lookahead found rows after the current page.")
+(defvar-local clutch--page-offset nil
+  "Zero-based SQL offset for the first row in the current result page.
+Nil means derive the offset from `clutch--page-current'.")
 (defvar-local clutch--page-total-rows nil
   "Total row count from COUNT(*), or nil if not yet queried.")
 (defvar-local clutch--pending-deletes nil
@@ -141,8 +146,9 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--trim-sql-bounds "clutch-query" (beg end))
 (declare-function clutch--value-placeholder "clutch-query" (value col-def))
 (declare-function clutch--visible-columns "clutch-query" ())
-(declare-function clutch-result--detect-table "clutch-edit" ())
-(declare-function clutch-result--table-from-sql "clutch-edit" (sql))
+(declare-function clutch-result--detect-table "clutch-query" ())
+(declare-function clutch-result--source-table "clutch-query" ())
+(declare-function clutch-result--table-from-sql "clutch-query" (sql))
 (declare-function clutch-result--current-row-identity "clutch-edit" (&optional table))
 (declare-function clutch-result--extract-row-identity-vec "clutch-edit" (row row-identity))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
@@ -486,7 +492,7 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
 (defun clutch--pending-insert-placeholders ()
   "Return placeholder sentinels aligned with `clutch--result-columns'."
   (when-let* ((conn clutch-connection)
-              (table (clutch-result--detect-table))
+              (table (clutch-result--source-table))
               (details (clutch--ensure-column-details conn table)))
     (mapcar (lambda (col-name)
               (when-let* ((detail (cl-find col-name details
@@ -588,7 +594,8 @@ RENDER-STATE carries cached lookup tables for staged row state."
          (visible-cols (clutch--visible-columns))
          (widths (clutch--effective-widths))
          (nw (clutch--row-number-digits))
-         (global-first-row (* clutch--page-current clutch-result-max-rows))
+         (global-first-row (or clutch--page-offset
+                               (* clutch--page-current clutch-result-max-rows)))
          (bface 'clutch-border-face)
          (pad-str (make-string clutch-column-padding ?\s))
          (marked-table (plist-get render-state :marked))
@@ -623,19 +630,34 @@ RENDER-STATE carries cached lookup tables for staged row state."
             data-row
             "\n")))
 
-(defun clutch--footer-row-summary (row-count total-rows)
+(defun clutch--footer-row-summary (row-count page-num page-size total-rows
+                                             &optional page-offset page-has-more)
   "Build propertized row count display for the footer.
-ROW-COUNT is the current page count, TOTAL-ROWS is the overall total or nil."
+ROW-COUNT and PAGE-NUM describe the visible page, PAGE-SIZE is the configured
+page length, and TOTAL-ROWS is the exact overall total when known.
+PAGE-OFFSET overrides PAGE-NUM for last-window pagination, and PAGE-HAS-MORE
+records one-row lookahead."
   (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face))
-    (if (and total-rows (= total-rows row-count))
-        (concat (propertize (format "%d" total-rows) 'face hi)
+        (dim 'font-lock-comment-face)
+        (offset (or page-offset (* page-num page-size))))
+    (if (zerop row-count)
+        (concat (propertize "0" 'face hi)
+                (propertize " of " 'face dim)
+                (propertize (format "%s" (or total-rows offset))
+                            'face hi)
                 (propertize " rows" 'face dim))
-      (concat (propertize (format "%d" row-count) 'face hi)
-              (propertize " of " 'face dim)
-              (propertize (if total-rows (format "%d" total-rows) "?")
-                          'face hi)
-              (propertize " rows" 'face dim)))))
+      (let* ((start (1+ offset))
+             (end (+ offset row-count))
+             (inferred-total (and (not page-has-more) end))
+             (total-text (cond
+                          (total-rows (format "%d" total-rows))
+                          (page-has-more (format "%d+" (1+ end)))
+                          (inferred-total (format "%d" inferred-total))
+                          (t "?"))))
+        (concat (propertize (format "%d-%d" start end) 'face hi)
+                (propertize " of " 'face dim)
+                (propertize total-text 'face hi)
+                (propertize " rows" 'face dim))))))
 
 (defun clutch--footer-aggregate-part ()
   "Build footer part for the last aggregate summary."
@@ -734,7 +756,7 @@ Returns a list of propertized strings (may be empty)."
 (defun clutch--footer-mutation-capability-part ()
   "Build footer part describing update/delete capability for the result."
   (when (and clutch--result-columns
-             (clutch-result--detect-table))
+             (clutch-result--source-table))
     (unless clutch--row-identity
       (let ((warn-icon 'font-lock-warning-face)
             (warn-text '(:inherit font-lock-warning-face :weight normal)))
@@ -742,22 +764,20 @@ Returns a list of propertized strings (may be empty)."
                 (propertize "row identity missing" 'face warn-text)
                 (propertize " E/D off" 'face warn-text))))))
 
-(defun clutch--footer-main-parts (row-count page-num page-size total-rows)
+(defun clutch--footer-main-parts (row-count page-num page-size total-rows
+                                            &optional page-offset page-has-more)
   "Return list of main footer part strings for pagination state.
-ROW-COUNT and PAGE-NUM describe the visible page, and PAGE-SIZE sets
-the page length.  TOTAL-ROWS describes the full result size when known."
-  (let* ((hi 'font-lock-keyword-face)
-         (dim 'font-lock-comment-face)
-         (total-pages (when total-rows
-                        (max 1 (ceiling total-rows (float page-size))))))
+ROW-COUNT and PAGE-NUM describe the visible page, PAGE-SIZE sets the page
+length, and TOTAL-ROWS describes the full result size when known.
+PAGE-OFFSET overrides PAGE-NUM for last-window pagination, and PAGE-HAS-MORE
+records one-row lookahead."
+  (let ((hi 'font-lock-keyword-face))
     (delq nil
           (list
            (concat (clutch--footer-icon '(mdicon . "nf-md-sigma") "Σ" hi)
-                   (clutch--footer-row-summary row-count total-rows))
-           (concat (clutch--footer-icon '(codicon . "nf-cod-files") "⊞" hi)
-                   (propertize (format "%d" (1+ page-num)) 'face hi)
-                   (propertize "/" 'face dim)
-                   (propertize (format "%d" (or total-pages 1)) 'face hi))
+                   (clutch--footer-row-summary
+                    row-count page-num page-size total-rows
+                    page-offset page-has-more))
            (clutch--tx-header-line-segment clutch-connection)
            (clutch--footer-sort-part)
            (clutch--footer-mutation-capability-part)
@@ -796,14 +816,16 @@ the page length.  TOTAL-ROWS describes the full result size when known."
                 (propertize (format "%s-%d/%d" col-name (1+ cidx) total-cols)
                             'face hi))))))
 
-(defun clutch--render-footer (row-count page-num page-size total-rows)
+(defun clutch--render-footer (row-count page-num page-size total-rows
+                                        &optional page-offset page-has-more)
   "Return the static footer string for pagination state.
 ROW-COUNT and PAGE-NUM describe the visible page, and PAGE-SIZE sets
 the page length.  TOTAL-ROWS describes the full result size when known."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (mapconcat #'identity
                (clutch--footer-main-parts row-count page-num page-size
-                                          total-rows)
+                                          total-rows page-offset
+                                          page-has-more)
                sep)))
 
 (defun clutch--footer-mode-line-display ()
@@ -921,7 +943,7 @@ metadata loading."
                      clutch--result-columns
                      clutch--last-query
                      (string= (clutch--connection-key clutch-connection) conn-key)
-                     (equal (clutch-result--table-from-sql clutch--last-query) table))
+                     (equal (clutch-result--source-table) table))
             (setq-local clutch--result-column-details
                         (clutch--cached-result-column-details
                          clutch-connection clutch--last-query clutch--result-columns))))))))
@@ -1059,7 +1081,8 @@ RENDER-STATE contains render lookup tables for staged UI state."
     (setq clutch--footer-base-string
           (clutch--render-footer
            (length rows) clutch--page-current
-           clutch-result-max-rows clutch--page-total-rows))
+           clutch-result-max-rows clutch--page-total-rows
+           clutch--page-offset clutch--page-has-more))
     (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
     (clutch--refresh-footer-display)))
 
@@ -1226,8 +1249,8 @@ Falls back to the same row (any column), then point-min."
 (defun clutch--row-number-digits ()
   "Return the digit width needed for row numbers."
   (let* ((row-count (length clutch--result-rows))
-         (global-last (+ (* clutch--page-current
-                            clutch-result-max-rows)
+         (global-last (+ (or clutch--page-offset
+                             (* clutch--page-current clutch-result-max-rows))
                          row-count)))
     (max 3 (length (number-to-string global-last)))))
 
@@ -1352,6 +1375,8 @@ initial result data."
   (setq-local clutch--sort-column nil)
   (setq-local clutch--sort-descending nil)
   (setq-local clutch--page-current 0)
+  (setq-local clutch--page-offset 0)
+  (setq-local clutch--page-has-more nil)
   (setq-local clutch--page-total-rows (length rows))
   (setq-local clutch--order-by nil)
   (setq-local clutch--aggregate-summary nil))

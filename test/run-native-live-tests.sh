@@ -76,6 +76,7 @@ emacs_load_args=(
   -L "$repo/test"
   -L "$HOME/.emacs.d/straight/repos/mysql.el"
   -L "$HOME/.emacs.d/straight/repos/pg-el"
+  --eval "(setq load-prefer-newer t)"
 )
 
 run_clutch_live_pg() {

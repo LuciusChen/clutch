@@ -168,12 +168,14 @@ Return a `clutch-db-result'."
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)
                                           base-sql page-num page-size
-                                          &optional order-by)
+                                          &optional order-by page-offset)
   "Build a paginated SQL query for SQLite from BASE-SQL.
 PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
-controls the optional sort clause."
+controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
+when non-nil."
   (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by #'clutch-db-sqlite--escape-id))
+   base-sql page-num page-size order-by #'clutch-db-sqlite--escape-id
+   page-offset))
 
 ;;;; SQL dialect methods
 

@@ -183,11 +183,13 @@ Read every changed line before committing.
 
 # Main UI/logic tests
 emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+  --eval '(setq load-prefer-newer t)' \
   -l ert -l clutch-test \
   -f ert-run-tests-batch-and-exit
 
 # Database backend tests
 emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+  --eval '(setq load-prefer-newer t)' \
   -l ert -l clutch-db-test \
   -f ert-run-tests-batch-and-exit
 ```
@@ -208,6 +210,7 @@ tests. JDBC live tests remain separate because they require external credentials
 
 ```bash
 emacs -batch -L . -L ../mysql.el -L ../pg-el \
+  --eval '(setq load-prefer-newer t)' \
   -f batch-byte-compile *.el
 ```
 
