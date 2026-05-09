@@ -418,13 +418,19 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
         (pcase type
           ("INDEX"
            (let* ((name (plist-get entry :name))
+                  (table (or (plist-get entry :target-table)
+                             (plist-get entry :table)))
+                  (_ (unless table
+                       (error "MySQL index details require :target-table")))
                   (result (mysql-query
                            conn
                            (format "SELECT COLUMN_NAME, SEQ_IN_INDEX, COLLATION
 FROM INFORMATION_SCHEMA.STATISTICS
 WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = %s
   AND INDEX_NAME = %s
 ORDER BY SEQ_IN_INDEX"
+                                   (mysql-escape-literal table)
                                    (mysql-escape-literal name)))))
              (mapcar
               (lambda (row)

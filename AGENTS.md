@@ -182,15 +182,27 @@ Read every changed line before committing.
 # Ensure external package dependencies (`mysql` and `pg`) are installed or on load-path.
 
 # Main UI/logic tests
-emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch \
-  -l test/clutch-test.el \
-  --eval '(ert-run-tests-batch-and-exit)'
+emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+  -l ert -l clutch-test \
+  -f ert-run-tests-batch-and-exit
 
-# JDBC backend tests
-emacs -batch -L . -L ../mysql.el -L ../pg-el -l ert -l clutch-db-jdbc \
-  -l test/clutch-db-test.el \
-  --eval '(ert-run-tests-batch-and-exit "clutch-db-test-jdbc")'
+# Database backend tests
+emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+  -l ert -l clutch-db-test \
+  -f ert-run-tests-batch-and-exit
 ```
+
+Default ERT runs skip live tests when credentials are unset. For changes touching
+query execution, row identity, result-buffer workflows, object metadata, or native
+backend adapters, also run the real MySQL/PostgreSQL live suite:
+
+```bash
+./test/run-native-live-tests.sh
+```
+
+The native live runner starts or reuses local Docker/OrbStack containers and runs
+both UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live`
+tests. JDBC live tests remain separate because they require external credentials.
 
 ### 3. Byte-compile with zero warnings
 
