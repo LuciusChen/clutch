@@ -24,15 +24,13 @@
 ;; bind `mysql-tls-verify-server' to nil unless the test environment installs a
 ;; trusted CA.
 ;;
-;; Run unit tests:
-;;   Emacs -batch -L .. -l ert -l clutch-db-test \
+;; Run unit tests from the repository root:
+;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+;;     --eval '(setq load-prefer-newer t)' \
+;;     -l ert -l clutch-db-test \
 ;;     -f ert-run-tests-batch-and-exit
 ;;
-;; Run native live tests manually:
-;;   Emacs -batch -L .. -l ert -l clutch-db-test \
-;;     --eval '(setq clutch-db-test-mysql-password "test")' \
-;;     --eval '(setq clutch-db-test-pg-password "test")' \
-;;     -f ert-run-tests-batch-and-exit
+;; Prefer ./test/run-native-live-tests.sh for MySQL/PostgreSQL live coverage.
 
 ;;; Code:
 
@@ -1920,6 +1918,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     ;; Page 2
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 1 10)))
       (should (string-match-p "OFFSET 10" sql)))
+    ;; Explicit offset for last-window pagination
+    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
+      (should (string-match-p "LIMIT 10" sql))
+      (should (string-match-p "OFFSET 70" sql)))
     ;; With order
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10
                                               '("name" . "ASC"))))
@@ -1955,6 +1957,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 2 25)))
       (should (string-match-p "LIMIT 25" sql))
       (should (string-match-p "OFFSET 50" sql)))
+    ;; Explicit offset for last-window pagination
+    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
+      (should (string-match-p "LIMIT 10" sql))
+      (should (string-match-p "OFFSET 70" sql)))
     ;; With descending order
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10
                                               '("id" . "DESC"))))
@@ -1978,6 +1984,17 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                 0 10)))
       (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
       (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
+
+(ert-deftest clutch-db-test-jdbc-build-paged-sql-with-explicit-offset ()
+  "JDBC pagination should support explicit offsets for last-window pages."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver sqlserver))))
+    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
+      (should (string-match-p "OFFSET 70 ROWS" sql))
+      (should (string-match-p "FETCH NEXT 10 ROWS ONLY" sql))))
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle))))
+    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
+      (should (string-match-p "ROWNUM <= 80" sql))
+      (should (string-match-p "rn > 70" sql)))))
 
 ;;;; Unit tests — SQL escaping
 

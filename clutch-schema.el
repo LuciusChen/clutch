@@ -82,7 +82,6 @@
 (declare-function clutch--schedule-object-warmup "clutch-object" (conn))
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql))
-(declare-function clutch--set-schema-status "clutch" (conn state &optional table-count error-message))
 
 (defun clutch--metadata-debug-backend (conn)
   "Return CONN's backend key for debug metadata events, or nil."
@@ -127,6 +126,18 @@
   "Return schema status plist for CONN, or nil."
   (and conn
        (gethash (clutch--connection-key conn) clutch--schema-status-cache)))
+
+(defun clutch--set-schema-status (conn state &optional table-count error-message)
+  "Record schema STATE for CONN and refresh connected UI.
+TABLE-COUNT is the number of known tables when STATE is \\='ready.
+ERROR-MESSAGE is stored when STATE is \\='failed."
+  (when conn
+    (puthash (clutch--connection-key conn)
+             (list :state state
+                   :tables table-count
+                   :error error-message)
+             clutch--schema-status-cache)
+    (clutch--refresh-schema-status-ui conn)))
 
 (defun clutch--begin-schema-refresh-ticket (conn)
   "Issue and record a new schema refresh ticket for CONN."

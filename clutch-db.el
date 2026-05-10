@@ -294,10 +294,12 @@ Leaves nested ORDER BY clauses inside subqueries or window functions intact."
     sql))
 
 (defun clutch-db--build-limit-offset-paged-sql (base-sql page-num page-size
-                                                         order-by escape-fn)
+                                                         order-by escape-fn
+                                                         &optional page-offset)
   "Build a LIMIT/OFFSET paginated query from BASE-SQL.
 PAGE-NUM is zero-based and PAGE-SIZE is the row count per page.
-ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name."
+ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name.
+PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
   (if (clutch-db-sql-has-top-level-limit-p base-sql)
       base-sql
     (let* ((trimmed (string-trim-right
@@ -305,7 +307,7 @@ ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name."
            (sortable-sql (if order-by
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
-           (offset (* page-num page-size))
+           (offset (or page-offset (* page-num page-size)))
            (order-clause (when order-by
                            (format " ORDER BY %s %s"
                                    (funcall escape-fn (car order-by))
@@ -476,10 +478,11 @@ interrupt path and the connection should remain usable.")
   nil)
 
 (cl-defgeneric clutch-db-build-paged-sql (conn base-sql page-num page-size
-                                          &optional order-by)
+                                          &optional order-by page-offset)
   "Build a paginated SQL query for CONN's dialect.
 BASE-SQL is the original query.  PAGE-NUM is 0-based, PAGE-SIZE is
-the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.")
+the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.  PAGE-OFFSET,
+when non-nil, overrides PAGE-NUM for last-window pagination.")
 
 ;; SQL dialect
 

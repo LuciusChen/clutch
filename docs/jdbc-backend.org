@@ -172,7 +172,9 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
   using the prefix fast path, while =C-c C-j= / the object discovery cache / the
   console's =schema~= state are backfilled from the same low-privilege-aware
   table snapshot once loading finishes.
-- Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+).
+- Pagination uses =ROWNUM= subquery, compatible with all Oracle versions (9i+);
+  result-buffer =M->= uses an explicit last-window offset generated on the
+  Emacs side, not a separate sidecar protocol operation.
 - CJK character sets (e.g. ZHS16GBK) require =orai18n.jar= in addition to the
   active Oracle JDBC jar (=ojdbc8.jar= or =ojdbc11.jar=).
 - Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=

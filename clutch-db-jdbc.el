@@ -1077,11 +1077,12 @@ an rn column as a side effect."
 
 (cl-defmethod clutch-db-build-paged-sql ((conn clutch-jdbc-conn) base-sql
                                          page-num page-size
-                                         &optional order-by)
+                                         &optional order-by page-offset)
   "Build a paginated SQL query for JDBC CONN from BASE-SQL.
 PAGE-NUM is zero-based, and PAGE-SIZE limits each page.  Oracle uses
 ROWNUM subquery syntax compatible with all Oracle versions.  ORDER-BY
-controls the optional sort clause.  Other
+controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
+when non-nil.  Other
 databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+,
 DB2)."
   (if (clutch-db-sql-has-top-level-limit-p base-sql)
@@ -1091,7 +1092,7 @@ DB2)."
            (sortable-sql (if order-by
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
-           (offset  (* page-num page-size))
+           (offset  (or page-offset (* page-num page-size)))
            (oracle-p (clutch-jdbc--oracle-conn-p conn)))
       (if oracle-p
           (clutch-jdbc--build-oracle-paged-sql conn sortable-sql offset page-size order-by)

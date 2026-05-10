@@ -63,6 +63,10 @@ For backend-specific notes, see
 - WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
 - Column-aligned horizontal paging via =[= / =]=, plus column width adjustment via =-= / ===
 - CSV / INSERT / UPDATE export, plus TSV / CSV / INSERT / UPDATE copy
+- Agent context copy (=clutch-copy-context-for-agent=): copy the current SQL,
+  connection context, referenced table metadata, and the visible columns from
+  the latest matching result sample as Markdown for external tools such as
+  ChatGPT, Claude, or DeepSeek
 - Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
 - SQL completion: table/column names scoped to the current statement, with native MySQL/PostgreSQL hot paths staying cache-first and scheduling idle-time column preheat on cache miss instead of blocking typing; JDBC backends keep their direct metadata path; completion case can be customized via =clutch-sql-completion-case-style=
 - Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; schema metadata is cache-first and quietly preheated on the main thread once Emacs is idle, so point motion does not block; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
@@ -415,6 +419,10 @@ Common entry points:
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
+- =M-x clutch-copy-context-for-agent= copies SQL, table metadata, and the latest
+  matching visible result sample as Markdown for an external agent; the same
+  command is available as =k= in the main and result transients.  Table metadata
+  reuses the existing object describe path.
 
 ** JDBC Backend
 
@@ -460,7 +468,8 @@ suites.
 
 Default ERT runs intentionally skip live tests when database credentials are not
 set.  Treat those runs as unit/regression coverage, not as proof that real
-database workflows still work.
+database workflows still work.  Test commands use =load-prefer-newer= so stale
+=.elc= files cannot mask source changes during local verification.
 
 ** Native live tests
 
@@ -475,8 +484,10 @@ and backend-level native adapter tests:
 The live runner validates real SELECT execution, pagination/sort/filter/count,
 export collection, object describe metadata, staged insert/update/delete commit,
 aggregate SELECT row-identity behavior, PostgreSQL =ctid= row locators, and MySQL
-index-detail scoping.  JDBC live suites for Oracle, SQL Server, and ClickHouse
-remain credential-driven and are skipped by default.
+index-detail scoping.  It stubs only Emacs UI boundaries such as display-buffer
+selection and confirmation prompts; query execution, metadata, staging SQL, and
+commit paths run against the live databases.  JDBC live suites for Oracle, SQL
+Server, and ClickHouse remain credential-driven and are skipped by default.
 
 See =AGENTS.md= §Pre-Commit Checklist for exact unit and live test commands.
 

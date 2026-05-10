@@ -18,6 +18,8 @@ clutch integrates directly into Emacs, offering:
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
+- Markdown context export for external assistants, built from the current SQL,
+  connection metadata, referenced tables, and latest matching result samples
 - Optional Org-Babel integration via the separate `ob-clutch` package
 
 ### Target Users
@@ -72,12 +74,12 @@ clutch follows a **layered, interface-based architecture** with clear separation
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `clutch.el` | ~7800 | Main UI: modes, transient menus, result display, mutation workflow, object-centric schema workflow, schema caching |
-| `clutch-db.el` | ~300 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
-| `clutch-db-mysql.el` | ~320 | MySQL backend adapter, type-category mapping |
-| `clutch-db-pg.el` | ~350 | PostgreSQL backend adapter, OID-to-type mapping |
-| `clutch-db-sqlite.el` | ~330 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
-| `clutch-db-jdbc.el` | ~980 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
+| `clutch.el` | ~5500 | Main UI: modes, transient menus, result display, mutation workflow, object-centric schema workflow, schema caching |
+| `clutch-db.el` | ~800 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
+| `clutch-db-mysql.el` | ~680 | MySQL backend adapter, type-category mapping |
+| `clutch-db-pg.el` | ~1260 | PostgreSQL backend adapter, OID-to-type mapping |
+| `clutch-db-sqlite.el` | ~400 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
+| `clutch-db-jdbc.el` | ~1760 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
 | External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
@@ -208,6 +210,8 @@ query is still running.
 | `clutch--cached-pk-indices` | Visible primary-key column positions when PK identity is available |
 | `clutch--fk-info` | Foreign key metadata for result table |
 | `clutch--page-current` | Current row page (0-based) |
+| `clutch--page-offset` | Zero-based row offset for the visible SQL page/window |
+| `clutch--page-has-more` | Lookahead flag showing whether another SQL page exists |
 | `clutch--page-total-rows` | Total row count (from COUNT(*)) |
 | `clutch--sort-column` | Current sort column name |
 | `clutch--sort-descending` | Sort direction flag |
@@ -230,7 +234,7 @@ query is still running.
 | `n` / `p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Move to next/previous row in same column |
 | `M-n` / `M-p` | `clutch-result-down-cell` / `clutch-result-up-cell` | Alias for next/previous row in same column |
 | `N` / `P` | `clutch-result-next-page` / `clutch-result-prev-page` | Next / previous SQL page |
-| `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First / last SQL page |
+| `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First page / last row window |
 | `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Page right / left (snap to column border) |
 | `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
 | `C` | `clutch-result-goto-column` | Jump to a column by name |
@@ -261,6 +265,23 @@ query is still running.
   - `y` → `clutch-result-copy-pending-sql`
   - `Y` → `clutch-result-save-pending-sql`
 - This exports the exact staged SQL batch that `C-c C-c` would execute, rather than re-exporting the full result set.
+
+**External agent context**:
+- `clutch-copy-context-for-agent` copies Markdown for tools such as ChatGPT, Claude, or
+  DeepSeek.
+- The main and result transients expose it as `k`; `M-x` remains the direct
+  entry point.
+- From `clutch-mode`, it uses the active region or current DWIM SQL statement
+  and includes a bounded sample from the latest result buffer produced by that
+  query console when the copied SQL still matches.
+- From `clutch-result-mode`, it uses the effective result query, including an
+  active SQL `WHERE` filter, and includes a bounded sample of visible columns
+  already in the result buffer.
+- The export includes connection/backend/schema context and metadata for
+  referenced tables: comments, primary keys, columns, indexes, and any foreign
+  keys or reverse references present in metadata.
+- The workflow is read-only with respect to user SQL.  It does not execute the
+  SQL being copied; metadata lookup failures are included in the Markdown.
 
 ---
 
@@ -442,7 +463,7 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust current column width |
 | `clutch-result-fullscreen-toggle` | Toggle fullscreen display of the current result |
 | `clutch-result-next-page` / `clutch-result-prev-page` | Move to the next / previous SQL page |
-| `clutch-result-first-page` / `clutch-result-last-page` | Jump to the first / last SQL page |
+| `clutch-result-first-page` / `clutch-result-last-page` | Jump to the first page / last row window |
 | `clutch-result-next-cell` / `clutch-result-prev-cell` | Move across cells |
 | `clutch-result-down-cell` / `clutch-result-up-cell` | Move down/up within the current column |
 | `clutch-result-copy-tsv` / `clutch-result-copy-csv` | Copy the current cell/selection as TSV / CSV |
@@ -727,10 +748,13 @@ User types SQL in clutch-mode
 ### Row Pagination
 
 - **Page size**: `clutch-result-max-rows` (default 500)
-- **Page numbering**: 0-based (page 0 = offset 0)
+- **Page numbering**: 0-based (page 0 = offset 0); `M->` uses a final
+  row-window offset so a 578-row result with 500-row pages can display
+  `79-578 of 578 rows`
 - **Total count**: loaded via `COUNT(*)` query for progress indication
 - **Navigation**: `N` / `P` (next/prev page), `M-<` / `M->` (first/last page)
-- **Offset**: `offset = page * page-size`
+- **Offset**: normally `offset = page * page-size`; last-window navigation uses
+  `max(0, total - page-size)`
 
 ### Horizontal Overflow
 

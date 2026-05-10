@@ -624,12 +624,13 @@ manual-commit mode via lazy `BEGIN'."
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn pgcon) base-sql
                                              page-num page-size
-                                             &optional order-by)
+                                             &optional order-by page-offset)
   "Build a paginated SQL query for PostgreSQL from BASE-SQL.
 PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
-controls the optional sort clause."
+controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
+when non-nil."
   (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by #'pg-escape-identifier))
+   base-sql page-num page-size order-by #'pg-escape-identifier page-offset))
 
 ;;;; SQL dialect methods
 

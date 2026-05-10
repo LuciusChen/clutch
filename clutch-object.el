@@ -51,6 +51,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
 (declare-function clutch--icon-with-face "clutch-ui"
                   (name fallback face &rest icon-args))
+(declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--humanize-db-error "clutch-query" (msg))
 (declare-function clutch--clear-connection-problem-capture "clutch" (connection))
@@ -1482,7 +1483,7 @@ passed to the fallback reader."
          (name (plist-get entry :name)))
     (kill-new name)
     (clutch--remember-current-object entry)
-    (message "Copied object name: %s" name)))
+    (message "Copied object name: %s" (clutch--message-ident name))))
 
 ;;;###autoload
 (defun clutch-copy-object-fqname (&optional entry)
@@ -1493,7 +1494,7 @@ passed to the fallback reader."
          (fqname (clutch--object-fqname entry)))
     (kill-new fqname)
     (clutch--remember-current-object entry)
-    (message "Copied object fqname: %s" fqname)))
+    (message "Copied object fqname: %s" (clutch--message-ident fqname))))
 
 ;;;###autoload
 (defun clutch-describe-table (table)

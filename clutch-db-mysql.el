@@ -212,12 +212,13 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn mysql-conn) base-sql
                                              page-num page-size
-                                             &optional order-by)
+                                             &optional order-by page-offset)
   "Build a paginated SQL query for MySQL from BASE-SQL.
 PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
-controls the optional sort clause."
+controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
+when non-nil."
   (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by #'mysql-escape-identifier))
+   base-sql page-num page-size order-by #'mysql-escape-identifier page-offset))
 
 ;;;; SQL dialect methods
 
