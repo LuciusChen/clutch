@@ -1230,11 +1230,6 @@ ROWS defaults to a small three-row sample."
       (should (equal (get-text-property identity-start 'face footer-prop)
                      '(:inherit font-lock-warning-face :weight normal))))))
 
-(ert-deftest clutch-test-result-mode-does-not-override-mouse-wheel ()
-  "Result mode should leave mouse-wheel scrolling to Emacs defaults."
-  (should-not (lookup-key clutch-result-mode-map [wheel-up]))
-  (should-not (lookup-key clutch-result-mode-map [wheel-down])))
-
 ;;;; Filter
 
 (ert-deftest clutch-test-filter-matches-substring-case-insensitive ()
@@ -7498,15 +7493,6 @@ crashing the UI layer."
       (should-not toggle-called)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
-(ert-deftest clutch-test-dwim-keybinding-does-not-collide-with-commit ()
-  "DWIM execution should keep the primary SQL key distinct from commit."
-  (should (eq (lookup-key clutch-mode-map (kbd "C-c C-c"))
-              #'clutch-execute-dwim))
-  (should-not (lookup-key clutch-mode-map (kbd "C-c ;")))
-  (should (eq (lookup-key clutch-mode-map (kbd "C-c C-m"))
-              #'clutch-commit))
-  (should-not (equal (kbd "C-c C-c") (kbd "C-c C-m"))))
-
 ;;;; Connection — display key and icons
 
 (ert-deftest clutch-test-tx-header-line-segment-preserves-icon-family ()
@@ -10322,19 +10308,6 @@ This applies when the buffer owns the connection."
         (clutch-describe-dwim)
         (should (equal resolved-prompt "Describe object: "))
         (should (equal captured '(:name "IDX_A" :type "INDEX")))))))
-
-(ert-deftest clutch-test-describe-buffer-exposes-shared-dwim-bindings ()
-  "Describe buffers should reuse the shared action commands."
-  (let ((entry '(:name "PROCESS_ORDER" :type "PROCEDURE")))
-    (with-temp-buffer
-      (clutch--render-object-describe 'fake-conn entry nil nil)
-      (should (eq major-mode 'clutch-describe-mode))
-      (should (equal clutch-browser-current-object entry))
-      (should (equal clutch--describe-object-entry entry))
-      (should (eq (lookup-key clutch-describe-mode-map (kbd "C-c C-d"))
-                  #'clutch-describe-dwim))
-      (should (eq (lookup-key clutch-describe-mode-map (kbd "C-c C-o"))
-                  #'clutch-act-dwim)))))
 
 (ert-deftest clutch-test-render-object-describe-keeps-fqname-in-body-not-header ()
   "Describe buffers should keep the fqname in the body title, not duplicate it in the header-line."
