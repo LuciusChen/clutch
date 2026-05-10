@@ -2909,6 +2909,42 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
       (should (string-match-p "Nullable: YES" info1))
       (should (string-match-p "Default: unnamed" info1)))))
 
+(ert-deftest clutch-test-column-info-string-is-propertized ()
+  "Column info string should carry faces for minibuffer highlighting."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id"))
+    (setq-local clutch--result-column-details
+                (list (list :name "id" :type "INT" :nullable nil
+                            :default "42" :comment "Primary key")))
+    (let* ((info (clutch--column-info-string 0))
+           (one-line (clutch--column-info-message-string info))
+           (name-pos (string-match-p "\\bid\\b" one-line))
+           (type-pos (string-match-p "INT" one-line))
+           (sep-pos (string-match-p "  •  " one-line)))
+      (should name-pos)
+      (should type-pos)
+      (should sep-pos)
+      (should (eq (get-text-property name-pos 'face one-line)
+                  'clutch-field-name-face))
+      (should (eq (get-text-property type-pos 'face one-line)
+                  'font-lock-type-face))
+      (should (eq (get-text-property sep-pos 'face one-line)
+                  'font-lock-comment-face)))))
+
+(ert-deftest clutch-test-message-formatting-helpers-apply-faces ()
+  "Echo-area formatting helpers should produce propertized strings."
+  (let ((count (clutch--message-count 42))
+        (ident (clutch--message-ident "users"))
+        (keyword (clutch--message-keyword "CSV"))
+        (literal (clutch--message-literal "\"needle\""))
+        (path (clutch--message-path "/tmp/staged.sql")))
+    (should (equal count "42"))
+    (should (eq (get-text-property 0 'face count) 'font-lock-constant-face))
+    (should (eq (get-text-property 0 'face ident) 'clutch-field-name-face))
+    (should (eq (get-text-property 0 'face keyword) 'font-lock-keyword-face))
+    (should (eq (get-text-property 0 'face literal) 'font-lock-string-face))
+    (should (eq (get-text-property 0 'face path) 'font-lock-doc-face))))
+
 (ert-deftest clutch-test-column-info-string-nil-when-no-details ()
   "Column info string returns nil when details are unavailable."
   (with-temp-buffer

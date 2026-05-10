@@ -69,8 +69,14 @@
 (declare-function clutch--refresh-header-line "clutch-ui" ())
 (declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
 (declare-function clutch--column-border-position "clutch-ui" (cidx))
+(declare-function clutch--column-info-message-string "clutch-ui" (info))
 (declare-function clutch--column-info-string "clutch-ui" (cidx))
+(declare-function clutch--message-count "clutch-ui" (value))
+(declare-function clutch--message-ident "clutch-ui" (value))
+(declare-function clutch--message-keyword "clutch-ui" (value))
+(declare-function clutch--message-literal "clutch-ui" (value))
 (declare-function clutch--resolve-result-column-details "clutch-ui" (conn sql col-names))
+(declare-function clutch--status-separator "clutch-ui" ())
 
 ;;;; Customization
 
@@ -2714,7 +2720,7 @@ Priority: region rows > current row."
       (push (format "/:%s" clutch--filter-pattern) parts))
     (when clutch--where-filter
       (push (format "W:%s" clutch--where-filter) parts))
-    (format " %s" (mapconcat #'identity parts " | "))))
+    (format " %s" (string-join parts (clutch--status-separator)))))
 
 (defun clutch--update-position-indicator ()
   "Update mode-line with current cursor position in the result grid."
@@ -2952,7 +2958,8 @@ Uses the rewrite layer so complex SQL is handled via derived-table count."
                     (string-to-number (format "%s" count-val))))
       (clutch--refresh-footer-line)
       (force-mode-line-update)
-      (message "Total rows: %d" clutch--page-total-rows))))
+      (message "Total rows: %s"
+               (clutch--message-count clutch--page-total-rows)))))
 
 ;;;###autoload
 (defun clutch-result-rerun ()
@@ -2985,7 +2992,9 @@ Re-executes from the first page."
       (setq clutch--order-by (cons col-name direction))
       (setq clutch--page-current 0)
       (clutch--execute-page 0)
-      (message "Sorted by %s %s" col-name direction))))
+      (message "Sorted by %s %s"
+               (clutch--message-ident col-name)
+               (clutch--message-keyword direction)))))
 
 (defun clutch-result--read-column ()
   "Read a column name, defaulting to column at point."
@@ -3100,8 +3109,10 @@ empty string at the condition prompt to clear the filter."
           clutch--filtered-rows matching
           clutch--marked-rows nil)
     (clutch--render-result)
-    (message "Filter: %d/%d rows match \"%s\""
-             (length matching) (length clutch--result-rows) input)))
+    (message "Filter: %s/%s rows match %s"
+             (clutch--message-count (length matching))
+             (clutch--message-count (length clutch--result-rows))
+             (clutch--message-literal (format "\"%s\"" input)))))
 
 ;;;###autoload
 (defun clutch-result-filter ()
@@ -3247,10 +3258,14 @@ Scans buffer once for this column — O(buffer)."
                 (setq clutch--refine-excluded-rows
                       (delq ridx clutch--refine-excluded-rows))
                 (clutch-refine--remove-row-exclusion ridx)
-                (message "Row %d included" (1+ ridx)))
+                (message "Row %s %s"
+                         (clutch--message-count (1+ ridx))
+                         (clutch--message-keyword "included")))
             (push ridx clutch--refine-excluded-rows)
             (clutch-refine--add-row-exclusion ridx)
-            (message "Row %d excluded" (1+ ridx)))
+            (message "Row %s %s"
+                     (clutch--message-count (1+ ridx))
+                     (clutch--message-keyword "excluded")))
         (user-error "Row not in selection"))
     (user-error "No row at point")))
 
@@ -3266,10 +3281,16 @@ Scans buffer once for this column — O(buffer)."
                 (setq clutch--refine-excluded-cols
                       (delq cidx clutch--refine-excluded-cols))
                 (clutch-refine--remove-col-exclusion cidx)
-                (message "Column \"%s\" included" (nth cidx clutch--result-columns)))
+                (message "Column %s %s"
+                         (clutch--message-ident
+                          (format "\"%s\"" (nth cidx clutch--result-columns)))
+                         (clutch--message-keyword "included")))
             (push cidx clutch--refine-excluded-cols)
             (clutch-refine--add-col-exclusion cidx)
-            (message "Column \"%s\" excluded" (nth cidx clutch--result-columns)))
+            (message "Column %s %s"
+                     (clutch--message-ident
+                      (format "\"%s\"" (nth cidx clutch--result-columns)))
+                     (clutch--message-keyword "excluded")))
         (user-error "Column not in selection"))
     (user-error "No column at point")))
 
@@ -3583,9 +3604,9 @@ Enable --refine to exclude rows/columns interactively before copying
 ;;;###autoload
 (defun clutch-copy-context-for-agent ()
   "Copy current SQL, result sample, and related metadata for an external agent.
-The copied Markdown is intended for tools such as ChatGPT, Claude, or DeepSeek.  The command
-uses the current connection's metadata APIs and the latest matching result
-buffer; it does not execute the SQL being copied."
+The copied Markdown is intended for tools such as ChatGPT, Claude, or
+DeepSeek.  The command uses the current connection's metadata APIs and the
+latest matching result buffer; it does not execute the SQL being copied."
   (interactive)
   (clutch--ensure-connection)
   (let ((sql (clutch--agent-context-current-sql)))
@@ -3594,15 +3615,17 @@ buffer; it does not execute the SQL being copied."
     (let* ((tables (clutch--agent-context-tables sql))
            (text (clutch--agent-context-text clutch-connection sql tables)))
       (kill-new text)
-      (message "Copied context for %d table%s"
-               (length tables)
+      (message "Copied context for %s table%s"
+               (clutch--message-count (length tables))
                (if (= (length tables) 1) "" "s")))))
 
 (defun clutch-result--yank-cell-value (val)
   "Copy VAL to kill ring and show a compact preview message."
   (let ((text (clutch--format-value val)))
     (kill-new text)
-    (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
+    (message "Copied: %s"
+             (clutch--message-literal
+              (truncate-string-to-width text 60 nil nil "…")))))
 
 (defun clutch-result--cell-at-or-near (pos)
   "Return cell triple at POS, or nearest cell on the same line."
@@ -3678,8 +3701,8 @@ When DEACTIVATE is non-nil, deactivate the active region after copying."
   (kill-new (clutch-result--cells-tsv-text cells))
   (when deactivate
     (deactivate-mark))
-  (message "Copied %d cell%s from region"
-           (length cells)
+  (message "Copied %s cell%s from region"
+           (clutch--message-count (length cells))
            (if (= (length cells) 1) "" "s")))
 
 (defun clutch-result--yank-region-cells ()
@@ -3878,7 +3901,9 @@ When QUIET is non-nil, suppress informational fallback messages."
         ((fboundp 'xml-mode) (xml-mode))
         (t (special-mode)))
   (setq-local header-line-format
-              (format " XML  |  %d bytes" (string-bytes val)))
+              (format " XML%s%d bytes"
+                      (clutch--status-separator)
+                      (string-bytes val)))
   ;; Force fontification so XML is highlighted immediately in popup buffers.
   (when (fboundp 'font-lock-ensure)
     (font-lock-ensure (point-min) (point-max)))
@@ -4084,13 +4109,13 @@ blob type with non-text value → binary string; otherwise plain text."
          (ridx (plist-get context :ridx))
          (cidx (plist-get context :cidx))
          (row-count (or (plist-get context :row-count) 0)))
-    (format " %s | %s | %s | R%d/%d C%d | f freeze  g refresh  q quit"
-            kind
-            (if frozen "FROZEN" "FOLLOW")
-            label
-            (1+ ridx)
-            row-count
-            (1+ cidx))))
+    (string-join
+     (list (format " %s" kind)
+           (if frozen "FROZEN" "FOLLOW")
+           label
+           (format "R%d/%d C%d" (1+ ridx) row-count (1+ cidx))
+           "f freeze  g refresh  q quit")
+     (clutch--status-separator))))
 
 (defun clutch--live-view-detach-source (source-buf &optional viewer-buf)
   "Detach live viewer state from SOURCE-BUF.
@@ -4396,9 +4421,12 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
          (stmts (clutch-result--build-insert-statements indices col-indices table)))
     (kill-new (mapconcat #'identity stmts "\n"))
     (deactivate-mark)
-    (message "Copied %d INSERT statement%s (%d col%s)"
-             (length stmts) (if (= (length stmts) 1) "" "s")
-             (length col-indices) (if (= (length col-indices) 1) "" "s"))))
+    (message "Copied %s %s statement%s (%s col%s)"
+             (clutch--message-count (length stmts))
+             (clutch--message-keyword "INSERT")
+             (if (= (length stmts) 1) "" "s")
+             (clutch--message-count (length col-indices))
+             (if (= (length col-indices) 1) "" "s"))))
 
 (defun clutch-result--copy-rows-as-update (&optional rect)
   "Copy row(s) as UPDATE statement(s) to the kill ring.
@@ -4411,9 +4439,12 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
                  rows col-indices "copy UPDATE SQL")))
     (kill-new (mapconcat #'identity stmts "\n"))
     (deactivate-mark)
-    (message "Copied %d UPDATE statement%s (%d col%s)"
-             (length stmts) (if (= (length stmts) 1) "" "s")
-             (length col-indices) (if (= (length col-indices) 1) "" "s"))))
+    (message "Copied %s %s statement%s (%s col%s)"
+             (clutch--message-count (length stmts))
+             (clutch--message-keyword "UPDATE")
+             (if (= (length stmts) 1) "" "s")
+             (clutch--message-count (length col-indices))
+             (if (= (length col-indices) 1) "" "s"))))
 
 (defun clutch--csv-lines-for-rows (rows col-indices)
   "Return CSV lines for ROWS using COL-INDICES."
@@ -4440,9 +4471,12 @@ Includes a header row with column names."
          (lines (clutch-result--build-csv-lines indices col-indices)))
     (kill-new (mapconcat #'identity lines "\n"))
     (deactivate-mark)
-    (message "Copied %d row%s as CSV (%d col%s)"
-             (length indices) (if (= (length indices) 1) "" "s")
-             (length col-indices) (if (= (length col-indices) 1) "" "s"))))
+    (message "Copied %s row%s as %s (%s col%s)"
+             (clutch--message-count (length indices))
+             (if (= (length indices) 1) "" "s")
+             (clutch--message-keyword "CSV")
+             (clutch--message-count (length col-indices))
+             (if (= (length col-indices) 1) "" "s"))))
 
 (defun clutch-result--goto-col-idx (col-idx)
   "Move point to COL-IDX in the current row, preserving the row position.
@@ -4481,7 +4515,7 @@ When details are not yet cached, attempts to load them from the database."
                     (clutch--resolve-result-column-details
                      clutch-connection sql cols))))
     (if-let* ((info (clutch--column-info-string cidx)))
-        (message "%s" (replace-regexp-in-string "\n" " | " info))
+        (message "%s" (clutch--column-info-message-string info))
       (message "%s (no detail info)" (nth cidx clutch--result-columns)))))
 
 ;;;###autoload

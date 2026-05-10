@@ -130,6 +130,9 @@
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
 (declare-function clutch--display-result "clutch-ui" (result sql elapsed))
+(declare-function clutch--message-count "clutch-ui" (value))
+(declare-function clutch--message-keyword "clutch-ui" (value))
+(declare-function clutch--message-literal "clutch-ui" (value))
 (declare-function clutch--load-fk-info "clutch-edit" ())
 (declare-function clutch-result--pending-sql-content "clutch-edit" (&optional stmts))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
@@ -986,11 +989,12 @@ Signals an error if pagination is not available."
        page-num
        row-identity-prep offset has-more)
       (clutch--refresh-display)
-      (message "Rows %d-%d loaded (%s, %d row%s)"
-               (if rows (1+ offset) 0)
-               (+ offset (length rows))
-               (clutch--format-elapsed elapsed)
-               (length rows)
+      (message "Rows %s loaded (%s, %s row%s)"
+               (clutch--message-count
+                (format "%d-%d" (if rows (1+ offset) 0)
+                        (+ offset (length rows))))
+               (clutch--message-literal (clutch--format-elapsed elapsed))
+               (clutch--message-count (length rows))
                (if (= (length rows) 1) "" "s")))))
 
 (defun clutch--execute-page-at-offset (page-offset &optional page-num)
@@ -1790,12 +1794,17 @@ result buffer.  Stops and reports on the first error."
       (if (clutch--select-query-p last)
           (progn
             (when (> done 0)
-              (message "%d statement%s executed" done (if (= done 1) "" "s")))
+              (message "%s statement%s %s"
+                       (clutch--message-count done)
+                       (if (= done 1) "" "s")
+                       (clutch--message-keyword "executed")))
             (clutch--execute last))
         (condition-case err
             (progn (clutch--run-db-query clutch-connection last) (cl-incf done)
-                   (message "%d statement%s executed"
-                            done (if (= done 1) "" "s")))
+                   (message "%s statement%s %s"
+                            (clutch--message-count done)
+                            (if (= done 1) "" "s")
+                            (clutch--message-keyword "executed")))
           (quit
            (clutch--handle-query-quit clutch-connection))
           (clutch-db-error

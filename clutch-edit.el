@@ -49,9 +49,14 @@
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
+(declare-function clutch--message-count "clutch-ui" (value))
+(declare-function clutch--message-keyword "clutch-ui" (value))
+(declare-function clutch--message-path "clutch-ui" (value))
+(declare-function clutch--status-separator "clutch-ui" ())
 (declare-function clutch-result--selected-row-indices "clutch" ())
 (declare-function clutch-db-escape-identifier "clutch-db" (conn name))
 (declare-function clutch-db-result-affected-rows "clutch-db" (result))
+(declare-function clutch-db-result-p "clutch-db" (result))
 (declare-function clutch-db-sql-find-top-level-clause "clutch-db" (sql pattern &optional start))
 (declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-db" (conn table))
@@ -250,8 +255,9 @@ Return nil when validation succeeds, or signal `user-error' when invalid."
       (push "C-c .: now" affordances))
     (when (clutch-result-edit--json-p)
       (push "C-c ': JSON" affordances))
-    (format " Editing row %d, column \"%s\"%s  |  %sC-c C-c: stage  C-c C-k: cancel"
+    (format " Editing row %d, column \"%s\"%s%s%sC-c C-c: stage  C-c C-k: cancel"
             ridx col-name tag-text
+            (clutch--status-separator)
             (if affordances
                 (concat (string-join (nreverse affordances) "  ") "  ")
               ""))))
@@ -509,8 +515,8 @@ Refresh the affected row and footer in place when possible."
   (clutch--refresh-footer-line)
   (force-mode-line-update)
   (if clutch--pending-edits
-      (message "%d staged edit%s — C-c C-c to commit"
-               (length clutch--pending-edits)
+      (message "%s staged edit%s — C-c C-c to commit"
+               (clutch--message-count (length clutch--pending-edits))
                (if (= (length clutch--pending-edits) 1) "" "s"))
     (message "Edit reverted to original")))
 
@@ -681,8 +687,10 @@ When STMTS is nil, build statements from the current staged state."
   (interactive)
   (let ((stmts (clutch-result--pending-sql-statements)))
     (kill-new (clutch-result--pending-sql-content stmts))
-    (message "Copied %d staged SQL statement%s"
-             (length stmts) (if (= (length stmts) 1) "" "s"))))
+    (message "Copied %s staged %s statement%s"
+             (clutch--message-count (length stmts))
+             (clutch--message-keyword "SQL")
+             (if (= (length stmts) 1) "" "s"))))
 
 ;;;###autoload
 (defun clutch-result-save-pending-sql ()
@@ -694,9 +702,11 @@ When STMTS is nil, build statements from the current staged state."
     (with-temp-buffer
       (insert sql)
       (write-region (point-min) (point-max) path nil 'silent))
-    (message "Saved %d staged SQL statement%s to %s"
-             (length stmts) (if (= (length stmts) 1) "" "s")
-             path)))
+    (message "Saved %s staged %s statement%s to %s"
+             (clutch--message-count (length stmts))
+             (clutch--message-keyword "SQL")
+             (if (= (length stmts) 1) "" "s")
+             (clutch--message-path path))))
 
 (defun clutch-result--execute-mutation-stmt (stmt &optional require-single-row)
   "Execute mutation STMT.
@@ -754,8 +764,8 @@ Executes in order: INSERTs first, then UPDATEs, then DELETEs."
             clutch--pending-deletes nil
             clutch--pending-inserts nil
             clutch--marked-rows nil)
-      (message "%d change%s committed"
-               (length all-stmts)
+      (message "%s change%s committed"
+               (clutch--message-count (length all-stmts))
                (if (= (length all-stmts) 1) "" "s"))
       (clutch--execute clutch--last-query clutch-connection))))
 
@@ -799,8 +809,8 @@ Use \\[clutch-result-commit] in the result buffer to commit."
       (clutch--replace-row-at-index ridx))
     (clutch--refresh-footer-line)
     (force-mode-line-update)
-    (message "%d row%s staged for deletion — C-c C-c to commit"
-             (length indices)
+    (message "%s row%s staged for deletion — C-c C-c to commit"
+             (clutch--message-count (length indices))
              (if (= (length indices) 1) "" "s"))))
 
 ;;;; Insert row
@@ -1251,8 +1261,9 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
         (define-key map (kbd "C-c C-k") cancel-fn)
         (use-local-map map))
       (setq-local header-line-format
-                  (format " JSON field %s  |  C-c C-c: save  C-c C-k: cancel"
-                          field-name)))
+                  (concat (format " JSON field %s" field-name)
+                          (clutch--status-separator)
+                          "C-c C-c: save  C-c C-k: cancel")))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--current-field-or-error ()
@@ -1415,10 +1426,13 @@ TIME defaults to `current-time'."
 
 (defun clutch-result-insert--header-line ()
   "Return the insert form header line."
-  (format " INSERT into %s [%s]  |  TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-a: %s  C-c C-y: import TSV/CSV  C-c C-c: stage  C-c C-k: cancel"
-          clutch-result-insert--table
-          (if clutch-result-insert--show-all-fields "all columns" "sparse")
-          (if clutch-result-insert--show-all-fields "sparse fields" "all fields")))
+  (concat
+   (format " INSERT into %s [%s]"
+           clutch-result-insert--table
+           (if clutch-result-insert--show-all-fields "all columns" "sparse"))
+   (clutch--status-separator)
+   (format "TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-a: %s  C-c C-y: import TSV/CSV  C-c C-c: stage  C-c C-k: cancel"
+           (if clutch-result-insert--show-all-fields "sparse fields" "all fields"))))
 
 (defun clutch-result-insert--refresh-header-line ()
   "Refresh the insert form header line."
@@ -1791,9 +1805,10 @@ fields until the user expands to all columns."
    clutch-result-insert--table
    (clutch-result-insert--all-column-names))
   (message "Insert form now shows %s"
-           (if clutch-result-insert--show-all-fields
-               "all columns"
-             "sparse columns")))
+           (clutch--message-keyword
+            (if clutch-result-insert--show-all-fields
+                "all columns"
+              "sparse columns"))))
 
 (defun clutch-result-insert--read-import-text ()
   "Return import text from the active region or the current kill."
@@ -1934,8 +1949,10 @@ immediately."
       (clutch-result-insert--populate-buffer
        clutch-result-insert--table
        (clutch-result-insert--all-column-names))
-      (message "Imported 1 row from %s into the insert form"
-               (clutch-result-insert--delimiter-name delim)))
+      (message "Imported %s row from %s into the insert form"
+               (clutch--message-count 1)
+               (clutch--message-keyword
+                (clutch-result-insert--delimiter-name delim))))
      (clutch-result-insert--pending-index
       (user-error "Cannot bulk import multiple rows while editing a staged insert"))
      (t
@@ -1952,9 +1969,10 @@ immediately."
         (clutch-result-insert--populate-buffer
          clutch-result-insert--table
          (clutch-result-insert--all-column-names))
-        (message "%d rows staged from %s import — C-c C-c to commit"
-                 row-count
-                 (clutch-result-insert--delimiter-name delim)))))))
+        (message "%s rows staged from %s import — C-c C-c to commit"
+                 (clutch--message-count row-count)
+                 (clutch--message-keyword
+                  (clutch-result-insert--delimiter-name delim))))))))
 
 (defun clutch-result-insert--parse-fields ()
   "Parse the insert buffer into an alist of (COLUMN . VALUE).
@@ -2107,8 +2125,8 @@ Use \\[clutch-result-commit] in the result buffer to commit."
       (clutch--refresh-display)
       (if pending-index
           (message "Staged insert updated — C-c C-c to commit")
-        (message "%d insertion%s staged — C-c C-c to commit"
-                 (length clutch--pending-inserts)
+        (message "%s insertion%s staged — C-c C-c to commit"
+                 (clutch--message-count (length clutch--pending-inserts))
                  (if (= (length clutch--pending-inserts) 1) "" "s"))))))
 
 ;;;###autoload

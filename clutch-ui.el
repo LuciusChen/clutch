@@ -878,6 +878,50 @@ Columns with sort indicators get wider to fit the label."
           (aset widths cidx label-w))))
     widths))
 
+(defun clutch--message-part (value face)
+  "Return VALUE formatted for echo-area display with FACE."
+  (propertize (format "%s" value) 'face face))
+
+(defun clutch--message-count (value)
+  "Return VALUE formatted as a highlighted count."
+  (clutch--message-part value 'font-lock-constant-face))
+
+(defun clutch--message-ident (value)
+  "Return VALUE formatted as a highlighted identifier."
+  (clutch--message-part value 'clutch-field-name-face))
+
+(defun clutch--message-keyword (value)
+  "Return VALUE formatted as a highlighted operation/status keyword."
+  (clutch--message-part value 'font-lock-keyword-face))
+
+(defun clutch--message-literal (value)
+  "Return VALUE formatted as a highlighted literal."
+  (clutch--message-part value 'font-lock-string-face))
+
+(defun clutch--message-path (value)
+  "Return VALUE formatted as a highlighted file path."
+  (clutch--message-part value 'font-lock-doc-face))
+
+(defun clutch--status-separator ()
+  "Return the standard short-status separator."
+  (propertize "  •  " 'face 'font-lock-comment-face))
+
+(defun clutch--column-info-field (label value &optional face)
+  "Return a propertized column-info LABEL and VALUE."
+  (concat (clutch--message-keyword label)
+          " "
+          (clutch--message-part value (or face 'font-lock-string-face))))
+
+(defun clutch--column-info-message-string (info)
+  "Return one-line minibuffer text for propertized column INFO."
+  (let ((start 0)
+        (parts nil))
+    (while (string-match "\n" info start)
+      (push (substring info start (match-beginning 0)) parts)
+      (setq start (match-end 0)))
+    (push (substring info start) parts)
+    (string-join (nreverse parts) (clutch--status-separator))))
+
 (defun clutch--column-info-string (cidx)
   "Build the display string for column at CIDX from cached details."
   (when-let* ((details clutch--result-column-details)
@@ -885,14 +929,20 @@ Columns with sort indicators get wider to fit the label."
     (let ((parts nil))
       (when-let* ((comment (plist-get col :comment)))
         (unless (string-empty-p comment)
-          (push comment parts)))
+          (push (propertize comment 'face 'font-lock-doc-face) parts)))
       (when-let* ((default (plist-get col :default)))
-        (push (format "Default: %s" default) parts))
-      (push (format "Nullable: %s" (if (plist-get col :nullable) "YES" "NO")) parts)
+        (push (clutch--column-info-field "Default:" default) parts))
+      (push (clutch--column-info-field
+             "Nullable:"
+             (if (plist-get col :nullable) "YES" "NO")
+             (if (plist-get col :nullable)
+                 'font-lock-comment-face
+               'font-lock-warning-face))
+            parts)
       (when-let* ((type (plist-get col :type)))
-        (push (format "Type: %s" type) parts))
+        (push (clutch--column-info-field "Type:" type 'font-lock-type-face) parts))
       (when-let* ((name (plist-get col :name)))
-        (push name parts))
+        (push (propertize name 'face 'clutch-field-name-face) parts))
       (string-join parts "\n"))))
 
 (defun clutch--resolve-result-column-details (conn sql col-names)
