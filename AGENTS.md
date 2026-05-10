@@ -4,9 +4,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Core Principles
 
-- **Question every abstraction**: Before adding a layer, file, or indirection, ask whether it solves a current problem. If the answer is hypothetical, do not add it.
-- **Simplify relentlessly**: Three similar lines are better than a premature abstraction. A single large file is better than several tiny files with unclear boundaries.
-- **Fewer files, clearer boundaries**: Split only when a file has a genuinely distinct responsibility. Never split for cosmetic reasons.
+- **Question every abstraction**: Add layers, files, or indirection only when they solve a current problem. Prefer simpler code and clear ownership over speculative structure.
 - **Delete, don't deprecate**: Remove unused code entirely. No backward-compatibility shims, re-exports, or "removed" comments.
 - **Converge UX**: Prefer one clear entry point and one consistent behavior model over overlapping commands or branchy mode-specific behavior. Wrapper commands are fine, but they must share one resolution path, one action registry, and one default-action model.
 
@@ -16,7 +14,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **One failed fix narrows the hypothesis**: If the first attempted fix does not hold, reduce the hypothesis space and gather evidence. Do not stack another speculative patch on top.
 - **Two failed fixes stop the patching loop**: After two failed fixes on the same issue, stop changing behavior and switch to diagnosis only.
 - **Fix the right layer**: If the real problem belongs in the JDBC agent, protocol code, cache model, or connection lifecycle, move the fix there instead of compensating in the UI layer.
-- **Stabilize workflow changes before coding**: For any change that alters a primary entry point, default action, or action menu, write a short design note first. Keep object resolution, action definition, and action presentation separate.
+- **Stabilize workflow changes before coding**: For any change that alters a primary entry point, default action, or action menu, write a short design note first.
 - **Keep experiments narrow**: Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice shows real user value.
 - **Flag compensating code as design debt**: When touching a subsystem, look for code that compensates in the wrong layer — `condition-case nil` swallowing internal errors, re-querying data already available from a caller, timing hacks, or silent fallbacks. These are not blockers; record them in a postmortem as design debt rather than fixing inline. Do not let debt discovery delay the current change.
 
@@ -114,8 +112,6 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 - Byte-compiling `clutch.el` and every extracted `clutch-*.el` module must produce zero warnings.
 - `checkdoc` and `package-lint` must produce zero warnings for distributable package entry files.
-- All public functions must have docstrings.
-- Every file must start with `;;; -*- lexical-binding: t; -*-` and end with `(provide 'pkg)` / `;;; pkg.el ends here`.
 - Export features that write files must provide explicit encoding behavior and sensible defaults.
 - Document Excel compatibility guidance clearly.
 - Any export-path change must include regression tests for content correctness and at least one encoding-related path.
@@ -162,7 +158,7 @@ These rules keep the package compatible with MELPA submission requirements
 
 - `cl-lib` functions require `(require 'cl-lib)` — do not rely on transitive loading.
 - Avoid `eval-when-compile` for runtime-needed dependencies.
-- Do not use `string-equal-ignore-case`, `ntake`, `take`, `pos-bol`, `pos-eol`, or other Emacs 29+ symbols without compat shims or guards.
+- Do not use Emacs 29+ symbols such as `ntake`, `take`, `pos-bol`, or `pos-eol` without compat shims or guards.
 
 ## Pre-Commit Checklist (Mandatory)
 
@@ -202,9 +198,10 @@ backend adapters, also run the real MySQL/PostgreSQL live suite:
 ./test/run-native-live-tests.sh
 ```
 
-The native live runner starts or reuses local Docker/OrbStack containers and runs
-both UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live`
-tests. JDBC live tests remain separate because they require external credentials.
+The native live runner starts or reuses local containers, preferring Podman on
+Linux and OrbStack-backed Docker on macOS. It runs both UI-level `:clutch-live`
+tests and backend-level `:pg-live` / `:mysql-live` tests. JDBC live tests remain
+separate because they require external credentials.
 
 ### 3. Byte-compile with zero warnings
 
@@ -229,10 +226,4 @@ emacs -Q --batch -L ../package-lint -l package-lint \
 
 ### 5. Update tests when behavior changes
 
-When a function's behavior changes intentionally, search all test files for existing tests of that function and update them before committing:
-
-```bash
-grep -n "function-name" test/clutch-test.el test/clutch-db-test.el
-```
-
-Update existing tests first. Add a new failing test only when the current suite does not already prove the regression or changed behavior.
+When behavior changes intentionally, update existing relevant tests first. Add a new failing test only when the current suite does not already prove the regression or changed behavior.

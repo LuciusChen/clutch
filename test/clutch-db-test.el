@@ -11,7 +11,8 @@
 ;;
 ;; Unit tests run without a database server.
 ;; Native live tests require MySQL and PostgreSQL.  The live runner starts or
-;; reuses local Docker/OrbStack containers:
+;; reuses local containers, preferring Podman on Linux and OrbStack-backed
+;; Docker on macOS:
 ;;   ./test/run-native-live-tests.sh
 ;;
 ;; Manual live setup:
@@ -1859,6 +1860,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-bytea) 'blob))
   (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-json) 'json))
   (should (eq (clutch-db-pg--type-category clutch-db-test--pg-oid-jsonb) 'json))
+  (should (eq (clutch-db-pg--type-category clutch-db-pg--oid-bool) 'text))
   ;; Unknown OID defaults to text
   (should (eq (clutch-db-pg--type-category 999999) 'text)))
 
@@ -3047,65 +3049,6 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
     (let ((entries (clutch-db-list-table-entries conn)))
       (should (listp entries))
       (should (> (length entries) 0)))))
-
-;;;; Unit tests — clutch--format-value and clutch--value-to-literal
-
-(ert-deftest clutch-db-test-format-value-primitives ()
-  "Format-value handles nil, :false, strings, and numbers correctly."
-  (should (equal (clutch--format-value nil)    "NULL"))
-  (should (equal (clutch--format-value :false) "false"))
-  (should (equal (clutch--format-value "hi")   "hi"))
-  (should (equal (clutch--format-value 42)     "42"))
-  (should (equal (clutch--format-value 3.14)   "3.14")))
-
-(ert-deftest clutch-db-test-format-value-json-hash-table ()
-  "Format-value serializes a hash-table (MySQL/PG JSON object) to a JSON string."
-  (let ((ht (make-hash-table :test 'equal)))
-    (puthash "key" "val" ht)
-    (let ((result (clutch--format-value ht)))
-      (should (stringp result))
-      (should (string-match-p "\"key\"" result))
-      (should (string-match-p "\"val\"" result)))))
-
-(ert-deftest clutch-db-test-format-value-json-vector ()
-  "Format-value serializes a vector (MySQL/PG JSON array) to a JSON string."
-  (should (equal (clutch--format-value [1 2 3]) "[1,2,3]")))
-
-(ert-deftest clutch-db-test-format-value-json-serialization-error-surfaces ()
-  "Format-value should signal `clutch-db-error' when JSON serialization fails."
-  (let ((ht (make-hash-table :test 'equal)))
-    (puthash "key" "val" ht)
-    (cl-letf (((symbol-function 'json-serialize)
-               (lambda (_value)
-                 (signal 'wrong-type-argument '("json serialization failed")))))
-      (let ((err (should-error (clutch--format-value ht)
-                               :type 'clutch-db-error)))
-        (should (string-match-p
-                 "Cannot serialize query result value as JSON"
-                 (cadr err)))))))
-
-(ert-deftest clutch-db-test-value-to-literal-json-hash-table ()
-  "Value-to-literal escapes a JSON hash-table as a quoted SQL string literal."
-  (let* ((ht (make-hash-table :test 'equal))
-         (_ (puthash "k" "v" ht))
-         (conn (make-clutch-jdbc-conn
-                :params '(:driver sqlserver :user "sa")))
-         (clutch-connection conn)
-         (result (clutch--value-to-literal ht)))
-    (should (stringp result))
-    ;; Result should be a quoted string containing the JSON
-    (should (string-match-p "\"k\"" result))
-    (should (string-match-p "\"v\"" result))))
-
-(ert-deftest clutch-db-test-value-to-literal-json-vector ()
-  "Value-to-literal escapes a JSON vector as a quoted SQL string literal."
-  (let* ((conn (make-clutch-jdbc-conn
-                :params '(:driver sqlserver :user "sa")))
-         (clutch-connection conn)
-         (result (clutch--value-to-literal [1 2 3])))
-    (should (stringp result))
-    (should (string-match-p "1" result))
-    (should (string-match-p "2" result))))
 
 ;;;; Cross-backend consistency tests
 

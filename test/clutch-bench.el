@@ -11,7 +11,7 @@
 
 ;;; Commentary:
 
-;; Run live backend benchmarks against local Docker/OrbStack databases.
+;; Run live backend benchmarks against local container databases.
 ;;
 ;; Example:
 ;;   Emacs -Q --batch \

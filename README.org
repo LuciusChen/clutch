@@ -474,8 +474,9 @@ database workflows still work.  Test commands use =load-prefer-newer= so stale
 ** Native live tests
 
 =test/run-native-live-tests.sh= runs the MySQL and PostgreSQL live suites against
-local Docker/OrbStack containers.  It covers both the UI-level result workflows
-and backend-level native adapter tests:
+local containers.  On Linux it prefers Podman when available; on macOS it
+requires OrbStack-backed Docker unless explicitly overridden.  It covers both
+the UI-level result workflows and backend-level native adapter tests:
 
 #+begin_src sh
 ./test/run-native-live-tests.sh
