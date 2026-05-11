@@ -105,8 +105,7 @@ and inject or read a matching row identity.
 
 * Requirements
 
-- Emacs 28.1+ for MySQL and PostgreSQL backends
-- Emacs 29.1+ for the SQLite backend (built-in =sqlite-*= functions)
+- Emacs 29.1+
 - MySQL 5.6+ / 8.x, PostgreSQL 12+, or SQLite 3 (via Emacs built-in)
 - MariaDB 10.11 has been live-validated through the native =mysql= backend;
   TLS with =mysql_native_password= has also been live-validated; other

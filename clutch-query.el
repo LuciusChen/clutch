@@ -1,11 +1,11 @@
 ;;; clutch-query.el --- SQL execution and result workflow -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -212,7 +212,7 @@ window rather than replacing the current window."
              (is-new (zerop (buffer-size buf))))
         (select-window (or (clutch--console-window-for buf) (selected-window)))
         (switch-to-buffer buf)
-        (unless (eq major-mode 'clutch-mode)
+        (unless (derived-mode-p 'clutch-mode)
           (clutch-mode))
         (setq-local clutch--console-name name)
         (setq-local clutch--console-storage-name storage-name)
@@ -563,7 +563,7 @@ Returns table name string or nil."
     close))
 
 (defun clutch--row-identity-window-aggregate-call-p (sql open-pos)
-  "Return non-nil when aggregate call at OPEN-POS is used as a window function."
+  "Return non-nil when SQL has a window aggregate call at OPEN-POS."
   (when-let* ((close-pos (clutch--row-identity-matching-paren-pos sql open-pos)))
     (let ((pos (clutch--row-identity-skip-space sql (1+ close-pos))))
       (when (clutch--row-identity-looking-at-keyword-p sql pos "FILTER")
@@ -640,7 +640,7 @@ Returns table name string or nil."
        (not (clutch-db-sql-find-top-level-clause sql "JOIN"))))
 
 (defun clutch--row-identity-from-body-range (sql from-pos)
-  "Return `(START END)' for the top-level FROM body after FROM-POS."
+  "Return `(START END)' for the top-level FROM body in SQL after FROM-POS."
   (let ((start (+ from-pos 4)))
     (list start
           (or (cl-loop for clause in '("WHERE" "GROUP" "HAVING" "ORDER\\s-+BY"
@@ -672,7 +672,7 @@ Returns table name string or nil."
    (t table)))
 
 (defun clutch--row-identity-oracle-star-rewrite (sql from-pos)
-  "Return Oracle-safe SQL and star qualifier for SELECT * SQL.
+  "Return Oracle-safe SQL and star qualifier for SELECT * SQL before FROM-POS.
 The return value is `(SQL QUALIFIER)'.  QUALIFIER is nil when SQL did not need
 rewriting."
   (let ((select-list (string-trim (substring sql 0 from-pos))))
@@ -897,7 +897,7 @@ operate on that result set via an outer wrapper query."
     0))
 
 (defun clutch--split-page-lookahead-rows (rows page-size)
-  "Return (VISIBLE-ROWS . HAS-MORE) after removing one lookahead row."
+  "Return (VISIBLE-ROWS . HAS-MORE) from ROWS after PAGE-SIZE lookahead trimming."
   (let ((has-more (> (length rows) page-size)))
     (cons (if has-more
               (cl-subseq rows 0 page-size)
@@ -1128,7 +1128,7 @@ names."
             (or (clutch-db-result-affected-rows result) 0))))
 
 (defun clutch--execute-source-buffer ()
-  "Return the source buffer for the current execution."
+  "Return the source BUFFER for the current execution."
   (if (window-live-p clutch--source-window)
       (window-buffer clutch--source-window)
     (current-buffer)))
@@ -1136,7 +1136,8 @@ names."
 (defun clutch--remember-execute-debug-event (connection phase sql
                                                         &optional buffer summary
                                                         elapsed context)
-  "Record an execute debug event for CONNECTION, PHASE, and SQL."
+  "Record an execute debug event.
+CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
   (when clutch-debug-mode
     (apply #'clutch--remember-debug-event
            (append (when buffer (list :buffer buffer))
@@ -1150,7 +1151,7 @@ names."
                    (when context (list :context context))))))
 
 (defun clutch--abort-execution-on-db-error (source-buffer connection sql err)
-  "Record ERR for SQL on CONNECTION and abort the current execution."
+  "Record ERR for SQL on CONNECTION and abort execution from SOURCE-BUFFER."
   (let* ((failure (clutch--remember-execute-error
                    source-buffer connection sql err))
          (message (car failure))

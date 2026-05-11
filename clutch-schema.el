@@ -1,9 +1,9 @@
 ;;; clutch-schema.el --- Schema refresh and metadata caches -*- lexical-binding: t; -*-
 
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -91,7 +91,8 @@
       (error nil))))
 
 (defun clutch--metadata-debug-event (conn op phase backend summary &optional context)
-  "Record a metadata debug event for CONN when debug mode is enabled."
+  "Record a metadata debug event.
+CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
   (when clutch-debug-mode
     (apply #'clutch--remember-debug-event
            (append (list :connection conn
@@ -103,12 +104,12 @@
                      (list :context context))))))
 
 (defun clutch--metadata-debug-table-event (conn op phase backend table summary)
-  "Record a metadata debug event for TABLE on CONN."
+  "Record a metadata debug event for TABLE and OP on CONN."
   (clutch--metadata-debug-event conn op phase backend summary
                                 (list :table table)))
 
 (defun clutch--metadata-debug-stale-table-event (conn op backend table what)
-  "Record a stale metadata debug event for TABLE and WHAT on CONN."
+  "Record a stale metadata debug event for TABLE, OP, and WHAT on CONN."
   (clutch--metadata-debug-table-event
    conn op "stale-drop" backend table
    (format "Ignored stale %s for %s" what table)))

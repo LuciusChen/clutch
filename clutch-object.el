@@ -1,9 +1,9 @@
 ;;; clutch-object.el --- Object discovery and describe workflow -*- lexical-binding: t; -*-
 
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (transient "0.3.7"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -40,6 +40,12 @@ Each value is a plist with at least :entries and :fetched-at.")
 (defvar embark-target-finders)
 (defvar embark-keymap-alist)
 (defvar embark-around-action-hooks)
+(defvar clutch--embark-setup-done nil
+  "Non-nil after clutch object Embark integration has been installed.")
+(defvar clutch-embark-object-actions nil
+  "Embark actions for clutch objects.")
+(defvar clutch-embark-target-object-actions nil
+  "Embark actions for clutch objects with explicit targets.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
@@ -312,7 +318,7 @@ minibuffer has been quit.")
        (= generation (clutch--object-warmup-generation conn key))))
 
 (defun clutch--object-warmup-debug-event (conn phase backend category summary)
-  "Record an object warmup debug event for CATEGORY on CONN."
+  "Record an object warmup debug event for CATEGORY and PHASE on CONN."
   (when clutch-debug-mode
     (clutch--remember-debug-event
      :connection conn
@@ -323,13 +329,14 @@ minibuffer has been quit.")
      :context (list :object-category category))))
 
 (defun clutch--object-warmup-stale-debug-event (conn backend category what)
-  "Record a stale object warmup debug event for CATEGORY and WHAT."
+  "Record a stale object warmup event.
+CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
   (clutch--object-warmup-debug-event
    conn "stale-drop" backend category
    (format "Ignored stale %s warmup %s" category what)))
 
 (defun clutch--object-warmup-success (conn key generation backend category type entries)
-  "Handle successful warmup ENTRIES for CATEGORY."
+  "Handle successful warmup ENTRIES for CATEGORY, KEY, and BACKEND on CONN."
   (if (clutch--object-warmup-current-p conn key generation)
       (progn
         (clutch--object-warmup-debug-event
@@ -340,7 +347,7 @@ minibuffer has been quit.")
     (clutch--object-warmup-stale-debug-event conn backend category "result")))
 
 (defun clutch--object-warmup-error (conn key generation backend category message)
-  "Handle a warmup error MESSAGE for CATEGORY."
+  "Handle a warmup error MESSAGE for CATEGORY, KEY, and BACKEND on CONN."
   (if (clutch--object-warmup-current-p conn key generation)
       (progn
         (clutch--object-warmup-debug-event
@@ -882,7 +889,8 @@ selection can surface objects from different Oracle sources and types."
 (defun clutch--find-console-for-conn (conn)
   "Return the clutch-mode buffer that owns CONN, or nil."
   (cl-loop for buf in (buffer-list)
-           when (and (eq (buffer-local-value 'major-mode buf) 'clutch-mode)
+           when (and (with-current-buffer buf
+                       (derived-mode-p 'clutch-mode))
                      (eq (buffer-local-value 'clutch-connection buf) conn))
            return buf))
 
@@ -1764,46 +1772,53 @@ Clears the map after resolution to prevent stale cross-session matches."
     (setq clutch--object-completion-entry-map nil)
     (when run (apply run rest))))
 
-(with-eval-after-load 'embark
-  (add-to-list 'embark-default-action-overrides
-               '(clutch-object . clutch-object-default-action))
-  (add-to-list 'embark-default-action-overrides
-               '(clutch-target-object . clutch-object-default-action))
-  (advice-add 'embark--command-name :around #'clutch--embark-command-name-advice)
-
-  (defvar clutch-embark-object-actions
-    (let ((map (make-sparse-keymap)))
-      (dolist (spec (clutch--embark-action-specs
+(defun clutch--embark-actions-keymap (&optional include-jump-target)
+  "Return a keymap of clutch object actions for Embark.
+INCLUDE-JUMP-TARGET non-nil keeps the jump-target action."
+  (let ((map (make-sparse-keymap))
+        (predicate (unless include-jump-target
                      (lambda (spec)
-                       (not (eq (plist-get spec :id) 'jump-target)))))
-        (define-key map
-                    (kbd (plist-get spec :key))
-                    (plist-get spec :command)))
-      map)
-    "Embark actions for clutch objects.")
+                       (not (eq (plist-get spec :id) 'jump-target))))))
+    (dolist (spec (clutch--embark-action-specs predicate))
+      (define-key map
+                  (kbd (plist-get spec :key))
+                  (plist-get spec :command)))
+    map))
 
-  (defvar clutch-embark-target-object-actions
-    (let ((map (make-sparse-keymap)))
-      (dolist (spec (clutch--embark-action-specs))
-        (define-key map
-                    (kbd (plist-get spec :key))
-                    (plist-get spec :command)))
-      map)
-    "Embark actions for clutch objects with explicit targets.")
+(defun clutch--embark-setup ()
+  "Install optional Embark integration for clutch object actions."
+  (unless clutch--embark-setup-done
+    (setq clutch--embark-setup-done t
+          clutch-embark-object-actions (clutch--embark-actions-keymap)
+          clutch-embark-target-object-actions
+          (clutch--embark-actions-keymap t))
+    (add-to-list 'embark-default-action-overrides
+                 '(clutch-object . clutch-object-default-action))
+    (add-to-list 'embark-default-action-overrides
+                 '(clutch-target-object . clutch-object-default-action))
+    (advice-add 'embark--command-name :around #'clutch--embark-command-name-advice)
+    (add-to-list 'embark-target-finders #'clutch--embark-object-target)
+    (add-to-list 'embark-keymap-alist
+                 '(clutch-object . clutch-embark-object-actions))
+    (add-to-list 'embark-keymap-alist
+                 '(clutch-target-object . clutch-embark-target-object-actions))
+    ;; Resolve minibuffer candidate to entry plist before running actions.
+    ;; Covers both explicit keymap actions and the default action (RET / embark-dwim).
+    (dolist (cmd (cons 'clutch-object-default-action
+                       (mapcar (lambda (spec) (plist-get spec :command))
+                               (clutch--embark-action-specs))))
+      (add-to-list 'embark-around-action-hooks
+                   (list cmd #'clutch--embark-with-resolved-entry)))))
 
-  (add-to-list 'embark-target-finders #'clutch--embark-object-target)
-  (add-to-list 'embark-keymap-alist
-               '(clutch-object . clutch-embark-object-actions))
-  (add-to-list 'embark-keymap-alist
-               '(clutch-target-object . clutch-embark-target-object-actions))
+(defun clutch--embark-after-load (_file)
+  "Install clutch Embark integration after loading a file when Embark is ready."
+  (when (featurep 'embark)
+    (remove-hook 'after-load-functions #'clutch--embark-after-load)
+    (clutch--embark-setup)))
 
-  ;; Resolve minibuffer candidate to entry plist before running actions.
-  ;; Covers both explicit keymap actions and the default action (RET / embark-dwim).
-  (dolist (cmd (cons 'clutch-object-default-action
-                     (mapcar (lambda (spec) (plist-get spec :command))
-                             (clutch--embark-action-specs))))
-    (add-to-list 'embark-around-action-hooks
-                 (list cmd #'clutch--embark-with-resolved-entry))))
+(if (featurep 'embark)
+    (clutch--embark-setup)
+  (add-hook 'after-load-functions #'clutch--embark-after-load))
 
 (provide 'clutch-object)
 ;;; clutch-object.el ends here

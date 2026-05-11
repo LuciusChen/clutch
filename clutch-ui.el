@@ -1,9 +1,9 @@
 ;;; clutch-ui.el --- Result rendering and icon helpers -*- lexical-binding: t; -*-
 
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -820,7 +820,8 @@ records one-row lookahead."
                                         &optional page-offset page-has-more)
   "Return the static footer string for pagination state.
 ROW-COUNT and PAGE-NUM describe the visible page, and PAGE-SIZE sets
-the page length.  TOTAL-ROWS describes the full result size when known."
+the page length.  TOTAL-ROWS describes the full result size when known.
+PAGE-OFFSET and PAGE-HAS-MORE carry lookahead pagination state."
   (let ((sep (propertize "  •  " 'face 'font-lock-comment-face)))
     (mapconcat #'identity
                (clutch--footer-main-parts row-count page-num page-size
@@ -907,7 +908,7 @@ Columns with sort indicators get wider to fit the label."
   (propertize "  •  " 'face 'font-lock-comment-face))
 
 (defun clutch--column-info-field (label value &optional face)
-  "Return a propertized column-info LABEL and VALUE."
+  "Return a propertized column-info LABEL and VALUE using optional FACE."
   (concat (clutch--message-keyword label)
           " "
           (clutch--message-part value (or face 'font-lock-string-face))))
@@ -1181,7 +1182,7 @@ Preserves point position (row + column) across the render."
         (save-excursion
           (goto-char line-pos)
           (while (and (< idx len)
-                      (< (point) (point-max)))
+                      (not (eobp)))
             (aset clutch--row-start-positions idx (point))
             (setq idx (1+ idx))
             (forward-line 1))
@@ -1366,7 +1367,7 @@ IGNORE-BUFFER, when non-nil, is excluded from the check."
            (buffer-list)))
 
 (defun clutch--disable-window-size-hook-if-unused (&optional ignore-buffer)
-  "Remove the window-size hook when no result buffers remain.
+  "Remove the `window-size' hook when no result buffers remain.
 IGNORE-BUFFER is excluded from liveness checks."
   (when (and clutch--window-size-hook-enabled
              (not (clutch--has-live-result-buffer-p ignore-buffer)))

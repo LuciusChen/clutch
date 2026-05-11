@@ -1,9 +1,10 @@
 ;;; clutch.el --- Interactive database client -*- lexical-binding: t; -*-
 ;; Copyright (C) 2025-2026 Lucius Chen
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (mysql "0.2.0") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (mysql "0.2.0") (pg "0.40") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
@@ -534,7 +535,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert (format "Clutch Debug\n============\nStarted: %s\n"
-                      (format-time-string "%Y-%m-%d %H:%M:%S"))))))
+                      (format-time-string "%F %T"))))))
 
 (defun clutch--debug-buffer-source-label (buffer)
   "Return a human-readable source label for BUFFER."
@@ -657,7 +658,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
            (body
             (with-temp-buffer
               (clutch--debug-insert-field "Recorded"
-                                          (format-time-string "%Y-%m-%d %H:%M:%S"))
+                                          (format-time-string "%F %T"))
               (clutch--debug-insert-field "Backend"
                                           (and backend
                                                (upcase (symbol-name backend))))
@@ -695,7 +696,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
             (with-temp-buffer
               (clutch--debug-insert-field "Recorded"
                                           (or (plist-get event :time)
-                                              (format-time-string "%Y-%m-%d %H:%M:%S")))
+                                              (format-time-string "%F %T")))
               (clutch--debug-insert-field "Operation" (plist-get event :op))
               (clutch--debug-insert-field "Phase" (plist-get event :phase))
               (clutch--debug-insert-field "Backend"
@@ -861,7 +862,7 @@ connection-scoped registry."
     (unless (plist-get normalized :time)
       (setq normalized
             (plist-put normalized :time
-                       (format-time-string "%Y-%m-%d %H:%M:%S"))))
+                       (format-time-string "%F %T"))))
     (when-let* ((sql (plist-get normalized :sql)))
       (setq normalized (plist-put normalized :sql-preview
                                   (clutch--debug-sql-preview sql)))
@@ -1050,7 +1051,7 @@ When nil, console persistence falls back to `clutch--console-name'.")
             (lambda (buf)
               (and (buffer-live-p buf)
                    (with-current-buffer buf
-                     (and (eq major-mode 'clutch-mode)
+                     (and (derived-mode-p 'clutch-mode)
                           (clutch--console-buffer-storage-match-p
                            storage-name)))))
             (buffer-list)))
@@ -1058,7 +1059,7 @@ When nil, console persistence falls back to `clutch--console-name'.")
        (lambda (buf)
          (and (buffer-live-p buf)
               (with-current-buffer buf
-                (and (eq major-mode 'clutch-mode)
+                (and (derived-mode-p 'clutch-mode)
                      (equal clutch--console-name name)
                      (or (not storage-name)
                          (and (not clutch--console-storage-name)
@@ -2312,7 +2313,9 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
 
 (defun clutch--completion-context-tables (schema qualified-table prefix-len
                                                  table-context-p busy)
-  "Return tables whose columns are useful completion candidates."
+  "Return tables from SCHEMA whose columns are useful completion candidates.
+QUALIFIED-TABLE narrows completion after an explicit qualifier.  PREFIX-LEN,
+TABLE-CONTEXT-P, and BUSY decide whether column loading is appropriate."
   (unless (or table-context-p busy
               (and (not qualified-table)
                    (< prefix-len clutch--schema-inline-min-prefix-length)))
@@ -2325,7 +2328,9 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
         tables))))
 
 (defun clutch--completion-column-values (conn schema table prefix sync-columns-p)
-  "Return raw column names for TABLE in completion context."
+  "Return raw column names for TABLE on CONN in completion context.
+SCHEMA supplies cached columns.  PREFIX is passed to direct backend completion
+when SYNC-COLUMNS-P is nil."
   (if sync-columns-p
       (or (clutch--cached-columns schema table)
           (and schema (clutch--ensure-columns conn schema table)))
@@ -2336,7 +2341,9 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
 
 (defun clutch--completion-column-candidates (conn schema tables qualified-table
                                                   prefix sync-columns-p)
-  "Return column completion candidates for TABLES."
+  "Return column completion candidates for TABLES on CONN.
+SCHEMA supplies cached columns.  QUALIFIED-TABLE, PREFIX, and SYNC-COLUMNS-P
+control narrowing and backend loading."
   (let ((all (unless qualified-table (copy-sequence tables))))
     (dolist (tbl tables)
       (when-let* ((cols (clutch--completion-column-values
@@ -2351,7 +2358,7 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
     (cons (point) (point))))
 
 (defun clutch--completion-table-sources (schema tables)
-  "Return visible table sources for TABLES in the current statement."
+  "Return visible table sources from SCHEMA for TABLES in the current statement."
   (let* ((aliases (and schema (clutch--table-aliases-in-current-statement schema)))
          (aliased-tables (mapcar #'cdr aliases))
          sources)
@@ -2377,7 +2384,9 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
 
 (defun clutch--completion-select-list-column-candidates
     (conn schema prefix sync-columns-p)
-  "Return (CANDIDATES . ANNOTATION-FN) for SELECT-list columns."
+  "Return (CANDIDATES . ANNOTATION-FN) for SELECT-list columns on CONN.
+SCHEMA supplies current statement tables.  PREFIX and SYNC-COLUMNS-P control
+backend column loading."
   (let* ((tables (or (and schema (clutch--tables-in-current-statement schema))
                      (clutch--statement-table-identifiers)))
          (sources (and tables (clutch--completion-table-sources schema tables)))
@@ -2407,7 +2416,7 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
               (gethash candidate annotations))))))
 
 (defun clutch--completion-select-list-ready-p (sql start offset)
-  "Return non-nil when OFFSET is an empty SELECT-list slot in SQL."
+  "Return non-nil when OFFSET is an empty SELECT-list slot in SQL after START."
   (let ((pos start)
         (depth 0)
         significant)
@@ -3620,10 +3629,10 @@ Enable --refine to exclude rows/columns interactively before copying
         sql
       (save-excursion
         (skip-chars-backward " \t\n\r;")
-        (when (and (> (point) (point-min))
+        (when (and (not (bobp))
                    (eq (char-after) ?\;))
           (backward-char))
-        (when (< (point) (point-max))
+        (when (not (eobp))
           (clutch--agent-context-sql-from-bounds
            (clutch--dwim-bounds-at-point)))))))
 
@@ -3743,7 +3752,7 @@ Enable --refine to exclude rows/columns interactively before copying
                (clutch--agent-context-row-values row col-indices)))
             sample
             "\n")
-           (unless (null sample) "\n")
+           (when sample "\n")
            "```\n\n"))))))
 
 (defun clutch--agent-context-connection-section (conn)
@@ -3757,7 +3766,7 @@ Enable --refine to exclude rows/columns interactively before copying
             (format "- Current schema/database: %s\n\n" (or schema database "none")))))
 
 (defun clutch--agent-context-text (conn sql &optional tables)
-  "Return Markdown context text for CONN and SQL."
+  "Return Markdown context text for CONN, SQL, and optional TABLES."
   (let* ((tables (or tables (clutch--agent-context-tables sql)))
          (result-buffer (clutch--agent-context-result-buffer sql))
          (sample (clutch--agent-context-result-sample result-buffer)))
@@ -5040,7 +5049,7 @@ Reuses a single *clutch-record* buffer, updating it in place."
          (result-buf (current-buffer))
          (buf (get-buffer-create "*clutch-record*")))
     (with-current-buffer buf
-      (unless (eq major-mode 'clutch-record-mode)
+      (unless (derived-mode-p 'clutch-record-mode)
         (clutch-record-mode))
       (setq-local clutch-record--result-buffer result-buf)
       (setq-local clutch-record--row-idx ridx)

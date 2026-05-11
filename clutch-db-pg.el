@@ -1,11 +1,11 @@
 ;;; clutch-db-pg.el --- Native backend over the PostgreSQL client -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (pg "0.40"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -524,7 +524,7 @@ No special init needed — encoding is set in startup message.")
 (cl-defmethod clutch-db-set-auto-commit ((conn pgcon) auto-commit)
   "Set foreground autocommit mode on PostgreSQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables clutch-managed
-manual-commit mode via lazy `BEGIN'."
+manual-commit mode via lazy BEGIN."
   (condition-case err
       (if auto-commit
           (progn

@@ -1,9 +1,9 @@
 ;;; clutch-edit.el --- Staged result edit and insert workflow -*- lexical-binding: t; -*-
 
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -781,7 +781,7 @@ ROW is the row data and ROW-IDENTITY describes the WHERE predicate."
 
 (defun clutch-result--build-delete-stmt-for-identity
     (table identity-vec row-identity)
-  "Build a DELETE statement spec for TABLE using IDENTITY-VEC."
+  "Build a DELETE statement spec for TABLE using IDENTITY-VEC and ROW-IDENTITY."
   (let* ((conn clutch-connection)
          (where-spec (clutch--row-identity-where-parts
                       conn row-identity identity-vec)))
@@ -1365,9 +1365,9 @@ next field.  Returns nil when no matching field exists."
 TIME defaults to `current-time'."
   (let ((ts (or time (current-time))))
     (pcase type-category
-      ('date (format-time-string "%Y-%m-%d" ts))
-      ('time (format-time-string "%H:%M:%S" ts))
-      ('datetime (format-time-string "%Y-%m-%d %H:%M:%S" ts))
+      ('date (format-time-string "%F" ts))
+      ('time (format-time-string "%T" ts))
+      ('datetime (format-time-string "%F %T" ts))
       (_ nil))))
 
 (defun clutch-result-insert--field-tag-list (col-name)

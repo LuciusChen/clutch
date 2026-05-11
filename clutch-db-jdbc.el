@@ -1,11 +1,11 @@
 ;;; clutch-db-jdbc.el --- JDBC backend over the Java sidecar -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -414,8 +414,7 @@ Defaults to 8 lines.  Return nil when stderr is empty."
     (cond
      ((and stderr
            (string-match-p "UnsupportedClassVersionError" stderr))
-      (format (concat "clutch-jdbc-agent requires a newer Java runtime than `%s'. "
-                      "Update `clutch-jdbc-agent-java-executable' or JAVA_HOME.\n%s")
+      (format "clutch-jdbc-agent requires a newer Java runtime than `%s'. Update `clutch-jdbc-agent-java-executable' or JAVA_HOME.\n%s"
               clutch-jdbc-agent-java-executable
               stderr-tail))
      (stderr-tail
@@ -1069,10 +1068,7 @@ an rn column as a side effect."
                  base)))
     (if (= offset 0)
         (format "SELECT * FROM (%s) WHERE ROWNUM <= %d" inner page-size)
-      (format (concat "SELECT * FROM ("
-                      "SELECT t.*, ROWNUM rn FROM (%s) t "
-                      "WHERE ROWNUM <= %d"
-                      ") WHERE rn > %d")
+      (format "SELECT * FROM (SELECT t.*, ROWNUM rn FROM (%s) t WHERE ROWNUM <= %d) WHERE rn > %d"
               inner (+ offset page-size) offset))))
 
 (cl-defmethod clutch-db-build-paged-sql ((conn clutch-jdbc-conn) base-sql

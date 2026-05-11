@@ -1,11 +1,11 @@
 ;;; clutch-connection.el --- Connection lifecycle and transaction commands -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 
@@ -1305,7 +1305,7 @@ params; see `clutch-connection-alist' for details."
 
 ;;;###autoload
 (defun clutch-prepare-ssh-host (&optional ssh-host)
-  "Open an interactive SSH session so OpenSSH can finish host/key setup.
+  "Open an interactive SSH session to SSH-HOST for host/key setup.
 This is useful before `clutch-connect' when a host alias in `~/.ssh/config'
 still needs an initial passphrase entry or host-key confirmation."
   (interactive (list (clutch--read-ssh-host-alias)))
