@@ -3063,6 +3063,41 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 
 ;;;; Completion — identifiers and columns
 
+(ert-deftest clutch-test-complete-select-list-at-point-uses-current-columns ()
+  "C-c TAB should complete visible columns at an empty SELECT-list position."
+  (with-temp-buffer
+    (clutch-mode)
+    (insert "select  from users u join orders o on u.id = o.user_id")
+    (goto-char (point-min))
+    (search-forward "select ")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake)
+          captured
+          annotation-function)
+      (puthash "users" '("id" "name") schema)
+      (puthash "orders" '("id" "user_id") schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                (completion-in-region-function
+                 (lambda (_start _end collection &optional predicate)
+                   (setq captured (all-completions "" collection predicate)
+                         annotation-function
+                         (plist-get completion-extra-properties
+                                    :annotation-function))
+                   t)))
+        (let ((command (local-key-binding (kbd "C-c TAB"))))
+          (let ((this-command command))
+            (call-interactively command)))
+        (should (equal captured '("u.id" "u.name" "o.id" "o.user_id")))
+        (should annotation-function)
+        (should (equal (substring-no-properties
+                        (funcall annotation-function "u.id"))
+                       "  u (users)"))))))
+
 (ert-deftest clutch-test-insert-completion-at-point-uses-enum-candidates ()
   "Insert buffer completion should return enum candidates for the current field."
   (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
@@ -3270,33 +3305,50 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (should (member "id" candidates))
           (should (member "users" candidates)))))))
 
-(ert-deftest clutch-test-completion-at-point-uses-alias-qualified-table-for-cached-column-loading ()
-  "Alias-qualified completion should only use cached columns for the referenced table."
-  (with-temp-buffer
-    (insert "select u.na from users u join posts p on u.id = p.user_id")
-    (goto-char (point-min))
-    (search-forward "na")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "users" '("name" "nickname") schema)
-      (puthash "posts" '("title" "body") schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "should not queue async loads when alias target is cached"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf "")))
-          (should capf)
-          (should (member "name" candidates))
-          (should (member "nickname" candidates))
-          (should-not (member "title" candidates))
-          (should-not (member "users" candidates))
-          (should-not (member "posts" candidates)))))))
+(ert-deftest clutch-test-completion-at-point-uses-qualified-table-for-cached-column-loading ()
+  "Qualified completion should only use cached columns for the referenced table."
+  (dolist (case '(("select * from users u join posts p on u." "u.")
+                  ("select users. from users" "users.")))
+    (pcase-let ((`(,sql ,marker) case))
+      (with-temp-buffer
+        (clutch-mode)
+        (insert sql)
+        (goto-char (point-min))
+        (search-forward marker)
+        (let ((schema (make-hash-table :test 'equal))
+              (clutch-connection 'fake)
+              captured)
+          (puthash "users" '("id" "name") schema)
+          (puthash "posts" '("title" "body") schema)
+          (push (lambda ()
+                  (list (point) (point) '("generic") :exclusive 'no))
+                completion-at-point-functions)
+          (run-hooks 'corfu-mode-hook)
+          (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                     (lambda () schema))
+                    ((symbol-function 'clutch-db-busy-p)
+                     (lambda (_conn) nil))
+                    ((symbol-function 'clutch-db-completion-sync-columns-p)
+                     (lambda (_conn) t))
+                    ((symbol-function 'clutch--ensure-columns-async)
+                     (lambda (&rest _args)
+                       (ert-fail "should not queue async loads when target is cached")))
+                    (completion-in-region-function
+                     (lambda (start end collection &optional predicate)
+                       (setq captured
+                             (all-completions
+                              (buffer-substring-no-properties start end)
+                              collection predicate))
+                       t)))
+            (let ((command (local-key-binding (kbd "TAB"))))
+              (let ((this-command command))
+                (call-interactively command)))
+            (should (equal captured '("id" "name")))
+            (should-not (member "generic" captured))
+            (should-not (member "title" captured))
+            (should (eq (plist-get (nthcdr 3 (clutch-completion-at-point))
+                                   :company-prefix-length)
+                        t))))))))
 
 (ert-deftest clutch-test-completion-at-point-uses-direct-table-candidates-without-schema-cache ()
   "Direct backend table completion should work without a schema cache."
