@@ -414,7 +414,7 @@ Detailed key bindings, result-browser workflows, object navigation, Embark integ
 Common entry points:
 
 - =C-c C-c= executes the region or statement at point
-- =C-c TAB= completes columns at an empty SELECT-list position
+- =C-c TAB= completes SQL identifiers at point, including empty column positions
 - =C-c ?= opens the transient menu
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row

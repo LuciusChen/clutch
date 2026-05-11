@@ -3077,7 +3077,46 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
              (candidates (clutch-test--completion-candidates result)))
         (should result)
         (should (member "select" candidates))
-        (should-not (member "SELECT" candidates))))))
+        (should-not (member "SELECT" candidates))))
+    (with-temp-buffer
+      (insert "gro")
+      (let* ((result (clutch-sql-keyword-completion-at-point))
+             (candidates (clutch-test--completion-candidates result)))
+        (should result)
+        (should (member "group by" candidates))
+        (should-not (member "GROUP BY" candidates))))))
+
+(ert-deftest clutch-test-sql-keyword-completion-uses-complete-clause-phrases ()
+  "Keyword completion should offer complete multi-word clause heads."
+  (dolist (case '(("gro" "GROUP BY" "GROUP")
+                  ("ord" "ORDER BY" "ORDER")
+                  ("par" "PARTITION BY" "PARTITION")
+                  ("pri" "PRIMARY KEY" "PRIMARY")
+                  ("for" "FOREIGN KEY" "FOREIGN")))
+    (pcase-let ((`(,prefix ,phrase ,first-token) case))
+      (with-temp-buffer
+        (insert prefix)
+        (let* ((result (clutch-sql-keyword-completion-at-point))
+               (candidates (clutch-test--completion-candidates result)))
+          (should (member phrase candidates))
+          (should-not (member first-token candidates)))))))
+
+(ert-deftest clutch-test-sql-keyword-completion-keeps-additive-phrase-bases ()
+  "Additive keyword phrases should not hide valid first-token completions."
+  (dolist (case '(("inn" "INNER" "INNER JOIN")
+                  ("lef" "LEFT" "LEFT JOIN")
+                  ("rig" "RIGHT" "RIGHT JOIN")
+                  ("cro" "CROSS" "CROSS JOIN")
+                  ("uni" "UNION" "UNION ALL")
+                  ("is" "IS" "IS NULL" "IS NOT NULL")
+                  ("not" "NOT" "NOT NULL")))
+    (pcase-let ((`(,prefix . ,expected) case))
+      (with-temp-buffer
+        (insert prefix)
+        (let* ((result (clutch-sql-keyword-completion-at-point))
+               (candidates (clutch-test--completion-candidates result)))
+          (dolist (candidate expected)
+            (should (member candidate candidates))))))))
 
 (ert-deftest clutch-test-keyword-capf-exit-function-inserts-space-on-exact ()
   "Keyword CAPF exit-function should insert a trailing space for status `exact'."
@@ -3090,19 +3129,80 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 
 ;;;; Completion — identifiers and columns
 
-(ert-deftest clutch-test-complete-select-list-at-point-uses-current-columns ()
-  "C-c TAB should complete visible columns at an empty SELECT-list position."
+(ert-deftest clutch-test-completion-at-point-keyword-phrase-exit-inserts-space ()
+  "Connection-aware completion should space accepted keyword phrases."
+  (with-temp-buffer
+    (insert "select * from users gro")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "users" '("id") schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t)))
+        (let* ((capf (clutch-completion-at-point))
+               (exit-fn (plist-get (cdddr capf) :exit-function)))
+          (delete-region (car capf) (cadr capf))
+          (insert "GROUP BY")
+          (funcall exit-fn "GROUP BY" 'finished)
+          (should (equal (buffer-string)
+                         "select * from users GROUP BY ")))))))
+
+(ert-deftest clutch-test-complete-at-point-uses-current-columns-at-empty-sql-slots ()
+  "C-c TAB should complete visible columns at empty SQL expression positions."
+  (dolist (sql '("select | from users u join orders o on u.id = o.user_id"
+                 "select * from users u join orders o on u.id = o.user_id where |"
+                 "select * from users u join orders o on u.id = o.user_id group by |"
+                 "select * from users u join orders o on u.id = o.user_id order by |"
+                 "select * from users u join orders o on |"))
+    (with-temp-buffer
+      (clutch-mode)
+      (insert sql)
+      (goto-char (point-min))
+      (search-forward "|")
+      (delete-char -1)
+      (let ((schema (make-hash-table :test 'equal))
+            (clutch-connection 'fake)
+            captured
+            annotation-function)
+        (puthash "users" '("id" "name") schema)
+        (puthash "orders" '("id" "user_id") schema)
+        (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                   (lambda (&optional _conn) schema))
+                  ((symbol-function 'clutch-db-busy-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch-db-completion-sync-columns-p)
+                   (lambda (_conn) t))
+                  (completion-in-region-function
+                   (lambda (_start _end collection &optional predicate)
+                     (setq captured (all-completions "" collection predicate)
+                           annotation-function
+                           (plist-get completion-extra-properties
+                                      :annotation-function))
+                     t)))
+          (should-not (clutch-completion-at-point))
+          (let ((command (local-key-binding (kbd "C-c TAB"))))
+            (let ((this-command command))
+              (call-interactively command)))
+          (should (equal captured '("u.id" "u.name" "o.id" "o.user_id")))
+          (should annotation-function)
+          (should (equal (substring-no-properties
+                          (funcall annotation-function "u.id"))
+                         "  u (users)")))))))
+
+(ert-deftest clutch-test-complete-at-point-keeps-empty-column-completion-active ()
+  "Manual empty-column completion should keep its completion region valid."
   (with-temp-buffer
     (clutch-mode)
-    (insert "select  from users u join orders o on u.id = o.user_id")
+    (insert "select  from users")
     (goto-char (point-min))
     (search-forward "select ")
     (let ((schema (make-hash-table :test 'equal))
           (clutch-connection 'fake)
-          captured
-          annotation-function)
+          completion-predicate)
       (puthash "users" '("id" "name") schema)
-      (puthash "orders" '("id" "user_id") schema)
       (cl-letf (((symbol-function 'clutch--schema-for-connection)
                  (lambda (&optional _conn) schema))
                 ((symbol-function 'clutch-db-busy-p)
@@ -3110,20 +3210,13 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                 ((symbol-function 'clutch-db-completion-sync-columns-p)
                  (lambda (_conn) t))
                 (completion-in-region-function
-                 (lambda (_start _end collection &optional predicate)
-                   (setq captured (all-completions "" collection predicate)
-                         annotation-function
-                         (plist-get completion-extra-properties
-                                    :annotation-function))
+                 (lambda (_start _end _collection &optional _predicate)
+                   (setq completion-predicate
+                         completion-in-region-mode-predicate)
                    t)))
-        (let ((command (local-key-binding (kbd "C-c TAB"))))
-          (let ((this-command command))
-            (call-interactively command)))
-        (should (equal captured '("u.id" "u.name" "o.id" "o.user_id")))
-        (should annotation-function)
-        (should (equal (substring-no-properties
-                        (funcall annotation-function "u.id"))
-                       "  u (users)"))))))
+        (call-interactively #'clutch-complete-at-point)
+        (should completion-predicate)
+        (should (funcall completion-predicate))))))
 
 (ert-deftest clutch-test-insert-completion-at-point-uses-enum-candidates ()
   "Insert buffer completion should return enum candidates for the current field."
