@@ -1717,6 +1717,33 @@ ROWS defaults to a small three-row sample."
                        '("INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"
                          "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')")))))))
 
+(ert-deftest clutch-test-execute-dwim-at-semicolon-edge ()
+  "DWIM execution should handle semicolon-edge cursor positions."
+  (with-temp-buffer
+    (insert "SELECT 1;\n\nSELECT 2;")
+    (let (captured)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (sql beg end &optional _conn)
+                   (setq captured
+                         (list sql
+                               (string-trim
+                                (buffer-substring-no-properties beg end)))))))
+        (goto-char (point-min))
+        (search-forward "1")
+        (clutch-execute-dwim (point) (point))
+        (should (equal captured '("SELECT 1" "SELECT 1")))
+        (forward-char 1)
+        (clutch-execute-dwim (point) (point))
+        (should (equal captured '("SELECT 1" "SELECT 1")))
+        (forward-char 1)
+        (should-error (clutch-execute-dwim (point) (point))
+                      :type 'user-error)
+        (search-forward "SELECT 2")
+        (goto-char (match-beginning 0))
+        (clutch-execute-dwim (point) (point))
+        (should (equal captured '("SELECT 2" "SELECT 2")))))))
+
 (ert-deftest clutch-test-execute-dwim-falls-back-to-query-bounds-without-semicolons ()
   "DWIM execution should keep blank-line query parsing when no top-level semicolon exists."
   (with-temp-buffer

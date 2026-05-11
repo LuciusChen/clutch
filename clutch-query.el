@@ -1625,6 +1625,20 @@ Semicolons inside strings, line comments, and block comments do not count."
       (cl-incf i))
     found))
 
+(defun clutch--statement-effective-offset (text offset)
+  "Return insertion OFFSET normalized for semicolon-edge statement selection.
+When point is on or immediately after a semicolon, treat it as belonging to the
+preceding statement."
+  (let ((len (length text)))
+    (cond
+     ((and (< offset len)
+           (= (aref text offset) ?\;))
+      offset)
+     ((and (> offset 0)
+           (= (aref text (1- offset)) ?\;))
+      (1- offset))
+     (t offset))))
+
 (defun clutch--preview-sql-buffer (sql)
   "Display SQL in the *clutch-preview* buffer."
   (let ((buf (get-buffer-create "*clutch-preview*")))
@@ -1681,7 +1695,7 @@ Unlike `clutch--query-bounds-at-point', blank lines are ignored so that
 long statements spanning multiple paragraphs are captured whole.
 Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
-         (pos (1- (point)))              ; 0-based index into TEXT
+         (offset (- (point) (point-min)))
          (len (length text))
          (breaks nil)                    ; list of semicolon positions
          (in-string nil)
@@ -1707,14 +1721,22 @@ Semicolons inside strings, line comments, and block comments are skipped."
       (cl-incf i))
     (setq breaks (nreverse breaks))
     ;; Find the enclosing semicolons around point.
-    (let ((beg (point-min))
-          (end (point-max)))
+    (let* ((beg (point-min))
+           (end (point-max))
+           (effective-offset (clutch--statement-effective-offset text offset))
+           (semicolon-edge (or (/= effective-offset offset)
+                               (and (< offset len)
+                                    (= (aref text offset) ?\;)))))
       (dolist (b breaks)
-        (if (<= b pos)
+        (if (< b effective-offset)
             (setq beg (+ (point-min) b 1))
           (when (= end (point-max))
             (setq end (+ (point-min) b)))))
-      (cons beg end))))
+      (if (or semicolon-edge
+              (when-let* ((trimmed (clutch--trim-sql-bounds beg end)))
+                (>= (point) (car trimmed))))
+          (cons beg end)
+        (cons (point) (point))))))
 
 (defun clutch--dwim-bounds-at-point ()
   "Return point-local SQL bounds for DWIM execute and preview workflows.
