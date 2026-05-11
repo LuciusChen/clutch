@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         emacs-version:
-          - "28.2"
+          - "29.1"
           - "29.4"
 
     steps:
@@ -73,7 +73,20 @@ jobs:
             --eval "(package-initialize)" \
             -L . \
             -l package-lint \
+            --eval "(setq package-lint-main-file \"clutch.el\")" \
             -f package-lint-batch-and-exit \
+            clutch-ui.el \
+            clutch-schema.el \
+            clutch-query.el \
+            clutch-object.el \
+            clutch-edit.el \
+            clutch-db.el \
+            clutch-db-sqlite.el \
+            clutch-db-pg.el \
+            clutch-db-mysql.el \
+            clutch-db-jdbc.el \
+            clutch-connection.el \
+            clutch-compat.el \
             clutch.el
 
       - name: Checkdoc entry file
