@@ -27,10 +27,16 @@ jobs:
 
       - name: Install package dependencies
         run: |
+          git clone --depth 1 https://github.com/emacs-straight/peg.git "$RUNNER_TEMP/peg"
+          PEG_CHECKOUT="$RUNNER_TEMP/peg" emacs -Q --batch \
+            --eval "(require 'package)" \
+            --eval "(require 'package-vc)" \
+            --eval "(setq package-archives nil)" \
+            --eval "(package-initialize)" \
+            --eval "(package-vc-install-from-checkout (getenv \"PEG_CHECKOUT\") \"peg\")"
           emacs -Q --batch \
             --eval "(require 'package)" \
-            --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t)" \
-            --eval "(add-to-list 'package-archives '(\"gnu\" . \"https://elpa.gnu.org/packages/\") t)" \
+            --eval "(setq package-archives '((\"melpa\" . \"https://melpa.org/packages/\")))" \
             --eval "(package-initialize)" \
             --eval "(package-refresh-contents)" \
             --eval "(dolist (pkg '(transient mysql pg package-lint)) (unless (package-installed-p pkg) (package-install pkg)))"
@@ -70,7 +76,9 @@ jobs:
         run: |
           emacs -Q --batch \
             --eval "(require 'package)" \
+            --eval "(setq package-archives '((\"melpa\" . \"https://melpa.org/packages/\")))" \
             --eval "(package-initialize)" \
+            --eval "(package-refresh-contents)" \
             -L . \
             -l package-lint \
             --eval "(setq package-lint-main-file \"clutch.el\")" \
