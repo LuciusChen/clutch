@@ -17,7 +17,7 @@
 | =C-c C-m=   | Commit transaction (manual-commit connections only) |
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
 | =C-c C-a=   | Toggle auto-commit on/off for the current connection |
-| =C-c TAB=   | Complete columns at an empty SELECT-list position |
+| =C-c TAB=   | Complete SQL identifiers at point, including empty column positions |
 | =C-c ?=     | Transient menu             |
 
 Standard editing integrations still apply in =clutch-mode=: xref lookup uses

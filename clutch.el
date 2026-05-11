@@ -495,6 +495,9 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)
   "Completion metadata errors already surfaced in this session.")
 
+(defvar clutch--completion-allow-empty-column-p nil
+  "Non-nil when manual completion may offer columns at an empty SQL slot.")
+
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 
@@ -1875,6 +1878,7 @@ like `orders.id' within the current statement."
     "INSERT" "INTO" "VALUES" "UPDATE" "SET" "DELETE"
     "CREATE" "ALTER" "DROP" "TABLE" "INDEX" "VIEW" "DATABASE"
     "GROUP" "BY" "ORDER" "ASC" "DESC" "HAVING" "LIMIT" "OFFSET"
+    "PARTITION"
     "UNION" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
     "IF" "IFNULL" "COALESCE" "CAST" "CONCAT" "SUBSTRING"
     "PRIMARY" "KEY" "FOREIGN" "REFERENCES" "CONSTRAINT" "DEFAULT"
@@ -1882,7 +1886,21 @@ like `orders.id' within the current statement."
     "TRUNCATE" "EXPLAIN" "SHOW" "DESCRIBE"
     "BEGIN" "COMMIT" "ROLLBACK" "TRANSACTION"
     "GRANT" "REVOKE" "WITH" "RECURSIVE" "TEMPORARY" "TEMP")
-  "SQL keywords for completion.")
+  "SQL reserved words used by completion and lightweight SQL parsing.")
+
+(defconst clutch--sql-keyword-replacement-phrases
+  '(("GROUP" . "GROUP BY")
+    ("ORDER" . "ORDER BY")
+    ("PARTITION" . "PARTITION BY")
+    ("PRIMARY" . "PRIMARY KEY")
+    ("FOREIGN" . "FOREIGN KEY"))
+  "SQL keyword completions which replace a less useful first token.")
+
+(defconst clutch--sql-keyword-additive-phrases
+  '("INNER JOIN" "LEFT JOIN" "RIGHT JOIN" "CROSS JOIN"
+    "UNION ALL"
+    "IS NULL" "IS NOT NULL" "NOT NULL")
+  "SQL keyword phrase completions offered alongside their first token.")
 
 (defconst clutch--sql-function-docs
   (let ((ht (make-hash-table :test 'equal :size 160)))
@@ -2260,9 +2278,24 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
     ('upper (upcase text))
     (_ text)))
 
+(defun clutch--sql-keyword-completion-raw-candidates ()
+  "Return raw SQL keyword completion candidates before case conversion."
+  (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases)))
+    (delete-dups
+     (append
+      (mapcar #'cdr clutch--sql-keyword-replacement-phrases)
+      clutch--sql-keyword-additive-phrases
+      (seq-remove (lambda (keyword) (member keyword replaced))
+                  clutch--sql-keywords)))))
+
 (defun clutch--sql-keyword-completion-candidates ()
   "Return SQL keyword completion candidates honoring case style."
-  (mapcar #'clutch--apply-sql-completion-case-style clutch--sql-keywords))
+  (mapcar #'clutch--apply-sql-completion-case-style
+          (clutch--sql-keyword-completion-raw-candidates)))
+
+(defun clutch--sql-keyword-completion-candidate-p (text)
+  "Return non-nil when TEXT is a SQL keyword completion candidate."
+  (member (upcase text) (clutch--sql-keyword-completion-raw-candidates)))
 
 (defun clutch--sql-identifier-completion-candidates (candidates)
   "Return completion CANDIDATES honoring identifier case style."
@@ -2274,7 +2307,7 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
   (let ((upcase-prefix (upcase prefix)))
     (seq-some (lambda (keyword)
                 (string-prefix-p upcase-prefix keyword))
-              clutch--sql-keywords)))
+              (clutch--sql-keyword-completion-raw-candidates))))
 
 
 (defun clutch-sql-keyword-completion-at-point ()
@@ -2312,12 +2345,15 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
    (upcase (buffer-substring-no-properties (line-beginning-position) beg))))
 
 (defun clutch--completion-context-tables (schema qualified-table prefix-len
-                                                 table-context-p busy)
+                                                 table-context-p busy
+                                                 &optional force-columns-p)
   "Return tables from SCHEMA whose columns are useful completion candidates.
 QUALIFIED-TABLE narrows completion after an explicit qualifier.  PREFIX-LEN,
-TABLE-CONTEXT-P, and BUSY decide whether column loading is appropriate."
+TABLE-CONTEXT-P, BUSY, and FORCE-COLUMNS-P decide whether column loading is
+appropriate."
   (unless (or table-context-p busy
               (and (not qualified-table)
+                   (not force-columns-p)
                    (< prefix-len clutch--schema-inline-min-prefix-length)))
     (let ((tables (or (and qualified-table (list qualified-table))
                       (and schema (clutch--tables-in-current-statement schema))
@@ -2382,14 +2418,12 @@ control narrowing and backend loading."
                  (format "%s (%s)" qualifier table))
                'face 'clutch-object-source-face)))
 
-(defun clutch--completion-select-list-column-candidates
-    (conn schema prefix sync-columns-p)
-  "Return (CANDIDATES . ANNOTATION-FN) for SELECT-list columns on CONN.
-SCHEMA supplies current statement tables.  PREFIX and SYNC-COLUMNS-P control
-backend column loading."
-  (let* ((tables (or (and schema (clutch--tables-in-current-statement schema))
-                     (clutch--statement-table-identifiers)))
-         (sources (and tables (clutch--completion-table-sources schema tables)))
+(defun clutch--completion-visible-column-candidates
+    (conn schema tables prefix sync-columns-p)
+  "Return (CANDIDATES . ANNOTATION-FN) for visible columns on CONN.
+SCHEMA and TABLES supply current statement tables.  PREFIX and SYNC-COLUMNS-P
+control backend column loading."
+  (let* ((sources (and tables (clutch--completion-table-sources schema tables)))
          (qualify-p (> (length sources) 1))
          (annotations (make-hash-table :test 'equal))
          candidates)
@@ -2414,6 +2448,40 @@ backend column loading."
       (cons candidates
             (lambda (candidate)
               (gethash candidate annotations))))))
+
+(defun clutch--completion-top-level-token-before (sql offset)
+  "Return the last top-level SQL token in SQL before OFFSET."
+  (let ((case-fold-search t)
+        (masked (clutch-db-sql-mask-literal-or-comment sql))
+        (depth 0)
+        token
+        (pos 0))
+    (while (< pos offset)
+      (pcase (aref masked pos)
+        (?\( (cl-incf depth)
+             (cl-incf pos))
+        (?\) (setq depth (max 0 (1- depth)))
+             (cl-incf pos))
+        (_
+         (if (and (zerop depth)
+                  (string-match
+                   (rx word-start
+                       (group
+                        (or "select" "from" "where" "having" "on" "join"
+                            "into" "update" "set" "values" "limit" "offset"
+                            "fetch" "for"
+                            (seq "group" (+ (any " \t\n\r")) "by")
+                            (seq "order" (+ (any " \t\n\r")) "by")))
+                       word-end)
+                   masked pos)
+                  (= (match-beginning 0) pos)
+                  (<= (match-end 0) offset))
+             (setq token (replace-regexp-in-string
+                          "[ \t\n\r]+" " "
+                          (upcase (match-string 1 masked)))
+                   pos (match-end 0))
+           (cl-incf pos)))))
+    token))
 
 (defun clutch--completion-select-list-ready-p (sql start offset)
   "Return non-nil when OFFSET is an empty SELECT-list slot in SQL after START."
@@ -2464,44 +2532,55 @@ backend column loading."
                (clutch--completion-select-list-ready-p sql select-end offset))
       (cons (point) (point)))))
 
-(defun clutch-complete-select-list-at-point ()
-  "Complete columns at an empty SELECT-list position."
+(defun clutch--completion-empty-column-bounds ()
+  "Return point bounds for manual empty-slot column completion, or nil."
+  (when (and clutch--completion-allow-empty-column-p
+             (not (clutch--completion-table-context-p (point))))
+    (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+                 (sql (buffer-substring-no-properties beg end))
+                 (offset (- (point) beg))
+                 (token (clutch--completion-top-level-token-before sql offset)))
+      (when (or (and (equal token "SELECT")
+                     (clutch--completion-select-list-empty-bounds))
+                (member token '("WHERE" "HAVING" "GROUP BY" "ORDER BY" "ON")))
+        (cons (point) (point))))))
+
+(defun clutch-complete-at-point ()
+  "Complete SQL identifiers at point."
   (interactive)
-  (unless clutch-connection
-    (user-error "No active connection"))
-  (pcase-let* ((`(,beg . ,end)
-                (or (clutch--completion-select-list-empty-bounds)
-                    (user-error "Not at an empty SELECT-list position")))
-               (schema (clutch--schema-for-connection))
-               (sync-columns-p
-                (clutch-db-completion-sync-columns-p clutch-connection))
-               (result
-                (and (not (clutch-db-busy-p clutch-connection))
-                     (clutch--completion-select-list-column-candidates
-                      clutch-connection schema "" sync-columns-p)))
-               (candidates (car-safe result))
-               (annotation-function (cdr-safe result)))
-    (unless candidates
-      (user-error "No column candidates"))
-    (let ((completion-extra-properties
-           (and annotation-function
-                (list :annotation-function annotation-function))))
-      (completion-in-region beg end (completion-table-case-fold candidates)))))
+  (let* ((clutch--completion-allow-empty-column-p t)
+         (capf (or (clutch-completion-at-point)
+                   (clutch-sql-keyword-completion-at-point))))
+    (pcase capf
+      (`(,beg ,end ,collection . ,plist)
+       (let ((completion-extra-properties plist)
+             (completion-in-region-mode-predicate #'always))
+         (unless (completion-in-region beg end collection
+                                       (plist-get plist :predicate))
+           (user-error "No completion at point"))))
+      (_
+       (user-error "No completion at point")))))
 
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
 when completion triggers during an in-flight query)."
   (let* ((symbol-bounds (bounds-of-thing-at-point 'symbol))
+         (qualified-bounds (clutch--completion-qualified-empty-prefix-bounds))
+         (empty-column-bounds (and (not symbol-bounds)
+                                   (not qualified-bounds)
+                                   (clutch--completion-empty-column-bounds)))
          (bounds (or symbol-bounds
-                     (clutch--completion-qualified-empty-prefix-bounds))))
+                     qualified-bounds
+                     empty-column-bounds)))
     (when-let* ((conn clutch-connection)
                 (bounds bounds))
       (let* ((beg (car bounds))
            (end (cdr bounds))
            (prefix (buffer-substring-no-properties beg end))
            (prefix-len (- end beg))
-           (qualified-empty-prefix-p (not symbol-bounds))
+           (qualified-empty-prefix-p (and qualified-bounds (not symbol-bounds)))
+           (empty-column-prefix-p (and empty-column-bounds t))
            (schema (clutch--schema-for-connection))
            (qualifier (and schema
                            (clutch--qualified-identifier-qualifier beg)))
@@ -2517,9 +2596,17 @@ when completion triggers during an in-flight query)."
                                  (clutch--qualified-identifier-table schema beg)))
            (context-tables
             (clutch--completion-context-tables
-             schema qualified-table prefix-len table-context-p busy))
+             schema qualified-table prefix-len table-context-p busy
+             empty-column-prefix-p))
+           (empty-column-result
+            (and empty-column-prefix-p
+                 context-tables
+                 (clutch--completion-visible-column-candidates
+                  conn schema context-tables prefix sync-columns-p)))
+           (annotation-function (cdr-safe empty-column-result))
            (keyword-candidates
-            (and (not qualified-empty-prefix-p)
+            (and (not empty-column-prefix-p)
+                 (not qualified-empty-prefix-p)
                  context-tables
                  (not table-context-p)
                  (clutch--sql-keyword-prefix-p prefix)
@@ -2533,24 +2620,28 @@ when completion triggers during an in-flight query)."
       (setq candidates
             (append
              keyword-candidates
-             (if prefer-keyword-p
-                 nil
-               (if context-tables
-                   (clutch--completion-column-candidates
-                    conn schema context-tables qualified-table prefix sync-columns-p)
-                 (unless qualified-empty-prefix-p
-                   (clutch--sql-identifier-completion-candidates
-                    (append direct-table-candidates
-                            (and schema (hash-table-keys schema)))))))))
+             (cond
+              (empty-column-prefix-p
+               (car-safe empty-column-result))
+              (prefer-keyword-p nil)
+              (context-tables
+               (clutch--completion-column-candidates
+                conn schema context-tables qualified-table prefix sync-columns-p))
+              (qualified-empty-prefix-p nil)
+              (t
+               (clutch--sql-identifier-completion-candidates
+                (append direct-table-candidates
+                        (and schema (hash-table-keys schema))))))))
       (when candidates
         (append
          (list beg end
                (completion-table-case-fold candidates)
+               :annotation-function annotation-function
                :exclusive 'no
                :exit-function
                (lambda (str status)
                  (when (and (clutch--completion-finished-status-p status)
-                            (member (upcase str) clutch--sql-keywords)
+                            (clutch--sql-keyword-completion-candidate-p str)
                             (not (looking-at-p "\\s-")))
                    (insert " "))))
          (when qualified-empty-prefix-p
@@ -2672,8 +2763,8 @@ SQL keyword/function docs are shown even without a connection."
     map)
   "Keymap for `clutch-mode'.")
 
-(define-key clutch-mode-map (kbd "C-c TAB") #'clutch-complete-select-list-at-point)
-(define-key clutch-mode-map (kbd "C-c <tab>") #'clutch-complete-select-list-at-point)
+(define-key clutch-mode-map (kbd "C-c TAB") #'clutch-complete-at-point)
+(define-key clutch-mode-map (kbd "C-c <tab>") #'clutch-complete-at-point)
 (define-key clutch-mode-map (kbd "TAB") #'clutch-complete-qualified-or-indent)
 (define-key clutch-mode-map (kbd "<tab>") #'clutch-complete-qualified-or-indent)
 
@@ -2691,7 +2782,7 @@ Key bindings:
   \\[clutch-describe-dwim]	Describe object
   \\[clutch-act-dwim]	Object actions
   \\[clutch-switch-schema]	Switch schema/database
-  \\[clutch-complete-select-list-at-point]	Complete empty SELECT list
+  \\[clutch-complete-at-point]	Complete SQL identifier at point
   \\[clutch-complete-qualified-or-indent]	Complete qualified column or indent
   \\[clutch-preview-execution-sql]	Preview execution"
   (set-buffer-file-coding-system 'utf-8-unix nil t)
