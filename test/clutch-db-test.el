@@ -80,7 +80,7 @@
 (declare-function clutch--jdbc-backend-p "clutch" (backend))
 (declare-function clutch--backend-display-name-from-params "clutch" (params))
 (declare-function clutch--build-conn "clutch" (params))
-(declare-function clutch--format-value "clutch" (value))
+(declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--value-to-literal "clutch" (value))
 (declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function make-mysql-result "mysql" (&rest args))

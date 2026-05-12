@@ -26,9 +26,8 @@
 
 ;;; Commentary:
 
-;; Query console, value formatting, column-width computation, pagination,
-;; query execution engine, error humanization, error details, and indirect
-;; edit buffers for clutch.
+;; Query console, SQL literal conversion, pagination, query execution engine,
+;; error humanization, error details, and indirect edit buffers for clutch.
 ;;
 ;; This module is required by `clutch.el' — do not require `clutch' here.
 
@@ -59,7 +58,6 @@
 (defvar clutch-connection-alist nil)
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
-(defvar clutch-column-width-max 30)
 (defvar clutch-console-yank-cleanup t)
 
 ;; Forward declarations — variables defined in clutch-ui / clutch-edit
@@ -123,13 +121,12 @@
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
-(declare-function clutch--render-separator "clutch-ui" (visible-cols widths &optional position))
-(declare-function clutch--render-header "clutch-ui" (visible-cols widths))
-(declare-function clutch--build-render-state "clutch-ui" ())
-(declare-function clutch--render-row "clutch-ui" (row ridx visible-cols widths render-state))
+(declare-function clutch--compute-column-widths "clutch-ui" (col-names rows column-defs &optional max-width))
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
 (declare-function clutch--display-result "clutch-ui" (result sql elapsed))
+(declare-function clutch--format-elapsed "clutch-ui" (seconds))
+(declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--message-count "clutch-ui" (value))
 (declare-function clutch--message-keyword "clutch-ui" (value))
 (declare-function clutch--message-literal "clutch-ui" (value))
@@ -241,28 +238,7 @@ window rather than replacing the current window."
         (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
       (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
 
-;;;; Value formatting
-
-(defun clutch--format-value (val)
-  "Format VAL for display in a result table.
-nil → \"NULL\", :false → \"false\", plists → formatted date/time strings,
-hash-tables and vectors (JSON from MySQL/PG) → JSON string."
-  (cond
-   ((null val) "NULL")
-   ((eq val :false) "false")
-   ((stringp val) val)
-   ((numberp val) (number-to-string val))
-   ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
-   ((or (hash-table-p val) (vectorp val))
-    (clutch--json-serialize-text val "query result value"))
-   (t (format "%S" val))))
-
-(defun clutch--truncate-cell (str max-width)
-  "Truncate STR to MAX-WIDTH, replacing embedded pipes to protect org tables."
-  (let ((clean (replace-regexp-in-string "|" "¦" (replace-regexp-in-string "\n" "↵" str))))
-    (if (> (length clean) max-width)
-        (concat (substring clean 0 (- max-width 1)) "…")
-      clean)))
+;;;; Value conversion
 
 (defun clutch--column-names (columns)
   "Extract column names from COLUMNS as a list of strings.
@@ -282,30 +258,6 @@ nil → \"NULL\", numbers unquoted, strings escaped."
    ((stringp val) (clutch-db-escape-literal clutch-connection val))
    (t (clutch-db-escape-literal clutch-connection
                                    (clutch--format-value val)))))
-
-(defun clutch--string-pad (str width &optional right-align)
-  "Pad STR with spaces to reach display WIDTH.
-Unlike `string-pad', this accounts for wide characters (CJK).
-When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
-  (let ((sw (string-width str)))
-    (if (>= sw width)
-        str
-      (let ((spaces (make-string (- width sw) ?\s)))
-        (if right-align
-            (concat spaces str)
-          (concat str spaces))))))
-
-(defun clutch--center-padding-widths (content-width width)
-  "Return (LEFT . RIGHT) padding widths to center CONTENT-WIDTH in WIDTH."
-  (let* ((extra (max 0 (- width content-width)))
-         (left (/ extra 2)))
-    (cons left (- extra left))))
-
-(defun clutch--format-elapsed (seconds)
-  "Format SECONDS as a human-readable duration."
-  (if (< seconds 1.0)
-      (format "%dms" (round (* seconds 1000)))
-    (format "%.3fs" seconds)))
 
 (defun clutch--json-false-value-p (val)
   "Return non-nil when VAL represents a parsed JSON false sentinel."
@@ -340,85 +292,7 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
       (error (clutch--format-value val))))
    (t (clutch--format-value val))))
 
-;;;; Column width computation and paging
-
-(defun clutch--numeric-type-p (col-def)
-  "Return non-nil if COL-DEF is a numeric column type."
-  (eq (plist-get col-def :type-category) 'numeric))
-
-(defun clutch--long-field-type-p (col-def)
-  "Return non-nil if COL-DEF is a long field type (JSON/BLOB)."
-  (memq (plist-get col-def :type-category) '(json blob)))
-
-(defun clutch--json-like-string-p (val)
-  "Return non-nil when string VAL appears to contain JSON text."
-  (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
-
-
-(defun clutch--xml-like-string-p (val)
-  "Return non-nil when string VAL appears to contain XML text.
-Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
-  (and (stringp val)
-       (let* ((s (string-trim-left val))
-              (body (if (string-match "\\`<\\?xml\\(?:.\\|\n\\)*?\\?>\\s-*\\(.*\\)\\'" s)
-                        (match-string 1 s)
-                      s))
-              (open-re "\\`<\\([[:alpha:]_][[:alnum:]_.:-]*\\)\\(?:\\s-+[^>]*\\)?\\s-*\\(/>\\|>\\)"))
-         (when (string-match open-re body)
-           (let ((tag (match-string 1 body))
-                 (close (match-string 2 body)))
-             (if (equal close "/>")
-                 (string-match-p "\\`<[^>]+/>\\s-*\\'" body)
-               (string-match-p (format "</%s\\s-*>" (regexp-quote tag)) body)))))))
-
-(defun clutch--value-placeholder (val col-def)
-  "Return compact placeholder text for VAL/COL-DEF in result grid."
-  (let ((cat (plist-get col-def :type-category)))
-    (cond
-     ((or (eq cat 'json) (clutch--json-like-string-p val))
-      "<JSON>")
-     ((clutch--xml-like-string-p val)
-      "<XML>")
-     ((eq cat 'blob)
-      "<BLOB>")
-     (t nil))))
-
-(defun clutch--cell-placeholder-value (val)
-  "Return display placeholder text for special cell VAL, or nil."
-  (pcase val
-    (:clutch-generated-placeholder "<generated>")
-    (:clutch-default-placeholder "<default>")
-    (_ nil)))
-
-(defun clutch--compute-column-widths (col-names rows column-defs
-                                                      &optional max-width)
-  "Compute display width for each column.
-COL-NAMES is a list of header strings, ROWS is the data,
-COLUMN-DEFS is the column metadata list.
-MAX-WIDTH caps individual column width (default `clutch-column-width-max').
-Pass a large value or nil to use the default.
-Returns a vector of integers."
-  (let* ((ncols (length col-names))
-         (max-w (or max-width clutch-column-width-max))
-         (widths (make-vector ncols 0))
-         (sample (seq-take rows 50)))
-    (dotimes (i ncols)
-      (if (and (clutch--long-field-type-p (nth i column-defs))
-               (<= max-w clutch-column-width-max))
-          (aset widths i 10)
-        (let ((header-w (string-width (nth i col-names)))
-              (data-w 0))
-          (dolist (row sample)
-            (let ((formatted (clutch--format-value (nth i row))))
-              (setq data-w (max data-w (string-width formatted)))))
-          (aset widths i (max 5 (min max-w (max header-w data-w)))))))
-    widths))
-
-(defun clutch--visible-columns ()
-  "Return the column indices rendered in the result buffer."
-  (cl-loop for i below (length clutch--result-columns)
-           unless (plist-get (nth i clutch--result-column-defs) :hidden)
-           collect i))
+;;;; Result source detection
 
 (defun clutch-result--table-from-sql (sql)
   "Extract the first table name from the FROM clause of SQL.
@@ -819,40 +693,6 @@ Uses the full connection key so each console gets its own result buffer."
   (if (clutch--connection-alive-p clutch-connection)
       (format "*clutch-result: %s*" (clutch--connection-key clutch-connection))
     "*clutch-result: results*"))
-
-(defun clutch--render-static-table (col-names rows &optional column-defs)
-  "Render a table string from COL-NAMES and ROWS.
-Uses the same visual style as the result renderer.
-COLUMN-DEFS, if provided, is used for long-field detection.
-Returns a string (with text properties)."
-  (let* ((clutch--result-columns col-names)
-         (clutch--result-column-defs column-defs)
-         (clutch--result-source-table nil)
-         (clutch--row-identity nil)
-         (clutch--pending-edits nil)
-         (clutch--fk-info nil)
-         (ncols (length col-names))
-         (all-cols (number-sequence 0 (1- ncols)))
-         (widths (clutch--compute-column-widths col-names rows column-defs 1000))
-         (bface 'clutch-border-face)
-         (sep-top (propertize (clutch--render-separator all-cols widths 'top)
-                              'face bface))
-         (sep-mid (propertize (clutch--render-separator all-cols widths 'middle)
-                              'face bface))
-         (sep-bot (propertize (clutch--render-separator all-cols widths 'bottom)
-                              'face bface))
-         (header (clutch--render-header all-cols widths))
-         (render-state (clutch--build-render-state))
-         (lines nil))
-    (push sep-top lines)
-    (push header lines)
-    (push sep-mid lines)
-    (cl-loop for row in rows
-             for ridx from 0
-             do (push (clutch--render-row row ridx all-cols widths render-state) lines))
-    (push sep-bot lines)
-    (mapconcat #'identity (nreverse lines) "\n")))
-
 
 ;;;; SQL pagination helpers
 
