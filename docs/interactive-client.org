@@ -17,13 +17,15 @@
 | =C-c C-m=   | Commit transaction (manual-commit connections only) |
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
 | =C-c C-a=   | Toggle auto-commit on/off for the current connection |
-| =C-c TAB=   | Complete SQL identifiers at point, including empty column positions |
+| =C-c TAB=   | Invoke SQL identifier completion explicitly, including empty column positions |
 | =C-c ?=     | Transient menu             |
 
 Standard editing integrations still apply in =clutch-mode=: xref lookup uses
-=M-.= through the buffer-local xref backend.  =TAB= completes columns after
-a table or alias dot, then falls back to indentation elsewhere; other
-completion stays on normal CAPF keys such as =M-TAB= inherited from Emacs.
+=M-.= through the buffer-local xref backend.  CAPF completion handles SQL
+identifiers, including empty column positions such as =select | from users=.
+=TAB= completes columns after a table or alias dot, then falls back to
+indentation elsewhere; other completion stays on normal CAPF keys such as
+=M-TAB= inherited from Emacs.
 
 * Result Browser (clutch-result-mode) Key Bindings
 

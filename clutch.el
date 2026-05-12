@@ -495,9 +495,6 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)
   "Completion metadata errors already surfaced in this session.")
 
-(defvar clutch--completion-allow-empty-column-p nil
-  "Non-nil when manual completion may offer columns at an empty SQL slot.")
-
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 
@@ -2532,9 +2529,8 @@ control backend column loading."
       (cons (point) (point)))))
 
 (defun clutch--completion-empty-column-bounds ()
-  "Return point bounds for manual empty-slot column completion, or nil."
-  (when (and clutch--completion-allow-empty-column-p
-             (not (clutch--completion-table-context-p (point))))
+  "Return point bounds for empty-slot column completion, or nil."
+  (when (not (clutch--completion-table-context-p (point)))
     (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
                  (sql (buffer-substring-no-properties beg end))
                  (offset (- (point) beg))
@@ -2547,9 +2543,8 @@ control backend column loading."
 (defun clutch-complete-at-point ()
   "Complete SQL identifiers at point."
   (interactive)
-  (let* ((clutch--completion-allow-empty-column-p t)
-         (capf (or (clutch-completion-at-point)
-                   (clutch-sql-keyword-completion-at-point))))
+  (let ((capf (or (clutch-completion-at-point)
+                  (clutch-sql-keyword-completion-at-point))))
     (pcase capf
       (`(,beg ,end ,collection . ,plist)
        (let ((completion-extra-properties plist)

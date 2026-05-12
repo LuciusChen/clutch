@@ -3139,8 +3139,8 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (should (equal (buffer-string)
                          "select * from users GROUP BY ")))))))
 
-(ert-deftest clutch-test-complete-at-point-uses-current-columns-at-empty-sql-slots ()
-  "C-c TAB should complete visible columns at empty SQL expression positions."
+(ert-deftest clutch-test-completion-at-point-uses-current-columns-at-empty-sql-slots ()
+  "CAPF should complete visible columns at empty SQL expression positions."
   (dolist (sql '("select | from users u join orders o on u.id = o.user_id"
                  "select * from users u join orders o on u.id = o.user_id where |"
                  "select * from users u join orders o on u.id = o.user_id group by |"
@@ -3169,9 +3169,19 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                      (setq captured (all-completions "" collection predicate)
                            annotation-function
                            (plist-get completion-extra-properties
-                                      :annotation-function))
+                                     :annotation-function))
                      t)))
-          (should-not (clutch-completion-at-point))
+          (let* ((capf (clutch-completion-at-point))
+                 (props (nthcdr 3 capf))
+                 (annotation-function (plist-get props :annotation-function)))
+            (should capf)
+            (should (equal (all-completions "" (nth 2 capf)
+                                            (plist-get props :predicate))
+                           '("u.id" "u.name" "o.id" "o.user_id")))
+            (should annotation-function)
+            (should (equal (substring-no-properties
+                            (funcall annotation-function "u.id"))
+                           "  u (users)")))
           (let ((command (local-key-binding (kbd "C-c TAB"))))
             (let ((this-command command))
               (call-interactively command)))
