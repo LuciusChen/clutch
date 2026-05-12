@@ -1387,13 +1387,48 @@ IGNORE-BUFFER is excluded from liveness checks."
                  col-names rows columns))
     (clutch--refresh-display)))
 
+(defun clutch--reset-nontabular-result-state ()
+  "Clear table-specific state before rendering a non-table result."
+  (setq-local clutch--dml-result t
+              clutch--base-query nil
+              clutch--result-source-table nil
+              clutch--column-widths nil
+              clutch--result-columns nil
+              clutch--result-column-defs nil
+              clutch--result-rows nil
+              clutch--result-column-details nil
+              clutch--row-identity nil
+              clutch--cached-pk-indices nil
+              clutch--pending-edits nil
+              clutch--pending-deletes nil
+              clutch--pending-inserts nil
+              clutch--marked-rows nil
+              clutch--sort-column nil
+              clutch--sort-descending nil
+              clutch--order-by nil
+              clutch--page-current 0
+              clutch--page-offset nil
+              clutch--page-has-more nil
+              clutch--page-total-rows nil
+              clutch--query-elapsed nil
+              clutch--filter-pattern nil
+              clutch--filtered-rows nil
+              clutch--aggregate-summary nil
+              clutch--header-active-col nil
+              clutch--header-line-string nil
+              clutch--footer-base-string nil
+              clutch--footer-display-cache nil
+              clutch--footer-timing-cache nil
+              clutch--footer-cursor-cache nil
+              clutch--footer-filters-cache nil)
+  (setq header-line-format nil)
+  (kill-local-variable 'mode-line-format))
+
 (defun clutch--display-dml-result (result sql elapsed)
   "Render a DML RESULT (INSERT/UPDATE/DELETE) with SQL and ELAPSED time."
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (setq-local clutch--dml-result t)
-    (setq-local clutch--result-source-table nil)
-    (setq-local clutch--column-widths nil)
+    (clutch--reset-nontabular-result-state)
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))
     (insert (format "Affected rows: %s\n"
@@ -1408,6 +1443,55 @@ IGNORE-BUFFER is excluded from liveness checks."
                                 (clutch--format-elapsed elapsed))
                         'face 'font-lock-comment-face))
     (goto-char (point-min))))
+
+(defun clutch--display-error-result (connection sql summary message
+                                                &optional elapsed hint)
+  "Render a SQL execution error for CONNECTION.
+SQL is the user-visible statement, SUMMARY is the humanized message,
+MESSAGE is the raw backend message, ELAPSED is the failed duration, and HINT
+is an optional actionable hint."
+  (let* ((buf-name (clutch--result-buffer-name))
+         (buf (get-buffer-create buf-name))
+         (params clutch--connection-params)
+         (product clutch--conn-sql-product)
+         (summary (string-trim (or summary "")))
+         (message (string-trim (or message "")))
+         (hint (string-trim (or hint "")))
+         (headline (cond
+                    ((not (string-empty-p summary)) summary)
+                    ((not (string-empty-p message)) message)
+                    (t "SQL execution failed")))
+         (sql (string-trim (or sql ""))))
+    (with-current-buffer buf
+      (clutch-result-mode)
+      (clutch--bind-connection-context connection params product)
+      (setq-local clutch--last-query sql)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (clutch--reset-nontabular-result-state)
+        (setq-local truncate-lines nil
+                    word-wrap t)
+        (insert (propertize headline 'face 'clutch-error-summary-face)
+                "\n")
+        (unless (string-empty-p hint)
+          (insert "\n"
+                  (propertize "Hint: " 'face 'shadow)
+                  hint
+                  "\n"))
+        (unless (string-empty-p sql)
+          (insert "\n")
+          (insert (propertize "SQL" 'face 'shadow)
+                  "\n"
+                  (replace-regexp-in-string "^" "  " sql)
+                  "\n"))
+        (when elapsed
+          (insert "\n"
+                  (propertize "Failed in " 'face 'shadow)
+                  (clutch--format-elapsed elapsed)
+                  "\n"))
+        (goto-char (point-min))))
+    (clutch--show-result-buffer buf)
+    buf))
 
 (defun clutch--init-select-result-state (col-names columns rows)
   "Initialize buffer-local state for a non-paginated SELECT result.

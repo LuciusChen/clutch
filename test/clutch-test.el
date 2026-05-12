@@ -470,6 +470,31 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (equal (plist-get prep :sql)
                      "SELECT name, \"id\" AS \"clutch__rid_0\" FROM users WHERE active = 1")))))
 
+(ert-deftest clutch-test-row-identity-prep-skips-missing-ready-schema-table ()
+  "Ready schema cache misses should skip row identity metadata probes."
+  (let ((clutch--schema-cache (make-hash-table :test 'equal))
+        (clutch--schema-status-cache (make-hash-table :test 'equal))
+        (called nil))
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "USERS" '("ID" "NAME") schema)
+      (puthash "fake-key" schema clutch--schema-cache))
+    (puthash "fake-key" '(:state ready :tables 1) clutch--schema-status-cache)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "fake-key"))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (_conn _table)
+                 (setq called t)
+                 (list (list :kind 'primary-key
+                             :name "PRIMARY"
+                             :columns '("id"))))))
+      (let* ((sql "SELECT * FROM missing_users")
+             (prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+        (should-not called)
+        (should-not (plist-get prep :augmented))
+        (should (equal (plist-get prep :sql) sql))))))
+
 (ert-deftest clutch-test-row-identity-prep-oracle-select-star-qualifies-star ()
   "Oracle SELECT * row identity injection should avoid SELECT *, expr syntax."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
@@ -8695,6 +8720,14 @@ This applies when the buffer owns the connection."
     (should (string-match-p "No suitable driver found" result))
     (should (string-match-p "clutch-jdbc-install-driver RET oracle" result))))
 
+(ert-deftest clutch-test-humanize-db-error-parts-keep-jdbc-state-in-summary ()
+  "Structured error rendering should not treat JDBC SQLState as a display hint."
+  (let ((parts (clutch--humanize-db-error-parts
+                "SQLException [SQLState=99999]: unexpected driver error")))
+    (should (string-match-p "\\[SQLState=99999\\]"
+                            (plist-get parts :summary)))
+    (should-not (plist-get parts :hint))))
+
 (ert-deftest clutch-test-humanize-db-error-unknown-passes-through ()
   "Unknown errors should pass through with noise stripped but no hint."
   (let ((result (clutch--humanize-db-error "Something totally unexpected happened")))
@@ -8973,37 +9006,6 @@ This applies when the buffer owns the connection."
                              "ORA-00942: table or view does not exist"))
               (should (equal (plist-get (plist-get diag :context) :sql)
                              "SELECT * FROM missing_table")))))
-      (kill-buffer source))))
-
-(ert-deftest clutch-test-execute-error-points-to-debug-workflow-when-disabled ()
-  "Query failures should point users at the single debug workflow."
-  (let ((source (generate-new-buffer " *clutch-execute-hint-source*"))
-        message-text)
-    (unwind-protect
-        (with-current-buffer source
-          (set-window-buffer (selected-window) source)
-          (setq-local clutch-connection 'fake-conn
-                      clutch--source-window (selected-window))
-          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-                     (lambda (_conn sql _page-num _page-size
-                                    &optional _order-by _page-offset)
-                       sql))
-                    ((symbol-function 'clutch--run-db-query)
-                     (lambda (_conn _sql)
-                       (signal 'clutch-db-error
-                               (list "ORA-00942: table or view does not exist"))))
-                    ((symbol-function 'clutch-db-error-details)
-                     (lambda (_conn) nil))
-                    ((symbol-function 'message)
-                     (lambda (fmt &rest args)
-                       (setq message-text (apply #'format fmt args))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) buf)))
-            (catch 'clutch--execution-aborted
-              (clutch--execute-select "SELECT * FROM missing_table" 'fake-conn))
-            (should (string-match-p "clutch-debug-mode" message-text))
-            (should (string-match-p (regexp-quote clutch-debug-buffer-name)
-                                    message-text))))
       (kill-buffer source))))
 
 ;;;; Execute — query execution and error handling
@@ -9517,21 +9519,29 @@ This applies when the buffer owns the connection."
   "Earlier failing statements should store details and humanized messages."
   (with-temp-buffer
     (let ((clutch-debug-mode t)
-          (raw-message "Connection refused (host=db.example.com, port=3306)"))
+          (raw-message "Connection refused (host=db.example.com, port=3306)")
+          displayed)
       (setq-local clutch-connection 'fake-conn)
       (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                  (lambda (_conn) 'mysql))
+                ((symbol-function 'clutch--display-error-result)
+                 (lambda (_conn sql summary message &optional _elapsed hint)
+                   (setq displayed (list sql summary message hint))
+                   (current-buffer)))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn sql)
                    (if (equal sql "UPDATE first SET x = 1")
                        (signal 'clutch-db-error (list raw-message))
                      'ok))))
-        (let ((display-summary
-               (condition-case err
-                   (signal 'clutch-db-error (list raw-message))
-                 (clutch-db-error
-                  (clutch--humanize-db-error (error-message-string err)))))
-              signaled)
+        (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
+               (result-summary (plist-get display-parts :summary))
+               (result-hint (plist-get display-parts :hint))
+               (display-summary
+                (condition-case err
+                    (signal 'clutch-db-error (list raw-message))
+                  (clutch-db-error
+                   (clutch--humanize-db-error (error-message-string err)))))
+               signaled)
           (condition-case err
               (clutch--execute-statements
                '("UPDATE first SET x = 1"
@@ -9542,6 +9552,11 @@ This applies when the buffer owns the connection."
           (should (equal (cadr signaled)
                          (format "Statement 1 failed: %s"
                                  (clutch--debug-workflow-message display-summary))))
+          (should (equal displayed
+                         (list "UPDATE first SET x = 1"
+                               result-summary
+                               raw-message
+                               result-hint)))
           (let* ((details clutch--buffer-error-details)
                  (diag (plist-get details :diag))
                  (event (car clutch--debug-events)))
@@ -9559,21 +9574,29 @@ This applies when the buffer owns the connection."
   "Final DML failures should store details and humanized messages."
   (with-temp-buffer
     (let ((clutch-debug-mode t)
-          (raw-message "Connection refused (host=db.example.com, port=3306)"))
+          (raw-message "Connection refused (host=db.example.com, port=3306)")
+          displayed)
       (setq-local clutch-connection 'fake-conn)
       (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                  (lambda (_conn) 'mysql))
+                ((symbol-function 'clutch--display-error-result)
+                 (lambda (_conn sql summary message &optional _elapsed hint)
+                   (setq displayed (list sql summary message hint))
+                   (current-buffer)))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn sql)
                    (if (equal sql "DELETE FROM broken_rows")
                        (signal 'clutch-db-error (list raw-message))
                      'ok))))
-        (let ((display-summary
-               (condition-case err
-                   (signal 'clutch-db-error (list raw-message))
-                 (clutch-db-error
-                  (clutch--humanize-db-error (error-message-string err)))))
-              signaled)
+        (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
+               (result-summary (plist-get display-parts :summary))
+               (result-hint (plist-get display-parts :hint))
+               (display-summary
+                (condition-case err
+                    (signal 'clutch-db-error (list raw-message))
+                  (clutch-db-error
+                   (clutch--humanize-db-error (error-message-string err)))))
+               signaled)
           (condition-case err
               (clutch--execute-statements
                '("UPDATE ok_rows SET enabled = 1"
@@ -9584,6 +9607,11 @@ This applies when the buffer owns the connection."
           (should (equal (cadr signaled)
                          (format "Statement 2 failed: %s"
                                  (clutch--debug-workflow-message display-summary))))
+          (should (equal displayed
+                         (list "DELETE FROM broken_rows"
+                               result-summary
+                               raw-message
+                               result-hint)))
           (let* ((details clutch--buffer-error-details)
                  (diag (plist-get details :diag))
                  (event (car clutch--debug-events)))
@@ -9597,69 +9625,72 @@ This applies when the buffer owns the connection."
             (should (equal (plist-get event :summary)
                            display-summary))))))))
 
-(ert-deftest clutch-test-parse-error-position-supports-pg-and-oracle ()
-  "Error position parsing should handle PG and Oracle/JDBC formats."
-  (should (= 17 (clutch--parse-error-position "syntax error (position 17)")))
-  (should (= 12 (clutch--parse-error-position
-                 "ORA-06550: line 2, column 3:"
-                 "SELECT 1\nFROM dual"))))
-
-(ert-deftest clutch-test-mark-sql-error-falls-back-to-statement-region ()
-  "Errors without a character position should still mark the statement."
+(ert-deftest clutch-test-abort-execution-error-renders-result-without-message ()
+  "Single-statement execution errors should not duplicate details in messages."
   (with-temp-buffer
-    (insert "SELECT missing_col FROM dual")
-    (let ((clutch--executing-sql-start (point-min))
-          (clutch--executing-sql-end (point-max)))
-      (clutch--mark-sql-error
-       (current-buffer)
-       (buffer-string)
-       "ORA-00904: \"MISSING_COL\": invalid identifier")
-      (should (overlayp clutch--error-position-overlay))
-      (should (= (overlay-start clutch--error-position-overlay) (point-min)))
-      (should (= (overlay-end clutch--error-position-overlay) (point-max))))))
+    (let ((raw-message "Table 'demo.missing_users' doesn't exist")
+          err displayed messages)
+      (condition-case caught
+          (signal 'clutch-db-error (list raw-message))
+        (clutch-db-error
+         (setq err caught)))
+      (cl-letf (((symbol-function 'clutch--display-error-result)
+                 (lambda (_conn sql summary message &optional elapsed hint)
+                   (setq displayed (list sql summary message elapsed hint))
+                   (current-buffer)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (catch 'clutch--execution-aborted
+          (clutch--abort-execution-on-db-error
+           (current-buffer) 'fake-conn "SELECT * FROM missing_users" err 0.012))
+        (should displayed)
+        (should (equal (car displayed) "SELECT * FROM missing_users"))
+        (should-not messages)
+        (should (eq clutch--last-result-buffer (current-buffer)))))))
 
-(ert-deftest clutch-test-mark-sql-error-uses-oracle-line-column ()
-  "Oracle line/column errors should mark the reported character."
-  (with-temp-buffer
-    (insert "SELECT 1\nFROM dual")
-    (let ((clutch--executing-sql-start (point-min))
-          (clutch--executing-sql-end (point-max)))
-      (clutch--mark-sql-error
-       (current-buffer)
-       (buffer-string)
-       "ORA-06550: line 2, column 3:")
-      (should (overlayp clutch--error-position-overlay))
-      (should (= (overlay-start clutch--error-position-overlay) 12))
-      (should (= (overlay-end clutch--error-position-overlay) 13)))))
-
-(ert-deftest clutch-test-mark-sql-error-banner-works-on-first-line ()
-  "The error banner should render above SQL that starts on the first line."
-  (with-temp-buffer
-    (insert "SELECT missing_col FROM dual")
-    (let ((clutch--executing-sql-start (point-min))
-          (clutch--executing-sql-end (point-max)))
-      (clutch--mark-sql-error
-       (current-buffer)
-       (buffer-string)
-       "ORA-00904: invalid identifier")
-      (should (overlayp clutch--error-banner-overlay))
-      (should (= (overlay-start clutch--error-banner-overlay) (point-min)))
-      (should (string-match-p
-               "ORA-00904"
-               (overlay-get clutch--error-banner-overlay 'before-string))))))
-
-(ert-deftest clutch-test-mark-sql-error-banner-anchors-to-statement-line ()
-  "The error banner should appear above the statement line, not mid-line."
-  (with-temp-buffer
-    (insert "-- heading\nSELECT 1; SELECT bad_col FROM dual")
-    (let ((clutch--executing-sql-start 20)
-          (clutch--executing-sql-end (point-max)))
-      (clutch--mark-sql-error
-       (current-buffer)
-       (buffer-substring-no-properties clutch--executing-sql-start clutch--executing-sql-end)
-       "ORA-00904: invalid identifier")
-      (should (overlayp clutch--error-banner-overlay))
-      (should (= (overlay-start clutch--error-banner-overlay) 12)))))
+(ert-deftest clutch-test-display-error-result-renders-result-buffer ()
+  "SQL errors should render in the result buffer without source overlays."
+  (let ((source (generate-new-buffer " *clutch-error-source*"))
+        shown result-buf)
+    (unwind-protect
+        (with-current-buffer source
+          (setq-local clutch-connection 'fake-conn
+                      clutch--connection-params '(:backend oracle :database "db")
+                      clutch--conn-sql-product 'oracle)
+          (insert "SELECT missing_col FROM dual")
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) nil))
+                    ((symbol-function 'clutch--show-result-buffer)
+                     (lambda (buf) (setq shown buf) buf)))
+            (setq result-buf
+                  (clutch--display-error-result
+                   clutch-connection
+                   (buffer-string)
+                   "ORA-00904: invalid column name"
+                   "ORA-00904: \"MISSING_COL\": invalid identifier"
+                   0.012
+                   "invalid column name")))
+          (should (eq shown result-buf))
+          (should-not (overlays-in (point-min) (point-max)))
+          (with-current-buffer result-buf
+            (should (derived-mode-p 'clutch-result-mode))
+            (should (equal clutch--connection-params
+                           '(:backend oracle :database "db")))
+            (should-not truncate-lines)
+            (should word-wrap)
+            (let ((text (buffer-string)))
+              (should-not (string-match-p "\\`ERROR\n" text))
+              (should (string-match-p "Hint: invalid column name" text))
+              (should (string-match-p "invalid column name" text))
+              (should (string-match-p "ORA-00904" text))
+              (should-not (string-match-p "Details" text))
+              (should (string-match-p "  SELECT missing_col FROM dual" text))
+              (should (string-match-p "Failed in" text)))))
+      (when (buffer-live-p result-buf)
+        (kill-buffer result-buf))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
 
 (ert-deftest clutch-test-execute-and-mark-skips-success-overlay-on-error ()
   "Failed execution should not mark SQL as successfully executed."
@@ -9693,7 +9724,6 @@ This applies when the buffer owns the connection."
       (puthash clutch-connection t clutch--tx-dirty-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
                 ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--update-mode-line) (lambda () nil))
                 ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
@@ -9718,7 +9748,6 @@ This applies when the buffer owns the connection."
           execute-saw-spinner)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
                 ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
                 ((symbol-function 'clutch--spinner-start)
@@ -9744,7 +9773,6 @@ This applies when the buffer owns the connection."
           seen-header)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
                 ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
                 ((symbol-function 'clutch--spinner-start) #'ignore)
@@ -9769,7 +9797,6 @@ This applies when the buffer owns the connection."
            (clutch--executing-p nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
                 ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--update-mode-line) (lambda () nil))
                 ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
@@ -9853,7 +9880,6 @@ This applies when the buffer owns the connection."
         (clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
               ((symbol-function 'clutch--check-pending-changes) #'ignore)
-              ((symbol-function 'clutch--clear-error-position-overlay) #'ignore)
               ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
               ((symbol-function 'clutch--require-risky-dml-confirmation)
                (lambda (sql) (setq called sql)))

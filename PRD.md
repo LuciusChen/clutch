@@ -639,8 +639,7 @@ migration fallback when the identity-keyed file has not been created yet.
 | `clutch-executed-sql-marker-face` | Light: #eaf5e9 bg / Dark: #223526 bg | Last executed SQL gutter marker |
 | `clutch-pending-delete-face` | Light: #fde8e8 bg, #9b1c1c fg, strikethrough | Rows staged for deletion |
 | `clutch-pending-insert-face` | Light: #e6f4ea bg, #1e4620 fg / Dark: #1a3320 bg | Rows staged for insertion |
-| `clutch-error-position-face` | Light: #fde8e8 bg, wave red / Dark: #3b1212 bg | Character at SQL error position |
-| `clutch-error-banner-face` | Light: #fee2e2 bg, #991b1b fg / Dark: #451a1a bg | Inline SQL execution error banner |
+| `clutch-error-summary-face` | Light: #b42318 fg / Dark: #ffb4b4 fg | Humanized SQL error summary in result buffers |
 | `clutch-insert-field-name-face` | bold, `#b8d7ec` fg | Insert-buffer field names |
 | `clutch-insert-field-tag-face` | shadow | Metadata tags (`[generated]`, `[default]`, ...) |
 | `clutch-insert-field-error-face` | wave red underline | Invalid values in insert buffer |

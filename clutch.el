@@ -220,22 +220,11 @@ Underlined to indicate clickable (RET to follow)."
   "Face for rows staged for insertion."
   :group 'clutch)
 
-(defface clutch-error-position-face
-  '((((class color) (background light))
-     :background "#fde8e8" :underline (:color "red" :style wave))
-    (((class color) (background dark))
-     :background "#3b1212" :underline (:color "#fca5a5" :style wave))
-    (t :underline t))
-  "Face for the character at the SQL error position."
-  :group 'clutch)
-
-(defface clutch-error-banner-face
-  '((((class color) (background light))
-     :background "#fee2e2" :foreground "#991b1b" :extend t)
-    (((class color) (background dark))
-     :background "#451a1a" :foreground "#fecaca" :extend t)
-    (t :inherit error))
-  "Face for the inline SQL execution error banner."
+(defface clutch-error-summary-face
+  '((((class color) (background dark)) :foreground "#ffb4b4" :weight semibold)
+    (((class color) (background light)) :foreground "#b42318" :weight semibold)
+    (t :inherit error :weight bold))
+  "Face for SQL execution error summaries."
   :group 'clutch)
 
 (defcustom clutch-connection-alist nil
@@ -451,12 +440,6 @@ cleaned up in the pasted region only."
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
 Used to update the mode-line with a spinner during execution.")
-
-(defvar-local clutch--error-position-overlay nil
-  "Overlay marking the error position in the last failed query, or nil.")
-
-(defvar-local clutch--error-banner-overlay nil
-  "Overlay showing the last SQL execution error banner, or nil.")
 
 (defvar-local clutch--tables-in-buffer-cache nil
   "Cached result for `clutch--tables-in-buffer' in the current buffer.")
