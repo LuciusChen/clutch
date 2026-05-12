@@ -1195,9 +1195,8 @@ Run from `kill-emacs-hook' to persist consoles on Emacs exit."
 
 ;;;; Schema cache + completion
 
-;; NOTE: clutch--connection-key, clutch--connection-alive-p, etc. are now
-;; in clutch-connection.el.  Query execution, error handling, value
-;; formatting, and indirect edit are now in clutch-query.el.
+;; NOTE: connection helpers live in clutch-connection.el, query execution and
+;; SQL rewriting in clutch-query.el, and result display helpers in clutch-ui.el.
 
 (defun clutch--refresh-result-status-line ()
   "Refresh the result buffer status line without rebuilding the table body."

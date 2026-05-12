@@ -65,6 +65,17 @@
 (defvar clutch--schema-refresh-tickets (make-hash-table :test 'equal)
   "Latest schema refresh ticket keyed by connection key string.")
 
+(defconst clutch--schema-dependent-cache-symbols
+  '(clutch--columns-status-cache
+    clutch--column-details-cache
+    clutch--column-details-status-cache
+    clutch--column-details-queue-cache
+    clutch--column-details-active-cache
+    clutch--table-comment-cache
+    clutch--table-comment-status-cache
+    clutch--help-doc-cache)
+  "Metadata cache variables invalidated when schema cache changes.")
+
 (defvar clutch--object-cache)
 (defvar clutch-connection)
 (defvar clutch-debug-mode nil)
@@ -123,6 +134,46 @@ CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
                       h))))
     cache))
 
+(defun clutch--metadata-cache-get (conn table cache-table &optional default)
+  "Return TABLE's metadata value for CONN from CACHE-TABLE.
+Return DEFAULT when CONN has no cache entry or TABLE is absent."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key cache-table)))
+    (if cache
+        (gethash table cache default)
+      default)))
+
+(defun clutch--metadata-cache-put (conn table value cache-table)
+  "Store VALUE for TABLE on CONN in CACHE-TABLE."
+  (puthash table value (clutch--metadata-cache-for conn cache-table)))
+
+(defun clutch--metadata-cache-remove (conn table cache-table)
+  "Remove TABLE's metadata entry for CONN from CACHE-TABLE."
+  (let* ((key (clutch--connection-key conn))
+         (cache (gethash key cache-table)))
+    (when cache
+      (remhash table cache))))
+
+(defun clutch--metadata-table-status (conn table cache-table)
+  "Return TABLE status plist for CONN from CACHE-TABLE, or nil."
+  (clutch--metadata-cache-get conn table cache-table))
+
+(defun clutch--set-metadata-table-status (conn table cache-table state
+                                               &optional error-message ticket)
+  "Record TABLE metadata STATE for CONN in CACHE-TABLE."
+  (clutch--metadata-cache-put
+   conn table (list :state state :error error-message :ticket ticket)
+   cache-table))
+
+(defun clutch--clear-metadata-table-status (conn table cache-table)
+  "Clear TABLE metadata status for CONN from CACHE-TABLE."
+  (clutch--metadata-cache-remove conn table cache-table))
+
+(defun clutch--clear-schema-dependent-caches (key)
+  "Clear metadata caches derived from schema cache KEY."
+  (dolist (cache-symbol clutch--schema-dependent-cache-symbols)
+    (remhash key (symbol-value cache-symbol))))
+
 (defun clutch--schema-status-entry (conn)
   "Return schema status plist for CONN, or nil."
   (and conn
@@ -155,25 +206,16 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 
 (defun clutch--columns-status (conn table)
   "Return column-name load status plist for TABLE on CONN, or nil."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--columns-status-cache)))
-    (and cache (gethash table cache))))
+  (clutch--metadata-table-status conn table clutch--columns-status-cache))
 
 (defun clutch--set-columns-status (conn table state &optional error-message ticket)
   "Record synchronous column-name load STATE for TABLE on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (or (gethash key clutch--columns-status-cache)
-                    (let ((h (make-hash-table :test 'equal)))
-                      (puthash key h clutch--columns-status-cache)
-                      h))))
-    (puthash table (list :state state :error error-message :ticket ticket) cache)))
+  (clutch--set-metadata-table-status
+   conn table clutch--columns-status-cache state error-message ticket))
 
 (defun clutch--clear-columns-status (conn table)
   "Clear any recorded column-name load status for TABLE on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--columns-status-cache)))
-    (when cache
-      (remhash table cache))))
+  (clutch--clear-metadata-table-status conn table clutch--columns-status-cache))
 
 (defun clutch--begin-columns-ticket ()
   "Issue a new column-name ticket."
@@ -188,53 +230,41 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 
 (defun clutch--column-details-status (conn table)
   "Return async column-detail status plist for TABLE on CONN, or nil."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--column-details-status-cache)))
-    (and cache (gethash table cache))))
+  (clutch--metadata-table-status
+   conn table clutch--column-details-status-cache))
 
 (defun clutch--cached-column-details (conn table)
   "Return cached column details for TABLE on CONN, or nil if not loaded."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--column-details-cache))
-         (details (and cache (gethash table cache 'missing))))
+  (let ((details (clutch--metadata-cache-get
+                  conn table clutch--column-details-cache 'missing)))
     (unless (eq details 'missing) details)))
 
 (defun clutch--table-comment-status (conn table)
   "Return async table-comment status plist for TABLE on CONN, or nil."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--table-comment-status-cache)))
-    (and cache (gethash table cache))))
+  (clutch--metadata-table-status conn table clutch--table-comment-status-cache))
 
 (defun clutch--cached-table-comment (conn table)
   "Return cached table comment for TABLE on CONN, or nil if not loaded."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--table-comment-cache))
-         (comment (and cache (gethash table cache 'missing))))
+  (let ((comment (clutch--metadata-cache-get
+                  conn table clutch--table-comment-cache 'missing)))
     (unless (eq comment 'missing) comment)))
 
 (defun clutch--table-comment-cached-p (conn table)
   "Return non-nil when TABLE has a cached comment entry on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--table-comment-cache)))
-    (and cache
-         (not (eq (gethash table cache 'missing) 'missing)))))
+  (not (eq (clutch--metadata-cache-get
+            conn table clutch--table-comment-cache 'missing)
+           'missing)))
 
 (defun clutch--set-table-comment-status (conn table state
                                               &optional error-message ticket)
   "Record async table-comment STATE for TABLE on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (or (gethash key clutch--table-comment-status-cache)
-                    (let ((h (make-hash-table :test 'equal)))
-                      (puthash key h clutch--table-comment-status-cache)
-                      h))))
-    (puthash table (list :state state :error error-message :ticket ticket) cache)))
+  (clutch--set-metadata-table-status
+   conn table clutch--table-comment-status-cache state error-message ticket))
 
 (defun clutch--clear-table-comment-status (conn table)
   "Clear any recorded table-comment status for TABLE on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--table-comment-status-cache)))
-    (when cache
-      (remhash table cache))))
+  (clutch--clear-metadata-table-status
+   conn table clutch--table-comment-status-cache))
 
 (defun clutch--begin-table-comment-ticket ()
   "Issue a new table-comment ticket."
@@ -250,19 +280,13 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 (defun clutch--set-column-details-status (conn table state
                                               &optional error-message ticket)
   "Record async column-detail STATE for TABLE on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (or (gethash key clutch--column-details-status-cache)
-                    (let ((h (make-hash-table :test 'equal)))
-                      (puthash key h clutch--column-details-status-cache)
-                      h))))
-    (puthash table (list :state state :error error-message :ticket ticket) cache)))
+  (clutch--set-metadata-table-status
+   conn table clutch--column-details-status-cache state error-message ticket))
 
 (defun clutch--clear-column-details-status (conn table)
   "Clear any recorded column-detail status for TABLE on CONN."
-  (let* ((key (clutch--connection-key conn))
-         (cache (gethash key clutch--column-details-status-cache)))
-    (when cache
-      (remhash table cache))))
+  (clutch--clear-metadata-table-status
+   conn table clutch--column-details-status-cache))
 
 (defun clutch--begin-column-details-ticket ()
   "Issue a new column-detail ticket."
@@ -306,14 +330,7 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 (defun clutch--finish-install-schema-cache (conn key schema)
   "Publish installed SCHEMA cache for CONN under KEY."
   (puthash key schema clutch--schema-cache)
-  (remhash key clutch--columns-status-cache)
-  (remhash key clutch--column-details-cache)
-  (remhash key clutch--column-details-status-cache)
-  (remhash key clutch--column-details-queue-cache)
-  (remhash key clutch--column-details-active-cache)
-  (remhash key clutch--table-comment-cache)
-  (remhash key clutch--table-comment-status-cache)
-  (remhash key clutch--help-doc-cache)
+  (clutch--clear-schema-dependent-caches key)
   (clutch--invalidate-object-warmup conn)
   (remhash key clutch--object-cache)
   (clutch--set-schema-status conn 'ready (hash-table-count schema))
@@ -371,14 +388,7 @@ When TICKET is non-nil, ignore the update unless it is still current."
 When KEY is non-nil, clear that cache namespace instead of CONN's current key."
   (let ((key (or key (clutch--connection-key conn))))
     (remhash key clutch--schema-cache)
-    (remhash key clutch--columns-status-cache)
-    (remhash key clutch--column-details-cache)
-    (remhash key clutch--column-details-status-cache)
-    (remhash key clutch--column-details-queue-cache)
-    (remhash key clutch--column-details-active-cache)
-    (remhash key clutch--table-comment-cache)
-    (remhash key clutch--table-comment-status-cache)
-    (remhash key clutch--help-doc-cache)
+    (clutch--clear-schema-dependent-caches key)
     (clutch--cancel-schema-install conn key)
     (clutch--invalidate-object-warmup conn key)
     (remhash key clutch--object-cache)

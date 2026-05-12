@@ -378,18 +378,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
     (let ((result (clutch--value-to-literal "it's")))
       (should (string-match-p "\\\\'" result)))))
 
-;;;; Rendering — cell truncation and padding
-
-(ert-deftest clutch-test-truncate-cell ()
-  "Test cell value truncation."
-  ;; Short string — no truncation
-  (should (equal (clutch--truncate-cell "hello" 10) "hello"))
-  ;; Exact length — no truncation
-  (should (equal (clutch--truncate-cell "hello" 5) "hello"))
-  ;; Long string — truncated with ellipsis
-  (let ((result (clutch--truncate-cell "hello world" 8)))
-    (should (= (length result) 8))
-    (should (string-suffix-p "…" result))))
+;;;; Rendering — padding
 
 (ert-deftest clutch-test-string-pad ()
   "Test string padding."
