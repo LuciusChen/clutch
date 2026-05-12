@@ -126,19 +126,14 @@ features remain version-specific:
 
 * Installation
 
-Clone this repository and add it to your =load-path=
-(skip this if installed via a package manager):
+Install =clutch= from MELPA or another package archive:
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/clutch")
-;; Add source checkouts for native backends you use:
-;; (add-to-list 'load-path "/path/to/mysql.el") ; for :backend mysql
-;; (add-to-list 'load-path "/path/to/pg-el")  ; for :backend pg
-(require 'clutch)
+(package-install 'clutch)
 #+end_src
 
-When installed from MELPA, installing =clutch= also installs the core native
-backend protocol packages:
+Package-manager installs also install the core native backend protocol
+packages:
 
 - =mysql= for =:backend mysql=
 - =pg= for =:backend pg=
@@ -147,7 +142,17 @@ SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
 =clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
 For Org-Babel support, install the separate =ob-clutch= package.
 
-* Package Split Migration
+For source checkouts, add =clutch= and any native protocol backend checkout you
+use to =load-path= explicitly:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/clutch")
+(add-to-list 'load-path "/path/to/mysql.el") ; only for :backend mysql
+(add-to-list 'load-path "/path/to/pg-el")    ; only for :backend pg
+(require 'clutch)
+#+end_src
+
+* Upgrading From Pre-Split Checkouts
 
 This release separates protocol and Org-Babel packages from the main
 =clutch= package.  If you are upgrading from an older checkout that bundled
@@ -162,23 +167,6 @@ everything in one repository, this is a breaking packaging change:
 - =ob-clutch.el= is no longer bundled; install =ob-clutch= separately for
   Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
-
-For package-manager installs, install =clutch=:
-
-#+begin_src emacs-lisp
-(package-install 'clutch)
-;; (package-install 'ob-clutch)  ;; Org-Babel integration, once available
-#+end_src
-
-For source checkouts, add each backend checkout you use to =load-path=
-explicitly:
-
-#+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/clutch")
-(add-to-list 'load-path "/path/to/mysql.el") ; only for :backend mysql
-(add-to-list 'load-path "/path/to/pg-el")    ; only for :backend pg
-(require 'clutch)
-#+end_src
 
 * Interactive Client
 
