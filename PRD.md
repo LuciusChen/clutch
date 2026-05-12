@@ -74,12 +74,19 @@ clutch follows a **layered, interface-based architecture** with clear separation
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `clutch.el` | ~5500 | Main UI: modes, transient menus, result display, mutation workflow, object-centric schema workflow, schema caching |
+| `clutch.el` | ~5500 | Package entry point: customization, major modes, keymaps, SQL completion/xref/eldoc, value viewers, record view, REPL, transient menus |
+| `clutch-connection.el` | ~1420 | Connection params, auth-source/pass lookup, SSH tunnels, reconnect/disconnect, transaction state, connection header context |
+| `clutch-query.el` | ~2000 | Query consoles, SQL execution, statement detection, pagination/rewrite, row-identity injection, result state setup, error overlays |
+| `clutch-ui.el` | ~1470 | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh, DML display |
+| `clutch-edit.el` | ~2140 | Staged edit, insert, delete, validation, JSON sub-editors, mutation commit workflow |
+| `clutch-object.el` | ~1820 | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
+| `clutch-schema.el` | ~800 | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat |
 | `clutch-db.el` | ~800 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
 | `clutch-db-mysql.el` | ~680 | MySQL backend adapter, type-category mapping |
 | `clutch-db-pg.el` | ~1260 | PostgreSQL backend adapter, OID-to-type mapping |
 | `clutch-db-sqlite.el` | ~400 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
 | `clutch-db-jdbc.el` | ~1760 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
+| `clutch-compat.el` | ~20 | Compatibility feature placeholder for small cross-version shims |
 | External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
@@ -100,8 +107,8 @@ user queries on the same JDBC session.
 
 | Backend | Emacs Version | Implementation | Notes |
 |---------|---------------|----------------|-------|
-| **MySQL** | 28.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
-| **PostgreSQL** | 28.1+ | `pg` | External `pg-el` package; supports PG 12+ |
+| **MySQL** | 29.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **PostgreSQL** | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 
 ### JDBC Backends (via JVM Sidecar)
@@ -122,8 +129,7 @@ user queries on the same JDBC session.
 
 | Component | Minimum Version | Notes |
 |-----------|-----------------|-------|
-| Emacs | 28.1 | MySQL, PostgreSQL native backends |
-| Emacs | 29.1 | SQLite (built-in `sqlite-*` functions) |
+| Emacs | 29.1 | Package baseline; SQLite uses built-in `sqlite-*` functions |
 | Java | 17 | JDBC agent (`clutch-jdbc-agent.jar`) |
 | MySQL | 5.6 | Wire protocol baseline |
 | PostgreSQL | 12 | Information schema queries |
@@ -175,11 +181,15 @@ by `clutch--connection-key`: `clutch--schema-cache`,
 | `C-c C-l` | `clutch-switch-schema` | Switch the current schema/database |
 | `C-c C-p` | `clutch-preview-execution-sql` | Preview the current execution payload |
 | `C-c C-s` | `clutch-refresh-schema` | Refresh schema cache |
+| `C-c TAB` / `C-c <tab>` | `clutch-complete-at-point` | Complete SQL identifiers, including empty column positions |
+| `TAB` / `<tab>` | `clutch-complete-qualified-or-indent` | Complete columns after a table/alias dot, otherwise indent |
 | `C-c ?` | Transient dispatch | Main command menu |
 
-`clutch-mode` also installs a buffer-local xref backend and CAPF pipeline, so
-standard Emacs bindings such as `M-.` and `TAB` keep working through inherited
-xref / completion machinery rather than explicit `define-key` entries.
+`clutch-mode` installs a buffer-local xref backend and CAPF pipeline.  `M-.`
+uses the xref backend, regular completion remains available through normal CAPF
+commands such as `M-TAB`, `C-c TAB` invokes clutch's manual SQL identifier
+completion, and `TAB` is explicitly limited to qualifier-dot column completion
+with indentation as the fallback.
 
 ---
 

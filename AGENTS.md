@@ -5,6 +5,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 ## Core Principles
 
 - **Question every abstraction**: Add layers, files, or indirection only when they solve a current problem. Prefer simpler code and clear ownership over speculative structure.
+- **Make abstractions pay for themselves**: A refactor should remove duplication, centralize a rule, or make callers simpler. If it mostly adds wrappers, accessors, or renamed intermediate state around one use site, keep the direct code.
+- **Prefer lightweight Elisp shapes**: Use `let*`, `pcase-let`, alists/plists, small helpers, or table-driven mappings for short-lived context. Reserve `cl-defstruct` or object-style layers for stable data that crosses module or lifecycle boundaries, such as connection, result, or protocol state.
 - **Delete, don't deprecate**: Remove unused code entirely. No backward-compatibility shims, re-exports, or "removed" comments.
 - **Converge UX**: Prefer one clear entry point and one consistent behavior model over overlapping commands or branchy mode-specific behavior. Wrapper commands are fine, but they must share one resolution path, one action registry, and one default-action model.
 
@@ -62,6 +64,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - Always use standard `completing-read`.
 - Completion-at-point functions must return quickly and use `:exclusive 'no`.
 - Add CAPFs buffer-locally via `add-hook` with LOCAL=`t`.
+- Keep CAPF implementations close to the Emacs protocol: compute bounds and candidates directly, return the standard completion list, and avoid inventing a separate completion context model unless multiple real call paths share it.
 - Keep object resolution, action definition, and action presentation separate. Embark and Transient are presentation layers, not independent business logic systems.
 
 ## Mutation Workflow Convergence
@@ -75,8 +78,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Version Baseline
 
-- `clutch` targets **Emacs 28.1+** for the native MySQL/PostgreSQL backends.
-- The SQLite backend requires **Emacs 29.1+** because it depends on built-in `sqlite-*` functions.
+- `clutch` targets **Emacs 29.1+**.
+- The SQLite backend depends on built-in `sqlite-*` functions and is covered by the package baseline.
 - The JDBC path depends on `clutch-jdbc-agent`, whose published baseline is **Java 17+**.
 - Do not silently raise any baseline. If a change requires a higher Emacs or Java version, update:
   - `README.org`
@@ -121,10 +124,9 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 These rules keep the package compatible with MELPA submission requirements
 (`package-lint`, `checkdoc`, and MELPA review conventions).
 
-### Emacs 28.1 baseline
+### Emacs 29.1 baseline
 
-- Do not use `string-equal-ignore-case` (Emacs 29.1). Use `(string= (downcase a) (downcase b))` instead.
-- Do not use `with-memoization` (Emacs 29.1), `use-package` (built-in from 29.1), or other 29+ APIs without a version guard.
+- Do not use Emacs 30+ APIs without a version guard or compatibility shim.
 - When in doubt, check `M-x find-function` to verify when a symbol was introduced.
 
 ### File headers
@@ -158,7 +160,7 @@ These rules keep the package compatible with MELPA submission requirements
 
 - `cl-lib` functions require `(require 'cl-lib)` — do not rely on transitive loading.
 - Avoid `eval-when-compile` for runtime-needed dependencies.
-- Do not use Emacs 29+ symbols such as `ntake`, `take`, `pos-bol`, or `pos-eol` without compat shims or guards.
+- Do not use Emacs 30+ symbols without compat shims or guards.
 
 ## Pre-Commit Checklist (Mandatory)
 
