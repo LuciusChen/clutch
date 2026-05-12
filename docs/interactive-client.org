@@ -536,7 +536,7 @@ Customize these through =M-x customize-group RET clutch RET=:
 | =clutch-null-face= | NULL cell values |
 | =clutch-modified-face= / =clutch-pending-delete-face= / =clutch-pending-insert-face= | Staged edit/delete/insert markers in result buffers |
 | =clutch-fk-face= | Foreign-key cell values |
-| =clutch-executed-sql-marker-face= | Last executed SQL marker in SQL buffers |
+| =clutch-executed-sql-marker-face= / =clutch-failed-sql-marker-face= | Last SQL execution marker in SQL buffers |
 | =clutch-error-summary-face= | SQL execution error summaries in result buffers |
 | =clutch-object-type-face= | Object type labels in describe/object UIs |
 | =clutch-object-source-face= / =clutch-object-public-source-face= | Object source/schema annotations |

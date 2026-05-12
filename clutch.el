@@ -198,8 +198,13 @@ Underlined to indicate clickable (RET to follow)."
   "Face for the executed SQL gutter marker."
   :group 'clutch)
 
+(defface clutch-failed-sql-marker-face
+  '((t :inherit error))
+  "Face for the failed SQL gutter marker."
+  :group 'clutch)
+
 (define-fringe-bitmap 'clutch-executed-sql-dot
-  [0 0 24 60 126 126 60 24]
+  [24 60 126 255 255 126 60 24]
   nil nil 'center)
 
 (defface clutch-pending-delete-face

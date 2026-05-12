@@ -91,7 +91,7 @@ Nil means derive the offset from `clutch--page-current'.")
 (defvar-local clutch--row-identity nil
   "Row identity metadata for staging edits and deletes in the current result.")
 (defvar-local clutch--executed-sql-overlay nil
-  "Overlay marking the last successfully executed SQL statement.")
+  "Overlay marking the last SQL execution status.")
 (defvar-local clutch--row-overlay nil
   "Overlay used to highlight the current row.")
 (defvar clutch--row-start-positions)
@@ -474,22 +474,27 @@ the real rendered width, preventing column misalignment."
       (or base ""))))
 
 (defun clutch--clear-executed-sql-overlay (&rest _)
-  "Remove the last executed SQL overlay in the current buffer."
+  "Remove the last SQL execution status overlay in the current buffer."
   (when (overlayp clutch--executed-sql-overlay)
     (let ((overlay clutch--executed-sql-overlay))
       (setq clutch--executed-sql-overlay nil)
       (delete-overlay overlay))))
 
-(defun clutch--executed-sql-marker-before-string ()
-  "Return the before-string used to mark executed SQL."
-  (if (display-graphic-p)
-      (propertize " "
-                  'display
-                  '(left-fringe clutch-executed-sql-dot clutch-executed-sql-marker-face))
-    (propertize "✓ " 'face 'clutch-executed-sql-marker-face)))
+(defun clutch--sql-status-marker-before-string (status)
+  "Return the before-string used to mark SQL execution STATUS."
+  (pcase-let* ((`(,face ,fallback)
+                (if (eq status 'failed)
+                    '(clutch-failed-sql-marker-face "✗ ")
+                  '(clutch-executed-sql-marker-face "✓ "))))
+    (if (display-graphic-p)
+        (propertize " "
+                    'display
+                    `(left-fringe clutch-executed-sql-dot ,face))
+      (propertize fallback 'face face))))
 
-(defun clutch--mark-executed-sql-region (beg end)
-  "Mark the last successfully executed SQL region BEG..END."
+(defun clutch--mark-sql-status-region (beg end status &optional message)
+  "Mark SQL region BEG..END with execution STATUS.
+MESSAGE, when non-nil, is used as hover text for failed SQL."
   (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
               (tbeg (car trimmed))
               (tend (cdr trimmed)))
@@ -503,9 +508,20 @@ the real rendered width, preventing column misalignment."
                           (line-beginning-position))
                         nil nil nil))
     (overlay-put clutch--executed-sql-overlay 'before-string
-                 (clutch--executed-sql-marker-before-string))
+                 (clutch--sql-status-marker-before-string status))
     (overlay-put clutch--executed-sql-overlay 'help-echo
-                 (format "Last executed SQL (%d chars)" (- tend tbeg)))))
+                 (if (eq status 'failed)
+                     (format "Last failed SQL: %s"
+                             (or message "SQL execution failed"))
+                   (format "Last executed SQL (%d chars)" (- tend tbeg))))))
+
+(defun clutch--mark-executed-sql-region (beg end)
+  "Mark the last successfully executed SQL region BEG..END."
+  (clutch--mark-sql-status-region beg end 'executed))
+
+(defun clutch--mark-failed-sql-region (beg end &optional message)
+  "Mark the last failed SQL region BEG..END with MESSAGE."
+  (clutch--mark-sql-status-region beg end 'failed message))
 
 (defun clutch--header-label (name)
   "Build the display label for column NAME.
@@ -1622,12 +1638,6 @@ is an optional actionable hint."
           (insert "\n"
                   (propertize "Hint: " 'face 'shadow)
                   hint
-                  "\n"))
-        (unless (string-empty-p sql)
-          (insert "\n")
-          (insert (propertize "SQL" 'face 'shadow)
-                  "\n"
-                  (replace-regexp-in-string "^" "  " sql)
                   "\n"))
         (when elapsed
           (insert "\n"

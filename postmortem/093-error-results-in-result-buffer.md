@@ -1,5 +1,7 @@
 # Error results in the result buffer
 
+Superseded by 094 for the failed-SQL marker and result-buffer SQL display split.
+
 ## Context
 
 SQL execution errors used to mark the SQL buffer with overlays. That made the

@@ -119,6 +119,7 @@
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
+(declare-function clutch--mark-failed-sql-region "clutch-ui" (beg end &optional message))
 (declare-function clutch--compute-column-widths "clutch-ui" (col-names rows column-defs &optional max-width))
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
@@ -1017,6 +1018,13 @@ ELAPSED, when non-nil, is the failed execution duration in seconds."
          (display (clutch--humanize-db-error-parts message))
          (display-summary (or (plist-get display :summary) summary))
          (hint (plist-get display :hint)))
+    (when (and (buffer-live-p source-buffer)
+               clutch--executing-sql-start
+               clutch--executing-sql-end)
+      (with-current-buffer source-buffer
+        (clutch--mark-failed-sql-region
+         clutch--executing-sql-start clutch--executing-sql-end
+         display-summary)))
     (let ((buf (clutch--display-error-result
                 connection sql display-summary message elapsed hint)))
       (when (and (buffer-live-p source-buffer)
@@ -1583,6 +1591,13 @@ result buffer.  Stops and reports on the first error."
                   (buf (clutch--display-error-result
                         clutch-connection stmt display-summary message nil
                         hint)))
+             (when (and (buffer-live-p source-buffer)
+                        clutch--executing-sql-start
+                        clutch--executing-sql-end)
+               (with-current-buffer source-buffer
+                 (clutch--mark-failed-sql-region
+                  clutch--executing-sql-start clutch--executing-sql-end
+                  display-summary)))
              (when (and (buffer-live-p source-buffer)
                         (buffer-live-p buf))
                (with-current-buffer source-buffer

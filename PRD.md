@@ -646,7 +646,7 @@ migration fallback when the identity-keyed file has not been created yet.
 | `clutch-modified-face` | Light: #fff3cd bg / Dark: #3d2b00 bg | Pending-edit cell values |
 | `clutch-fk-face` | `font-lock-type-face`, underlined | Foreign key column values |
 | `clutch-marked-face` | `dired-marked` | Dired-style marked rows |
-| `clutch-executed-sql-marker-face` | Light: #eaf5e9 bg / Dark: #223526 bg | Last executed SQL gutter marker |
+| `clutch-executed-sql-marker-face` / `clutch-failed-sql-marker-face` | Success / error inherited faces | Last SQL execution gutter marker |
 | `clutch-pending-delete-face` | Light: #fde8e8 bg, #9b1c1c fg, strikethrough | Rows staged for deletion |
 | `clutch-pending-insert-face` | Light: #e6f4ea bg, #1e4620 fg / Dark: #1a3320 bg | Rows staged for insertion |
 | `clutch-error-summary-face` | Light: #b42318 fg / Dark: #ffb4b4 fg | Humanized SQL error summary in result buffers |

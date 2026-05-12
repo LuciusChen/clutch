@@ -9617,6 +9617,7 @@ This applies when the buffer owns the connection."
 (ert-deftest clutch-test-abort-execution-error-renders-result-without-message ()
   "Single-statement execution errors should not duplicate details in messages."
   (with-temp-buffer
+    (insert "SELECT * FROM missing_users")
     (let ((raw-message "Table 'demo.missing_users' doesn't exist")
           err displayed messages)
       (condition-case caught
@@ -9630,12 +9631,26 @@ This applies when the buffer owns the connection."
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (push (apply #'format fmt args) messages))))
-        (catch 'clutch--execution-aborted
-          (clutch--abort-execution-on-db-error
-           (current-buffer) 'fake-conn "SELECT * FROM missing_users" err 0.012))
+        (let ((clutch--executing-sql-start (point-min))
+              (clutch--executing-sql-end (point-max)))
+          (catch 'clutch--execution-aborted
+            (clutch--abort-execution-on-db-error
+             (current-buffer) 'fake-conn "SELECT * FROM missing_users" err 0.012)))
         (should displayed)
         (should (equal (car displayed) "SELECT * FROM missing_users"))
         (should-not messages)
+        (should (overlayp clutch--executed-sql-overlay))
+        (should (string-match-p
+                 "Last failed SQL"
+                 (overlay-get clutch--executed-sql-overlay 'help-echo)))
+        (let* ((before (overlay-get clutch--executed-sql-overlay 'before-string))
+               (display (get-text-property 0 'display before)))
+          (if display
+              (should (equal display
+                             '(left-fringe clutch-executed-sql-dot
+                                           clutch-failed-sql-marker-face)))
+            (should (eq (get-text-property 0 'face before)
+                        'clutch-failed-sql-marker-face))))
         (should (eq clutch--last-result-buffer (current-buffer)))))))
 
 (ert-deftest clutch-test-display-error-result-renders-result-buffer ()
@@ -9674,7 +9689,7 @@ This applies when the buffer owns the connection."
               (should (string-match-p "invalid column name" text))
               (should (string-match-p "ORA-00904" text))
               (should-not (string-match-p "Details" text))
-              (should (string-match-p "  SELECT missing_col FROM dual" text))
+              (should-not (string-match-p "SELECT missing_col FROM dual" text))
               (should (string-match-p "Failed in" text)))))
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf))
@@ -9699,7 +9714,14 @@ This applies when the buffer owns the connection."
     (clutch--mark-executed-sql-region (point-min) (point-max))
     (should (overlayp clutch--executed-sql-overlay))
     (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
-    (should (overlay-get clutch--executed-sql-overlay 'before-string))
+    (let* ((before (overlay-get clutch--executed-sql-overlay 'before-string))
+           (display (get-text-property 0 'display before)))
+      (if display
+          (should (equal display
+                         '(left-fringe clutch-executed-sql-dot
+                                       clutch-executed-sql-marker-face)))
+        (should (eq (get-text-property 0 'face before)
+                    'clutch-executed-sql-marker-face))))
     (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
 
 (ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
