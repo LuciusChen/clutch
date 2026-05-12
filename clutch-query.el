@@ -904,31 +904,31 @@ operate on that result set via an outer wrapper query."
             rows)
           has-more)))
 
-(defun clutch--update-page-state (columns rows elapsed page-num
-                                          &optional row-identity-prep
-                                          page-offset page-has-more)
-  "Update buffer-local state for a new page of results.
-COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page.
-ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS.
-PAGE-OFFSET is the zero-based row offset for ROWS, and PAGE-HAS-MORE records
-whether a lookahead row proved there are later rows."
-  (let* ((columns (clutch--apply-row-identity-column-metadata
-                   columns row-identity-prep))
+(defun clutch--install-result-page-state
+    (columns rows elapsed page-num &optional row-identity-prep
+             page-offset page-has-more)
+  "Install buffer-local state for a rendered result page.
+COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the page.  ROW-IDENTITY-PREP
+describes hidden row identity columns, PAGE-OFFSET overrides the derived SQL
+offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
+  (let* ((column-defs (clutch--apply-row-identity-column-metadata
+                       columns row-identity-prep))
          (row-identity (clutch--finalize-row-identity
-                        row-identity-prep columns))
-         (col-names (clutch--column-names columns))
+                        row-identity-prep column-defs))
+         (column-names (clutch--column-names column-defs))
+         (cached-pk-indices
+          (and (eq (plist-get row-identity :kind) 'primary-key)
+               (or (plist-get row-identity :source-indices)
+                   (plist-get row-identity :indices))))
          (offset (or page-offset (* page-num clutch-result-max-rows))))
-    (setq-local clutch--result-columns col-names
-                clutch--result-column-defs columns
+    (setq-local clutch--result-columns column-names
+                clutch--result-column-defs column-defs
                 clutch--row-identity row-identity
                 clutch--result-rows rows
                 clutch--page-current page-num
                 clutch--page-offset offset
                 clutch--page-has-more page-has-more
-                clutch--cached-pk-indices
-                (and (eq (plist-get row-identity :kind) 'primary-key)
-                     (or (plist-get row-identity :source-indices)
-                         (plist-get row-identity :indices)))
+                clutch--cached-pk-indices cached-pk-indices
                 clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
@@ -937,7 +937,19 @@ whether a lookahead row proved there are later rows."
                 clutch--filter-pattern nil
                 clutch--filtered-rows nil
                 clutch--column-widths
-                (clutch--compute-column-widths col-names rows columns))))
+                (clutch--compute-column-widths column-names rows column-defs))
+    column-names))
+
+(defun clutch--update-page-state (columns rows elapsed page-num
+                                          &optional row-identity-prep
+                                          page-offset page-has-more)
+  "Update buffer-local state for a new page of results.
+COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page.
+ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS.
+PAGE-OFFSET is the zero-based row offset for ROWS, and PAGE-HAS-MORE records
+whether a lookahead row proved there are later rows."
+  (clutch--install-result-page-state
+   columns rows elapsed page-num row-identity-prep page-offset page-has-more))
 
 (defun clutch--execute-page (page-num &optional page-offset)
   "Execute the query for PAGE-NUM and refresh the result buffer display.
@@ -1087,38 +1099,16 @@ the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
 hidden row identity columns in COLUMNS.  PAGE-OFFSET is the zero-based row
 offset for ROWS, and PAGE-HAS-MORE records one-row lookahead.  Returns column
 names."
-  (let* ((columns (clutch--apply-row-identity-column-metadata
-                   columns row-identity-prep))
-         (row-identity (clutch--finalize-row-identity
-                        row-identity-prep columns))
-         (col-names (clutch--column-names columns)))
-    (setq-local clutch--last-query sql
-                clutch--base-query sql
-                clutch-connection conn
-                clutch--result-columns col-names
-                clutch--result-column-defs columns
-                clutch--result-rows rows
-                clutch--row-identity row-identity
-                clutch--cached-pk-indices
-                (and (eq (plist-get row-identity :kind) 'primary-key)
-                     (or (plist-get row-identity :source-indices)
-                         (plist-get row-identity :indices)))
-                clutch--pending-edits nil
-                clutch--pending-deletes nil
-                clutch--pending-inserts nil
-                clutch--marked-rows nil
-                clutch--sort-column nil
-                clutch--sort-descending nil
-                clutch--page-current 0
-                clutch--page-offset (or page-offset 0)
-                clutch--page-has-more page-has-more
-                clutch--page-total-rows nil
-                clutch--order-by nil
-                clutch--query-elapsed elapsed
-                clutch--filter-pattern nil
-                clutch--filtered-rows nil
-                clutch--aggregate-summary nil)
-    col-names))
+  (setq-local clutch--last-query sql
+              clutch--base-query sql
+              clutch-connection conn
+              clutch--sort-column nil
+              clutch--sort-descending nil
+              clutch--page-total-rows nil
+              clutch--order-by nil
+              clutch--aggregate-summary nil)
+  (clutch--install-result-page-state
+   columns rows elapsed 0 row-identity-prep page-offset page-has-more))
 
 (defun clutch--query-debug-summary (result)
   "Return a compact summary string for RESULT."

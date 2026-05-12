@@ -213,6 +213,14 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
   "Sentinel used to represent JSON false distinctly from nil.")
 
+(defconst clutch-jdbc--object-category-specs
+  '((indexes . (:op "get-indexes" :key :indexes))
+    (sequences . (:op "get-sequences" :key :sequences))
+    (procedures . (:op "get-procedures" :key :procedures))
+    (functions . (:op "get-functions" :key :functions))
+    (triggers . (:op "get-triggers" :key :triggers)))
+  "JDBC object category to agent operation/result-key mapping.")
+
 (defun clutch-jdbc--agent-jar ()
   "Return the path to the clutch-jdbc-agent jar."
   (expand-file-name
@@ -535,6 +543,7 @@ Unlike `clutch-jdbc--recv-response', this never kills the agent process."
         (setq agent-exited t))
       (unless agent-exited
         response))))
+
 (defun clutch-jdbc--rpc (op params &optional timeout-seconds)
   "Send OP with PARAMS to the agent and return the result plist.
 TIMEOUT-SECONDS overrides the default wait time.  Signals
@@ -543,13 +552,7 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
   (let* ((conn (clutch-jdbc--conn-from-params params))
          (id (clutch-jdbc--send op params))
          (response (clutch-jdbc--recv-response id timeout-seconds op)))
-    (if (eq t (plist-get response :ok))
-        (plist-get response :result)
-      (let ((details (clutch-jdbc--remember-error-response conn op response)))
-      (signal 'clutch-db-error
-              (if details
-                  (list (clutch-jdbc--rpc-error-message op response) details)
-                (list (clutch-jdbc--rpc-error-message op response))))))))
+    (clutch-jdbc--response-result-or-signal conn op response)))
 
 (defun clutch-jdbc--rpc-error-message (op response)
   "Return a user-facing error string for OP from RESPONSE."
@@ -582,6 +585,17 @@ When CONN is nil, return the details snapshot for the current failure."
       (puthash conn details clutch-jdbc--error-details-by-conn))
     details))
 
+(defun clutch-jdbc--response-result-or-signal (conn op response)
+  "Return RESPONSE's result or signal `clutch-db-error' for OP.
+When CONN is non-nil, remember structured diagnostics on the connection."
+  (if (eq t (plist-get response :ok))
+      (plist-get response :result)
+    (let ((details (clutch-jdbc--remember-error-response conn op response)))
+      (signal 'clutch-db-error
+              (if details
+                  (list (clutch-jdbc--rpc-error-message op response) details)
+                (list (clutch-jdbc--rpc-error-message op response)))))))
+
 (defun clutch-jdbc--conn-from-params (params)
   "Return the JDBC connection object referenced by PARAMS, or nil."
   (when-let* ((conn-id (alist-get 'conn-id params)))
@@ -598,13 +612,7 @@ When CONN is nil, return the details snapshot for the current failure."
         (condition-case err
             (progn
               (setq response (clutch-jdbc--recv-response id timeout-seconds op))
-              (if (eq t (plist-get response :ok))
-                  (plist-get response :result)
-                (let ((details (clutch-jdbc--remember-error-response conn op response)))
-                  (signal 'clutch-db-error
-                          (if details
-                              (list (clutch-jdbc--rpc-error-message op response) details)
-                            (list (clutch-jdbc--rpc-error-message op response)))))))
+              (clutch-jdbc--response-result-or-signal conn op response))
           (quit
            (setq clear-request-id nil)
            (signal 'quit nil))
@@ -1006,6 +1014,10 @@ Clob plists become their :preview string."
                        (clutch-jdbc--json-bool (plist-get normalized :unique)))))
     normalized))
 
+(defun clutch-jdbc--object-category-spec (category)
+  "Return JDBC object RPC spec plist for CATEGORY, or nil."
+  (alist-get category clutch-jdbc--object-category-specs))
+
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
   (setf (clutch-jdbc-conn-busy conn) t)
@@ -1398,45 +1410,22 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
   "Return object entry plists for CATEGORY on JDBC CONN."
-  (let* ((op (pcase category
-               ('indexes "get-indexes")
-               ('sequences "get-sequences")
-               ('procedures "get-procedures")
-               ('functions "get-functions")
-               ('triggers "get-triggers")
-               (_ nil))))
-    (when op
-      (let* ((result (clutch-jdbc--rpc
-                      op
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                        ,@(clutch-jdbc--metadata-scope-params conn))))
-             (key (pcase category
-                    ('indexes :indexes)
-                    ('sequences :sequences)
-                    ('procedures :procedures)
-                    ('functions :functions)
-                    ('triggers :triggers))))
-        (mapcar #'clutch-jdbc--normalize-object-entry
-                (plist-get result key))))))
+  (when-let* ((spec (clutch-jdbc--object-category-spec category)))
+    (let* ((op (plist-get spec :op))
+           (key (plist-get spec :key))
+           (result (clutch-jdbc--rpc
+                    op
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                      ,@(clutch-jdbc--metadata-scope-params conn)))))
+      (mapcar #'clutch-jdbc--normalize-object-entry
+              (plist-get result key)))))
 
 (cl-defmethod clutch-db-list-objects-async ((conn clutch-jdbc-conn) category callback
                                             &optional errback)
   "Fetch object entry plists for CATEGORY on JDBC CONN asynchronously."
-  (let* ((op (pcase category
-               ('indexes "get-indexes")
-               ('sequences "get-sequences")
-               ('procedures "get-procedures")
-               ('functions "get-functions")
-               ('triggers "get-triggers")
-               (_ nil)))
-         (key (pcase category
-                ('indexes :indexes)
-                ('sequences :sequences)
-                ('procedures :procedures)
-                ('functions :functions)
-                ('triggers :triggers)
-                (_ nil))))
-    (when (and op key)
+  (when-let* ((spec (clutch-jdbc--object-category-spec category)))
+    (let ((op (plist-get spec :op))
+          (key (plist-get spec :key)))
       (clutch-jdbc--rpc-async
        op
        `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
