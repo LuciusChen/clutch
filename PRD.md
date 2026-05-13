@@ -1144,7 +1144,7 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 | **Prepared statements** | DML mutations use parameterized execution for native MySQL/PostgreSQL/SQLite backends; JDBC still falls back to literal SQL rendering |
 | **CLOB/BLOB full content** | CLOBs show first 256 chars; BLOBs show length only; full streaming deferred |
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
-| **Cancel/interrupt** | `C-g` is recoverable for JDBC and native PostgreSQL; backends without explicit interrupt support still fall back to disconnect/reconnect |
+| **Cancel/interrupt** | `C-g` is recoverable for JDBC and native MySQL/PostgreSQL; backends without explicit interrupt support still fall back to disconnect/reconnect |
 
 ## 20. Development Guidelines
 

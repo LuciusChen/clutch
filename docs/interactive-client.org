@@ -556,6 +556,9 @@ Customize these through =M-x customize-group RET clutch RET=:
 - During long-running queries, press =C-g= to interrupt.
   - On JDBC backends, clutch first sends a protocol-level =cancel= for the
     running statement.
+  - On native MySQL, clutch opens a helper connection, issues =KILL QUERY= for
+    the original connection id, drains the interrupted response, and keeps the
+    same session usable.
   - On native PostgreSQL, clutch sends a protocol-level =CancelRequest=, drains
     the main socket back to =ReadyForQuery=, and keeps the same session usable.
   - When that backend-specific cancel succeeds, the connection stays usable and

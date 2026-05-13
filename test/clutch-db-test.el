@@ -2191,6 +2191,61 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should-not (plist-member captured-args :pass-entry))
       (should (equal (plist-get captured-args :password) "secret")))))
 
+(ert-deftest clutch-db-test-mysql-interrupt-kills-query-and-drains-original-conn ()
+  "MySQL interrupt should use a helper connection and keep the session usable."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let* ((conn (make-mysql-conn :host "127.0.0.1"
+                                :port 3306
+                                :user "root"
+                                :database "test"
+                                :connection-id 123
+                                :read-idle-timeout 30))
+         (killer (make-mysql-conn :connection-id 999))
+         (captured-connect-args nil)
+         (captured-sql nil)
+         (drained nil)
+         (disconnected nil))
+    (puthash conn
+             '(:host "127.0.0.1"
+               :port 3306
+               :user "root"
+               :password "secret"
+               :database "test"
+               :read-idle-timeout 30)
+             clutch-db-mysql--connection-params)
+    (cl-letf (((symbol-function 'mysql-connect)
+               (lambda (&rest args)
+                 (setq captured-connect-args args)
+                 killer))
+              ((symbol-function 'mysql-query)
+               (lambda (mysql-conn sql)
+                 (when (eq mysql-conn killer)
+                   (setq captured-sql sql))
+                 (make-mysql-result :connection mysql-conn :status "OK")))
+              ((symbol-function 'mysql--read-packet)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 "cancelled-packet"))
+              ((symbol-function 'mysql--handle-query-response)
+               (lambda (mysql-conn packet)
+                 (should (eq mysql-conn conn))
+                 (should (equal packet "cancelled-packet"))
+                 (setq drained t)
+                 (signal 'mysql-query-error '("[1317] Query execution was interrupted"))))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (mysql-conn)
+                 (when (eq mysql-conn killer)
+                   (setq disconnected t)))))
+      (should (clutch-db-interrupt-query conn))
+      (should (equal captured-sql "KILL QUERY 123"))
+      (should (equal (plist-get captured-connect-args :password) "secret"))
+      (should (equal (plist-get captured-connect-args :read-idle-timeout)
+                     clutch-db-mysql-cancel-timeout-seconds))
+      (should drained)
+      (should disconnected)
+      (should (= (mysql-conn-read-idle-timeout conn) 30)))))
+
 (ert-deftest clutch-db-test-pg-interrupt-query-returns-t-after-cancel ()
   "PostgreSQL interrupt should report success when cancel completes."
   (require 'clutch-db-pg)
@@ -2299,6 +2354,51 @@ Skips if `clutch-db-test-mysql-password' is nil."
  clutch-db-test--with-mysql
  (:db-live :mysql-live)
  "MySQL")
+
+(ert-deftest clutch-db-test-mysql-live-interrupt-keeps-connection-usable ()
+  :tags '(:db-live :mysql-live)
+  "MySQL query interruption should keep the original session usable."
+  (clutch-db-test--with-mysql conn
+    (clutch-db-test--with-mysql watcher
+      (let (worker)
+        (unwind-protect
+            (progn
+              (setq worker
+                    (make-thread
+                     (lambda ()
+                       (clutch-db-query conn "SELECT SLEEP(10)")
+                       :completed)
+                     "clutch-mysql-interrupt-test"))
+              (let ((seen nil))
+                (dotimes (_ 50)
+                  (unless seen
+                    (sleep-for 0.1)
+                    (let* ((result
+                            (clutch-db-query
+                             watcher
+                             (format
+                              "SELECT INFO FROM INFORMATION_SCHEMA.PROCESSLIST WHERE ID = %d"
+                              (mysql-conn-connection-id conn))))
+                           (info (caar (clutch-db-result-rows result))))
+                      (setq seen
+                            (and (stringp info)
+                                 (string-match-p "SELECT SLEEP" info))))))
+                (should seen))
+              (thread-signal worker 'quit nil)
+              (let ((joined (condition-case nil
+                                (thread-join worker)
+                              (quit :quit))))
+                (should (eq joined :quit)))
+              (should (clutch-db-interrupt-query conn))
+              (let ((result (clutch-db-query conn "SELECT 1 AS n")))
+                (should (= (caar (clutch-db-result-rows result)) 1))))
+          (when (and worker (thread-live-p worker))
+            (ignore-errors (thread-signal worker 'quit nil))
+            (condition-case nil
+                (thread-join worker)
+              (quit nil)
+              (error nil)))
+          (ignore-errors (clutch-db-interrupt-query conn)))))))
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   :tags '(:db-live :mysql-live)

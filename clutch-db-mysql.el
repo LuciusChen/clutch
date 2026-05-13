@@ -71,6 +71,22 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
         mysql-type-medium-blob mysql-type-long-blob)
   "MySQL type codes that share BLOB/TEXT family encodings.")
 
+(defcustom clutch-db-mysql-cancel-timeout-seconds 5
+  "Seconds to wait while cancelling and draining an interrupted MySQL query."
+  :type 'number
+  :group 'clutch)
+
+(defvar clutch-db-mysql--connection-params
+  (make-hash-table :test 'eq :weakness 'key)
+  "Wire connection parameters keyed by MySQL connection objects.")
+
+(defun clutch-db-mysql--wire-connect-args (params)
+  "Return PARAMS with clutch-only keys removed for `mysql-connect'."
+  (cl-loop for (key value) on params by #'cddr
+           unless (memq key '(:sql-product :backend :pass-entry
+                              :clutch-tls-mode))
+           append (list key value)))
+
 (defun clutch-db-mysql--type-category (mysql-type charset)
   "Map a MySQL type code MYSQL-TYPE (with CHARSET) to a type-category symbol.
 For the blob-family type codes, charset 63 (binary) means a true BLOB;
@@ -122,10 +138,11 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
        (setq params (plist-put params :ssl-mode 'disabled))
        (cl-remf params :tls)))
     (condition-case err
-        (apply #'mysql-connect
-               (cl-loop for (k v) on params by #'cddr
-                        unless (memq k '(:sql-product :backend :pass-entry))
-                        append (list k v)))
+        (let* ((wire-args (clutch-db-mysql--wire-connect-args params))
+               (conn (apply #'mysql-connect wire-args)))
+          (puthash conn (copy-sequence wire-args)
+                   clutch-db-mysql--connection-params)
+          conn)
       (mysql-error
        (signal 'clutch-db-error
                (list (error-message-string err)))))))
@@ -143,6 +160,47 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
   (and conn
        (mysql-conn-p conn)
        (process-live-p (mysql-conn-process conn))))
+
+(defun clutch-db-mysql--drain-interrupted-response (conn)
+  "Drain the interrupted query response from CONN.
+Return non-nil when the wire protocol is synchronized again."
+  (let ((old-timeout (mysql-conn-read-idle-timeout conn)))
+    (unwind-protect
+        (progn
+          (setf (mysql-conn-read-idle-timeout conn)
+                clutch-db-mysql-cancel-timeout-seconds)
+          (setf (mysql-conn-busy conn) t)
+          (condition-case nil
+              (progn
+                (mysql--handle-query-response conn (mysql--read-packet conn))
+                t)
+            (mysql-query-error t)
+            (mysql-error nil)))
+      (setf (mysql-conn-busy conn) nil)
+      (setf (mysql-conn-read-idle-timeout conn) old-timeout))))
+
+(cl-defmethod clutch-db-interrupt-query ((conn mysql-conn))
+  "Interrupt the active MySQL query on CONN without dropping the session."
+  (let ((thread-id (mysql-conn-connection-id conn))
+        (params (gethash conn clutch-db-mysql--connection-params))
+        killer)
+    (and thread-id
+         params
+         (condition-case nil
+             (let ((inhibit-quit t))
+               (unwind-protect
+                   (progn
+                     (setq killer
+                           (apply #'mysql-connect
+                                  (plist-put
+                                   (copy-sequence params)
+                                   :read-idle-timeout
+                                   clutch-db-mysql-cancel-timeout-seconds)))
+                     (mysql-query killer (format "KILL QUERY %d" thread-id))
+                     (clutch-db-mysql--drain-interrupted-response conn))
+                 (when killer
+                   (ignore-errors (mysql-disconnect killer)))))
+           (mysql-error nil)))))
 
 (cl-defmethod clutch-db-init-connection ((conn mysql-conn))
   "Initialize MySQL CONN with utf8mb4."

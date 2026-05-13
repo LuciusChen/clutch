@@ -218,13 +218,16 @@ Relevant variables:
 
 ### Interrupts and Timeouts
 
+- Native MySQL `C-g` uses a helper connection to issue `KILL QUERY` for the
+  original connection id, then drains the interrupted response on the original
+  socket so the same session remains usable.
 - `:query-timeout` maps to PostgreSQL `statement_timeout`.
 - `pg-cancel` sends a wire-protocol `CancelRequest` on an auxiliary
   socket, then drains the main connection until `ReadyForQuery`.
 - In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled
   query keeps the same session usable for the next SQL.
-- Native MySQL and SQLite do not currently provide the same recoverable
-  interrupt path; clutch falls back to disconnect/reconnect semantics there.
+- Native SQLite does not currently provide the same recoverable interrupt path;
+  clutch falls back to disconnect/reconnect semantics there.
 
 ## SQLite
 
