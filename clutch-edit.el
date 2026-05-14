@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'clutch-db)
 (require 'json)
 
 (defvar-local clutch--cached-pk-indices nil
@@ -330,7 +331,7 @@ All field types use the same delay so feedback timing is consistent."
   (let ((handled (completion-at-point)))
     (unless handled
       (let* ((candidates (or (clutch-result-edit--field-candidates)
-                             (user-error "No completion candidates for %s"
+                             (clutch--user-error "No completion candidates for %s"
                                          clutch-result-edit--column-name)))
              (current (buffer-substring-no-properties (point-min) (point-max)))
              (choice (completing-read (format "%s: " clutch-result-edit--column-name)
@@ -344,7 +345,7 @@ All field types use the same delay so feedback timing is consistent."
   (interactive)
   (let ((value (or (clutch-result-insert--current-time-value
                     (plist-get clutch-result-edit--column-def :type-category))
-                   (user-error "Column %s is not a date/time field"
+                   (clutch--user-error "Column %s is not a date/time field"
                                clutch-result-edit--column-name))))
     (erase-buffer)
     (insert value)
@@ -355,7 +356,7 @@ All field types use the same delay so feedback timing is consistent."
   "Open a dedicated JSON editor for the current edit buffer."
   (interactive)
   (unless (clutch-result-edit--json-p)
-    (user-error "Column %s is not a JSON field" clutch-result-edit--column-name))
+    (clutch--user-error "Column %s is not a JSON field" clutch-result-edit--column-name))
   (let ((parent-buf (current-buffer))
         (field-name clutch-result-edit--column-name)
         (parent-text (buffer-substring-no-properties (point-min) (point-max)))
@@ -375,7 +376,7 @@ All field types use the same delay so feedback timing is consistent."
 Signal MISSING-MESSAGE when PARENT is dead.  UPDATER runs in PARENT.
 When SUCCESS-MESSAGE is non-nil, echo it after returning to PARENT."
   (unless (buffer-live-p parent)
-    (user-error "%s" missing-message))
+    (clutch--user-error "%s" missing-message))
   (quit-window 'kill)
   (with-current-buffer parent
     (funcall updater))
@@ -420,9 +421,9 @@ When RESTORER is non-nil, run it in PARENT before switching back."
   (let* ((nrows (length clutch--result-rows))
          (iidx (- ridx nrows)))
     (unless (and (>= iidx 0) (< iidx (length clutch--pending-inserts)))
-      (user-error "No staged insert at this row"))
+      (clutch--user-error "No staged insert at this row"))
     (let ((table (or (clutch-result--source-table)
-                     (user-error "Cannot detect source table")))
+                     (clutch--user-error "Cannot detect source table")))
           (fields (nth iidx clutch--pending-inserts)))
       (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
 
@@ -431,7 +432,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
   "Edit or re-edit the value at point in a dedicated buffer."
   (interactive)
   (pcase-let* ((`(,ridx ,cidx ,val) (or (clutch-result--cell-at-point)
-                                        (user-error "No cell at point"))))
+                                        (clutch--user-error "No cell at point"))))
     (if (>= ridx (length clutch--result-rows))
         (clutch-result--edit-pending-insert ridx)
       (let* ((op "edit cell")
@@ -458,7 +459,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (setq-local clutch-result--edit-callback
                       (lambda (new-value)
                         (unless (buffer-live-p result-buf)
-                          (user-error "Result buffer no longer exists"))
+                          (clutch--user-error "Result buffer no longer exists"))
                         (with-current-buffer result-buf
                           (clutch-result--apply-edit ridx cidx new-value))))
           (setq-local clutch-result--edit-result-buffer result-buf))
@@ -531,7 +532,7 @@ TABLE is accepted for callers that already know the result source table."
 (defun clutch-result--row-identity-or-user-error (table op)
   "Return row identity metadata for TABLE, or signal `user-error' for OP."
   (or (clutch-result--current-row-identity table)
-      (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
+      (clutch--user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
 
 (defun clutch--load-fk-info ()
@@ -568,7 +569,7 @@ Returns hash-table mapping identity vector -> list of (cidx . new-value)."
   (dolist (stmt statements)
     (unless (clutch-db-sql-find-top-level-clause
              (clutch--sql-normalize-for-rewrite stmt) "WHERE")
-      (user-error "%s blocked: statement without WHERE: %s"
+      (clutch--user-error "%s blocked: statement without WHERE: %s"
                   op-name
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
@@ -628,7 +629,7 @@ WHERE predicate."
 (defun clutch-result--build-update-statements ()
   "Build UPDATE statement specs from staged edits."
   (unless clutch--pending-edits
-    (user-error "No staged edits"))
+    (clutch--user-error "No staged edits"))
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
          (row-identity (clutch-result--row-identity-or-user-error table "Build UPDATE"))
          (col-names clutch--result-columns)
@@ -645,7 +646,7 @@ WHERE predicate."
 (defun clutch-result--build-pending-insert-statements ()
   "Build INSERT statement specs from staged inserts."
   (let ((table (or (clutch-result--source-table)
-                   (user-error "Cannot detect source table"))))
+                   (clutch--user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
               (clutch-result-insert--build-sql clutch-connection table fields))
             clutch--pending-inserts)))
@@ -663,7 +664,7 @@ WHERE predicate."
 (defun clutch-result--pending-sql-statements ()
   "Return the staged SQL statements that would run on commit."
   (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
-    (user-error "No staged SQL"))
+    (clutch--user-error "No staged SQL"))
   (clutch-result--render-statements
    (append
     (when clutch--pending-inserts
@@ -719,11 +720,11 @@ an affected row count other than one."
                                      (clutch-db-result-p result)
                                      (clutch-db-result-affected-rows result))))
             (unless (= affected 1)
-              (user-error "Mutation matched %d rows; expected exactly 1"
+              (clutch--user-error "Mutation matched %d rows; expected exactly 1"
                           affected)))
           result)
       (clutch-db-error
-       (user-error "%s" (clutch--humanize-db-error
+       (clutch--user-error "%s" (clutch--humanize-db-error
                          (error-message-string err)))))))
 
 ;;;###autoload
@@ -732,7 +733,7 @@ an affected row count other than one."
 Executes in order: INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
   (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
-    (user-error "No staged changes"))
+    (clutch--user-error "No staged changes"))
   (let* ((insert-stmts (when clutch--pending-inserts
                          (clutch-result--build-pending-insert-statements)))
          (update-stmts (when clutch--pending-edits
@@ -796,7 +797,7 @@ ROW is the row data and ROW-IDENTITY describes the WHERE predicate."
 Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
   (let* ((indices (or (clutch-result--selected-row-indices)
-                      (user-error "No row at point")))
+                      (clutch--user-error "No row at point")))
          (table (clutch--result-source-table-or-user-error "Stage DELETE"))
          (row-identity (clutch-result--row-identity-or-user-error table "Stage DELETE"))
          (display-rows (or clutch--filtered-rows clutch--result-rows)))
@@ -1225,7 +1226,7 @@ All field types use the same delay so feedback timing is consistent."
         (if (fboundp 'json-serialize)
             (json-serialize (json-parse-string value))
           value)
-      (error (user-error "Field %s expects valid JSON"
+      (error (clutch--user-error "Field %s expects valid JSON"
                          (or clutch-result-insert-json--field-name
                              (clutch-result-insert--current-field-name)
                              "JSON"))))))
@@ -1269,7 +1270,7 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
 (defun clutch-result-insert--current-field-or-error ()
   "Return the structured field at point or signal a user error."
   (or (clutch-result-insert--field-state-at-position)
-      (user-error "Point is not on an insert field")))
+      (clutch--user-error "Point is not on an insert field")))
 
 (defun clutch-result-insert--current-field-value-start ()
   "Return the start position of the current insert field value, or nil."
@@ -1488,7 +1489,7 @@ TIME defaults to `current-time'."
       (progn
         (goto-char pos)
         (clutch-result-insert--normalize-point))
-    (user-error "No next insert field")))
+    (clutch--user-error "No next insert field")))
 
 ;;;###autoload
 (defun clutch-result-insert-prev-field ()
@@ -1498,7 +1499,7 @@ TIME defaults to `current-time'."
       (progn
         (goto-char pos)
         (clutch-result-insert--normalize-point))
-    (user-error "No previous insert field")))
+    (clutch--user-error "No previous insert field")))
 
 ;;;###autoload
 (defun clutch-result-insert-submit-field ()
@@ -1515,11 +1516,11 @@ If nothing handles the completion, fall back to `completing-read'."
   (let ((handled (completion-at-point)))
     (unless handled
       (let* ((field-name (or (clutch-result-insert--current-field-name)
-                             (user-error "Point is not on an insert field")))
+                             (clutch--user-error "Point is not on an insert field")))
              (candidates (or (clutch-result-insert--field-candidates field-name)
-                             (user-error "No completion candidates for %s" field-name)))
+                             (clutch--user-error "No completion candidates for %s" field-name)))
              (bounds (or (clutch-result-insert--current-field-value-bounds)
-                         (user-error "Cannot edit field %s" field-name)))
+                         (clutch--user-error "Cannot edit field %s" field-name)))
              (current (buffer-substring-no-properties (car bounds) (cdr bounds)))
              (choice (completing-read (format "%s: " field-name)
                                       candidates nil t current nil current)))
@@ -1532,15 +1533,15 @@ If nothing handles the completion, fall back to `completing-read'."
   "Replace the current insert field with a current date/time value."
   (interactive)
   (let* ((field-name (or (clutch-result-insert--current-field-name)
-                         (user-error "Point is not on an insert field")))
+                         (clutch--user-error "Point is not on an insert field")))
          (col-def (or (clutch-result-insert--column-def field-name)
-                      (user-error "No column metadata for %s" field-name)))
+                      (clutch--user-error "No column metadata for %s" field-name)))
          (type-category (plist-get col-def :type-category))
          (value (or (clutch-result-insert--current-time-value type-category)
-                    (user-error "Field %s is not a date/time column" field-name))))
+                    (clutch--user-error "Field %s is not a date/time column" field-name))))
     (pcase-let ((`(,beg . ,end)
                  (or (clutch-result-insert--current-field-value-bounds)
-                     (user-error "Cannot edit field %s" field-name))))
+                     (clutch--user-error "Cannot edit field %s" field-name))))
       (delete-region beg end)
       (goto-char beg)
       (insert value))))
@@ -1556,7 +1557,7 @@ If nothing handles the completion, fall back to `completing-read'."
                   (plist-get field :value)))
          (parent-buf (current-buffer)))
     (unless (clutch-result-insert--json-field-p field)
-      (user-error "Field %s is not a JSON column" field-name))
+      (clutch--user-error "Field %s is not a JSON column" field-name))
     (let ((buf (clutch--open-json-sub-editor
                 (format "*clutch-insert-json: %s.%s*"
                         clutch-result-insert--table field-name)
@@ -1706,7 +1707,7 @@ fields until the user expands to all columns."
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
   (let* ((table (or (clutch-result--source-table)
-                    (user-error "Cannot detect source table")))
+                    (clutch--user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
 
@@ -1748,16 +1749,16 @@ fields until the user expands to all columns."
   "Return prefilled insert fields for result row RIDX in RESULT-BUF."
   (with-current-buffer result-buf
     (let* ((table (or (clutch-result--source-table)
-                      (user-error "Cannot detect source table")))
+                      (clutch--user-error "Cannot detect source table")))
            (nrows (length clutch--result-rows)))
       (if (>= ridx nrows)
           (clutch-result-insert--filter-clone-fields
            table
            (or (nth (- ridx nrows) clutch--pending-inserts)
-               (user-error "No staged insert at this row")))
+               (clutch--user-error "No staged insert at this row")))
         (let* ((display-rows (or clutch--filtered-rows clutch--result-rows))
                (row (or (nth ridx display-rows)
-                        (user-error "No row at point")))
+                        (clutch--user-error "No row at point")))
                (values (clutch-result-insert--row-values-with-pending-edits row)))
           (clutch-result-insert--clone-fields-from-row-values table values))))))
 
@@ -1772,21 +1773,21 @@ fields until the user expands to all columns."
                   ((derived-mode-p 'clutch-result-mode)
                    (list (current-buffer)
                          (or (clutch-result--row-idx-at-line)
-                             (user-error "No row at point"))))
+                             (clutch--user-error "No row at point"))))
                   (t
-                   (user-error "Clone row is only available from result or record buffers"))))
+                   (clutch--user-error "Clone row is only available from result or record buffers"))))
          (result-buf (nth 0 source))
          (ridx (nth 1 source)))
     (unless (buffer-live-p result-buf)
-      (user-error "Result buffer no longer exists"))
+      (clutch--user-error "Result buffer no longer exists"))
     (let* ((table (with-current-buffer result-buf
                     (or (clutch-result--source-table)
-                        (user-error "Cannot detect source table"))))
+                        (clutch--user-error "Cannot detect source table"))))
            (fields
             (if record-source-p
                 (with-current-buffer result-buf
                   (let* ((row (or (nth ridx clutch--result-rows)
-                                  (user-error "Row %d no longer exists" ridx)))
+                                  (clutch--user-error "Row %d no longer exists" ridx)))
                          (values (clutch-result-insert--row-values-with-pending-edits
                                   row)))
                     (clutch-result-insert--clone-fields-from-row-values table values)))
@@ -1817,7 +1818,7 @@ fields until the user expands to all columns."
     (condition-case nil
         (current-kill 0 t)
       (error
-       (user-error "Kill ring is empty")))))
+       (clutch--user-error "Kill ring is empty")))))
 
 (defun clutch-result-insert--parse-delimited-text (text)
   "Parse delimited TEXT as TSV or CSV.
@@ -1859,7 +1860,7 @@ ROWS is a list of string lists."
           (push (char-to-string ch) field))))
       (setq i (1+ i)))
     (when quoted
-      (user-error "Import text has an unterminated quoted field"))
+      (clutch--user-error "Import text has an unterminated quoted field"))
     (push (apply #'concat (nreverse field)) row)
     (push (nreverse row) rows)
     (cons delim
@@ -1894,10 +1895,10 @@ ROWS is a list of string lists."
                         (cdr rows)
                       rows)))
     (unless data-rows
-      (user-error "Import text contains no data rows"))
+      (clutch--user-error "Import text contains no data rows"))
     (dolist (row data-rows)
       (when (> (length row) (length columns))
-        (user-error "Import row has %d values but only %d target columns"
+        (clutch--user-error "Import row has %d values but only %d target columns"
                     (length row) (length columns))))
     (cons columns data-rows)))
 
@@ -1918,7 +1919,7 @@ ROWS is a list of string lists."
 (defun clutch-result-insert--stage-imported-rows (rows)
   "Stage imported ROWS as inserts in the parent result buffer."
   (unless (buffer-live-p clutch-result-insert--result-buffer)
-    (user-error "Result buffer no longer exists"))
+    (clutch--user-error "Result buffer no longer exists"))
   (with-current-buffer clutch-result-insert--result-buffer
     (setq clutch--pending-inserts
           (append clutch--pending-inserts rows))
@@ -1954,7 +1955,7 @@ immediately."
                (clutch--message-keyword
                 (clutch-result-insert--delimiter-name delim))))
      (clutch-result-insert--pending-index
-      (user-error "Cannot bulk import multiple rows while editing a staged insert"))
+      (clutch--user-error "Cannot bulk import multiple rows while editing a staged insert"))
      (t
       (let ((field-rows (mapcar (lambda (row)
                                   (clutch-result-insert--fields-from-import-row
@@ -1962,7 +1963,7 @@ immediately."
                                 data-rows)))
         (dolist (fields field-rows)
           (unless fields
-            (user-error "Cannot stage an empty imported row"))
+            (clutch--user-error "Cannot stage an empty imported row"))
           (clutch-result-insert--validate-fields fields))
         (clutch-result-insert--stage-imported-rows field-rows)
         (clutch-result-insert--clear-seed-fields)
@@ -1992,7 +1993,7 @@ Skips columns with empty values."
                                    :null-object nil))
         t)
     (error
-     (user-error "Field %s expects valid JSON" field-name))))
+     (clutch--user-error "Field %s expects valid JSON" field-name))))
 
 (defun clutch-result-insert--valid-date-value-p (value)
   "Return non-nil when VALUE is a valid YYYY-MM-DD date."
@@ -2047,27 +2048,27 @@ Skips columns with empty values."
       (cond
        (enum-candidates
         (unless (member value enum-candidates)
-          (user-error "Field %s must be one of: %s"
+          (clutch--user-error "Field %s must be one of: %s"
                       field-name
                       (string-join enum-candidates ", "))))
        ((member type '("boolean" "bool"))
         (unless (member (downcase value) '("true" "false"))
-          (user-error "Field %s expects true/false" field-name)))
+          (clutch--user-error "Field %s expects true/false" field-name)))
        ((member type '("tinyint(1)" "bit(1)"))
         (unless (member value '("0" "1"))
-          (user-error "Field %s expects 0/1" field-name)))
+          (clutch--user-error "Field %s expects 0/1" field-name)))
        ((and (eq type-category 'numeric)
              (not (clutch-result-insert--valid-numeric-value-p value)))
-        (user-error "Field %s expects a numeric value" field-name))
+        (clutch--user-error "Field %s expects a numeric value" field-name))
        ((and (eq type-category 'date)
              (not (clutch-result-insert--valid-date-value-p value)))
-        (user-error "Field %s expects YYYY-MM-DD" field-name))
+        (clutch--user-error "Field %s expects YYYY-MM-DD" field-name))
        ((and (eq type-category 'time)
              (not (clutch-result-insert--valid-time-value-p value)))
-        (user-error "Field %s expects HH:MM[:SS]" field-name))
+        (clutch--user-error "Field %s expects HH:MM[:SS]" field-name))
        ((and (eq type-category 'datetime)
              (not (clutch-result-insert--valid-datetime-value-p value)))
-        (user-error "Field %s expects YYYY-MM-DD HH:MM[:SS]" field-name))
+        (clutch--user-error "Field %s expects YYYY-MM-DD HH:MM[:SS]" field-name))
        ((or (eq type-category 'json)
             (string= type "json"))
         (clutch-result-insert--validate-json field-name value))))))
@@ -2110,16 +2111,16 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   (let* ((fields (clutch-result-insert--parse-fields))
          (result-buf clutch-result-insert--result-buffer)
          (pending-index clutch-result-insert--pending-index))
-    (unless fields (user-error "No values entered"))
+    (unless fields (clutch--user-error "No values entered"))
     (unless (buffer-live-p result-buf)
-      (user-error "Result buffer no longer exists"))
+      (clutch--user-error "Result buffer no longer exists"))
     (clutch-result-insert--validate-fields fields)
     (quit-window 'kill)
     (with-current-buffer result-buf
       (if pending-index
           (if-let* ((cell (nthcdr pending-index clutch--pending-inserts)))
               (setcar cell fields)
-            (user-error "Staged insert no longer exists"))
+            (clutch--user-error "Staged insert no longer exists"))
         (setq clutch--pending-inserts
               (append clutch--pending-inserts (list fields))))
       (clutch--refresh-display)

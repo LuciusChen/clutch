@@ -438,6 +438,13 @@ connection as live and not busy."
         (conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott"))))
     (should-not (clutch-db-manual-commit-p conn))))
 
+(ert-deftest clutch-db-test-fallback-set-auto-commit-errors-consistently ()
+  "Backends without manual commit support should use the public error wording."
+  (let ((err (should-error (clutch-db-set-auto-commit 'opaque-conn nil)
+                           :type 'user-error)))
+    (should (string-match-p "Manual commit is not supported by this connection"
+                            (error-message-string err)))))
+
 (ert-deftest clutch-db-test-jdbc-commit-fires-rpc ()
   "Clutch-db-commit should issue a commit RPC with the connection id."
   (let ((conn (make-clutch-jdbc-conn :conn-id 17

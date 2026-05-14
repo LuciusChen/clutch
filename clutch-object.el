@@ -595,7 +595,7 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
               #'complete
               nil t initial-input)))
         (or (gethash choice entry-map)
-            (user-error "Unknown clutch object: %s" choice))))))
+            (clutch--user-error "Unknown clutch object: %s" choice))))))
 
 (defun clutch--synonym-entry-p (entry)
   "Return non-nil when ENTRY is a synonym-like object."
@@ -1306,7 +1306,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
   "Refresh the current describe buffer."
   (interactive)
   (unless clutch--describe-object-entry
-    (user-error "No object is associated with this buffer"))
+    (clutch--user-error "No object is associated with this buffer"))
   (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
   (clutch--with-object-error-capture
       (current-buffer) clutch-connection clutch--describe-object-entry "describe"
@@ -1342,16 +1342,16 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                     (clutch--resolve-object-entry "Show definition: ")))
          (conn (or clutch-connection
                    (plist-get context :connection)
-                   (user-error "No active connection")))
+                   (clutch--user-error "No active connection")))
          (name (clutch--object-display-name entry))
          (type (clutch--object-type-string entry)))
     (unless (clutch--object-supports-definition-p entry)
-      (user-error "%s %s does not expose a definition"
+      (clutch--user-error "%s %s does not expose a definition"
                   type name))
     (clutch--with-object-error-capture source-buffer conn entry "show-definition"
       (let ((text (clutch--object-definition-text conn entry)))
         (unless text
-          (user-error "DDL/source unavailable for %s %s" type name))
+          (clutch--user-error "DDL/source unavailable for %s %s" type name))
         (clutch--remember-current-object entry)
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
@@ -1367,7 +1367,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                     (clutch--resolve-object-entry "Describe object: ")))
          (conn (or clutch-connection
                    (plist-get context :connection)
-                   (user-error "No active connection"))))
+                   (clutch--user-error "No active connection"))))
     (clutch--remember-current-object entry)
     (clutch--with-object-error-capture source-buffer conn entry "describe"
       (clutch--show-object-describe-buffer conn entry
@@ -1384,19 +1384,19 @@ When ENTRY is nil, use the current table-like object."
                     (clutch--resolve-object-entry "Browse object: " t)))
          (type (clutch--object-type-string entry)))
     (unless (clutch--table-like-entry-p entry)
-      (user-error "%s %s does not support row browsing"
+      (clutch--user-error "%s %s does not support row browsing"
                   type (clutch--object-display-name entry)))
     (clutch--remember-current-object entry)
     (let* ((conn (or clutch-connection
                      (plist-get context :connection)
-                     (user-error "No active connection")))
+                     (clutch--user-error "No active connection")))
            (sql (format "SELECT * FROM %s;"
                         (clutch--object-sql-name conn entry)))
            (console (or (and (derived-mode-p 'clutch-mode)
                              (eq clutch-connection conn)
                              (current-buffer))
                         (clutch--find-console-for-conn conn)
-                        (user-error "No query console open for this connection"))))
+                        (clutch--user-error "No query console open for this connection"))))
       (pop-to-buffer console)
       (unless (eq (current-buffer) console)
         (goto-char (point-max)))
@@ -1439,12 +1439,12 @@ When ENTRY is nil, use the current table-like object."
 (defun clutch--read-object-target (conn entry)
   "Read a target object for ENTRY on CONN."
   (unless (clutch--object-supports-jump-target-p entry)
-    (user-error "%s %s has no target object"
+    (clutch--user-error "%s %s has no target object"
                 (clutch--object-type-string entry)
                 (clutch--object-display-name entry)))
   (let ((targets (clutch--resolve-object-targets conn entry)))
     (pcase (length targets)
-      (0 (user-error "No target object for %s %s"
+      (0 (clutch--user-error "No target object for %s %s"
                      (clutch--object-type-string entry)
                      (clutch--object-display-name entry)))
       (1 (car targets))
@@ -1459,7 +1459,7 @@ When ENTRY is nil, use the current table-like object."
                     (clutch--resolve-object-entry "Jump from object: ")))
          (conn (or clutch-connection
                    (plist-get context :connection)
-                   (user-error "No active connection")))
+                   (clutch--user-error "No active connection")))
          (target (clutch--read-object-target conn entry)))
     (clutch--remember-current-object target)
     (clutch-object-describe target)))
@@ -1592,7 +1592,7 @@ passed to the fallback reader."
 (defun clutch--run-object-action (entry action-id)
   "Run ACTION-ID for ENTRY."
   (unless (clutch--object-action-available-p entry action-id)
-    (user-error "%s does not support %s"
+    (clutch--user-error "%s does not support %s"
                 (clutch--object-fqname entry)
                 (downcase (clutch--object-action-label action-id))))
   (clutch--remember-current-object entry)
@@ -1671,7 +1671,7 @@ passed to the fallback reader."
   (let ((entry (or entry
                    (clutch--resolve-object-dwim "Object actions for: "))))
     (unless (clutch--present-object-actions-natively entry)
-      (user-error "No object action UI is available"))))
+      (clutch--user-error "No object action UI is available"))))
 
 ;;;###autoload
 (defun clutch-jump (&optional entry)

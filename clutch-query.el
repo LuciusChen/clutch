@@ -48,6 +48,7 @@
 (defvar clutch--connection-params)
 (defvar clutch--console-name)
 (defvar clutch--console-storage-name)
+(defvar clutch--console-ad-hoc-params)
 (defvar clutch--source-window)
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
@@ -112,6 +113,11 @@
 (declare-function clutch--update-mode-line "clutch-connection" ())
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--saved-connection-params "clutch-connection" (name))
+(declare-function clutch--read-manual-connection-params "clutch-connection" (&optional sqlite-file))
+(declare-function clutch--read-sqlite-file-params "clutch-connection" ())
+(declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
+(declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
+(declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
 ;; clutch-result-mode and clutch-mode are defined in clutch.el which requires
 ;; clutch-query.el — we cannot require clutch here.
 (declare-function clutch-result-mode "clutch" ())
@@ -151,14 +157,65 @@ console window; (3) nil, meaning use the selected window."
                                      (buffer-name (window-buffer w))))
                   (window-list))))
 
-(defun clutch--read-query-console-name ()
-  "Read a saved connection name for `clutch-query-console'."
+(defun clutch--sqlite-file-console-target (&optional params)
+  "Return an ad hoc SQLite query console target for PARAMS."
+  (let ((params (or params (clutch--read-sqlite-file-params))))
+    (list :name (clutch--ad-hoc-console-name params)
+          :params params
+          :ad-hoc t)))
+
+(defun clutch--ad-hoc-console-name (params)
+  "Return a display name for an ad hoc console using PARAMS."
+  (if (eq (plist-get params :backend) 'sqlite)
+      (format "SQLite: %s" (abbreviate-file-name (plist-get params :database)))
+    (let* ((backend (or (clutch--backend-display-name-from-params params)
+                        (format "%s" (plist-get params :backend))))
+           (user (or (plist-get params :user) "?"))
+           (host (or (plist-get params :host) "?"))
+           (port (plist-get params :port))
+           (database (or (plist-get params :database)
+                         (plist-get params :sid))))
+      (format "%s: %s@%s%s%s"
+              backend
+              user
+              host
+              (if port (format ":%s" port) "")
+              (if database (format "/%s" database) "")))))
+
+(defun clutch--ad-hoc-console-target (&optional params)
+  "Return an ad hoc query console target for PARAMS."
+  (let ((params (or params (clutch--read-manual-connection-params t))))
+    (list :name (clutch--ad-hoc-console-name params)
+          :params params
+          :ad-hoc t)))
+
+(defun clutch--read-query-console-choice (names)
+  "Read a query console choice from NAMES; no match means new."
+  (let ((read-choice
+         (lambda ()
+           (let ((completion-extra-properties
+                  '(:affixation-function clutch--connection-candidates-affixation)))
+             (completing-read "Console: "
+                              names nil nil nil nil "")))))
+    (if (boundp 'vertico-preselect)
+        (cl-progv '(vertico-preselect) '(prompt)
+          (funcall read-choice))
+      (funcall read-choice))))
+
+(defun clutch--read-query-console-target ()
+  "Read a saved connection name or an ad hoc connection target."
   (clutch--ensure-clutch-loaded)
-  (if clutch-connection-alist
-      (completing-read "Console: "
-                       (mapcar #'car clutch-connection-alist)
-                       nil t)
-    (user-error "No saved connections.  Populate `clutch-connection-alist' first")))
+  (let* ((names (mapcar #'car clutch-connection-alist))
+         (choice (if names
+                     (clutch--read-query-console-choice names)
+                   "")))
+    (cond
+     ((string= choice "")
+      (clutch--ad-hoc-console-target))
+     ((member choice names)
+      choice)
+     (t
+      (clutch--ad-hoc-console-target)))))
 
 (defun clutch--console-yank-cleanup ()
   "Clean whitespace in the just-pasted region of a query console.
@@ -172,18 +229,10 @@ buffer is a query console, and the last command was a yank variant."
       (when (< beg end)
         (whitespace-cleanup-region beg end)))))
 
-;;;###autoload
-(defun clutch-query-console (name)
-  "Open or switch to the query console for saved connection NAME.
-Creates a dedicated buffer *clutch: NAME* with `clutch-mode' enabled
-and connects automatically if not already connected.
-Repeated calls with the same NAME switch to the existing buffer.
-When called from outside a clutch buffer, reuses any visible clutch
-window rather than replacing the current window."
-  (interactive (list (clutch--read-query-console-name)))
-  (let* ((params (or (clutch--saved-connection-params name)
-                     (user-error "No saved connection named %s" name)))
-         (product (clutch--effective-sql-product params))
+(defun clutch--open-query-console (name params &optional ad-hoc-params)
+  "Open or switch to query console NAME using PARAMS.
+AD-HOC-PARAMS, when non-nil, are stored for console-local reconnects."
+  (let* ((product (clutch--effective-sql-product params))
          (storage-name (clutch--console-persistence-name name params))
          (existing (clutch--find-console-buffer name storage-name)))
     (if (and existing
@@ -194,6 +243,7 @@ window rather than replacing the current window."
           (with-current-buffer existing
             (setq-local clutch--console-name name)
             (setq-local clutch--console-storage-name storage-name)
+            (setq-local clutch--console-ad-hoc-params ad-hoc-params)
             (clutch--bind-connection-context clutch-connection params product)
             (clutch--update-console-buffer-name))
           (select-window
@@ -215,6 +265,7 @@ window rather than replacing the current window."
           (clutch-mode))
         (setq-local clutch--console-name name)
         (setq-local clutch--console-storage-name storage-name)
+        (setq-local clutch--console-ad-hoc-params ad-hoc-params)
         (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
         (when is-new
           (let* ((coding-system-for-read 'utf-8)
@@ -230,6 +281,35 @@ window rather than replacing the current window."
         (clutch--update-console-buffer-name)))))
 
 ;;;###autoload
+(defun clutch-query-sqlite-file (file)
+  "Open a query console for SQLite database FILE."
+  (interactive
+   (list (plist-get (clutch--read-sqlite-file-params) :database)))
+  (let ((params (list :backend 'sqlite
+                      :database (clutch--normalize-sqlite-database-file file))))
+    (pcase-let ((`(:name ,name :params ,target-params :ad-hoc t)
+                 (clutch--sqlite-file-console-target params)))
+      (clutch--open-query-console name target-params target-params))))
+
+;;;###autoload
+(defun clutch-query-console (target)
+  "Open or switch to a query console for TARGET.
+Creates a dedicated buffer *clutch: TARGET* with `clutch-mode' enabled
+and connects automatically if not already connected.
+Repeated calls with the same saved connection or ad hoc target switch to the
+existing buffer.
+When called from outside a clutch buffer, reuses any visible clutch
+window rather than replacing the current window."
+  (interactive (list (clutch--read-query-console-target)))
+  (if (stringp target)
+      (let ((params (or (clutch--saved-connection-params target)
+                        (clutch--user-error "No saved connection named %s" target))))
+        (clutch--open-query-console target params nil))
+    (let ((name (plist-get target :name))
+          (params (plist-get target :params)))
+      (clutch--open-query-console name params params))))
+
+;;;###autoload
 (defun clutch-switch-console ()
   "Switch to an open clutch query console using `completing-read'."
   (interactive)
@@ -238,7 +318,7 @@ window rather than replacing the current window."
                             collect (buffer-name buf))))
     (if consoles
         (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
-      (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
+      (clutch--user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
 
 ;;;; Value conversion
 
@@ -326,7 +406,7 @@ Returns table name string or nil."
 (defun clutch--result-source-table-or-user-error (op)
   "Return source table for current result, or signal user-error for OP."
   (or (clutch-result--source-table)
-      (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
+      (clutch--user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
                   op)))
 
 (defconst clutch--row-identity-hidden-prefix "clutch__rid_"
@@ -829,13 +909,13 @@ Signals an error if pagination is not available."
          (offset (or page-offset (* page-num page-size)))
          (fetch-size (1+ page-size)))
     (unless effective-sql
-      (user-error "Pagination not available for this query"))
+      (clutch--user-error "Pagination not available for this query"))
     (clutch--ensure-connection)
     (when (and (or clutch--pending-edits
                    clutch--pending-deletes
                    clutch--pending-inserts)
                (not (yes-or-no-p "Discard staged changes and change page? ")))
-      (user-error "Page change cancelled"))
+      (clutch--user-error "Page change cancelled"))
     (let* ((row-identity-prep
             (clutch--prepare-row-identity-query clutch-connection effective-sql))
            (identity-sql (plist-get row-identity-prep :sql))
@@ -857,7 +937,7 @@ Signals an error if pagination is not available."
                                      :paged-sql
                                      (clutch--debug-sql-preview paged-sql))))
                              (summary (cdr failure)))
-                        (user-error "%s" (clutch--debug-workflow-message summary))))))
+                        (clutch--user-error "%s" (clutch--debug-workflow-message summary))))))
            (elapsed (- (float-time) start))
            (page (clutch--split-page-lookahead-rows
                   (clutch-db-result-rows result) page-size))
@@ -945,7 +1025,7 @@ Leading SQL comments are stripped before checking."
   (when (clutch--risky-dml-p sql)
     (let ((token (read-string "High-risk DML (no WHERE). Type YES to continue: ")))
       (unless (string= token "YES")
-        (user-error "Query cancelled")))))
+        (clutch--user-error "Query cancelled")))))
 
 (defun clutch--select-query-p (sql)
   "Return non-nil if SQL returns a result set.
@@ -1126,7 +1206,7 @@ Signals `user-error' if the user declines."
                      clutch--pending-deletes
                      clutch--pending-inserts)
                  (not (yes-or-no-p "Discard staged changes and re-run query? ")))
-        (user-error "Execution cancelled")))))
+        (clutch--user-error "Execution cancelled")))))
 
 (defun clutch--abandon-query-connection (connection)
   "Drop CONNECTION after an unrecoverable query interruption."
@@ -1186,7 +1266,7 @@ Prompts for confirmation on destructive operations."
       (unless (yes-or-no-p
                (format "Execute destructive query?\n  %s\n\nProceed? "
                        (truncate-string-to-width (string-trim sql) 80)))
-        (user-error "Query cancelled")))
+        (clutch--user-error "Query cancelled")))
     (clutch--require-risky-dml-confirmation sql)
     (setq clutch--executing-p t)
     (clutch--spinner-start)
@@ -1452,7 +1532,7 @@ preceding statement."
            (pcase-let* ((`(,beg . ,end) (clutch--dwim-bounds-at-point)))
              (string-trim (buffer-substring-no-properties beg end)))))))
     (when (or (null sql) (string-empty-p sql))
-      (user-error "No SQL to preview"))
+      (clutch--user-error "No SQL to preview"))
     (clutch--preview-sql-buffer sql)))
 
 ;;;; Interactive commands
@@ -1464,7 +1544,7 @@ preceding statement."
   (pcase-let* ((`(,beg . ,end) (clutch--query-bounds-at-point))
                (sql (string-trim (buffer-substring-no-properties beg end))))
     (when (string-empty-p sql)
-      (user-error "No query at point"))
+      (clutch--user-error "No query at point"))
     (clutch--ensure-connection)
     (clutch--execute-and-mark sql beg end)))
 
@@ -1534,7 +1614,7 @@ Blank lines inside the statement are preserved."
   (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds-at-point))
                (sql (string-trim (buffer-substring-no-properties beg end))))
     (when (string-empty-p sql)
-      (user-error "No statement at point"))
+      (clutch--user-error "No statement at point"))
     (clutch--ensure-connection)
     (clutch--execute-and-mark sql beg end)))
 
@@ -1602,7 +1682,7 @@ result buffer.  Stops and reports on the first error."
                         (buffer-live-p buf))
                (with-current-buffer source-buffer
                  (setq-local clutch--last-result-buffer buf)))
-             (user-error "Statement %d failed: %s"
+             (clutch--user-error "Statement %d failed: %s"
                          (1+ done)
                          (clutch--debug-workflow-message summary)))))
       (dolist (stmt before-last)
@@ -1649,7 +1729,7 @@ are executed sequentially."
     (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
                  (sql (string-trim (buffer-substring-no-properties qb qe))))
       (when (string-empty-p sql)
-        (user-error "No SQL at point"))
+        (clutch--user-error "No SQL at point"))
       (clutch--execute-and-mark sql qb qe))))
 
 (defun clutch--execute-sql-range (beg end scope)
@@ -1658,7 +1738,7 @@ Semicolon-delimited multi-statement ranges run sequentially."
   (let* ((sql (string-trim (buffer-substring-no-properties beg end)))
          (stmts (clutch--split-statements sql)))
     (when (string-empty-p sql)
-      (user-error "No SQL in %s" scope))
+      (clutch--user-error "No SQL in %s" scope))
     (if (cdr stmts)
         (clutch--execute-statements stmts)
       (clutch--execute-and-mark sql beg end))))
@@ -1699,10 +1779,10 @@ current line.  Uses the connection from any clutch-mode buffer."
             (buffer-substring-no-properties
              (line-beginning-position) (line-end-position))))))
   (when (string-empty-p sql)
-    (user-error "No SQL to execute"))
+    (clutch--user-error "No SQL to execute"))
   (let* ((conn (or clutch-connection
                    (clutch--find-connection)
-                   (user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
+                   (clutch--user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
          (beg (if (use-region-p) (region-beginning) (line-beginning-position)))
          (end (if (use-region-p) (region-end) (line-end-position))))
     (clutch--execute-and-mark sql beg end conn)))
@@ -1746,9 +1826,9 @@ Key bindings:
         (conn (or clutch-connection
                   (clutch--find-connection))))
     (when (string-empty-p sql)
-      (user-error "No SQL to execute"))
+      (clutch--user-error "No SQL to execute"))
     (unless conn
-      (user-error "No active connection"))
+      (clutch--user-error "No active connection"))
     (quit-window 'kill)
     ;; `quit-window' kills the indirect buffer, leaving the Lisp execution
     ;; context in a dead buffer.  Any subsequent `with-current-buffer' call

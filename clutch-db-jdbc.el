@@ -251,9 +251,9 @@ If verification is disabled, return non-nil."
 JAR defaults to `clutch-jdbc--agent-jar'."
   (let ((jar (or jar (clutch-jdbc--agent-jar))))
     (unless (file-exists-p jar)
-      (user-error "JDBC agent jar not found: %s\nRun M-x clutch-jdbc-ensure-agent" jar))
+      (clutch--user-error "JDBC agent jar not found: %s\nRun M-x clutch-jdbc-ensure-agent" jar))
     (unless (clutch-jdbc--agent-jar-valid-p jar)
-      (user-error (concat "JDBC agent checksum mismatch: %s\n"
+      (clutch--user-error (concat "JDBC agent checksum mismatch: %s\n"
                           "Run M-x clutch-jdbc-ensure-agent to refresh it,\n"
                           "or set `clutch-jdbc-agent-sha256' to nil for a custom jar")
                   jar))))
@@ -352,7 +352,7 @@ Return non-nil when RESPONSE was consumed asynchronously."
   (let ((jar (clutch-jdbc--agent-jar)))
     (clutch-jdbc--validate-agent-jar jar)
     (unless (executable-find clutch-jdbc-agent-java-executable)
-      (user-error "Java not found.  Set `clutch-jdbc-agent-java-executable'"))
+      (clutch--user-error "Java not found.  Set `clutch-jdbc-agent-java-executable'"))
     (let* ((buf (generate-new-buffer " *clutch-jdbc-agent*"))
            (proc (make-process
                   :name "clutch-jdbc-agent"
@@ -711,18 +711,18 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
   "Ensure agent jar and DRIVER jar are present."
   (let ((jar (clutch-jdbc--agent-jar)))
     (unless (and (file-exists-p jar) (clutch-jdbc--agent-jar-valid-p jar))
-      (user-error "JDBC agent not found.  Run M-x clutch-jdbc-ensure-agent")))
+      (clutch--user-error "JDBC agent not found.  Run M-x clutch-jdbc-ensure-agent")))
   (when-let* ((spec (alist-get driver clutch-jdbc--driver-sources))
               (filename (plist-get spec :filename))
               (dest (expand-file-name filename (clutch-jdbc--drivers-dir))))
     (unless (file-exists-p dest)
       (cond
        ((plist-get spec :maven)
-        (user-error "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
+        (clutch--user-error "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
                     (capitalize (symbol-name driver))
                     driver))
        ((plist-get spec :manual)
-        (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
+        (clutch--user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
                     (capitalize (symbol-name driver))
                     (plist-get spec :manual) dest))))))
 
@@ -873,6 +873,10 @@ Supports common `jdbc:subprotocol://host[:port]/database' URLs."
   "Return non-nil when JDBC CONN runs with auto-commit disabled."
   (let ((params (clutch-jdbc-conn-params conn)))
     (clutch-jdbc--manual-commit-mode (plist-get params :driver) params)))
+
+(cl-defmethod clutch-db-manual-commit-supported-p ((_conn clutch-jdbc-conn))
+  "Return non-nil because JDBC supports runtime auto-commit changes."
+  t)
 
 (cl-defmethod clutch-db-commit ((conn clutch-jdbc-conn))
   "Commit the current transaction on JDBC CONN."
@@ -1242,7 +1246,7 @@ returning tables from SYS/SYSTEM and other visible schemas."
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-jdbc-conn) schema)
   "Switch JDBC CONN to SCHEMA."
   (unless (clutch-jdbc--oracle-conn-p conn)
-    (user-error "Schema switching is currently supported only for Oracle JDBC"))
+    (clutch--user-error "Schema switching is currently supported only for Oracle JDBC"))
   (let ((schema (upcase schema)))
     (clutch-jdbc--rpc
      "set-current-schema"

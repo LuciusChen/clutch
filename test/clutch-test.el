@@ -7292,7 +7292,7 @@ crashing the UI layer."
   "Saved-connection readers should load `clutch' before checking profiles."
   (dolist (case `((clutch--read-connection-params
                    (:backend mysql :database "app_a" :pass-entry "alpha"))
-                  (clutch--read-query-console-name
+                  (clutch--read-query-console-target
                    "alpha")))
     (pcase-let ((`(,reader ,expected) case))
       (ert-info ((symbol-name reader))
@@ -7368,6 +7368,8 @@ crashing the UI layer."
                 ((symbol-function 'clutch--connection-display-key)
                  (lambda (_conn) "scott@db"))
                 ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-manual-commit-supported-p)
                  (lambda (_conn) t))
                 ((symbol-function 'clutch-db-manual-commit-p)
                  (lambda (_conn) t))
@@ -7540,10 +7542,20 @@ crashing the UI layer."
       (clutch--run-db-query conn "ALTER TABLE demo ADD x NUMBER")
       (should-not (clutch--tx-dirty-p conn)))))
 
+(ert-deftest clutch-test-user-error-helper-preserves-message ()
+  "Clutch user errors should keep a clean message and `user-error' condition."
+  (let ((err (should-error
+              (if t
+                  (clutch--user-error "Clean %s" "failure"))
+              :type 'user-error)))
+    (should (equal (error-message-string err) "Clean failure"))))
+
 (ert-deftest clutch-test-commit-errors-in-autocommit-mode ()
   "Clutch-commit should signal user-error when the connection is not in manual-commit mode."
   (let ((clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
       (should-error (clutch-commit) :type 'user-error))))
 
@@ -7554,6 +7566,8 @@ crashing the UI layer."
         committed)
     (puthash clutch-connection t clutch--tx-dirty-cache)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
               ((symbol-function 'clutch-db-commit)
                (lambda (_conn) (setq committed t)))
@@ -7566,6 +7580,8 @@ crashing the UI layer."
   "Clutch-rollback should signal user-error when the connection is not in manual-commit mode."
   (let ((clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil)))
       (should-error (clutch-rollback) :type 'user-error))))
 
@@ -7576,6 +7592,8 @@ crashing the UI layer."
         rolled-back)
     (puthash clutch-connection t clutch--tx-dirty-cache)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
               ((symbol-function 'clutch-db-rollback)
                (lambda (_conn) (setq rolled-back t)))
@@ -7602,6 +7620,8 @@ crashing the UI layer."
     (puthash clutch-connection t clutch--tx-dirty-cache)
     (unwind-protect
         (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                  ((symbol-function 'clutch-db-manual-commit-supported-p)
+                   (lambda (_conn) t))
                   ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
                   ((symbol-function 'clutch-db-rollback) #'ignore)
                   ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
@@ -7619,6 +7639,8 @@ crashing the UI layer."
          (buf (clutch-test--make-dml-result-buf 'fake-conn)))
     (unwind-protect
         (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                  ((symbol-function 'clutch-db-manual-commit-supported-p)
+                   (lambda (_conn) t))
                   ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
                   ((symbol-function 'clutch-db-commit) #'ignore)
                   ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
@@ -7653,6 +7675,8 @@ crashing the UI layer."
         captured-auto-commit
         mode-line-updated)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
               ((symbol-function 'clutch-db-set-auto-commit)
                (lambda (_conn v) (setq captured-auto-commit v)))
@@ -7668,6 +7692,8 @@ crashing the UI layer."
         (clutch-connection 'fake-conn)
         captured-auto-commit)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) nil))
               ((symbol-function 'clutch-db-set-auto-commit)
                (lambda (_conn v) (setq captured-auto-commit v)))
@@ -7682,6 +7708,8 @@ crashing the UI layer."
         toggle-called)
     (puthash clutch-connection t clutch--tx-dirty-cache)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
               ((symbol-function 'clutch-db-set-auto-commit)
                (lambda (_conn _v) (setq toggle-called t))))
@@ -7689,13 +7717,35 @@ crashing the UI layer."
       (should-not toggle-called)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-toggle-auto-commit-errors-when-unsupported ()
+  "Backends without manual commit support should not attempt a toggle."
+  (let ((clutch-connection 'fake-conn)
+        toggle-called)
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-set-auto-commit)
+               (lambda (_conn _v) (setq toggle-called t))))
+      (should-error (clutch-toggle-auto-commit) :type 'user-error)
+      (should-not toggle-called))))
+
+(ert-deftest clutch-test-sqlite-omits-manual-commit-ui ()
+  "SQLite should not advertise Clutch manual-commit controls."
+  (require 'clutch-db-sqlite)
+  (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/bookmarks.db")))
+    (should-not (clutch-db-manual-commit-supported-p conn))
+    (should-not (clutch--manual-commit-supported-p conn))
+    (should-not (clutch--tx-header-line-segment conn))))
+
 ;;;; Connection — display key and icons
 
 (ert-deftest clutch-test-tx-header-line-segment-preserves-icon-family ()
   "Transaction header icons should keep the nerd-icons font family."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
-    (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
+    (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-manual-commit-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch--tx-dirty-p)
                (lambda (_conn) nil))
@@ -7863,11 +7913,43 @@ crashing the UI layer."
     (should (equal (clutch--connection-display-key 'fake-conn)
                    "scott@dbhost:1522"))))
 
+(ert-deftest clutch-test-connection-display-key-shows-sqlite-file-name ()
+  "SQLite display labels should not fall back to user/host placeholders."
+  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+             (lambda (_conn) 'sqlite))
+            ((symbol-function 'clutch-db-database)
+             (lambda (_conn) "/tmp/bookmarks.db")))
+    (should (equal (clutch--connection-key 'fake-conn)
+                   "sqlite:/tmp/bookmarks.db"))
+    (should (equal (clutch--connection-display-key 'fake-conn)
+                   "bookmarks.db"))))
+
+(ert-deftest clutch-test-connection-display-key-shows-sqlite-memory ()
+  "SQLite in-memory databases should keep their canonical label."
+  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+             (lambda (_conn) 'sqlite))
+            ((symbol-function 'clutch-db-database)
+             (lambda (_conn) ":memory:")))
+    (should (equal (clutch--connection-display-key 'fake-conn)
+                   ":memory:"))))
+
 (ert-deftest clutch-test-jdbc-backend-icon-spec-uses-database-cog-outline ()
   "Generic JDBC should use the requested database-cog-outline icon."
   (should (equal (car (car (alist-get 'jdbc clutch--db-icon-specs))) 'mdicon))
   (should (equal (cdr (car (alist-get 'jdbc clutch--db-icon-specs)))
                  "nf-md-database_cog_outline")))
+
+(ert-deftest clutch-test-backend-candidates-affixation-omits-annotation ()
+  "Backend candidates should not repeat backend names as annotations."
+  (cl-letf (((symbol-function 'clutch--nerd-icons-available-p)
+             (lambda () t))
+            ((symbol-function 'clutch--db-backend-icon-for-key)
+             (lambda (key) (format "[%s]" key))))
+    (let ((row (car (clutch--backend-candidates-affixation '("sqlite")))))
+      (should (equal (nth 0 row) "sqlite"))
+      (should (equal (substring-no-properties (nth 1 row))
+                     "[sqlite] "))
+      (should (equal (nth 2 row) "")))))
 
 (ert-deftest clutch-test-connection-state-icon-uses-database-check-outline ()
   "Connected state icon should use the requested database-check-outline glyph."
@@ -8403,6 +8485,221 @@ This applies when the buffer owns the connection."
           (should-not (get-buffer buffer-name)))
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf)))))
+
+(ert-deftest clutch-test-query-console-opens-ad-hoc-sqlite-file ()
+  "Query console should open a SQL workspace for an ad hoc SQLite file."
+  (let* ((db-file "/tmp/clutch-direct-console.db")
+         (name (format "SQLite: %s" (abbreviate-file-name db-file)))
+         (buffer-name (clutch--console-buffer-base-name name))
+         (params (list :backend 'sqlite :database db-file))
+         built
+         activated)
+    (unwind-protect
+        (cl-letf (((symbol-function 'read-file-name)
+                   (lambda (&rest _args) db-file))
+                  ((symbol-function 'clutch--build-conn)
+                   (lambda (conn-params)
+                     (setq built conn-params)
+                     'sqlite-conn))
+                  ((symbol-function 'clutch--effective-sql-product)
+                   (lambda (_params) 'sqlite))
+                  ((symbol-function 'clutch--activate-current-buffer-connection)
+                   (lambda (conn conn-params product)
+                     (setq-local clutch-connection conn
+                                 clutch--connection-params conn-params
+                                 clutch--conn-sql-product product)
+                     (setq activated (list conn conn-params product))))
+                  ((symbol-function 'clutch--update-console-buffer-name)
+                   #'ignore))
+          (clutch-query-sqlite-file db-file)
+          (should (equal built params))
+          (should (equal activated (list 'sqlite-conn params 'sqlite)))
+          (should (equal clutch--console-name name))
+          (should (equal clutch--console-ad-hoc-params params))
+          (should (eq (current-buffer) (get-buffer buffer-name))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-query-console-no-match-opens-sqlite-file ()
+  "No-match query-console choice should open the new-connection flow."
+  (let* ((db-file "/tmp/clutch-new-sqlite-console.db")
+         (name (format "SQLite: %s" (abbreviate-file-name db-file)))
+         (buffer-name (clutch--console-buffer-base-name name))
+         (params (list :backend 'sqlite :database db-file))
+         (clutch-connection-alist
+          '(("alpha" . (:backend mysql :database "app_a"))))
+         console-candidates
+         built)
+    (unwind-protect
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &rest _args)
+                     (pcase prompt
+                       ("Console: "
+                        (setq console-candidates collection)
+                        "")
+                       ("Backend: " "sqlite")
+                       (_ (error "Unexpected prompt: %s" prompt)))))
+                  ((symbol-function 'read-file-name)
+                   (lambda (&rest _args) db-file))
+                  ((symbol-function 'clutch--build-conn)
+                   (lambda (conn-params)
+                     (setq built conn-params)
+                     'sqlite-conn))
+                  ((symbol-function 'clutch--effective-sql-product)
+                   (lambda (_params) 'sqlite))
+                  ((symbol-function 'clutch--activate-current-buffer-connection)
+                   (lambda (conn conn-params product)
+                     (setq-local clutch-connection conn
+                                 clutch--connection-params conn-params
+                                 clutch--conn-sql-product product)))
+                  ((symbol-function 'clutch--update-console-buffer-name)
+                   #'ignore))
+          (call-interactively #'clutch-query-console)
+          (should (member "alpha" console-candidates))
+          (should-not (member "New connection..." console-candidates))
+          (should-not (member "SQLite file..." console-candidates))
+          (should (equal built params))
+          (should (equal clutch--console-ad-hoc-params params))
+          (should (eq (current-buffer) (get-buffer buffer-name))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-query-console-choice-affixes-connection-icons ()
+  "Saved query-console candidates should expose backend icons as affixes."
+  (let ((clutch-connection-alist
+         '(("alpha" . (:backend sqlite :database "/tmp/bookmarks.db"))))
+        affixation)
+    (cl-letf (((symbol-function 'clutch--nerd-icons-available-p)
+               (lambda () t))
+              ((symbol-function 'clutch--db-backend-icon-for-key)
+               (lambda (key) (format "[%s]" key)))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (should (equal collection '("alpha")))
+                 (setq affixation
+                       (plist-get completion-extra-properties
+                                  :affixation-function))
+                 "alpha")))
+      (should (equal (clutch--read-query-console-choice '("alpha"))
+                     "alpha"))
+      (let ((row (car (funcall affixation '("alpha")))))
+        (should (equal (nth 0 row) "alpha"))
+        (should (equal (substring-no-properties (nth 1 row))
+                       "[sqlite] "))
+        (should (equal (substring-no-properties (nth 2 row))
+                       "  SQLite /tmp/bookmarks.db"))))))
+
+(ert-deftest clutch-test-query-console-choice-omits-icons-without-nerd-icons ()
+  "Saved query-console candidates should not show icon fallbacks."
+  (let ((clutch-connection-alist
+         '(("alpha" . (:backend sqlite :database "/tmp/bookmarks.db"))))
+        affixation)
+    (cl-letf (((symbol-function 'clutch--nerd-icons-available-p)
+               (lambda () nil))
+              ((symbol-function 'clutch--db-backend-icon-for-key)
+               (lambda (_key) "[sqlite]"))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _collection &rest _args)
+                 (setq affixation
+                       (plist-get completion-extra-properties
+                                  :affixation-function))
+                 "alpha")))
+      (should (equal (clutch--read-query-console-choice '("alpha"))
+                     "alpha"))
+      (let ((row (car (funcall affixation '("alpha")))))
+        (should (equal (nth 0 row) "alpha"))
+        (should (equal (nth 1 row) ""))
+        (should (equal (substring-no-properties (nth 2 row))
+                       "  SQLite /tmp/bookmarks.db"))))))
+
+(ert-deftest clutch-test-query-console-no-match-reads-network-params ()
+  "No-match query-console choice should collect temporary network params."
+  (let* ((params '(:backend pg
+                   :host "db.example.com"
+                   :port 5544
+                   :user "alice"
+                   :ssh-host "bastion-prod"
+                   :password "secret"
+                   :database "app_db"))
+         (name (clutch--ad-hoc-console-name params))
+         (buffer-name (clutch--console-buffer-base-name name))
+         (clutch-connection-alist
+          '(("alpha" . (:backend mysql :database "app_a"))))
+         built
+         port-default)
+    (unwind-protect
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt _collection &rest _args)
+                     (pcase prompt
+                       ("Console: " "new-pg")
+                       ("Backend: " "pg")
+                       (_ (error "Unexpected prompt: %s" prompt)))))
+                  ((symbol-function 'read-string)
+                   (lambda (prompt &optional _initial _history default-value _inherit)
+                     (pcase prompt
+                       ("Host (127.0.0.1): " "db.example.com")
+                       ("User: " "alice")
+                       ("SSH host from ~/.ssh/config (optional): " "bastion-prod")
+                       ("Database (optional): " "app_db")
+                       (_ (or default-value "")))))
+                  ((symbol-function 'read-number)
+                   (lambda (_prompt default)
+                     (setq port-default default)
+                     5544))
+                  ((symbol-function 'clutch--resolve-password)
+                   (lambda (_params) nil))
+                  ((symbol-function 'read-passwd)
+                   (lambda (&rest _args) "secret"))
+                  ((symbol-function 'clutch--build-conn)
+                   (lambda (conn-params)
+                     (setq built conn-params)
+                     'pg-conn))
+                  ((symbol-function 'clutch--effective-sql-product)
+                   (lambda (_params) 'pg))
+                  ((symbol-function 'clutch--activate-current-buffer-connection)
+                   (lambda (conn conn-params product)
+                     (setq-local clutch-connection conn
+                                 clutch--connection-params conn-params
+                                 clutch--conn-sql-product product)))
+                  ((symbol-function 'clutch--update-console-buffer-name)
+                   #'ignore))
+          (call-interactively #'clutch-query-console)
+          (should (= port-default 5432))
+          (should (equal built params))
+          (should (equal clutch--console-ad-hoc-params params))
+          (should (eq (current-buffer) (get-buffer buffer-name))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-connect-in-ad-hoc-sqlite-console-reuses-file-params ()
+  "Ad hoc SQLite consoles should reconnect using their file params."
+  (with-temp-buffer
+    (let ((params '(:backend sqlite :database "/tmp/ad-hoc.db"))
+          built
+          read-called)
+      (clutch-mode)
+      (setq-local clutch--console-name "SQLite: /tmp/ad-hoc.db"
+                  clutch--console-ad-hoc-params params)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--read-connection-params)
+                 (lambda ()
+                   (setq read-called t)
+                   '(:backend mysql :database "should-not-be-used")))
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'sqlite))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (conn-params)
+                   (setq built conn-params)
+                   'new-conn))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "sqlite-file"))
+                ((symbol-function 'clutch--activate-current-buffer-connection)
+                 (lambda (_conn _params _product) nil))
+                ((symbol-function 'message) #'ignore))
+        (clutch-connect)
+        (should-not read-called)
+        (should (equal built params))))))
 
 (ert-deftest clutch-test-query-console-switches-to-existing-connected-buffer ()
   "Query console should reuse an existing connected console buffer."

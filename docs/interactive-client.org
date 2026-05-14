@@ -7,7 +7,7 @@
 | =C-c C-c=   | Execute region, or the current =;=-delimited statement / query at point |
 | =C-c C-r=   | Execute selected region; multiple =;=-delimited statements run sequentially |
 | =C-c C-b=   | Execute entire buffer; multiple =;=-delimited statements run sequentially |
-| =C-c C-e=   | Connect; query consoles reconnect their own saved connection |
+| =C-c C-e=   | Connect; query consoles reconnect their current connection |
 | =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions for the current object, or prompt |
@@ -16,7 +16,7 @@
 | =C-c C-s=   | Refresh schema for current connection now |
 | =C-c C-m=   | Commit transaction (manual-commit connections only) |
 | =C-c C-u=   | Roll back transaction (manual-commit connections only) |
-| =C-c C-a=   | Toggle auto-commit on/off for the current connection |
+| =C-c C-a=   | Toggle auto-commit on/off when supported |
 | =C-c TAB=   | Invoke SQL identifier completion explicitly, including empty column positions |
 | =C-c ?=     | Transient menu             |
 
@@ -317,9 +317,9 @@ db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
 | Key         | Action                        |
 |-------------+-------------------------------|
 | =C-c C-e=   | Connect                       |
-| =C-c C-m=   | Commit transaction            |
-| =C-c C-u=   | Roll back transaction         |
-| =C-c C-a=   | Toggle auto-commit            |
+| =C-c C-m=   | Commit transaction when supported |
+| =C-c C-u=   | Roll back transaction when supported |
+| =C-c C-a=   | Toggle auto-commit when supported |
 | =C-c C-j=   | Jump to object                |
 | =C-c C-d=   | Describe object               |
 | =C-c C-o=   | Object actions                |
@@ -361,18 +361,28 @@ external agent can see which context is missing.
 
 * Query Console
 
-=clutch-query-console= opens a dedicated buffer =*clutch: NAME*= for a saved
-connection, enables =clutch-mode=, and connects automatically.  Repeated calls
-with the same name switch to the existing buffer rather than creating a new one.
-Connection happens before the buffer is shown: if the initial connect or a
-reconnect of an existing disconnected console fails, clutch raises the error
+=clutch-query-console= opens a dedicated buffer =*clutch: NAME*=, enables
+=clutch-mode=, and connects automatically.  The picker lists saved
+connections; pressing RET with no matching connection starts a temporary connection
+flow.  SQLite is part of that flow and reads a database file instead of
+host/user credentials.  =clutch-query-sqlite-file= jumps straight to the
+SQLite-file shortcut.  Repeated calls with the same saved connection or
+temporary connection switch to the existing buffer rather than creating a new
+one.  Connection happens before the buffer is shown: if the initial connect or
+a reconnect of an existing disconnected console fails, clutch raises the error
 without leaving a visible disconnected console buffer behind.
 
-Inside a query console, =C-c C-e= reconnects only that console's saved
-connection.  It does not reopen the full connection list.  If that saved
-connection entry was removed from =clutch-connection-alist=, clutch raises a
-clear error instead of silently reconnecting to some other database.  To move
-to a different saved connection, call =clutch-query-console= again.
+Inside a query console, =C-c C-e= reconnects only that console's current
+connection.  For saved consoles, if the saved connection entry was removed from
+=clutch-connection-alist=, clutch raises a clear error instead of silently
+reconnecting to some other database.  For ad hoc consoles, reconnect uses the
+original temporary parameters; SQLite reuses the original file path.  To move to
+a different saved or temporary connection, call =clutch-query-console= again;
+press RET with no matching connection to create another temporary connection.
+
+In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps the generic connect
+picker.  For SQLite files, use the query-console path instead of opening the
+database file itself as an editor buffer.
 
 =clutch-switch-console= lists all open console buffers via =completing-read= for
 fast switching between active connections.

@@ -48,6 +48,7 @@
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
 (defvar clutch--console-name)
+(defvar clutch--console-ad-hoc-params)
 (defvar clutch-connection-alist nil)
 (defvar clutch-connect-timeout-seconds 10)
 (defvar clutch-read-idle-timeout-seconds 30)
@@ -148,13 +149,29 @@
     (remhash conn clutch--connection-ssh-tunnel-cache)
     (remhash conn clutch--connection-remote-params-cache)))
 
+(defun clutch--sqlite-database-display-label (database &optional compact)
+  "Return a display label for SQLite DATABASE.
+When COMPACT is non-nil, prefer the file basename for header-line use."
+  (cond
+   ((not (stringp database)) "SQLite")
+   ((string= database ":memory:") ":memory:")
+   (compact
+    (let ((name (file-name-nondirectory (directory-file-name database))))
+      (if (string-empty-p name)
+          (abbreviate-file-name database)
+        name)))
+   (t
+    (abbreviate-file-name database))))
+
 (defun clutch--connection-key (conn)
   "Return a descriptive string for CONN like \"user@host:port/db\"."
-  (format "%s@%s:%s/%s"
-          (or (clutch-db-user conn) "?")
-          (or (clutch--connection-remote-host conn) "?")
-          (or (clutch--connection-remote-port conn) "?")
-          (or (clutch-db-database conn) "")))
+  (if (eq (ignore-errors (clutch--backend-key-from-conn conn)) 'sqlite)
+      (format "sqlite:%s" (or (clutch-db-database conn) ""))
+    (format "%s@%s:%s/%s"
+            (or (clutch-db-user conn) "?")
+            (or (clutch--connection-remote-host conn) "?")
+            (or (clutch--connection-remote-port conn) "?")
+            (or (clutch-db-database conn) ""))))
 
 (defun clutch--default-port-for-connection (conn)
   "Return the default port for CONN's backend, or nil when not applicable."
@@ -167,23 +184,25 @@
 
 (defun clutch--connection-display-key (conn)
   "Return a compact display identity for CONN for use in UI only."
-  (let* ((user (or (clutch-db-user conn) "?"))
-         (host (or (clutch--connection-remote-host conn) "?"))
-         (port (clutch--connection-remote-port conn))
-         (ssh-host (clutch--connection-ssh-host conn))
-         (default-port (clutch--default-port-for-connection conn)))
-    (concat
-     (format "%s@%s%s"
-             user
-             host
-             (if (and port default-port (equal port default-port))
-                 ""
-               (if port
-                   (format ":%s" port)
-                 "")))
-     (if ssh-host
-         (format " via %s" ssh-host)
-       ""))))
+  (if (eq (ignore-errors (clutch--backend-key-from-conn conn)) 'sqlite)
+      (clutch--sqlite-database-display-label (clutch-db-database conn) t)
+    (let* ((user (or (clutch-db-user conn) "?"))
+           (host (or (clutch--connection-remote-host conn) "?"))
+           (port (clutch--connection-remote-port conn))
+           (ssh-host (clutch--connection-ssh-host conn))
+           (default-port (clutch--default-port-for-connection conn)))
+      (concat
+       (format "%s@%s%s"
+               user
+               host
+               (if (and port default-port (equal port default-port))
+                   ""
+                 (if port
+                     (format ":%s" port)
+                   "")))
+       (if ssh-host
+           (format " via %s" ssh-host)
+         "")))))
 
 (defun clutch--ensure-clutch-loaded ()
   "Load the `clutch' entrypoint before module-autoloaded commands run.
@@ -241,6 +260,13 @@ interactive readers inspect shared customization such as
   "Return non-nil when CONN has uncommitted DML."
   (and conn (gethash conn clutch--tx-dirty-cache)))
 
+(defun clutch--manual-commit-supported-p (conn)
+  "Return non-nil when CONN supports Clutch transaction controls."
+  (and conn
+       (condition-case nil
+           (clutch-db-manual-commit-supported-p conn)
+         ((clutch-db-error cl-no-applicable-method wrong-type-argument) nil))))
+
 (defun clutch--refresh-transaction-ui (conn)
   "Refresh transaction indicators for buffers attached to CONN."
   (when conn
@@ -297,7 +323,7 @@ interactive readers inspect shared customization such as
 (defun clutch--tx-header-line-segment (conn)
   "Return a header-line segment for CONN transaction state, or nil.
 Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
-  (when conn
+  (when (clutch--manual-commit-supported-p conn)
     (let* ((state-face (if (clutch-db-manual-commit-p conn)
                            (if (clutch--tx-dirty-p conn) 'error 'warning)
                          'success))
@@ -338,7 +364,7 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
   (when (and (clutch-db-manual-commit-p conn)
              (clutch--tx-dirty-p conn)
              (not (yes-or-no-p prompt)))
-    (user-error "Disconnect cancelled")))
+    (clutch--user-error "Disconnect cancelled")))
 
 ;;;; Connection lifecycle
 
@@ -451,7 +477,7 @@ If the connection has dropped, attempts to reconnect automatically
 using the stored params.  Signals a user-error if not recoverable."
   (unless (clutch--connection-alive-p clutch-connection)
     (unless (clutch--try-reconnect)
-      (user-error
+      (clutch--user-error
        (if (derived-mode-p 'clutch-result-mode 'clutch-record-mode
                            'clutch-describe-mode)
            "Connection closed.  Reconnect from the SQL buffer or REPL"
@@ -565,6 +591,79 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
         ('redshift "Redshift")
         ('clickhouse "ClickHouse")
         (_ nil))))
+
+(defconst clutch--manual-backend-choices
+  '(mysql pg sqlite oracle sqlserver db2 snowflake redshift)
+  "Backend choices offered by manual connection readers.")
+
+(defun clutch--completion-backend-icon-prefix (key)
+  "Return a minibuffer completion icon prefix for backend KEY."
+  (let ((icon (clutch--db-backend-icon-for-key key)))
+    (if (and icon
+             (not (string-empty-p icon))
+             (clutch--nerd-icons-available-p))
+        (concat icon " ")
+      "")))
+
+(defun clutch--completion-annotation (parts)
+  "Return a `completing-read' suffix annotation from non-empty PARTS."
+  (let ((parts (cl-remove-if (lambda (part)
+                               (or (null part)
+                                   (string-empty-p part)))
+                             parts)))
+    (if parts
+        (propertize (concat "  " (mapconcat #'identity parts " "))
+                    'face 'completions-annotations)
+      "")))
+
+(defun clutch--connection-candidate-target (params)
+  "Return the target annotation for connection PARAMS."
+  (let* ((backend (clutch--backend-key-from-params params))
+         (database (plist-get params :database))
+         (sid (plist-get params :sid))
+         (url (plist-get params :url))
+         (host (plist-get params :host))
+         (port (plist-get params :port)))
+    (cond
+     ((and (eq backend 'sqlite) database)
+      (clutch--sqlite-database-display-label database))
+     ((and host port database)
+      (format "%s:%s/%s" host port database))
+     ((and host database)
+      (format "%s/%s" host database))
+     ((and host port)
+      (format "%s:%s" host port))
+     (host host)
+     (database database)
+     (sid sid)
+     (url url))))
+
+(defun clutch--connection-candidates-affixation (candidates)
+  "Return affixation triples for saved connection CANDIDATES."
+  (mapcar
+   (lambda (candidate)
+     (let* ((params (cdr (assoc candidate clutch-connection-alist)))
+            (backend (and params (clutch--backend-key-from-params params))))
+       (list candidate
+             (if backend
+                 (clutch--completion-backend-icon-prefix backend)
+               "")
+             (if params
+                 (clutch--completion-annotation
+                  (list (clutch--backend-display-name-from-params params)
+                        (clutch--connection-candidate-target params)))
+               ""))))
+   candidates))
+
+(defun clutch--backend-candidates-affixation (candidates)
+  "Return affixation triples for backend-name CANDIDATES."
+  (mapcar
+   (lambda (candidate)
+     (let ((key (intern candidate)))
+       (list candidate
+             (clutch--completion-backend-icon-prefix key)
+             "")))
+   candidates))
 
 (defun clutch--connection-backend-segment (&optional conn params)
   "Return the shared backend segment for CONN or PARAMS, or nil.
@@ -712,7 +811,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Return PARAMS with unified timeout defaults for BACKEND.
 Signals a `user-error' when removed timeout keys are present."
   (when (plist-member params :read-timeout)
-    (user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
+    (clutch--user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
   (clutch--apply-timeout-defaults
    params
    (cond
@@ -744,7 +843,7 @@ Signals a `user-error' when removed timeout keys are present."
 
 (defun clutch--password-lookup-error (message)
   "Signal MESSAGE as a user-facing password lookup failure."
-  (user-error "%s" message))
+  (clutch--user-error "%s" message))
 
 (defun clutch--resolve-pass-entry-password (entry)
   "Return the password from pass ENTRY.
@@ -897,7 +996,7 @@ cannot be read."
                    "SSH host from ~/.ssh/config: "))
          (ssh-host (read-string prompt nil nil default)))
     (if (string-empty-p ssh-host)
-        (user-error "An SSH host alias is required")
+        (clutch--user-error "An SSH host alias is required")
       ssh-host)))
 
 (defun clutch--ssh-buffer-output (buffer)
@@ -1059,15 +1158,15 @@ and TIMEOUT is the maximum wait in seconds."
 (defun clutch--start-ssh-tunnel (params)
   "Start an SSH tunnel for PARAMS using the user's OpenSSH config."
   (unless (executable-find "ssh")
-    (user-error "SSH tunnels require the OpenSSH client executable `ssh'"))
+    (clutch--user-error "SSH tunnels require the OpenSSH client executable `ssh'"))
   (when (eq (plist-get params :backend) 'sqlite)
-    (user-error "SQLite connections do not support SSH tunnels"))
+    (clutch--user-error "SQLite connections do not support SSH tunnels"))
   (when (plist-get params :url)
-    (user-error "SSH tunnels currently require structured :host/:port params, not :url"))
+    (clutch--user-error "SSH tunnels currently require structured :host/:port params, not :url"))
   (unless (plist-get params :host)
-    (user-error "SSH tunnels require :host for the remote database endpoint"))
+    (clutch--user-error "SSH tunnels require :host for the remote database endpoint"))
   (unless (plist-get params :port)
-    (user-error "SSH tunnels require :port for the remote database endpoint"))
+    (clutch--user-error "SSH tunnels require :port for the remote database endpoint"))
   (let* ((ssh-host (plist-get params :ssh-host))
          (local-port (clutch--allocate-local-port))
          (buffer (get-buffer-create (clutch--ssh-tunnel-buffer-name ssh-host)))
@@ -1143,13 +1242,13 @@ The returned plist keeps the original backend-facing keys, but fills in the
 password that `clutch--resolve-password' produced so later reconnects reuse the
 same credentials as the successful foreground connection."
   (let* ((backend (or (plist-get params :backend)
-                      (user-error "Connection params require :backend")))
+                      (clutch--user-error "Connection params require :backend")))
          (params (clutch--normalize-timeout-params backend params))
          (password (clutch--resolve-password params)))
     (when (and (clutch--jdbc-backend-p backend)
                (plist-get params :pass-entry)
                (null password))
-      (user-error
+      (clutch--user-error
        (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
                "Enable auth-source-pass/auth-source, or set :password explicitly")
        backend
@@ -1209,7 +1308,7 @@ Returns a live connection object or signals a `user-error'."
             :backend backend
             :summary message
             :context (clutch--debug-connection-context backend effective-params)))
-         (user-error "%s" (clutch--debug-workflow-message message)))))))
+         (clutch--user-error "%s" (clutch--debug-workflow-message message)))))))
 
 (defun clutch--inject-entry-name (params name)
   "Return PARAMS with :pass-entry defaulting to NAME.
@@ -1223,13 +1322,68 @@ Leaves PARAMS unchanged when :password or :pass-entry is already set."
   (when-let* ((params (cdr (assoc name clutch-connection-alist))))
     (clutch--inject-entry-name params name)))
 
+(defun clutch--normalize-sqlite-database-file (file)
+  "Return canonical SQLite database FILE for connection identity."
+  (if (string= file ":memory:")
+      file
+    (expand-file-name file)))
+
+(defun clutch--read-sqlite-file-params ()
+  "Read an ad hoc SQLite database file and return connection params."
+  (list :backend 'sqlite
+        :database (clutch--normalize-sqlite-database-file
+                   (read-file-name "SQLite database file: " nil nil t))))
+
+(defun clutch--read-manual-connection-params (&optional sqlite-file)
+  "Prompt for a new connection plist.
+When SQLITE-FILE is non-nil, SQLite reads a database file path instead of a
+raw database string."
+  (let* ((backend (intern
+                   (let ((completion-extra-properties
+                          '(:affixation-function clutch--backend-candidates-affixation)))
+                     (completing-read
+                      "Backend: "
+                      (mapcar #'symbol-name clutch--manual-backend-choices)
+                      nil t nil nil "mysql")))))
+    (if (eq backend 'sqlite)
+        (if sqlite-file
+            (clutch--read-sqlite-file-params)
+          (list :backend 'sqlite
+                :database (read-string "Database (:memory:): " nil nil ":memory:")))
+      (let* ((port-default (pcase backend
+                             ('mysql 3306)
+                             ('pg 5432)
+                             ('oracle 1521)
+                             ('sqlserver 1433)
+                             ('db2 50000)
+                             ('redshift 5439)
+                             ('snowflake 443)))
+             (host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
+             (port (read-number (format "Port (%d): " port-default) port-default))
+             (user (read-string "User: "))
+             (ssh-host (read-string "SSH host from ~/.ssh/config (optional): "))
+             (manual-params (append (list :backend backend
+                                          :host host :port port :user user)
+                                    (unless (string-empty-p ssh-host)
+                                      (list :ssh-host ssh-host))))
+             (pw (or (clutch--resolve-password manual-params)
+                     (read-passwd "Password: ")))
+             (db (read-string "Database (optional): ")))
+        (append manual-params
+                (list :password pw
+                      :database (unless (string-empty-p db) db)))))))
+
 (defun clutch--connect-params-for-current-buffer ()
   "Return connection params appropriate for the current buffer."
-  (if clutch--console-name
-      (or (clutch--saved-connection-params clutch--console-name)
-          (user-error "Saved connection %s for this query console no longer exists"
-                      clutch--console-name))
-    (clutch--read-connection-params)))
+  (cond
+   (clutch--console-ad-hoc-params
+    clutch--console-ad-hoc-params)
+   (clutch--console-name
+    (or (clutch--saved-connection-params clutch--console-name)
+        (clutch--user-error "Saved connection %s for this query console no longer exists"
+                    clutch--console-name)))
+   (t
+    (clutch--read-connection-params))))
 
 (defun clutch--read-connection-params ()
   "Prompt the user for connection parameters and return a params plist.
@@ -1239,42 +1393,13 @@ connection parameters.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
   (clutch--ensure-clutch-loaded)
   (if clutch-connection-alist
-      (let* ((name   (completing-read "Connection: "
+      (let* ((name (let ((completion-extra-properties
+                          '(:affixation-function clutch--connection-candidates-affixation)))
+                     (completing-read "Connection: "
                                       (mapcar #'car clutch-connection-alist)
-                                      nil t))
-             (params (clutch--saved-connection-params name)))
-        params)
-    (let* ((backend (intern
-                     (completing-read
-                      "Backend: "
-                      (mapcar #'symbol-name
-                              '(mysql pg sqlite oracle sqlserver db2 snowflake redshift))
-                      nil t nil nil "mysql"))))
-      (if (eq backend 'sqlite)
-          (list :backend 'sqlite
-                :database (read-string "Database (:memory:): " nil nil ":memory:"))
-        (let* ((port-default (pcase backend
-                               ('mysql 3306)
-                               ('pg 5432)
-                               ('oracle 1521)
-                               ('sqlserver 1433)
-               ('db2 50000)
-                               ('redshift 5439)
-                               ('snowflake 443)))
-               (host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
-               (port (read-number (format "Port (%d): " port-default) port-default))
-               (user (read-string "User: "))
-               (ssh-host (read-string "SSH host from ~/.ssh/config (optional): "))
-               (manual-params (append (list :backend backend
-                                            :host host :port port :user user)
-                                      (unless (string-empty-p ssh-host)
-                                        (list :ssh-host ssh-host))))
-               (pw (or (clutch--resolve-password manual-params)
-                       (read-passwd "Password: ")))
-               (db (read-string "Database (optional): ")))
-          (append manual-params
-                  (list :password pw
-                        :database (unless (string-empty-p db) db))))))))
+                                      nil t))))
+        (clutch--saved-connection-params name))
+    (clutch--read-manual-connection-params)))
 
 ;;;; Interactive connect/disconnect
 
@@ -1310,7 +1435,7 @@ This is useful before `clutch-connect' when a host alias in `~/.ssh/config'
 still needs an initial passphrase entry or host-key confirmation."
   (interactive (list (clutch--read-ssh-host-alias)))
   (unless (executable-find "ssh")
-    (user-error "SSH preparation requires the OpenSSH client executable `ssh'"))
+    (clutch--user-error "SSH preparation requires the OpenSSH client executable `ssh'"))
   (let* ((ssh-host (or ssh-host
                        (clutch--read-ssh-host-alias)))
          (buffer (clutch--start-ssh-prepare-session ssh-host)))
@@ -1382,8 +1507,10 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
   "Commit the current transaction."
   (interactive)
   (clutch--ensure-connection)
+  (unless (clutch--manual-commit-supported-p clutch-connection)
+    (clutch--user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
-    (user-error "Connection is in autocommit mode"))
+    (clutch--user-error "Connection is in autocommit mode"))
   (clutch-db-commit clutch-connection)
   (clutch--mark-dml-results-committed clutch-connection)
   (clutch--clear-tx-dirty clutch-connection)
@@ -1394,8 +1521,10 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
   "Roll back the current transaction."
   (interactive)
   (clutch--ensure-connection)
+  (unless (clutch--manual-commit-supported-p clutch-connection)
+    (clutch--user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
-    (user-error "Connection is in autocommit mode"))
+    (clutch--user-error "Connection is in autocommit mode"))
   (clutch-db-rollback clutch-connection)
   (clutch--mark-dml-results-rolled-back clutch-connection)
   (clutch--clear-tx-dirty clutch-connection)
@@ -1408,9 +1537,11 @@ When switching from manual-commit to auto-commit, the backend finishes
 any open transaction according to its own semantics."
   (interactive)
   (clutch--ensure-connection)
+  (unless (clutch--manual-commit-supported-p clutch-connection)
+    (clutch--user-error "Manual commit is not supported by this connection"))
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
     (when (and manual-now (clutch--tx-dirty-p clutch-connection))
-      (user-error "Cannot toggle: commit or roll back staged changes first"))
+      (clutch--user-error "Cannot toggle: commit or roll back staged changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
     (when manual-now
       (clutch--clear-tx-dirty clutch-connection))

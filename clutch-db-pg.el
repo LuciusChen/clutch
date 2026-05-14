@@ -499,6 +499,10 @@ No special init needed — encoding is set in startup message.")
   "Return non-nil when PostgreSQL CONN is in manual-commit mode."
   (clutch-db-pg--manual-commit-enabled-p conn))
 
+(cl-defmethod clutch-db-manual-commit-supported-p ((_conn pgcon))
+  "Return non-nil because PostgreSQL supports Clutch-managed manual commit."
+  t)
+
 (cl-defmethod clutch-db-commit ((conn pgcon))
   "Commit the current foreground transaction on PostgreSQL CONN."
   (condition-case err

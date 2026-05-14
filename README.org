@@ -74,7 +74,7 @@ For backend-specific notes, see
 - Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
 - Schema refresh state is explicit: MySQL, PostgreSQL, and JDBC start a deferred schema snapshot after connect/reconnect, while SQLite keeps its lightweight synchronous path; query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; here =Nt= means "the current schema-cache snapshot contains N browseable table/object names". =schema 0t= is therefore a successful empty snapshot, not an error. Schema errors also appear in the console header-line (see below). Manual =C-c C-s= refresh is explicit and synchronous, so it can recover a failed deferred refresh immediately.
 - Native MySQL/PostgreSQL also preheat passive metadata via idle-time callbacks on the main thread: result buffers render immediately and then enrich cached column details, while object warmup keeps non-table categories off the first-open path without creating Emacs worker threads
-- Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate namespace segment with =nf-md-sitemap_outline= + the current schema/database whenever the effective namespace is known, and =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
+- Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate namespace segment with =nf-md-sitemap_outline= + the current schema/database whenever the effective namespace is known, and, for connections that support Clutch manual commit, =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; SQLite omits the transaction segment. Disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
 - Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
 - Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
 - Value viewers: =v= opens a static one-shot viewer for the current cell; =V= opens a live viewer that follows point across result / record buffers.  Both auto-detect JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in the viewer header-line (without polluting content highlighting)
@@ -230,18 +230,22 @@ JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
 *** 2. Open a query console
 
 #+begin_src
-M-x clutch-query-console   ;; Select a saved connection → opens *clutch: NAME*
-                            ;; and connects automatically
-                            ;; Mode-line: MySQL[root@127.0.0.1:3306/mydb]
-                            ;;         or PostgreSQL[postgres@127.0.0.1:5432/mydb]
-                            ;;         or SQLite[?@?:?//path/to/my.db]
+M-x clutch-query-console     ;; Select a saved connection, or press RET on an
+                              ;; unmatched connection to create a temporary connection
+M-x clutch-query-sqlite-file ;; Shortcut: select a SQLite file → opens a connected SQL console
+                             ;; Header-line: MySQL[root@127.0.0.1:3306/mydb]
+                             ;;         or PostgreSQL[postgres@127.0.0.1:5432/mydb]
+                             ;;         or SQLite[my.db]
 #+end_src
 
 Repeated calls with the same name switch to the existing buffer instead of
 opening a new one.  Use =clutch-switch-console= to jump between open consoles.
-If no saved connections are configured, =clutch-connect= first prompts for
-=:backend= and then asks for the matching connection fields, including an
-optional SSH host alias from =~/.ssh/config= for network backends.
+=clutch-query-console= lists saved connections; pressing RET with no matching
+connection starts a temporary connection flow and opens a query console for it.
+SQLite is part of that flow and asks for a database file instead of host/user
+credentials.  =clutch-query-sqlite-file= is the direct shortcut for local
+SQLite files.  If no saved connections are configured, =clutch-query-console=
+starts the temporary connection flow immediately.
 
 *** 3. Write and execute SQL
 
@@ -256,9 +260,12 @@ Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs; oth
 For native MySQL and PostgreSQL, and for JDBC connections that run in
 manual-commit mode, clutch uses the same transaction keys:
 
-- =C-c C-a= toggles auto-commit
+- =C-c C-a= toggles auto-commit when supported
 - =C-c C-m= commits
 - =C-c C-u= rolls back
+
+SQLite does not expose these transaction controls; its console header omits the
+=Tx= segment.
 
 Native MySQL maps =C-c C-a= to the server session's autocommit flag directly.
 Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does
@@ -375,10 +382,13 @@ manually — the query console is not required.
 #+end_src
 
 In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps that generic
-connect flow.  In query-console buffers, it is narrower: it reconnects the
-saved connection already associated with that console, without reopening the
-global connection picker.  To switch to another saved connection, use
-=M-x clutch-query-console=.
+connect flow.  For SQLite files, prefer =M-x clutch-query-sqlite-file=, or
+=M-x clutch-query-console= followed by RET with no matching connection and
+backend =sqlite=; both open a connected SQL console rather than using the
+database file buffer as the editor.  In query-console buffers, =C-c C-e=
+reconnects the connection already associated with that console, without
+reopening the global connection picker.
+To switch to another saved or temporary connection, use =M-x clutch-query-console=.
 
 For deeper troubleshooting, enable =M-x clutch-debug-mode=, reproduce the
 failure, then inspect =*clutch-debug*=.  Enabling the mode starts a fresh
