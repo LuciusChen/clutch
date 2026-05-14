@@ -8585,7 +8585,7 @@ This applies when the buffer owns the connection."
             (should (equal (substring-no-properties (nth 1 row))
                            expected-prefix))
             (should (equal (substring-no-properties (nth 2 row))
-                           "  SQLite /tmp/bookmarks.db"))))))))
+                           "  /tmp/bookmarks.db"))))))))
 
 (ert-deftest clutch-test-query-console-no-match-reads-network-params ()
   "No-match query-console choice should collect temporary network params."

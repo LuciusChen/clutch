@@ -650,8 +650,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
                "")
              (if params
                  (clutch--completion-annotation
-                  (list (clutch--backend-display-name-from-params params)
-                        (clutch--connection-candidate-target params)))
+                  (list (clutch--connection-candidate-target params)))
                ""))))
    candidates))
 
