@@ -67,6 +67,12 @@ interactive `ssh HOST` succeeds but clutch still reports SSH authentication
 failure, configure OpenSSH to authenticate non-interactively too, usually by
 loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 
+TRAMP-aware forwarding follows the same rule.  Opening `/ssh:HOST:/path/` via
+TRAMP with an interactive password does not make that password available to
+clutch's separate OpenSSH `-L` process.  Use non-interactive OpenSSH auth or a
+reusable ControlMaster; `/rpc:` paths can reuse tramp-rpc's active ControlPath
+when tramp-rpc has one.
+
 ## MySQL (`mysql`)
 
 ### Scope
@@ -236,6 +242,7 @@ Relevant variables:
 - Uses Emacs 29.1+ built-in `sqlite-*` functions
 - No network stack, no TLS, no sidecar process
 - Connection identity is the database file path
+- Clutch treats the database path as a local file opened by the Emacs process
 
 ### Connection Example
 
@@ -249,6 +256,8 @@ Relevant variables:
 
 - SQLite does not use `:host`, `:port`, or `:user`
 - Network timeout settings do not apply
+- `:ssh-host` and `:tramp-default-directory` do not apply to SQLite; those
+  transports forward structured TCP endpoints, while SQLite opens a file
 - Schema/database switching is not part of the SQLite path
 
 ## Shared Native-Backend Notes

@@ -198,6 +198,10 @@ everything in one repository, this is a breaking packaging change:
                           :host "pg.internal" :port 5432
                           :user "app" :database "appdb"
                           :ssh-host "bastion-prod"))
+        ("remote-pg"  . (:backend pg
+                          :host "127.0.0.1" :port 55433
+                          :user "app" :database "appdb"
+                          :tramp-default-directory "/ssh:devbox:/workspace/"))
         ("dev-sqlite" . (:backend sqlite
                           :database "/path/to/my.db"))))
 #+end_src
@@ -205,6 +209,11 @@ everything in one repository, this is a breaking packaging change:
 Each entry must specify =:backend= explicitly (=mysql=, =pg=, =sqlite=, or a JDBC driver symbol).
 SQLite connections only require =:database= (the file path); no host, port, or user.
 Use =":memory:"= for a transient in-memory database (data is lost when disconnected).
+Clutch treats SQLite as a local file backend: the file is opened by Emacs'
+built-in SQLite support from the Emacs process, not through a TCP connection.
+Do not combine SQLite profiles with =:ssh-host= or
+=:tramp-default-directory=; those transports only apply to structured
+network endpoints.
 =:password= is optional for network backends — see [[#password-management][Password Management]] for auth-source integration.
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
@@ -223,6 +232,11 @@ as shorthand for the explicit plaintext mode on MySQL and PostgreSQL.
 endpoint and connects through a local forwarded port automatically.  This
 first version supports structured =:host= / =:port= entries, not raw JDBC
 =:url= strings.
+For ssh-like TRAMP directories, =:tramp-default-directory= starts a local
+OpenSSH forward through the TRAMP host.  Use it for remote-machine endpoints
+where =:host= / =:port= are reachable from the SSH host rather than from the
+local Emacs host.
+=:ssh-host= and =:tramp-default-directory= are mutually exclusive.
 
 JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
 [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]] for the full list of supported databases and setup.
@@ -367,6 +381,66 @@ This keeps the Emacs flow simple:
 Current limitation: SSH tunneling is only wired up for structured
 =:host= / =:port= entries, so JDBC profiles that rely on a raw =:url= still
 need a manual tunnel for now.
+
+** TRAMP-aware Connection Origin
+
+clutch distinguishes three connection origins:
+
+- local: the database client connects from your Emacs host
+- SSH forward: the database client still runs locally, through an OpenSSH
+  local port forward configured by =:ssh-host=
+- TRAMP forward: the database client connects to a local temporary port, but
+  clutch derives the SSH target from an ssh-like TRAMP directory and the TCP
+  connection to the database is opened from that SSH host
+
+Opening a TRAMP buffer does not globally change clutch.  TRAMP is considered
+only when a connection is established by =clutch-connect= or
+=clutch-query-console=.  The chosen origin is then stored in that connection's
+params so reconnect, completion, refresh, and query execution keep using the
+same origin.
+
+For a connection that should always use a remote-machine endpoint, configure
+=:tramp-default-directory= explicitly.  The =:host= / =:port= pair is the
+database endpoint as seen from the SSH host:
+
+#+begin_src emacs-lisp
+("remote-pg" . (:backend pg
+                 :host "127.0.0.1" :port 55433
+                 :user "app" :database "appdb"
+                 :tramp-default-directory "/ssh:devbox:/workspace/"))
+#+end_src
+
+Without an explicit transport, a command invoked from a TRAMP buffer can infer
+that buffer's remote context.  =clutch-tramp-context-policy= controls that:
+
+- =nil=: never infer TRAMP context
+- =ask= (default): ask before using the current TRAMP context
+- =auto=: use the current TRAMP context without asking
+
+The first implementation supports ssh-like TRAMP methods such as
+=/ssh:devbox:/path/=, =/scp:devbox:/path/=, =/rsync:devbox:/path/=, and
+=/rpc:devbox:/path/= when using tramp-rpc.  TRAMP hop chains made only of
+those methods are mapped to OpenSSH =ProxyJump=.  Clutch uses the local
+OpenSSH client, so it does not require =nc=, =netcat=, or =socat= on the
+remote host.
+
+TRAMP forwarding is still an OpenSSH batch forward.  A plain =/ssh:= TRAMP
+buffer that was opened by typing a password does not automatically lend that
+password or connection to clutch.  Make the target usable by non-interactive
+OpenSSH first, for example with =ssh-agent=, host aliases, or a reusable
+OpenSSH ControlMaster.  When tramp-rpc has an active ControlMaster, clutch can
+reuse its ControlPath for =/rpc:= forwards.
+
+Container TRAMP paths such as =/ssh:devbox|podman:app:/workspace/= are not
+enabled yet.  Live protocol tests showed that TRAMP async process stdio is not
+binary-clean enough for database wire protocols on that path.  Use =:ssh-host=,
+an OpenSSH config, or a manual tunnel for those topologies for now.
+
+Like SSH forwarding, TRAMP forwarding currently supports structured
+=:host= / =:port= entries only.  SQLite connections are local file opens, not
+TCP connections, so they are not forwarded and are not inferred from a TRAMP
+buffer.  Raw JDBC =:url= profiles are also not forwarded because URL rewrite
+rules are driver-specific.
 
 ** Working with SQL files
 

@@ -118,6 +118,8 @@
 (declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
+(declare-function clutch--prepare-connection-origin-params
+                  "clutch-connection" (params &optional source-default-directory))
 ;; clutch-result-mode and clutch-mode are defined in clutch.el which requires
 ;; clutch-query.el — we cannot require clutch here.
 (declare-function clutch-result-mode "clutch" ())
@@ -229,10 +231,15 @@ buffer is a query console, and the last command was a yank variant."
       (when (< beg end)
         (whitespace-cleanup-region beg end)))))
 
-(defun clutch--open-query-console (name params &optional ad-hoc-params)
+(defun clutch--open-query-console
+    (name params &optional ad-hoc-params source-default-directory)
   "Open or switch to query console NAME using PARAMS.
-AD-HOC-PARAMS, when non-nil, are stored for console-local reconnects."
-  (let* ((product (clutch--effective-sql-product params))
+AD-HOC-PARAMS, when non-nil, are stored for console-local reconnects.
+SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
+  (let* ((params (clutch--prepare-connection-origin-params
+                  params source-default-directory))
+         (ad-hoc-params (and ad-hoc-params params))
+         (product (clutch--effective-sql-product params))
          (storage-name (clutch--console-persistence-name name params))
          (existing (clutch--find-console-buffer name storage-name)))
     (if (and existing
@@ -241,10 +248,13 @@ AD-HOC-PARAMS, when non-nil, are stored for console-local reconnects."
               (buffer-local-value 'clutch-connection existing)))
         (progn
           (with-current-buffer existing
-            (setq-local clutch--console-name name)
-            (setq-local clutch--console-storage-name storage-name)
-            (setq-local clutch--console-ad-hoc-params ad-hoc-params)
-            (clutch--bind-connection-context clutch-connection params product)
+            (let ((existing-params (or clutch--connection-params params)))
+              (setq-local clutch--console-name name)
+              (setq-local clutch--console-storage-name storage-name)
+              (setq-local clutch--console-ad-hoc-params
+                          (and ad-hoc-params existing-params))
+              (clutch--bind-connection-context
+               clutch-connection existing-params product))
             (clutch--update-console-buffer-name))
           (select-window
            (or (clutch--console-window-for existing) (selected-window)))
@@ -285,11 +295,13 @@ AD-HOC-PARAMS, when non-nil, are stored for console-local reconnects."
   "Open a query console for SQLite database FILE."
   (interactive
    (list (plist-get (clutch--read-sqlite-file-params) :database)))
-  (let ((params (list :backend 'sqlite
+  (let ((source-default-directory default-directory)
+        (params (list :backend 'sqlite
                       :database (clutch--normalize-sqlite-database-file file))))
     (pcase-let ((`(:name ,name :params ,target-params :ad-hoc t)
                  (clutch--sqlite-file-console-target params)))
-      (clutch--open-query-console name target-params target-params))))
+      (clutch--open-query-console
+       name target-params target-params source-default-directory))))
 
 ;;;###autoload
 (defun clutch-query-console (target)
@@ -301,13 +313,16 @@ existing buffer.
 When called from outside a clutch buffer, reuses any visible clutch
 window rather than replacing the current window."
   (interactive (list (clutch--read-query-console-target)))
-  (if (stringp target)
-      (let ((params (or (clutch--saved-connection-params target)
-                        (clutch--user-error "No saved connection named %s" target))))
-        (clutch--open-query-console target params nil))
-    (let ((name (plist-get target :name))
-          (params (plist-get target :params)))
-      (clutch--open-query-console name params params))))
+  (let ((source-default-directory default-directory))
+    (if (stringp target)
+        (let ((params (or (clutch--saved-connection-params target)
+                          (clutch--user-error "No saved connection named %s" target))))
+          (clutch--open-query-console
+           target params nil source-default-directory))
+      (let ((name (plist-get target :name))
+            (params (plist-get target :params)))
+        (clutch--open-query-console
+         name params params source-default-directory)))))
 
 ;;;###autoload
 (defun clutch-switch-console ()
@@ -1485,7 +1500,7 @@ Semicolons inside strings, line comments, and block comments do not count."
     found))
 
 (defun clutch--statement-effective-offset (text offset)
-  "Return insertion OFFSET normalized for semicolon-edge statement selection.
+  "Return insertion OFFSET in TEXT for semicolon-edge statement selection.
 When point is on or immediately after a semicolon, treat it as belonging to the
 preceding statement."
   (let ((len (length text)))

@@ -45,6 +45,8 @@
 
 (defvar clutch--result-source-table)
 
+(defvar tramp-rpc-use-controlmaster)
+
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
 
 (declare-function make-mysql-conn "mysql" (&rest args))
@@ -3058,6 +3060,23 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
       (should result)
       (should (member "SELECT" candidates)))))
 
+(ert-deftest clutch-test-sql-keyword-completion-includes-zero-arg-functions ()
+  "Installed keyword CAPF should include zero-argument SQL functions."
+  (with-temp-buffer
+    (insert "cur")
+    (let (captured)
+      (setq-local completion-at-point-functions nil)
+      (clutch--install-completion-capfs)
+      (cl-letf ((completion-in-region-function
+                 (lambda (start end collection &optional predicate)
+                   (setq captured
+                         (all-completions
+                          (buffer-substring-no-properties start end)
+                          collection predicate))
+                   t)))
+        (should (completion-at-point))
+        (should (member "CURRENT_DATABASE()" captured))))))
+
 (ert-deftest clutch-test-sql-keyword-completion-chain-case-insensitive ()
   "The installed CAPF chain should complete lowercase keyword prefixes."
   (with-temp-buffer
@@ -3140,6 +3159,15 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
            (exit-fn (plist-get (cdddr capf) :exit-function)))
       (funcall exit-fn "FROM" 'exact)
       (should (equal (buffer-string) "FROM ")))))
+
+(ert-deftest clutch-test-keyword-capf-exit-function-skips-space-after-call ()
+  "Keyword CAPF exit-function should not add a space after function calls."
+  (with-temp-buffer
+    (insert "cur")
+    (let* ((capf (clutch-sql-keyword-completion-at-point))
+           (exit-fn (plist-get (cdddr capf) :exit-function)))
+      (funcall exit-fn "CURRENT_DATABASE()" 'exact)
+      (should (equal (buffer-string) "cur")))))
 
 ;;;; Completion — identifiers and columns
 
@@ -6820,6 +6848,74 @@ crashing the UI layer."
       (should (equal (clutch--connection-display-key conn)
                      "alice@db.internal via bastion-prod")))))
 
+(ert-deftest clutch-test-connection-display-key-prefers-remote-tramp-endpoint ()
+  "Connection labels should keep the remote endpoint visible when TRAMP is used."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (conn 'fake-conn))
+    (puthash conn '(:host "db" :port 5432
+                    :tramp-default-directory "/ssh:devbox:/workspace/")
+             clutch--connection-remote-params-cache)
+    (cl-letf (((symbol-function 'clutch-db-user) (lambda (_conn) "alice"))
+              ((symbol-function 'clutch-db-host) (lambda (_conn) "127.0.0.1"))
+              ((symbol-function 'clutch-db-port) (lambda (_conn) 40123))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "appdb"))
+              ((symbol-function 'clutch-db-display-name) (lambda (_conn) "PostgreSQL")))
+      (should (equal (clutch--connection-key conn)
+                     "alice@db:5432/appdb"))
+      (should (equal (clutch--connection-display-key conn)
+                     "alice@db via devbox")))))
+
+(ert-deftest clutch-test-prepare-origin-auto-adds-source-tramp-context ()
+  "TRAMP source context should be copied into network params under auto policy."
+  (let ((clutch-tramp-context-policy 'auto))
+    (should (equal
+             (clutch--prepare-connection-origin-params
+              '(:backend pg :host "db" :port 5432 :user "app")
+              "/ssh:devbox:/workspace/")
+             '(:backend pg :host "db" :port 5432 :user "app"
+               :tramp-default-directory "/ssh:devbox:/workspace/")))))
+
+(ert-deftest clutch-test-prepare-origin-ask-can-decline-source-tramp-context ()
+  "Declining the TRAMP prompt should leave network params local."
+  (let ((clutch-tramp-context-policy 'ask)
+        asked)
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt)
+                 (setq asked t)
+                 nil)))
+      (should (equal
+               (clutch--prepare-connection-origin-params
+                '(:backend pg :host "db" :port 5432 :user "app")
+                "/ssh:devbox:/workspace/")
+               '(:backend pg :host "db" :port 5432 :user "app")))
+      (should asked))))
+
+(ert-deftest clutch-test-prepare-origin-does-not-infer-over-ssh-transport ()
+  "Existing SSH forward configuration must win over current TRAMP context."
+  (let ((clutch-tramp-context-policy 'auto)
+        (params '(:backend pg :host "db" :port 5432 :user "app"
+                  :ssh-host "bastion-prod")))
+    (should (equal
+             (clutch--prepare-connection-origin-params
+              params "/ssh:devbox:/workspace/")
+             params))))
+
+(ert-deftest clutch-test-prepare-origin-skips-unforwardable-params ()
+  "TRAMP source inference should not attach to SQLite or raw URL profiles."
+  (let ((clutch-tramp-context-policy 'auto))
+    (should-not
+     (plist-member
+      (clutch--prepare-connection-origin-params
+       '(:backend sqlite :database "/tmp/app.db")
+       "/ssh:devbox:/workspace/")
+      :tramp-default-directory))
+    (should-not
+     (plist-member
+      (clutch--prepare-connection-origin-params
+       '(:backend oracle :url "jdbc:oracle:thin:@//db:1521/ORCL")
+       "/ssh:devbox:/workspace/")
+      :tramp-default-directory))))
+
 (ert-deftest clutch-test-build-conn-includes-native-timeouts-for-network-backends ()
   "Test that `clutch--build-conn' passes timeout defaults to mysql/pg."
   (let ((clutch-connect-timeout-seconds 11)
@@ -6844,7 +6940,7 @@ crashing the UI layer."
 (ert-deftest clutch-test-build-conn-rewrites-network-endpoint-through-ssh-tunnel ()
   "SSH-backed connections should target the local forwarded port."
   (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
-        (clutch--connection-ssh-tunnel-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
         captured)
     (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) nil))
@@ -6869,9 +6965,60 @@ crashing the UI layer."
       (should (equal (plist-get (gethash 'fake-conn clutch--connection-remote-params-cache)
                                 :host)
                      "db.internal"))
-      (should (equal (plist-get (gethash 'fake-conn clutch--connection-ssh-tunnel-cache)
+      (should (equal (plist-get (gethash 'fake-conn clutch--connection-transport-cache)
                                 :ssh-host)
                      "bastion-prod")))))
+
+(ert-deftest clutch-test-build-conn-rewrites-network-endpoint-through-tramp-forward ()
+  "TRAMP-backed connections should target the local forwarded port."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--start-tramp-tcp-forward)
+               (lambda (params)
+                 (should (equal (plist-get params :tramp-default-directory)
+                                "/ssh:devbox:/workspace/"))
+                 '(:kind tramp
+                   :process fake-listener
+                   :local-port 40124
+                   :tramp-default-directory "/ssh:devbox:/workspace/")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq captured params)
+                 'fake-conn)))
+      (should (eq (clutch--build-conn
+                   '(:backend pg
+                     :host "db"
+                     :port 5432
+                     :user "alice"
+                     :database "appdb"
+                     :tramp-default-directory "/ssh:devbox:/workspace/"))
+                  'fake-conn))
+      (should (equal (plist-get captured :host) "127.0.0.1"))
+      (should (= (plist-get captured :port) 40124))
+      (should-not (plist-member captured :tramp-default-directory))
+      (should (equal (plist-get (gethash 'fake-conn clutch--connection-remote-params-cache)
+                                :host)
+                     "db"))
+      (should (equal (plist-get (gethash 'fake-conn clutch--connection-remote-params-cache)
+                                :tramp-default-directory)
+                     "/ssh:devbox:/workspace/"))
+      (should (eq (plist-get (gethash 'fake-conn clutch--connection-transport-cache)
+                             :kind)
+                  'tramp)))))
+
+(ert-deftest clutch-test-prepare-connect-params-rejects-ambiguous-transports ()
+  "A connection must not combine SSH and TRAMP transports."
+  (should-error
+   (clutch--prepare-connect-params
+    '(:backend pg
+      :host "db"
+      :port 5432
+      :ssh-host "bastion-prod"
+      :tramp-default-directory "/ssh:devbox:/workspace/"))
+   :type 'user-error))
 
 (ert-deftest clutch-test-build-conn-stops-ssh-tunnel-when-db-connect-fails ()
   "Failed DB connect should tear down the SSH tunnel it just opened."
@@ -6951,6 +7098,151 @@ crashing the UI layer."
                          "-o" "ExitOnForwardFailure=yes"
                          "-L" "127.0.0.1:40123:db.internal:5432"
                          "bastion-prod")))))))
+
+(ert-deftest clutch-test-start-tramp-forward-rejects-jdbc-url ()
+  "TRAMP forwarding should fail fast when the profile only provides a raw JDBC URL."
+  (let (make-process-called)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _args)
+                 (setq make-process-called t)
+                 'unexpected)))
+      (should-error
+       (clutch--start-tramp-tcp-forward
+        '(:backend oracle
+          :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL"
+          :user "scott"
+          :tramp-default-directory "/ssh:devbox:/workspace/"))
+       :type 'user-error)
+      (should-not make-process-called))))
+
+(ert-deftest clutch-test-start-tramp-forward-starts-direct-ssh-forward ()
+  "Direct ssh TRAMP forward startup should use OpenSSH -L."
+  (let (make-process-args query-flag waited)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (program)
+                 (when (equal program "ssh") "/usr/bin/ssh")))
+              ((symbol-function 'clutch--allocate-local-port)
+               (lambda () 40124))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq make-process-args args)
+                 'fake-proc))
+              ((symbol-function 'set-process-query-on-exit-flag)
+               (lambda (proc flag)
+                 (setq query-flag (list proc flag))))
+              ((symbol-function 'clutch--wait-for-ssh-tunnel)
+               (lambda (proc port params buffer timeout)
+                 (setq waited (list proc port params buffer timeout)))))
+      (let ((transport (clutch--start-tramp-tcp-forward
+                        '(:backend pg
+                          :host "db"
+                          :port 5432
+                          :tramp-default-directory "/ssh:devbox:/workspace/"))))
+        (should (equal (plist-get make-process-args :command)
+                       '("ssh"
+                         "-N"
+                         "-o" "BatchMode=yes"
+                         "-o" "ExitOnForwardFailure=yes"
+                         "-L" "127.0.0.1:40124:db:5432"
+                         "devbox")))
+        (should (equal query-flag '(fake-proc nil)))
+        (should (eq (plist-get transport :kind) 'tramp))
+        (should (eq (plist-get transport :process) 'fake-proc))
+        (should (= (plist-get transport :local-port) 40124))
+        (should (equal (plist-get transport :tramp-default-directory)
+                       "/ssh:devbox:/workspace/"))
+        (should (equal (nth 0 waited) 'fake-proc))
+        (should (= (nth 1 waited) 40124))
+        (should (equal (plist-get (nth 2 waited) :ssh-host) "devbox"))))))
+
+(ert-deftest clutch-test-start-tramp-forward-starts-rpc-forward ()
+  "tramp-rpc directories should be mapped to OpenSSH -L."
+  (let ((old-bound (boundp 'tramp-rpc-use-controlmaster))
+        (old-value (and (boundp 'tramp-rpc-use-controlmaster)
+                        (symbol-value 'tramp-rpc-use-controlmaster)))
+        make-process-args)
+    (unwind-protect
+        (progn
+          (set 'tramp-rpc-use-controlmaster t)
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (program)
+                       (when (equal program "ssh") "/usr/bin/ssh")))
+                    ((symbol-function 'clutch--allocate-local-port)
+                     (lambda () 40124))
+                    ((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (setq make-process-args args)
+                       'fake-proc))
+                    ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+                    ((symbol-function 'clutch--wait-for-ssh-tunnel) #'ignore)
+                    ((symbol-function 'tramp-rpc--controlmaster-active-p)
+                     (lambda (vec)
+                       (should (equal (tramp-file-name-method vec) "rpc"))
+                       t))
+                    ((symbol-function 'tramp-rpc--controlmaster-socket-path)
+                     (lambda (_vec) "/tmp/tramp-rpc.sock")))
+            (clutch--start-tramp-tcp-forward
+             '(:backend pg
+               :host "127.0.0.1"
+               :port 55433
+               :tramp-default-directory "/rpc:devbox:/workspace/"))
+            (should (equal (plist-get make-process-args :command)
+                           '("ssh"
+                             "-N"
+                             "-o" "BatchMode=yes"
+                             "-o" "ExitOnForwardFailure=yes"
+                             "-L" "127.0.0.1:40124:127.0.0.1:55433"
+                             "-o" "ControlMaster=auto"
+                             "-o" "ControlPath=/tmp/tramp-rpc.sock"
+                             "devbox")))))
+      (if old-bound
+          (set 'tramp-rpc-use-controlmaster old-value)
+        (makunbound 'tramp-rpc-use-controlmaster)))))
+
+(ert-deftest clutch-test-start-tramp-forward-maps-ssh-like-hops-to-proxyjump ()
+  "SSH-like TRAMP hops should become an OpenSSH ProxyJump option."
+  (let (make-process-args)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (program)
+                 (when (equal program "ssh") "/usr/bin/ssh")))
+              ((symbol-function 'clutch--allocate-local-port)
+               (lambda () 40124))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq make-process-args args)
+                 'fake-proc))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'clutch--wait-for-ssh-tunnel) #'ignore))
+      (clutch--start-tramp-tcp-forward
+       '(:backend pg
+         :host "db"
+         :port 5432
+         :tramp-default-directory "/rpc:jump|rpc:devbox:/workspace/"))
+      (should (equal (plist-get make-process-args :command)
+                     '("ssh"
+                       "-N"
+                       "-o" "BatchMode=yes"
+                       "-o" "ExitOnForwardFailure=yes"
+                       "-L" "127.0.0.1:40124:db:5432"
+                       "-J" "jump"
+                       "devbox"))))))
+
+(ert-deftest clutch-test-start-tramp-forward-rejects-container-tramp-path ()
+  "Container TRAMP paths should fail before spawning a forward."
+  (let (make-process-called)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _args)
+                 (setq make-process-called t)
+                 'unexpected)))
+      (let ((err (should-error
+                  (clutch--start-tramp-tcp-forward
+                   '(:backend pg
+                     :host "db"
+                     :port 5432
+                     :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
+                  :type 'user-error)))
+        (should (string-match-p "ssh-like" (cadr err))))
+      (should-not make-process-called))))
 
 (ert-deftest clutch-test-ssh-diagnose-output-hints-locked-key ()
   "SSH diagnosis should point users at an interactive unlock step."
@@ -7993,10 +8285,10 @@ crashing the UI layer."
 (ert-deftest clutch-test-do-disconnect-stops-ssh-tunnel ()
   "Disconnect should stop any SSH tunnel associated with the connection."
   (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
-        (clutch--connection-ssh-tunnel-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
         disconnected
         stopped)
-    (puthash 'fake-conn '(:process fake-proc) clutch--connection-ssh-tunnel-cache)
+    (puthash 'fake-conn '(:kind ssh :process fake-proc) clutch--connection-transport-cache)
     (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
               ((symbol-function 'clutch--invalidate-derived-buffers) #'ignore)
               ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
@@ -8010,7 +8302,7 @@ crashing the UI layer."
       (clutch--do-disconnect 'fake-conn)
       (should disconnected)
       (should (eq stopped 'fake-proc))
-      (should-not (gethash 'fake-conn clutch--connection-ssh-tunnel-cache)))))
+      (should-not (gethash 'fake-conn clutch--connection-transport-cache)))))
 
 (ert-deftest clutch-test-kill-console-disconnects-and-invalidates ()
   "Killing a console buffer disconnects and invalidates derived buffers."
@@ -8419,6 +8711,91 @@ This applies when the buffer owns the connection."
         (should-not read-called)
         (should (equal built '(:backend mysql :database "app_a" :pass-entry "alpha")))))))
 
+(ert-deftest clutch-test-connect-in-query-console-preserves-tramp-origin ()
+  "Query console reconnect should keep its stored TRAMP origin."
+  (with-temp-buffer
+    (let ((clutch-connection-alist
+           '(("alpha" . (:backend pg
+                         :host "db"
+                         :port 5432
+                         :database "appdb"))))
+          (clutch-tramp-context-policy 'ask)
+          built)
+      (setq-local clutch--console-name "alpha"
+                  clutch--connection-params
+                  '(:backend pg
+                    :host "db"
+                    :port 5432
+                    :database "appdb"
+                    :pass-entry "alpha"
+                    :tramp-default-directory "/ssh:devbox:/workspace/"))
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (_prompt)
+                   (ert-fail "stored TRAMP origin should not prompt again")))
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'postgres))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (params)
+                   (setq built params)
+                   'new-conn))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "test-conn"))
+                ((symbol-function 'clutch--activate-current-buffer-connection)
+                 (lambda (_conn _params _product) nil))
+                ((symbol-function 'message) #'ignore))
+        (clutch-connect)
+        (should (equal built
+                       '(:backend pg
+                         :host "db"
+                         :port 5432
+                         :database "appdb"
+                         :pass-entry "alpha"
+                         :tramp-default-directory "/ssh:devbox:/workspace/")))))))
+
+(ert-deftest clutch-test-connect-in-query-console-skips-stale-tramp-origin-for-unforwardable-profile ()
+  "Reconnect should not carry old TRAMP origin onto non-TCP profiles."
+  (dolist (case '((:saved (:backend sqlite :database "/tmp/app.db")
+                   :expected (:backend sqlite :database "/tmp/app.db"
+                              :pass-entry "alpha"))
+                  (:saved (:backend oracle
+                           :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL")
+                   :expected (:backend oracle
+                              :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL"
+                              :pass-entry "alpha"))))
+    (pcase-let ((`(:saved ,saved :expected ,expected) case))
+      (let ((clutch-connection-alist `(("alpha" . ,saved)))
+            (clutch-tramp-context-policy 'ask)
+            built)
+        (with-temp-buffer
+          (setq-local clutch--console-name "alpha"
+                      clutch--connection-params
+                      '(:backend pg
+                        :host "db"
+                        :port 5432
+                        :database "appdb"
+                        :pass-entry "alpha"
+                        :tramp-default-directory "/ssh:devbox:/workspace/"))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) nil))
+                    ((symbol-function 'y-or-n-p)
+                     (lambda (_prompt)
+                       (ert-fail "unforwardable profile should not prompt for TRAMP")))
+                    ((symbol-function 'clutch--effective-sql-product)
+                     (lambda (_params) 'generic))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (params)
+                       (setq built params)
+                       'new-conn))
+                    ((symbol-function 'clutch--connection-key)
+                     (lambda (_conn) "test-conn"))
+                    ((symbol-function 'clutch--activate-current-buffer-connection)
+                     (lambda (_conn _params _product) nil))
+                    ((symbol-function 'message) #'ignore))
+            (clutch-connect)
+            (should (equal built expected))))))))
+
 (ert-deftest clutch-test-connect-stores-resolved-password-in-connection-context ()
   "Connect should retain resolved credentials for reconnects."
   (with-temp-buffer
@@ -8631,6 +9008,35 @@ This applies when the buffer owns the connection."
             (should (equal built params))
             (should (equal clutch--console-ad-hoc-params params))
             (should (eq (current-buffer) (get-buffer buffer-name)))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-query-console-infers-tramp-origin-from-source-buffer ()
+  "Query console connection origin should use the command source buffer."
+  (let* ((name "alpha")
+         (buffer-name (clutch--console-buffer-base-name name))
+         (clutch-connection-alist
+          '(("alpha" . (:backend pg
+                        :host "db"
+                        :port 5432
+                        :user "alice"
+                        :database "appdb"))))
+         (clutch-tramp-context-policy 'auto)
+         (default-directory "/ssh:devbox:/workspace/")
+         built)
+    (unwind-protect
+        (clutch-test--with-query-console-build-stubs (built 'postgres 'pg-conn)
+          (clutch-query-console name)
+          (should (equal built
+                         '(:backend pg
+                           :host "db"
+                           :port 5432
+                           :user "alice"
+                           :database "appdb"
+                           :pass-entry "alpha"
+                           :tramp-default-directory "/ssh:devbox:/workspace/")))
+          (should (equal clutch--connection-params built))
+          (should (eq (current-buffer) (get-buffer buffer-name))))
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf)))))
 

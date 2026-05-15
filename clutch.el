@@ -357,6 +357,19 @@ Applies to networked backends.  SQLite ignores this setting."
   :type 'natnum
   :group 'clutch)
 
+(defcustom clutch-tramp-context-policy 'ask
+  "How connection commands use the current TRAMP buffer context.
+When nil, Clutch never infers TRAMP transport from the current buffer.
+When `ask', Clutch prompts before using the current TRAMP default directory.
+When `auto', Clutch uses the current TRAMP default directory without asking.
+This only applies when a connection has no explicit transport such as
+:ssh-host or :tramp-default-directory.  TRAMP transport currently supports
+ssh-like TRAMP directories."
+  :type '(choice (const :tag "Never infer TRAMP context" nil)
+                 (const :tag "Ask before using current TRAMP context" ask)
+                 (const :tag "Automatically use current TRAMP context" auto))
+  :group 'clutch)
+
 (defcustom clutch-read-idle-timeout-seconds 30
   "Idle timeout in seconds while waiting for query I/O.
 Applies to MySQL, PostgreSQL, and JDBC network I/O.  SQLite ignores this
@@ -1135,7 +1148,8 @@ Returns non-nil on success, nil on failure."
   "Regexp matching URL parameters that must not affect console identity.")
 
 (defconst clutch--console-identity-param-keys
-  '(:user :host :port :database :schema :sid :ssh-host)
+  '(:user :host :port :database :schema :sid :ssh-host
+    :tramp-default-directory)
   "Connection params that distinguish query console identity.")
 
 (defun clutch--console-redacted-url (url)
@@ -2267,13 +2281,26 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
 
 (defun clutch--sql-keyword-completion-raw-candidates ()
   "Return raw SQL keyword completion candidates before case conversion."
-  (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases)))
+  (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases))
+        (zero-arg-functions nil))
+    (maphash
+     (lambda (_name doc)
+       (let ((sig (plist-get doc :sig)))
+         (when (and (stringp sig)
+                    (string-match-p "\\`[[:upper:]_]+()[[:space:]]*\\'" sig))
+           (push (string-trim sig) zero-arg-functions))))
+     clutch--sql-function-docs)
     (delete-dups
      (append
       (mapcar #'cdr clutch--sql-keyword-replacement-phrases)
       clutch--sql-keyword-additive-phrases
+      zero-arg-functions
       (seq-remove (lambda (keyword) (member keyword replaced))
                   clutch--sql-keywords)))))
+
+(defun clutch--sql-completion-insert-space-p (candidate)
+  "Return non-nil when accepting CANDIDATE should add a trailing space."
+  (not (string-suffix-p ")" candidate)))
 
 (defun clutch--sql-keyword-completion-candidates ()
   "Return SQL keyword completion candidates honoring case style."
@@ -2305,8 +2332,9 @@ Works without a database connection."
           (completion-table-case-fold
            (clutch--sql-keyword-completion-candidates))
           :exclusive 'no
-          :exit-function (lambda (_str status)
+          :exit-function (lambda (str status)
                            (when (and (clutch--completion-finished-status-p status)
+                                      (clutch--sql-completion-insert-space-p str)
                                       (not (looking-at-p "\\s-")))
                              (insert " "))))))
 
@@ -2627,6 +2655,7 @@ when completion triggers during an in-flight query)."
                (lambda (str status)
                  (when (and (clutch--completion-finished-status-p status)
                             (clutch--sql-keyword-completion-candidate-p str)
+                            (clutch--sql-completion-insert-space-p str)
                             (not (looking-at-p "\\s-")))
                    (insert " "))))
          (when qualified-empty-prefix-p

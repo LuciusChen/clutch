@@ -38,8 +38,13 @@
 (require 'auth-source)
 (require 'cl-lib)
 (require 'comint)
+(require 'subr-x)
+(require 'tramp)
 
 (declare-function auth-source-pass-parse-entry "auth-source-pass" (entry))
+(declare-function tramp-rpc--controlmaster-active-p "tramp-rpc" (vec))
+(declare-function tramp-rpc--controlmaster-socket-path "tramp-rpc" (vec))
+(defvar tramp-rpc-use-controlmaster)
 
 ;; Forward declarations — variables defined in clutch.el
 (defvar clutch-connection)
@@ -54,6 +59,7 @@
 (defvar clutch-read-idle-timeout-seconds 30)
 (defvar clutch-query-timeout-seconds 30)
 (defvar clutch-jdbc-rpc-timeout-seconds 30)
+(defvar clutch-tramp-context-policy 'ask)
 (defvar clutch--dml-result)
 (defvar clutch-debug-mode nil)
 (defvar clutch--spinner-timer nil
@@ -101,9 +107,12 @@
   (make-hash-table :test 'eq :weakness 'key)
   "Original remote connection params keyed by live connection object.")
 
-(defvar clutch--connection-ssh-tunnel-cache
+(defvar clutch--connection-transport-cache
   (make-hash-table :test 'eq :weakness 'key)
-  "SSH tunnel process plists keyed by live connection object.")
+  "Transport process plists keyed by live connection object.")
+
+(defconst clutch--tramp-ssh-forward-methods '("ssh" "scp" "rsync" "rpc")
+  "TRAMP methods Clutch can map to a binary-clean ssh command.")
 
 (defun clutch--connection-remote-param (conn key)
   "Return remote KEY for CONN when clutch cached transport metadata."
@@ -124,8 +133,49 @@
   "Return the configured SSH host alias for CONN, or nil."
   (clutch--connection-remote-param conn :ssh-host))
 
+(defun clutch--connection-tramp-default-directory (conn)
+  "Return the configured TRAMP default directory for CONN, or nil."
+  (clutch--connection-remote-param conn :tramp-default-directory))
+
+(defun clutch--tramp-vector-display-target (vec)
+  "Return a compact display target for TRAMP VEC."
+  (let ((host (tramp-file-name-host vec))
+        (user (tramp-file-name-user vec))
+        (port (tramp-file-name-port vec)))
+    (when (and (stringp host) (not (string-empty-p host)))
+      (concat
+       (if (and (stringp user) (not (string-empty-p user)))
+           (format "%s@%s" user host)
+         host)
+       (if port (format ":%s" port) "")))))
+
+(defun clutch--tramp-display-label (tramp-default-directory)
+  "Return a compact label for TRAMP-DEFAULT-DIRECTORY."
+  (let* ((vec (clutch--tramp-dissect-file-name tramp-default-directory))
+         (hops (clutch--tramp-hop-vectors (tramp-file-name-hop vec)))
+         (targets (delq nil
+                        (append
+                         (mapcar #'clutch--tramp-vector-display-target hops)
+                         (list (clutch--tramp-vector-display-target vec))))))
+    (if targets
+        (string-join targets "->")
+      (or (file-remote-p tramp-default-directory)
+          tramp-default-directory))))
+
+(defun clutch--connection-transport-label (conn)
+  "Return a compact transport label for CONN, or nil."
+  (or (clutch--connection-ssh-host conn)
+      (when-let* ((dir (clutch--connection-tramp-default-directory conn)))
+        (clutch--tramp-display-label dir))))
+
+(defun clutch--stop-connection-transport (transport)
+  "Stop TRANSPORT and any process it owns."
+  (when-let* ((proc (plist-get transport :process)))
+    (when (process-live-p proc)
+      (delete-process proc))))
+
 (defun clutch--remember-connection-transport (conn params &optional tunnel)
-  "Remember original PARAMS and optional SSH TUNNEL for CONN."
+  "Remember original PARAMS and optional TRANSPORT for CONN."
   (when conn
     (let ((remote nil))
       (when-let* ((host (plist-get params :host)))
@@ -134,19 +184,23 @@
         (setq remote (plist-put remote :port port)))
       (when-let* ((ssh-host (plist-get params :ssh-host)))
         (setq remote (plist-put remote :ssh-host ssh-host)))
+      (when-let* ((tramp-default-directory
+                   (plist-get params :tramp-default-directory)))
+        (setq remote (plist-put remote :tramp-default-directory
+                                tramp-default-directory)))
+      (when-let* ((kind (plist-get tunnel :kind)))
+        (setq remote (plist-put remote :transport kind)))
       (puthash conn remote clutch--connection-remote-params-cache))
     (if tunnel
-        (puthash conn tunnel clutch--connection-ssh-tunnel-cache)
-      (remhash conn clutch--connection-ssh-tunnel-cache))))
+        (puthash conn tunnel clutch--connection-transport-cache)
+      (remhash conn clutch--connection-transport-cache))))
 
 (defun clutch--release-connection-transport (conn)
-  "Stop any SSH tunnel and forget cached transport metadata for CONN."
+  "Stop any connection transport and forget cached metadata for CONN."
   (when conn
-    (when-let* ((tunnel (gethash conn clutch--connection-ssh-tunnel-cache))
-                (proc (plist-get tunnel :process)))
-      (when (process-live-p proc)
-        (delete-process proc)))
-    (remhash conn clutch--connection-ssh-tunnel-cache)
+    (when-let* ((transport (gethash conn clutch--connection-transport-cache)))
+      (clutch--stop-connection-transport transport))
+    (remhash conn clutch--connection-transport-cache)
     (remhash conn clutch--connection-remote-params-cache)))
 
 (defun clutch--sqlite-database-display-label (database &optional compact)
@@ -189,7 +243,7 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
     (let* ((user (or (clutch-db-user conn) "?"))
            (host (or (clutch--connection-remote-host conn) "?"))
            (port (clutch--connection-remote-port conn))
-           (ssh-host (clutch--connection-ssh-host conn))
+           (transport-label (clutch--connection-transport-label conn))
            (default-port (clutch--default-port-for-connection conn)))
       (concat
        (format "%s@%s%s"
@@ -200,8 +254,8 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
                  (if port
                      (format ":%s" port)
                    "")))
-       (if ssh-host
-           (format " via %s" ssh-host)
+       (if transport-label
+           (format " via %s" transport-label)
          "")))))
 
 (defun clutch--ensure-clutch-loaded ()
@@ -944,14 +998,113 @@ cannot be read."
       (setq context (plist-put context :display-name display-name)))
     (when-let* ((ssh-host (plist-get params :ssh-host)))
       (setq context (plist-put context :ssh-host ssh-host)))
+    (when-let* ((tramp-default-directory
+                 (plist-get params :tramp-default-directory)))
+      (setq context (plist-put context :tramp-default-directory
+                               tramp-default-directory)))
     (setq context (plist-put context :backend backend))
     context))
+
+(defun clutch--tramp-forward-enabled-p (params)
+  "Return non-nil when PARAMS request a TRAMP TCP forward."
+  (let ((tramp-default-directory (plist-get params :tramp-default-directory)))
+    (and (stringp tramp-default-directory)
+         (not (string-empty-p tramp-default-directory)))))
 
 (defun clutch--ssh-tunnel-enabled-p (params)
   "Return non-nil when PARAMS request an SSH tunnel."
   (let ((ssh-host (plist-get params :ssh-host)))
     (and (stringp ssh-host)
          (not (string-empty-p ssh-host)))))
+
+(defun clutch--connection-transport-kind (params)
+  "Return the explicit transport kind requested by PARAMS, or nil."
+  (let ((ssh (clutch--ssh-tunnel-enabled-p params))
+        (tramp (clutch--tramp-forward-enabled-p params)))
+    (cond
+     ((and ssh tramp)
+      (clutch--user-error
+       "Connection cannot combine :ssh-host with :tramp-default-directory"))
+     (ssh 'ssh)
+     (tramp 'tramp))))
+
+(defun clutch--tramp-origin-compatible-p (params)
+  "Return non-nil when PARAMS can use an inferred TRAMP origin."
+  (and (not (eq (plist-get params :backend) 'sqlite))
+       (not (plist-get params :url))
+       (plist-get params :host)
+       (plist-get params :port)))
+
+(defun clutch--source-tramp-default-directory (&optional source-default-directory)
+  "Return SOURCE-DEFAULT-DIRECTORY when it names a TRAMP context."
+  (let ((dir (or source-default-directory default-directory)))
+    (when (and (stringp dir)
+               (file-remote-p dir))
+      dir)))
+
+(defun clutch--connection-origin-summary (params)
+  "Return a compact connection identity for PARAMS origin prompts."
+  (let ((host (plist-get params :host))
+        (port (plist-get params :port))
+        (database (or (plist-get params :database)
+                      (plist-get params :sid))))
+    (string-join
+     (delq nil
+           (list (and host
+                      (if port
+                          (format "%s:%s" host port)
+                        host))
+                 database))
+     "/")))
+
+(defun clutch--use-source-tramp-context-p (params tramp-default-directory)
+  "Return non-nil when PARAMS should use TRAMP-DEFAULT-DIRECTORY."
+  (pcase clutch-tramp-context-policy
+    ('auto t)
+    ('ask
+     (y-or-n-p
+      (format "Use TRAMP context %s for database connection%s? "
+              (or (file-remote-p tramp-default-directory)
+                  tramp-default-directory)
+              (let ((summary (clutch--connection-origin-summary params)))
+                (if (string-empty-p summary)
+                    ""
+                  (format " to %s" summary))))))
+    (_ nil)))
+
+(defun clutch--prepare-connection-origin-params
+    (params &optional source-default-directory)
+  "Return PARAMS with any command-source connection origin applied.
+Explicit transports in PARAMS always win.  When PARAMS has no explicit
+transport, `clutch-tramp-context-policy' controls whether the current TRAMP
+SOURCE-DEFAULT-DIRECTORY is copied into :tramp-default-directory."
+  (let ((explicit-kind (clutch--connection-transport-kind params)))
+    (if-let* ((tramp-default-directory
+               (and (not explicit-kind)
+                    (clutch--tramp-origin-compatible-p params)
+                    (clutch--source-tramp-default-directory
+                     source-default-directory)))
+              ((clutch--use-source-tramp-context-p
+                params tramp-default-directory)))
+        (plist-put (copy-sequence params)
+                   :tramp-default-directory tramp-default-directory)
+      params)))
+
+(defun clutch--carry-current-connection-origin (params)
+  "Return PARAMS with the current buffer's inferred origin preserved.
+Saved query consoles re-read their saved connection on `clutch-connect'.
+When the live logical session was originally opened from a TRAMP context,
+keep that origin unless the saved connection now specifies an explicit
+transport."
+  (if (or (clutch--connection-transport-kind params)
+          (not (clutch--tramp-origin-compatible-p params))
+          (null clutch--connection-params))
+      params
+    (if-let* ((tramp-default-directory
+               (plist-get clutch--connection-params :tramp-default-directory)))
+        (plist-put (copy-sequence params)
+                   :tramp-default-directory tramp-default-directory)
+      params)))
 
 (defun clutch--allocate-local-port ()
   "Return an available local TCP port for an SSH tunnel."
@@ -1122,6 +1275,23 @@ cannot be read."
                                                    :host (plist-get params :host)
                                                    :port (plist-get params :port))))))))
 
+(defun clutch--validate-network-forward-params (params transport-name)
+  "Validate PARAMS for a structured TCP forward named TRANSPORT-NAME."
+  (when (eq (plist-get params :backend) 'sqlite)
+    (clutch--user-error
+     "SQLite opens a local database file and does not support %s"
+     transport-name))
+  (when (plist-get params :url)
+    (clutch--user-error
+     "%s currently requires structured :host/:port params, not :url"
+     transport-name))
+  (unless (plist-get params :host)
+    (clutch--user-error "%s requires :host for the remote database endpoint"
+                        transport-name))
+  (unless (plist-get params :port)
+    (clutch--user-error "%s requires :port for the remote database endpoint"
+                        transport-name)))
+
 (defun clutch--ssh-local-port-open-p (port)
   "Return non-nil when localhost PORT accepts TCP connections."
   (condition-case nil
@@ -1158,14 +1328,7 @@ and TIMEOUT is the maximum wait in seconds."
   "Start an SSH tunnel for PARAMS using the user's OpenSSH config."
   (unless (executable-find "ssh")
     (clutch--user-error "SSH tunnels require the OpenSSH client executable `ssh'"))
-  (when (eq (plist-get params :backend) 'sqlite)
-    (clutch--user-error "SQLite connections do not support SSH tunnels"))
-  (when (plist-get params :url)
-    (clutch--user-error "SSH tunnels currently require structured :host/:port params, not :url"))
-  (unless (plist-get params :host)
-    (clutch--user-error "SSH tunnels require :host for the remote database endpoint"))
-  (unless (plist-get params :port)
-    (clutch--user-error "SSH tunnels require :port for the remote database endpoint"))
+  (clutch--validate-network-forward-params params "SSH tunnels")
   (let* ((ssh-host (plist-get params :ssh-host))
          (local-port (clutch--allocate-local-port))
          (buffer (get-buffer-create (clutch--ssh-tunnel-buffer-name ssh-host)))
@@ -1189,24 +1352,171 @@ and TIMEOUT is the maximum wait in seconds."
                 :coding 'utf-8
                 :noquery t))
     (set-process-query-on-exit-flag proc nil)
-    (clutch--wait-for-ssh-tunnel proc local-port params buffer timeout)
-    (list :process proc
+    (clutch--wait-for-ssh-tunnel
+     proc local-port (plist-put (copy-sequence params) :ssh-host ssh-host)
+     buffer timeout)
+    (list :kind 'ssh
+          :process proc
           :local-port local-port
           :buffer buffer
           :ssh-host ssh-host)))
 
+(defun clutch--tramp-forward-buffer-name (tramp-default-directory host port)
+  "Return the TRAMP TCP forward buffer name for TRAMP-DEFAULT-DIRECTORY HOST PORT."
+  (format " *clutch-tramp %s %s:%s*"
+          (or (file-remote-p tramp-default-directory)
+              tramp-default-directory)
+          host port))
+
+(defun clutch--tramp-ssh-target (vec)
+  "Return the ssh target string for TRAMP VEC."
+  (let ((host (tramp-file-name-host vec))
+        (user (tramp-file-name-user vec)))
+    (unless (and (stringp host) (not (string-empty-p host)))
+      (clutch--user-error "TRAMP forwarding requires an ssh host"))
+    (if (and (stringp user) (not (string-empty-p user)))
+        (format "%s@%s" user host)
+      host)))
+
+(defun clutch--tramp-proxyjump-target (vec)
+  "Return the OpenSSH ProxyJump target string for TRAMP VEC."
+  (let ((target (clutch--tramp-ssh-target vec))
+        (port (tramp-file-name-port vec)))
+    (if port
+        (format "%s:%s" target port)
+      target)))
+
+(defun clutch--tramp-dissect-file-name (tramp-default-directory)
+  "Dissect TRAMP-DEFAULT-DIRECTORY for connection-origin parsing.
+Clutch can map tramp-rpc's `rpc' method to OpenSSH without using tramp-rpc
+file handlers, so provide a local method entry when tramp-rpc is not loaded."
+  (let ((tramp-methods
+         (if (assoc "rpc" tramp-methods)
+             tramp-methods
+           (cons '("rpc" (tramp-login-args (("%h")))) tramp-methods))))
+    (tramp-dissect-file-name tramp-default-directory)))
+
+(defun clutch--tramp-hop-vectors (hop)
+  "Return ssh-like TRAMP vectors parsed from HOP."
+  (when (and (stringp hop) (not (string-empty-p hop)))
+    (mapcar
+     (lambda (hop-part)
+       (clutch--tramp-dissect-file-name
+        (concat tramp-prefix-format hop-part tramp-postfix-host-format)))
+     (split-string hop tramp-postfix-hop-regexp 'omit))))
+
+(defun clutch--tramp-ssh-forward-vector (tramp-default-directory)
+  "Return ssh-like TRAMP vector for TRAMP-DEFAULT-DIRECTORY, or nil."
+  (let* ((vec (clutch--tramp-dissect-file-name tramp-default-directory))
+         (method (tramp-file-name-method vec)))
+    (when (member method clutch--tramp-ssh-forward-methods)
+      vec)))
+
+(defun clutch--tramp-proxyjump (vec)
+  "Return OpenSSH ProxyJump value for VEC hops, or nil."
+  (let ((hops (clutch--tramp-hop-vectors (tramp-file-name-hop vec))))
+    (when hops
+      (dolist (hop-vec hops)
+        (unless (member (tramp-file-name-method hop-vec)
+                        clutch--tramp-ssh-forward-methods)
+          (clutch--user-error
+           "TRAMP forwarding does not support %s hops"
+           (tramp-file-name-method hop-vec))))
+      (mapconcat #'clutch--tramp-proxyjump-target hops ","))))
+
+(defun clutch--tramp-rpc-controlmaster-options (vec)
+  "Return OpenSSH options for reusing tramp-rpc ControlMaster for VEC."
+  (when (and (string= (tramp-file-name-method vec) "rpc")
+             (boundp 'tramp-rpc-use-controlmaster)
+             tramp-rpc-use-controlmaster
+             (fboundp 'tramp-rpc--controlmaster-active-p)
+             (fboundp 'tramp-rpc--controlmaster-socket-path)
+             (tramp-rpc--controlmaster-active-p vec))
+    (list "-o" "ControlMaster=auto"
+          "-o" (format "ControlPath=%s"
+                       (tramp-rpc--controlmaster-socket-path vec)))))
+
+(defun clutch--start-tramp-ssh-forward (params)
+  "Start an OpenSSH local forward for ssh-like TRAMP PARAMS."
+  (unless (executable-find "ssh")
+    (clutch--user-error "TRAMP forwarding requires the OpenSSH client executable `ssh'"))
+  (let* ((tramp-default-directory (plist-get params :tramp-default-directory))
+         (vec (clutch--tramp-ssh-forward-vector tramp-default-directory))
+         (host (plist-get params :host))
+         (port (plist-get params :port))
+         (local-port (clutch--allocate-local-port))
+         (target (and vec (clutch--tramp-ssh-target vec)))
+         (ssh-port (and vec (tramp-file-name-port vec)))
+         (proxyjump (and vec (clutch--tramp-proxyjump vec)))
+         (buffer (get-buffer-create
+                  (clutch--tramp-forward-buffer-name
+                   tramp-default-directory host port)))
+         (timeout (or (plist-get params :connect-timeout)
+                      clutch-connect-timeout-seconds))
+         proc)
+    (unless vec
+      (clutch--user-error
+       "TRAMP forwarding currently supports ssh-like TRAMP directories such as /ssh:host:/path/ or /rpc:host:/path/"))
+    (with-current-buffer buffer
+      (erase-buffer))
+    (setq proc (make-process
+                :name (format "clutch-tramp-ssh-%s:%s" host port)
+                :buffer buffer
+                :command (append
+                          (list "ssh"
+                                "-N"
+                                "-o" "BatchMode=yes"
+                                "-o" "ExitOnForwardFailure=yes"
+                                "-L" (format "127.0.0.1:%d:%s:%s"
+                                             local-port host port))
+                          (clutch--tramp-rpc-controlmaster-options vec)
+                          (when proxyjump
+                            (list "-J" proxyjump))
+                          (when ssh-port
+                            (list "-p" (format "%s" ssh-port)))
+                          (list target))
+                :coding 'utf-8
+                :noquery t))
+    (set-process-query-on-exit-flag proc nil)
+    (clutch--wait-for-ssh-tunnel
+     proc local-port (plist-put (copy-sequence params) :ssh-host target)
+     buffer timeout)
+    (list :kind 'tramp
+          :process proc
+          :local-port local-port
+          :buffer buffer
+          :tramp-default-directory tramp-default-directory)))
+
+(defun clutch--start-tramp-tcp-forward (params)
+  "Start an OpenSSH local forward for ssh-like TRAMP PARAMS."
+  (clutch--validate-network-forward-params params "TRAMP forwarding")
+  (let ((tramp-default-directory (plist-get params :tramp-default-directory)))
+    (unless (and (stringp tramp-default-directory)
+                 (file-remote-p tramp-default-directory))
+      (clutch--user-error
+       "TRAMP forwarding requires :tramp-default-directory to be a remote TRAMP directory"))
+    (if (clutch--tramp-ssh-forward-vector tramp-default-directory)
+        (clutch--start-tramp-ssh-forward params)
+      (clutch--user-error
+       (concat
+        "TRAMP forwarding currently supports ssh-like TRAMP directories "
+        "such as /ssh:host:/path/ or /rpc:host:/path/. Container TRAMP paths need "
+        "an explicit :ssh-host or manual tunnel for now")))))
+
 (defun clutch--prepare-connect-params (params)
-  "Return `(CONNECT-PARAMS TUNNEL)' for PARAMS.
-When PARAMS request SSH, CONNECT-PARAMS targets the local forwarded port
-and TUNNEL contains the live process metadata."
-  (if (not (clutch--ssh-tunnel-enabled-p params))
-      (list params nil)
-    (let* ((tunnel (clutch--start-ssh-tunnel params))
-           (connect-params (copy-sequence params)))
-      (setq connect-params (plist-put connect-params :host "127.0.0.1"))
-      (setq connect-params (plist-put connect-params :port
-                                      (plist-get tunnel :local-port)))
-      (list connect-params tunnel))))
+  "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS.
+When PARAMS request a transport, CONNECT-PARAMS targets the local forwarded
+port and TRANSPORT contains the live process metadata."
+  (if-let* ((kind (clutch--connection-transport-kind params)))
+      (let* ((transport (pcase kind
+                          ('ssh (clutch--start-ssh-tunnel params))
+                          ('tramp (clutch--start-tramp-tcp-forward params))))
+             (connect-params (copy-sequence params)))
+        (setq connect-params (plist-put connect-params :host "127.0.0.1"))
+        (setq connect-params (plist-put connect-params :port
+                                        (plist-get transport :local-port)))
+        (list connect-params transport))
+    (list params nil)))
 
 (defun clutch--make-connection-error-details (params err)
   "Return structured error details for a failed connection attempt.
@@ -1261,7 +1571,7 @@ same credentials as the successful foreground connection."
 Returns a live connection object or signals a `user-error'."
   (let* ((effective-params params)
          (backend (plist-get params :backend))
-         (ssh-tunnel nil))
+         (transport nil))
     (condition-case err
         (progn
           (setq effective-params (clutch--materialize-connection-params params))
@@ -1271,14 +1581,15 @@ Returns a live connection object or signals a `user-error'."
                  (password (plist-get connect-params :password))
                  (db-params (cl-loop for (k v) on connect-params by #'cddr
                                      unless (memq k '(:sql-product :backend :password :pass-entry
-                                                                   :ssh-host))
+                                                                   :ssh-host
+                                                                   :tramp-default-directory))
                                      append (list k v)))
                  (db-params (if password
                                 (append db-params (list :password password))
                               db-params)))
-            (setq ssh-tunnel (cadr prepared))
+            (setq transport (cadr prepared))
             (let ((conn (clutch-db-connect backend db-params)))
-              (clutch--remember-connection-transport conn effective-params ssh-tunnel)
+              (clutch--remember-connection-transport conn effective-params transport)
               (when clutch-debug-mode
                 (clutch--remember-debug-event
                  :connection conn
@@ -1291,9 +1602,8 @@ Returns a live connection object or signals a `user-error'."
                  :context (clutch--debug-connection-context backend effective-params)))
               conn)))
       (clutch-db-error
-       (when-let* ((proc (and ssh-tunnel (plist-get ssh-tunnel :process))))
-         (when (process-live-p proc)
-           (delete-process proc)))
+       (when transport
+         (clutch--stop-connection-transport transport))
        (clutch--remember-problem-record
         :buffer (current-buffer)
         :problem (clutch--make-connection-error-details effective-params err))
@@ -1378,9 +1688,10 @@ raw database string."
    (clutch--console-ad-hoc-params
     clutch--console-ad-hoc-params)
    (clutch--console-name
-    (or (clutch--saved-connection-params clutch--console-name)
-        (clutch--user-error "Saved connection %s for this query console no longer exists"
-                    clutch--console-name)))
+    (clutch--carry-current-connection-origin
+     (or (clutch--saved-connection-params clutch--console-name)
+         (clutch--user-error "Saved connection %s for this query console no longer exists"
+                             clutch--console-name))))
    (t
     (clutch--read-connection-params))))
 
@@ -1416,7 +1727,10 @@ params; see `clutch-connection-alist' for details."
       (clutch--confirm-disconnect-transaction-loss
        old-conn
        "Uncommitted changes will be lost.  Disconnect? "))
-    (let* ((params  (clutch--connect-params-for-current-buffer))
+    (let* ((source-default-directory default-directory)
+           (params  (clutch--prepare-connection-origin-params
+                     (clutch--connect-params-for-current-buffer)
+                     source-default-directory))
            (effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product effective-params))
            (conn    (clutch--build-conn params)))
