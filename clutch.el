@@ -52,10 +52,8 @@
 (require 'transient)
 (require 'clutch-schema)
 (require 'clutch-ui)
-(require 'clutch-debug)
 (require 'clutch-object)
 (require 'clutch-edit)
-(require 'clutch-export)
 (require 'xref)
 
 (defvar clutch--describe-object-entry)
@@ -427,6 +425,20 @@ after async metadata refreshes."
   :type 'natnum
   :group 'clutch)
 
+(defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
+  "Default coding system when exporting CSV files."
+  :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
+                 (const :tag "UTF-8" utf-8)
+                 (const :tag "GBK" gbk)
+                 (coding-system :tag "Other coding system"))
+  :group 'clutch)
+
+(defcustom clutch-debug-event-limit 25
+  "Maximum number of recent debug events kept per buffer or connection.
+Only recorded while `clutch-debug-mode' is enabled."
+  :type 'natnum
+  :group 'clutch)
+
 (defcustom clutch-console-yank-cleanup t
   "When non-nil, clean whitespace in pasted text in query consoles.
 After `yank', `yank-pop', or `clipboard-yank' in a query console buffer,
@@ -435,10 +447,22 @@ cleaned up in the pasted region only."
   :type 'boolean
   :group 'clutch)
 
+(defconst clutch-debug-buffer-name "*clutch-debug*"
+  "Name of the dedicated clutch debug buffer.")
+
 ;;;; Buffer-local variables
 
 (defvar-local clutch-connection nil
   "Current database connection for this buffer.")
+
+(defvar clutch-debug-mode nil
+  "Non-nil when Clutch debug capture is enabled.")
+
+(defvar-local clutch--buffer-error-details nil
+  "Current problem record scoped to this buffer.")
+
+(defvar clutch--problem-records-by-conn (make-hash-table :test 'eq :weakness 'key)
+  "Current problem records keyed by live connection object.")
 
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
@@ -489,6 +513,379 @@ Dynamically bound by `clutch--execute-and-mark'.")
 
 (defvar-local clutch--live-view-buffer nil
   "Live value viewer buffer attached to the current source buffer, or nil.")
+
+(defvar-local clutch--debug-events nil
+  "Recent redacted debug events captured for this buffer.")
+
+(defvar clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key)
+  "Recent redacted debug events keyed by live connection object.")
+
+(defvar clutch--debug-buffer-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `clutch--debug-buffer-mode'.")
+
+(define-derived-mode clutch--debug-buffer-mode special-mode "clutch-debug"
+  "Mode for inspecting the dedicated clutch debug buffer.")
+
+(defun clutch--debug-buffer ()
+  "Return the dedicated clutch debug buffer, creating it if needed."
+  (let ((buf (get-buffer-create clutch-debug-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'clutch--debug-buffer-mode)
+        (clutch--debug-buffer-mode))
+      (setq-local header-line-format " Clutch debug capture"))
+    buf))
+
+(defun clutch--reset-debug-buffer ()
+  "Reset the dedicated clutch debug buffer for a new capture window."
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (format "Clutch Debug\n============\nStarted: %s\n"
+                      (format-time-string "%F %T"))))))
+
+(defun clutch--debug-buffer-source-label (buffer)
+  "Return a human-readable source label for BUFFER."
+  (when (buffer-live-p buffer)
+    (buffer-name buffer)))
+
+(defun clutch--debug-buffer-connection-label (connection)
+  "Return a human-readable connection label for CONNECTION."
+  (when connection
+    (condition-case nil
+        (clutch--connection-key connection)
+      (error nil))))
+
+(defun clutch--debug-format-label (key)
+  "Return a human-readable label for KEY."
+  (capitalize
+   (replace-regexp-in-string
+    "-" " "
+    (string-remove-prefix ":" (format "%s" key)))))
+
+(defun clutch--debug-indent-block (text spaces)
+  "Indent TEXT by SPACES."
+  (let ((prefix (make-string spaces ?\s)))
+    (string-join
+     (mapcar (lambda (line)
+               (if (string-empty-p line)
+                   line
+                 (concat prefix line)))
+             (split-string (string-trim-right text) "\n"))
+     "\n")))
+
+(defun clutch--debug-format-plist-data (plist)
+  "Return a human-readable string for PLIST."
+  (with-temp-buffer
+    (cl-loop for (key val) on plist by #'cddr
+             when val
+             do (let ((rendered (clutch--debug-format-data val)))
+                  (when rendered
+                    (if (string-match-p "\n" rendered)
+                        (insert (format "%s:\n%s\n"
+                                        (clutch--debug-format-label key)
+                                        (clutch--debug-indent-block rendered 2)))
+                      (insert (format "%s: %s\n"
+                                      (clutch--debug-format-label key)
+                                      rendered))))))
+    (string-trim-right (buffer-string))))
+
+(defun clutch--debug-format-list-data (items)
+  "Return a human-readable string for ITEMS."
+  (string-join
+   (mapcar
+    (lambda (item)
+      (let ((rendered (clutch--debug-format-data item)))
+        (if (string-match-p "\n" rendered)
+            (concat "-\n" (clutch--debug-indent-block rendered 2))
+          (concat "- " rendered))))
+    items)
+   "\n"))
+
+(defun clutch--debug-format-data (data)
+  "Return a human-readable string for DATA."
+  (cond
+   ((null data) nil)
+   ((stringp data) data)
+   ((vectorp data) (clutch--debug-format-data (append data nil)))
+   ((and (listp data) (keywordp (car-safe data)))
+    (clutch--debug-format-plist-data data))
+   ((listp data)
+    (clutch--debug-format-list-data data))
+   (t (format "%s" data))))
+
+(defun clutch--debug-insert-field (label value)
+  "Insert LABEL and VALUE into the current debug output buffer."
+  (when-let* ((rendered (clutch--debug-format-data value)))
+    (if (string-match-p "\n" rendered)
+        (insert (format "%s:\n%s\n"
+                        label
+                        (clutch--debug-indent-block rendered 2)))
+      (insert (format "%s: %s\n" label rendered)))))
+
+(defun clutch--debug-insert-section (title value)
+  "Insert a TITLE section containing VALUE into the current debug buffer."
+  (when-let* ((rendered (clutch--debug-format-data value)))
+    (insert "\n" title "\n")
+    (insert (clutch--debug-indent-block rendered 2) "\n")))
+
+(defun clutch--debug-context-without-inline-sql (context)
+  "Return CONTEXT plist without inline SQL payload entries."
+  (when context
+    (cl-loop for (key val) on context by #'cddr
+             unless (memq key '(:generated-sql :sql))
+             append (list key val))))
+
+(defun clutch--append-debug-buffer-entry (heading body)
+  "Append HEADING and BODY to the dedicated debug buffer."
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (unless (bobp)
+        (insert "\n\n"))
+      (insert heading "\n")
+      (insert (make-string (length heading) ?-) "\n")
+      (when body
+        (insert body))
+      (unless (or (bobp) (eq (char-before) ?\n))
+        (insert "\n")))))
+
+(defun clutch--append-problem-record-to-debug-buffer (buffer connection problem)
+  "Append PROBLEM for BUFFER and CONNECTION to the dedicated debug buffer."
+  (when (and clutch-debug-mode problem)
+    (let* ((backend (plist-get problem :backend))
+           (diag (plist-get problem :diag))
+           (debug-payload (plist-get problem :debug))
+           (stderr-tail (plist-get problem :stderr-tail))
+           (context (copy-tree (plist-get diag :context)))
+           (sql (plist-get context :sql))
+           (generated-sql (plist-get context :generated-sql))
+           (display-context
+            (clutch--debug-context-without-inline-sql context))
+           (body
+            (with-temp-buffer
+              (clutch--debug-insert-field "Recorded"
+                                          (format-time-string "%F %T"))
+              (clutch--debug-insert-field "Backend"
+                                          (and backend
+                                               (upcase (symbol-name backend))))
+              (clutch--debug-insert-field "Source"
+                                          (clutch--debug-buffer-source-label buffer))
+              (clutch--debug-insert-field "Connection"
+                                          (clutch--debug-buffer-connection-label connection))
+              (clutch--debug-insert-field "Summary"
+                                          (plist-get problem :summary))
+              (clutch--debug-insert-field "Category" (plist-get diag :category))
+              (clutch--debug-insert-field "Operation" (plist-get diag :op))
+              (clutch--debug-insert-field "Request ID" (plist-get diag :request-id))
+              (clutch--debug-insert-field "Conn ID" (plist-get diag :conn-id))
+              (clutch--debug-insert-field "Exception"
+                                          (plist-get diag :exception-class))
+              (clutch--debug-insert-field "SQLState" (plist-get diag :sql-state))
+              (clutch--debug-insert-field "Vendor code" (plist-get diag :vendor-code))
+              (clutch--debug-insert-field "Raw message"
+                                          (plist-get diag :raw-message))
+              (clutch--debug-insert-section "SQL" sql)
+              (clutch--debug-insert-section "Generated SQL" generated-sql)
+              (clutch--debug-insert-section "Context" display-context)
+              (clutch--debug-insert-section "Cause chain"
+                                            (plist-get diag :cause-chain))
+              (clutch--debug-insert-section "Backend debug" debug-payload)
+              (clutch--debug-insert-section "Agent stderr tail" stderr-tail)
+              (string-trim-right (buffer-string)))))
+      (clutch--append-debug-buffer-entry "Problem" body))))
+
+(defun clutch--append-debug-event-to-buffer (buffer connection event)
+  "Append EVENT for BUFFER and CONNECTION to the dedicated debug buffer."
+  (when clutch-debug-mode
+    (let* ((backend (plist-get event :backend))
+           (body
+            (with-temp-buffer
+              (clutch--debug-insert-field "Recorded"
+                                          (or (plist-get event :time)
+                                              (format-time-string "%F %T")))
+              (clutch--debug-insert-field "Operation" (plist-get event :op))
+              (clutch--debug-insert-field "Phase" (plist-get event :phase))
+              (clutch--debug-insert-field "Backend"
+                                          (and backend
+                                               (upcase (symbol-name backend))))
+              (clutch--debug-insert-field "Source"
+                                          (clutch--debug-buffer-source-label buffer))
+              (clutch--debug-insert-field "Connection"
+                                          (clutch--debug-buffer-connection-label connection))
+              (when-let* ((elapsed (plist-get event :elapsed)))
+                (clutch--debug-insert-field "Elapsed"
+                                            (clutch--format-elapsed elapsed)))
+              (clutch--debug-insert-field "Summary" (plist-get event :summary))
+              (clutch--debug-insert-field "SQL preview"
+                                          (plist-get event :sql-preview))
+              (clutch--debug-insert-section "Context"
+                                            (plist-get event :context))
+              (string-trim-right (buffer-string)))))
+      (clutch--append-debug-buffer-entry "Trace Event" body))))
+
+(defun clutch--clear-debug-capture ()
+  "Forget captured debug events and reset the dedicated debug buffer."
+  (setq clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key))
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (setq-local clutch--debug-events nil))))
+  (clutch--reset-debug-buffer))
+
+(defun clutch--attached-buffer-for-connection (connection)
+  "Return one live buffer attached to CONNECTION, or nil."
+  (when connection
+    (or (and (eq clutch-connection connection)
+             (current-buffer))
+        (cl-loop for buf in (buffer-list)
+                 when (and (buffer-live-p buf)
+                           (eq (buffer-local-value 'clutch-connection buf)
+                               connection))
+                 return buf))))
+
+(defun clutch--replay-problem-records-to-debug-buffer ()
+  "Replay stored problem records into the dedicated debug buffer.
+This preserves historical failure context when debug capture starts after a
+problem was already recorded."
+  (let (records seen)
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when clutch--buffer-error-details
+            (let ((entry (list :buffer buf
+                               :connection clutch-connection
+                               :problem (copy-tree clutch--buffer-error-details))))
+              (unless (member entry seen)
+                (push entry seen)
+                (push entry records)))))))
+    (maphash
+     (lambda (connection problem)
+       (let ((entry (list :buffer (clutch--attached-buffer-for-connection connection)
+                          :connection connection
+                          :problem (copy-tree problem))))
+         (unless (member entry seen)
+           (push entry seen)
+           (push entry records))))
+     clutch--problem-records-by-conn)
+    (when records
+      (clutch--append-debug-buffer-entry
+       "Historical Problems"
+       "Recorded before debug mode was enabled.")
+      (dolist (entry (nreverse records))
+        (clutch--append-problem-record-to-debug-buffer
+         (plist-get entry :buffer)
+         (plist-get entry :connection)
+         (plist-get entry :problem))))))
+
+;;;###autoload
+(define-minor-mode clutch-debug-mode
+  "Capture additional redacted troubleshooting data for clutch workflows.
+When enabled, clutch records a bounded recent-event trace per buffer and per
+connection.  JDBC requests also ask the agent for an optional debug payload,
+and captured output is appended to the dedicated `*clutch-debug*' buffer."
+  :global t
+  :group 'clutch
+  :lighter " ClutchDbg"
+  (when clutch-debug-mode
+    (clutch--clear-debug-capture)
+    (clutch--replay-problem-records-to-debug-buffer)))
+
+(defun clutch--remember-problem-record (&rest args)
+  "Store the current problem record described by ARGS.
+Recognized keys are :buffer, :connection, and :problem.  Problem records are
+stored buffer-locally and, when CONNECTION is non-nil, in the shared
+connection-scoped registry."
+  (let* ((buffer (or (plist-get args :buffer) (current-buffer)))
+         (connection (plist-get args :connection))
+         (problem (copy-tree (plist-get args :problem))))
+    (when (and buffer (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (setq-local clutch--buffer-error-details problem)))
+    (when connection
+      (if problem
+          (puthash connection problem clutch--problem-records-by-conn)
+        (remhash connection clutch--problem-records-by-conn)))
+    (when problem
+      (clutch--append-problem-record-to-debug-buffer buffer connection problem))
+    problem))
+
+(defun clutch--forget-problem-record (&optional buffer connection)
+  "Forget the current problem record for BUFFER and CONNECTION."
+  (when (and buffer (buffer-live-p buffer))
+    (with-current-buffer buffer
+      (setq-local clutch--buffer-error-details nil)))
+  (when connection
+    (remhash connection clutch--problem-records-by-conn)))
+
+(defun clutch--forget-problem-records-for-connection (connection)
+  "Forget problem records for CONNECTION across all attached buffers."
+  (when connection
+    (remhash connection clutch--problem-records-by-conn)
+    (dolist (buf (buffer-list))
+      (when (and (buffer-live-p buf)
+                 (eq (buffer-local-value 'clutch-connection buf) connection))
+        (with-current-buffer buf
+          (setq-local clutch--buffer-error-details nil))))))
+
+(defun clutch--clear-connection-problem-capture (connection)
+  "Forget problem records and backend-local diagnostics for CONNECTION."
+  (when connection
+    (clutch--forget-problem-records-for-connection connection)
+    (clutch-db-clear-error-details connection)))
+
+(defun clutch--debug-sql-preview (sql)
+  "Return a compact single-line preview of SQL."
+  (when sql
+    (truncate-string-to-width
+     (replace-regexp-in-string "[\n\r\t ]+" " " (string-trim sql))
+     160 0 nil "...")))
+
+(defun clutch--debug-trim-events (events)
+  "Return EVENTS truncated to `clutch-debug-event-limit'."
+  (let ((limit (max 1 clutch-debug-event-limit)))
+    (cl-subseq events 0 (min limit (length events)))))
+
+(defun clutch--normalize-debug-event (event)
+  "Return EVENT normalized for storage."
+  (let ((normalized (copy-tree event)))
+    (unless (plist-get normalized :time)
+      (setq normalized
+            (plist-put normalized :time
+                       (format-time-string "%F %T"))))
+    (when-let* ((sql (plist-get normalized :sql)))
+      (setq normalized (plist-put normalized :sql-preview
+                                  (clutch--debug-sql-preview sql)))
+      (setq normalized (plist-put normalized :sql-length (length sql)))
+      (cl-remf normalized :sql))
+    normalized))
+
+(defun clutch--remember-debug-event (&rest event)
+  "Record EVENT for the current buffer and optional connection.
+Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
+:backend, :context, and :elapsed.  Recording is disabled unless
+`clutch-debug-mode' is non-nil."
+  (when clutch-debug-mode
+    (let* ((buffer (or (plist-get event :buffer) (current-buffer)))
+           (conn (plist-get event :connection))
+           (normalized (clutch--normalize-debug-event event)))
+      (cl-remf normalized :buffer)
+      (cl-remf normalized :connection)
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq-local clutch--debug-events
+                      (clutch--debug-trim-events
+                       (cons normalized clutch--debug-events)))))
+      (when conn
+        (puthash conn
+                 (clutch--debug-trim-events
+                  (cons normalized (gethash conn clutch--debug-events-by-conn)))
+                 clutch--debug-events-by-conn))
+      (clutch--append-debug-event-to-buffer buffer conn normalized)
+      normalized)))
 
 (defun clutch--effective-sql-product (params)
   "Return the SQL product to use for connection PARAMS."
@@ -4279,6 +4676,251 @@ OP is a short operation description used in user-facing error messages."
                table identity-vec edits col-names row-identity)
               statements)))
     (clutch-result--render-statements (nreverse statements))))
+
+(defconst clutch--result-export-formats
+  '(("csv-copy" :kind csv :destination clipboard)
+    ("csv-file" :kind csv :destination file)
+    ("insert-copy" :kind insert :destination clipboard)
+    ("insert-file" :kind insert :destination file)
+    ("update-copy" :kind update :destination clipboard)
+    ("update-file" :kind update :destination file))
+  "Available result export choices and their execution targets.")
+
+(defconst clutch--result-export-kinds
+  '((csv . (:content clutch--export-csv-content
+            :file-prompt "Export CSV to file: "
+            :default-file "export.csv"
+            :copy-message "Copied %d row%s as CSV"
+            :file-message "Exported %d row%s to %s (%s)"
+            :file-coding csv))
+    (insert . (:content clutch--export-insert-content
+               :file-prompt "Export SQL to file: "
+               :default-file "export.sql"
+               :copy-message "Copied %d row%s as INSERT SQL"
+               :file-message "Exported %d row%s as INSERT SQL to %s"))
+    (update . (:content clutch--export-update-content
+               :file-prompt "Export SQL to file: "
+               :default-file "export.sql"
+               :copy-message "Copied %d row%s as UPDATE SQL"
+               :file-message "Exported %d row%s as UPDATE SQL to %s")))
+  "Result export behavior keyed by logical export kind.")
+
+(defun clutch-result--copy-selection-indices (&optional rect)
+  "Return row and column indices for result copy commands.
+RECT, when non-nil, has priority.  Otherwise active regions are treated as a
+rectangle and inactive regions fall back to the current cell."
+  (let ((rect (or rect
+                  (if (use-region-p)
+                      (clutch-result--region-rectangle-indices)
+                    (pcase-let ((`(,ridx ,cidx ,_v)
+                                 (or (clutch-result--cell-at-point)
+                                     (clutch--user-error "No cell at point"))))
+                      (cons (list ridx) (list cidx)))))))
+    (cons (or (car-safe rect)
+              (clutch-result--selected-row-indices)
+              (clutch--user-error "No row at point"))
+          (or (cdr-safe rect)
+              (clutch--visible-columns)))))
+
+(defun clutch-result--copy-rows-as-insert (&optional rect)
+  "Copy row(s) as INSERT statement(s) to the kill ring.
+Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
+  (let* ((selection (clutch-result--copy-selection-indices rect))
+         (indices (car selection))
+         (col-indices (cdr selection))
+         (table (clutch--insert-target-table))
+         (stmts (clutch-result--build-insert-statements indices col-indices table)))
+    (kill-new (mapconcat #'identity stmts "\n"))
+    (deactivate-mark)
+    (message "Copied %s %s statement%s (%s col%s)"
+             (clutch--message-count (length stmts))
+             (clutch--message-keyword "INSERT")
+             (if (= (length stmts) 1) "" "s")
+             (clutch--message-count (length col-indices))
+             (if (= (length col-indices) 1) "" "s"))))
+
+(defun clutch-result--copy-rows-as-update (&optional rect)
+  "Copy row(s) as UPDATE statement(s) to the kill ring.
+Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
+  (let* ((selection (clutch-result--copy-selection-indices rect))
+         (indices (car selection))
+         (col-indices (cdr selection))
+         (rows (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices))
+         (stmts (clutch-result--build-update-statements-for-rows
+                 rows col-indices "copy UPDATE SQL")))
+    (kill-new (mapconcat #'identity stmts "\n"))
+    (deactivate-mark)
+    (message "Copied %s %s statement%s (%s col%s)"
+             (clutch--message-count (length stmts))
+             (clutch--message-keyword "UPDATE")
+             (if (= (length stmts) 1) "" "s")
+             (clutch--message-count (length col-indices))
+             (if (= (length col-indices) 1) "" "s"))))
+
+(defun clutch--csv-escape (val)
+  "Return CSV-escaped string for VAL."
+  (let ((s (clutch--format-value val)))
+    (if (string-match-p "[,\"\n]" s)
+        (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
+      s)))
+
+(defun clutch--csv-lines-for-rows (rows col-indices)
+  "Return CSV lines for ROWS using COL-INDICES."
+  (let ((col-names (mapcar (lambda (i) (nth i clutch--result-columns))
+                           col-indices)))
+    (cons (mapconcat #'identity col-names ",")
+          (cl-loop for row in rows
+                   for vals = (mapcar (lambda (i) (nth i row)) col-indices)
+                   collect (mapconcat #'clutch--csv-escape vals ",")))))
+
+(defun clutch-result--build-csv-lines (indices col-indices)
+  "Return CSV lines for INDICES rows using COL-INDICES columns."
+  (clutch--csv-lines-for-rows
+   (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices)
+   col-indices))
+
+(defun clutch-result--copy-rows-as-csv (&optional rect)
+  "Copy row(s) as CSV to the kill ring.
+Use RECT when non-nil.  Rows/columns: region rectangle > current cell.
+Includes a header row with column names."
+  (let* ((selection (clutch-result--copy-selection-indices rect))
+         (indices (car selection))
+         (col-indices (cdr selection))
+         (lines (clutch-result--build-csv-lines indices col-indices)))
+    (kill-new (mapconcat #'identity lines "\n"))
+    (deactivate-mark)
+    (message "Copied %s row%s as %s (%s col%s)"
+             (clutch--message-count (length indices))
+             (if (= (length indices) 1) "" "s")
+             (clutch--message-keyword "CSV")
+             (clutch--message-count (length col-indices))
+             (if (= (length col-indices) 1) "" "s"))))
+
+;;;###autoload
+(defun clutch-result-export ()
+  "Export the current result.
+Prompts for format:
+- csv-copy: all rows to clipboard as CSV text
+- csv-file: all rows to CSV file
+- insert-copy: all rows to clipboard as INSERT statements
+- insert-file: all rows to a .sql file as INSERT statements
+- update-copy: all rows to clipboard as UPDATE statements
+- update-file: all rows to a .sql file as UPDATE statements."
+  (interactive)
+  (let* ((choice (completing-read
+                  "Export format: "
+                  (mapcar #'car clutch--result-export-formats)
+                  nil t))
+         (format (cdr (assoc choice clutch--result-export-formats))))
+    (unless format
+      (clutch--user-error "Unsupported export format: %s" choice))
+    (clutch--export-result format)))
+
+(defun clutch--export-csv-content (rows)
+  "Return CSV export text for ROWS using current visible result columns."
+  (let* ((lines (clutch--csv-lines-for-rows rows (clutch--visible-columns)))
+         (body (mapconcat #'identity (cdr lines) "\n")))
+    (if (string-empty-p body)
+        (concat (car lines) "\n")
+      (concat (car lines) "\n" body "\n"))))
+
+(defun clutch--csv-export-coding-choices ()
+  "Return alist of CSV export coding labels to coding systems."
+  (let ((pairs '(("utf-8-bom" . utf-8-with-signature)
+                 ("utf-8" . utf-8)
+                 ("gbk" . gbk)
+                 ("cp936" . cp936))))
+    (cl-loop for (label . coding) in pairs
+             when (coding-system-p coding)
+             collect (cons label coding))))
+
+(defun clutch--read-csv-export-coding-system ()
+  "Read coding system for CSV file export."
+  (let* ((choices (clutch--csv-export-coding-choices))
+         (default (if (coding-system-p clutch-csv-export-default-coding-system)
+                      clutch-csv-export-default-coding-system
+                    'utf-8-with-signature))
+         (default-label (car (rassoc default choices)))
+         (label (completing-read
+                 (format "CSV encoding (default %s): "
+                         (or default-label (symbol-name default)))
+                 (mapcar #'car choices) nil t nil nil default-label)))
+    (or (cdr (assoc label choices)) default)))
+
+(defun clutch-result--collect-all-export-rows ()
+  "Return all rows for current result by auto-paging when needed."
+  (clutch--ensure-connection)
+  (let ((effective-sql (clutch-result--effective-query)))
+    (if (null effective-sql)
+        clutch--result-rows
+      (let* ((row-identity-prep
+              (clutch--prepare-row-identity-query clutch-connection effective-sql))
+             (identity-sql (plist-get row-identity-prep :sql)))
+        (if (or (null clutch--base-query)
+                (clutch--sql-has-limit-p effective-sql))
+            (clutch-db-result-rows
+             (clutch--run-db-query clutch-connection identity-sql))
+          (cl-loop with page-size = clutch-result-max-rows
+                   for page-num from 0
+                   for paged-sql = (clutch--build-paged-sql
+                                    identity-sql page-num page-size
+                                    clutch--order-by)
+                   for result = (clutch--run-db-query
+                                  clutch-connection paged-sql)
+                   for batch = (clutch-db-result-rows result)
+                   append batch into rows
+                   until (< (length batch) page-size)
+                   finally return rows))))))
+
+(defun clutch--export-insert-content (rows)
+  "Return INSERT statement export text for ROWS using current result metadata."
+  (let* ((table (clutch--insert-target-table))
+         (col-indices (clutch--visible-columns))
+         (stmts (clutch-result--build-insert-statements-for-rows
+                 rows col-indices table)))
+    (if stmts
+        (concat (mapconcat #'identity stmts "\n") "\n")
+      "")))
+
+(defun clutch--export-update-content (rows)
+  "Return UPDATE statement export text for ROWS using current result metadata."
+  (let* ((col-indices (clutch--visible-columns))
+         (stmts (clutch-result--build-update-statements-for-rows
+                 rows col-indices "export UPDATE SQL")))
+    (if stmts
+        (concat (mapconcat #'identity stmts "\n") "\n")
+      "")))
+
+(defun clutch--export-result (format)
+  "Execute result export described by FORMAT."
+  (let* ((kind (plist-get format :kind))
+         (destination (plist-get format :destination))
+         (spec (or (cdr (assq kind clutch--result-export-kinds))
+                   (clutch--user-error "Unsupported export kind: %s" kind)))
+         (rows (clutch-result--collect-all-export-rows))
+         (coding (when (and (eq destination 'file)
+                            (eq (plist-get spec :file-coding) 'csv))
+                   (clutch--read-csv-export-coding-system)))
+         (text (funcall (plist-get spec :content) rows))
+         (row-count (length rows))
+         (row-suffix (if (= (length rows) 1) "" "s")))
+    (pcase destination
+      ('clipboard
+       (kill-new text)
+       (message (plist-get spec :copy-message) row-count row-suffix))
+      ('file
+       (let* ((path (read-file-name (plist-get spec :file-prompt)
+                                    nil nil nil
+                                    (plist-get spec :default-file)))
+              (coding-system-for-write (or coding coding-system-for-write)))
+         (with-temp-buffer
+           (insert text)
+           (write-region (point-min) (point-max) path nil 'silent))
+         (apply #'message (plist-get spec :file-message)
+                (append (list row-count row-suffix path)
+                        (when coding (list coding))))))
+      (_
+       (clutch--user-error "Unsupported export destination: %s" destination)))))
 
 (defun clutch-result--goto-col-idx (col-idx)
   "Move point to COL-IDX in the current row, preserving the row position.

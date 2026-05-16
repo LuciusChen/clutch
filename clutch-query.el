@@ -87,9 +87,9 @@
 
 ;; Forward declarations — functions defined in clutch.el
 (declare-function clutch--console-buffer-base-name "clutch" (name))
-(declare-function clutch--debug-sql-preview "clutch-debug" (sql))
-(declare-function clutch--remember-debug-event "clutch-debug" (&rest event))
-(declare-function clutch--remember-problem-record "clutch-debug" (&rest args))
+(declare-function clutch--debug-sql-preview "clutch" (sql))
+(declare-function clutch--remember-debug-event "clutch" (&rest event))
+(declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--find-console-buffer "clutch" (name &optional storage-name))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--console-persistence-name "clutch" (name &optional params))

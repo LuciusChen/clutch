@@ -79,10 +79,10 @@
 
 ;; Forward declarations — functions defined in clutch.el
 (declare-function clutch--effective-sql-product "clutch" (params))
-(declare-function clutch--clear-connection-problem-capture "clutch-debug" (connection))
-(declare-function clutch--forget-problem-record "clutch-debug" (&optional buffer connection))
-(declare-function clutch--remember-debug-event "clutch-debug" (&rest event))
-(declare-function clutch--remember-problem-record "clutch-debug" (&rest args))
+(declare-function clutch--clear-connection-problem-capture "clutch" (connection))
+(declare-function clutch--forget-problem-record "clutch" (&optional buffer connection))
+(declare-function clutch--remember-debug-event "clutch" (&rest event))
+(declare-function clutch--remember-problem-record "clutch" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--refresh-result-status-line "clutch" ())
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))
