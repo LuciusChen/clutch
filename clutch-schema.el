@@ -88,7 +88,7 @@
 (declare-function clutch--invalidate-object-warmup "clutch-object" (conn &optional key))
 (declare-function clutch--remember-debug-event "clutch" (&rest event))
 (declare-function clutch--remember-problem-record "clutch" (&rest args))
-(declare-function clutch--cached-columns "clutch" (schema table))
+(declare-function clutch--cached-columns "clutch-sql" (schema table))
 (declare-function clutch--refresh-result-metadata-buffers "clutch-ui" (conn table))
 (declare-function clutch--schedule-object-warmup "clutch-object" (conn))
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))

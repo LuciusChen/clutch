@@ -96,7 +96,6 @@
 (declare-function clutch--console-file "clutch" (name))
 (declare-function clutch--effective-sql-product "clutch" (params))
 (declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))
-(declare-function clutch--sql-rewrite "clutch" (sql op &optional arg))
 
 ;; Forward declarations — functions from clutch-connection.el
 (declare-function clutch--connection-key "clutch-connection" (conn))
@@ -120,9 +119,9 @@
 (declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
 (declare-function clutch--prepare-connection-origin-params
                   "clutch-connection" (params &optional source-default-directory))
-;; clutch-result-mode and clutch-mode are defined in clutch.el which requires
-;; clutch-query.el — we cannot require clutch here.
-(declare-function clutch-result-mode "clutch" ())
+;; `clutch-result-mode' is defined in clutch-result.el, which requires this
+;; file, so query keeps a forward declaration instead of requiring it.
+(declare-function clutch-result-mode "clutch-result" ())
 (declare-function clutch-mode "clutch" ())
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
@@ -1206,6 +1205,59 @@ Includes the active WHERE filter when one is applied."
         (clutch--apply-where base clutch--where-filter)
       base)))
 
+(defun clutch--sql-strip-top-level-tail (sql)
+  "Strip top-level ORDER/LIMIT/OFFSET tail clauses from SQL."
+  (let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY"))
+         (limit-pos (clutch-db-sql-find-top-level-clause sql "LIMIT"))
+         (offset-pos (clutch-db-sql-find-top-level-clause sql "OFFSET"))
+         (cut-pos (car (sort (delq nil (list order-pos limit-pos offset-pos)) #'<))))
+    (if cut-pos
+        (string-trim-right (substring sql 0 cut-pos))
+      sql)))
+
+(defun clutch--sql-rewrite-fallback (sql op arg)
+  "Fallback SQL rewrite for OP with ARG when structured rewrite fails."
+  (let ((trimmed (string-trim-right
+                  (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+    (pcase op
+      ('where (format "SELECT * FROM (%s) %s WHERE %s"
+                      trimmed
+                      (clutch--sql-derived-table-alias "_clutch_filter")
+                      arg))
+      ('count (format "SELECT COUNT(*) FROM (%s) %s"
+                      (clutch--sql-strip-top-level-tail trimmed)
+                      (clutch--sql-derived-table-alias "_clutch_count")))
+      (_ (error "Unsupported rewrite op: %s" op)))))
+
+(defun clutch--sql-rewrite (sql op &optional arg)
+  "Rewrite SQL for OP with optional ARG.
+Uses top-level clause awareness with a derived-table fallback for complex SQL."
+  (condition-case nil
+      (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
+        (pcase op
+          ('where
+           (format "SELECT * FROM (%s) %s WHERE %s"
+                   normalized
+                   (clutch--sql-derived-table-alias "_clutch_filter")
+                   arg))
+          ('count
+           (format "SELECT COUNT(*) FROM (%s) %s"
+                   (clutch--sql-strip-top-level-tail normalized)
+                   (clutch--sql-derived-table-alias "_clutch_count")))
+          (_ (error "Unsupported rewrite op: %s" op))))
+    (error
+     (clutch--sql-rewrite-fallback sql op arg))))
+
+(defun clutch--build-count-sql (sql)
+  "Rewrite SQL as a COUNT(*) query.
+Uses the rewrite layer so complex SQL is handled via derived-table count."
+  (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
+    (if (clutch--sql-has-page-tail-p normalized)
+        (format "SELECT COUNT(*) FROM (%s) %s"
+                normalized
+                (clutch--sql-derived-table-alias "_clutch_count"))
+      (clutch--sql-rewrite normalized 'count))))
+
 (defun clutch--apply-where (sql filter)
   "Apply WHERE FILTER to SQL query string.
 Wraps SQL as a derived table and applies FILTER in an outer WHERE.
@@ -1386,13 +1438,20 @@ actionable hints for known error patterns."
       (format "%s Enable clutch-debug-mode, reproduce the failure, then inspect %s."
               message clutch-debug-buffer-name))))
 
-(defun clutch--make-buffer-query-error-details (connection sql err)
+(defun clutch--make-buffer-query-error-details
+    (connection sql err &optional extra-context extra-diag)
   "Return structured error details for a failed SQL execution on CONNECTION.
-SQL is the user-visible statement.  ERR is the original signaled condition."
+SQL is the user-visible statement.  ERR is the original signaled condition.
+EXTRA-CONTEXT is merged into the diagnostic context when non-nil.
+EXTRA-DIAG is merged into the diagnostic plist when non-nil."
   (let* ((message (or (cadr err) (error-message-string err)))
          (details (copy-tree (nth 2 err)))
          (diag (copy-tree (plist-get details :diag)))
          (context (copy-tree (plist-get diag :context))))
+    (when extra-diag
+      (setq diag (append extra-diag diag)))
+    (when extra-context
+      (setq context (append extra-context context)))
     (unless details
       (setq details (list :summary (clutch--humanize-db-error message))))
     (when-let* ((backend (and connection
@@ -1414,35 +1473,49 @@ SQL is the user-visible statement.  ERR is the original signaled condition."
     (setq diag (plist-put diag :context context))
     (plist-put details :diag diag)))
 
-(defun clutch--remember-buffer-query-error-details (buffer connection sql err)
+(defun clutch--remember-buffer-query-error-details
+    (buffer connection sql err &optional extra-context extra-diag)
   "Store the failed SQL execution details for BUFFER.
-CONNECTION, SQL and ERR describe the failed query."
+CONNECTION, SQL and ERR describe the failed query.
+EXTRA-CONTEXT is merged into the diagnostic context when non-nil.
+EXTRA-DIAG is merged into the diagnostic plist when non-nil."
   (when (buffer-live-p buffer)
     (clutch--remember-problem-record
      :buffer buffer
      :connection connection
-     :problem (clutch--make-buffer-query-error-details connection sql err))))
+     :problem (clutch--make-buffer-query-error-details
+               connection sql err extra-context extra-diag))))
 
-(defun clutch--remember-execute-error (buffer connection sql err &optional context)
-  "Capture a failed execute path for BUFFER on CONNECTION.
-SQL is the user-visible statement and ERR is the original condition.
-Optional CONTEXT is merged into the debug event.  Return
-`(MESSAGE . SUMMARY)' for the failure."
+(defun clutch--remember-query-error
+    (buffer connection op sql err &optional context diag)
+  "Capture a failed query-like OP for BUFFER on CONNECTION.
+SQL is the generated statement and ERR is the original condition.
+Optional CONTEXT is merged into the stored problem and debug event.
+Optional DIAG is merged into the stored problem diagnostic plist.
+Return `(MESSAGE . SUMMARY)' for the failure."
   (let* ((formatted (error-message-string err))
          (message (if (stringp (cadr err)) (cadr err) formatted))
          (summary (clutch--humanize-db-error formatted)))
-    (clutch--remember-buffer-query-error-details buffer connection sql err)
+    (clutch--remember-buffer-query-error-details
+     buffer connection sql err context diag)
     (when clutch-debug-mode
       (clutch--remember-debug-event
        :buffer buffer
        :connection connection
-       :op "execute"
+       :op op
        :phase "error"
        :backend (clutch--backend-key-from-conn connection)
        :summary summary
        :sql sql
        :context context))
     (cons message summary)))
+
+(defun clutch--remember-execute-error (buffer connection sql err &optional context)
+  "Capture a failed execute path for BUFFER on CONNECTION.
+SQL is the user-visible statement and ERR is the original condition.
+Optional CONTEXT is merged into the debug event.  Return
+`(MESSAGE . SUMMARY)' for the failure."
+  (clutch--remember-query-error buffer connection "execute" sql err context))
 
 (defun clutch--execute-and-mark (sql beg end &optional conn)
   "Execute SQL on CONN and mark BEG..END on success."

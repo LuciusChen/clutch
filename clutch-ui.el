@@ -94,7 +94,8 @@ Nil means derive the offset from `clutch--page-current'.")
   "Overlay marking the last SQL execution status.")
 (defvar-local clutch--row-overlay nil
   "Overlay used to highlight the current row.")
-(defvar clutch--row-start-positions)
+(defvar-local clutch--row-start-positions nil
+  "Vector mapping rendered row indices to their line start positions.")
 (defvar-local clutch--sort-column nil
   "Column name currently sorted by, or nil.")
 (defvar-local clutch--sort-descending nil
@@ -147,7 +148,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch-result--current-row-identity "clutch-edit" (&optional table))
 (declare-function clutch-result--extract-row-identity-vec "clutch-edit" (row row-identity))
 (declare-function clutch-result--row-idx-at-line "clutch-edit" ())
-(declare-function clutch-result-mode "clutch" (&optional arg))
+(declare-function clutch-result-mode "clutch-result" (&optional arg))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch-db-result-affected-rows "clutch-db" (result))
 (declare-function clutch-db-result-columns "clutch-db" (result))
