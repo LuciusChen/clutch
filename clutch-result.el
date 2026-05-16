@@ -2118,7 +2118,7 @@ Prompts for format:
   "Move point to COL-IDX in the current row, preserving the row position.
 When point is at line-end or a border, scan backward to find the row."
   (let ((ridx (or (get-text-property (point) 'clutch-row-idx)
-                   (and (> (point) (line-beginning-position))
+                   (and (not (bolp))
                         (get-text-property (1- (point)) 'clutch-row-idx))
                    (save-excursion
                      (let ((prev (previous-single-property-change

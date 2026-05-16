@@ -1262,9 +1262,9 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
         (define-key map (kbd "C-c C-k") cancel-fn)
         (use-local-map map))
       (setq-local header-line-format
-                  (concat (format " JSON field %s" field-name)
-                          (clutch--status-separator)
-                          "C-c C-c: save  C-c C-k: cancel")))
+                  (format " JSON field %s%sC-c C-c: save  C-c C-k: cancel"
+                          field-name
+                          (clutch--status-separator))))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--current-field-or-error ()

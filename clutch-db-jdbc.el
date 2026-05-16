@@ -46,14 +46,10 @@
 (require 'json)
 (require 'sql)
 
-;; `clutch--schema-cache' lives in clutch.el, and `clutch--connection-key' now
-;; lives in clutch-connection.el.  They are always loaded before any JDBC
-;; method is dispatched, so we declare them here to silence the byte-compiler
-;; without creating a hard `require' dependency that would invert the
-;; dependency graph.
-(declare-function clutch--connection-key "clutch-connection" (conn))
+;; These are loaded before JDBC completion methods are dispatched.  Keep them
+;; as declarations to avoid a hard schema/UI dependency from the backend.
+(declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
 (declare-function clutch--schema-status-entry "clutch-schema" (conn))
-(defvar clutch--schema-cache)
 
 ;;;; Configuration
 
@@ -1339,7 +1335,7 @@ For Oracle: uses the schema cache when available (no RPC); falls back to a
                (and (fboundp 'clutch--schema-status-entry)
                     (eq (plist-get (clutch--schema-status-entry conn) :state) 'ready)))
               (schema (and schema-ready
-                           (gethash (clutch--connection-key conn) clutch--schema-cache))))
+                           (clutch--schema-for-connection conn))))
         (let ((cached
                (seq-filter (lambda (name)
                              (string-prefix-p (upcase prefix) (upcase name)))

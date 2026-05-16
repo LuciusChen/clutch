@@ -44,11 +44,6 @@
 (eval-when-compile
   (require 'pg))
 
-;; `clutch--schema-cache' lives in clutch.el (the UI layer), which is not
-;; loaded in this test batch.  Declare it special here so that `let' bindings
-;; in the cache-based completion tests create dynamic (not lexical) bindings
-;; that the bytecode in clutch-db-jdbc.el can see.
-(defvar clutch--schema-cache (make-hash-table :test 'equal))
 (defvar clutch-debug-buffer-name "*clutch-debug*")
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it
 ;; special here so local test bindings remain dynamic even before the backend
@@ -1148,19 +1143,17 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "When schema cache is populated, complete-tables filters locally without RPC."
   (let* ((conn (make-clutch-jdbc-conn :conn-id 5
                                       :params '(:driver oracle :user "scott")))
-         (clutch--schema-cache (make-hash-table :test 'equal))
          (schema (make-hash-table :test 'equal))
          rpc-called)
     (puthash "USERS" nil schema)
     (puthash "ORDERS" nil schema)
     (puthash "USER_ROLES" nil schema)
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "test-key"))
-              ((symbol-function 'clutch--schema-status-entry)
+    (cl-letf (((symbol-function 'clutch--schema-status-entry)
                (lambda (_conn) '(:state ready)))
+              ((symbol-function 'clutch--schema-for-connection)
+               (lambda (_conn) schema))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (&rest _) (setq rpc-called t) nil)))
-      (puthash "test-key" schema clutch--schema-cache)
       (let ((result (clutch-db-complete-tables conn "US")))
         (should-not rpc-called)
         (should (equal (sort (copy-sequence result) #'string<)
@@ -1170,20 +1163,18 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "Oracle completion should fall back to RPC when the ready cache has no matches."
   (let* ((conn (make-clutch-jdbc-conn :conn-id 5
                                       :params '(:driver oracle :user "scott")))
-         (clutch--schema-cache (make-hash-table :test 'equal))
          (schema (make-hash-table :test 'equal))
          captured-op)
     (puthash "AUDIT_LOG" nil schema)
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "test-key"))
-              ((symbol-function 'clutch--schema-status-entry)
+    (cl-letf (((symbol-function 'clutch--schema-status-entry)
                (lambda (_conn) '(:state ready)))
+              ((symbol-function 'clutch--schema-for-connection)
+               (lambda (_conn) schema))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional _timeout)
                  (setq captured-op op)
                  (should (equal (alist-get 'prefix params) "OR"))
                  '(:tables ((:name "ORDERS"))))))
-      (puthash "test-key" schema clutch--schema-cache)
       (let ((result (clutch-db-complete-tables conn "OR")))
         (should (equal captured-op "search-tables"))
         (should (equal result '("ORDERS")))))))
@@ -1192,20 +1183,17 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "Oracle completion should ignore stale cache entries and fall back to RPC."
   (let* ((conn (make-clutch-jdbc-conn :conn-id 5
                                       :params '(:driver oracle :user "scott")))
-         (clutch--schema-cache (make-hash-table :test 'equal))
-         (schema (make-hash-table :test 'equal))
          captured-op)
-    (puthash "USERS" nil schema)
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "test-key"))
-              ((symbol-function 'clutch--schema-status-entry)
+    (cl-letf (((symbol-function 'clutch--schema-status-entry)
                (lambda (_conn) '(:state stale)))
+              ((symbol-function 'clutch--schema-for-connection)
+               (lambda (_conn)
+                 (error "stale cache should not be read")))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional _timeout)
                  (setq captured-op op)
                  (should (equal (alist-get 'prefix params) "US"))
                  '(:tables ((:name "USERS_NEW"))))))
-      (puthash "test-key" schema clutch--schema-cache)
       (let ((result (clutch-db-complete-tables conn "US")))
         (should (equal captured-op "search-tables"))
         (should (equal result '("USERS_NEW")))))))
@@ -1214,11 +1202,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "When schema cache is nil for this connection, complete-tables fires search-tables RPC."
   (let* ((conn (make-clutch-jdbc-conn :conn-id 5
                                       :params '(:driver oracle :user "scott")))
-         (clutch--schema-cache (make-hash-table :test 'equal))
          captured-op)
-    ;; Cache is empty for this connection key
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "test-key"))
+    (cl-letf (((symbol-function 'clutch--schema-status-entry)
+               (lambda (_conn) '(:state ready)))
+              ((symbol-function 'clutch--schema-for-connection)
+               (lambda (_conn) nil))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional _timeout)
                  (setq captured-op op)
