@@ -81,9 +81,11 @@ Compatibility entry files live in the =ob-clutch= package:
 | =:user=        | Database user                                                       |
 | =:database=    | Database name or file path (SQLite)                                 |
 | =:pass-entry=  | auth-source entry name for password lookup                          |
+| =:ssh-host=    | OpenSSH host alias for Clutch SSH forwarding                        |
+| =:tramp=       | ssh-like TRAMP directory for Clutch TRAMP forwarding                 |
 
 ** Connection Caching
 
-Connections are cached by parameter hash and reused across source block
-evaluations in the same Emacs session.  All cached connections are cleanly
-disconnected when Emacs exits (via =kill-emacs-hook=).
+Connections are cached by parameter hash and source TRAMP origin, then reused
+across source block evaluations in the same Emacs session.  All cached
+connections are cleanly disconnected when Emacs exits (via =kill-emacs-hook=).

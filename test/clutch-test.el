@@ -74,6 +74,15 @@
     (with-current-buffer buf
       (buffer-string))))
 
+(defun clutch-test--clear-problem-capture ()
+  "Clear captured problem records across test buffers."
+  (setq clutch--problem-records-by-conn
+        (make-hash-table :test 'eq :weakness 'key))
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (setq-local clutch--buffer-error-details nil)))))
+
 (defun clutch-test--primary-row-identity (&optional table columns indices)
   "Return primary-key row identity metadata for tests."
   (let ((indices (or indices '(0))))
@@ -5856,7 +5865,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "CSV content should include header and escaped values."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name"))
-    (let ((csv (clutch--csv-content '((1 "a,b") (2 "x\"y")))))
+    (let ((csv (clutch--export-csv-content '((1 "a,b") (2 "x\"y")))))
       (should (string-match-p "^id,name\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
       (should (string-match-p "2,\"x\"\"y\"" csv)))))
@@ -5874,12 +5883,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                (lambda (_conn s) (format "\"%s\"" s)))
               ((symbol-function 'clutch-db-escape-literal)
                (lambda (_conn s) (format "'%s'" s))))
-      (should (equal (clutch--insert-content '((1 "a") (2 "b")))
+      (should (equal (clutch--export-insert-content '((1 "a") (2 "b")))
                      (concat
                       "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a');\n"
                       "INSERT INTO \"users\" (\"id\", \"name\") VALUES (2, 'b');\n")))
       (should-not (string-match-p "current-page-only"
-                                  (clutch--insert-content '((1 "a"))))))))
+                                  (clutch--export-insert-content '((1 "a"))))))))
 
 (ert-deftest clutch-test-update-content-builds-full-row-sql ()
   "UPDATE export content should build SQL from the ROWS argument."
@@ -5900,12 +5909,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                (lambda (_conn s) (format "\"%s\"" s)))
               ((symbol-function 'clutch-db-escape-literal)
                (lambda (_conn s) (format "'%s'" s))))
-      (should (equal (clutch--update-content '((1 "a") (2 "b")))
+      (should (equal (clutch--export-update-content '((1 "a") (2 "b")))
                      (concat
                       "UPDATE \"users\" SET \"name\" = 'a' WHERE \"id\" = 1\n"
                       "UPDATE \"users\" SET \"name\" = 'b' WHERE \"id\" = 2\n")))
       (should-not (string-match-p "current-page-only"
-                                  (clutch--update-content '((1 "a"))))))))
+                                  (clutch--export-update-content '((1 "a"))))))))
 
 (ert-deftest clutch-test-simple-insert-source-table-rejects-joined-query ()
   "Joined result queries should not pretend one table is the INSERT target."
@@ -5943,7 +5952,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                (lambda (_conn s) s))
               ((symbol-function 'clutch-db-escape-literal)
                (lambda (_conn s) (format "'%s'" s))))
-      (should (equal (clutch--insert-content '((1 "a") (2 "b")))
+      (should (equal (clutch--export-insert-content '((1 "a") (2 "b")))
                      (concat
                       "INSERT INTO MY_TABLE (id, name) VALUES (1, 'a');\n"
                       "INSERT INTO MY_TABLE (id, name) VALUES (2, 'b');\n"))))))
@@ -6875,6 +6884,24 @@ crashing the UI layer."
              '(:backend pg :host "db" :port 5432 :user "app"
                :tramp-default-directory "/ssh:devbox:/workspace/")))))
 
+(ert-deftest clutch-test-prepare-connection-params-normalizes-tramp-alias ()
+  "The shorter :tramp key should be canonicalized before connection setup."
+  (let ((params (clutch-prepare-connection-params
+                 '(:backend pg :host "db" :port 5432 :user "app"
+                   :tramp "/ssh:devbox:/workspace/"))))
+    (should-not (plist-member params :tramp))
+    (should (equal (plist-get params :tramp-default-directory)
+                   "/ssh:devbox:/workspace/"))))
+
+(ert-deftest clutch-test-prepare-connection-params-rejects-conflicting-tramp-aliases ()
+  "The short and long TRAMP keys must not describe different origins."
+  (should-error
+   (clutch-prepare-connection-params
+    '(:backend pg :host "db" :port 5432 :user "app"
+      :tramp "/ssh:a:/work/"
+      :tramp-default-directory "/ssh:b:/work/"))
+   :type 'user-error))
+
 (ert-deftest clutch-test-prepare-origin-ask-can-decline-source-tramp-context ()
   "Declining the TRAMP prompt should leave network params local."
   (let ((clutch-tramp-context-policy 'ask)
@@ -7009,6 +7036,39 @@ crashing the UI layer."
                              :kind)
                   'tramp)))))
 
+(ert-deftest clutch-test-open-connection-supports-tramp-alias ()
+  "The public connection API should support the short :tramp key."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--start-tramp-tcp-forward)
+               (lambda (params)
+                 (should-not (plist-member params :tramp))
+                 (should (equal (plist-get params :tramp-default-directory)
+                                "/ssh:devbox:/workspace/"))
+                 '(:kind tramp
+                   :process fake-listener
+                   :local-port 40124
+                   :tramp-default-directory "/ssh:devbox:/workspace/")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq captured params)
+                 'fake-conn)))
+      (should (eq (clutch-open-connection
+                   '(:backend pg
+                     :host "db"
+                     :port 5432
+                     :user "alice"
+                     :database "appdb"
+                     :tramp "/ssh:devbox:/workspace/"))
+                  'fake-conn))
+      (should (equal (plist-get captured :host) "127.0.0.1"))
+      (should (= (plist-get captured :port) 40124))
+      (should-not (plist-member captured :tramp))
+      (should-not (plist-member captured :tramp-default-directory)))))
+
 (ert-deftest clutch-test-prepare-connect-params-rejects-ambiguous-transports ()
   "A connection must not combine SSH and TRAMP transports."
   (should-error
@@ -7017,7 +7077,7 @@ crashing the UI layer."
       :host "db"
       :port 5432
       :ssh-host "bastion-prod"
-      :tramp-default-directory "/ssh:devbox:/workspace/"))
+      :tramp "/ssh:devbox:/workspace/"))
    :type 'user-error))
 
 (ert-deftest clutch-test-build-conn-stops-ssh-tunnel-when-db-connect-fails ()
@@ -9541,7 +9601,7 @@ This applies when the buffer owns the connection."
               (should (eq (clutch--run-db-query conn "SELECT 1") 'ok))))
           (with-current-buffer source
             (should-not clutch--buffer-error-details)
-            (should-not (clutch--problem-record-for-connection conn)))
+            (should-not (gethash conn clutch--problem-records-by-conn)))
           (should-not (gethash conn clutch--problem-records-by-conn))
           (should (eq cleared conn)))
       (kill-buffer source)
@@ -9555,7 +9615,7 @@ This applies when the buffer owns the connection."
         (progn
           (when clutch-debug-mode
             (clutch-debug-mode -1))
-          (clutch--clear-problem-capture)
+          (clutch-test--clear-problem-capture)
           (with-current-buffer source
             (clutch--remember-problem-record
              :buffer source
@@ -9578,7 +9638,7 @@ This applies when the buffer owns the connection."
         (progn
           (when clutch-debug-mode
             (clutch-debug-mode -1))
-          (clutch--clear-problem-capture)
+          (clutch-test--clear-problem-capture)
           (with-current-buffer source
             (clutch--remember-problem-record
              :buffer source
@@ -9602,7 +9662,7 @@ This applies when the buffer owns the connection."
         (progn
           (when clutch-debug-mode
             (clutch-debug-mode -1))
-          (clutch--clear-problem-capture)
+          (clutch-test--clear-problem-capture)
           (with-current-buffer source
             (setq-local clutch-connection conn)
             (clutch-debug-mode 1)

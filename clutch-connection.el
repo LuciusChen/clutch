@@ -79,10 +79,10 @@
 
 ;; Forward declarations — functions defined in clutch.el
 (declare-function clutch--effective-sql-product "clutch" (params))
-(declare-function clutch--clear-connection-problem-capture "clutch" (connection))
-(declare-function clutch--forget-problem-record "clutch" (&optional buffer connection))
-(declare-function clutch--remember-debug-event "clutch" (&rest event))
-(declare-function clutch--remember-problem-record "clutch" (&rest args))
+(declare-function clutch--clear-connection-problem-capture "clutch-debug" (connection))
+(declare-function clutch--forget-problem-record "clutch-debug" (&optional buffer connection))
+(declare-function clutch--remember-debug-event "clutch-debug" (&rest event))
+(declare-function clutch--remember-problem-record "clutch-debug" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch" ())
 (declare-function clutch--refresh-result-status-line "clutch" ())
 (declare-function clutch--refresh-schema-status-ui "clutch" (conn))
@@ -983,8 +983,31 @@ cannot be read."
       (or (and entry (clutch--resolve-pass-entry-password entry))
           (clutch--resolve-auth-source-password params))))))
 
+(defun clutch--canonicalize-connection-params (params)
+  "Return PARAMS with public connection aliases normalized."
+  (let ((has-tramp (plist-member params :tramp))
+        (has-tramp-default-directory
+         (plist-member params :tramp-default-directory))
+        (tramp (plist-get params :tramp))
+        (tramp-default-directory
+         (plist-get params :tramp-default-directory)))
+    (cond
+     ((not has-tramp) params)
+     ((and has-tramp-default-directory
+           (not (equal tramp tramp-default-directory)))
+      (clutch--user-error
+       "Connection cannot set both :tramp and :tramp-default-directory"))
+     (t
+      (let ((out (cl-loop for (k v) on params by #'cddr
+                          unless (eq k :tramp)
+                          append (list k v))))
+        (if has-tramp-default-directory
+            out
+          (plist-put out :tramp-default-directory tramp)))))))
+
 (defun clutch--debug-connection-context (backend params)
   "Return a redacted connect context for BACKEND and PARAMS."
+  (setq params (clutch--canonicalize-connection-params params))
   (let ((context nil))
     (when-let* ((user (plist-get params :user)))
       (setq context (plist-put context :user user)))
@@ -1005,26 +1028,20 @@ cannot be read."
     (setq context (plist-put context :backend backend))
     context))
 
-(defun clutch--tramp-forward-enabled-p (params)
-  "Return non-nil when PARAMS request a TRAMP TCP forward."
-  (let ((tramp-default-directory (plist-get params :tramp-default-directory)))
-    (and (stringp tramp-default-directory)
-         (not (string-empty-p tramp-default-directory)))))
-
-(defun clutch--ssh-tunnel-enabled-p (params)
-  "Return non-nil when PARAMS request an SSH tunnel."
-  (let ((ssh-host (plist-get params :ssh-host)))
-    (and (stringp ssh-host)
-         (not (string-empty-p ssh-host)))))
-
 (defun clutch--connection-transport-kind (params)
   "Return the explicit transport kind requested by PARAMS, or nil."
-  (let ((ssh (clutch--ssh-tunnel-enabled-p params))
-        (tramp (clutch--tramp-forward-enabled-p params)))
+  (setq params (clutch--canonicalize-connection-params params))
+  (let* ((ssh-host (plist-get params :ssh-host))
+         (tramp-default-directory
+          (plist-get params :tramp-default-directory))
+         (ssh (and (stringp ssh-host)
+                   (not (string-empty-p ssh-host))))
+         (tramp (and (stringp tramp-default-directory)
+                     (not (string-empty-p tramp-default-directory)))))
     (cond
      ((and ssh tramp)
       (clutch--user-error
-       "Connection cannot combine :ssh-host with :tramp-default-directory"))
+       "Connection cannot combine :ssh-host with :tramp"))
      (ssh 'ssh)
      (tramp 'tramp))))
 
@@ -1078,6 +1095,7 @@ cannot be read."
 Explicit transports in PARAMS always win.  When PARAMS has no explicit
 transport, `clutch-tramp-context-policy' controls whether the current TRAMP
 SOURCE-DEFAULT-DIRECTORY is copied into :tramp-default-directory."
+  (setq params (clutch--canonicalize-connection-params params))
   (let ((explicit-kind (clutch--connection-transport-kind params)))
     (if-let* ((tramp-default-directory
                (and (not explicit-kind)
@@ -1090,12 +1108,21 @@ SOURCE-DEFAULT-DIRECTORY is copied into :tramp-default-directory."
                    :tramp-default-directory tramp-default-directory)
       params)))
 
+(defun clutch-prepare-connection-params
+    (params &optional source-default-directory)
+  "Return PARAMS prepared according to Clutch connection rules.
+This normalizes public aliases such as `:tramp'.  When PARAMS has no explicit
+transport, SOURCE-DEFAULT-DIRECTORY may provide a TRAMP origin according to
+`clutch-tramp-context-policy'."
+  (clutch--prepare-connection-origin-params params source-default-directory))
+
 (defun clutch--carry-current-connection-origin (params)
   "Return PARAMS with the current buffer's inferred origin preserved.
 Saved query consoles re-read their saved connection on `clutch-connect'.
 When the live logical session was originally opened from a TRAMP context,
 keep that origin unless the saved connection now specifies an explicit
 transport."
+  (setq params (clutch--canonicalize-connection-params params))
   (if (or (clutch--connection-transport-kind params)
           (not (clutch--tramp-origin-compatible-p params))
           (null clutch--connection-params))
@@ -1507,6 +1534,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
   "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS.
 When PARAMS request a transport, CONNECT-PARAMS targets the local forwarded
 port and TRANSPORT contains the live process metadata."
+  (setq params (clutch--canonicalize-connection-params params))
   (if-let* ((kind (clutch--connection-transport-kind params)))
       (let* ((transport (pcase kind
                           ('ssh (clutch--start-ssh-tunnel params))
@@ -1550,6 +1578,7 @@ signaled condition."
 The returned plist keeps the original backend-facing keys, but fills in the
 password that `clutch--resolve-password' produced so later reconnects reuse the
 same credentials as the successful foreground connection."
+  (setq params (clutch--canonicalize-connection-params params))
   (let* ((backend (or (plist-get params :backend)
                       (clutch--user-error "Connection params require :backend")))
          (params (clutch--normalize-timeout-params backend params))
@@ -1569,6 +1598,7 @@ same credentials as the successful foreground connection."
 (defun clutch--build-conn (params)
   "Connect to a database using PARAMS, resolving the password via auth-source.
 Returns a live connection object or signals a `user-error'."
+  (setq params (clutch--canonicalize-connection-params params))
   (let* ((effective-params params)
          (backend (plist-get params :backend))
          (transport nil))
@@ -1582,6 +1612,7 @@ Returns a live connection object or signals a `user-error'."
                  (db-params (cl-loop for (k v) on connect-params by #'cddr
                                      unless (memq k '(:sql-product :backend :password :pass-entry
                                                                    :ssh-host
+                                                                   :tramp
                                                                    :tramp-default-directory))
                                      append (list k v)))
                  (db-params (if password
@@ -1617,7 +1648,18 @@ Returns a live connection object or signals a `user-error'."
             :backend backend
             :summary message
             :context (clutch--debug-connection-context backend effective-params)))
-         (clutch--user-error "%s" (clutch--debug-workflow-message message)))))))
+         (clutch--user-error "%s"
+                              (clutch--debug-workflow-message message)))))))
+
+(defun clutch-open-connection (params)
+  "Open a database connection from PARAMS using Clutch connection rules.
+PARAMS must include `:backend' and backend endpoint keys.  It may also include
+Clutch connection keys such as `:ssh-host', `:tramp',
+`:tramp-default-directory', `:pass-entry', and `:sql-product'.  The caller owns
+the returned connection and should close it with `clutch-db-disconnect'.  Call
+`clutch-prepare-connection-params' first when the current command source should
+be allowed to supply TRAMP context."
+  (clutch--build-conn params))
 
 (defun clutch--inject-entry-name (params name)
   "Return PARAMS with :pass-entry defaulting to NAME.
@@ -1728,7 +1770,7 @@ params; see `clutch-connection-alist' for details."
        old-conn
        "Uncommitted changes will be lost.  Disconnect? "))
     (let* ((source-default-directory default-directory)
-           (params  (clutch--prepare-connection-origin-params
+           (params  (clutch-prepare-connection-params
                      (clutch--connect-params-for-current-buffer)
                      source-default-directory))
            (effective-params (clutch--materialize-connection-params params))

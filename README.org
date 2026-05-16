@@ -201,7 +201,7 @@ everything in one repository, this is a breaking packaging change:
         ("remote-pg"  . (:backend pg
                           :host "127.0.0.1" :port 55433
                           :user "app" :database "appdb"
-                          :tramp-default-directory "/ssh:devbox:/workspace/"))
+                          :tramp "/ssh:devbox:/workspace/"))
         ("dev-sqlite" . (:backend sqlite
                           :database "/path/to/my.db"))))
 #+end_src
@@ -212,8 +212,7 @@ Use =":memory:"= for a transient in-memory database (data is lost when disconnec
 Clutch treats SQLite as a local file backend: the file is opened by Emacs'
 built-in SQLite support from the Emacs process, not through a TCP connection.
 Do not combine SQLite profiles with =:ssh-host= or
-=:tramp-default-directory=; those transports only apply to structured
-network endpoints.
+=:tramp=; those transports only apply to structured network endpoints.
 =:password= is optional for network backends — see [[#password-management][Password Management]] for auth-source integration.
 For networked backends, you can set =:connect-timeout= and
 =:read-idle-timeout= (seconds) per connection entry.  JDBC connections also
@@ -232,11 +231,11 @@ as shorthand for the explicit plaintext mode on MySQL and PostgreSQL.
 endpoint and connects through a local forwarded port automatically.  This
 first version supports structured =:host= / =:port= entries, not raw JDBC
 =:url= strings.
-For ssh-like TRAMP directories, =:tramp-default-directory= starts a local
-OpenSSH forward through the TRAMP host.  Use it for remote-machine endpoints
-where =:host= / =:port= are reachable from the SSH host rather than from the
-local Emacs host.
-=:ssh-host= and =:tramp-default-directory= are mutually exclusive.
+For ssh-like TRAMP directories, =:tramp= starts a local OpenSSH forward through
+the TRAMP host.  Use it for remote-machine endpoints where =:host= / =:port=
+are reachable from the SSH host rather than from the local Emacs host.
+=:tramp-default-directory= remains accepted as a longer spelling.
+=:ssh-host= and =:tramp= are mutually exclusive.
 
 JDBC backends use a driver symbol as =:backend= instead of =mysql=/=pg=.  See
 [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]] for the full list of supported databases and setup.
@@ -400,15 +399,18 @@ params so reconnect, completion, refresh, and query execution keep using the
 same origin.
 
 For a connection that should always use a remote-machine endpoint, configure
-=:tramp-default-directory= explicitly.  The =:host= / =:port= pair is the
-database endpoint as seen from the SSH host:
+=:tramp= explicitly.  The =:host= / =:port= pair is the database endpoint as
+seen from the SSH host:
 
 #+begin_src emacs-lisp
 ("remote-pg" . (:backend pg
                  :host "127.0.0.1" :port 55433
                  :user "app" :database "appdb"
-                 :tramp-default-directory "/ssh:devbox:/workspace/"))
+                 :tramp "/ssh:devbox:/workspace/"))
 #+end_src
+
+=:tramp-default-directory= remains accepted for existing configurations, but
+new examples use the shorter =:tramp= spelling.
 
 Without an explicit transport, a command invoked from a TRAMP buffer can infer
 that buffer's remote context.  =clutch-tramp-context-policy= controls that:
