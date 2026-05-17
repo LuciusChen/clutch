@@ -8824,7 +8824,8 @@ This applies when the buffer owns the connection."
                    :expected (:backend oracle
                               :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL"
                               :pass-entry "alpha"))))
-    (pcase-let ((`(:saved ,saved :expected ,expected) case))
+    (let* ((saved (plist-get case :saved))
+           (expected (plist-get case :expected)))
       (let ((clutch-connection-alist `(("alpha" . ,saved)))
             (clutch-tramp-context-policy 'ask)
             built)
