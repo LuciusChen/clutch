@@ -895,7 +895,7 @@ Otherwise, copy the current cell."
 (transient-define-prefix clutch-result-copy-dispatch ()
   "Copy result buffer data.
 Enable --refine to exclude rows/columns interactively before copying
-\(requires an active region set with C-x SPC or mouse)."
+\(requires an active region set with \\<global-map>\\[set-mark-command] or mouse)."
   ["Options"
    :pad-keys t
    ("-r" "Exclude rows/cols interactively (needs region)" "--refine")]
@@ -977,8 +977,8 @@ Enable --refine to exclude rows/columns interactively before copying
                 (clutch--agent-context-table-entry table))
                "\n```\n\n")
      (error
-      (format "- Table metadata unavailable: %s\n\n"
-              (error-message-string err))))))
+      (let ((message (error-message-string err)))
+        (format "- Table metadata unavailable: %s\n\n" message))))))
 
 (defun clutch--agent-context-row-list (row)
   "Return ROW as a list."

@@ -104,7 +104,7 @@ Scans text properties across the line."
   "Callback for the cell edit buffer: (lambda (new-value) ...).")
 
 (defvar-local clutch-result--edit-result-buffer nil
-  "The result buffer to commit edits to after clutch-result-edit-finish.")
+  "The result buffer to commit edits to after `clutch-result-edit-finish'.")
 
 (defvar-local clutch-result-edit--column-name nil
   "Column name for the current single-cell edit buffer.")

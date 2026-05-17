@@ -88,6 +88,8 @@ jobs:
             clutch-query.el \
             clutch-object.el \
             clutch-edit.el \
+            clutch-result.el \
+            clutch-sql.el \
             clutch-db.el \
             clutch-db-sqlite.el \
             clutch-db-pg.el \
@@ -97,12 +99,12 @@ jobs:
             clutch-compat.el \
             clutch.el
 
-      - name: Checkdoc entry file
+      - name: Checkdoc package files
         run: |
           emacs -Q --batch \
             --eval "(require 'package)" \
             --eval "(package-initialize)" \
             -L . \
             --eval "(require 'checkdoc)" \
-            --eval "(checkdoc-file \"clutch.el\")" \
+            --eval "(dolist (file '(\"clutch-ui.el\" \"clutch-schema.el\" \"clutch-query.el\" \"clutch-object.el\" \"clutch-edit.el\" \"clutch-result.el\" \"clutch-sql.el\" \"clutch-db.el\" \"clutch-db-sqlite.el\" \"clutch-db-pg.el\" \"clutch-db-mysql.el\" \"clutch-db-jdbc.el\" \"clutch-connection.el\" \"clutch-compat.el\" \"clutch.el\")) (checkdoc-file file))" \
             --eval "(when (get-buffer \"*warn*\") (with-current-buffer \"*warn*\" (goto-char (point-min)) (when (re-search-forward \"^Warning\" nil t) (princ (buffer-string)) (kill-emacs 1))))"

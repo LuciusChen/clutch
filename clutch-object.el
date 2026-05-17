@@ -887,7 +887,7 @@ selection can surface objects from different Oracle sources and types."
    (clutch-db-browseable-object-entries conn)))
 
 (defun clutch--find-console-for-conn (conn)
-  "Return the clutch-mode buffer that owns CONN, or nil."
+  "Return the `clutch-mode' buffer that owns CONN, or nil."
   (cl-loop for buf in (buffer-list)
            when (and (with-current-buffer buf
                        (derived-mode-p 'clutch-mode))

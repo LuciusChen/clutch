@@ -1848,7 +1848,7 @@ Semicolon-delimited multi-statement buffers run sequentially."
   (clutch--execute-sql-range (point-min) (point-max) "buffer"))
 
 (defun clutch--find-connection ()
-  "Find a live database connection from any clutch-mode buffer.
+  "Find a live database connection from any `clutch-mode' buffer.
 Returns the connection or nil."
   (cl-loop for buf in (buffer-list)
            for conn = (buffer-local-value 'clutch-connection buf)
@@ -1859,7 +1859,7 @@ Returns the connection or nil."
 (defun clutch-execute (sql)
   "Execute SQL from any buffer.
 With an active region, execute the region.  Otherwise execute the
-current line.  Uses the connection from any clutch-mode buffer."
+current line.  Uses the connection from any `clutch-mode' buffer."
   (interactive
    (list (string-trim
           (if (use-region-p)

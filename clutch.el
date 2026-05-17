@@ -1358,13 +1358,12 @@ executed outside clutch that would otherwise leave stale completions."
     (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
     (define-key map (kbd "C-c ?") #'clutch-dispatch)
+    (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
+    (define-key map (kbd "C-c <tab>") #'clutch-complete-at-point)
+    (define-key map (kbd "TAB") #'clutch-complete-qualified-or-indent)
+    (define-key map (kbd "<tab>") #'clutch-complete-qualified-or-indent)
     map)
   "Keymap for `clutch-mode'.")
-
-(define-key clutch-mode-map (kbd "C-c TAB") #'clutch-complete-at-point)
-(define-key clutch-mode-map (kbd "C-c <tab>") #'clutch-complete-at-point)
-(define-key clutch-mode-map (kbd "TAB") #'clutch-complete-qualified-or-indent)
-(define-key clutch-mode-map (kbd "<tab>") #'clutch-complete-qualified-or-indent)
 
 ;;;###autoload
 (define-derived-mode clutch-mode sql-mode "clutch"
