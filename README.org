@@ -396,15 +396,17 @@ Supported and unsupported cases:
 
 - Supported TRAMP methods are ssh-like paths: =/ssh:=, =/scp:=, =/rsync:=, and
   =/rpc:= when using tramp-rpc.  SSH-like hop chains are mapped to OpenSSH
-  =ProxyJump=.
+  =ProxyJump=.  Other TRAMP methods are not inferred from the source buffer.
 - Clutch uses the local OpenSSH client; it does not require =nc=, =netcat=, or
   =socat= on the remote host.
 - TRAMP forwarding is still an OpenSSH batch forward.  A TRAMP buffer opened by
   typing a password does not automatically lend that password to clutch; use
   non-interactive OpenSSH auth or a reusable ControlMaster.  When tramp-rpc has
   an active ControlMaster, clutch can reuse its ControlPath for =/rpc:=.
-- Container TRAMP paths such as =/ssh:devbox|podman:app:/workspace/= are not
-  enabled yet.
+- Container TRAMP paths such as =/docker:user@container:/workspace/= or
+  =/ssh:devbox|podman:app:/workspace/= are not enabled yet.  They need a
+  separate container transport because OpenSSH =-L= cannot target a container
+  namespace directly.
 - Forwarding only applies to structured =:host= / =:port= entries.  SQLite is a
   local file open, and raw JDBC =:url= profiles are not rewritten.
 

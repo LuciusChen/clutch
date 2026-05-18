@@ -1094,7 +1094,8 @@ cannot be read."
   "Return PARAMS with any command-source connection origin applied.
 Explicit transports in PARAMS always win.  When PARAMS has no explicit
 transport, `clutch-tramp-context-policy' controls whether the current TRAMP
-SOURCE-DEFAULT-DIRECTORY is copied into :tramp-default-directory."
+SOURCE-DEFAULT-DIRECTORY is copied into :tramp-default-directory.  Unsupported
+TRAMP methods are ignored for inference."
   (setq params (clutch--canonicalize-connection-params params))
   (let ((explicit-kind (clutch--connection-transport-kind params)))
     (if-let* ((tramp-default-directory
@@ -1102,6 +1103,7 @@ SOURCE-DEFAULT-DIRECTORY is copied into :tramp-default-directory."
                     (clutch--tramp-origin-compatible-p params)
                     (clutch--source-tramp-default-directory
                      source-default-directory)))
+              ((clutch--tramp-ssh-forward-vector tramp-default-directory))
               ((clutch--use-source-tramp-context-p
                 params tramp-default-directory)))
         (plist-put (copy-sequence params)

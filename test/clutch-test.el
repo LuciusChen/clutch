@@ -9105,6 +9105,37 @@ This applies when the buffer owns the connection."
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf)))))
 
+(ert-deftest clutch-test-query-console-skips-container-tramp-origin-from-source-buffer ()
+  "Query console should not infer unsupported container TRAMP origins."
+  (let* ((name "alpha")
+         (buffer-name (clutch--console-buffer-base-name name))
+         (clutch-connection-alist
+          '(("alpha" . (:backend pg
+                        :host "127.0.0.1"
+                        :port 5432
+                        :user "alice"
+                        :database "appdb"))))
+         (clutch-tramp-context-policy 'ask)
+         (default-directory "/docker:vscode@f500f94f96e3:/workspace/")
+         built)
+    (unwind-protect
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (_prompt)
+                     (ert-fail "unsupported TRAMP origin should not prompt"))))
+          (clutch-test--with-query-console-build-stubs (built 'postgres 'pg-conn)
+            (clutch-query-console name)
+            (should (equal built
+                           '(:backend pg
+                             :host "127.0.0.1"
+                             :port 5432
+                             :user "alice"
+                             :database "appdb"
+                             :pass-entry "alpha")))
+            (should (equal clutch--connection-params built))
+            (should (eq (current-buffer) (get-buffer buffer-name)))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
 (ert-deftest clutch-test-connect-in-ad-hoc-sqlite-console-reuses-file-params ()
   "Ad hoc SQLite consoles should reconnect using their file params."
   (with-temp-buffer
