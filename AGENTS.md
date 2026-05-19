@@ -115,7 +115,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 ## Quality and Release Checks
 
 - Byte-compiling `clutch.el` and every extracted `clutch-*.el` module must produce zero warnings.
-- `checkdoc` and `package-lint` must produce zero warnings for distributable package entry files.
+- `checkdoc` must produce zero warnings for distributable `clutch*.el` files;
+  `package-lint` must produce zero warnings for the package entry file.
 - Export features that write files must provide explicit encoding behavior and sensible defaults.
 - Document Excel compatibility guidance clearly.
 - Any export-path change must include regression tests for content correctness and at least one encoding-related path.
@@ -135,8 +136,16 @@ These rules keep the package compatible with MELPA submission requirements
 - First line: `;;; file.el --- Short description -*- lexical-binding: t; -*-`
   - Description must NOT contain "for Emacs" or the package name — both are redundant.
   - Keep the description under 60 characters.
-- `;; Package-Requires:` must list all direct dependencies with minimum versions.
-- `;; URL:`, `;; Version:`, `;; Author:` headers are required.
+- `clutch.el` is the package entry file.  It is the only file that should carry
+  package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`,
+  and `;; Author:`.
+- `;; Package-Requires:` in `clutch.el` must list all direct dependencies with
+  minimum versions, including the declared Emacs baseline.
+- Split implementation files must not carry `;; Package-Requires:` headers, but
+  they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
+- Keep the MELPA checklist attribution in the main package file when AI tools
+  materially assist the package:
+  `;; Assisted-by: OpenAI Codex:gpt-5.5`
 - Last line: `;;; file.el ends here`
 
 ### Naming
@@ -156,12 +165,19 @@ These rules keep the package compatible with MELPA submission requirements
 - Every public `defun`, `defmacro`, `defcustom`, and `defvar` must have a docstring.
 - Docstring first line must be a complete sentence ending with a period.
 - Argument names in docstrings should be UPPERCASED.
+- Run checkdoc across every distributable `clutch*.el` file, not only the main
+  entry file.
 
 ### Common pitfalls
 
 - `cl-lib` functions require `(require 'cl-lib)` — do not rely on transitive loading.
 - Avoid `eval-when-compile` for runtime-needed dependencies.
 - Do not use Emacs 30+ symbols without compat shims or guards.
+- Compatibility shims must stay in the `clutch--` namespace.  When an upstream
+  function exists, prefer a prefixed `defalias` over defining an unprefixed
+  replacement.
+- Avoid `with-eval-after-load` in package code unless the form registers an
+  optional integration at a clear package boundary.
 
 ## Pre-Commit Checklist (Mandatory)
 
@@ -221,6 +237,9 @@ emacs -batch -L . -L ../mysql.el -L ../pg-el \
 modules as if they were standalone packages.  For local straight checkouts,
 make sure package metadata for external deps (`transient`, `mysql`, `pg`) is
 available to `package.el` in the batch session before running the command.
+Do not move `Package-Requires` into split files to satisfy per-file lint; set
+`package-lint-main-file` to `clutch.el` when linting implementation files
+directly.
 
 ```bash
 emacs -Q --batch -L ../package-lint -l package-lint \
