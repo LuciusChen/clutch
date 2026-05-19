@@ -1,6 +1,10 @@
 #+title: Container TRAMP Origin Inference
 #+date: 2026-05-18
 
+Superseded by [[file:098-container-tramp-relay.md][Container TRAMP Relay]] for
+the container transport itself.  This record remains the rationale for not
+silently pretending container TRAMP could be served by the OpenSSH forwarder.
+
 * Context
 
 Issue #16 follow-up testing showed that command-source TRAMP inference offered

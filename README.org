@@ -216,10 +216,10 @@ everything in one repository, this is a breaking packaging change:
   accepts =:query-timeout= and =:rpc-timeout=.
 - TLS can be enabled with =:tls t=.  For explicit plaintext, prefer
   =:ssl-mode disabled= on MySQL and =:sslmode disable= on PostgreSQL.
-- =:ssh-host= and =:tramp= both create local OpenSSH forwards for structured
-  =:host= / =:port= endpoints; =:ssh-host= uses a =~/.ssh/config= host alias,
-  while =:tramp= derives the SSH target from an ssh-like TRAMP directory.
-  =:tramp-default-directory= remains accepted as a longer spelling.
+- =:ssh-host= and =:tramp= both create local forwards for structured
+  =:host= / =:port= endpoints.  =:ssh-host= uses a =~/.ssh/config= host alias,
+  while =:tramp= derives the origin from an ssh-like or container TRAMP
+  directory.  =:tramp-default-directory= remains accepted as a longer spelling.
 - Query-console SQL is saved by connection identity rather than saved connection
   name, so renaming a saved connection keeps the same console SQL.
 
@@ -374,15 +374,26 @@ only when =clutch-connect= or =clutch-query-console= creates a connection, and
 the chosen origin is stored so reconnect, completion, refresh, and query
 execution keep using the same route.
 
-For a saved connection that should always use a remote-machine endpoint,
-configure =:tramp= explicitly.  The =:host= / =:port= pair is the database
-endpoint as seen from that SSH host:
+For a saved connection that should always use a remote-machine or container
+endpoint, configure =:tramp= explicitly.  The =:host= / =:port= pair is the
+database endpoint as seen from that TRAMP origin:
 
 #+begin_src emacs-lisp
 ("remote-pg" . (:backend pg
                  :host "127.0.0.1" :port 55433
                  :user "app" :database "appdb"
                  :tramp "/ssh:devbox:/workspace/"))
+#+end_src
+
+For a dev container where the database is reachable from inside the container
+network, point =:tramp= at the container and keep =:host= / =:port= in the
+container's view:
+
+#+begin_src emacs-lisp
+("container-pg" . (:backend pg
+                   :host "db" :port 5432
+                   :user "app" :database "appdb"
+                   :tramp "/docker:vscode@app:/workspace/"))
 #+end_src
 
 Without =:ssh-host= or =:tramp=, commands invoked from a TRAMP buffer can infer
@@ -396,17 +407,19 @@ Supported and unsupported cases:
 
 - Supported TRAMP methods are ssh-like paths: =/ssh:=, =/scp:=, =/rsync:=, and
   =/rpc:= when using tramp-rpc.  SSH-like hop chains are mapped to OpenSSH
-  =ProxyJump=.  Other TRAMP methods are not inferred from the source buffer.
-- Clutch uses the local OpenSSH client; it does not require =nc=, =netcat=, or
-  =socat= on the remote host.
-- TRAMP forwarding is still an OpenSSH batch forward.  A TRAMP buffer opened by
-  typing a password does not automatically lend that password to clutch; use
-  non-interactive OpenSSH auth or a reusable ControlMaster.  When tramp-rpc has
-  an active ControlMaster, clutch can reuse its ControlPath for =/rpc:=.
-- Container TRAMP paths such as =/docker:user@container:/workspace/= or
-  =/ssh:devbox|podman:app:/workspace/= are not enabled yet.  They need a
-  separate container transport because OpenSSH =-L= cannot target a container
-  namespace directly.
+  =ProxyJump=.  Clutch uses the local OpenSSH client for these paths; it does
+  not require =nc=, =netcat=, or =socat= on the SSH host.
+- Container TRAMP methods =/docker:= and =/podman:= are supported through a
+  local TCP listener plus =docker exec= or =podman exec=.  OrbStack works through
+  its Docker-compatible =docker= CLI.
+- Container relays require =socat=, =nc=, =netcat=, or =bash= inside the
+  container that owns the TRAMP buffer.  SSH-hop container paths such as
+  =/ssh:devbox|podman:app:/workspace/= run the container runtime on the SSH
+  host.
+- A TRAMP buffer opened by typing a password does not automatically lend that
+  password to clutch.  SSH-like paths still need non-interactive OpenSSH auth or
+  a reusable ControlMaster.  When tramp-rpc has an active ControlMaster, clutch
+  can reuse its ControlPath for =/rpc:=.
 - Forwarding only applies to structured =:host= / =:port= entries.  SQLite is a
   local file open, and raw JDBC =:url= profiles are not rewritten.
 

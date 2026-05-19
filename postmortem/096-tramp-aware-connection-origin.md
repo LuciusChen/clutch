@@ -1,6 +1,9 @@
 #+title: TRAMP-aware Connection Origin
 #+date: 2026-05-15
 
+Container transport limitations in this first slice were later superseded by
+[[file:098-container-tramp-relay.md][Container TRAMP Relay]].
+
 * Context
 
 Issue #16 asked for database connections opened from a TRAMP buffer to reach

@@ -6884,6 +6884,16 @@ crashing the UI layer."
              '(:backend pg :host "db" :port 5432 :user "app"
                :tramp-default-directory "/ssh:devbox:/workspace/")))))
 
+(ert-deftest clutch-test-prepare-origin-auto-adds-source-container-tramp-context ()
+  "Container TRAMP source context should be copied into network params."
+  (let ((clutch-tramp-context-policy 'auto))
+    (should (equal
+             (clutch--prepare-connection-origin-params
+              '(:backend pg :host "db" :port 5432 :user "app")
+              "/docker:vscode@app:/workspace/")
+             '(:backend pg :host "db" :port 5432 :user "app"
+               :tramp-default-directory "/docker:vscode@app:/workspace/")))))
+
 (ert-deftest clutch-test-prepare-connection-params-normalizes-tramp-alias ()
   "The shorter :tramp key should be canonicalized before connection setup."
   (let ((params (clutch-prepare-connection-params
@@ -7287,22 +7297,129 @@ crashing the UI layer."
                        "-J" "jump"
                        "devbox"))))))
 
-(ert-deftest clutch-test-start-tramp-forward-rejects-container-tramp-path ()
-  "Container TRAMP paths should fail before spawning a forward."
-  (let (make-process-called)
-    (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest _args)
-                 (setq make-process-called t)
-                 'unexpected)))
-      (let ((err (should-error
-                  (clutch--start-tramp-tcp-forward
-                   '(:backend pg
-                     :host "db"
-                     :port 5432
-                     :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
-                  :type 'user-error)))
-        (should (string-match-p "ssh-like" (cadr err))))
-      (should-not make-process-called))))
+(ert-deftest clutch-test-start-tramp-forward-starts-docker-container-relay ()
+  "Docker TRAMP forward startup should create a local relay listener."
+  (let (network-args puts query-flag)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (program)
+                 (when (equal program "docker") "/usr/bin/docker")))
+              ((symbol-function 'make-network-process)
+               (lambda (&rest args)
+                 (setq network-args args)
+                 'fake-listener))
+              ((symbol-function 'process-contact)
+               (lambda (_process key)
+                 (when (eq key :service) 40125)))
+              ((symbol-function 'process-put)
+               (lambda (process key value)
+                 (push (list process key value) puts)))
+              ((symbol-function 'set-process-query-on-exit-flag)
+               (lambda (proc flag)
+                 (setq query-flag (list proc flag)))))
+      (let ((transport (clutch--start-tramp-tcp-forward
+                        '(:backend pg
+                          :host "db"
+                          :port 5432
+                          :tramp-default-directory
+                          "/docker:vscode@app:/workspace/"))))
+        (should (equal (plist-get network-args :name)
+                       "clutch-tramp-container-db:5432"))
+        (should (eq (plist-get network-args :server) t))
+        (should (equal (plist-get network-args :host) "127.0.0.1"))
+        (should (eq (plist-get network-args :service) t))
+        (should (eq (plist-get network-args :coding) 'no-conversion))
+        (should (equal query-flag '(fake-listener nil)))
+        (should (member
+                 (list 'fake-listener
+                       :clutch-container-command
+                       (list "docker" "exec" "-i" "-u" "vscode" "app"
+                             "sh" "-lc" clutch--container-relay-script
+                             "clutch-container-relay" "db" "5432"))
+                 puts))
+        (should (eq (plist-get transport :kind) 'tramp))
+        (should (eq (plist-get transport :process) 'fake-listener))
+        (should (= (plist-get transport :local-port) 40125))
+        (should (equal (plist-get transport :tramp-default-directory)
+                       "/docker:vscode@app:/workspace/"))))))
+
+(ert-deftest clutch-test-start-tramp-forward-starts-remote-podman-container-relay ()
+  "Container TRAMP paths behind SSH hops should run the runtime remotely."
+  (let (network-args puts)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (program)
+                 (when (equal program "ssh") "/usr/bin/ssh")))
+              ((symbol-function 'make-network-process)
+               (lambda (&rest args)
+                 (setq network-args args)
+                 'fake-listener))
+              ((symbol-function 'process-contact)
+               (lambda (_process key)
+                 (when (eq key :service) 40126)))
+              ((symbol-function 'process-put)
+               (lambda (process key value)
+                 (push (list process key value) puts)))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore))
+      (clutch--start-tramp-tcp-forward
+       '(:backend pg
+         :host "db"
+         :port 5432
+         :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
+      (should (equal (plist-get network-args :name)
+                     "clutch-tramp-container-db:5432"))
+      (should (member
+               (list 'fake-listener
+                     :clutch-container-command
+                     (append
+                      (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
+                      (mapcar
+                       #'shell-quote-argument
+                       (list "podman" "exec" "-i" "app" "sh" "-lc"
+                             clutch--container-relay-script
+                             "clutch-container-relay" "db" "5432"))))
+               puts)))))
+
+(ert-deftest clutch-test-container-forward-relays-bytes ()
+  "Container relay listener should bridge bytes between client and relay."
+  (skip-unless (executable-find "cat"))
+  (let (server client received)
+    (unwind-protect
+        (progn
+          (setq server
+                (make-network-process
+                 :name "clutch-test-container-forward"
+                 :server t
+                 :host "127.0.0.1"
+                 :service t
+                 :family 'ipv4
+                 :coding 'no-conversion
+                 :filter #'clutch--container-forward-client-filter
+                 :sentinel #'clutch--container-forward-client-sentinel
+                 :noquery t))
+          (set-process-query-on-exit-flag server nil)
+          (process-put server :clutch-container-command (list "cat"))
+          (process-put server :clutch-container-listener server)
+          (process-put server :clutch-container-children nil)
+          (setq client
+                (make-network-process
+                 :name "clutch-test-container-client"
+                 :host "127.0.0.1"
+                 :service (process-contact server :service)
+                 :family 'ipv4
+                 :coding 'no-conversion
+                 :filter (lambda (_proc string)
+                           (setq received (concat received string)))
+                 :noquery t))
+          (set-process-query-on-exit-flag client nil)
+          (process-send-string client "ping")
+          (let ((deadline (+ (float-time) 2)))
+            (while (and (< (float-time) deadline)
+                        (not (equal received "ping")))
+              (accept-process-output nil 0.05)))
+          (should (equal received "ping")))
+      (when (and client (process-live-p client))
+        (delete-process client))
+      (when server
+        (clutch--stop-connection-transport (list :process server))))))
 
 (ert-deftest clutch-test-ssh-diagnose-output-hints-locked-key ()
   "SSH diagnosis should point users at an interactive unlock step."
@@ -9105,8 +9222,8 @@ This applies when the buffer owns the connection."
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf)))))
 
-(ert-deftest clutch-test-query-console-skips-container-tramp-origin-from-source-buffer ()
-  "Query console should not infer unsupported container TRAMP origins."
+(ert-deftest clutch-test-query-console-infers-container-tramp-origin-from-source-buffer ()
+  "Query console should infer supported container TRAMP origins."
   (let* ((name "alpha")
          (buffer-name (clutch--console-buffer-base-name name))
          (clutch-connection-alist
@@ -9120,8 +9237,9 @@ This applies when the buffer owns the connection."
          built)
     (unwind-protect
         (cl-letf (((symbol-function 'y-or-n-p)
-                   (lambda (_prompt)
-                     (ert-fail "unsupported TRAMP origin should not prompt"))))
+                   (lambda (prompt)
+                     (should (string-match-p "/docker:vscode@f500f94f96e3:" prompt))
+                     t)))
           (clutch-test--with-query-console-build-stubs (built 'postgres 'pg-conn)
             (clutch-query-console name)
             (should (equal built
@@ -9130,7 +9248,9 @@ This applies when the buffer owns the connection."
                              :port 5432
                              :user "alice"
                              :database "appdb"
-                             :pass-entry "alpha")))
+                             :pass-entry "alpha"
+                             :tramp-default-directory
+                             "/docker:vscode@f500f94f96e3:/workspace/")))
             (should (equal clutch--connection-params built))
             (should (eq (current-buffer) (get-buffer buffer-name)))))
       (when-let* ((buf (get-buffer buffer-name)))

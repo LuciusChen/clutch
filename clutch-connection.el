@@ -114,6 +114,32 @@
 (defconst clutch--tramp-ssh-forward-methods '("ssh" "scp" "rsync" "rpc")
   "TRAMP methods Clutch can map to a binary-clean ssh command.")
 
+(defconst clutch--tramp-container-forward-methods '("docker" "podman")
+  "TRAMP container methods Clutch can bridge with runtime exec.")
+
+(defconst clutch--container-relay-script
+  (string-join
+   '("host=$1"
+     "port=$2"
+     "if command -v socat >/dev/null 2>&1; then"
+     "  exec socat - TCP:\"$host\":\"$port\""
+     "fi"
+     "if command -v nc >/dev/null 2>&1; then"
+     "  exec nc \"$host\" \"$port\""
+     "fi"
+     "if command -v netcat >/dev/null 2>&1; then"
+     "  exec netcat \"$host\" \"$port\""
+     "fi"
+     "if command -v bash >/dev/null 2>&1; then"
+     "  exec bash -lc 'host=$1; port=$2;"
+     "    exec 3<>/dev/tcp/$host/$port;"
+     "    cat <&3 & cat >&3; wait' clutch-bash \"$host\" \"$port\""
+     "fi"
+     "echo 'clutch container relay requires socat, nc, netcat, or bash' >&2"
+     "exit 127")
+   "\n")
+  "Shell script run inside a container to proxy stdio to HOST:PORT.")
+
 (defun clutch--connection-remote-param (conn key)
   "Return remote KEY for CONN when clutch cached transport metadata."
   (when conn
@@ -171,6 +197,10 @@
 (defun clutch--stop-connection-transport (transport)
   "Stop TRANSPORT and any process it owns."
   (when-let* ((proc (plist-get transport :process)))
+    (when (processp proc)
+      (dolist (child (process-get proc :clutch-container-children))
+        (when (process-live-p child)
+          (delete-process child))))
     (when (process-live-p proc)
       (delete-process proc))))
 
@@ -1103,7 +1133,7 @@ TRAMP methods are ignored for inference."
                     (clutch--tramp-origin-compatible-p params)
                     (clutch--source-tramp-default-directory
                      source-default-directory)))
-              ((clutch--tramp-ssh-forward-vector tramp-default-directory))
+              ((clutch--tramp-forward-vector tramp-default-directory))
               ((clutch--use-source-tramp-context-p
                 params tramp-default-directory)))
         (plist-put (copy-sequence params)
@@ -1434,11 +1464,12 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
         (concat tramp-prefix-format hop-part tramp-postfix-host-format)))
      (split-string hop tramp-postfix-hop-regexp 'omit))))
 
-(defun clutch--tramp-ssh-forward-vector (tramp-default-directory)
-  "Return ssh-like TRAMP vector for TRAMP-DEFAULT-DIRECTORY, or nil."
+(defun clutch--tramp-forward-vector (tramp-default-directory)
+  "Return supported TRAMP forward vector for TRAMP-DEFAULT-DIRECTORY, or nil."
   (let* ((vec (clutch--tramp-dissect-file-name tramp-default-directory))
          (method (tramp-file-name-method vec)))
-    (when (member method clutch--tramp-ssh-forward-methods)
+    (when (or (member method clutch--tramp-ssh-forward-methods)
+              (member method clutch--tramp-container-forward-methods))
       vec)))
 
 (defun clutch--tramp-proxyjump (vec)
@@ -1470,20 +1501,21 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
   (unless (executable-find "ssh")
     (clutch--user-error "TRAMP forwarding requires the OpenSSH client executable `ssh'"))
   (let* ((tramp-default-directory (plist-get params :tramp-default-directory))
-         (vec (clutch--tramp-ssh-forward-vector tramp-default-directory))
+         (vec (clutch--tramp-dissect-file-name tramp-default-directory))
+         (method (tramp-file-name-method vec))
          (host (plist-get params :host))
          (port (plist-get params :port))
          (local-port (clutch--allocate-local-port))
-         (target (and vec (clutch--tramp-ssh-target vec)))
-         (ssh-port (and vec (tramp-file-name-port vec)))
-         (proxyjump (and vec (clutch--tramp-proxyjump vec)))
+         (target (clutch--tramp-ssh-target vec))
+         (ssh-port (tramp-file-name-port vec))
+         (proxyjump (clutch--tramp-proxyjump vec))
          (buffer (get-buffer-create
                   (clutch--tramp-forward-buffer-name
                    tramp-default-directory host port)))
          (timeout (or (plist-get params :connect-timeout)
                       clutch-connect-timeout-seconds))
          proc)
-    (unless vec
+    (unless (member method clutch--tramp-ssh-forward-methods)
       (clutch--user-error
        "TRAMP forwarding currently supports ssh-like TRAMP directories such as /ssh:host:/path/ or /rpc:host:/path/"))
     (with-current-buffer buffer
@@ -1516,21 +1548,179 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
           :buffer buffer
           :tramp-default-directory tramp-default-directory)))
 
+(defun clutch--tramp-container-command (vec host port)
+  "Return the process command for container TRAMP VEC to reach HOST PORT."
+  (let* ((method (tramp-file-name-method vec))
+         (runtime (pcase method
+                    ("docker" "docker")
+                    ("podman" "podman")
+                    (_ (clutch--user-error
+                        "Container TRAMP forwarding does not support %s"
+                        method))))
+         (container (tramp-file-name-host vec))
+         (user (tramp-file-name-user vec))
+         (exec-command (append
+                        (list runtime "exec" "-i")
+                        (when (and (stringp user)
+                                   (not (string-empty-p user)))
+                          (list "-u" user))
+                        (list container "sh" "-lc"
+                              clutch--container-relay-script
+                              "clutch-container-relay"
+                              (format "%s" host)
+                              (format "%s" port))))
+         (hops (clutch--tramp-hop-vectors (tramp-file-name-hop vec))))
+    (unless (and (stringp container) (not (string-empty-p container)))
+      (clutch--user-error "Container TRAMP forwarding requires a container name"))
+    (if hops
+        (progn
+          (unless (executable-find "ssh")
+            (clutch--user-error
+             "Container TRAMP forwarding through SSH requires the OpenSSH client executable `ssh'"))
+          (dolist (hop-vec hops)
+            (unless (member (tramp-file-name-method hop-vec)
+                            clutch--tramp-ssh-forward-methods)
+              (clutch--user-error
+               "Container TRAMP forwarding does not support %s hops"
+               (tramp-file-name-method hop-vec))))
+          (let* ((target-vec (car (last hops)))
+                 (proxyjump-vecs (butlast hops))
+                 (proxyjump
+                  (when proxyjump-vecs
+                    (mapconcat #'clutch--tramp-proxyjump-target
+                               proxyjump-vecs ",")))
+                 (ssh-port (tramp-file-name-port target-vec)))
+            (append
+             (list "ssh" "-T" "-o" "BatchMode=yes")
+             (clutch--tramp-rpc-controlmaster-options target-vec)
+             (when proxyjump
+               (list "-J" proxyjump))
+             (when ssh-port
+               (list "-p" (format "%s" ssh-port)))
+             (list (clutch--tramp-ssh-target target-vec))
+             (mapcar #'shell-quote-argument exec-command))))
+      (unless (executable-find runtime)
+        (clutch--user-error
+         "Container TRAMP forwarding requires the `%s' executable" runtime))
+      exec-command)))
+
+(defun clutch--container-forward-register-child (listener child)
+  "Register CHILD so deleting LISTENER can stop active relay processes."
+  (process-put listener :clutch-container-children
+               (cons child
+                     (delq child
+                           (process-get listener
+                                        :clutch-container-children)))))
+
+(defun clutch--container-forward-stop-peer (proc peer-key)
+  "Delete PROC's PEER-KEY process when it is still live."
+  (when-let* ((peer (process-get proc peer-key)))
+    (when (process-live-p peer)
+      (delete-process peer))))
+
+(defun clutch--container-forward-relay-filter (relay string)
+  "Send STRING bytes from RELAY to its client connection."
+  (when-let* ((client (process-get relay :clutch-container-client)))
+    (when (process-live-p client)
+      (process-send-string client string))))
+
+(defun clutch--container-forward-client-filter (client string)
+  "Send STRING bytes from CLIENT to its container relay process."
+  (when-let* ((relay (process-get client :clutch-container-relay)))
+    (when (process-live-p relay)
+      (process-send-string relay string))))
+
+(defun clutch--container-forward-relay-sentinel (relay _event)
+  "Close RELAY's client connection when the relay exits."
+  (clutch--container-forward-stop-peer relay :clutch-container-client))
+
+(defun clutch--container-forward-client-sentinel (client event)
+  "Start or stop the container relay for CLIENT according to EVENT."
+  (if (string-prefix-p "open " event)
+      (let* ((command (process-get client :clutch-container-command))
+             (buffer (process-get client :clutch-container-buffer))
+             (listener (process-get client :clutch-container-listener))
+             (relay (make-process
+                     :name (format "%s relay" (process-name client))
+                     :buffer buffer
+                     :command command
+                     :connection-type 'pipe
+                     :coding 'no-conversion
+                     :filter #'clutch--container-forward-relay-filter
+                     :sentinel #'clutch--container-forward-relay-sentinel
+                     :stderr buffer
+                     :noquery t)))
+        (set-process-coding-system client 'no-conversion 'no-conversion)
+        (set-process-query-on-exit-flag relay nil)
+        (process-put client :clutch-container-relay relay)
+        (process-put relay :clutch-container-client client)
+        (when listener
+          (clutch--container-forward-register-child listener client)
+          (clutch--container-forward-register-child listener relay)))
+    (clutch--container-forward-stop-peer client :clutch-container-relay)))
+
+(defun clutch--start-tramp-container-forward (params)
+  "Start a local TCP relay for container TRAMP PARAMS."
+  (let* ((tramp-default-directory (plist-get params :tramp-default-directory))
+         (vec (clutch--tramp-dissect-file-name tramp-default-directory))
+         (method (tramp-file-name-method vec))
+         (host (plist-get params :host))
+         (port (plist-get params :port))
+         (buffer (get-buffer-create
+                  (clutch--tramp-forward-buffer-name
+                   tramp-default-directory host port)))
+         (command (clutch--tramp-container-command vec host port))
+         listener local-port)
+    (unless (member method clutch--tramp-container-forward-methods)
+      (clutch--user-error
+       "Container TRAMP forwarding requires /docker: or /podman:"))
+    (with-current-buffer buffer
+      (erase-buffer))
+    (setq listener
+          (make-network-process
+           :name (format "clutch-tramp-container-%s:%s" host port)
+           :buffer buffer
+           :server t
+           :host "127.0.0.1"
+           :service t
+           :family 'ipv4
+           :coding 'no-conversion
+           :filter #'clutch--container-forward-client-filter
+           :sentinel #'clutch--container-forward-client-sentinel
+           :noquery t))
+    (setq local-port (process-contact listener :service))
+    (set-process-query-on-exit-flag listener nil)
+    (process-put listener :clutch-container-command command)
+    (process-put listener :clutch-container-buffer buffer)
+    (process-put listener :clutch-container-listener listener)
+    (process-put listener :clutch-container-children nil)
+    (list :kind 'tramp
+          :process listener
+          :local-port local-port
+          :buffer buffer
+          :tramp-default-directory tramp-default-directory)))
+
 (defun clutch--start-tramp-tcp-forward (params)
-  "Start an OpenSSH local forward for ssh-like TRAMP PARAMS."
+  "Start a local TCP forward for TRAMP PARAMS."
   (clutch--validate-network-forward-params params "TRAMP forwarding")
   (let ((tramp-default-directory (plist-get params :tramp-default-directory)))
     (unless (and (stringp tramp-default-directory)
                  (file-remote-p tramp-default-directory))
       (clutch--user-error
        "TRAMP forwarding requires :tramp-default-directory to be a remote TRAMP directory"))
-    (if (clutch--tramp-ssh-forward-vector tramp-default-directory)
-        (clutch--start-tramp-ssh-forward params)
-      (clutch--user-error
-       (concat
-        "TRAMP forwarding currently supports ssh-like TRAMP directories "
-        "such as /ssh:host:/path/ or /rpc:host:/path/. Container TRAMP paths need "
-        "an explicit :ssh-host or manual tunnel for now")))))
+    (let* ((vec (clutch--tramp-dissect-file-name tramp-default-directory))
+           (method (tramp-file-name-method vec)))
+      (cond
+       ((member method clutch--tramp-ssh-forward-methods)
+        (clutch--start-tramp-ssh-forward params))
+       ((member method clutch--tramp-container-forward-methods)
+        (clutch--start-tramp-container-forward params))
+       (t
+        (clutch--user-error
+         (concat
+          "TRAMP forwarding supports ssh-like paths such as /ssh:host:/path/ "
+          "or /rpc:host:/path/, and container paths such as "
+          "/docker:container:/path/ or /podman:container:/path/")))))))
 
 (defun clutch--prepare-connect-params (params)
   "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS.
