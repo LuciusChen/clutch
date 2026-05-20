@@ -1802,7 +1802,7 @@ ROWS defaults to a small three-row sample."
                    (setq single-call t))))
         (clutch-execute-region (point-min) (point-max))
         (should ensured)
-        (should (equal executed
+        (should (equal (mapcar #'car executed)
                        '("INSERT INTO demo VALUES (1)"
                          "INSERT INTO demo VALUES (2)")))
         (should-not single-call)))))
@@ -1824,10 +1824,62 @@ ROWS defaults to a small three-row sample."
                    (setq single-call t))))
         (clutch-execute-buffer)
         (should ensured)
-        (should (equal executed
+        (should (equal (mapcar #'car executed)
                        '("INSERT INTO demo VALUES (1)"
                          "INSERT INTO demo VALUES (2)")))
         (should-not single-call)))))
+
+(ert-deftest clutch-test-execute-region-marks-each-successful-statement ()
+  "Region execution should move the fringe marker statement by statement."
+  (with-temp-buffer
+    (insert "  INSERT INTO demo VALUES (1);\n\n"
+            "  UPDATE demo SET seen = 1;\n"
+            "  DELETE FROM demo WHERE id = 2;")
+    (let ((clutch-connection 'fake-conn)
+          (original-marker (symbol-function 'clutch--mark-executed-sql-region))
+          starts
+          marks)
+      (cl-letf (((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql)
+                   (push (list sql (overlayp clutch--executed-sql-overlay))
+                         starts)
+                   'ok))
+                ((symbol-function 'clutch--mark-executed-sql-region)
+                 (lambda (beg end)
+                   (push (string-trim
+                          (buffer-substring-no-properties beg end))
+                         marks)
+                   (funcall original-marker beg end)))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-sql-range (point-min) (point-max) "region"))
+      (should (equal (mapcar #'car (reverse starts))
+                     '("INSERT INTO demo VALUES (1)"
+                       "UPDATE demo SET seen = 1"
+                       "DELETE FROM demo WHERE id = 2")))
+      (should (equal (mapcar #'cadr (reverse starts))
+                     '(nil nil nil)))
+      (should (equal (reverse marks)
+                     '("INSERT INTO demo VALUES (1)"
+                       "UPDATE demo SET seen = 1"
+                       "DELETE FROM demo WHERE id = 2")))
+      (should (overlayp clutch--executed-sql-overlay))
+      (should (= (overlay-start clutch--executed-sql-overlay)
+                 (save-excursion
+                   (goto-char (point-max))
+                   (line-beginning-position)))))))
+
+(ert-deftest clutch-test-execute-statements-marks-final-select ()
+  "A final SELECT in a statement batch should keep its source bounds."
+  (let (final-select)
+    (cl-letf (((symbol-function 'clutch--run-db-query) (lambda (&rest _) 'ok))
+              ((symbol-function 'clutch--execute-and-mark)
+               (lambda (sql beg end &optional _conn)
+                 (setq final-select (list sql beg end))))
+              ((symbol-function 'message) #'ignore))
+      (clutch--execute-statements
+       '(("UPDATE demo SET seen = 1" 1 25)
+         ("SELECT * FROM demo" 27 45))))
+    (should (equal final-select '("SELECT * FROM demo" 27 45)))))
 
 ;;;; SQL parsing — table and alias extraction
 

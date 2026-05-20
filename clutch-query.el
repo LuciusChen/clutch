@@ -127,6 +127,7 @@
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
 (declare-function clutch--mark-failed-sql-region "clutch-ui" (beg end &optional message))
+(declare-function clutch--clear-executed-sql-overlay "clutch-ui" (&rest _))
 (declare-function clutch--compute-column-widths "clutch-ui" (col-names rows column-defs &optional max-width))
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
@@ -1522,6 +1523,8 @@ Optional CONTEXT is merged into the debug event.  Return
   (pcase-let* ((`(,trim-beg . ,trim-end)
                  (or (clutch--trim-sql-bounds beg end)
                      (cons beg end))))
+    (clutch--clear-executed-sql-overlay)
+    (redisplay t)
     (when (let ((clutch--executing-sql-start trim-beg)
                 (clutch--executing-sql-end trim-end))
             (clutch--execute sql conn))
@@ -1541,36 +1544,40 @@ Optional CONTEXT is merged into the debug event.  Return
                 (match-beginning 0)
               (point-max))))))
 
-(defun clutch--statement-delimited-buffer-p ()
-  "Return non-nil when the current buffer contains a top-level semicolon.
+(defun clutch--sql-statement-breaks (sql)
+  "Return zero-based offsets of top-level semicolons in SQL.
 Semicolons inside strings, line comments, and block comments do not count."
-  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
-         (len (length text))
-         (in-string nil)
-         (i 0)
-         found)
-    (while (and (< i len) (not found))
-      (let ((ch (aref text i)))
+  (let ((breaks nil)
+        (in-string nil)
+        (i 0)
+        (len (length sql)))
+    (while (< i len)
+      (let ((ch (aref sql i)))
         (cond
          (in-string
           (when (= ch in-string)
             (setq in-string nil)))
          ((= ch ?')  (setq in-string ?'))
          ((= ch ?\") (setq in-string ?\"))
-         ((and (= ch ?-) (< (1+ i) len) (= (aref text (1+ i)) ?-))
-          (while (and (< i len) (/= (aref text i) ?\n))
+         ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
+          (while (and (< i len) (/= (aref sql i) ?\n))
             (cl-incf i)))
-         ((and (= ch ?/) (< (1+ i) len) (= (aref text (1+ i)) ?*))
+         ((and (= ch ?/) (< (1+ i) len) (= (aref sql (1+ i)) ?*))
           (cl-incf i 2)
           (while (and (< (1+ i) len)
-                      (not (and (= (aref text i) ?*)
-                                (= (aref text (1+ i)) ?/))))
+                      (not (and (= (aref sql i) ?*)
+                                (= (aref sql (1+ i)) ?/))))
             (cl-incf i))
           (cl-incf i))
          ((= ch ?\;)
-          (setq found t))))
+          (push i breaks))))
       (cl-incf i))
-    found))
+    (nreverse breaks)))
+
+(defun clutch--statement-delimited-buffer-p ()
+  "Return non-nil when the current buffer contains a top-level semicolon."
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (consp (clutch--sql-statement-breaks text))))
 
 (defun clutch--statement-effective-offset (text offset)
   "Return insertion OFFSET in TEXT for semicolon-edge statement selection.
@@ -1644,29 +1651,7 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (len (length text))
-         (breaks nil)                    ; list of semicolon positions
-         (in-string nil)
-         (i 0))
-    ;; Collect all top-level semicolon positions using the same parser
-    ;; as `clutch--split-statements'.
-    (while (< i len)
-      (let ((ch (aref text i)))
-        (cond
-         (in-string
-          (when (= ch in-string) (setq in-string nil)))
-         ((= ch ?')  (setq in-string ?'))
-         ((= ch ?\") (setq in-string ?\"))
-         ((and (= ch ?-) (< (1+ i) len) (= (aref text (1+ i)) ?-))
-          (while (and (< i len) (/= (aref text i) ?\n)) (cl-incf i)))
-         ((and (= ch ?/) (< (1+ i) len) (= (aref text (1+ i)) ?*))
-          (cl-incf i 2)
-          (while (and (< (1+ i) len)
-                      (not (and (= (aref text i) ?*) (= (aref text (1+ i)) ?/))))
-            (cl-incf i))
-          (cl-incf i))
-         ((= ch ?\;) (push i breaks))))
-      (cl-incf i))
-    (setq breaks (nreverse breaks))
+         (breaks (clutch--sql-statement-breaks text)))
     ;; Find the enclosing semicolons around point.
     (let* ((beg (point-min))
            (end (point-max))
@@ -1706,98 +1691,133 @@ Blank lines inside the statement are preserved."
     (clutch--ensure-connection)
     (clutch--execute-and-mark sql beg end)))
 
-(defun clutch--split-statements (sql)
-  "Split SQL into individual statements on unquoted semicolons.
-Skips semicolons inside single-quoted strings, -- line comments,
-and /* */ block comments."
-  (let ((stmts nil) (start 0) (in-string nil) (i 0) (len (length sql)))
-    (while (< i len)
-      (let ((ch (aref sql i)))
-        (cond
-         (in-string
-          (when (= ch in-string)
-            (setq in-string nil)))
-         ((= ch ?')  (setq in-string ?'))
-         ((= ch ?\") (setq in-string ?\"))
-         ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
-          (while (and (< i len) (/= (aref sql i) ?\n)) (cl-incf i)))
-         ((and (= ch ?/) (< (1+ i) len) (= (aref sql (1+ i)) ?*))
-          (cl-incf i 2)
-          (while (and (< (1+ i) len)
-                      (not (and (= (aref sql i) ?*) (= (aref sql (1+ i)) ?/))))
-            (cl-incf i))
-          (cl-incf i))
-         ((= ch ?\;)
-          (let ((stmt (string-trim (substring sql start i))))
-            (unless (string-empty-p stmt) (push stmt stmts)))
-          (setq start (1+ i)))))
-      (cl-incf i))
-    (let ((tail (string-trim (substring sql start))))
-      (unless (string-empty-p tail) (push tail stmts)))
+(defun clutch--split-statement-specs (sql &optional base-position)
+  "Split SQL into `(STATEMENT BEG END)' specs on unquoted semicolons.
+BEG and END are buffer positions when BASE-POSITION is non-nil.  Semicolons
+inside single-quoted strings, -- line comments, and /* */ block comments are
+skipped."
+  (let ((stmts nil)
+        (start 0)
+        (len (length sql)))
+    (cl-labels
+        ((blank-char-p (ch)
+           (memq ch '(?\s ?\t ?\r ?\n)))
+         (emit (end)
+           (let ((tbeg start)
+                 (tend end))
+             (while (and (< tbeg tend)
+                         (blank-char-p (aref sql tbeg)))
+               (cl-incf tbeg))
+             (while (and (< tbeg tend)
+                         (blank-char-p (aref sql (1- tend))))
+               (cl-decf tend))
+             (when (< tbeg tend)
+               (push (list (substring sql tbeg tend)
+                           (and base-position (+ base-position tbeg))
+                           (and base-position (+ base-position tend)))
+                     stmts)))))
+      (dolist (break (clutch--sql-statement-breaks sql))
+        (emit break)
+        (setq start (1+ break)))
+      (emit len))
     (nreverse stmts)))
 
 (defun clutch--execute-statements (stmts)
   "Execute STMTS sequentially.
 DML/DDL statements run silently; the final SELECT (if any) opens a
 result buffer.  Stops and reports on the first error."
-  (let* ((last (car (last stmts)))
-         (before-last (butlast stmts))
+  (let* ((specs (mapcar (lambda (stmt)
+                          (if (consp stmt)
+                              stmt
+                            (list stmt nil nil)))
+                        stmts))
+         (last-spec (car (last specs)))
+         (before-last (butlast specs))
          (done 0)
          (source-buffer (current-buffer)))
-    (cl-labels
-        ((signal-statement-error (err stmt)
-           (let* ((failure
-                  (clutch--remember-execute-error
-                   source-buffer clutch-connection stmt err
-                   (list :statement-index (1+ done))))
-                  (message (car failure))
-                  (summary (cdr failure))
-                  (display (clutch--humanize-db-error-parts message))
-                  (display-summary (or (plist-get display :summary)
-                                       summary))
-                  (hint (plist-get display :hint))
-                  (buf (clutch--display-error-result
-                        clutch-connection stmt display-summary message nil
-                        hint)))
-             (when (and (buffer-live-p source-buffer)
+    (let ((mark-success
+           (lambda (spec)
+             (pcase-let ((`(,_sql ,beg ,end) spec))
+               (when (and beg end)
+                 (clutch--mark-executed-sql-region beg end)
+                 (redisplay t)))))
+          (clear-status
+           (lambda (spec)
+             (when (nth 1 spec)
+               (clutch--clear-executed-sql-overlay)
+               (redisplay t))))
+          (signal-statement-error
+           (lambda (err spec)
+             (pcase-let ((`(,stmt ,beg ,end) spec))
+               (let* ((failure
+                       (clutch--remember-execute-error
+                        source-buffer clutch-connection stmt err
+                        (list :statement-index (1+ done))))
+                      (message (car failure))
+                      (summary (cdr failure))
+                      (display (clutch--humanize-db-error-parts message))
+                      (display-summary (or (plist-get display :summary)
+                                           summary))
+                      (hint (plist-get display :hint))
+                      (buf (clutch--display-error-result
+                            clutch-connection stmt display-summary message nil
+                            hint)))
+                 (cond
+                  ((and (buffer-live-p source-buffer) beg end)
+                   (with-current-buffer source-buffer
+                     (clutch--mark-failed-sql-region beg end display-summary)))
+                  ((and (buffer-live-p source-buffer)
                         clutch--executing-sql-start
                         clutch--executing-sql-end)
-               (with-current-buffer source-buffer
-                 (clutch--mark-failed-sql-region
-                  clutch--executing-sql-start clutch--executing-sql-end
-                  display-summary)))
-             (when (and (buffer-live-p source-buffer)
-                        (buffer-live-p buf))
-               (with-current-buffer source-buffer
-                 (setq-local clutch--last-result-buffer buf)))
-             (clutch--user-error "Statement %d failed: %s"
-                         (1+ done)
-                         (clutch--debug-workflow-message summary)))))
-      (dolist (stmt before-last)
-        (condition-case err
-            (progn (clutch--run-db-query clutch-connection stmt) (cl-incf done))
-          (quit
-           (clutch--handle-query-quit clutch-connection))
-          (clutch-db-error
-           (signal-statement-error err stmt))))
-      (if (clutch--select-query-p last)
-          (progn
-            (when (> done 0)
-              (message "%s statement%s %s"
-                       (clutch--message-count done)
-                       (if (= done 1) "" "s")
-                       (clutch--message-keyword "executed")))
-            (clutch--execute last))
-        (condition-case err
-            (progn (clutch--run-db-query clutch-connection last) (cl-incf done)
-                   (message "%s statement%s %s"
-                            (clutch--message-count done)
-                            (if (= done 1) "" "s")
-                            (clutch--message-keyword "executed")))
-          (quit
-           (clutch--handle-query-quit clutch-connection))
-          (clutch-db-error
-           (signal-statement-error err last)))))))
+                   (with-current-buffer source-buffer
+                     (clutch--mark-failed-sql-region
+                      clutch--executing-sql-start clutch--executing-sql-end
+                      display-summary))))
+                 (when (and (buffer-live-p source-buffer)
+                            (buffer-live-p buf))
+                   (with-current-buffer source-buffer
+                     (setq-local clutch--last-result-buffer buf)))
+                 (clutch--user-error "Statement %d failed: %s"
+                                     (1+ done)
+                                     (clutch--debug-workflow-message summary)))))))
+      (dolist (spec before-last)
+        (pcase-let ((`(,stmt ,_beg ,_end) spec))
+          (funcall clear-status spec)
+          (condition-case err
+              (progn
+                (clutch--run-db-query clutch-connection stmt)
+                (cl-incf done)
+                (funcall mark-success spec))
+            (quit
+             (clutch--handle-query-quit clutch-connection))
+            (clutch-db-error
+             (funcall signal-statement-error err spec)))))
+      (pcase-let ((`(,last ,beg ,end) last-spec))
+        (cond
+         ((clutch--select-query-p last)
+          (when (> done 0)
+            (message "%s statement%s %s"
+                     (clutch--message-count done)
+                     (if (= done 1) "" "s")
+                     (clutch--message-keyword "executed")))
+          (if (and beg end)
+              (clutch--execute-and-mark last beg end)
+            (clutch--execute last)))
+         (t
+          (funcall clear-status last-spec)
+          (condition-case err
+              (progn
+                (clutch--run-db-query clutch-connection last)
+                (cl-incf done)
+                (funcall mark-success last-spec)
+                (message "%s statement%s %s"
+                         (clutch--message-count done)
+                         (if (= done 1) "" "s")
+                         (clutch--message-keyword "executed")))
+            (quit
+             (clutch--handle-query-quit clutch-connection))
+            (clutch-db-error
+             (funcall signal-statement-error err last-spec)))))))))
 
 ;;;###autoload
 (defun clutch-execute-dwim (beg end)
@@ -1823,8 +1843,9 @@ are executed sequentially."
 (defun clutch--execute-sql-range (beg end scope)
   "Execute trimmed SQL between BEG and END for SCOPE.
 Semicolon-delimited multi-statement ranges run sequentially."
-  (let* ((sql (string-trim (buffer-substring-no-properties beg end)))
-         (stmts (clutch--split-statements sql)))
+  (let* ((raw-sql (buffer-substring-no-properties beg end))
+         (sql (string-trim raw-sql))
+         (stmts (clutch--split-statement-specs raw-sql beg)))
     (when (string-empty-p sql)
       (clutch--user-error "No SQL in %s" scope))
     (if (cdr stmts)
