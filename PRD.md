@@ -86,7 +86,6 @@ clutch follows a **layered, interface-based architecture** with clear separation
 | `clutch-db-pg.el` | ~1260 | PostgreSQL backend adapter, OID-to-type mapping |
 | `clutch-db-sqlite.el` | ~400 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
 | `clutch-db-jdbc.el` | ~1760 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
-| `clutch-compat.el` | ~20 | Compatibility feature placeholder for small cross-version shims |
 | External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |

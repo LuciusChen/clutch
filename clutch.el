@@ -39,7 +39,6 @@
 
 ;;; Code:
 
-(require 'clutch-compat)
 (require 'clutch-db)
 (require 'clutch-connection)
 (require 'clutch-query)

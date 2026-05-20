@@ -16,7 +16,6 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'clutch-compat)
 (require 'clutch-db)
 
 (defvar clutch--executing-p)
