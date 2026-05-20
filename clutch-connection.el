@@ -155,14 +155,6 @@
   (or (clutch--connection-remote-param conn :port)
       (clutch-db-port conn)))
 
-(defun clutch--connection-ssh-host (conn)
-  "Return the configured SSH host alias for CONN, or nil."
-  (clutch--connection-remote-param conn :ssh-host))
-
-(defun clutch--connection-tramp-default-directory (conn)
-  "Return the configured TRAMP default directory for CONN, or nil."
-  (clutch--connection-remote-param conn :tramp-default-directory))
-
 (defun clutch--tramp-vector-display-target (vec)
   "Return a compact display target for TRAMP VEC."
   (let ((host (tramp-file-name-host vec))
@@ -190,8 +182,9 @@
 
 (defun clutch--connection-transport-label (conn)
   "Return a compact transport label for CONN, or nil."
-  (or (clutch--connection-ssh-host conn)
-      (when-let* ((dir (clutch--connection-tramp-default-directory conn)))
+  (or (clutch--connection-remote-param conn :ssh-host)
+      (when-let* ((dir (clutch--connection-remote-param
+                        conn :tramp-default-directory)))
         (clutch--tramp-display-label dir))))
 
 (defun clutch--stop-connection-transport (transport)

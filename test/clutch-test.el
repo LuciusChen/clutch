@@ -1673,55 +1673,64 @@ ROWS defaults to a small three-row sample."
 
 ;;;; SQL parsing — statement bounds
 
-(ert-deftest clutch-test-statement-bounds-ignores-blank-lines ()
-  "Statement bounds use only semicolons, ignoring blank lines."
-  (with-temp-buffer
-    (insert "SELECT *\nFROM users\n\nWHERE id = 1")
-    (goto-char 20) ;; inside the statement
-    (let ((bounds (clutch--statement-bounds-at-point)))
-      (should (equal (string-trim
-                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                     "SELECT *\nFROM users\n\nWHERE id = 1")))))
+(ert-deftest clutch-test-statement-bounds ()
+  "Statement bounds should handle semicolon-delimited SQL edge cases."
+  (dolist (case '(("blank lines"
+                   "SELECT *\nFROM users\n\nWHERE id = 1"
+                   "users"
+                   "SELECT *\nFROM users\n\nWHERE id = 1")
+                  ("middle statement"
+                   "SELECT 1;\nSELECT 2;\nSELECT 3"
+                   "SELECT 2"
+                   "SELECT 2")
+                  ("first statement"
+                   "SELECT 1;\nSELECT 2"
+                   "SELECT 1"
+                   "SELECT 1")
+                  ("semicolon in string"
+                   "SELECT 'a;b' AS v;"
+                   "SELECT"
+                   "SELECT 'a;b' AS v")
+                  ("semicolon in comment"
+                   "SELECT 1 -- foo;\nFROM t;"
+                   "SELECT"
+                   "SELECT 1 -- foo;\nFROM t")))
+    (pcase-let ((`(,label ,sql ,point-token ,expected) case))
+      (ert-info ((format "case: %s" label))
+        (with-temp-buffer
+          (insert sql)
+          (goto-char (point-min))
+          (search-forward point-token)
+          (let ((bounds (clutch--statement-bounds-at-point)))
+            (should (equal (string-trim
+                            (buffer-substring-no-properties
+                             (car bounds) (cdr bounds)))
+                           expected))))))))
 
-(ert-deftest clutch-test-statement-bounds-semicolon-delimited ()
-  "Statement bounds stop at semicolons."
-  (with-temp-buffer
-    (insert "SELECT 1;\nSELECT 2;\nSELECT 3")
-    (goto-char 15) ;; inside SELECT 2
-    (let ((bounds (clutch--statement-bounds-at-point)))
-      (should (equal (string-trim
-                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                     "SELECT 2")))))
-
-(ert-deftest clutch-test-statement-bounds-first-statement ()
-  "Statement bounds work for the first statement (no leading semicolon)."
-  (with-temp-buffer
-    (insert "SELECT 1;\nSELECT 2")
-    (goto-char 5) ;; inside SELECT 1
-    (let ((bounds (clutch--statement-bounds-at-point)))
-      (should (equal (string-trim
-                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                     "SELECT 1")))))
-
-(ert-deftest clutch-test-statement-bounds-skips-semicolon-in-string ()
-  "Statement bounds skip semicolons inside string literals."
-  (with-temp-buffer
-    (insert "SELECT 'a;b' AS v;")
-    (goto-char 5) ;; inside the SELECT
-    (let ((bounds (clutch--statement-bounds-at-point)))
-      (should (equal (string-trim
-                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                     "SELECT 'a;b' AS v")))))
-
-(ert-deftest clutch-test-statement-bounds-skips-semicolon-in-comment ()
-  "Statement bounds skip semicolons inside line comments."
-  (with-temp-buffer
-    (insert "SELECT 1 -- foo;\nFROM t;")
-    (goto-char 5) ;; inside SELECT 1
-    (let ((bounds (clutch--statement-bounds-at-point)))
-      (should (equal (string-trim
-                      (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                     "SELECT 1 -- foo;\nFROM t")))))
+(ert-deftest clutch-test-sql-context-statement-bounds ()
+  "SQL context bounds should share semicolon-aware statement parsing."
+  (dolist (case '(("semicolon in string"
+                   "SELECT 'a;b' AS semi;\nSELECT 2"
+                   "semi"
+                   "SELECT 'a;b' AS semi")
+                  ("semicolon in comment"
+                   "SELECT 1 -- ignored;\nFROM users;\nSELECT 2"
+                   "users"
+                   "SELECT 1 -- ignored;\nFROM users")
+                  ("blank-line fallback"
+                   "SELECT 1\n\nSELECT 2"
+                   "2"
+                   "SELECT 2")))
+    (pcase-let ((`(,label ,sql ,point-token ,expected) case))
+      (ert-info ((format "case: %s" label))
+        (with-temp-buffer
+          (insert sql)
+          (goto-char (point-min))
+          (search-forward point-token)
+          (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+            (should (equal (string-trim
+                            (buffer-substring-no-properties beg end))
+                           expected))))))))
 
 (ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
   "DWIM execution should prefer semicolon-delimited statement bounds."
@@ -1785,28 +1794,6 @@ ROWS defaults to a small three-row sample."
         (clutch-execute-dwim (point) (point))
         (should (equal captured '("SELECT 2" "SELECT 2")))))))
 
-(ert-deftest clutch-test-execute-region-splits-multiple-statements ()
-  "Region execution should split semicolon-delimited statements."
-  (with-temp-buffer
-    (let ((sql "INSERT INTO demo VALUES (1);\nINSERT INTO demo VALUES (2);")
-          executed ensured single-call)
-      (insert sql)
-      (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 (lambda ()
-                   (setq ensured t)))
-                ((symbol-function 'clutch--execute-statements)
-                 (lambda (stmts)
-                   (setq executed stmts)))
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (&rest _args)
-                   (setq single-call t))))
-        (clutch-execute-region (point-min) (point-max))
-        (should ensured)
-        (should (equal (mapcar #'car executed)
-                       '("INSERT INTO demo VALUES (1)"
-                         "INSERT INTO demo VALUES (2)")))
-        (should-not single-call)))))
-
 (ert-deftest clutch-test-execute-buffer-splits-multiple-statements ()
   "Buffer execution should split semicolon-delimited statements."
   (with-temp-buffer
@@ -1837,9 +1824,13 @@ ROWS defaults to a small three-row sample."
             "  DELETE FROM demo WHERE id = 2;")
     (let ((clutch-connection 'fake-conn)
           (original-marker (symbol-function 'clutch--mark-executed-sql-region))
+          ensured
           starts
           marks)
-      (cl-letf (((symbol-function 'clutch--run-db-query)
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda ()
+                   (setq ensured t)))
+                ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn sql)
                    (push (list sql (overlayp clutch--executed-sql-overlay))
                          starts)
@@ -1851,7 +1842,8 @@ ROWS defaults to a small three-row sample."
                          marks)
                    (funcall original-marker beg end)))
                 ((symbol-function 'message) #'ignore))
-        (clutch--execute-sql-range (point-min) (point-max) "region"))
+        (clutch-execute-region (point-min) (point-max)))
+      (should ensured)
       (should (equal (mapcar #'car (reverse starts))
                      '("INSERT INTO demo VALUES (1)"
                        "UPDATE demo SET seen = 1"
@@ -2324,21 +2316,23 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 
 ;;;; SQL parsing — LIMIT detection and paging SQL
 
-(ert-deftest clutch-test-sql-has-limit-p ()
+(ert-deftest clutch-test-db-sql-has-top-level-limit-p ()
   "Test LIMIT clause detection."
-  (should (clutch--sql-has-limit-p "SELECT * FROM t LIMIT 10"))
-  (should (clutch--sql-has-limit-p "select * from t limit 10"))
-  (should (clutch--sql-has-limit-p "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"))
-  (should (clutch--sql-has-limit-p
+  (should (clutch-db-sql-has-top-level-limit-p "SELECT * FROM t LIMIT 10"))
+  (should (clutch-db-sql-has-top-level-limit-p "select * from t limit 10"))
+  (should (clutch-db-sql-has-top-level-limit-p
+           "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"))
+  (should (clutch-db-sql-has-top-level-limit-p
            "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 20"))
-  (should-not (clutch--sql-has-limit-p
+  (should-not (clutch-db-sql-has-top-level-limit-p
                "SELECT * FROM (SELECT * FROM t LIMIT 5) AS s"))
-  (should-not (clutch--sql-has-limit-p
+  (should-not (clutch-db-sql-has-top-level-limit-p
                "(SELECT id FROM a LIMIT 1) UNION ALL (SELECT id FROM b)"))
-  (should-not (clutch--sql-has-limit-p
+  (should-not (clutch-db-sql-has-top-level-limit-p
                "WITH x AS (SELECT * FROM t LIMIT 3) SELECT * FROM x"))
-  (should-not (clutch--sql-has-limit-p "SELECT * FROM t"))
-  (should-not (clutch--sql-has-limit-p "SELECT * FROM t WHERE limitation = 1")))
+  (should-not (clutch-db-sql-has-top-level-limit-p "SELECT * FROM t"))
+  (should-not (clutch-db-sql-has-top-level-limit-p
+               "SELECT * FROM t WHERE limitation = 1")))
 
 (ert-deftest clutch-test-build-paged-sql-wraps-limited-query-result-set ()
   "Paging should wrap queries with top-level LIMIT so paging stays correct."
@@ -10183,7 +10177,6 @@ This applies when the buffer owns the connection."
                 ((symbol-function 'clutch-db-query)
                  (lambda (_conn _sql)
                    (make-clutch-db-result :columns nil :rows nil)))
-                ((symbol-function 'clutch--update-page-state) #'ignore)
                 ((symbol-function 'clutch--refresh-display) #'ignore)
                 ((symbol-function 'message) #'ignore))
         (clutch--execute-page 0)
@@ -10262,7 +10255,6 @@ This applies when the buffer owns the connection."
                  (lambda (conn _sql)
                    (setq captured-conn conn)
                    (make-clutch-db-result :columns nil :rows nil)))
-                ((symbol-function 'clutch--update-page-state) #'ignore)
                 ((symbol-function 'clutch--refresh-display) #'ignore)
                 ((symbol-function 'message) #'ignore))
         (clutch--execute-page 0)
@@ -10438,115 +10430,69 @@ This applies when the buffer owns the connection."
                  "Cannot serialize parameter value as JSON"
                  (cadr err)))))))
 
-(ert-deftest clutch-test-execute-statements-remembers-error-details-before-last ()
-  "Earlier failing statements should store details and humanized messages."
-  (with-temp-buffer
-    (let ((clutch-debug-mode t)
-          (raw-message "Connection refused (host=db.example.com, port=3306)")
-          displayed)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
-                 (lambda (_conn) 'mysql))
-                ((symbol-function 'clutch--display-error-result)
-                 (lambda (_conn sql summary message &optional _elapsed hint)
-                   (setq displayed (list sql summary message hint))
-                   (current-buffer)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql)
-                   (if (equal sql "UPDATE first SET x = 1")
-                       (signal 'clutch-db-error (list raw-message))
-                     'ok))))
-        (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
-               (result-summary (plist-get display-parts :summary))
-               (result-hint (plist-get display-parts :hint))
-               (display-summary
-                (condition-case err
-                    (signal 'clutch-db-error (list raw-message))
-                  (clutch-db-error
-                   (clutch--humanize-db-error (error-message-string err)))))
-               signaled)
-          (condition-case err
-              (clutch--execute-statements
-               '("UPDATE first SET x = 1"
-                 "UPDATE second SET y = 2"))
-            (user-error
-             (setq signaled err)))
-          (should signaled)
-          (should (equal (cadr signaled)
-                         (format "Statement 1 failed: %s"
-                                 (clutch--debug-workflow-message display-summary))))
-          (should (equal displayed
-                         (list "UPDATE first SET x = 1"
-                               result-summary
-                               raw-message
-                               result-hint)))
-          (let* ((details clutch--buffer-error-details)
-                 (diag (plist-get details :diag))
-                 (event (car clutch--debug-events)))
-            (should details)
-            (should (eq (plist-get details :backend) 'mysql))
-            (should (equal (plist-get diag :raw-message) raw-message))
-            (should (equal (plist-get (plist-get diag :context) :sql)
-                           "UPDATE first SET x = 1"))
-            (should event)
-            (should (equal (plist-get event :phase) "error"))
-            (should (equal (plist-get event :summary)
-                           display-summary))))))))
-
-(ert-deftest clutch-test-execute-statements-remembers-error-details-on-last-statement ()
-  "Final DML failures should store details and humanized messages."
-  (with-temp-buffer
-    (let ((clutch-debug-mode t)
-          (raw-message "Connection refused (host=db.example.com, port=3306)")
-          displayed)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
-                 (lambda (_conn) 'mysql))
-                ((symbol-function 'clutch--display-error-result)
-                 (lambda (_conn sql summary message &optional _elapsed hint)
-                   (setq displayed (list sql summary message hint))
-                   (current-buffer)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql)
-                   (if (equal sql "DELETE FROM broken_rows")
-                       (signal 'clutch-db-error (list raw-message))
-                     'ok))))
-        (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
-               (result-summary (plist-get display-parts :summary))
-               (result-hint (plist-get display-parts :hint))
-               (display-summary
-                (condition-case err
-                    (signal 'clutch-db-error (list raw-message))
-                  (clutch-db-error
-                   (clutch--humanize-db-error (error-message-string err)))))
-               signaled)
-          (condition-case err
-              (clutch--execute-statements
-               '("UPDATE ok_rows SET enabled = 1"
-                 "DELETE FROM broken_rows"))
-            (user-error
-             (setq signaled err)))
-          (should signaled)
-          (should (equal (cadr signaled)
-                         (format "Statement 2 failed: %s"
-                                 (clutch--debug-workflow-message display-summary))))
-          (should (equal displayed
-                         (list "DELETE FROM broken_rows"
-                               result-summary
-                               raw-message
-                               result-hint)))
-          (let* ((details clutch--buffer-error-details)
-                 (diag (plist-get details :diag))
-                 (event (car clutch--debug-events)))
-            (should details)
-            (should (eq (plist-get details :backend) 'mysql))
-            (should (equal (plist-get diag :raw-message) raw-message))
-            (should (equal (plist-get (plist-get diag :context) :sql)
-                           "DELETE FROM broken_rows"))
-            (should event)
-            (should (equal (plist-get event :phase) "error"))
-            (should (equal (plist-get event :summary)
-                           display-summary))))))))
+(ert-deftest clutch-test-execute-statements-remembers-error-details ()
+  "Batch statement failures should store details for early and final errors."
+  (dolist (case '((("UPDATE first SET x = 1"
+                    "UPDATE second SET y = 2")
+                   "UPDATE first SET x = 1"
+                   1)
+                  (("UPDATE ok_rows SET enabled = 1"
+                    "DELETE FROM broken_rows")
+                   "DELETE FROM broken_rows"
+                   2)))
+    (pcase-let ((`(,stmts ,broken-sql ,statement-index) case))
+      (with-temp-buffer
+        (let ((clutch-debug-mode t)
+              (raw-message "Connection refused (host=db.example.com, port=3306)")
+              displayed)
+          (setq-local clutch-connection 'fake-conn)
+          (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                     (lambda (_conn) 'mysql))
+                    ((symbol-function 'clutch--display-error-result)
+                     (lambda (_conn sql summary message &optional _elapsed hint)
+                       (setq displayed (list sql summary message hint))
+                       (current-buffer)))
+                    ((symbol-function 'clutch--run-db-query)
+                     (lambda (_conn sql)
+                       (if (equal sql broken-sql)
+                           (signal 'clutch-db-error (list raw-message))
+                         'ok))))
+            (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
+                   (result-summary (plist-get display-parts :summary))
+                   (result-hint (plist-get display-parts :hint))
+                   (display-summary
+                    (condition-case err
+                        (signal 'clutch-db-error (list raw-message))
+                      (clutch-db-error
+                       (clutch--humanize-db-error (error-message-string err)))))
+                   signaled)
+              (condition-case err
+                  (clutch--execute-statements stmts)
+                (user-error
+                 (setq signaled err)))
+              (should signaled)
+              (should (equal (cadr signaled)
+                             (format "Statement %d failed: %s"
+                                     statement-index
+                                     (clutch--debug-workflow-message
+                                      display-summary))))
+              (should (equal displayed
+                             (list broken-sql
+                                   result-summary
+                                   raw-message
+                                   result-hint)))
+              (let* ((details clutch--buffer-error-details)
+                     (diag (plist-get details :diag))
+                     (event (car clutch--debug-events)))
+                (should details)
+                (should (eq (plist-get details :backend) 'mysql))
+                (should (equal (plist-get diag :raw-message) raw-message))
+                (should (equal (plist-get (plist-get diag :context) :sql)
+                               broken-sql))
+                (should event)
+                (should (equal (plist-get event :phase) "error"))
+                (should (equal (plist-get event :summary)
+                               display-summary))))))))))
 
 (ert-deftest clutch-test-abort-execution-error-renders-result-without-message ()
   "Single-statement execution errors should not duplicate details in messages."

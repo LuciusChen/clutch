@@ -256,6 +256,67 @@ are left intact.  Safe for multibyte strings (avoids `aset')."
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
+;;;; SQL helpers (statement boundaries)
+
+(defun clutch-db-sql-statement-breaks (sql)
+  "Return zero-based offsets of top-level semicolons in SQL.
+Semicolons inside strings, line comments, and block comments do not count."
+  (let ((breaks nil)
+        (in-string nil)
+        (i 0)
+        (len (length sql)))
+    (while (< i len)
+      (let ((ch (aref sql i)))
+        (cond
+         (in-string
+          (when (= ch in-string)
+            (setq in-string nil)))
+         ((= ch ?')  (setq in-string ?'))
+         ((= ch ?\") (setq in-string ?\"))
+         ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
+          (while (and (< i len) (/= (aref sql i) ?\n))
+            (cl-incf i)))
+         ((and (= ch ?/) (< (1+ i) len) (= (aref sql (1+ i)) ?*))
+          (cl-incf i 2)
+          (while (and (< (1+ i) len)
+                      (not (and (= (aref sql i) ?*)
+                                (= (aref sql (1+ i)) ?/))))
+            (cl-incf i))
+          (cl-incf i))
+         ((= ch ?\;)
+          (push i breaks))))
+      (cl-incf i))
+    (nreverse breaks)))
+
+(defun clutch-db-sql-statement-effective-offset (text offset)
+  "Return insertion OFFSET in TEXT for semicolon-edge statement selection.
+When point is on or immediately after a semicolon, treat it as belonging to the
+preceding statement."
+  (let ((len (length text)))
+    (cond
+     ((and (< offset len)
+           (= (aref text offset) ?\;))
+      offset)
+     ((and (> offset 0)
+           (= (aref text (1- offset)) ?\;))
+      (1- offset))
+     (t offset))))
+
+(defun clutch-db-sql-semicolon-statement-bounds (text offset)
+  "Return zero-based statement bounds around OFFSET in TEXT.
+Top-level semicolons delimit statements.  Semicolons inside strings and
+comments are ignored."
+  (let ((beg 0)
+        (end (length text))
+        (effective-offset
+         (clutch-db-sql-statement-effective-offset text offset)))
+    (dolist (break (clutch-db-sql-statement-breaks text))
+      (if (< break effective-offset)
+          (setq beg (1+ break))
+        (when (= end (length text))
+          (setq end break))))
+    (cons beg end)))
+
 ;;;; SQL helpers (top-level clause detection)
 
 (defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)

@@ -106,16 +106,22 @@
 
 (defun clutch--statement-bounds ()
   "Return (BEG . END) for the SQL statement surrounding point."
-  (let ((delim "\\(;\\|^[[:space:]]*$\\)"))
-    (cons
-     (save-excursion
-       (if (re-search-backward delim nil t)
-           (match-end 0)
-         (point-min)))
-     (save-excursion
-       (if (re-search-forward delim nil t)
-           (match-beginning 0)
-         (point-max))))))
+  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+         (offset (- (point) (point-min))))
+    (if (clutch-db-sql-statement-breaks text)
+        (pcase-let ((`(,beg . ,end)
+                     (clutch-db-sql-semicolon-statement-bounds text offset)))
+          (cons (+ (point-min) beg) (+ (point-min) end)))
+      (let ((delim "\\(^[[:space:]]*$\\)"))
+        (cons
+         (save-excursion
+           (if (re-search-backward delim nil t)
+               (match-end 0)
+             (point-min)))
+         (save-excursion
+           (if (re-search-forward delim nil t)
+               (match-beginning 0)
+             (point-max))))))))
 
 (defun clutch--compute-tables-in-query-cache (schema)
   "Return a fresh cache plist for table-name analysis on SCHEMA."

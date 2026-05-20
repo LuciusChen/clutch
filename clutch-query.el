@@ -818,10 +818,6 @@ Uses the full connection key so each console gets its own result buffer."
 
 ;;;; SQL pagination helpers
 
-(defun clutch--sql-has-limit-p (sql)
-  "Return non-nil if SQL has a top-level LIMIT clause."
-  (clutch-db-sql-has-top-level-limit-p sql))
-
 (defun clutch--sql-has-page-tail-p (sql)
   "Return non-nil if SQL has a top-level LIMIT or OFFSET clause."
   (or (clutch-db-sql-has-top-level-limit-p sql)
@@ -902,17 +898,6 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                 (clutch--compute-column-widths column-names rows column-defs))
     column-names))
 
-(defun clutch--update-page-state (columns rows elapsed page-num
-                                          &optional row-identity-prep
-                                          page-offset page-has-more)
-  "Update buffer-local state for a new page of results.
-COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the new page.
-ROW-IDENTITY-PREP describes any hidden row identity columns in COLUMNS.
-PAGE-OFFSET is the zero-based row offset for ROWS, and PAGE-HAS-MORE records
-whether a lookahead row proved there are later rows."
-  (clutch--install-result-page-state
-   columns rows elapsed page-num row-identity-prep page-offset page-has-more))
-
 (defun clutch--execute-page (page-num &optional page-offset)
   "Execute the query for PAGE-NUM and refresh the result buffer display.
 Uses the current effective result SQL, including active WHERE filters.
@@ -958,7 +943,7 @@ Signals an error if pagination is not available."
                   (clutch-db-result-rows result) page-size))
            (rows (car page))
            (has-more (cdr page)))
-      (clutch--update-page-state
+      (clutch--install-result-page-state
        (clutch-db-result-columns result) rows elapsed
        page-num
        row-identity-prep offset has-more)
@@ -999,18 +984,22 @@ Handles single-line (--) and multi-line (/* */) comments."
                    ""))))))
     s))
 
-(defun clutch--destructive-query-p (sql)
-  "Return non-nil if SQL is a destructive operation.
+(defun clutch--sql-starts-with-keyword-p (sql keywords)
+  "Return non-nil when SQL starts with one of KEYWORDS.
 Leading SQL comments are stripped before checking."
   (let ((trimmed (clutch--strip-leading-comments sql)))
-    (string-match-p "\\`\\(?:DELETE\\|DROP\\|TRUNCATE\\|ALTER\\)\\b"
+    (string-match-p (concat "\\`" (regexp-opt keywords) "\\b")
                     (upcase trimmed))))
+
+(defun clutch--destructive-query-p (sql)
+  "Return non-nil if SQL is a destructive operation."
+  (clutch--sql-starts-with-keyword-p
+   sql '("DELETE" "DROP" "TRUNCATE" "ALTER")))
 
 (defun clutch--schema-affecting-query-p (sql)
   "Return non-nil if SQL is likely to invalidate cached schema."
-  (let ((trimmed (clutch--strip-leading-comments sql)))
-    (string-match-p "\\`\\(?:CREATE\\|ALTER\\|DROP\\|TRUNCATE\\|RENAME\\)\\b"
-                    (upcase trimmed))))
+  (clutch--sql-starts-with-keyword-p
+   sql '("CREATE" "ALTER" "DROP" "TRUNCATE" "RENAME")))
 
 (defun clutch--sql-normalize-for-rewrite (sql)
   "Return SQL trimmed for rewrite operations."
@@ -1045,12 +1034,9 @@ Leading SQL comments are stripped before checking."
 (defun clutch--select-query-p (sql)
   "Return non-nil if SQL returns a result set.
 Matches SELECT, WITH, and introspection keywords (DESCRIBE, DESC,
-SHOW, EXPLAIN) that also return tabular results.
-Leading SQL comments are stripped before checking."
-  (let ((trimmed (clutch--strip-leading-comments sql)))
-    (string-match-p
-     "\\`\\(?:SELECT\\|WITH\\|DESCRIBE\\|DESC\\|SHOW\\|EXPLAIN\\)\\b"
-     (upcase trimmed))))
+SHOW, EXPLAIN) that also return tabular results."
+  (clutch--sql-starts-with-keyword-p
+   sql '("SELECT" "WITH" "DESCRIBE" "DESC" "SHOW" "EXPLAIN")))
 
 (defun clutch--init-result-state (conn sql columns rows elapsed
                                        &optional row-identity-prep
@@ -1544,54 +1530,10 @@ Optional CONTEXT is merged into the debug event.  Return
                 (match-beginning 0)
               (point-max))))))
 
-(defun clutch--sql-statement-breaks (sql)
-  "Return zero-based offsets of top-level semicolons in SQL.
-Semicolons inside strings, line comments, and block comments do not count."
-  (let ((breaks nil)
-        (in-string nil)
-        (i 0)
-        (len (length sql)))
-    (while (< i len)
-      (let ((ch (aref sql i)))
-        (cond
-         (in-string
-          (when (= ch in-string)
-            (setq in-string nil)))
-         ((= ch ?')  (setq in-string ?'))
-         ((= ch ?\") (setq in-string ?\"))
-         ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
-          (while (and (< i len) (/= (aref sql i) ?\n))
-            (cl-incf i)))
-         ((and (= ch ?/) (< (1+ i) len) (= (aref sql (1+ i)) ?*))
-          (cl-incf i 2)
-          (while (and (< (1+ i) len)
-                      (not (and (= (aref sql i) ?*)
-                                (= (aref sql (1+ i)) ?/))))
-            (cl-incf i))
-          (cl-incf i))
-         ((= ch ?\;)
-          (push i breaks))))
-      (cl-incf i))
-    (nreverse breaks)))
-
 (defun clutch--statement-delimited-buffer-p ()
   "Return non-nil when the current buffer contains a top-level semicolon."
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (consp (clutch--sql-statement-breaks text))))
-
-(defun clutch--statement-effective-offset (text offset)
-  "Return insertion OFFSET in TEXT for semicolon-edge statement selection.
-When point is on or immediately after a semicolon, treat it as belonging to the
-preceding statement."
-  (let ((len (length text)))
-    (cond
-     ((and (< offset len)
-           (= (aref text offset) ?\;))
-      offset)
-     ((and (> offset 0)
-           (= (aref text (1- offset)) ?\;))
-      (1- offset))
-     (t offset))))
+    (consp (clutch-db-sql-statement-breaks text))))
 
 (defun clutch--preview-sql-buffer (sql)
   "Display SQL in the *clutch-preview* buffer."
@@ -1651,19 +1593,15 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (len (length text))
-         (breaks (clutch--sql-statement-breaks text)))
+         (bounds (clutch-db-sql-semicolon-statement-bounds text offset)))
     ;; Find the enclosing semicolons around point.
-    (let* ((beg (point-min))
-           (end (point-max))
-           (effective-offset (clutch--statement-effective-offset text offset))
+    (let* ((beg (+ (point-min) (car bounds)))
+           (end (+ (point-min) (cdr bounds)))
+           (effective-offset
+            (clutch-db-sql-statement-effective-offset text offset))
            (semicolon-edge (or (/= effective-offset offset)
                                (and (< offset len)
                                     (= (aref text offset) ?\;)))))
-      (dolist (b breaks)
-        (if (< b effective-offset)
-            (setq beg (+ (point-min) b 1))
-          (when (= end (point-max))
-            (setq end (+ (point-min) b)))))
       (if (or semicolon-edge
               (when-let* ((trimmed (clutch--trim-sql-bounds beg end)))
                 (>= (point) (car trimmed))))
@@ -1716,7 +1654,7 @@ skipped."
                            (and base-position (+ base-position tbeg))
                            (and base-position (+ base-position tend)))
                      stmts)))))
-      (dolist (break (clutch--sql-statement-breaks sql))
+      (dolist (break (clutch-db-sql-statement-breaks sql))
         (emit break)
         (setq start (1+ break)))
       (emit len))

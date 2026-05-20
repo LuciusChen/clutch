@@ -2049,7 +2049,7 @@ Prompts for format:
               (clutch--prepare-row-identity-query clutch-connection effective-sql))
              (identity-sql (plist-get row-identity-prep :sql)))
         (if (or (null clutch--base-query)
-                (clutch--sql-has-limit-p effective-sql))
+                (clutch-db-sql-has-top-level-limit-p effective-sql))
             (clutch-db-result-rows
              (clutch--run-db-query clutch-connection identity-sql))
           (cl-loop with page-size = clutch-result-max-rows
