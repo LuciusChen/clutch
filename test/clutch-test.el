@@ -2362,6 +2362,20 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                      '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC LIMIT 1000) AS _clutch_page"
                        0 500 ("name" . "ASC") nil))))))
 
+(ert-deftest clutch-test-build-paged-sql-wraps-offset-query-result-set ()
+  "Paging should wrap queries with top-level OFFSET so paging stays correct."
+  (let ((clutch-connection 'fake-conn)
+        captured)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql page-num page-size &optional order-by page-offset)
+                 (setq captured (list sql page-num page-size order-by page-offset))
+                 "SELECT * FROM page")))
+      (clutch--build-paged-sql
+       "SELECT * FROM users ORDER BY created_at DESC OFFSET 20" 0 500)
+      (should (equal captured
+                     '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC OFFSET 20) AS _clutch_page"
+                       0 500 nil nil))))))
+
 (ert-deftest clutch-test-split-page-lookahead-rows-trims-extra-row ()
   "Lookahead splitting should keep page-size rows and report whether more exist."
   (should (equal (clutch--split-page-lookahead-rows '((1) (2) (3)) 2)
@@ -10056,6 +10070,36 @@ This applies when the buffer owns the connection."
               (should (equal clutch--result-rows '((1) (2))))
               (should clutch--page-has-more)
               (should (= clutch--page-offset 0))))
+        (when-let* ((buf (get-buffer result-name)))
+          (kill-buffer buf))))))
+
+(ert-deftest clutch-test-execute-select-wraps-page-tailed-query-before-pagination ()
+  "Initial SELECT execution should page over an existing LIMIT/OFFSET result set."
+  (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql _page-num _page-size &optional _order-by _page-offset)
+                 (setq captured-sql sql)
+                 "SELECT * FROM page"))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn _sql)
+                 (make-clutch-db-result
+                  :columns '((:name "id"))
+                  :rows '((1)))))
+              ((symbol-function 'clutch--result-buffer-name)
+               (lambda () result-name))
+              ((symbol-function 'clutch--show-result-buffer) #'ignore)
+              ((symbol-function 'clutch--load-fk-info) #'ignore)
+              ((symbol-function 'clutch--display-select-result) #'ignore))
+      (unwind-protect
+          (progn
+            (clutch--execute-select "SELECT id FROM users OFFSET 20" 'fake-conn)
+            (should
+             (equal captured-sql
+                    "SELECT * FROM (SELECT id FROM users OFFSET 20) AS _clutch_page")))
         (when-let* ((buf (get-buffer result-name)))
           (kill-buffer buf))))))
 

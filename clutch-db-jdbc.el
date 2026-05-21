@@ -830,12 +830,23 @@ Emacs RPC timeout."
   "Return non-nil when CONN is an Oracle JDBC connection."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
 
+(defun clutch-jdbc--url-prefix-p (conn prefix)
+  "Return non-nil when JDBC CONN URL starts with PREFIX."
+  (let ((url (plist-get (clutch-jdbc-conn-params conn) :url)))
+    (and (stringp url)
+         (string-prefix-p prefix url))))
+
 (defun clutch-jdbc--duckdb-conn-p (conn)
   "Return non-nil when CONN is a DuckDB JDBC connection."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (url (plist-get params :url)))
-    (and (stringp url)
-         (string-prefix-p "jdbc:duckdb:" url))))
+  (clutch-jdbc--url-prefix-p conn "jdbc:duckdb:"))
+
+(defun clutch-jdbc--limit-offset-conn-p (conn)
+  "Return non-nil when JDBC CONN should use LIMIT/OFFSET pagination."
+  (let ((driver (plist-get (clutch-jdbc-conn-params conn) :driver)))
+    (or (memq driver '(redshift clickhouse))
+        (clutch-jdbc--duckdb-conn-p conn)
+        (clutch-jdbc--url-prefix-p conn "jdbc:redshift:")
+        (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:"))))
 
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
@@ -1097,13 +1108,13 @@ an rn column as a side effect."
 PAGE-NUM is zero-based, and PAGE-SIZE limits each page.  Oracle uses
 ROWNUM subquery syntax compatible with all Oracle versions.  ORDER-BY
 controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
-when non-nil.  DuckDB JDBC uses LIMIT/OFFSET.  Other databases use
-SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+, DB2)."
+when non-nil.  DuckDB, Redshift, and ClickHouse JDBC use LIMIT/OFFSET.
+Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
+2012+, DB2)."
   (cond
-   ((clutch-jdbc--duckdb-conn-p conn)
-    ;; DuckDB is the confirmed JDBC backend that needs LIMIT/OFFSET here.
-    ;; Other JDBC databases may share that dialect family, but keep this
-    ;; branch narrow until they are identified and tested.
+   ((clutch-jdbc--limit-offset-conn-p conn)
+    ;; Keep this dialect family explicit; generic JDBC covers engines with
+    ;; materially different pagination syntax under one transport.
     (clutch-db--build-limit-offset-paged-sql
      base-sql page-num page-size order-by
      (lambda (name) (clutch-db-escape-identifier conn name))

@@ -118,6 +118,7 @@
 
 (defun clutch-db-test--make-pgcon (&rest params)
   "Return a lightweight upstream `pgcon' built from PARAMS."
+  (require 'pg)
   (let* ((dbname (or (plist-get params :database)
                      (plist-get params :dbname)
                      "test"))
@@ -2017,6 +2018,20 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                0 10)))
     (should (string-match-p "ORDER BY created_at DESC LIMIT 10 OFFSET 0\\'" sql))
     (should-not (string-match-p "FETCH NEXT" sql))))
+
+(ert-deftest clutch-db-test-jdbc-build-paged-sql-limit-offset-dialects ()
+  "LIMIT/OFFSET JDBC dialects should not use OFFSET/FETCH."
+  (dolist (params '((:driver redshift)
+                    (:driver clickhouse)
+                    (:url "jdbc:redshift://cluster.example.com:5439/analytics")
+                    (:url "jdbc:clickhouse://ch.example.com:8123/default")))
+    (let* ((conn (make-clutch-jdbc-conn :params params))
+           (sql (clutch-db-build-paged-sql
+                 conn
+                 "SELECT * FROM t ORDER BY created_at DESC"
+                 0 10)))
+      (should (string-match-p "ORDER BY created_at DESC LIMIT 10 OFFSET 0\\'" sql))
+      (should-not (string-match-p "FETCH NEXT" sql)))))
 
 ;;;; Unit tests — SQL escaping
 

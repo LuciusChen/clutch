@@ -1122,8 +1122,8 @@ Returns the query result."
          (row-identity-prep
           (clutch--prepare-row-identity-query connection sql))
          (identity-sql (plist-get row-identity-prep :sql))
-         (paged-sql (clutch-db-build-paged-sql
-                     connection identity-sql 0 fetch-size nil 0))
+         (paged-sql (let ((clutch-connection connection))
+                      (clutch--build-paged-sql identity-sql 0 fetch-size nil 0)))
          (start (float-time))
          (source-buffer (clutch--execute-source-buffer))
          (_debug-start
