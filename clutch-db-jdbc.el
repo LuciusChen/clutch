@@ -830,6 +830,13 @@ Emacs RPC timeout."
   "Return non-nil when CONN is an Oracle JDBC connection."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
 
+(defun clutch-jdbc--duckdb-conn-p (conn)
+  "Return non-nil when CONN is a DuckDB JDBC connection."
+  (let* ((params (clutch-jdbc-conn-params conn))
+         (url (plist-get params :url)))
+    (and (stringp url)
+         (string-prefix-p "jdbc:duckdb:" url))))
+
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'clickhouse))
@@ -1090,13 +1097,24 @@ an rn column as a side effect."
 PAGE-NUM is zero-based, and PAGE-SIZE limits each page.  Oracle uses
 ROWNUM subquery syntax compatible with all Oracle versions.  ORDER-BY
 controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
-when non-nil.  Other
-databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+,
-DB2)."
-  (if (clutch-db-sql-has-top-level-limit-p base-sql)
-      base-sql
+when non-nil.  DuckDB JDBC uses LIMIT/OFFSET.  Other databases use
+SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server 2012+, DB2)."
+  (cond
+   ((clutch-jdbc--duckdb-conn-p conn)
+    ;; DuckDB is the confirmed JDBC backend that needs LIMIT/OFFSET here.
+    ;; Other JDBC databases may share that dialect family, but keep this
+    ;; branch narrow until they are identified and tested.
+    (clutch-db--build-limit-offset-paged-sql
+     base-sql page-num page-size order-by
+     (lambda (name) (clutch-db-escape-identifier conn name))
+     page-offset))
+   ((clutch-db-sql-has-top-level-limit-p base-sql)
+    base-sql)
+   (t
     (let* ((trimmed (string-trim-right
                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+           (has-user-order-by
+            (clutch-db-sql-has-top-level-clause-p trimmed "ORDER\\s-+BY"))
            (sortable-sql (if order-by
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
@@ -1104,13 +1122,15 @@ DB2)."
            (oracle-p (clutch-jdbc--oracle-conn-p conn)))
       (if oracle-p
           (clutch-jdbc--build-oracle-paged-sql conn sortable-sql offset page-size order-by)
-        (let ((order-clause (if order-by
-                                (format " ORDER BY %s %s"
-                                        (clutch-db-escape-identifier conn (car order-by))
-                                        (cdr order-by))
-                              " ORDER BY (SELECT NULL)")))
+        (let ((order-clause (cond
+                             (order-by
+                              (format " ORDER BY %s %s"
+                                      (clutch-db-escape-identifier conn (car order-by))
+                                      (cdr order-by)))
+                             (has-user-order-by "")
+                             (t " ORDER BY (SELECT NULL)"))))
           (format "%s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY"
-                  sortable-sql order-clause offset page-size))))))
+                  sortable-sql order-clause offset page-size)))))))
 
 ;;;; SQL dialect methods
 
