@@ -1997,6 +1997,27 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (string-match-p "ROWNUM <= 80" sql))
       (should (string-match-p "rn > 70" sql)))))
 
+(ert-deftest clutch-db-test-jdbc-build-paged-sql-preserves-user-order-by ()
+  "Generic JDBC pagination should not append a second top-level ORDER BY."
+  (let* ((conn (make-clutch-jdbc-conn :params '(:driver sqlserver)))
+         (sql (clutch-db-build-paged-sql
+               conn
+               "SELECT * FROM t ORDER BY created_at DESC"
+               0 10)))
+    (should (string-match-p "ORDER BY created_at DESC" sql))
+    (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql))
+    (should (string-match-p "OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY\\'" sql))))
+
+(ert-deftest clutch-db-test-jdbc-build-paged-sql-duckdb-uses-limit-offset ()
+  "DuckDB JDBC pagination should use LIMIT/OFFSET."
+  (let* ((conn (make-clutch-jdbc-conn :params '(:url "jdbc:duckdb:/tmp/test.duckdb")))
+         (sql (clutch-db-build-paged-sql
+               conn
+               "SELECT * FROM t ORDER BY created_at DESC"
+               0 10)))
+    (should (string-match-p "ORDER BY created_at DESC LIMIT 10 OFFSET 0\\'" sql))
+    (should-not (string-match-p "FETCH NEXT" sql))))
+
 ;;;; Unit tests — SQL escaping
 
 (ert-deftest clutch-db-test-mysql-escape ()
