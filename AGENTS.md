@@ -98,6 +98,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 - Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
+- Optimize documentation for the rendered reader, not source-width aesthetics. Do not rewrap unchanged Markdown/Org prose or lists just to fit a column; rendered documents already wrap naturally.
+- When documentation feels hard to read, improve the information structure: use a table, shorter bullets, a clearer heading, or a focused rewrite. Avoid changes whose only effect is different source line breaks.
 - `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
 - Do not assume a release asset is immutable just because the version string is unchanged. If the jar bytes change, update `clutch-jdbc-agent-sha256` immediately.
 - Prefer bumping the agent version for released jar content changes. Replacing a GitHub release asset in place is an exceptional repair path, not normal workflow.

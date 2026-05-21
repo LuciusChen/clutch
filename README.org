@@ -23,18 +23,14 @@ For Org-Babel integration, install the separate =ob-clutch= package.
 #+CAPTION: Query console with result pane, value viewer, and footer status.
 [[file:docs/screenshots/clutch-overview.png]]
 
-*Note:* MySQL is the primary backend — thoroughly tested and used daily.
-Native MySQL support has been live-validated against MySQL 5.6, 8.0, and
-MariaDB 10.11 through the same =mysql= backend.  PostgreSQL support is
-functional and compatible, but has not been tested as extensively in daily
-use.
-SQLite support requires Emacs 29.1+ (built-in =sqlite-*= functions); no external dependencies.
-The JDBC backend requires Java 17+ and =clutch-jdbc-agent.jar=
-(install via =M-x clutch-jdbc-ensure-agent=).
-For backend-specific notes, see
-[[file:docs/native-backends.md][docs/native-backends.md]] for MySQL / PostgreSQL / SQLite,
-[[file:docs/jdbc-backend.org][docs/jdbc-backend.org]] for JDBC usage, and
-[[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]] for JDBC agent internals.
+** Backend Support
+
+| Backend | Status | Requirements and notes |
+|---------+--------+------------------------|
+| MySQL | Primary backend; tested daily | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
+| PostgreSQL | Supported | Functional and compatible, with less daily-use coverage than MySQL |
+| SQLite | Supported | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
+| JDBC | Optional sidecar | Requires Java 17+ and =clutch-jdbc-agent.jar=; install with =M-x clutch-jdbc-ensure-agent= |
 
 * Features
 
@@ -48,38 +44,14 @@ For backend-specific notes, see
 
 ** Interactive UI (clutch.el)
 
-- Single-page result display with horizontal scrolling for wide tables
-- SQL pagination (=LIMIT/OFFSET=) with fixed header and status bar
-  - =mode-line=: row count, page, elapsed time, sort state, staged-change summary, aggregate status, row-identity guidance, active filters, and cursor position (=R-N:column-N/M=) (with =nerd-icons=, Unicode fallback)
-  - =header-line=: column names with =│= borders and underlined labels
-- After execution, focus stays in the SQL buffer while results refresh below
-- Last successfully executed SQL is marked at the statement start gutter in the editor
-- Row numbers as a table column; sort indicators via =nerd-icons= (with Unicode fallback)
-- Right-aligned numeric columns
-- Record buffer for single-row detail view
-- Foreign key detection and navigation
-- Row-identity-backed inline cell editing with staged UPDATE generation; editable results use primary keys first, then non-null unique keys, then backend row locators when available
-- Staged INSERT (=i=), DELETE (=d=), and staged SQL preview/commit
-- WHERE filtering (=W=), client-side fuzzy filter (=/=), SQL =ORDER BY= sorting (=s=)
-- Column-aligned horizontal paging via =[= / =]=, plus column width adjustment via =-= / ===
-- CSV / INSERT / UPDATE export, plus TSV / CSV / INSERT / UPDATE copy
-- Agent context copy (=clutch-copy-context-for-agent=): copy the current SQL,
-  connection context, referenced table metadata, and the visible columns from
-  the latest matching result sample as Markdown for external tools such as
-  ChatGPT, Claude, or DeepSeek
-- Object picker and actions for =Tables= / =Views= / =Synonyms= / =Indexes= / =Sequences= / =Procedures= / =Functions= / =Triggers=, with annotated minibuffer candidates, type-grouped completion, optional prefix filtering, and a no-Embark transient fallback
-- SQL completion: table/column names scoped to the current statement, with native MySQL/PostgreSQL hot paths staying cache-first and scheduling idle-time column preheat on cache miss instead of blocking typing; JDBC backends keep their direct metadata path; completion case can be customized via =clutch-sql-completion-case-style=
-- Eldoc: three-tier lookup — (1) schema-aware: table name shows database, column count, and table comment; column name shows =table.column=, type, nullability, PK/FK references, and comment; schema metadata is cache-first and quietly preheated on the main thread once Emacs is idle, so point motion does not block; (2) live MySQL =HELP= lookup (MySQL only, result cached per session); (3) static reference covering ~150 SQL keywords and functions with call signatures and descriptions (works without a connection; MySQL/PG-specific entries annotated)
-- Mode-line spinner (=…=) while a query is executing, so you always know when clutch is waiting for the server
-- Dedicated query console per connection (=clutch-query-console=), with fast switching between open consoles (=clutch-switch-console=); console content persisted across Emacs sessions
-- Schema refresh state is explicit: MySQL, PostgreSQL, and JDBC start a deferred schema snapshot after connect/reconnect, while SQLite keeps its lightweight synchronous path; query console buffer names surface =schema...= / =schema~= / =schema!= / =schema 42t= style state markers; here =Nt= means "the current schema-cache snapshot contains N browseable table/object names". =schema 0t= is therefore a successful empty snapshot, not an error. Schema errors also appear in the console header-line (see below). Manual =C-c C-s= refresh is explicit and synchronous, so it can recover a failed deferred refresh immediately.
-- Native MySQL/PostgreSQL also preheat passive metadata via idle-time callbacks on the main thread: result buffers render immediately and then enrich cached column details, while object warmup keeps non-table categories off the first-open path without creating Emacs worker threads
-- Console header-line shows live connection context: database-type icon + backend name, a dedicated connection-state icon before the compact connection key (=user@host=, with =:port= only when non-default), a separate namespace segment with =nf-md-sitemap_outline= + the current schema/database whenever the effective namespace is known, and, for connections that support Clutch manual commit, =Tx: Auto= / =Tx: Manual= / =Tx: Manual*= for the current commit mode; SQLite omits the transaction segment. Disconnected state keeps the backend context visible and warns explicitly instead of dimming it away
-- Cache-backed schema actions also warn when the schema cache is stale, failed, or still refreshing, so completion / table prompts do not silently pretend cached metadata is current
-- Auto-reconnect: if the connection drops, clutch silently reconnects before the next query using the stored credentials
-- Value viewers: =v= opens a static one-shot viewer for the current cell; =V= opens a live viewer that follows point across result / record buffers.  Both auto-detect JSON (pretty-printed with =json-ts-mode=), XML (formatted via =xmllint= if available, rendered with =nxml-mode=), or BLOB (concise text/hex preview); XML/BLOB size is shown in the viewer header-line (without polluting content highlighting)
-- Per-table/per-column result displayers can override cell text via =clutch-register-column-displayer= or =clutch-column-displayers= while keeping the raw cell value, value viewers (=v= / =V=), and cell face logic unchanged
-- REPL mode (comint-based)
+- Result browser: single-page table view, fixed header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
+- Execution flow: run a region or statement, keep focus in the SQL buffer, refresh results below, and mark the last executed statement in the gutter
+- Editing workflow: record view, foreign-key navigation, staged insert/edit/delete, SQL preview, and guarded commit
+- Filtering and export: server-side =WHERE= filters, client-side fuzzy filters, =ORDER BY= sorting, horizontal paging, and CSV/TSV/INSERT/UPDATE copy/export
+- SQL intelligence: scoped table/column completion, Eldoc, object lookup, MySQL =HELP= lookup, and cache-first metadata loading that avoids blocking point motion
+- Connection feedback: per-connection consoles, persisted console contents, auto-reconnect, explicit schema-refresh states, transaction status, and a dedicated debug buffer
+- Inspection and extension: JSON/XML/BLOB value viewers, live cell viewer, per-column display overrides, and context export for external assistants
+- REPL mode built on =comint-mode=
 
 Row identity support for staged =UPDATE= / =DELETE=:
 

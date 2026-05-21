@@ -74,18 +74,20 @@ clutch follows a **layered, interface-based architecture** with clear separation
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `clutch.el` | ~5500 | Package entry point: customization, major modes, keymaps, SQL completion/xref/eldoc, value viewers, record view, REPL, transient menus |
-| `clutch-connection.el` | ~1420 | Connection params, auth-source/pass lookup, SSH tunnels, reconnect/disconnect, transaction state, connection header context |
-| `clutch-query.el` | ~2000 | Query consoles, SQL execution, statement detection, pagination/rewrite, row-identity injection, result state setup, error overlays |
-| `clutch-ui.el` | ~1470 | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh, DML display |
+| `clutch.el` | ~1600 | Package entry point, customization, modes, keymaps, REPL, transient menus |
+| `clutch-connection.el` | ~2090 | Connection params, auth-source/pass lookup, transports, reconnect/disconnect, transaction state |
+| `clutch-query.el` | ~1940 | Query consoles, SQL execution, statement detection, pagination/rewrite, error overlays |
+| `clutch-result.el` | ~2540 | Result-mode commands, selection, sorting, filtering, export, record view, dispatch menus |
+| `clutch-ui.el` | ~1710 | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh |
 | `clutch-edit.el` | ~2140 | Staged edit, insert, delete, validation, JSON sub-editors, mutation commit workflow |
 | `clutch-object.el` | ~1820 | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
 | `clutch-schema.el` | ~800 | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat |
-| `clutch-db.el` | ~800 | Generic interface: `cl-defgeneric` definitions, result struct, shared helpers |
-| `clutch-db-mysql.el` | ~680 | MySQL backend adapter, type-category mapping |
+| `clutch-sql.el` | ~1430 | SQL context, statement analysis, completion, Eldoc, xref |
+| `clutch-db.el` | ~870 | Generic backend interface, result struct, shared SQL helpers |
+| `clutch-db-mysql.el` | ~750 | MySQL backend adapter, type-category mapping |
 | `clutch-db-pg.el` | ~1260 | PostgreSQL backend adapter, OID-to-type mapping |
 | `clutch-db-sqlite.el` | ~400 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
-| `clutch-db-jdbc.el` | ~1760 | JDBC backend: JVM sidecar management, JSON protocol, async schema, runtime schema switching |
+| `clutch-db-jdbc.el` | ~1750 | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
 | External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
