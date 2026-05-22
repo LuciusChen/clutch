@@ -720,7 +720,7 @@ Call ERRBACK if the metadata refresh fails."
       (let ((result (pg-exec
                      conn
                      "SELECT tablename FROM pg_tables \
-WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+WHERE schemaname = current_schema() \
 ORDER BY tablename")))
         (mapcar #'car (clutch-db-pg--rows result)))
     (pg-error

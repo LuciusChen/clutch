@@ -141,6 +141,11 @@ Priority: region rows > current row."
       (when-let* ((ridx (clutch-result--row-idx-at-line)))
         (list ridx))))
 
+(defun clutch-result--rows-for-display-indices (indices)
+  "Return visible result rows at display INDICES."
+  (let ((rows (or clutch--filtered-rows clutch--result-rows)))
+    (mapcar (lambda (ridx) (nth ridx rows)) indices)))
+
 ;;;###autoload
 (defun clutch-result-discard-pending-at-point ()
   "Discard the staged change at point."
@@ -209,6 +214,7 @@ Priority: region rows > current row."
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "S" #'clutch-result-sort-by-column-desc)
     (define-key map "c" #'clutch-result-copy-dispatch)
+    (define-key map "k" #'clutch-copy-context-for-agent)
     (define-key map "v" #'clutch-result-view-value)
     (define-key map "V" #'clutch-result-live-view-value)
     (define-key map "|" #'clutch-result-shell-command-on-cell)
@@ -1756,7 +1762,7 @@ Selects JSON, XML, or binary string view based on column type and content."
 (defun clutch-result--build-insert-statements (indices col-indices table)
   "Return INSERT statement strings for INDICES rows using COL-INDICES into TABLE."
   (clutch-result--build-insert-statements-for-rows
-   (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices)
+   (clutch-result--rows-for-display-indices indices)
    col-indices
    table))
 
@@ -1937,7 +1943,7 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
   (let* ((selection (clutch-result--copy-selection-indices rect))
          (indices (car selection))
          (col-indices (cdr selection))
-         (rows (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices))
+         (rows (clutch-result--rows-for-display-indices indices))
          (stmts (clutch-result--build-update-statements-for-rows
                  rows col-indices "copy UPDATE SQL")))
     (kill-new (mapconcat #'identity stmts "\n"))
@@ -1968,7 +1974,7 @@ Use RECT when non-nil.  Rows/columns: region rectangle > current cell."
 (defun clutch-result--build-csv-lines (indices col-indices)
   "Return CSV lines for INDICES rows using COL-INDICES columns."
   (clutch--csv-lines-for-rows
-   (mapcar (lambda (ridx) (nth ridx clutch--result-rows)) indices)
+   (clutch-result--rows-for-display-indices indices)
    col-indices))
 
 (defun clutch-result--copy-rows-as-csv (&optional rect)
@@ -2049,7 +2055,8 @@ Prompts for format:
               (clutch--prepare-row-identity-query clutch-connection effective-sql))
              (identity-sql (plist-get row-identity-prep :sql)))
         (if (or (null clutch--base-query)
-                (clutch-db-sql-has-top-level-limit-p effective-sql))
+                (and (null clutch--order-by)
+                     (clutch-db-sql-has-top-level-limit-p effective-sql)))
             (clutch-db-result-rows
              (clutch--run-db-query clutch-connection identity-sql))
           (cl-loop with page-size = clutch-result-max-rows

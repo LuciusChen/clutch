@@ -184,8 +184,9 @@ everything in one repository, this is a breaking packaging change:
   for a transient database.  Do not combine SQLite with =:ssh-host= or =:tramp=.
 - =:password= is optional for network backends; see [[*Password Management][Password Management]] for
   auth-source integration.
-- Network backends accept =:connect-timeout= and =:read-idle-timeout=.  JDBC also
-  accepts =:query-timeout= and =:rpc-timeout=.
+- Network backends accept =:connect-timeout= and =:read-idle-timeout=.
+  PostgreSQL and JDBC also accept =:query-timeout=; JDBC additionally accepts
+  =:rpc-timeout=.
 - TLS can be enabled with =:tls t=.  For explicit plaintext, prefer
   =:ssl-mode disabled= on MySQL and =:sslmode disable= on PostgreSQL.
 - =:ssh-host= and =:tramp= both create local forwards for structured

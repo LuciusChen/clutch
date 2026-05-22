@@ -1820,8 +1820,8 @@ ROWS defaults to a small three-row sample."
   "Region execution should move the fringe marker statement by statement."
   (with-temp-buffer
     (insert "  INSERT INTO demo VALUES (1);\n\n"
-            "  UPDATE demo SET seen = 1;\n"
-            "  DELETE FROM demo WHERE id = 2;")
+            "  UPDATE demo SET seen = 1 WHERE id = 1;\n"
+            "  UPDATE demo SET seen = 0 WHERE id = 2;")
     (let ((clutch-connection 'fake-conn)
           (original-marker (symbol-function 'clutch--mark-executed-sql-region))
           ensured
@@ -1846,14 +1846,14 @@ ROWS defaults to a small three-row sample."
       (should ensured)
       (should (equal (mapcar #'car (reverse starts))
                      '("INSERT INTO demo VALUES (1)"
-                       "UPDATE demo SET seen = 1"
-                       "DELETE FROM demo WHERE id = 2")))
+                       "UPDATE demo SET seen = 1 WHERE id = 1"
+                       "UPDATE demo SET seen = 0 WHERE id = 2")))
       (should (equal (mapcar #'cadr (reverse starts))
                      '(nil nil nil)))
       (should (equal (reverse marks)
                      '("INSERT INTO demo VALUES (1)"
-                       "UPDATE demo SET seen = 1"
-                       "DELETE FROM demo WHERE id = 2")))
+                       "UPDATE demo SET seen = 1 WHERE id = 1"
+                       "UPDATE demo SET seen = 0 WHERE id = 2")))
       (should (overlayp clutch--executed-sql-overlay))
       (should (= (overlay-start clutch--executed-sql-overlay)
                  (save-excursion
@@ -1869,7 +1869,7 @@ ROWS defaults to a small three-row sample."
                  (setq final-select (list sql beg end))))
               ((symbol-function 'message) #'ignore))
       (clutch--execute-statements
-       '(("UPDATE demo SET seen = 1" 1 25)
+       '(("UPDATE demo SET seen = 1 WHERE id = 1" 1 25)
          ("SELECT * FROM demo" 27 45))))
     (should (equal final-select '("SELECT * FROM demo" 27 45)))))
 
@@ -5143,6 +5143,23 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 "no primary, unique, or row locator identity available for table users"
                 (error-message-string err)))))))
 
+(ert-deftest clutch-test-apply-edit-with-filter-noop-uses-visible-row ()
+  "Edit staging should compare against the filtered display row."
+  (with-temp-buffer
+    (setq-local clutch--last-query "SELECT id, name FROM users"
+                clutch--result-columns '("id" "name")
+                clutch--result-source-table "users"
+                clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filtered-rows '((2 "beta"))
+                clutch--row-identity (clutch-test--primary-row-identity
+                                      "users" '("id") '(0))
+                clutch--pending-edits nil)
+    (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+              ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (clutch-result--apply-edit 0 1 "beta")
+      (should-not clutch--pending-edits))))
+
 (ert-deftest clutch-test-delete-rows-errors-clearly-without-row-identity ()
   "Delete staging should explain why update/delete are disabled."
   (with-temp-buffer
@@ -6077,6 +6094,46 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal (current-kill 0)
                        "UPDATE \"users\" SET \"name\" = 'a' WHERE \"id\" = 1"))))))
 
+(ert-deftest clutch-test-copy-update-with-filter-uses-visible-row ()
+  "UPDATE copy should use the filtered display row for visible indices."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filtered-rows '((2 "beta")))
+    (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+              ((symbol-function 'clutch-result--cell-at-point)
+               (lambda () (list 0 1 "beta")))
+              ((symbol-function 'clutch-result--build-update-statements-for-rows)
+               (lambda (rows col-indices op)
+                 (should (equal rows '((2 "beta"))))
+                 (should (equal col-indices '(1)))
+                 (should (equal op "copy UPDATE SQL"))
+                 '("UPDATE users SET name = 'beta' WHERE id = 2"))))
+      (clutch-result--copy-rows-as-update))))
+
+(ert-deftest clutch-test-build-csv-lines-with-filter-uses-visible-row ()
+  "CSV copy should use filtered display rows for visible row indices."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filtered-rows '((2 "beta")))
+    (should (equal (clutch-result--build-csv-lines '(0) '(1))
+                   '("name" "beta")))))
+
+(ert-deftest clutch-test-build-insert-statements-with-filter-uses-visible-row ()
+  "INSERT copy should use filtered display rows for visible row indices."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name")
+                clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filtered-rows '((2 "beta")))
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn s) s))
+              ((symbol-function 'clutch-db-escape-literal)
+               (lambda (_conn s) (format "'%s'" s))))
+      (should (equal (clutch-result--build-insert-statements '(0) '(1) "users")
+                     '("INSERT INTO users (name) VALUES ('beta');"))))))
+
 (ert-deftest clutch-test-copy-update-errors-when-only-pk-column-is-selected ()
   "UPDATE copy should reject selections that contain only primary key columns."
   (with-temp-buffer
@@ -6248,6 +6305,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (string-match-p "Indexes (1)" copied))
       (should (string-match-p "users_email_idx[[:space:]]+UNIQUE" copied))
       (should-not (string-match-p "Row identity candidates" copied)))))
+
+(ert-deftest clutch-test-result-mode-k-copies-agent-context ()
+  "The documented result-mode k binding should copy agent context."
+  (should (eq (lookup-key clutch-result-mode-map "k")
+              #'clutch-copy-context-for-agent)))
 
 (ert-deftest clutch-test-copy-context-for-agent-at-end-of-semicolon-statement ()
   "Agent context copy should use the previous statement after a trailing semicolon."
@@ -9984,6 +10046,34 @@ This applies when the buffer owns the connection."
         (should (equal (clutch-result--collect-all-export-rows) '((1) (2))))
         (should (= calls 1))))))
 
+(ert-deftest clutch-test-collect-all-export-rows-with-top-level-limit-and-sort ()
+  "Export-all should preserve result-driven sort for limited base queries."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (setq-local clutch--base-query "SELECT id FROM t LIMIT 3")
+    (setq-local clutch--last-query "SELECT id FROM t LIMIT 3")
+    (setq-local clutch--where-filter nil)
+    (setq-local clutch--order-by '("id" . "DESC"))
+    (let ((clutch-result-max-rows 2)
+          seen-order-by)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--build-paged-sql)
+                 (lambda (_sql page-num _page-size order-by
+                         &optional _page-offset)
+                   (setq seen-order-by order-by)
+                   (format "SELECT id FROM t LIMIT 3 -- page:%d" page-num)))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn sql)
+                   (make-clutch-db-result
+                    :rows (cond
+                           ((string-match-p "page:0\\'" sql) '((3) (2)))
+                           ((string-match-p "page:1\\'" sql) '((1)))
+                           (t (error "unsorted direct query: %s" sql)))))))
+        (should (equal (clutch-result--collect-all-export-rows)
+                       '((3) (2) (1))))
+        (should (equal seen-order-by '("id" . "DESC")))))))
+
 (ert-deftest clutch-test-collect-all-export-rows-ensures-connection ()
   "Export-all should use the shared reconnect path before querying."
   (with-temp-buffer
@@ -10476,13 +10566,13 @@ This applies when the buffer owns the connection."
 
 (ert-deftest clutch-test-execute-statements-remembers-error-details ()
   "Batch statement failures should store details for early and final errors."
-  (dolist (case '((("UPDATE first SET x = 1"
-                    "UPDATE second SET y = 2")
-                   "UPDATE first SET x = 1"
+  (dolist (case '((("INSERT INTO first VALUES (1)"
+                    "INSERT INTO second VALUES (2)")
+                   "INSERT INTO first VALUES (1)"
                    1)
-                  (("UPDATE ok_rows SET enabled = 1"
-                    "DELETE FROM broken_rows")
-                   "DELETE FROM broken_rows"
+                  (("INSERT INTO ok_rows VALUES (1)"
+                    "INSERT INTO broken_rows VALUES (2)")
+                   "INSERT INTO broken_rows VALUES (2)"
                    2)))
     (pcase-let ((`(,stmts ,broken-sql ,statement-index) case))
       (with-temp-buffer
@@ -10823,6 +10913,86 @@ This applies when the buffer owns the connection."
               ((symbol-function 'clutch--execute-select) (lambda (&rest _args) 'ok)))
       (clutch--execute "UPDATE users SET x=1" clutch-connection)
       (should (equal called "UPDATE users SET x=1")))))
+
+(ert-deftest clutch-test-execute-from-arbitrary-buffer-uses-live-connection ()
+  "`clutch-execute' should execute with a connection found in another buffer."
+  (let ((conn-buf (generate-new-buffer " *clutch-conn*"))
+        captured-conn)
+    (unwind-protect
+        (progn
+          (with-current-buffer conn-buf
+            (setq-local clutch-connection 'fake-conn))
+          (with-temp-buffer
+            (insert "SELECT 1")
+            (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+                      ((symbol-function 'clutch--connection-alive-p)
+                       (lambda (conn) (eq conn 'fake-conn)))
+                      ((symbol-function 'clutch--try-reconnect) (lambda () nil))
+                      ((symbol-function 'clutch--check-pending-changes) #'ignore)
+                      ((symbol-function 'clutch--destructive-query-p)
+                       (lambda (_sql) nil))
+                      ((symbol-function 'clutch--require-risky-dml-confirmation)
+                       #'ignore)
+                      ((symbol-function 'clutch--spinner-start) #'ignore)
+                      ((symbol-function 'clutch--update-mode-line) #'ignore)
+                      ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                      ((symbol-function 'clutch--execute-select)
+                       (lambda (_sql conn)
+                         (setq captured-conn conn)
+                         'ok))
+                      ((symbol-function 'clutch--mark-executed-sql-region)
+                       #'ignore))
+              (clutch-execute "SELECT 1")
+              (should (eq captured-conn 'fake-conn)))))
+      (when (buffer-live-p conn-buf)
+        (kill-buffer conn-buf)))))
+
+(ert-deftest clutch-test-execute-statements-confirms-each-nonselect ()
+  "Batch execution should apply destructive and risky DML guards."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (let (queries risky-sqls yes-prompts)
+      (cl-letf (((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql)
+                   (push sql queries)
+                   (make-clutch-db-result :affected-rows 1)))
+                ((symbol-function 'clutch--require-risky-dml-confirmation)
+                 (lambda (sql) (push sql risky-sqls)))
+                ((symbol-function 'clutch--schema-affecting-query-p)
+                 (lambda (_sql) nil))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (_prompt)
+                   (setq yes-prompts (1+ (or yes-prompts 0)))
+                   t))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-statements
+         '("DROP TABLE users" "UPDATE users SET admin = 1"))
+        (should (equal (nreverse queries)
+                       '("DROP TABLE users" "UPDATE users SET admin = 1")))
+        (should (equal (nreverse risky-sqls)
+                       '("DROP TABLE users" "UPDATE users SET admin = 1")))
+        (should (= yes-prompts 1))))))
+
+(ert-deftest clutch-test-execute-statements-refreshes-schema-after-ddl ()
+  "Batch DDL execution should refresh or invalidate schema metadata."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn)
+    (let (refreshed)
+      (cl-letf (((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn _sql)
+                   (make-clutch-db-result :affected-rows 0)))
+                ((symbol-function 'clutch--schema-affecting-query-p)
+                 (lambda (_sql) t))
+                ((symbol-function 'clutch-db-eager-schema-refresh-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--refresh-schema-cache-async)
+                 (lambda (conn) (setq refreshed conn)))
+                ((symbol-function 'clutch--require-risky-dml-confirmation)
+                 #'ignore)
+                ((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-statements '("CREATE TABLE users (id INT)"))
+        (should (eq refreshed 'fake-conn))))))
 
 ;;;; Console — yank cleanup and save
 

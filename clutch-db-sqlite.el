@@ -68,7 +68,7 @@ Use \":memory:\" for a transient in-memory database."
       (signal 'clutch-db-error (list "Missing :database parameter")))
     (condition-case err
         (make-clutch-db-sqlite-conn
-         :handle   (sqlite-open db)
+         :handle   (sqlite-open (unless (string= db ":memory:") db))
          :database db
          :busy     nil
          :closed   nil)
@@ -117,7 +117,8 @@ Use \":memory:\" for a transient in-memory database."
 (defun clutch-db-sqlite--select-p (sql)
   "Return non-nil if SQL is a statement that returns rows."
   (let ((case-fold-search t))
-    (string-match-p "\\`\\s-*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\)" sql)))
+    (or (string-match-p "\\`\\s-*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\)" sql)
+        (clutch-db-sql-has-top-level-clause-p sql "RETURNING"))))
 
 (defun clutch-db-sqlite--run-select (handle sql &optional values)
   "Execute a SELECT-like SQL on HANDLE with optional VALUES.

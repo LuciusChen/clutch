@@ -52,7 +52,7 @@ jobs:
             -l test/clutch-test.el \
             --eval "(ert-run-tests-batch-and-exit)"
 
-      - name: Run JDBC backend ERT suite
+      - name: Run database backend ERT suite
         run: |
           emacs -Q --batch \
             --eval "(require 'package)" \
@@ -61,7 +61,7 @@ jobs:
             -l ert \
             -l clutch-db-jdbc \
             -l test/clutch-db-test.el \
-            --eval "(ert-run-tests-batch-and-exit \"clutch-db-test-jdbc\")"
+            --eval "(ert-run-tests-batch-and-exit)"
 
       - name: Byte compile
         run: |

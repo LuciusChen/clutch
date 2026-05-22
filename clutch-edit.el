@@ -504,7 +504,7 @@ Refresh the affected row and footer in place when possible."
          (row (nth ridx display-rows))
          (identity-vec (clutch-result--extract-row-identity-vec row row-identity))
          (key (cons identity-vec cidx))
-         (original (nth cidx (nth ridx clutch--result-rows))))
+         (original (nth cidx row)))
     (if (equal new-value original)
         (setq clutch--pending-edits
               (cl-remove key clutch--pending-edits :test #'equal :key #'car))

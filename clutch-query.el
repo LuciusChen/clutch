@@ -1031,6 +1031,28 @@ Leading SQL comments are stripped before checking."
       (unless (string= token "YES")
         (clutch--user-error "Query cancelled")))))
 
+(defun clutch--confirm-query-execution (sql)
+  "Prompt for any confirmation required before executing SQL."
+  (when (clutch--destructive-query-p sql)
+    (unless (yes-or-no-p
+             (format "Execute destructive query?\n  %s\n\nProceed? "
+                     (truncate-string-to-width (string-trim sql) 80)))
+      (clutch--user-error "Query cancelled")))
+  (clutch--require-risky-dml-confirmation sql))
+
+(defun clutch--note-schema-affecting-query (sql connection)
+  "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
+  (when (clutch--schema-affecting-query-p sql)
+    (if (clutch-db-eager-schema-refresh-p connection)
+        (clutch--set-schema-status connection 'stale)
+      (clutch--refresh-schema-cache-async connection))))
+
+(defun clutch--execute-nonselect-statement (sql connection)
+  "Execute non-SELECT SQL on CONNECTION without opening a result buffer."
+  (clutch--confirm-query-execution sql)
+  (prog1 (clutch--run-db-query connection sql)
+    (clutch--note-schema-affecting-query sql connection)))
+
 (defun clutch--select-query-p (sql)
   "Return non-nil if SQL returns a result set.
 Matches SELECT, WITH, and introspection keywords (DESCRIBE, DESC,
@@ -1177,10 +1199,7 @@ Returns the query result."
          (elapsed (- (float-time) start)))
     (clutch--remember-execute-debug-event
      connection "success" sql nil (clutch--query-debug-summary result) elapsed)
-    (when (clutch--schema-affecting-query-p sql)
-      (if (clutch-db-eager-schema-refresh-p connection)
-          (clutch--set-schema-status connection 'stale)
-        (clutch--refresh-schema-cache-async connection)))
+    (clutch--note-schema-affecting-query sql connection)
     (clutch--display-result result sql elapsed)
     result))
 
@@ -1311,17 +1330,16 @@ Signals `user-error' if the user declines."
 Times execution and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
-  (clutch--ensure-connection)
+  (if (and conn (not (eq conn clutch-connection)))
+      (unless (clutch--connection-alive-p conn)
+        (clutch--user-error
+         "Connection closed.  Reconnect from the SQL buffer or REPL"))
+    (clutch--ensure-connection))
   (setq-local clutch--buffer-error-details nil)
   (clutch--check-pending-changes)
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
-    (when (clutch--destructive-query-p sql)
-      (unless (yes-or-no-p
-               (format "Execute destructive query?\n  %s\n\nProceed? "
-                       (truncate-string-to-width (string-trim sql) 80)))
-        (clutch--user-error "Query cancelled")))
-    (clutch--require-risky-dml-confirmation sql)
+    (clutch--confirm-query-execution sql)
     (setq clutch--executing-p t)
     (clutch--spinner-start)
     (clutch--update-mode-line)
@@ -1723,7 +1741,7 @@ result buffer.  Stops and reports on the first error."
           (funcall clear-status spec)
           (condition-case err
               (progn
-                (clutch--run-db-query clutch-connection stmt)
+                (clutch--execute-nonselect-statement stmt clutch-connection)
                 (cl-incf done)
                 (funcall mark-success spec))
             (quit
@@ -1745,7 +1763,7 @@ result buffer.  Stops and reports on the first error."
           (funcall clear-status last-spec)
           (condition-case err
               (progn
-                (clutch--run-db-query clutch-connection last)
+                (clutch--execute-nonselect-statement last clutch-connection)
                 (cl-incf done)
                 (funcall mark-success last-spec)
                 (message "%s statement%s %s"

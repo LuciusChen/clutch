@@ -661,6 +661,47 @@ connection as live and not busy."
       (clutch-db-disconnect conn)
       (ignore-errors (delete-file db-file)))))
 
+(ert-deftest clutch-db-test-sqlite-memory-does-not-create-file ()
+  "SQLite :memory: profiles should open an in-memory database."
+  (skip-unless (require 'clutch-db-sqlite nil t))
+  (skip-unless (and (fboundp 'sqlite-available-p)
+                    (sqlite-available-p)))
+  (let* ((dir (make-temp-file "clutch-sqlite-memory-" t))
+         (default-directory (file-name-as-directory dir))
+         conn)
+    (unwind-protect
+        (progn
+          (setq conn (clutch-db-sqlite-connect '(:database ":memory:")))
+          (clutch-db-query conn "CREATE TABLE demo (id INTEGER)")
+          (should-not (file-exists-p (expand-file-name ":memory:" dir))))
+      (when conn
+        (clutch-db-disconnect conn))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-db-test-sqlite-returning-yields-result-rows ()
+  "SQLite DML with RETURNING should produce columns and rows."
+  (skip-unless (require 'clutch-db-sqlite nil t))
+  (skip-unless (and (fboundp 'sqlite-available-p)
+                    (sqlite-available-p)))
+  (let* ((db-file (make-temp-file "clutch-sqlite-returning-" nil ".db"))
+         conn)
+    (unwind-protect
+        (progn
+          (setq conn (clutch-db-sqlite-connect (list :database db-file)))
+          (clutch-db-query conn
+                           "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
+          (let ((result (clutch-db-query
+                         conn
+                         "INSERT INTO demo (name) VALUES ('a') RETURNING id, name")))
+            (should (equal (mapcar (lambda (col) (plist-get col :name))
+                                   (clutch-db-result-columns result))
+                           '("id" "name")))
+            (should (equal (clutch-db-result-rows result) '((1 "a"))))
+            (should-not (clutch-db-result-affected-rows result))))
+      (when conn
+        (clutch-db-disconnect conn))
+      (ignore-errors (delete-file db-file)))))
+
 (ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
@@ -2113,6 +2154,19 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal (clutch-db-list-schemas conn) '("app" "public")))
       (should (string-match-p "information_schema" captured-sql))
       (should (string-match-p "NOT LIKE 'pg" captured-sql)))))
+
+(ert-deftest clutch-db-test-pg-list-tables-uses-current-schema ()
+  "PostgreSQL table listing should be scoped to the active search_path schema."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        captured-sql)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-pgresult :tuples '(("users"))))))
+      (should (equal (clutch-db-list-tables conn) '("users")))
+      (should (string-match-p "schemaname = current_schema()" captured-sql))
+      (should-not (string-match-p "NOT IN" captured-sql)))))
 
 (ert-deftest clutch-db-test-pg-current-schema-caches-result ()
   "PostgreSQL current schema lookup should cache the result on the connection."
