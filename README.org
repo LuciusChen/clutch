@@ -1,6 +1,8 @@
 #+TITLE: clutch — Interactive Database Client for Emacs
 #+AUTHOR: Lucius Chen
 
+[[https://melpa.org/#/clutch][file:https://melpa.org/packages/clutch-badge.svg]]
+
 * Overview
 
 An Emacs database client with an interactive data browsing UI.
