@@ -70,6 +70,8 @@
                   "clutch-query"
                   (buffer connection op sql err &optional context diag))
 (declare-function clutch--resolve-result-column-details "clutch-ui" (conn sql col-names))
+(declare-function clutch--result-server-pageable-p "clutch-query" ())
+(declare-function clutch--result-server-rewritable-p "clutch-query" ())
 (declare-function clutch--status-separator "clutch-ui" ())
 (declare-function clutch--update-result-line-formats "clutch-ui" (rows visible-cols widths nw))
 (declare-function clutch--value-to-literal "clutch-query" (val))
@@ -416,6 +418,8 @@ Triggers a COUNT(*) query if total rows are not yet known."
 (defun clutch-result-count-total ()
   "Query the total row count for the current base query."
   (interactive)
+  (unless (clutch--result-server-rewritable-p)
+    (user-error "Server-side count is not available for this query result"))
   (let* ((conn clutch-connection)
          (base (clutch-result--effective-query)))
     (clutch--ensure-connection)
@@ -463,6 +467,8 @@ If DESCENDING, sort in descending order.
 Re-executes from the first page."
   (unless clutch--result-columns
     (user-error "No result data"))
+  (unless (clutch--result-server-rewritable-p)
+    (user-error "Server-side sort is not available for this query result"))
   (let* ((col-names clutch--result-columns)
          (idx (cl-position col-name col-names :test #'string=)))
     (unless idx
@@ -552,8 +558,12 @@ empty string at the condition prompt to clear the filter."
   (interactive)
   (unless clutch--last-query
     (user-error "No query to filter"))
+  (unless (clutch--result-server-rewritable-p)
+    (user-error "Server-side filter is not available for this query result"))
   (let* ((base (or clutch--base-query
                    clutch--last-query))
+         (source-table (clutch-result--source-table))
+         (server-pageable (clutch--result-server-pageable-p))
          (current clutch--where-filter)
          (columns (mapcar (lambda (i) (nth i clutch--result-columns))
                           (clutch--visible-columns)))
@@ -563,7 +573,11 @@ empty string at the condition prompt to clear the filter."
          (filtered-sql (unless (string-empty-p input)
                          (clutch--apply-where base input))))
     (clutch--execute (or filtered-sql base)
-                     clutch-connection)
+                     clutch-connection
+                     (and filtered-sql
+                          (list :server-pageable server-pageable
+                                :server-rewritable t
+                                :source-table source-table)))
     (setq clutch--base-query (when filtered-sql base))
     (setq clutch--where-filter (when filtered-sql input))
     (message (if filtered-sql
@@ -2049,7 +2063,8 @@ Prompts for format:
   "Return all rows for current result by auto-paging when needed."
   (clutch--ensure-connection)
   (let ((effective-sql (clutch-result--effective-query)))
-    (if (null effective-sql)
+    (if (or (null effective-sql)
+            (not (clutch--result-server-pageable-p)))
         clutch--result-rows
       (let* ((row-identity-prep
               (clutch--prepare-row-identity-query clutch-connection effective-sql))

@@ -81,6 +81,10 @@ Nil means derive the offset from `clutch--page-current'.")
   "Elapsed time in seconds for the last query execution.")
 (defvar-local clutch--result-source-table nil
   "Detected source table name for the current result buffer, or nil.")
+(defvar-local clutch--result-server-pageable nil
+  "Non-nil when server-side page navigation is safe for this result.")
+(defvar-local clutch--result-server-rewritable nil
+  "Non-nil when server-side sort/filter/count rewrites are safe.")
 (defvar-local clutch--result-column-defs nil
   "Full column definition plists from the last result.")
 (defvar-local clutch--result-columns nil
@@ -1569,7 +1573,10 @@ IGNORE-BUFFER is excluded from liveness checks."
 (defun clutch--display-select-result (col-names rows columns)
   "Render a SELECT result with COL-NAMES, ROWS, and COLUMNS metadata."
   (let ((inhibit-read-only t))
-    (setq-local clutch--result-source-table (clutch-result--detect-table))
+    (setq-local clutch--result-source-table
+                (or clutch--result-source-table
+                    (and clutch--result-server-rewritable
+                         (clutch-result--detect-table))))
     (setq-local clutch--column-widths
                 (clutch--compute-column-widths
                  col-names rows columns))
@@ -1580,6 +1587,8 @@ IGNORE-BUFFER is excluded from liveness checks."
   (setq-local clutch--dml-result t
               clutch--base-query nil
               clutch--result-source-table nil
+              clutch--result-server-pageable nil
+              clutch--result-server-rewritable nil
               clutch--column-widths nil
               clutch--result-columns nil
               clutch--result-column-defs nil
@@ -1680,6 +1689,9 @@ is an optional actionable hint."
 COL-NAMES and COLUMNS describe the result shape, and ROWS provides the
 initial result data."
   (setq-local clutch--base-query nil)
+  (setq-local clutch--result-source-table nil)
+  (setq-local clutch--result-server-pageable nil)
+  (setq-local clutch--result-server-rewritable nil)
   (setq-local clutch--result-columns col-names)
   (setq-local clutch--result-column-defs columns)
   (setq-local clutch--result-rows rows)

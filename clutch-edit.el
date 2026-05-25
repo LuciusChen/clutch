@@ -36,7 +36,7 @@
 (defvar clutch-record--row-idx)
 
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
-(declare-function clutch--execute "clutch-query" (sql &optional conn))
+(declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--json-value-to-string "clutch-query" (value))
 (declare-function clutch-result--source-table "clutch-query" ())

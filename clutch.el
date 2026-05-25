@@ -960,6 +960,8 @@ debug event when `clutch-debug-mode' is enabled."
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
+(defvar clutch--result-server-pageable)
+(defvar clutch--result-server-rewritable)
 (defvar clutch--row-identity)
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)

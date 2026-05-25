@@ -45,6 +45,10 @@
 
 (defvar clutch--result-source-table)
 
+(defvar clutch--result-server-pageable)
+
+(defvar clutch--result-server-rewritable)
+
 (defvar tramp-rpc-use-controlmaster)
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
@@ -903,11 +907,36 @@ ROWS defaults to a small three-row sample."
 (ert-deftest clutch-test-display-select-result-records-source-table ()
   "SELECT result rendering should cache the detected source table name."
   (with-temp-buffer
-    (setq-local clutch--last-query "SELECT * FROM orders")
+    (setq-local clutch--last-query "SELECT * FROM orders"
+                clutch--result-server-rewritable t)
     (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch--display-select-result '("id") '((1))
                                      '((:name "id" :type-category numeric)))
       (should (equal clutch--result-source-table "orders")))))
+
+(ert-deftest clutch-test-display-select-result-preserves-source-table ()
+  "Internal rewrites should keep the verified source table metadata."
+  (with-temp-buffer
+    (setq-local clutch--last-query
+                "SELECT * FROM (SELECT * FROM orders) AS _clutch_filter WHERE id = 1"
+                clutch--result-server-rewritable t
+                clutch--result-source-table "orders")
+    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
+      (clutch--display-select-result '("id") '((1))
+                                     '((:name "id" :type-category numeric)))
+      (should (equal clutch--result-source-table "orders")))))
+
+(ert-deftest clutch-test-init-select-result-state-clears-source-table ()
+  "Non-paginated result initialization should not keep stale source metadata."
+  (with-temp-buffer
+    (setq-local clutch--result-source-table "users"
+                clutch--result-server-pageable t
+                clutch--result-server-rewritable t)
+    (clutch--init-select-result-state
+     '("name") '((:name "name" :type-category text)) '(("alice")))
+    (should-not clutch--result-source-table)
+    (should-not clutch--result-server-pageable)
+    (should-not clutch--result-server-rewritable)))
 
 (ert-deftest clutch-test-result-source-table-prefers-buffer-state ()
   "Result edit paths should use the recorded source table before reparsing SQL."
@@ -917,6 +946,16 @@ ROWS defaults to a small three-row sample."
     (should (equal (clutch-result--source-table) "orders"))
     (should (equal (clutch--result-source-table-or-user-error "Stage UPDATE")
                    "orders"))))
+
+(ert-deftest clutch-test-result-source-table-rejects-nonrewritable-query-result ()
+  "Arbitrary query results should not infer a writable table from first FROM."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable nil
+                clutch--result-source-table nil
+                clutch--last-query "SELECT a.*, b.* FROM a JOIN b ON a.id = b.id LIMIT 10")
+    (should-not (clutch-result--source-table))
+    (should-error (clutch--result-source-table-or-user-error "Stage UPDATE")
+                  :type 'user-error)))
 
 (ert-deftest clutch-test-insert-data-rows-marks-pending-edits ()
   "Edited rows should show an E marker in the left prefix."
@@ -1244,6 +1283,7 @@ ROWS defaults to a small three-row sample."
   "Footer should explain when edit/delete are disabled due to missing identity."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
+                clutch--result-source-table "users"
                 clutch--last-query "SELECT * FROM users")
     (let* ((footer-prop (clutch--render-footer 10 0 500 100))
            (footer (substring-no-properties footer-prop))
@@ -1361,18 +1401,24 @@ ROWS defaults to a small three-row sample."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch--last-query "SELECT * FROM t"
+                clutch--result-source-table "t"
+                clutch--result-server-pageable t
+                clutch--result-server-rewritable t
                 clutch--result-columns '("id" "name")
                 clutch--where-filter nil)
     (let (captured)
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _args) "id"))
                 ((symbol-function 'read-string) (lambda (&rest _args) "> 5"))
                 ((symbol-function 'clutch--execute)
-                 (lambda (sql conn)
-                   (setq captured (list sql conn)))))
+                 (lambda (sql conn &optional result-context)
+                   (setq captured (list sql conn result-context)))))
         (clutch-result-apply-filter)
         (should (equal captured
                        (list (clutch--apply-where "SELECT * FROM t" "id > 5")
-                             'fake-conn)))
+                             'fake-conn
+                             '(:server-pageable t
+                               :server-rewritable t
+                               :source-table "t"))))
         (should (equal clutch--where-filter "id > 5"))
         (should (equal clutch--base-query "SELECT * FROM t"))))))
 
@@ -1382,16 +1428,38 @@ ROWS defaults to a small three-row sample."
     (setq-local clutch-connection 'fake-conn
                 clutch--last-query "SELECT * FROM t"
                 clutch--base-query "SELECT * FROM t"
+                clutch--result-source-table "t"
+                clutch--result-server-pageable t
+                clutch--result-server-rewritable t
                 clutch--where-filter "id > 5")
     (let (captured)
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _args) ""))
                 ((symbol-function 'clutch--execute)
-                 (lambda (sql conn)
+                 (lambda (sql conn &optional _result-context)
                    (setq captured (list sql conn)))))
         (clutch-result-apply-filter)
         (should (equal captured '("SELECT * FROM t" fake-conn)))
         (should-not clutch--where-filter)
         (should-not clutch--base-query)))))
+
+(ert-deftest clutch-test-apply-filter-errors-for-nonrewritable-query-result ()
+  "Server-side WHERE filtering should not rewrite arbitrary query results."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable nil
+                clutch-connection 'fake-conn
+                clutch--last-query "SELECT a.*, b.* FROM a JOIN b ON a.id = b.id LIMIT 10"
+                clutch--base-query clutch--last-query
+                clutch--result-columns '("id" "name" "id"))
+    (let (executed)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _args) "id"))
+                ((symbol-function 'read-string) (lambda (&rest _args) "= 1"))
+                ((symbol-function 'clutch--execute)
+                 (lambda (&rest _args) (setq executed t))))
+        (let ((err (should-error (clutch-result-apply-filter)
+                                 :type 'user-error)))
+          (should (string-match-p "Server-side filter"
+                                  (error-message-string err))))
+        (should-not executed)))))
 
 ;;;; Rendering — custom column displayers
 
@@ -2334,47 +2402,24 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
   (should-not (clutch-db-sql-has-top-level-limit-p
                "SELECT * FROM t WHERE limitation = 1")))
 
-(ert-deftest clutch-test-build-paged-sql-wraps-limited-query-result-set ()
-  "Paging should wrap queries with top-level LIMIT so paging stays correct."
+(ert-deftest clutch-test-build-paged-sql-delegates-page-tailed-query ()
+  "Page-tailed SQL should not be wrapped before backend pagination."
   (let ((clutch-connection 'fake-conn)
         captured)
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
                (lambda (_conn sql page-num page-size &optional order-by page-offset)
-                 (setq captured (list sql page-num page-size order-by page-offset))
+                 (push (list sql page-num page-size order-by page-offset) captured)
                  "SELECT * FROM page")))
       (clutch--build-paged-sql
        "SELECT * FROM users ORDER BY created_at DESC LIMIT 1000" 1 500)
-      (should (equal captured
-                     '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC LIMIT 1000) AS _clutch_page"
-                       1 500 nil nil))))))
-
-(ert-deftest clutch-test-build-paged-sql-wraps-limited-query-before-resort ()
-  "Resorting a limited query should sort the limited result set, not append to it."
-  (let ((clutch-connection 'fake-conn)
-        captured)
-    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-               (lambda (_conn sql page-num page-size &optional order-by page-offset)
-                 (setq captured (list sql page-num page-size order-by page-offset))
-                 "SELECT * FROM page")))
       (clutch--build-paged-sql
-       "SELECT * FROM users ORDER BY created_at DESC LIMIT 1000" 0 500 '("name" . "ASC"))
-      (should (equal captured
-                     '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC LIMIT 1000) AS _clutch_page"
-                       0 500 ("name" . "ASC") nil))))))
-
-(ert-deftest clutch-test-build-paged-sql-wraps-offset-query-result-set ()
-  "Paging should wrap queries with top-level OFFSET so paging stays correct."
-  (let ((clutch-connection 'fake-conn)
-        captured)
-    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-               (lambda (_conn sql page-num page-size &optional order-by page-offset)
-                 (setq captured (list sql page-num page-size order-by page-offset))
-                 "SELECT * FROM page")))
-      (clutch--build-paged-sql
-       "SELECT * FROM users ORDER BY created_at DESC OFFSET 20" 0 500)
-      (should (equal captured
-                     '("SELECT * FROM (SELECT * FROM users ORDER BY created_at DESC OFFSET 20) AS _clutch_page"
-                       0 500 nil nil))))))
+       "SELECT * FROM users ORDER BY created_at DESC OFFSET 20"
+       0 500 '("name" . "ASC"))
+      (should (equal (nreverse captured)
+                     '(("SELECT * FROM users ORDER BY created_at DESC LIMIT 1000"
+                        1 500 nil nil)
+                       ("SELECT * FROM users ORDER BY created_at DESC OFFSET 20"
+                        0 500 ("name" . "ASC") nil)))))))
 
 (ert-deftest clutch-test-split-page-lookahead-rows-trims-extra-row ()
   "Lookahead splitting should keep page-size rows and report whether more exist."
@@ -3022,11 +3067,13 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
             (clutch-result-mode)
             (setq-local clutch-connection 'conn-a)
             (setq-local clutch--result-columns '("id"))
+            (setq-local clutch--result-source-table "users")
             (setq-local clutch--last-query "select * from users"))
           (with-current-buffer buf-b
             (clutch-result-mode)
             (setq-local clutch-connection 'conn-b)
             (setq-local clutch--result-columns '("id"))
+            (setq-local clutch--result-source-table "orders")
             (setq-local clutch--last-query "select * from orders"))
           (clutch--refresh-result-metadata-buffers 'conn-a "users")
           (with-current-buffer buf-a
@@ -4478,6 +4525,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      '((:name "id" :type-category numeric)
                        (:name "name" :type-category text))
                      '((1 "alice"))
+                     'clutch--result-source-table "users"
                      'clutch--last-query "SELECT * FROM users")))
     (unwind-protect
         (cl-letf (((symbol-function 'clutch-result--cell-at-point)
@@ -4912,6 +4960,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (clutch-result-mode)
             (setq-local clutch-connection 'fake-conn
                         clutch--last-query "SELECT * FROM shipping_incidents"
+                        clutch--result-source-table "shipping_incidents"
                         clutch--result-columns '("id" "severity" "owner" "created_at")
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "severity" :type-category text)
@@ -4958,6 +5007,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (with-current-buffer result-buf
             (setq-local clutch-connection 'fake-conn
                         clutch--last-query "SELECT * FROM shipping_incidents"
+                        clutch--result-source-table "shipping_incidents"
                         clutch--result-columns '("id" "owner")
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "owner" :type-category text))
@@ -4995,6 +5045,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (clutch-result-mode)
             (setq-local clutch-connection 'fake-conn
                         clutch--last-query "SELECT * FROM incident_codes"
+                        clutch--result-source-table "incident_codes"
                         clutch--result-columns '("id" "label")
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "label" :type-category text))
@@ -5132,6 +5183,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Edit staging should explain why update/delete are disabled."
   (with-temp-buffer
     (setq-local clutch--last-query "SELECT * FROM users"
+                clutch--result-source-table "users"
                 clutch--result-rows '((1 "before"))
                 clutch--filtered-rows nil)
     (condition-case err
@@ -5164,6 +5216,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Delete staging should explain why update/delete are disabled."
   (with-temp-buffer
     (setq-local clutch--last-query "SELECT * FROM users"
+                clutch--result-source-table "users"
                 clutch--result-rows '((1 "before"))
                 clutch--filtered-rows nil)
     (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
@@ -5653,6 +5706,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       clutch--result-column-defs '((:name "name" :type-category text))
                       clutch--result-rows '(("before"))
                       clutch--last-query "SELECT * FROM users"
+                      clutch--result-source-table "users"
                       clutch--row-identity (clutch-test--primary-row-identity
                                             "users" '("name") '(0)))
           (let ((inhibit-read-only t))
@@ -6889,6 +6943,20 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (col desc) (setq sort-args (list col desc)))))
         (clutch-result-sort-by-column-desc)
         (should (equal sort-args '("created_at" t)))))))
+
+(ert-deftest clutch-test-sort-errors-for-nonrewritable-query-result ()
+  "Server-side sorting should not rewrite arbitrary query results."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable nil
+                clutch--result-columns '("id" "name" "id"))
+    (let (paged)
+      (cl-letf (((symbol-function 'clutch--execute-page)
+                 (lambda (&rest _args) (setq paged t))))
+        (let ((err (should-error (clutch-result--sort "id" nil)
+                                 :type 'user-error)))
+          (should (string-match-p "Server-side sort"
+                                  (error-message-string err))))
+        (should-not paged)))))
 
 ;;;; Connection — build, timeout, and lifecycle
 
@@ -9999,6 +10067,7 @@ This applies when the buffer owns the connection."
     (setq-local clutch--base-query "SELECT id FROM t")
     (setq-local clutch--last-query "SELECT id FROM t")
     (setq-local clutch--where-filter nil)
+    (setq-local clutch--result-server-pageable t)
     (setq-local clutch--order-by nil)
     (let ((clutch-result-max-rows 2))
       (cl-letf (((symbol-function 'clutch--connection-alive-p)
@@ -10016,12 +10085,14 @@ This applies when the buffer owns the connection."
                        '((1) (2) (3))))))))
 
 (ert-deftest clutch-test-collect-all-export-rows-with-top-level-limit ()
-  "Collect export rows with top-level LIMIT via single query."
+  "Export should reuse already fetched rows for nonpageable limited results."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--base-query "SELECT id FROM t LIMIT 2")
     (setq-local clutch--last-query "SELECT id FROM t LIMIT 2")
     (setq-local clutch--where-filter nil)
+    (setq-local clutch--result-server-pageable nil)
+    (setq-local clutch--result-rows '((1) (2)))
     (let ((calls 0))
       (cl-letf (((symbol-function 'clutch--connection-alive-p)
                  (lambda (_conn) t))
@@ -10033,16 +10104,18 @@ This applies when the buffer owns the connection."
                    (cl-incf calls)
                    (make-clutch-db-result :rows '((1) (2))))))
         (should (equal (clutch-result--collect-all-export-rows) '((1) (2))))
-        (should (= calls 1))))))
+        (should (= calls 0))))))
 
 (ert-deftest clutch-test-collect-all-export-rows-with-top-level-limit-and-sort ()
-  "Export-all should preserve result-driven sort for limited base queries."
+  "Export should reuse current rows when limited results are not pageable."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--base-query "SELECT id FROM t LIMIT 3")
     (setq-local clutch--last-query "SELECT id FROM t LIMIT 3")
     (setq-local clutch--where-filter nil)
     (setq-local clutch--order-by '("id" . "DESC"))
+    (setq-local clutch--result-server-pageable nil)
+    (setq-local clutch--result-rows '((3) (2) (1)))
     (let ((clutch-result-max-rows 2)
           seen-order-by)
       (cl-letf (((symbol-function 'clutch--connection-alive-p)
@@ -10061,7 +10134,7 @@ This applies when the buffer owns the connection."
                            (t (error "unsorted direct query: %s" sql)))))))
         (should (equal (clutch-result--collect-all-export-rows)
                        '((3) (2) (1))))
-        (should (equal seen-order-by '("id" . "DESC")))))))
+        (should-not seen-order-by)))))
 
 (ert-deftest clutch-test-collect-all-export-rows-ensures-connection ()
   "Export-all should use the shared reconnect path before querying."
@@ -10069,7 +10142,8 @@ This applies when the buffer owns the connection."
     (let (ensured captured-conn)
       (setq-local clutch-connection 'stale-conn
                   clutch--base-query "SELECT id FROM t LIMIT 1"
-                  clutch--last-query "SELECT id FROM t LIMIT 1")
+                  clutch--last-query "SELECT id FROM t LIMIT 1"
+                  clutch--result-server-pageable t)
       (cl-letf (((symbol-function 'clutch--ensure-connection)
                  (lambda ()
                    (setq ensured t)
@@ -10085,6 +10159,7 @@ This applies when the buffer owns the connection."
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary key cache should be ready before the first result render."
   (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
         (captured-pk :unset))
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
                (lambda (_conn sql _page-num _page-size
@@ -10103,7 +10178,7 @@ This applies when the buffer owns the connection."
                   :columns '((:name "id") (:name "name") (:name "clutch__rid_0"))
                   :rows '((1 "a" 1)))))
               ((symbol-function 'clutch--result-buffer-name)
-               (lambda () "*clutch-test-result*"))
+               (lambda () result-name))
               ((symbol-function 'clutch--show-result-buffer) #'ignore)
               ((symbol-function 'clutch--load-fk-info) #'ignore)
               ((symbol-function 'clutch--display-select-result)
@@ -10112,8 +10187,11 @@ This applies when the buffer owns the connection."
       (unwind-protect
           (progn
             (clutch--execute-select "SELECT * FROM users" 'fake-conn)
-            (should (equal captured-pk '(0))))
-        (when-let* ((buf (get-buffer "*clutch-test-result*")))
+            (should (equal captured-pk '(0)))
+            (with-current-buffer result-name
+              (should clutch--result-server-pageable)
+              (should clutch--result-server-rewritable)))
+        (when-let* ((buf (get-buffer result-name)))
           (kill-buffer buf))))))
 
 (ert-deftest clutch-test-execute-select-fetches-one-row-lookahead ()
@@ -10152,19 +10230,19 @@ This applies when the buffer owns the connection."
         (when-let* ((buf (get-buffer result-name)))
           (kill-buffer buf))))))
 
-(ert-deftest clutch-test-execute-select-wraps-page-tailed-query-before-pagination ()
-  "Initial SELECT execution should page over an existing LIMIT/OFFSET result set."
+(ert-deftest clutch-test-execute-select-keeps-page-tailed-query-flat ()
+  "Initial SELECT execution should not wrap a user-limited result set."
   (let ((clutch--source-window (selected-window))
         (result-name "*clutch-test-result*")
         captured-sql)
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-               (lambda (_conn sql _page-num _page-size &optional _order-by _page-offset)
-                 (setq captured-sql sql)
-                 "SELECT * FROM page"))
+               (lambda (&rest _args)
+                 (error "Should not wrap a user-limited query result")))
               ((symbol-function 'clutch-db-row-identity-candidates)
                (lambda (&rest _args) nil))
               ((symbol-function 'clutch--run-db-query)
-               (lambda (_conn _sql)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
                  (make-clutch-db-result
                   :columns '((:name "id"))
                   :rows '((1)))))
@@ -10176,9 +10254,145 @@ This applies when the buffer owns the connection."
       (unwind-protect
           (progn
             (clutch--execute-select "SELECT id FROM users OFFSET 20" 'fake-conn)
-            (should
-             (equal captured-sql
-                    "SELECT * FROM (SELECT id FROM users OFFSET 20) AS _clutch_page")))
+            (should (equal captured-sql "SELECT id FROM users OFFSET 20"))
+            (with-current-buffer result-name
+              (should-not clutch--result-server-pageable)
+              (should-not clutch--result-server-rewritable)
+              (should-not clutch--page-has-more)))
+        (when-let* ((buf (get-buffer result-name)))
+          (kill-buffer buf))))))
+
+(ert-deftest clutch-test-execute-select-keeps-page-tailed-complex-query-flat ()
+  "Complex query results with user LIMIT should execute as result sets, not wrappers."
+  (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
+        (sql "SELECT c.*, cc.* FROM table_a AS c JOIN table_b AS cc ON c.id = cc.id LIMIT 10")
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (&rest _args)
+                 (error "Should not wrap arbitrary limited query results")))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn query)
+                 (setq captured-sql query)
+                 (make-clutch-db-result
+                  :columns '((:name "id") (:name "name") (:name "id"))
+                  :rows '((1 "a" 1) (2 "b" 2)))))
+              ((symbol-function 'clutch--result-buffer-name)
+               (lambda () result-name))
+              ((symbol-function 'clutch--show-result-buffer) #'ignore)
+              ((symbol-function 'clutch--load-fk-info) #'ignore)
+              ((symbol-function 'clutch--display-select-result) #'ignore))
+      (unwind-protect
+          (progn
+            (clutch--execute-select sql 'fake-conn)
+            (should (equal captured-sql sql))
+            (with-current-buffer result-name
+              (should-not clutch--result-server-pageable)
+              (should-not clutch--result-server-rewritable)
+              (should-not clutch--page-has-more)
+              (should (equal clutch--result-rows '((1 "a" 1) (2 "b" 2))))))
+        (when-let* ((buf (get-buffer result-name)))
+          (kill-buffer buf))))))
+
+(ert-deftest clutch-test-execute-select-keeps-page-tailed-duplicate-alias-query-flat ()
+  "Page-tailed queries with duplicate projected labels should not be wrapped."
+  (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
+        (sql "SELECT id AS dup, name AS dup FROM users LIMIT 10")
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (&rest _args)
+                 (error "Should not wrap duplicate-label query results")))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn query)
+                 (setq captured-sql query)
+                 (make-clutch-db-result
+                  :columns '((:name "dup") (:name "dup"))
+                  :rows '((1 "a")))))
+              ((symbol-function 'clutch--result-buffer-name)
+               (lambda () result-name))
+              ((symbol-function 'clutch--show-result-buffer) #'ignore)
+              ((symbol-function 'clutch--load-fk-info) #'ignore)
+              ((symbol-function 'clutch--display-select-result) #'ignore))
+      (unwind-protect
+          (progn
+            (clutch--execute-select sql 'fake-conn)
+            (should (equal captured-sql sql))
+            (with-current-buffer result-name
+              (should-not clutch--result-server-pageable)
+              (should-not clutch--result-server-rewritable)))
+        (when-let* ((buf (get-buffer result-name)))
+          (kill-buffer buf))))))
+
+(ert-deftest clutch-test-execute-select-duplicate-labels-are-not-rewritable ()
+  "Duplicate result labels should remain pageable but not relation-rewritable."
+  (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
+        (sql "SELECT id AS dup, name AS dup FROM users")
+        captured-build-sql)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn base-sql _page-num _page-size
+                              &optional _order-by _page-offset)
+                 (setq captured-build-sql base-sql)
+                 base-sql))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn _query)
+                 (make-clutch-db-result
+                  :columns '((:name "dup") (:name "dup"))
+                  :rows '((1 "a")))))
+              ((symbol-function 'clutch--result-buffer-name)
+               (lambda () result-name))
+              ((symbol-function 'clutch--show-result-buffer) #'ignore)
+              ((symbol-function 'clutch--load-fk-info) #'ignore)
+              ((symbol-function 'clutch--display-select-result) #'ignore))
+      (unwind-protect
+          (progn
+            (clutch--execute-select sql 'fake-conn)
+            (should (equal captured-build-sql sql))
+            (with-current-buffer result-name
+              (should clutch--result-server-pageable)
+              (should-not clutch--result-server-rewritable)))
+        (when-let* ((buf (get-buffer result-name)))
+          (kill-buffer buf))))))
+
+(ert-deftest clutch-test-execute-select-honors-result-context-overrides ()
+  "Internal filter SQL should keep the verified relation source capabilities."
+  (let ((clutch--source-window (selected-window))
+        (result-context
+         '(:server-pageable t
+           :server-rewritable t
+           :source-table "users"))
+        (result-name "*clutch-test-result*")
+        (sql "SELECT * FROM (SELECT id, name FROM users) AS _clutch_filter WHERE id > 1"))
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn base-sql _page-num _page-size
+                              &optional _order-by _page-offset)
+                 base-sql))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn _query)
+                 (make-clutch-db-result
+                  :columns '((:name "id") (:name "name"))
+                  :rows '((2 "bob")))))
+              ((symbol-function 'clutch--result-buffer-name)
+               (lambda () result-name))
+              ((symbol-function 'clutch--show-result-buffer) #'ignore)
+              ((symbol-function 'clutch--load-fk-info) #'ignore)
+              ((symbol-function 'clutch--display-select-result) #'ignore))
+      (unwind-protect
+          (progn
+            (clutch--execute-select sql 'fake-conn result-context)
+            (with-current-buffer result-name
+              (should clutch--result-server-pageable)
+              (should clutch--result-server-rewritable)
+              (should (equal clutch--result-source-table "users"))))
         (when-let* ((buf (get-buffer result-name)))
           (kill-buffer buf))))))
 
@@ -10287,6 +10501,7 @@ This applies when the buffer owns the connection."
       (setq-local clutch-connection 'fake-conn
                   clutch--base-query "SELECT * FROM t"
                   clutch--where-filter "id = 1"
+                  clutch--result-server-pageable t
                   clutch-result-max-rows 500)
       (cl-letf (((symbol-function 'clutch--apply-where)
                  (lambda (sql filter)
@@ -10311,6 +10526,7 @@ This applies when the buffer owns the connection."
     (let (captured-page-size captured-offset)
       (setq-local clutch-connection 'fake-conn
                   clutch--base-query "SELECT id FROM t"
+                  clutch--result-server-pageable t
                   clutch-result-max-rows 2)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch--prepare-row-identity-query)
@@ -10341,7 +10557,8 @@ This applies when the buffer owns the connection."
     (let (captured-base)
       (setq-local clutch-connection 'fake-conn
                   clutch--base-query "SELECT * FROM t"
-                  clutch--where-filter "id = 1")
+                  clutch--where-filter "id = 1"
+                  clutch--result-server-rewritable t)
       (cl-letf (((symbol-function 'clutch--apply-where)
                  (lambda (sql filter)
                    (format "FILTER[%s]{%s}" filter sql)))
@@ -10359,12 +10576,32 @@ This applies when the buffer owns the connection."
         (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))
         (should (= clutch--page-total-rows 7))))))
 
+(ert-deftest clutch-test-count-total-errors-for-nonrewritable-query-result ()
+  "COUNT should not wrap arbitrary query results in a derived table."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable nil
+                clutch-connection 'fake-conn
+                clutch--base-query "SELECT a.*, b.* FROM a JOIN b ON a.id = b.id LIMIT 10"
+                clutch--last-query clutch--base-query)
+    (let (queried)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--build-count-sql)
+                 (lambda (&rest _args) (error "Should not build COUNT SQL")))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (&rest _args) (setq queried t))))
+        (let ((err (should-error (clutch-result-count-total)
+                                 :type 'user-error)))
+          (should (string-match-p "Server-side count"
+                                  (error-message-string err))))
+        (should-not queried)))))
+
 (ert-deftest clutch-test-execute-page-ensures-connection-before-query ()
   "Paging should use the shared reconnect path before querying."
   (with-temp-buffer
     (let (ensured captured-conn)
       (setq-local clutch-connection 'stale-conn
                   clutch--base-query "SELECT * FROM t"
+                  clutch--result-server-pageable t
                   clutch-result-max-rows 100)
       (cl-letf (((symbol-function 'clutch--ensure-connection)
                  (lambda ()
@@ -10391,6 +10628,7 @@ This applies when the buffer owns the connection."
           (raw-message "Connection refused (host=db.example.com, port=3306)"))
       (setq-local clutch-connection 'fake-conn
                   clutch--base-query "SELECT * FROM t"
+                  clutch--result-server-pageable t
                   clutch-result-max-rows 100)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch--build-paged-sql)
@@ -10448,7 +10686,8 @@ This applies when the buffer owns the connection."
   (with-temp-buffer
     (let (ensured captured-conn)
       (setq-local clutch-connection 'stale-conn
-                  clutch--base-query "SELECT * FROM t")
+                  clutch--base-query "SELECT * FROM t"
+                  clutch--result-server-rewritable t)
       (cl-letf (((symbol-function 'clutch--ensure-connection)
                  (lambda ()
                    (setq ensured t)
@@ -10926,7 +11165,7 @@ This applies when the buffer owns the connection."
                       ((symbol-function 'clutch--update-mode-line) #'ignore)
                       ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
                       ((symbol-function 'clutch--execute-select)
-                       (lambda (_sql conn)
+                       (lambda (_sql conn &optional _result-context)
                          (setq captured-conn conn)
                          'ok))
                       ((symbol-function 'clutch--mark-executed-sql-region)
@@ -13281,6 +13520,60 @@ Skips if `clutch-test-password' is nil."
         (when-let* ((buf (get-buffer result-name)))
           (kill-buffer buf))
         (ignore-errors (clutch-db-query conn drop-sql))))))
+
+(ert-deftest clutch-test-live-mysql-limited-join-duplicate-columns-executes-flat ()
+  :tags '(:clutch-live)
+  "MySQL limited JOIN results with duplicate column names should not be wrapped."
+  (unless (eq clutch-test-backend 'mysql)
+    (ert-skip "Duplicate-column derived table restriction is MySQL-specific"))
+  (clutch-test--with-conn conn
+    (let* ((table-a (format "clutch_dup_a_%d" (emacs-pid)))
+           (table-b (format "clutch_dup_b_%d" (emacs-pid)))
+           (drop-a (format "DROP TABLE IF EXISTS %s" table-a))
+           (drop-b (format "DROP TABLE IF EXISTS %s" table-b))
+           (create-a
+            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))"
+                    table-a))
+           (create-b
+            (format "CREATE TABLE %s (id INT PRIMARY KEY, label VARCHAR(64))"
+                    table-b))
+           (insert-a
+            (format "INSERT INTO %s (id, name) VALUES (1, 'ann'), (2, 'bob')"
+                    table-a))
+           (insert-b
+            (format "INSERT INTO %s (id, label) VALUES (1, 'a1'), (2, 'b2')"
+                    table-b))
+           (select-sql
+            (format "SELECT a.*, b.* FROM %s AS a JOIN %s AS b ON a.id = b.id LIMIT 10"
+                    table-a table-b))
+           (result-name (format " *clutch-dup-columns-live-%d*" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-b)
+            (clutch-db-query conn drop-a)
+            (clutch-db-query conn create-a)
+            (clutch-db-query conn create-b)
+            (clutch-db-query conn insert-a)
+            (clutch-db-query conn insert-b)
+            (let ((clutch-result-max-rows 1))
+              (with-temp-buffer
+                (let ((clutch-connection conn)
+                      (clutch--source-window (selected-window)))
+                  (cl-letf (((symbol-function 'clutch--result-buffer-name)
+                             (lambda () result-name)))
+                    (clutch--execute-select select-sql conn)))))
+            (with-current-buffer result-name
+              (should (equal clutch--result-columns
+                             '("id" "name" "id" "label")))
+              (should (= (length clutch--result-rows) 2))
+              (should-not clutch--page-has-more)
+              (should-not clutch--result-server-pageable)
+              (should-not clutch--result-server-rewritable)
+              (should-not clutch--result-source-table)))
+        (when-let* ((buf (get-buffer result-name)))
+          (kill-buffer buf))
+        (ignore-errors (clutch-db-query conn drop-b))
+        (ignore-errors (clutch-db-query conn drop-a))))))
 
 (ert-deftest clutch-test-live-pg-ctid-edit-via-execute-select-persists ()
   :tags '(:clutch-live)

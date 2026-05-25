@@ -80,6 +80,8 @@
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-source-table)
+(defvar clutch--result-server-pageable)
+(defvar clutch--result-server-rewritable)
 (defvar clutch--result-rows)
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)
@@ -416,7 +418,8 @@ Returns table name string or nil."
 (defun clutch-result--source-table ()
   "Return the current result source table from state or SQL detection."
   (or clutch--result-source-table
-      (clutch-result--detect-table)))
+      (and (clutch--result-server-rewritable-p)
+           (clutch-result--detect-table))))
 
 (defun clutch--result-source-table-or-user-error (op)
   "Return source table for current result, or signal user-error for OP."
@@ -823,6 +826,39 @@ Uses the full connection key so each console gets its own result buffer."
   (or (clutch-db-sql-has-top-level-limit-p sql)
       (clutch-db-sql-has-top-level-offset-p sql)))
 
+(defun clutch--result-server-pageable-p ()
+  "Return non-nil when server-side page navigation is safe here."
+  (and (local-variable-p 'clutch--result-server-pageable (current-buffer))
+       clutch--result-server-pageable))
+
+(defun clutch--result-server-rewritable-p ()
+  "Return non-nil when server-side sort/filter/count rewrites are safe here."
+  (and (local-variable-p 'clutch--result-server-rewritable (current-buffer))
+       clutch--result-server-rewritable))
+
+(defun clutch--column-names-unique-p (columns)
+  "Return non-nil when COLUMNS have no duplicate display names."
+  (let ((seen (make-hash-table :test 'equal))
+        unique)
+    (setq unique t)
+    (dolist (name (clutch--column-names columns))
+      (let ((key (downcase name)))
+        (if (gethash key seen)
+            (setq unique nil)
+          (puthash key t seen))))
+    unique))
+
+(defun clutch--server-rewritable-result-p (sql columns)
+  "Return non-nil when SQL result COLUMNS are safe for derived-table rewrites.
+The check is intentionally conservative: the SQL must be a simple single-table
+SELECT without its own LIMIT/OFFSET, and the actual result labels must be
+unique.  Arbitrary query results are displayed as result sets instead."
+  (let ((table (clutch-result--table-from-sql sql)))
+    (and table
+         (not (clutch--sql-has-page-tail-p sql))
+         (clutch--row-identity-augmentable-sql-p sql table)
+         (clutch--column-names-unique-p columns))))
+
 (defun clutch--sql-derived-table-alias (alias &optional conn)
   "Return a derived-table alias clause for ALIAS on CONN.
 Oracle does not accept AS before a subquery alias."
@@ -832,21 +868,12 @@ Oracle does not accept AS before a subquery alias."
 
 (defun clutch--build-paged-sql (base-sql page-num page-size
                                          &optional order-by page-offset)
-  "Build a paged SQL query wrapping BASE-SQL.
+  "Build a paged SQL query from BASE-SQL.
 PAGE-NUM is 0-based, PAGE-SIZE is the row limit.
 ORDER-BY is a cons (COL-NAME . DIRECTION) or nil.
-PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM.
-If BASE-SQL already has a top-level LIMIT/OFFSET, pagination and sorting
-operate on that result set via an outer wrapper query."
-  (let ((effective-base
-         (if (clutch--sql-has-page-tail-p base-sql)
-             (format "SELECT * FROM (%s) %s"
-                     (string-trim-right
-                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql))
-                     (clutch--sql-derived-table-alias "_clutch_page"))
-           base-sql)))
-    (clutch-db-build-paged-sql clutch-connection effective-base
-                               page-num page-size order-by page-offset)))
+PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
+  (clutch-db-build-paged-sql clutch-connection base-sql
+                             page-num page-size order-by page-offset))
 
 (defun clutch--page-current-from-offset (page-offset page-size)
   "Return the zero-based logical page number for PAGE-OFFSET and PAGE-SIZE."
@@ -903,6 +930,8 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
 Uses the current effective result SQL, including active WHERE filters.
 PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination.
 Signals an error if pagination is not available."
+  (unless (clutch--result-server-pageable-p)
+    (user-error "Server-side pagination is not available for this query result"))
   (let* ((source-buffer (current-buffer))
          (effective-sql (clutch-result--effective-query))
          (page-size clutch-result-max-rows)
@@ -1063,16 +1092,23 @@ SHOW, EXPLAIN) that also return tabular results."
 
 (defun clutch--init-result-state (conn sql columns rows elapsed
                                        &optional row-identity-prep
-                                       page-offset page-has-more)
+                                       page-offset page-has-more
+                                       server-pageable server-rewritable
+                                       source-table)
   "Initialize buffer-local state for a fresh query result.
 CONN is the connection, SQL the original query, COLUMNS and ROWS
 the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
 hidden row identity columns in COLUMNS.  PAGE-OFFSET is the zero-based row
-offset for ROWS, and PAGE-HAS-MORE records one-row lookahead.  Returns column
-names."
+offset for ROWS, and PAGE-HAS-MORE records one-row lookahead.
+SERVER-PAGEABLE, SERVER-REWRITABLE, and SOURCE-TABLE describe whether clutch
+may treat the result as a re-executable relation source.
+Returns column names."
   (setq-local clutch--last-query sql
               clutch--base-query sql
               clutch-connection conn
+              clutch--result-source-table source-table
+              clutch--result-server-pageable server-pageable
+              clutch--result-server-rewritable server-rewritable
               clutch--sort-column nil
               clutch--sort-descending nil
               clutch--page-total-rows nil
@@ -1137,24 +1173,34 @@ ELAPSED, when non-nil, is the failed execution duration in seconds."
           (setq-local clutch--last-result-buffer buf))))
     (throw 'clutch--execution-aborted nil)))
 
-(defun clutch--execute-select (sql connection)
+(defun clutch--execute-select (sql connection &optional result-context)
   "Execute a SELECT SQL query with pagination on CONNECTION.
+RESULT-CONTEXT, when non-nil, is an internal plist carrying source metadata
+for SQL generated from an already verified result.
 Returns the query result."
   (let* ((page-size clutch-result-max-rows)
          (fetch-size (1+ page-size))
          (row-identity-prep
           (clutch--prepare-row-identity-query connection sql))
          (identity-sql (plist-get row-identity-prep :sql))
-         (paged-sql (let ((clutch-connection connection))
-                      (clutch--build-paged-sql identity-sql 0 fetch-size nil 0)))
+         (server-pageable
+          (if (plist-member result-context :server-pageable)
+              (plist-get result-context :server-pageable)
+            (not (clutch--sql-has-page-tail-p identity-sql))))
+         (execution-sql (if server-pageable
+                            (let ((clutch-connection connection))
+                              (clutch--build-paged-sql
+                               identity-sql 0 fetch-size nil 0))
+                          identity-sql))
          (start (float-time))
          (source-buffer (clutch--execute-source-buffer))
          (_debug-start
           (clutch--remember-execute-debug-event
            connection "start" sql source-buffer nil nil
-           (list :paged-sql (clutch--debug-sql-preview paged-sql))))
+           (list :execution-sql (clutch--debug-sql-preview execution-sql)
+                 :server-pageable server-pageable)))
          (result (condition-case err
-                     (clutch--run-db-query connection paged-sql)
+                     (clutch--run-db-query connection execution-sql)
                    (clutch-db-error
                     (clutch--abort-execution-on-db-error
                      source-buffer connection sql err
@@ -1163,8 +1209,18 @@ Returns the query result."
          (buf (get-buffer-create (clutch--result-buffer-name)))
          (columns (clutch--apply-row-identity-column-metadata
                    (clutch-db-result-columns result) row-identity-prep))
-         (page (clutch--split-page-lookahead-rows
-                (clutch-db-result-rows result) page-size))
+         (visible-columns
+          (cl-remove-if (lambda (col) (plist-get col :hidden)) columns))
+         (server-rewritable
+          (if (plist-member result-context :server-rewritable)
+              (plist-get result-context :server-rewritable)
+            (and server-pageable
+                 (clutch--server-rewritable-result-p sql visible-columns))))
+         (source-table (plist-get result-context :source-table))
+         (page (if server-pageable
+                   (clutch--split-page-lookahead-rows
+                    (clutch-db-result-rows result) page-size)
+                 (cons (clutch-db-result-rows result) nil)))
          (rows (car page))
          (has-more (cdr page)))
     (clutch--remember-execute-debug-event
@@ -1174,7 +1230,8 @@ Returns the query result."
       (clutch-result-mode)
       (let ((col-names (clutch--init-result-state
                         connection sql columns rows elapsed
-                        row-identity-prep 0 has-more)))
+                        row-identity-prep 0 has-more
+                        server-pageable server-rewritable source-table)))
         (clutch--load-fk-info)
         (when col-names
           (clutch--display-select-result col-names rows columns))))
@@ -1326,10 +1383,11 @@ Signals `user-error' if the user declines."
       (clutch--abandon-query-connection connection))
     (signal 'clutch-query-interrupted nil)))
 
-(defun clutch--execute (sql &optional conn)
+(defun clutch--execute (sql &optional conn result-context)
   "Execute SQL on CONN (or current buffer connection).
 Times execution and displays results.
 For SELECT queries, applies pagination (LIMIT/OFFSET).
+RESULT-CONTEXT carries internal result metadata for generated SELECT SQL.
 Prompts for confirmation on destructive operations."
   (if (and conn (not (eq conn clutch-connection)))
       (unless (clutch--connection-alive-p conn)
@@ -1351,7 +1409,7 @@ Prompts for confirmation on destructive operations."
               (catch 'clutch--execution-aborted
                 (let ((clutch--source-window source-win))
                   (if (clutch--select-query-p sql)
-                      (clutch--execute-select sql connection)
+                      (clutch--execute-select sql connection result-context)
                     (clutch--execute-dml sql connection))))
             (quit
              (clutch--handle-query-quit connection)))
