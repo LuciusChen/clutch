@@ -53,6 +53,7 @@
 (defvar clutch-jdbc--error-details-by-conn)
 (defvar clutch-jdbc--busy-request-ids)
 (defvar clutch-jdbc--ignored-response-ids)
+(defvar clutch-db--foreground-connections)
 (defvar mysql-type-long)
 (defvar mysql-type-float)
 (defvar mysql-type-double)
@@ -862,6 +863,47 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                   'fake-timer))
       (should (= scheduled 2))
       (should (equal callback-result '("id" "name"))))))
+
+(ert-deftest clutch-db-test-idle-metadata-call-reschedules-while-foreground-active ()
+  "Idle metadata calls should not run during foreground work on the same CONN."
+  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                          :user "postgres" :database "test"))
+        (clutch-db--foreground-connections (make-hash-table :test 'eq))
+        timers
+        callback-result
+        (query-count 0))
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn &rest args)
+                 (push (lambda () (apply fn args)) timers)
+                 'fake-timer))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-busy-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-list-columns)
+               (lambda (context table)
+                 (should (eq context conn))
+                 (should (equal table "users"))
+                 (cl-incf query-count)
+                 '("id" "name"))))
+      (puthash conn t clutch-db--foreground-connections)
+      (should (eq (clutch-db--schedule-idle-metadata-call
+                   conn
+                   (lambda (columns)
+                     (setq callback-result columns))
+                   nil
+                   #'clutch-db-list-columns
+                   "users")
+                  'fake-timer))
+      (should (= (length timers) 1))
+      (funcall (pop timers))
+      (should-not callback-result)
+      (should (= query-count 0))
+      (should (= (length timers) 1))
+      (remhash conn clutch-db--foreground-connections)
+      (funcall (pop timers))
+      (should (equal callback-result '("id" "name")))
+      (should (= query-count 1)))))
 
 (ert-deftest clutch-db-test-mysql-list-columns-async-schedules-idle-call ()
   "Native MySQL column-name preheat should schedule idle work."

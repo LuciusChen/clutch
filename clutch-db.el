@@ -186,6 +186,31 @@ ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
+(defvar clutch-db--foreground-connections (make-hash-table :test 'eq)
+  "Connections currently reserved by foreground Clutch commands.
+Values are nesting counts.")
+
+(defun clutch-db--foreground-busy-p (conn)
+  "Return non-nil when CONN is reserved by foreground Clutch work."
+  (and conn (gethash conn clutch-db--foreground-connections)))
+
+(defmacro clutch-db-with-foreground-connection (conn &rest body)
+  "Run BODY while marking CONN reserved for foreground work."
+  (declare (indent 1) (debug t))
+  (let ((conn-var (make-symbol "conn")))
+    `(let ((,conn-var ,conn))
+       (when ,conn-var
+         (puthash ,conn-var
+                  (1+ (or (gethash ,conn-var clutch-db--foreground-connections) 0))
+                  clutch-db--foreground-connections))
+       (unwind-protect
+           (progn ,@body)
+         (when ,conn-var
+           (let ((count (1- (or (gethash ,conn-var clutch-db--foreground-connections) 1))))
+             (if (> count 0)
+                 (puthash ,conn-var count clutch-db--foreground-connections)
+               (remhash ,conn-var clutch-db--foreground-connections))))))))
+
 ;;;; SQL helpers (literal-or-comment awareness)
 
 (defun clutch-db-sql-skip-literal-or-comment (sql pos)
@@ -490,7 +515,8 @@ ERRBACK receives an error-message string when the work fails."
   (cl-labels
       ((run ()
          (if (clutch-db-live-p conn)
-             (if (clutch-db-busy-p conn)
+             (if (or (clutch-db-busy-p conn)
+                     (clutch-db--foreground-busy-p conn))
                  (run-with-idle-timer 0.1 nil #'run)
                (condition-case err
                    (when callback

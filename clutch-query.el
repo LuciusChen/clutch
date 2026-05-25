@@ -916,45 +916,46 @@ Signals an error if pagination is not available."
                    clutch--pending-inserts)
                (not (yes-or-no-p "Discard staged changes and change page? ")))
       (user-error "Page change cancelled"))
-    (let* ((row-identity-prep
-            (clutch--prepare-row-identity-query clutch-connection effective-sql))
-           (identity-sql (plist-get row-identity-prep :sql))
-           (paged-sql (clutch--build-paged-sql
-                       identity-sql page-num fetch-size clutch--order-by
-                       offset))
-           (start (float-time))
-           (result (condition-case err
-                       (clutch--run-db-query clutch-connection paged-sql)
-                     (clutch-db-error
-                      (let* ((failure
-                              (clutch--remember-execute-error
-                               source-buffer
-                               clutch-connection
-                               effective-sql
-                               err
-                               (list :page-num page-num
-                                     :page-offset offset
-                                     :paged-sql
-                                     (clutch--debug-sql-preview paged-sql))))
-                             (summary (cdr failure)))
-                        (user-error "%s" (clutch--debug-workflow-message summary))))))
-           (elapsed (- (float-time) start))
-           (page (clutch--split-page-lookahead-rows
-                  (clutch-db-result-rows result) page-size))
-           (rows (car page))
-           (has-more (cdr page)))
-      (clutch--install-result-page-state
-       (clutch-db-result-columns result) rows elapsed
-       page-num
-       row-identity-prep offset has-more)
-      (clutch--refresh-display)
-      (message "Rows %s loaded (%s, %s row%s)"
-               (clutch--message-count
-                (format "%d-%d" (if rows (1+ offset) 0)
-                        (+ offset (length rows))))
-               (clutch--message-literal (clutch--format-elapsed elapsed))
-               (clutch--message-count (length rows))
-               (if (= (length rows) 1) "" "s")))))
+    (clutch-db-with-foreground-connection clutch-connection
+      (let* ((row-identity-prep
+              (clutch--prepare-row-identity-query clutch-connection effective-sql))
+             (identity-sql (plist-get row-identity-prep :sql))
+             (paged-sql (clutch--build-paged-sql
+                         identity-sql page-num fetch-size clutch--order-by
+                         offset))
+             (start (float-time))
+             (result (condition-case err
+                         (clutch--run-db-query clutch-connection paged-sql)
+                       (clutch-db-error
+                        (let* ((failure
+                                (clutch--remember-execute-error
+                                 source-buffer
+                                 clutch-connection
+                                 effective-sql
+                                 err
+                                 (list :page-num page-num
+                                       :page-offset offset
+                                       :paged-sql
+                                       (clutch--debug-sql-preview paged-sql))))
+                               (summary (cdr failure)))
+                          (user-error "%s" (clutch--debug-workflow-message summary))))))
+             (elapsed (- (float-time) start))
+             (page (clutch--split-page-lookahead-rows
+                    (clutch-db-result-rows result) page-size))
+             (rows (car page))
+             (has-more (cdr page)))
+        (clutch--install-result-page-state
+         (clutch-db-result-columns result) rows elapsed
+         page-num
+         row-identity-prep offset has-more)
+        (clutch--refresh-display)
+        (message "Rows %s loaded (%s, %s row%s)"
+                 (clutch--message-count
+                  (format "%d-%d" (if rows (1+ offset) 0)
+                          (+ offset (length rows))))
+                 (clutch--message-literal (clutch--format-elapsed elapsed))
+                 (clutch--message-count (length rows))
+                 (if (= (length rows) 1) "" "s"))))))
 
 (defun clutch--execute-page-at-offset (page-offset &optional page-num)
   "Execute the result page whose first row starts at PAGE-OFFSET.
@@ -1339,24 +1340,25 @@ Prompts for confirmation on destructive operations."
   (clutch--check-pending-changes)
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
-    (clutch--confirm-query-execution sql)
-    (setq clutch--executing-p t)
-    (clutch--spinner-start)
-    (clutch--update-mode-line)
-    (redisplay t)
-    (unwind-protect
-        (condition-case nil
-            (catch 'clutch--execution-aborted
-              (let ((clutch--source-window source-win))
-                (if (clutch--select-query-p sql)
-                    (clutch--execute-select sql connection)
-                  (clutch--execute-dml sql connection))))
-          (quit
-           (clutch--handle-query-quit connection)))
-      (when (window-live-p source-win)
-        (select-window source-win))
-      (setq clutch--executing-p nil)
-      (clutch--update-mode-line))))
+    (clutch-db-with-foreground-connection connection
+      (clutch--confirm-query-execution sql)
+      (setq clutch--executing-p t)
+      (clutch--spinner-start)
+      (clutch--update-mode-line)
+      (redisplay t)
+      (unwind-protect
+          (condition-case nil
+              (catch 'clutch--execution-aborted
+                (let ((clutch--source-window source-win))
+                  (if (clutch--select-query-p sql)
+                      (clutch--execute-select sql connection)
+                    (clutch--execute-dml sql connection))))
+            (quit
+             (clutch--handle-query-quit connection)))
+        (when (window-live-p source-win)
+          (select-window source-win))
+        (setq clutch--executing-p nil)
+        (clutch--update-mode-line)))))
 
 (defun clutch--trim-sql-bounds (beg end)
   "Return (BEG . END) trimmed to non-whitespace between BEG and END."

@@ -384,7 +384,8 @@ CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
           (remhash key clutch--object-warmup-timers)
           (when (clutch--object-warmup-current-p conn key generation)
             (condition-case err
-                (if (clutch-db-busy-p conn)
+                (if (or (clutch-db-busy-p conn)
+                        (clutch-db--foreground-busy-p conn))
                     (clutch--schedule-object-warmup conn)
                   (let ((type (clutch--object-category-type next)))
                     (unless
