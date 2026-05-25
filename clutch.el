@@ -5,7 +5,7 @@
 ;; Assisted-by: OpenAI Codex:gpt-5.5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (mysql "0.2.0") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (mysql "0.2.1") (pg "0.40") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
@@ -1252,17 +1252,17 @@ executed outside clutch that would otherwise leave stale completions."
   (let* ((context (clutch--command-connection-context))
          (conn (or clutch-connection
                    (plist-get context :connection)
-                   (clutch--user-error "No active connection")))
+                   (user-error "No active connection")))
          (params (or (plist-get context :params)
                      (car (clutch--connection-context conn))
-                     (clutch--user-error "No reconnect parameters for this connection")))
+                     (user-error "No reconnect parameters for this connection")))
          (current (or (plist-get params :database) "default"))
          (databases (clutch--list-clickhouse-databases conn)))
     (unless (or (clutch--connection-clickhouse-p conn)
                 (clutch--params-clickhouse-p params))
-      (clutch--user-error "Runtime database switching is currently available only for ClickHouse"))
+      (user-error "Runtime database switching is currently available only for ClickHouse"))
     (unless databases
-      (clutch--user-error "No databases returned by SHOW DATABASES"))
+      (user-error "No databases returned by SHOW DATABASES"))
     (let ((database (completing-read
                      (if current
                          (format "Switch to database (current %s): " current)
@@ -1288,7 +1288,7 @@ executed outside clutch that would otherwise leave stale completions."
   (let* ((context (clutch--command-connection-context))
          (conn (or clutch-connection
                    (plist-get context :connection)
-                   (clutch--user-error "No active connection")))
+                   (user-error "No active connection")))
          (params (or clutch--connection-params
                      (plist-get context :params))))
     (if (or (clutch--connection-clickhouse-p conn)
@@ -1298,7 +1298,7 @@ executed outside clutch that would otherwise leave stale completions."
              (current (clutch-db-current-schema conn))
              (old-key (clutch--connection-key conn)))
         (unless schemas
-          (clutch--user-error "Runtime schema switching is not available for this connection"))
+          (user-error "Runtime schema switching is not available for this connection"))
         (let ((schema (completing-read
                        (if current
                            (format "Switch to schema (current %s): " current)
@@ -1336,7 +1336,7 @@ executed outside clutch that would otherwise leave stale completions."
                       :summary summary
                       :context (list :schema schema
                                      :current-schema current)))
-                   (clutch--user-error "%s"
+                   (user-error "%s"
                                (clutch--debug-workflow-message summary))))))))))))
 
 ;;;; clutch-mode (SQL editing major mode)

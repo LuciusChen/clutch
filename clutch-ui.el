@@ -132,7 +132,6 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (defvar clutch-result-max-rows)
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
-(declare-function nerd-icons--function-name "nerd-icons" (name))
 (declare-function clutch--column-names "clutch-query" (columns))
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
@@ -389,27 +388,55 @@ Returns a vector of integers."
                 table column (error-message-string err))
        nil))))
 
+(defconst clutch--nerd-icons-function-alist
+  '((codicon   . nerd-icons-codicon)
+    (devicon   . nerd-icons-devicon)
+    (faicon    . nerd-icons-faicon)
+    (flicon    . nerd-icons-flicon)
+    (ipsicon   . nerd-icons-ipsicon)
+    (mdicon    . nerd-icons-mdicon)
+    (octicon   . nerd-icons-octicon)
+    (pomicon   . nerd-icons-pomicon)
+    (powerline . nerd-icons-powerline)
+    (sucicon   . nerd-icons-sucicon)
+    (wicon     . nerd-icons-wicon))
+  "Alist mapping nerd-icons glyph-set symbols to public render functions.")
+
+(defvar clutch--nerd-icons-warning-families nil
+  "Nerd-icons glyph-set families already reported as unavailable.")
+
 (defun clutch--nerd-icons-available-p ()
-  "Return non-nil when nerd-icons is loaded and usable."
+  "Return non-nil when nerd-icons is loadable and exposes public icon functions."
   (and (require 'nerd-icons nil t)
-       (fboundp 'nerd-icons--function-name)))
+       (cl-some (lambda (entry) (fboundp (cdr entry)))
+                clutch--nerd-icons-function-alist)))
+
+(defun clutch--nerd-icons-warn-unavailable-family (family)
+  "Warn once that nerd-icons FAMILY cannot be rendered."
+  (unless (memq family clutch--nerd-icons-warning-families)
+    (push family clutch--nerd-icons-warning-families)
+    (display-warning
+     'clutch
+     (format "nerd-icons does not expose a public renderer for %S; using fallback text"
+             family)
+     :warning)))
 
 (defun clutch--icon (name &optional fallback &rest icon-args)
   "Return a nerd-icons icon for NAME, or FALLBACK string.
-NAME is a cons (FAMILY . ICON-NAME) where FAMILY is any nerd-icons
-glyph-set symbol (e.g. `mdicon', `devicon', `codicon', `octicon').
+NAME is a cons (FAMILY . ICON-NAME), where FAMILY maps to a public
+nerd-icons glyph-set function such as `nerd-icons-mdicon'.
 ICON-ARGS are keyword arguments forwarded to the nerd-icons function
-\(e.g. :height 1.2).  The icon function is resolved dynamically via
-`nerd-icons--function-name', so new families require no changes here.
-Falls back to FALLBACK (a Unicode symbol) when nerd-icons is not
-installed or the icon is unknown."
+\(e.g. :height 1.2).  Falls back to FALLBACK when nerd-icons is not
+installed, the family is unsupported, or the icon is unknown."
   (pcase-let ((`(,family . ,icon-name) name))
-    (or (and (clutch--nerd-icons-available-p)
-             (let ((fn (nerd-icons--function-name family)))
-               (and (fboundp fn)
-                    (apply fn icon-name icon-args))))
-        fallback
-        "")))
+    (let ((fn (alist-get family clutch--nerd-icons-function-alist)))
+      (or (and (clutch--nerd-icons-available-p)
+               (if (and fn (fboundp fn))
+                   (apply fn icon-name icon-args)
+                 (clutch--nerd-icons-warn-unavailable-family family)
+                 nil))
+          fallback
+          ""))))
 
 (defun clutch--append-face (string face)
   "Return STRING with FACE appended, preserving existing properties."

@@ -36,6 +36,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 - **Interface / implementation separation**: `mysql` and upstream `pg` are external protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
 - **External dependency boundaries stay explicit**: `mysql` and `pg` are required package dependencies. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
+- **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
 - **Single responsibility per file**: Do not mix protocol code with rendering code.
 - **Keep `clutch.el` as the entry point**: External consumers should continue to load `(require 'clutch)`. When implementation moves out, `clutch.el` becomes the assembler, not a grab bag.
 - **Split by stable workflow boundaries**: Prefer modules such as result UI, object workflow, staged mutation flow, or schema/cache lifecycle. Do not split by vague internal labels like `common`, `utils`, or `helpers`.
@@ -43,6 +44,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Do not split for cosmetics**: A shorter `clutch.el` is not enough reason to extract a file. Split only when ownership becomes clearer and future changes will touch fewer files.
 - **Stop splitting before glue takes over**: If a proposed extraction mostly adds `defvar`, `declare-function`, and cross-file hopping without reducing conceptual ownership, stop. That is a sign of over-modularization.
 - **Use declarations to keep modules honest**: When a module depends on shared globals or functions defined elsewhere, add explicit `defvar` / `declare-function` forms so byte-compilation stays clean.
+- **Do not use declarations as boundary patches**: A new `declare-function` to a higher-level clutch module, or to any external package private symbol, is a design smell. Move the interface to the owner module or expose a real public API instead.
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
@@ -54,6 +56,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Prefer destructuring over repeated accessors**: Use `pcase-let` to destructure lists and plists instead of multiple `nth` or `plist-get` calls on the same object. For example, prefer `(pcase-let ((\`(,a ,b ,c) row)) ...)` over `(let ((a (nth 0 row)) (b (nth 1 row)) (c (nth 2 row))) ...)`.
 - **Prefer `cl-loop` for non-trivial accumulation**: Use it instead of `dolist` + manual accumulators or over-clever folds.
 - **Use the right error type**: `user-error` for user-caused problems; `error` for programmer bugs; `condition-case` for recoverable failures.
+- **Do not wrap stdlib errors without semantics**: Use `user-error` directly unless the wrapper adds behavior that the builtin does not provide and the docstring names that behavior.
 - **Prefer idiomatic primitives**: Use `vconcat` to build vectors from lists, not `apply #'vector`. Predicates returning non-nil need no `(not (null ...))` wrapper — the return value itself suffices.
 - **State placement**: `defvar-local` for buffer state, plain `defvar` for shared state, `defcustom` for user options. Major modes must make their state buffer-local.
 - **Mode definitions**: Read-only UI buffers derive from `special-mode`; editing buffers derive from the right parent (`sql-mode`, `comint-mode`, etc.). Register buffer-local hooks in the mode body with LOCAL=`t`.
@@ -192,6 +195,15 @@ git diff HEAD
 ```
 
 Read every changed line before committing.
+
+Also check that clutch does not depend on external private APIs:
+
+```bash
+rg -n -P "(?<![A-Za-z0-9-])(mysql|nerd-icons|tramp-rpc)--[A-Za-z0-9-]+" clutch*.el test/*.el
+```
+
+This command should return no matches. Internal `clutch--*` and backend-local
+`clutch-db-foo--*` symbols are allowed inside this repo.
 
 ### 2. Run all test files
 

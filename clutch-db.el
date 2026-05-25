@@ -47,16 +47,6 @@
 (define-error 'clutch-db-error "Database error")
 (define-error 'clutch-query-interrupted "Query interrupted" 'user-error)
 
-;;;; Shared helpers
-
-(defun clutch--user-error (format-string &rest args)
-  "Signal a Clutch user error using FORMAT-STRING and ARGS.
-Clutch raises many user-facing errors from guard expressions.  Keeping the
-actual signal in one function prevents internal control-form names from
-leaking into the command-loop error context, while preserving `user-error'
-for callers and tests."
-  (signal 'user-error (list (apply #'format-message format-string args))))
-
 (defun clutch-db--pass-entry-by-suffix (suffix)
   "Return the first pass entry path whose tail matches SUFFIX.
 Matches e.g. `dev-mysql' against `mysql/dev-mysql'.
@@ -444,7 +434,7 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
 
 (cl-defmethod clutch-db-set-auto-commit ((_conn t) _auto-commit)
   "Signal that the backend does not support runtime auto-commit changes."
-  (clutch--user-error "Manual commit is not supported by this connection"))
+  (user-error "Manual commit is not supported by this connection"))
 
 (cl-defgeneric clutch-db-eager-schema-refresh-p (conn)
   "Return non-nil when CONN should refresh schema synchronously on connect.")
@@ -621,7 +611,7 @@ RENDER-FN is called once per parameter and must return the replacement string."
 
 (cl-defmethod clutch-db-set-current-schema ((_conn t) _schema)
   "Default: runtime schema switching is unsupported."
-  (clutch--user-error "This backend does not support switching schemas"))
+  (user-error "This backend does not support switching schemas"))
 
 (cl-defgeneric clutch-db-list-table-entries (conn)
   "Return browseable table-like object entries for CONN.
@@ -822,8 +812,8 @@ Returns a backend-specific connection object."
                    (require (plist-get feature-plist :require))
                  (file-missing
                   (pcase backend
-                    ('mysql (clutch--user-error "MySQL backend requires the mysql package"))
-                    ('pg (clutch--user-error "PostgreSQL backend requires the pg package"))
+                    ('mysql (user-error "MySQL backend requires the mysql package"))
+                    ('pg (user-error "PostgreSQL backend requires the pg package"))
                     (_ (signal (car err) (cdr err))))))
                (plist-get feature-plist :connect-fn))))
       (condition-case err
@@ -836,7 +826,7 @@ Returns a backend-specific connection object."
          (signal 'clutch-db-error
                  (list (format "Connection failed (%s): %s"
                                backend (error-message-string err))))))
-    (clutch--user-error "Unknown backend: %s" backend)))
+    (user-error "Unknown backend: %s" backend)))
 
 ;;;; Temporal value formatting
 

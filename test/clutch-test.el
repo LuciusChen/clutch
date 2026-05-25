@@ -7367,12 +7367,11 @@ crashing the UI layer."
                        'fake-proc))
                     ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
                     ((symbol-function 'clutch--wait-for-ssh-tunnel) #'ignore)
-                    ((symbol-function 'tramp-rpc--controlmaster-active-p)
+                    ((symbol-function 'tramp-rpc-controlmaster-options)
                      (lambda (vec)
                        (should (equal (tramp-file-name-method vec) "rpc"))
-                       t))
-                    ((symbol-function 'tramp-rpc--controlmaster-socket-path)
-                     (lambda (_vec) "/tmp/tramp-rpc.sock")))
+                       '("-o" "ControlMaster=auto"
+                         "-o" "ControlPath=/tmp/tramp-rpc.sock"))))
             (clutch--start-tramp-tcp-forward
              '(:backend pg
                :host "127.0.0.1"
@@ -8133,14 +8132,6 @@ crashing the UI layer."
       (clutch--run-db-query conn "ALTER TABLE demo ADD x NUMBER")
       (should-not (clutch--tx-dirty-p conn)))))
 
-(ert-deftest clutch-test-user-error-helper-preserves-message ()
-  "Clutch user errors should keep a clean message and `user-error' condition."
-  (let ((err (should-error
-              (if t
-                  (clutch--user-error "Clean %s" "failure"))
-              :type 'user-error)))
-    (should (equal (error-message-string err) "Clean failure"))))
-
 (ert-deftest clutch-test-commit-errors-in-autocommit-mode ()
   "Clutch-commit should signal user-error when the connection is not in manual-commit mode."
   (let ((clutch-connection 'fake-conn))
@@ -8379,14 +8370,12 @@ crashing the UI layer."
                      '((:family "Symbols Nerd Font Mono")
                        header-line))))))
 
-(ert-deftest clutch-test-icon-supports-any-family ()
-  "Icon helper should dispatch any nerd-icons family via nerd-icons--function-name."
+(ert-deftest clutch-test-icon-dispatches-public-nerd-icons-functions ()
+  "Icon helper should dispatch through public nerd-icons render functions."
   (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
-            ((symbol-function 'nerd-icons--function-name)
-             (lambda (family) (intern (concat "mock-icon-" (symbol-name family)))))
-            ((symbol-function 'mock-icon-octicon)
+            ((symbol-function 'nerd-icons-octicon)
              (lambda (name) (concat "oct:" name)))
-            ((symbol-function 'mock-icon-devicon)
+            ((symbol-function 'nerd-icons-devicon)
              (lambda (name) (concat "dev:" name))))
     (should (equal (clutch--icon '(octicon . "nf-oct-sort_desc") "fallback")
                    "oct:nf-oct-sort_desc"))

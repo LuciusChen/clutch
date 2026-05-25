@@ -42,8 +42,7 @@
 (require 'tramp)
 
 (declare-function auth-source-pass-parse-entry "auth-source-pass" (entry))
-(declare-function tramp-rpc--controlmaster-active-p "tramp-rpc" (vec))
-(declare-function tramp-rpc--controlmaster-socket-path "tramp-rpc" (vec))
+(declare-function tramp-rpc-controlmaster-options "tramp-rpc" (vec))
 (defvar tramp-rpc-use-controlmaster)
 
 ;; Forward declarations — variables defined in clutch.el
@@ -110,6 +109,9 @@
 (defvar clutch--connection-transport-cache
   (make-hash-table :test 'eq :weakness 'key)
   "Transport process plists keyed by live connection object.")
+
+(defvar clutch--tramp-rpc-controlmaster-warning-reported nil
+  "Non-nil after warning about an old tramp-rpc ControlMaster API.")
 
 (defconst clutch--tramp-ssh-forward-methods '("ssh" "scp" "rsync" "rpc")
   "TRAMP methods Clutch can map to a binary-clean ssh command.")
@@ -441,7 +443,7 @@ Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
   (when (and (clutch-db-manual-commit-p conn)
              (clutch--tx-dirty-p conn)
              (not (yes-or-no-p prompt)))
-    (clutch--user-error "Disconnect cancelled")))
+    (user-error "Disconnect cancelled")))
 
 ;;;; Connection lifecycle
 
@@ -554,7 +556,7 @@ If the connection has dropped, attempts to reconnect automatically
 using the stored params.  Signals a user-error if not recoverable."
   (unless (clutch--connection-alive-p clutch-connection)
     (unless (clutch--try-reconnect)
-      (clutch--user-error
+      (user-error
        (if (derived-mode-p 'clutch-result-mode 'clutch-record-mode
                            'clutch-describe-mode)
            "Connection closed.  Reconnect from the SQL buffer or REPL"
@@ -887,7 +889,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Return PARAMS with unified timeout defaults for BACKEND.
 Signals a `user-error' when removed timeout keys are present."
   (when (plist-member params :read-timeout)
-    (clutch--user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
+    (user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
   (clutch--apply-timeout-defaults
    params
    (cond
@@ -919,7 +921,7 @@ Signals a `user-error' when removed timeout keys are present."
 
 (defun clutch--password-lookup-error (message)
   "Signal MESSAGE as a user-facing password lookup failure."
-  (clutch--user-error "%s" message))
+  (user-error "%s" message))
 
 (defun clutch--resolve-pass-entry-password (entry)
   "Return the password from pass ENTRY.
@@ -1018,7 +1020,7 @@ cannot be read."
      ((not has-tramp) params)
      ((and has-tramp-default-directory
            (not (equal tramp tramp-default-directory)))
-      (clutch--user-error
+      (user-error
        "Connection cannot set both :tramp and :tramp-default-directory"))
      (t
       (let ((out (cl-loop for (k v) on params by #'cddr
@@ -1063,7 +1065,7 @@ cannot be read."
                      (not (string-empty-p tramp-default-directory)))))
     (cond
      ((and ssh tramp)
-      (clutch--user-error
+      (user-error
        "Connection cannot combine :ssh-host with :tramp"))
      (ssh 'ssh)
      (tramp 'tramp))))
@@ -1200,7 +1202,7 @@ transport."
                    "SSH host from ~/.ssh/config: "))
          (ssh-host (read-string prompt nil nil default)))
     (if (string-empty-p ssh-host)
-        (clutch--user-error "An SSH host alias is required")
+        (user-error "An SSH host alias is required")
       ssh-host)))
 
 (defun clutch--ssh-buffer-output (buffer)
@@ -1330,18 +1332,18 @@ transport."
 (defun clutch--validate-network-forward-params (params transport-name)
   "Validate PARAMS for a structured TCP forward named TRANSPORT-NAME."
   (when (eq (plist-get params :backend) 'sqlite)
-    (clutch--user-error
+    (user-error
      "SQLite opens a local database file and does not support %s"
      transport-name))
   (when (plist-get params :url)
-    (clutch--user-error
+    (user-error
      "%s currently requires structured :host/:port params, not :url"
      transport-name))
   (unless (plist-get params :host)
-    (clutch--user-error "%s requires :host for the remote database endpoint"
+    (user-error "%s requires :host for the remote database endpoint"
                         transport-name))
   (unless (plist-get params :port)
-    (clutch--user-error "%s requires :port for the remote database endpoint"
+    (user-error "%s requires :port for the remote database endpoint"
                         transport-name)))
 
 (defun clutch--ssh-local-port-open-p (port)
@@ -1379,7 +1381,7 @@ and TIMEOUT is the maximum wait in seconds."
 (defun clutch--start-ssh-tunnel (params)
   "Start an SSH tunnel for PARAMS using the user's OpenSSH config."
   (unless (executable-find "ssh")
-    (clutch--user-error "SSH tunnels require the OpenSSH client executable `ssh'"))
+    (user-error "SSH tunnels require the OpenSSH client executable `ssh'"))
   (clutch--validate-network-forward-params params "SSH tunnels")
   (let* ((ssh-host (plist-get params :ssh-host))
          (local-port (clutch--allocate-local-port))
@@ -1425,7 +1427,7 @@ and TIMEOUT is the maximum wait in seconds."
   (let ((host (tramp-file-name-host vec))
         (user (tramp-file-name-user vec)))
     (unless (and (stringp host) (not (string-empty-p host)))
-      (clutch--user-error "TRAMP forwarding requires an ssh host"))
+      (user-error "TRAMP forwarding requires an ssh host"))
     (if (and (stringp user) (not (string-empty-p user)))
         (format "%s@%s" user host)
       host)))
@@ -1472,27 +1474,31 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
       (dolist (hop-vec hops)
         (unless (member (tramp-file-name-method hop-vec)
                         clutch--tramp-ssh-forward-methods)
-          (clutch--user-error
+          (user-error
            "TRAMP forwarding does not support %s hops"
            (tramp-file-name-method hop-vec))))
       (mapconcat #'clutch--tramp-proxyjump-target hops ","))))
 
 (defun clutch--tramp-rpc-controlmaster-options (vec)
   "Return OpenSSH options for reusing tramp-rpc ControlMaster for VEC."
-  (when (and (string= (tramp-file-name-method vec) "rpc")
-             (boundp 'tramp-rpc-use-controlmaster)
-             tramp-rpc-use-controlmaster
-             (fboundp 'tramp-rpc--controlmaster-active-p)
-             (fboundp 'tramp-rpc--controlmaster-socket-path)
-             (tramp-rpc--controlmaster-active-p vec))
-    (list "-o" "ControlMaster=auto"
-          "-o" (format "ControlPath=%s"
-                       (tramp-rpc--controlmaster-socket-path vec)))))
+  (when (string= (tramp-file-name-method vec) "rpc")
+    (cond
+     ((fboundp 'tramp-rpc-controlmaster-options)
+      (tramp-rpc-controlmaster-options vec))
+     ((and (boundp 'tramp-rpc-use-controlmaster)
+           tramp-rpc-use-controlmaster
+           (not clutch--tramp-rpc-controlmaster-warning-reported))
+      (setq clutch--tramp-rpc-controlmaster-warning-reported t)
+      (display-warning
+       'clutch
+       "tramp-rpc is too old to expose ControlMaster SSH options; not reusing its ControlMaster"
+       :warning)
+      nil))))
 
 (defun clutch--start-tramp-ssh-forward (params)
   "Start an OpenSSH local forward for ssh-like TRAMP PARAMS."
   (unless (executable-find "ssh")
-    (clutch--user-error "TRAMP forwarding requires the OpenSSH client executable `ssh'"))
+    (user-error "TRAMP forwarding requires the OpenSSH client executable `ssh'"))
   (let* ((tramp-default-directory (plist-get params :tramp-default-directory))
          (vec (clutch--tramp-dissect-file-name tramp-default-directory))
          (method (tramp-file-name-method vec))
@@ -1509,7 +1515,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                       clutch-connect-timeout-seconds))
          proc)
     (unless (member method clutch--tramp-ssh-forward-methods)
-      (clutch--user-error
+      (user-error
        "TRAMP forwarding currently supports ssh-like TRAMP directories such as /ssh:host:/path/ or /rpc:host:/path/"))
     (with-current-buffer buffer
       (erase-buffer))
@@ -1547,7 +1553,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
          (runtime (pcase method
                     ("docker" "docker")
                     ("podman" "podman")
-                    (_ (clutch--user-error
+                    (_ (user-error
                         "Container TRAMP forwarding does not support %s"
                         method))))
          (container (tramp-file-name-host vec))
@@ -1564,16 +1570,16 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                               (format "%s" port))))
          (hops (clutch--tramp-hop-vectors (tramp-file-name-hop vec))))
     (unless (and (stringp container) (not (string-empty-p container)))
-      (clutch--user-error "Container TRAMP forwarding requires a container name"))
+      (user-error "Container TRAMP forwarding requires a container name"))
     (if hops
         (progn
           (unless (executable-find "ssh")
-            (clutch--user-error
+            (user-error
              "Container TRAMP forwarding through SSH requires the OpenSSH client executable `ssh'"))
           (dolist (hop-vec hops)
             (unless (member (tramp-file-name-method hop-vec)
                             clutch--tramp-ssh-forward-methods)
-              (clutch--user-error
+              (user-error
                "Container TRAMP forwarding does not support %s hops"
                (tramp-file-name-method hop-vec))))
           (let* ((target-vec (car (last hops)))
@@ -1593,7 +1599,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
              (list (clutch--tramp-ssh-target target-vec))
              (mapcar #'shell-quote-argument exec-command))))
       (unless (executable-find runtime)
-        (clutch--user-error
+        (user-error
          "Container TRAMP forwarding requires the `%s' executable" runtime))
       exec-command)))
 
@@ -1665,7 +1671,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
          (command (clutch--tramp-container-command vec host port))
          listener local-port)
     (unless (member method clutch--tramp-container-forward-methods)
-      (clutch--user-error
+      (user-error
        "Container TRAMP forwarding requires /docker: or /podman:"))
     (with-current-buffer buffer
       (erase-buffer))
@@ -1699,7 +1705,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
   (let ((tramp-default-directory (plist-get params :tramp-default-directory)))
     (unless (and (stringp tramp-default-directory)
                  (file-remote-p tramp-default-directory))
-      (clutch--user-error
+      (user-error
        "TRAMP forwarding requires :tramp-default-directory to be a remote TRAMP directory"))
     (let* ((vec (clutch--tramp-dissect-file-name tramp-default-directory))
            (method (tramp-file-name-method vec)))
@@ -1709,7 +1715,7 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
        ((member method clutch--tramp-container-forward-methods)
         (clutch--start-tramp-container-forward params))
        (t
-        (clutch--user-error
+        (user-error
          (concat
           "TRAMP forwarding supports ssh-like paths such as /ssh:host:/path/ "
           "or /rpc:host:/path/, and container paths such as "
@@ -1765,13 +1771,13 @@ password that `clutch--resolve-password' produced so later reconnects reuse the
 same credentials as the successful foreground connection."
   (setq params (clutch--canonicalize-connection-params params))
   (let* ((backend (or (plist-get params :backend)
-                      (clutch--user-error "Connection params require :backend")))
+                      (user-error "Connection params require :backend")))
          (params (clutch--normalize-timeout-params backend params))
          (password (clutch--resolve-password params)))
     (when (and (clutch--jdbc-backend-p backend)
                (plist-get params :pass-entry)
                (null password))
-      (clutch--user-error
+      (user-error
        (concat "No password resolved for JDBC connection %s (:pass-entry %s). "
                "Enable auth-source-pass/auth-source, or set :password explicitly")
        backend
@@ -1833,7 +1839,7 @@ Returns a live connection object or signals a `user-error'."
             :backend backend
             :summary message
             :context (clutch--debug-connection-context backend effective-params)))
-         (clutch--user-error "%s"
+         (user-error "%s"
                               (clutch--debug-workflow-message message)))))))
 
 (defun clutch-open-connection (params)
@@ -1917,7 +1923,7 @@ raw database string."
    (clutch--console-name
     (clutch--carry-current-connection-origin
      (or (clutch--saved-connection-params clutch--console-name)
-         (clutch--user-error "Saved connection %s for this query console no longer exists"
+         (user-error "Saved connection %s for this query console no longer exists"
                              clutch--console-name))))
    (t
     (clutch--read-connection-params))))
@@ -1975,7 +1981,7 @@ This is useful before `clutch-connect' when a host alias in `~/.ssh/config'
 still needs an initial passphrase entry or host-key confirmation."
   (interactive (list (clutch--read-ssh-host-alias)))
   (unless (executable-find "ssh")
-    (clutch--user-error "SSH preparation requires the OpenSSH client executable `ssh'"))
+    (user-error "SSH preparation requires the OpenSSH client executable `ssh'"))
   (let* ((ssh-host (or ssh-host
                        (clutch--read-ssh-host-alias)))
          (buffer (clutch--start-ssh-prepare-session ssh-host)))
@@ -2048,9 +2054,9 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
   (interactive)
   (clutch--ensure-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
-    (clutch--user-error "Manual commit is not supported by this connection"))
+    (user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
-    (clutch--user-error "Connection is in autocommit mode"))
+    (user-error "Connection is in autocommit mode"))
   (clutch-db-commit clutch-connection)
   (clutch--mark-dml-results-committed clutch-connection)
   (clutch--clear-tx-dirty clutch-connection)
@@ -2062,9 +2068,9 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
   (interactive)
   (clutch--ensure-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
-    (clutch--user-error "Manual commit is not supported by this connection"))
+    (user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
-    (clutch--user-error "Connection is in autocommit mode"))
+    (user-error "Connection is in autocommit mode"))
   (clutch-db-rollback clutch-connection)
   (clutch--mark-dml-results-rolled-back clutch-connection)
   (clutch--clear-tx-dirty clutch-connection)
@@ -2078,10 +2084,10 @@ any open transaction according to its own semantics."
   (interactive)
   (clutch--ensure-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
-    (clutch--user-error "Manual commit is not supported by this connection"))
+    (user-error "Manual commit is not supported by this connection"))
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
     (when (and manual-now (clutch--tx-dirty-p clutch-connection))
-      (clutch--user-error "Cannot toggle: commit or roll back staged changes first"))
+      (user-error "Cannot toggle: commit or roll back staged changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
     (when manual-now
       (clutch--clear-tx-dirty clutch-connection))

@@ -316,7 +316,7 @@ window rather than replacing the current window."
   (let ((source-default-directory default-directory))
     (if (stringp target)
         (let ((params (or (clutch--saved-connection-params target)
-                          (clutch--user-error "No saved connection named %s" target))))
+                          (user-error "No saved connection named %s" target))))
           (clutch--open-query-console
            target params nil source-default-directory))
       (let ((name (plist-get target :name))
@@ -333,7 +333,7 @@ window rather than replacing the current window."
                             collect (buffer-name buf))))
     (if consoles
         (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
-      (clutch--user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
+      (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
 
 ;;;; Value conversion
 
@@ -421,7 +421,7 @@ Returns table name string or nil."
 (defun clutch--result-source-table-or-user-error (op)
   "Return source table for current result, or signal user-error for OP."
   (or (clutch-result--source-table)
-      (clutch--user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
+      (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
                   op)))
 
 (defconst clutch--row-identity-hidden-prefix "clutch__rid_"
@@ -909,13 +909,13 @@ Signals an error if pagination is not available."
          (offset (or page-offset (* page-num page-size)))
          (fetch-size (1+ page-size)))
     (unless effective-sql
-      (clutch--user-error "Pagination not available for this query"))
+      (user-error "Pagination not available for this query"))
     (clutch--ensure-connection)
     (when (and (or clutch--pending-edits
                    clutch--pending-deletes
                    clutch--pending-inserts)
                (not (yes-or-no-p "Discard staged changes and change page? ")))
-      (clutch--user-error "Page change cancelled"))
+      (user-error "Page change cancelled"))
     (let* ((row-identity-prep
             (clutch--prepare-row-identity-query clutch-connection effective-sql))
            (identity-sql (plist-get row-identity-prep :sql))
@@ -937,7 +937,7 @@ Signals an error if pagination is not available."
                                      :paged-sql
                                      (clutch--debug-sql-preview paged-sql))))
                              (summary (cdr failure)))
-                        (clutch--user-error "%s" (clutch--debug-workflow-message summary))))))
+                        (user-error "%s" (clutch--debug-workflow-message summary))))))
            (elapsed (- (float-time) start))
            (page (clutch--split-page-lookahead-rows
                   (clutch-db-result-rows result) page-size))
@@ -1029,7 +1029,7 @@ Leading SQL comments are stripped before checking."
   (when (clutch--risky-dml-p sql)
     (let ((token (read-string "High-risk DML (no WHERE). Type YES to continue: ")))
       (unless (string= token "YES")
-        (clutch--user-error "Query cancelled")))))
+        (user-error "Query cancelled")))))
 
 (defun clutch--confirm-query-execution (sql)
   "Prompt for any confirmation required before executing SQL."
@@ -1037,7 +1037,7 @@ Leading SQL comments are stripped before checking."
     (unless (yes-or-no-p
              (format "Execute destructive query?\n  %s\n\nProceed? "
                      (truncate-string-to-width (string-trim sql) 80)))
-      (clutch--user-error "Query cancelled")))
+      (user-error "Query cancelled")))
   (clutch--require-risky-dml-confirmation sql))
 
 (defun clutch--note-schema-affecting-query (sql connection)
@@ -1279,7 +1279,7 @@ Signals `user-error' if the user declines."
                      clutch--pending-deletes
                      clutch--pending-inserts)
                  (not (yes-or-no-p "Discard staged changes and re-run query? ")))
-        (clutch--user-error "Execution cancelled")))))
+        (user-error "Execution cancelled")))))
 
 (defun clutch--abandon-query-connection (connection)
   "Drop CONNECTION after an unrecoverable query interruption."
@@ -1332,7 +1332,7 @@ For SELECT queries, applies pagination (LIMIT/OFFSET).
 Prompts for confirmation on destructive operations."
   (if (and conn (not (eq conn clutch-connection)))
       (unless (clutch--connection-alive-p conn)
-        (clutch--user-error
+        (user-error
          "Connection closed.  Reconnect from the SQL buffer or REPL"))
     (clutch--ensure-connection))
   (setq-local clutch--buffer-error-details nil)
@@ -1587,7 +1587,7 @@ Optional CONTEXT is merged into the debug event.  Return
            (pcase-let* ((`(,beg . ,end) (clutch--dwim-bounds-at-point)))
              (string-trim (buffer-substring-no-properties beg end)))))))
     (when (or (null sql) (string-empty-p sql))
-      (clutch--user-error "No SQL to preview"))
+      (user-error "No SQL to preview"))
     (clutch--preview-sql-buffer sql)))
 
 ;;;; Interactive commands
@@ -1599,7 +1599,7 @@ Optional CONTEXT is merged into the debug event.  Return
   (pcase-let* ((`(,beg . ,end) (clutch--query-bounds-at-point))
                (sql (string-trim (buffer-substring-no-properties beg end))))
     (when (string-empty-p sql)
-      (clutch--user-error "No query at point"))
+      (user-error "No query at point"))
     (clutch--ensure-connection)
     (clutch--execute-and-mark sql beg end)))
 
@@ -1643,7 +1643,7 @@ Blank lines inside the statement are preserved."
   (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds-at-point))
                (sql (string-trim (buffer-substring-no-properties beg end))))
     (when (string-empty-p sql)
-      (clutch--user-error "No statement at point"))
+      (user-error "No statement at point"))
     (clutch--ensure-connection)
     (clutch--execute-and-mark sql beg end)))
 
@@ -1733,7 +1733,7 @@ result buffer.  Stops and reports on the first error."
                             (buffer-live-p buf))
                    (with-current-buffer source-buffer
                      (setq-local clutch--last-result-buffer buf)))
-                 (clutch--user-error "Statement %d failed: %s"
+                 (user-error "Statement %d failed: %s"
                                      (1+ done)
                                      (clutch--debug-workflow-message summary)))))))
       (dolist (spec before-last)
@@ -1793,7 +1793,7 @@ are executed sequentially."
     (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
                  (sql (string-trim (buffer-substring-no-properties qb qe))))
       (when (string-empty-p sql)
-        (clutch--user-error "No SQL at point"))
+        (user-error "No SQL at point"))
       (clutch--execute-and-mark sql qb qe))))
 
 (defun clutch--execute-sql-range (beg end scope)
@@ -1803,7 +1803,7 @@ Semicolon-delimited multi-statement ranges run sequentially."
          (sql (string-trim raw-sql))
          (stmts (clutch--split-statement-specs raw-sql beg)))
     (when (string-empty-p sql)
-      (clutch--user-error "No SQL in %s" scope))
+      (user-error "No SQL in %s" scope))
     (if (cdr stmts)
         (clutch--execute-statements stmts)
       (clutch--execute-and-mark sql beg end))))
@@ -1844,10 +1844,10 @@ current line.  Uses the connection from any `clutch-mode' buffer."
             (buffer-substring-no-properties
              (line-beginning-position) (line-end-position))))))
   (when (string-empty-p sql)
-    (clutch--user-error "No SQL to execute"))
+    (user-error "No SQL to execute"))
   (let* ((conn (or clutch-connection
                    (clutch--find-connection)
-                   (clutch--user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
+                   (user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
          (beg (if (use-region-p) (region-beginning) (line-beginning-position)))
          (end (if (use-region-p) (region-end) (line-end-position))))
     (clutch--execute-and-mark sql beg end conn)))
@@ -1891,9 +1891,9 @@ Key bindings:
         (conn (or clutch-connection
                   (clutch--find-connection))))
     (when (string-empty-p sql)
-      (clutch--user-error "No SQL to execute"))
+      (user-error "No SQL to execute"))
     (unless conn
-      (clutch--user-error "No active connection"))
+      (user-error "No active connection"))
     (quit-window 'kill)
     ;; `quit-window' kills the indirect buffer, leaving the Lisp execution
     ;; context in a dead buffer.  Any subsequent `with-current-buffer' call

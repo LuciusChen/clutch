@@ -1243,9 +1243,9 @@ control backend column loading."
              (completion-in-region-mode-predicate #'always))
          (unless (completion-in-region beg end collection
                                        (plist-get plist :predicate))
-           (clutch--user-error "No completion at point"))))
+           (user-error "No completion at point"))))
       (_
-       (clutch--user-error "No completion at point")))))
+       (user-error "No completion at point")))))
 
 (defun clutch-completion-at-point ()
   "Completion-at-point function for SQL identifiers.

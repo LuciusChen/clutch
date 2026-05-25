@@ -164,20 +164,13 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
 (defun clutch-db-mysql--drain-interrupted-response (conn)
   "Drain the interrupted query response from CONN.
 Return non-nil when the wire protocol is synchronized again."
-  (let ((old-timeout (mysql-conn-read-idle-timeout conn)))
-    (unwind-protect
-        (progn
-          (setf (mysql-conn-read-idle-timeout conn)
-                clutch-db-mysql-cancel-timeout-seconds)
-          (setf (mysql-conn-busy conn) t)
-          (condition-case nil
-              (progn
-                (mysql--handle-query-response conn (mysql--read-packet conn))
-                t)
-            (mysql-query-error t)
-            (mysql-error nil)))
-      (setf (mysql-conn-busy conn) nil)
-      (setf (mysql-conn-read-idle-timeout conn) old-timeout))))
+  (condition-case nil
+      (progn
+        (mysql-drain-query-response conn clutch-db-mysql-cancel-timeout-seconds)
+        t)
+    ;; KILL QUERY returns an ERR packet after the response has been consumed.
+    (mysql-query-error t)
+    (mysql-error nil)))
 
 (cl-defmethod clutch-db-interrupt-query ((conn mysql-conn))
   "Interrupt the active MySQL query on CONN without dropping the session."
