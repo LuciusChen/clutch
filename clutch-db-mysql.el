@@ -166,9 +166,7 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
 
 (cl-defmethod clutch-db-live-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is live."
-  (and conn
-       (mysql-conn-p conn)
-       (process-live-p (mysql-conn-process conn))))
+  (mysql-live-p conn))
 
 (cl-defmethod clutch-db-backend-key ((_conn mysql-conn))
   "Return the registered backend key for MySQL connections."
@@ -187,7 +185,7 @@ Return non-nil when the wire protocol is synchronized again."
 
 (cl-defmethod clutch-db-interrupt-query ((conn mysql-conn))
   "Interrupt the active MySQL query on CONN without dropping the session."
-  (let ((thread-id (mysql-conn-connection-id conn))
+  (let ((thread-id (mysql-connection-id conn))
         (params (gethash conn clutch-db-mysql--connection-params))
         killer)
     (and thread-id
@@ -349,12 +347,7 @@ when non-nil."
 (cl-defmethod clutch-db-set-current-schema ((conn mysql-conn) schema)
   "Switch MySQL CONN to SCHEMA."
   (clutch-db--translate-library-error mysql-error
-    (let ((schema (string-trim schema)))
-      (clutch-db-query
-       conn
-       (format "USE %s" (clutch-db-escape-identifier conn schema)))
-      (setf (mysql-conn-database conn) schema)
-      schema)))
+    (mysql-select-database conn schema)))
 
 (cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
   "Return table/view entry plists for the current MySQL database on CONN."
@@ -687,25 +680,25 @@ ORDER BY ORDINAL_POSITION"
 
 (cl-defmethod clutch-db-busy-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is executing a query."
-  (mysql-conn-busy conn))
+  (mysql-busy-p conn))
 
 ;;;; Metadata methods
 
 (cl-defmethod clutch-db-user ((conn mysql-conn))
   "Return the user for MySQL CONN."
-  (mysql-conn-user conn))
+  (mysql-connection-user conn))
 
 (cl-defmethod clutch-db-host ((conn mysql-conn))
   "Return the host for MySQL CONN."
-  (mysql-conn-host conn))
+  (mysql-connection-host conn))
 
 (cl-defmethod clutch-db-port ((conn mysql-conn))
   "Return the port for MySQL CONN."
-  (mysql-conn-port conn))
+  (mysql-connection-port conn))
 
 (cl-defmethod clutch-db-database ((conn mysql-conn))
   "Return the database for MySQL CONN."
-  (mysql-conn-database conn))
+  (mysql-current-database conn))
 
 (cl-defmethod clutch-db-display-name ((_conn mysql-conn))
   "Return \"MySQL\" as the display name."

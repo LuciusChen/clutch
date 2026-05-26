@@ -86,7 +86,8 @@
                   (conn value &optional fallback-format-fn))
 (declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function make-mysql-result "mysql" (&rest args))
-(declare-function mysql-conn-database "mysql" (conn))
+(declare-function mysql-current-database "mysql" (conn))
+(declare-function mysql-connection-id "mysql" (conn))
 (declare-function make-pgcon "pg" (&rest args))
 (declare-function make-pgresult "pg" (&rest args))
 (declare-function pgcon-connect-plist "pg" (conn))
@@ -1546,13 +1547,13 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "MySQL schema switching should execute USE and update the connection database."
   (let ((conn (make-mysql-conn :database "zj_test"))
         executed-sql)
-    (cl-letf (((symbol-function 'clutch-db-query)
+    (cl-letf (((symbol-function 'mysql-query)
                (lambda (_conn sql)
                  (setq executed-sql sql)
-                 (make-clutch-db-result :connection conn :affected-rows 0))))
+                 (make-mysql-result :connection conn :affected-rows 0))))
       (should (equal (clutch-db-set-current-schema conn "cjh_test") "cjh_test"))
       (should (equal executed-sql "USE `cjh_test`"))
-      (should (equal (mysql-conn-database conn) "cjh_test")))))
+      (should (equal (mysql-current-database conn) "cjh_test")))))
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
@@ -2466,7 +2467,7 @@ Skips if `clutch-db-test-mysql-password' is nil."
                              watcher
                              (format
                               "SELECT INFO FROM INFORMATION_SCHEMA.PROCESSLIST WHERE ID = %d"
-                              (mysql-conn-connection-id conn))))
+                              (mysql-connection-id conn))))
                            (info (caar (clutch-db-result-rows result))))
                       (setq seen
                             (and (stringp info)
