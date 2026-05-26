@@ -6,21 +6,28 @@
 * Overview
 
 An Emacs database client with an interactive data browsing UI.
-Supports MySQL, PostgreSQL, and SQLite via pure Elisp backends, plus Oracle,
-SQL Server, DB2, Snowflake, and Amazon Redshift through a lightweight JVM
-sidecar (=clutch-jdbc-agent=, Java 17+).
+Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite
+through Emacs built-in =sqlite-*= functions, plus Oracle, SQL Server, DB2,
+Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through a
+lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]], Java 17+).
 
 - =clutch-db.el= — generic database interface (=cl-defgeneric= dispatch)
 - =clutch-db-mysql.el= — MySQL backend adapter
 - =clutch-db-pg.el= — PostgreSQL backend adapter
 - =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29.1+ built-in sqlite)
-- =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, and any JDBC-compatible database)
-- =clutch.el= — interactive UI layer: single-page result browser, record view, FK navigation, editing, transient menus, REPL
+- =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and any JDBC-compatible database)
+- =clutch.el= — package entry point, customization, debug capture, console persistence, and public interactive commands
+- =clutch-connection.el= — connection lifecycle, reconnect, transaction state, backend identity, and header-line status
+- =clutch-query.el= — SQL-buffer execution workflow, query rewriting orchestration, and REPL execution
+- =clutch-result.el= / =clutch-ui.el= — result, record, value-viewer, navigation, and table rendering UI
+- =clutch-object.el= / =clutch-schema.el= — object discovery/describe flow plus schema and metadata cache lifecycle
+- =clutch-edit.el= — staged insert/update/delete editing workflow
+- =clutch-sql.el= — SQL context parsing, completion, and xref helpers
 - External native protocol dependencies:
-  - =mysql= — pure Elisp MySQL wire protocol client
-  - =pg= — PostgreSQL client from =pg-el=
+  - [[https://github.com/LuciusChen/mysql.el][=mysql=]] — pure Elisp MySQL wire protocol client
+  - [[https://github.com/emarsden/pg-el][=pg=]] — PostgreSQL client from [[https://github.com/emarsden/pg-el][=pg-el=]]
 
-For Org-Babel integration, install the separate =ob-clutch= package.
+For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package.
 
 #+CAPTION: Query console with result pane, value viewer, and footer status.
 [[file:docs/screenshots/clutch-overview.png]]
@@ -44,7 +51,7 @@ For Org-Babel integration, install the separate =ob-clutch= package.
 - For native backend protocol, TLS, timeout, and connection examples, see
   [[file:docs/native-backends.md][docs/native-backends.md]]
 
-** Interactive UI (clutch.el)
+** Interactive UI
 
 - Result browser: single-page table view, fixed header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
 - Execution flow: run a region or statement, keep focus in the SQL buffer, refresh results below, and mark the last executed statement in the gutter
@@ -85,7 +92,7 @@ and inject or read a matching row identity.
   TLS with =mysql_native_password= has also been live-validated; other
   MariaDB versions are expected to be broadly compatible but are not yet part
   of the regular test matrix
-- Java 17+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift)
+- Java 17+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB)
 
 For MySQL-family servers, core functionality (connect/query/object workflow,
 editing, prepared statements, and clutch UI workflows) is expected to work on
@@ -109,12 +116,12 @@ Install =clutch= from MELPA or another package archive:
 Package-manager installs also install the core native backend protocol
 packages:
 
-- =mysql= for =:backend mysql=
-- =pg= for =:backend pg=
+- [[https://github.com/LuciusChen/mysql.el][=mysql=]] for =:backend mysql=
+- [[https://github.com/emarsden/pg-el][=pg=]] for =:backend pg=
 
 SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
 =clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
-For Org-Babel support, install the separate =ob-clutch= package.
+For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package.
 
 For source checkouts, add =clutch= and any native protocol backend checkout you
 use to =load-path= explicitly:
@@ -132,13 +139,13 @@ This release separates protocol and Org-Babel packages from the main
 =clutch= package.  If you are upgrading from an older checkout that bundled
 everything in one repository, this is a breaking packaging change:
 
-- =mysql.el= is no longer bundled in this repository.  Package-manager installs
+- [[https://github.com/LuciusChen/mysql.el][=mysql.el=]] is no longer bundled in this repository.  Package-manager installs
   of =clutch= install the =mysql= package as a dependency; source checkouts must
   add =mysql.el= to =load-path= for =:backend mysql=.
-- =pg.el= is no longer bundled in this repository.  Package-manager installs of
+- [[https://github.com/emarsden/pg-el][=pg.el=]] is no longer bundled in this repository.  Package-manager installs of
   =clutch= install the =pg= package as a dependency; source checkouts must add
   =pg-el= to =load-path= for =:backend pg=.
-- =ob-clutch.el= is no longer bundled; install =ob-clutch= separately for
+- [[https://github.com/LuciusChen/ob-clutch][=ob-clutch.el=]] is no longer bundled; install =ob-clutch= separately for
   Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
 
@@ -455,13 +462,13 @@ Common entry points:
 
 ** JDBC Backend
 
-JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, and generic JDBC URLs through the =clutch-jdbc-agent= sidecar.  For setup, driver installation, connection examples, Oracle notes, and transaction behavior, see [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
+JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through the [[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]] sidecar.  For setup, driver installation, connection examples, Oracle notes, and transaction behavior, see [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
 
 For the sidecar wire protocol and agent internals, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]].
 
 ** Org-Babel Integration
 
-Org-Babel integration lives in the separate =ob-clutch= package and supports saved clutch connections plus MySQL, PostgreSQL, SQLite, and generic JDBC-backed =clutch= source blocks.  For setup, block examples, header arguments, and connection caching, see [[file:docs/org-babel.org][docs/org-babel.org]].
+Org-Babel integration lives in the separate [[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package and supports saved clutch connections plus MySQL, PostgreSQL, SQLite, and generic JDBC-backed =clutch= source blocks.  For setup, block examples, header arguments, and connection caching, see [[file:docs/org-babel.org][docs/org-babel.org]].
 
 ** Timeouts, Interrupts, and Customization
 
@@ -486,14 +493,14 @@ ordering), object workflow and schema refresh state, SQL keyword completion
 =test/clutch-db-test.el= — database backend layer, covering JDBC
 connection and timeout mapping, query-timeout clamping, transaction
 (commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
-installation (Oracle, SQL Server, Redshift), agent JAR validation and lifecycle,
+installation (Oracle, SQL Server, Redshift, DuckDB), agent JAR validation and lifecycle,
 =clutch-db-live-p= identity check, row identity candidates, RPC timeout kill,
 native backend adapter mapping (mysql / pg / sqlite), and cross-backend value
 formatting and null handling.
 
-The pure protocol packages (=mysql= and =pg=) and the Org-Babel bridge
-(=ob-clutch=) now live in separate repositories and carry their own focused test
-suites.
+The pure protocol packages ([[https://github.com/LuciusChen/mysql.el][=mysql=]] and [[https://github.com/emarsden/pg-el][=pg=]]) and the
+Org-Babel bridge ([[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]]) now live in separate repositories and carry
+their own focused test suites.
 
 Default ERT runs intentionally skip live tests when database credentials are not
 set.  Treat those runs as unit/regression coverage, not as proof that real
@@ -517,17 +524,18 @@ aggregate SELECT row-identity behavior, PostgreSQL =ctid= row locators, and MySQ
 index-detail scoping.  It stubs only Emacs UI boundaries such as display-buffer
 selection and confirmation prompts; query execution, metadata, staging SQL, and
 commit paths run against the live databases.  JDBC live suites for Oracle, SQL
-Server, and ClickHouse remain credential-driven and are skipped by default.
+Server, ClickHouse, and DuckDB remain environment-driven and are skipped by default.
 
 See =AGENTS.md= §Pre-Commit Checklist for exact unit and live test commands.
 
 * Roadmap
 
 - AST-based SQL rewriting is deferred, not planned as a near-term feature.
-  The current top-level clause scanner plus derived-table fallback covers known
-  WHERE/filter/count/pagination cases across CTE, UNION, nested SELECT, and
-  window-function queries.  Revisit a full parser only if concrete rewrite bugs
-  or optimization features justify the added complexity.
+  The current top-level clause scanner, direct LIMIT/OFFSET pagination, and
+  conservative result capability checks cover known WHERE/filter/count/
+  pagination cases without making derived-table wrapping the default escape
+  hatch.  Revisit a full parser only if concrete rewrite bugs or optimization
+  features justify the added complexity.
 
 * License
 

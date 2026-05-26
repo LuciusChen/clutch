@@ -1,7 +1,8 @@
 # JDBC Agent Protocol
 
 This document describes the wire protocol and runtime model used by
-`clutch-db-jdbc.el` and `clutch-jdbc-agent`.
+`clutch-db-jdbc.el` and
+[`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent).
 
 It is intentionally narrower than the user-facing JDBC section in `README.org`.
 `README.org` explains how to install and use the JDBC backend; this file
@@ -9,7 +10,8 @@ documents how the Elisp side and JVM sidecar talk to each other.
 
 ## Runtime model
 
-`clutch` launches `clutch-jdbc-agent` as a local JVM sidecar process and
+`clutch` launches
+[`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent) as a local JVM sidecar process and
 communicates with it over stdin/stdout using one JSON object per line.
 
 Each logical JDBC connection in clutch maps to one logical session in the

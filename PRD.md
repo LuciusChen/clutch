@@ -14,7 +14,8 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages
+- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, plus built-in SQLite
+- JDBC sidecar support for Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
@@ -33,61 +34,54 @@ clutch integrates directly into Emacs, offering:
 
 ## 2. Architecture
 
-clutch follows a **layered, interface-based architecture** with clear separation of concerns:
+clutch follows a **modular backend-facade architecture** with clear project
+boundaries.  UI/workflow modules depend on the `clutch-db.el` facade, while
+backend adapters contain database-specific protocol, SQL dialect, and metadata
+behavior.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  UI Layer (clutch.el)                                   │
-│  - Interactive modes and transient menus                │
-│  - Result display, editing buffers, object workflow     │
-│  - Query execution, column paging, mutation workflow    │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-┌──────────────────────v──────────────────────────────────┐
-│  Generic Interface (clutch-db.el)                       │
-│  - cl-defgeneric methods (dispatch on conn type)        │
-│  - Unified schema, query, lifecycle API                 │
-│  - Result struct: clutch-db-result                      │
-└──────────────────────┬──────────────────────────────────┘
-         ┌─────────────┼─────────────┬──────────────────┐
-         │             │             │                  │
-         v             v             v                  v
-    ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐
-    │  MySQL  │  │   PG    │  │  SQLite  │  │ JDBC Agent   │
-    │ Backend │  │ Backend │  │ Backend  │  │ (JVM sidecar)│
-    │clutch-  │  │clutch-  │  │clutch-   │  │clutch-db-    │
-    │db-      │  │db-      │  │db-       │  │jdbc.el       │
-    │mysql.el │  │pg.el    │  │sqlite.el │  │              │
-    └─────────┘  └─────────┘  └──────────┘  └──────────────┘
-         │             │             │                  │
-         v             v             v                  v
-    ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────────┐
-    │mysql    │  │ upstream│  │ Emacs    │  │ Java 17+ JVM │
-    │(external │ │ pg-el   │  │ 29.1+    │  │ process +    │
-    │ pure     │ │ package)│  │ -in      │  │ JDBC drivers │
-    │ Elisp)   │ │         │  │ sqlite-* │  │              │
-    │          │ │         │  │ functions│  │              │
-    └─────────┘  └─────────┘  └──────────┘  └──────────────┘
+clutch.el
+  package entry, customization, public commands, mode assembly
+
+workflow modules
+  clutch-connection.el   connection lifecycle, auth, transport, transactions
+  clutch-query.el        query buffers, execution, SQL rewrite orchestration
+  clutch-result.el       result/record/value commands, sort/filter/export
+  clutch-ui.el           table rendering, header/footer/modeline, navigation
+  clutch-edit.el         staged edit/insert/delete and mutation commit
+  clutch-object.el       object discovery, describe buffers, object actions
+  clutch-schema.el       schema refresh lifecycle and metadata caches
+  clutch-sql.el          SQL context, completion, Eldoc, xref
+
+backend facade
+  clutch-db.el           generic API, result struct, shared SQL helpers,
+                         capability gates, error normalization
+
+backend adapters
+  clutch-db-mysql.el     external mysql.el wire protocol client
+  clutch-db-pg.el        external pg-el client
+  clutch-db-sqlite.el    Emacs sqlite-* functions
+  clutch-db-jdbc.el      JVM sidecar plus JDBC drivers
 ```
 
 ### File Responsibilities
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `clutch.el` | ~1600 | Package entry point, customization, modes, keymaps, REPL, transient menus |
-| `clutch-connection.el` | ~2090 | Connection params, auth-source/pass lookup, transports, reconnect/disconnect, transaction state |
-| `clutch-query.el` | ~1940 | Query consoles, SQL execution, statement detection, pagination/rewrite, error overlays |
-| `clutch-result.el` | ~2540 | Result-mode commands, selection, sorting, filtering, export, record view, dispatch menus |
-| `clutch-ui.el` | ~1710 | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh |
-| `clutch-edit.el` | ~2140 | Staged edit, insert, delete, validation, JSON sub-editors, mutation commit workflow |
-| `clutch-object.el` | ~1820 | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
-| `clutch-schema.el` | ~800 | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat |
-| `clutch-sql.el` | ~1430 | SQL context, statement analysis, completion, Eldoc, xref |
-| `clutch-db.el` | ~870 | Generic backend interface, result struct, shared SQL helpers |
-| `clutch-db-mysql.el` | ~750 | MySQL backend adapter, type-category mapping |
-| `clutch-db-pg.el` | ~1260 | PostgreSQL backend adapter, OID-to-type mapping |
-| `clutch-db-sqlite.el` | ~400 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
-| `clutch-db-jdbc.el` | ~1750 | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
+| `clutch.el` | ~856 | Package entry point, customization, autoloaded public commands, mode assembly |
+| `clutch-connection.el` | ~2042 | Connection lifecycle, auth-source/pass lookup, transports, reconnect/disconnect, transaction state |
+| `clutch-query.el` | ~1802 | Query consoles, SQL execution, statement detection, row-identity preparation, SQL rewrite orchestration |
+| `clutch-result.el` | ~2803 | Result/record/value commands, pagination, sorting, filtering, export, context export |
+| `clutch-ui.el` | ~1697 | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh |
+| `clutch-edit.el` | ~2079 | Staged edit, insert, delete, validation, JSON sub-editors, mutation commit workflow |
+| `clutch-object.el` | ~1810 | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
+| `clutch-schema.el` | ~858 | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat, recoverable metadata warnings |
+| `clutch-sql.el` | ~1376 | SQL context parsing, completion, Eldoc, xref |
+| `clutch-db.el` | ~1368 | Backend facade, result struct, shared SQL helpers, capability gates, error normalization |
+| `clutch-db-mysql.el` | ~715 | MySQL backend adapter, type-category mapping, mysql.el boundary wrappers |
+| `clutch-db-pg.el` | ~1175 | PostgreSQL backend adapter, OID-to-type mapping, pg-el boundary wrappers |
+| `clutch-db-sqlite.el` | ~399 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
+| `clutch-db-jdbc.el` | ~1817 | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
 | External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
 | Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
@@ -104,7 +98,7 @@ user queries on the same JDBC session.
 
 ## 3. Supported Backends
 
-### Native Backends (Pure Elisp)
+### Native / In-Process Backends
 
 | Backend | Emacs Version | Implementation | Notes |
 |---------|---------------|----------------|-------|
@@ -121,6 +115,8 @@ user queries on the same JDBC session.
 | **SQL Server** | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
 | **Snowflake** | `snowflake-jdbc` | 3.14.4 | Maven Central (auto-download) |
 | **Amazon Redshift** | `redshift-jdbc42` | 2.1.0.30 | Maven Central (auto-download) |
+| **ClickHouse** | `clickhouse-jdbc` | 0.9.8:all | Maven Central (auto-download) |
+| **DuckDB** | `duckdb_jdbc` | 1.5.3.0 | Maven Central (auto-download; connect through generic JDBC URL) |
 | **DB2** | `db2jcc4` | — | Manual installation from IBM |
 | **Generic JDBC** | any | — | Drop jar into `clutch-jdbc-agent-dir/drivers/` |
 
@@ -549,7 +545,7 @@ Connection profile plist keys:
 | `:password` | string | Password (prefer auth-source instead) |
 | `:database` | string | Database/schema name |
 | `:sid` | string | Oracle SID when using `@host:port:SID` style connections |
-| `:backend` | symbol | `mysql`, `pg`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
+| `:backend` | symbol | `mysql`, `pg`, `postgresql`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
 | `:sql-product` | symbol | SQL highlight product for `sql-mode` |
 | `:pass-entry` | string | Pass store suffix for password lookup |
 | `:ssh-host` | string | OpenSSH host alias from `~/.ssh/config` used for an automatic local tunnel |
@@ -766,6 +762,19 @@ User types SQL in clutch-mode
 - **Offset**: normally `offset = page * page-size`; last-window navigation uses
   `max(0, total - page-size)`
 
+### Server-Side Rewrite Policy
+
+- Pagination appends backend-specific `LIMIT` / `OFFSET` / `FETCH` clauses only
+  when the original query has no top-level page tail.
+- Server-side sort, filter, and count rewrites are gated by
+  `clutch--server-rewritable-result-p`: the result must come from a simple
+  single-table SELECT, have unique result labels, and preserve row-identity
+  metadata.
+- Queries that already contain top-level `LIMIT` / `OFFSET`, derived-table unsafe
+  duplicate result labels, aggregates, unions, distincts, or window functions
+  stay displayable, but server-side sort/filter/count commands are disabled
+  instead of wrapping the query in a potentially invalid derived table.
+
 ### Horizontal Overflow
 
 - **Layout**: every result column is rendered into one buffer
@@ -928,7 +937,7 @@ Field names are read-only (`font-lock-face clutch-insert-field-name-face`, `read
 | Argument | Description |
 |----------|-------------|
 | `:connection NAME` | Use named profile from `clutch-connection-alist`; this supplies the backend when using a saved connection |
-| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `oracle`, `sqlserver`, `snowflake`, `redshift`; required for inline params when `:connection` is absent |
+| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `jdbc`, `oracle`, `sqlserver`, `clickhouse`, `snowflake`, `redshift`, `db2`; required for inline params when `:connection` is absent |
 | `:host HOST` | Database host (inline, without `:connection`) |
 | `:port PORT` | Database port |
 | `:user USER` | Database user |
@@ -986,6 +995,7 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 | `clutch-db-connect (backend params)` | Open a backend connection |
 | `clutch-db-disconnect (conn)` | Close a connection |
 | `clutch-db-live-p (conn)` | Check whether the connection is still live |
+| `clutch-db-backend-key (conn)` | Return the registered backend key for UI/debug routing |
 | `clutch-db-error-details (conn)` / `clutch-db-clear-error-details (conn)` | Structured backend error detail access |
 | `clutch-db-init-connection (conn)` | Backend-specific post-connect initialization |
 | `clutch-db-manual-commit-p (conn)` | Report whether the connection is in manual-commit mode |
@@ -1022,6 +1032,7 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 | `clutch-db-list-columns (conn table)` / `clutch-db-complete-columns (conn table prefix)` | Column metadata and completion |
 | `clutch-db-complete-tables (conn prefix)` / `clutch-db-search-table-entries (conn prefix)` | Table completion and prefix search |
 | `clutch-db-table-comment (conn table)` / `clutch-db-column-details (conn table)` | Synchronous table comment / detailed column metadata |
+| `clutch-db-symbol-help (conn symbol)` | Optional backend-provided live symbol help, used by Eldoc |
 | `clutch-db-primary-key-columns (conn table)` / `clutch-db-foreign-keys (conn table)` / `clutch-db-referencing-objects (conn table)` | Relationship metadata |
 | `clutch-db-row-identity-candidates (conn table)` | Ordered UPDATE/DELETE row identity candidates: primary key, non-null unique key, backend row locator |
 
@@ -1041,7 +1052,10 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 
 ### Overview
 
-The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating via stdin/stdout with one JSON object per line.
+The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating
+via stdin/stdout with one JSON object per line.  A single logical clutch JDBC
+connection owns separate foreground and metadata JDBC sessions so background
+introspection does not contend with user SQL.
 
 ### Request Format
 
@@ -1120,9 +1134,10 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 - Result buffers support per-table/per-column displayers through
   `clutch-register-column-displayer`.
 - Result buffers can pipe the current cell through a shell command with `|`.
-- Native MySQL/PostgreSQL live coverage is available through
-  `test/run-native-live-tests.sh`, which exercises UI-level result workflows and
-  backend-level adapter behavior against real local containers.
+- Live coverage is split by backend path: native MySQL/PostgreSQL suites run
+  through `test/run-native-live-tests.sh`, SQLite is covered in-process, and
+  environment-driven JDBC live suites cover Oracle, SQL Server, ClickHouse, and
+  DuckDB user workflows against real databases.
 
 ---
 
@@ -1132,13 +1147,13 @@ The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating 
 
 | Issue | Severity | Description |
 |-------|----------|-------------|
-| SQL Server/DB2/Snowflake/Redshift coverage | Low | No live integration tests; behavior gaps may exist |
+| DB2/Snowflake/Redshift coverage | Low | No regular live integration environment; behavior gaps may exist |
 
 ### Design Constraints
 
 | Area | Limitation |
 |------|-----------|
-| **SQL rewriting** | ORDER BY/LIMIT/OFFSET injection uses top-level clause detection (regex); complex CTEs/UNIONs may rewrite incorrectly |
+| **SQL rewriting** | Clause detection is still scanner-based, but server-side rewrites are capability-gated and disabled for unsafe shapes rather than applied blindly. Full SQL AST rewriting remains deferred. |
 | **Physical row locators** | PostgreSQL `ctid`, SQLite `rowid`, and Oracle JDBC `ROWID` can identify rows without logical keys, but may change after UPDATE; explicit `ORDER BY` is still required for stable refresh ordering |
 | **MySQL query timeout** | `clutch-query-timeout-seconds` is not enforced for MySQL (applied for PostgreSQL and JDBC only) |
 | **Transaction control** | Native MySQL and PostgreSQL support `commit` / `rollback` / runtime auto-commit toggle; JDBC supports the same, with Oracle defaulting to manual-commit and `:manual-commit` remaining JDBC-only at connect time |
@@ -1157,7 +1172,7 @@ See `AGENTS.md` in both repos for full rules. Key points:
 - **Error conventions**: `user-error` for user problems, `error` for programmer bugs, `condition-case` for recovery
 - **State**: `defvar-local` for per-buffer, `defcustom` for configurable, `defvar` for global/shared
 - **Function size**: keep under ~30 lines; extract helpers by what they compute
-- **Byte-compile clean**: `(byte-compile-file "clutch.el")` must produce zero warnings before any commit
+- **Byte-compile clean**: `emacs --batch ... -f batch-byte-compile *.el` must produce zero warnings before any commit
 
 ### Postmortem Records
 

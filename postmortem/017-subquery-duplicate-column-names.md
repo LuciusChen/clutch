@@ -1,5 +1,10 @@
 # 017 — Subquery Wrapping Fails on Duplicate Column Names
 
+Update: this record was extended by
+`099-derived-table-rewrite-capability-gates.md`, which applies the duplicate
+column lesson to user-LIMIT pagination and result-level sort/filter/count
+capability checks.
+
 ## Background
 
 Pagination and total-count queries both required transforming a user-supplied

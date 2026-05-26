@@ -27,7 +27,7 @@
 ;;; Commentary:
 
 ;; Query console, SQL literal conversion, pagination, query execution engine,
-;; error humanization, error details, and indirect edit buffers for clutch.
+;; debug capture, error details, and indirect edit buffers for clutch.
 ;;
 ;; This module is required by `clutch.el' — do not require `clutch' here.
 
@@ -39,74 +39,36 @@
 
 ;; Forward declarations — variables defined in clutch.el
 (defvar clutch-connection)
-(defvar clutch--buffer-error-details)
 (defvar clutch--executing-p)
 (defvar clutch--conn-sql-product)
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
 (defvar clutch--base-query)
 (defvar clutch--connection-params)
-(defvar clutch--console-name)
-(defvar clutch--console-storage-name)
-(defvar clutch--console-ad-hoc-params)
 (defvar clutch--source-window)
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
+(defvar clutch-console-directory)
 (defvar clutch-debug-mode nil)
 (defvar clutch-debug-buffer-name "*clutch-debug*")
+(defvar clutch-debug-event-limit 25)
 (defvar clutch-connection-alist nil)
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch-console-yank-cleanup t)
 
-;; Forward declarations — variables defined in clutch-ui / clutch-edit
-(defvar clutch--aggregate-summary)
-(defvar clutch--cached-pk-indices)
-(defvar clutch--column-widths)
-(defvar clutch--filter-pattern)
-(defvar clutch--filtered-rows)
-(defvar clutch--fk-info)
-(defvar clutch--marked-rows)
-(defvar clutch--order-by)
-(defvar clutch--page-current)
-(defvar clutch--page-has-more)
-(defvar clutch--page-offset)
-(defvar clutch--page-total-rows)
-(defvar clutch--pending-deletes)
-(defvar clutch--pending-edits)
-(defvar clutch--pending-inserts)
-(defvar clutch--query-elapsed)
-(defvar clutch--row-identity)
-(defvar clutch--result-column-defs)
-(defvar clutch--result-columns)
-(defvar clutch--result-source-table)
-(defvar clutch--result-server-pageable)
-(defvar clutch--result-server-rewritable)
-(defvar clutch--result-rows)
-(defvar clutch--sort-column)
-(defvar clutch--sort-descending)
-(defvar clutch--where-filter)
-
-;; Forward declarations — functions defined in clutch.el
-(declare-function clutch--console-buffer-base-name "clutch" (name))
-(declare-function clutch--debug-sql-preview "clutch" (sql))
-(declare-function clutch--remember-debug-event "clutch" (&rest event))
-(declare-function clutch--remember-problem-record "clutch" (&rest args))
-(declare-function clutch--find-console-buffer "clutch" (name &optional storage-name))
-(declare-function clutch--update-console-buffer-name "clutch" ())
-(declare-function clutch--console-persistence-name "clutch" (name &optional params))
-(declare-function clutch--console-file "clutch" (name))
-(declare-function clutch--effective-sql-product "clutch" (params))
+;; Forward declarations — functions from sibling modules
+(declare-function clutch--effective-sql-product "clutch-connection" (params))
 (declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))
 
 ;; Forward declarations — functions from clutch-connection.el
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--ensure-clutch-loaded "clutch-connection" ())
-(declare-function clutch--connection-oracle-jdbc-p "clutch-connection" (conn))
 (declare-function clutch--clear-tx-dirty "clutch-connection" (conn))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
+(declare-function clutch--attached-buffer-for-connection "clutch-connection" (connection))
 (declare-function clutch--activate-current-buffer-connection "clutch-connection" (conn params &optional product))
 (declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
@@ -121,35 +83,180 @@
 (declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
 (declare-function clutch--prepare-connection-origin-params
                   "clutch-connection" (params &optional source-default-directory))
-;; `clutch-result-mode' is defined in clutch-result.el, which requires this
-;; file, so query keeps a forward declaration instead of requiring it.
-(declare-function clutch-result-mode "clutch-result" ())
+(declare-function clutch-result--display-error
+                  "clutch-result"
+                  (connection sql summary message &optional elapsed hint))
+(declare-function clutch-result--display "clutch-result" (result sql elapsed))
+(declare-function clutch-result--check-pending-changes "clutch-result" ())
+(declare-function clutch-result--display-select
+                  "clutch-result"
+                  (connection sql result elapsed row-identity-prep
+                              server-pageable result-context source-buffer))
+(declare-function clutch-result--preview-execution-sql "clutch-result" ())
 (declare-function clutch-mode "clutch" ())
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
 (declare-function clutch--mark-failed-sql-region "clutch-ui" (beg end &optional message))
 (declare-function clutch--clear-executed-sql-overlay "clutch-ui" (&rest _))
-(declare-function clutch--compute-column-widths "clutch-ui" (col-names rows column-defs &optional max-width))
 (declare-function clutch--refresh-display "clutch-ui" ())
-(declare-function clutch--display-select-result "clutch-ui" (col-names rows columns))
-(declare-function clutch--display-result "clutch-ui" (result sql elapsed))
-(declare-function clutch--display-error-result "clutch-ui" (connection sql summary message &optional elapsed hint))
 (declare-function clutch--format-elapsed "clutch-ui" (seconds))
-(declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--message-count "clutch-ui" (value))
 (declare-function clutch--message-keyword "clutch-ui" (value))
 (declare-function clutch--message-literal "clutch-ui" (value))
-(declare-function clutch--load-fk-info "clutch-edit" ())
-(declare-function clutch-result--pending-sql-content "clutch-edit" (&optional stmts))
-(declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
+(declare-function clutch--trim-sql-bounds "clutch-ui" (beg end))
 (declare-function clutch--schema-status-entry "clutch-schema" (conn))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
 (declare-function clutch-db-interrupt-query "clutch-db" (conn))
+(declare-function clutch-db-clear-error-details "clutch-db" (conn))
 
 ;;;; Query console
+
+(defvar-local clutch--console-name nil
+  "Display name if this buffer is a query console, nil otherwise.
+Set by `clutch-query-console'; used for buffer display and persistence.")
+
+(defvar-local clutch--console-storage-name nil
+  "Stable storage identity for this query console, or nil.
+When nil, console persistence falls back to `clutch--console-name'.")
+
+(defvar-local clutch--console-ad-hoc-params nil
+  "Connection params for a query console not backed by a saved profile.")
+
+(defun clutch--console-buffer-base-name (name)
+  "Return canonical buffer name for console NAME."
+  (format "*clutch: %s*" name))
+
+(defun clutch--console-buffer-name (&optional name conn)
+  "Return display buffer name for console NAME and schema state on CONN."
+  (let* ((console-name (or name clutch--console-name "?"))
+         (base (clutch--console-buffer-base-name console-name))
+         (entry (and conn (clutch--schema-status-entry conn)))
+         (state (plist-get entry :state))
+         (tables (plist-get entry :tables))
+         (suffix (pcase state
+                   ('refreshing " [schema...]")
+                   ('stale " [schema~]")
+                   ('failed " [schema!]")
+                   ('ready (format " [schema %dt]" (or tables 0)))
+                   (_ ""))))
+    (concat base suffix)))
+
+(defun clutch--console-buffer-storage-match-p (storage-name)
+  "Return non-nil when the current console buffer matches STORAGE-NAME."
+  (and storage-name
+       (or (equal clutch--console-storage-name storage-name)
+           (and (not clutch--console-storage-name)
+                clutch--connection-params
+                (equal (clutch--console-persistence-name
+                        clutch--console-name
+                        clutch--connection-params)
+                       storage-name)))))
+
+(defun clutch--find-console-buffer (name &optional storage-name)
+  "Return the live console buffer for NAME or STORAGE-NAME, or nil."
+  (or (and storage-name
+           (cl-find-if
+            (lambda (buf)
+              (and (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (and (derived-mode-p 'clutch-mode)
+                          (clutch--console-buffer-storage-match-p
+                           storage-name)))))
+            (buffer-list)))
+      (cl-find-if
+       (lambda (buf)
+         (and (buffer-live-p buf)
+              (with-current-buffer buf
+                (and (derived-mode-p 'clutch-mode)
+                     (equal clutch--console-name name)
+                     (or (not storage-name)
+                         (and (not clutch--console-storage-name)
+                              (not clutch--connection-params)))))))
+       (buffer-list))))
+
+(defun clutch--update-console-buffer-name ()
+  "Rename the current console buffer to reflect schema status."
+  (when clutch--console-name
+    (rename-buffer (clutch--console-buffer-name clutch--console-name clutch-connection)
+                   t)))
+
+(defconst clutch--console-url-secret-param-regexp
+  (concat "\\([?&;]"
+          (regexp-opt '("access_token" "pass" "password" "passwd"
+                        "private_key" "private-key" "pwd" "secret" "token"))
+          "=\\)[^&;]*")
+  "Regexp matching URL parameters that must not affect console identity.")
+
+(defconst clutch--console-identity-param-keys
+  '(:user :host :port :database :schema :sid :ssh-host
+    :tramp-default-directory)
+  "Connection params that distinguish query console identity.")
+
+(defun clutch--console-redacted-url (url)
+  "Return URL with obvious password parameters redacted."
+  (when url
+    (let ((case-fold-search t))
+      (replace-regexp-in-string
+       clutch--console-url-secret-param-regexp
+       "\\1REDACTED"
+       url))))
+
+(defun clutch--console-identity-pairs (params)
+  "Return canonical non-secret identity pairs for connection PARAMS."
+  (when params
+    (let ((backend (or (plist-get params :backend)
+                       (plist-get params :driver)))
+          (url (clutch--console-redacted-url (plist-get params :url))))
+      (append
+       (and backend (list (cons :backend backend)))
+       (cl-loop for key in clutch--console-identity-param-keys
+                when (plist-member params key)
+                collect (cons key (plist-get params key)))
+       (and url (list (cons :url url)))))))
+
+(defun clutch--console-identity-from-params (params)
+  "Return a stable query-console persistence identity from PARAMS."
+  (when-let* ((pairs (clutch--console-identity-pairs params)))
+    (concat "console-"
+            (secure-hash 'sha256 (prin1-to-string pairs)))))
+
+(defun clutch--console-persistence-name (name &optional params)
+  "Return storage identity for console NAME and PARAMS."
+  (or (clutch--console-identity-from-params params)
+      name))
+
+(defun clutch--console-file (name)
+  "Return the persistence file path for console NAME."
+  (expand-file-name
+   (concat (replace-regexp-in-string "[/:\\*?\"<>|]" "_" name) ".sql")
+   clutch-console-directory))
+
+(defun clutch--save-console ()
+  "Save console buffer content to its persistence file."
+  (when clutch--console-name
+    (condition-case err
+        (progn
+          (make-directory clutch-console-directory t)
+          (let ((coding-system-for-write 'utf-8-unix)
+                (storage-name (or clutch--console-storage-name
+                                  clutch--console-name)))
+            (write-region (point-min) (point-max)
+                          (clutch--console-file storage-name)
+                          nil 'silent)))
+      (error
+       (message "Failed to save console %s: %s"
+                clutch--console-name
+                (error-message-string err))))))
+
+(defun clutch--save-all-consoles ()
+  "Save content of all open query console buffers.
+Run from `kill-emacs-hook' to persist consoles on Emacs exit."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (clutch--save-console))))
 
 (defun clutch--console-window-for (buf)
   "Return the best window to display BUF.
@@ -337,96 +444,6 @@ window rather than replacing the current window."
         (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
       (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
 
-;;;; Value conversion
-
-(defun clutch--column-names (columns)
-  "Extract column names from COLUMNS as a list of strings.
-Handles the case where the driver returns non-string names
-\(e.g., SELECT 1 produces an integer column name)."
-  (mapcar (lambda (c)
-            (let ((name (plist-get c :name)))
-              (if (stringp name) name (format "%s" name))))
-          columns))
-
-(defun clutch--value-to-literal (val)
-  "Convert Elisp VAL to a SQL literal string.
-nil → \"NULL\", numbers unquoted, strings escaped."
-  (cond
-   ((null val) "NULL")
-   ((numberp val) (number-to-string val))
-   ((stringp val) (clutch-db-escape-literal clutch-connection val))
-   (t (clutch-db-escape-literal clutch-connection
-                                   (clutch--format-value val)))))
-
-(defun clutch--json-false-value-p (val)
-  "Return non-nil when VAL represents a parsed JSON false sentinel."
-  (or (eq val :false)
-      ;; JDBC uses a private false sentinel so it can distinguish JSON false
-      ;; from SQL NULL when decoding metadata payloads.
-      (and (symbolp val)
-           (string= (symbol-name val) "clutch-jdbc-json-false"))))
-
-(defun clutch--json-value-to-string (val)
-  "Convert VAL to valid JSON text suitable for JSON editing and viewing."
-  (cond
-   ((null val)
-    "null")
-   ((and (stringp val)
-         (fboundp 'json-serialize)
-         (fboundp 'json-parse-string))
-    (condition-case nil
-        (clutch--json-serialize-text (json-parse-string val))
-      (error (clutch--json-serialize-text val))))
-   ((clutch--json-false-value-p val)
-    "false")
-   ((and (fboundp 'json-serialize)
-         (or (numberp val)
-             (eq val t)
-             (hash-table-p val)
-             (vectorp val)
-             (listp val)))
-    (condition-case nil
-        (clutch--json-serialize-text
-         (if (clutch--json-false-value-p val) :false val))
-      (error (clutch--format-value val))))
-   (t (clutch--format-value val))))
-
-;;;; Result source detection
-
-(defun clutch-result--table-from-sql (sql)
-  "Extract the first table name from the FROM clause of SQL.
-Handles backtick, double-quote, and unquoted identifiers, with an
-optional schema prefix (schema.table).  Returns a string or nil."
-  (let ((case-fold-search t))
-    (cond
-     ;; backtick-quoted: FROM `schema`.`table` or FROM `table`
-     ((string-match "\\bFROM\\s-+\\(?:`[^`]+`\\.\\)?`\\([^`]+\\)`" sql)
-      (match-string 1 sql))
-     ;; double-quoted: FROM \"schema\".\"table\" or FROM \"table\"
-     ((string-match "\\bFROM\\s-+\\(?:\"[^\"]+\"\\.\\)?\"\\([^\"]+\\)\"" sql)
-      (match-string 1 sql))
-     ;; unquoted (including CJK): FROM schema.table or FROM table
-     ((string-match "\\bFROM\\s-+\\(?:[^[:space:],();.]+\\.\\)?\\([^[:space:],();]+\\)" sql)
-      (match-string 1 sql)))))
-
-(defun clutch-result--detect-table ()
-  "Try to detect the source table from the last query.
-Returns table name string or nil."
-  (when clutch--last-query
-    (clutch-result--table-from-sql clutch--last-query)))
-
-(defun clutch-result--source-table ()
-  "Return the current result source table from state or SQL detection."
-  (or clutch--result-source-table
-      (and (clutch--result-server-rewritable-p)
-           (clutch-result--detect-table))))
-
-(defun clutch--result-source-table-or-user-error (op)
-  "Return source table for current result, or signal user-error for OP."
-  (or (clutch-result--source-table)
-      (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
-                  op)))
-
 (defconst clutch--row-identity-hidden-prefix "clutch__rid_"
   "Prefix used for hidden row identity result columns.")
 
@@ -445,36 +462,6 @@ Returns table name string or nil."
   "Return hidden SELECT expressions for CANDIDATE on CONN."
   (or (plist-get candidate :select-expressions)
       (clutch--row-identity-key-expressions conn candidate)))
-
-(defun clutch--row-identity-top-level-comma-p (sql start end)
-  "Return non-nil when SQL has a top-level comma between START and END."
-  (let ((pos start)
-        (depth 0)
-        found)
-    (while (and (< pos end) (not found))
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
-          (setq pos (min skip end))
-        (let ((ch (aref sql pos)))
-          (cond
-           ((= ch ?\() (cl-incf depth) (cl-incf pos))
-           ((= ch ?\)) (cl-decf depth) (cl-incf pos))
-           ((and (= depth 0) (= ch ?,)) (setq found t))
-           (t (cl-incf pos))))))
-    found))
-
-(defun clutch--row-identity-single-from-table-p (sql)
-  "Return non-nil when SQL has a single top-level FROM table segment."
-  (when-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
-    (pcase-let ((`(,start ,end)
-                 (clutch--row-identity-from-body-range sql from-pos)))
-      (let ((from-segment (string-trim-left (substring sql start end))))
-        (and (not (string-prefix-p "(" from-segment))
-             (not (clutch--row-identity-top-level-comma-p sql start end)))))))
-
-(defun clutch--row-identity-direct-select-p (sql)
-  "Return non-nil when SQL starts with a direct SELECT."
-  (let ((case-fold-search t))
-    (string-match-p "\\`\\s-*select\\b" sql)))
 
 (defconst clutch--row-identity-aggregate-functions
   '("ARRAY_AGG" "AVG" "BIT_AND" "BIT_OR" "BIT_XOR" "BOOL_AND" "BOOL_OR"
@@ -513,32 +500,9 @@ Returns table name string or nil."
          (not (clutch--row-identity-ident-char-p
                (and (< end len) (aref sql end)))))))
 
-(defun clutch--row-identity-matching-paren-pos (sql open-pos)
-  "Return the matching close-paren position for OPEN-POS in SQL, or nil."
-  (let ((pos open-pos)
-        (len (length sql))
-        (depth 0)
-        close)
-    (while (and (< pos len) (not close))
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
-          (setq pos skip)
-        (let ((char (aref sql pos)))
-          (cond
-           ((= char ?\()
-            (cl-incf depth)
-            (cl-incf pos))
-           ((= char ?\))
-            (cl-decf depth)
-            (if (= depth 0)
-                (setq close pos)
-              (cl-incf pos)))
-           (t
-            (cl-incf pos))))))
-    close))
-
 (defun clutch--row-identity-window-aggregate-call-p (sql open-pos)
   "Return non-nil when SQL has a window aggregate call at OPEN-POS."
-  (when-let* ((close-pos (clutch--row-identity-matching-paren-pos sql open-pos)))
+  (when-let* ((close-pos (clutch-db-sql-matching-paren-position sql open-pos)))
     (let ((pos (clutch--row-identity-skip-space sql (1+ close-pos))))
       (when (clutch--row-identity-looking-at-keyword-p sql pos "FILTER")
         (setq pos (clutch--row-identity-skip-space
@@ -546,7 +510,7 @@ Returns table name string or nil."
         (when (and (< pos (length sql))
                    (= (aref sql pos) ?\())
           (when-let* ((filter-close
-                       (clutch--row-identity-matching-paren-pos sql pos)))
+                       (clutch-db-sql-matching-paren-position sql pos)))
             (setq pos (clutch--row-identity-skip-space
                        sql (1+ filter-close))))))
       (clutch--row-identity-looking-at-keyword-p sql pos "OVER"))))
@@ -575,7 +539,7 @@ Returns table name string or nil."
                                  select-list inner "SELECT")
                                 (clutch--row-identity-looking-at-keyword-p
                                  select-list inner "WITH"))
-                            (setq pos (if-let* ((close (clutch--row-identity-matching-paren-pos
+                            (setq pos (if-let* ((close (clutch-db-sql-matching-paren-position
                                                         select-list pos)))
                                           (1+ close)
                                         len))
@@ -602,65 +566,25 @@ Returns table name string or nil."
 (defun clutch--row-identity-augmentable-sql-p (sql table)
   "Return non-nil when SQL for TABLE may receive hidden identity columns."
   (and table
-       (clutch--row-identity-direct-select-p sql)
-       (clutch--row-identity-single-from-table-p sql)
+       (clutch-db-sql-source-table sql t)
        (not (clutch--row-identity-select-list-has-aggregate-p sql))
-       (not (clutch-db-sql-find-top-level-clause sql "DISTINCT"))
-       (not (clutch-db-sql-find-top-level-clause sql "GROUP"))
-       (not (clutch-db-sql-find-top-level-clause sql "HAVING"))
-       (not (clutch-db-sql-find-top-level-clause sql "UNION"))
-       (not (clutch-db-sql-find-top-level-clause sql "INTERSECT"))
-       (not (clutch-db-sql-find-top-level-clause sql "EXCEPT"))
-       (not (clutch-db-sql-find-top-level-clause sql "JOIN"))))
+       (not (clutch-db-sql-next-top-level-clause-position
+             sql 0 '("DISTINCT" "GROUP" "HAVING")))))
 
-(defun clutch--row-identity-from-body-range (sql from-pos)
-  "Return `(START END)' for the top-level FROM body in SQL after FROM-POS."
-  (let ((start (+ from-pos 4)))
-    (list start
-          (or (cl-loop for clause in '("WHERE" "GROUP" "HAVING" "ORDER\\s-+BY"
-                                       "LIMIT" "OFFSET" "FETCH" "UNION"
-                                       "INTERSECT" "EXCEPT")
-                       for pos = (clutch-db-sql-find-top-level-clause
-                                  sql clause start)
-                       when pos minimize pos)
-              (length sql)))))
-
-(defun clutch--row-identity-from-body-parts (body)
-  "Return `(TABLE ALIAS)' from simple FROM BODY."
-  (let ((case-fold-search t)
-        (pattern (concat "\\`\\s-*"
-                         "\\(\\(?:\\(?:\"[^\"]+\"\\.\\)?\"[^\"]+\"\\|[^[:space:]]+\\)\\)"
-                         "\\(?:\\s-+\\(?:AS\\s-+\\)?\\(\"[^\"]+\"\\|[^[:space:]]+\\)\\)?"
-                         "\\s-*\\'")))
-    (and (string-match pattern body)
-         (list (match-string 1 body)
-               (match-string 2 body)))))
-
-(defun clutch--row-identity-table-qualifier (table)
-  "Return the exposed table qualifier from TABLE."
-  (cond
-   ((string-match "\\.\\(\"[^\"]+\"\\)\\'" table)
-    (match-string 1 table))
-   ((string-match "\\.\\([^.\"]+\\)\\'" table)
-    (match-string 1 table))
-   (t table)))
-
-(defun clutch--row-identity-oracle-star-rewrite (sql from-pos)
-  "Return Oracle-safe SQL and star qualifier for SELECT * SQL before FROM-POS.
-The return value is `(SQL QUALIFIER)'.  QUALIFIER is nil when SQL did not need
-rewriting."
+(defun clutch--row-identity-star-qualifier (sql from-pos)
+  "Return TABLE.* qualifier for simple SELECT * SQL before FROM-POS."
   (let ((select-list (string-trim (substring sql 0 from-pos))))
     (when (string-match-p "\\`\\s-*SELECT\\s-+\\*\\s-*\\'" select-list)
       (pcase-let* ((`(,body-start ,body-end)
-                    (clutch--row-identity-from-body-range sql from-pos))
+                    (clutch-db-sql-from-body-range sql from-pos))
                    (body (substring sql body-start body-end))
-                   (parts (clutch--row-identity-from-body-parts body)))
+                   (parts (clutch-db-sql-from-body-parts body)))
         (when parts
           (let* ((table (car parts))
                  (alias (cadr parts))
                  (qualifier (or alias
-                                (clutch--row-identity-table-qualifier table))))
-            (list sql (format "%s.*" qualifier))))))))
+                                (clutch-db-sql-table-qualifier table))))
+            (format "%s.*" qualifier)))))))
 
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
@@ -668,14 +592,12 @@ CONN supplies identifier escaping for the hidden aliases."
   (let ((sql (string-trim-right
               (replace-regexp-in-string ";\\s-*\\'" "" sql))))
     (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
-      (let* ((oracle-star
-              (and (clutch--connection-oracle-jdbc-p conn)
-                   (clutch--row-identity-oracle-star-rewrite sql from-pos)))
-             (effective-sql (or (car oracle-star) sql))
+      (let* ((star-qualifier
+              (clutch--row-identity-star-qualifier sql from-pos))
              (select-head
-              (if-let* ((qualified-star (cadr oracle-star)))
-                  (format "SELECT %s" qualified-star)
-                (string-trim-right (substring effective-sql 0 from-pos))))
+              (if star-qualifier
+                  (format "SELECT %s" star-qualifier)
+                (string-trim-right (substring sql 0 from-pos))))
              (hidden (mapconcat
                       #'identity
                       (cl-mapcar
@@ -687,43 +609,26 @@ CONN supplies identifier escaping for the hidden aliases."
                       ", ")))
         (concat select-head
                 ", " hidden " "
-                (string-trim-left (substring effective-sql from-pos))))
+                (string-trim-left (substring sql from-pos))))
       sql)))
 
-(defun clutch--schema-cache-contains-table-p (schema table)
-  "Return non-nil when SCHEMA contains TABLE, case-insensitively."
-  (and (hash-table-p schema)
-       (cl-loop for cached being the hash-keys of schema
-                thereis (and (stringp cached)
-                             (string-equal (downcase cached)
-                                           (downcase table))))))
-
-(defun clutch--schema-cache-definitely-misses-table-p (conn table)
-  "Return non-nil when CONN's ready schema cache does not contain TABLE."
-  (condition-case nil
-      (when (and conn
-                 (stringp table)
-                 (fboundp 'clutch--schema-status-entry)
-                 (fboundp 'clutch--schema-for-connection))
-        (let ((entry (clutch--schema-status-entry conn)))
-          (when (eq (plist-get entry :state) 'ready)
-            (let ((schema (clutch--schema-for-connection conn)))
-              (and schema
-                   (not (clutch--schema-cache-contains-table-p
-                         schema table)))))))
-    (error nil)))
-
-(defun clutch--prepare-row-identity-query (conn sql)
+(defun clutch--prepare-row-identity-query (conn sql &optional candidate table)
   "Return a row identity preparation plist for executing SQL on CONN.
 The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
-:augmented.  If no identity candidate is available, :sql is the original SQL."
-  (let* ((table (clutch-result--table-from-sql sql))
-         (candidates (and table
-                          (not (clutch--schema-cache-definitely-misses-table-p
-                                conn table))
-                          (condition-case nil
-                              (clutch-db-row-identity-candidates conn table)
-                            (clutch-db-error nil))))
+:augmented.  If no identity candidate is available, :sql is the original SQL.
+CANDIDATE and TABLE reuse row identity already established by a result buffer."
+  (let* ((analysis-sql (clutch-db-sql-normalize sql))
+         (source-token (and (not table)
+                            (clutch-db-sql--source-table-token analysis-sql)))
+         (table (or table
+                    (and source-token
+                         (clutch-db--source-table-name conn source-token))))
+         (candidates (cond
+                      (candidate (list candidate))
+                      (table
+                       (condition-case nil
+                           (clutch-db-row-identity-candidates conn table)
+                         (clutch-db-error nil)))))
          (candidate (car candidates))
          (expressions (and candidate
                            (clutch--row-identity-select-expressions
@@ -732,10 +637,11 @@ The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
                        (clutch--row-identity-hidden-aliases
                         (length expressions))))
          (augment-p (and candidate expressions
-                         (clutch--row-identity-augmentable-sql-p sql table))))
+                         (clutch--row-identity-augmentable-sql-p
+                          analysis-sql table))))
     (list :sql (if augment-p
                    (clutch--row-identity-inject-select-list
-                    conn sql expressions aliases)
+                    conn analysis-sql expressions aliases)
                  sql)
           :table table
           :candidate candidate
@@ -745,7 +651,7 @@ The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
 
 (defun clutch--row-identity-column-indices (columns names)
   "Return column indices in COLUMNS for NAMES, or nil if any is absent."
-  (let ((col-names (clutch--column-names columns))
+  (let ((col-names (clutch-db-result-column-names columns))
         indices)
     (catch 'missing
       (dolist (name names (nreverse indices))
@@ -786,39 +692,6 @@ The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
              column)))
        columns))))
 
-;;;; Result display
-
-(defun clutch--result-window ()
-  "Return the window currently showing a clutch result buffer, or nil.
-Searches all windows on the current frame."
-  (cl-find-if (lambda (w)
-                (string-prefix-p "*clutch-result:"
-                                 (buffer-name (window-buffer w))))
-              (window-list nil 'no-minibuf)))
-
-(defun clutch--show-result-buffer (buf)
-  "Display BUF in the result window slot.
-Reuses the existing result window when one is visible, replacing its
-buffer in place.  Creates a new window below `clutch--source-window'
-when no result window exists yet."
-  (let ((result-win (clutch--result-window)))
-    (if result-win
-        (progn
-          (set-window-buffer result-win buf)
-          (select-window result-win))
-      (pop-to-buffer buf `(display-buffer-in-direction
-                           (window . ,(or clutch--source-window
-                                          (selected-window)))
-                           (direction . below)
-                           (window-height . ,clutch-result-window-height))))))
-
-(defun clutch--result-buffer-name ()
-  "Return the result buffer name based on current connection.
-Uses the full connection key so each console gets its own result buffer."
-  (if (clutch--connection-alive-p clutch-connection)
-      (format "*clutch-result: %s*" (clutch--connection-key clutch-connection))
-    "*clutch-result: results*"))
-
 ;;;; SQL pagination helpers
 
 (defun clutch--sql-has-page-tail-p (sql)
@@ -826,231 +699,386 @@ Uses the full connection key so each console gets its own result buffer."
   (or (clutch-db-sql-has-top-level-limit-p sql)
       (clutch-db-sql-has-top-level-offset-p sql)))
 
-(defun clutch--result-server-pageable-p ()
-  "Return non-nil when server-side page navigation is safe here."
-  (and (local-variable-p 'clutch--result-server-pageable (current-buffer))
-       clutch--result-server-pageable))
-
-(defun clutch--result-server-rewritable-p ()
-  "Return non-nil when server-side sort/filter/count rewrites are safe here."
-  (and (local-variable-p 'clutch--result-server-rewritable (current-buffer))
-       clutch--result-server-rewritable))
-
-(defun clutch--column-names-unique-p (columns)
-  "Return non-nil when COLUMNS have no duplicate display names."
-  (let ((seen (make-hash-table :test 'equal))
-        unique)
-    (setq unique t)
-    (dolist (name (clutch--column-names columns))
-      (let ((key (downcase name)))
-        (if (gethash key seen)
-            (setq unique nil)
-          (puthash key t seen))))
-    unique))
-
 (defun clutch--server-rewritable-result-p (sql columns)
   "Return non-nil when SQL result COLUMNS are safe for derived-table rewrites.
 The check is intentionally conservative: the SQL must be a simple single-table
 SELECT without its own LIMIT/OFFSET, and the actual result labels must be
 unique.  Arbitrary query results are displayed as result sets instead."
-  (let ((table (clutch-result--table-from-sql sql)))
+  (let* ((analysis-sql (clutch-db-sql-normalize sql))
+         (table (clutch-db-sql-source-table analysis-sql))
+         (seen (make-hash-table :test 'equal)))
     (and table
-         (not (clutch--sql-has-page-tail-p sql))
-         (clutch--row-identity-augmentable-sql-p sql table)
-         (clutch--column-names-unique-p columns))))
+         (not (clutch--sql-has-page-tail-p analysis-sql))
+         (clutch--row-identity-augmentable-sql-p analysis-sql table)
+         (cl-loop for name in (clutch-db-result-column-names columns)
+                  for key = (downcase name)
+                  if (gethash key seen)
+                  return nil
+                  else do (puthash key t seen)
+                  finally return t))))
 
-(defun clutch--sql-derived-table-alias (alias &optional conn)
-  "Return a derived-table alias clause for ALIAS on CONN.
-Oracle does not accept AS before a subquery alias."
-  (if (clutch--connection-oracle-jdbc-p (or conn clutch-connection))
-      (replace-regexp-in-string "\\`_+" "" alias)
-    (format "AS %s" alias)))
+;;;; Diagnostics and debug capture
 
-(defun clutch--build-paged-sql (base-sql page-num page-size
-                                         &optional order-by page-offset)
-  "Build a paged SQL query from BASE-SQL.
-PAGE-NUM is 0-based, PAGE-SIZE is the row limit.
-ORDER-BY is a cons (COL-NAME . DIRECTION) or nil.
-PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
-  (clutch-db-build-paged-sql clutch-connection base-sql
-                             page-num page-size order-by page-offset))
+(defvar-local clutch--buffer-error-details nil
+  "Current problem record scoped to this buffer.")
 
-(defun clutch--page-current-from-offset (page-offset page-size)
-  "Return the zero-based logical page number for PAGE-OFFSET and PAGE-SIZE."
-  (if (and page-size (> page-size 0))
-      (floor (max 0 page-offset) page-size)
-    0))
+(defvar clutch--problem-records-by-conn (make-hash-table :test 'eq :weakness 'key)
+  "Current problem records keyed by live connection object.")
 
-(defun clutch--split-page-lookahead-rows (rows page-size)
-  "Return (VISIBLE-ROWS . HAS-MORE) from ROWS after PAGE-SIZE lookahead trimming."
-  (let ((has-more (> (length rows) page-size)))
-    (cons (if has-more
-              (cl-subseq rows 0 page-size)
-            rows)
-          has-more)))
+(defvar-local clutch--debug-events nil
+  "Recent redacted debug events captured for this buffer.")
 
-(defun clutch--install-result-page-state
-    (columns rows elapsed page-num &optional row-identity-prep
-             page-offset page-has-more)
-  "Install buffer-local state for a rendered result page.
-COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the page.  ROW-IDENTITY-PREP
-describes hidden row identity columns, PAGE-OFFSET overrides the derived SQL
-offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
-  (let* ((column-defs (clutch--apply-row-identity-column-metadata
-                       columns row-identity-prep))
-         (row-identity (clutch--finalize-row-identity
-                        row-identity-prep column-defs))
-         (column-names (clutch--column-names column-defs))
-         (cached-pk-indices
-          (and (eq (plist-get row-identity :kind) 'primary-key)
-               (or (plist-get row-identity :source-indices)
-                   (plist-get row-identity :indices))))
-         (offset (or page-offset (* page-num clutch-result-max-rows))))
-    (setq-local clutch--result-columns column-names
-                clutch--result-column-defs column-defs
-                clutch--row-identity row-identity
-                clutch--result-rows rows
-                clutch--page-current page-num
-                clutch--page-offset offset
-                clutch--page-has-more page-has-more
-                clutch--cached-pk-indices cached-pk-indices
-                clutch--pending-edits nil
-                clutch--pending-deletes nil
-                clutch--pending-inserts nil
-                clutch--marked-rows nil
-                clutch--query-elapsed elapsed
-                clutch--filter-pattern nil
-                clutch--filtered-rows nil
-                clutch--column-widths
-                (clutch--compute-column-widths column-names rows column-defs))
-    column-names))
+(defvar clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key)
+  "Recent redacted debug events keyed by live connection object.")
 
-(defun clutch--execute-page (page-num &optional page-offset)
-  "Execute the query for PAGE-NUM and refresh the result buffer display.
-Uses the current effective result SQL, including active WHERE filters.
-PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination.
-Signals an error if pagination is not available."
-  (unless (clutch--result-server-pageable-p)
-    (user-error "Server-side pagination is not available for this query result"))
-  (let* ((source-buffer (current-buffer))
-         (effective-sql (clutch-result--effective-query))
-         (page-size clutch-result-max-rows)
-         (offset (or page-offset (* page-num page-size)))
-         (fetch-size (1+ page-size)))
-    (unless effective-sql
-      (user-error "Pagination not available for this query"))
-    (clutch--ensure-connection)
-    (when (and (or clutch--pending-edits
-                   clutch--pending-deletes
-                   clutch--pending-inserts)
-               (not (yes-or-no-p "Discard staged changes and change page? ")))
-      (user-error "Page change cancelled"))
-    (clutch-db-with-foreground-connection clutch-connection
-      (let* ((row-identity-prep
-              (clutch--prepare-row-identity-query clutch-connection effective-sql))
-             (identity-sql (plist-get row-identity-prep :sql))
-             (paged-sql (clutch--build-paged-sql
-                         identity-sql page-num fetch-size clutch--order-by
-                         offset))
-             (start (float-time))
-             (result (condition-case err
-                         (clutch--run-db-query clutch-connection paged-sql)
-                       (clutch-db-error
-                        (let* ((failure
-                                (clutch--remember-execute-error
-                                 source-buffer
-                                 clutch-connection
-                                 effective-sql
-                                 err
-                                 (list :page-num page-num
-                                       :page-offset offset
-                                       :paged-sql
-                                       (clutch--debug-sql-preview paged-sql))))
-                               (summary (cdr failure)))
-                          (user-error "%s" (clutch--debug-workflow-message summary))))))
-             (elapsed (- (float-time) start))
-             (page (clutch--split-page-lookahead-rows
-                    (clutch-db-result-rows result) page-size))
-             (rows (car page))
-             (has-more (cdr page)))
-        (clutch--install-result-page-state
-         (clutch-db-result-columns result) rows elapsed
-         page-num
-         row-identity-prep offset has-more)
-        (clutch--refresh-display)
-        (message "Rows %s loaded (%s, %s row%s)"
-                 (clutch--message-count
-                  (format "%d-%d" (if rows (1+ offset) 0)
-                          (+ offset (length rows))))
-                 (clutch--message-literal (clutch--format-elapsed elapsed))
-                 (clutch--message-count (length rows))
-                 (if (= (length rows) 1) "" "s"))))))
+(defvar clutch--debug-buffer-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `clutch--debug-buffer-mode'.")
 
-(defun clutch--execute-page-at-offset (page-offset &optional page-num)
-  "Execute the result page whose first row starts at PAGE-OFFSET.
-PAGE-NUM records the logical page index for navigation when provided."
-  (clutch--execute-page
-   (or page-num
-       (clutch--page-current-from-offset page-offset clutch-result-max-rows))
-   page-offset))
+(define-derived-mode clutch--debug-buffer-mode special-mode "clutch-debug"
+  "Mode for inspecting the dedicated clutch debug buffer.")
+
+(defun clutch--debug-buffer ()
+  "Return the dedicated clutch debug buffer, creating it if needed."
+  (let ((buf (get-buffer-create clutch-debug-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'clutch--debug-buffer-mode)
+        (clutch--debug-buffer-mode))
+      (setq-local header-line-format " Clutch debug capture"))
+    buf))
+
+(defun clutch--reset-debug-buffer ()
+  "Reset the dedicated clutch debug buffer for a new capture window."
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (format "Clutch Debug\n============\nStarted: %s\n"
+                      (format-time-string "%F %T"))))))
+
+(defun clutch--debug-buffer-source-label (buffer)
+  "Return a human-readable source label for BUFFER."
+  (when (buffer-live-p buffer)
+    (buffer-name buffer)))
+
+(defun clutch--debug-buffer-connection-label (connection)
+  "Return a human-readable connection label for CONNECTION."
+  (when connection
+    (condition-case nil
+        (clutch--connection-key connection)
+      (error nil))))
+
+(defun clutch--debug-format-label (key)
+  "Return a human-readable label for KEY."
+  (capitalize
+   (replace-regexp-in-string
+    "-" " "
+    (string-remove-prefix ":" (format "%s" key)))))
+
+(defun clutch--debug-indent-block (text spaces)
+  "Indent TEXT by SPACES."
+  (let ((prefix (make-string spaces ?\s)))
+    (string-join
+     (mapcar (lambda (line)
+               (if (string-empty-p line)
+                   line
+                 (concat prefix line)))
+             (split-string (string-trim-right text) "\n"))
+     "\n")))
+
+(defun clutch--debug-format-plist-data (plist)
+  "Return a human-readable string for PLIST."
+  (with-temp-buffer
+    (cl-loop for (key val) on plist by #'cddr
+             when val
+             do (let ((rendered (clutch--debug-format-data val)))
+                  (when rendered
+                    (if (string-match-p "\n" rendered)
+                        (insert (format "%s:\n%s\n"
+                                        (clutch--debug-format-label key)
+                                        (clutch--debug-indent-block rendered 2)))
+                      (insert (format "%s: %s\n"
+                                      (clutch--debug-format-label key)
+                                      rendered))))))
+    (string-trim-right (buffer-string))))
+
+(defun clutch--debug-format-list-data (items)
+  "Return a human-readable string for ITEMS."
+  (string-join
+   (cl-loop for item in items
+            for rendered = (clutch--debug-format-data item)
+            when rendered
+            collect (if (string-match-p "\n" rendered)
+                        (concat "-\n" (clutch--debug-indent-block rendered 2))
+                      (concat "- " rendered)))
+   "\n"))
+
+(defun clutch--debug-format-data (data)
+  "Return a human-readable string for DATA."
+  (cond
+   ((null data) nil)
+   ((stringp data) data)
+   ((vectorp data) (clutch--debug-format-data (append data nil)))
+   ((and (listp data) (keywordp (car-safe data)))
+    (clutch--debug-format-plist-data data))
+   ((listp data)
+    (clutch--debug-format-list-data data))
+   (t (format "%s" data))))
+
+(defun clutch--debug-insert-field (label value)
+  "Insert LABEL and VALUE into the current debug output buffer."
+  (when-let* ((rendered (clutch--debug-format-data value)))
+    (if (string-match-p "\n" rendered)
+        (insert (format "%s:\n%s\n"
+                        label
+                        (clutch--debug-indent-block rendered 2)))
+      (insert (format "%s: %s\n" label rendered)))))
+
+(defun clutch--debug-insert-section (title value)
+  "Insert a TITLE section containing VALUE into the current debug buffer."
+  (when-let* ((rendered (clutch--debug-format-data value)))
+    (insert "\n" title "\n")
+    (insert (clutch--debug-indent-block rendered 2) "\n")))
+
+(defun clutch--debug-context-without-inline-sql (context)
+  "Return CONTEXT plist without inline SQL payload entries."
+  (when context
+    (cl-loop for (key val) on context by #'cddr
+             unless (memq key '(:generated-sql :sql))
+             append (list key val))))
+
+(defun clutch--append-debug-buffer-entry (heading body)
+  "Append HEADING and BODY to the dedicated debug buffer."
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (unless (bobp)
+        (insert "\n\n"))
+      (insert heading "\n")
+      (insert (make-string (length heading) ?-) "\n")
+      (when body
+        (insert body))
+      (unless (or (bobp) (eq (char-before) ?\n))
+        (insert "\n")))))
+
+(defun clutch--append-problem-record-to-debug-buffer (buffer connection problem)
+  "Append PROBLEM for BUFFER and CONNECTION to the dedicated debug buffer."
+  (when (and clutch-debug-mode problem)
+    (let* ((backend (plist-get problem :backend))
+           (diag (plist-get problem :diag))
+           (debug-payload (plist-get problem :debug))
+           (stderr-tail (plist-get problem :stderr-tail))
+           (context (copy-tree (plist-get diag :context)))
+           (sql (plist-get context :sql))
+           (generated-sql (plist-get context :generated-sql))
+           (display-context
+            (clutch--debug-context-without-inline-sql context))
+           (body
+            (with-temp-buffer
+              (clutch--debug-insert-field "Recorded"
+                                          (format-time-string "%F %T"))
+              (clutch--debug-insert-field "Backend"
+                                          (and backend
+                                               (upcase (symbol-name backend))))
+              (clutch--debug-insert-field "Source"
+                                          (clutch--debug-buffer-source-label buffer))
+              (clutch--debug-insert-field "Connection"
+                                          (clutch--debug-buffer-connection-label connection))
+              (clutch--debug-insert-field "Summary"
+                                          (plist-get problem :summary))
+              (clutch--debug-insert-field "Category" (plist-get diag :category))
+              (clutch--debug-insert-field "Operation" (plist-get diag :op))
+              (clutch--debug-insert-field "Request ID" (plist-get diag :request-id))
+              (clutch--debug-insert-field "Conn ID" (plist-get diag :conn-id))
+              (clutch--debug-insert-field "Exception"
+                                          (plist-get diag :exception-class))
+              (clutch--debug-insert-field "SQLState" (plist-get diag :sql-state))
+              (clutch--debug-insert-field "Vendor code" (plist-get diag :vendor-code))
+              (clutch--debug-insert-field "Raw message"
+                                          (plist-get diag :raw-message))
+              (clutch--debug-insert-section "SQL" sql)
+              (clutch--debug-insert-section "Generated SQL" generated-sql)
+              (clutch--debug-insert-section "Context" display-context)
+              (clutch--debug-insert-section "Cause chain"
+                                            (plist-get diag :cause-chain))
+              (clutch--debug-insert-section "Backend debug" debug-payload)
+              (clutch--debug-insert-section "Agent stderr tail" stderr-tail)
+              (string-trim-right (buffer-string)))))
+      (clutch--append-debug-buffer-entry "Problem" body))))
+
+(defun clutch--append-debug-event-to-buffer (buffer connection event)
+  "Append EVENT for BUFFER and CONNECTION to the dedicated debug buffer."
+  (when clutch-debug-mode
+    (let* ((backend (plist-get event :backend))
+           (body
+            (with-temp-buffer
+              (clutch--debug-insert-field "Recorded"
+                                          (or (plist-get event :time)
+                                              (format-time-string "%F %T")))
+              (clutch--debug-insert-field "Operation" (plist-get event :op))
+              (clutch--debug-insert-field "Phase" (plist-get event :phase))
+              (clutch--debug-insert-field "Backend"
+                                          (and backend
+                                               (upcase (symbol-name backend))))
+              (clutch--debug-insert-field "Source"
+                                          (clutch--debug-buffer-source-label buffer))
+              (clutch--debug-insert-field "Connection"
+                                          (clutch--debug-buffer-connection-label connection))
+              (when-let* ((elapsed (plist-get event :elapsed)))
+                (clutch--debug-insert-field "Elapsed"
+                                            (clutch--format-elapsed elapsed)))
+              (clutch--debug-insert-field "Summary" (plist-get event :summary))
+              (clutch--debug-insert-field "SQL preview"
+                                          (plist-get event :sql-preview))
+              (clutch--debug-insert-section "Context"
+                                            (plist-get event :context))
+              (string-trim-right (buffer-string)))))
+      (clutch--append-debug-buffer-entry "Trace Event" body))))
+
+(defun clutch--clear-debug-capture ()
+  "Forget captured debug events and reset the dedicated debug buffer."
+  (setq clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key))
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (setq-local clutch--debug-events nil))))
+  (clutch--reset-debug-buffer))
+
+(defun clutch--replay-problem-records-to-debug-buffer ()
+  "Replay stored problem records into the dedicated debug buffer.
+This preserves historical failure context when debug capture starts after a
+problem was already recorded."
+  (let (records seen)
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when clutch--buffer-error-details
+            (let ((entry (list :buffer buf
+                               :connection clutch-connection
+                               :problem (copy-tree clutch--buffer-error-details))))
+              (unless (member entry seen)
+                (push entry seen)
+                (push entry records)))))))
+    (maphash
+     (lambda (connection problem)
+       (let ((entry (list :buffer (clutch--attached-buffer-for-connection connection)
+                          :connection connection
+                          :problem (copy-tree problem))))
+         (unless (member entry seen)
+           (push entry seen)
+           (push entry records))))
+     clutch--problem-records-by-conn)
+    (when records
+      (clutch--append-debug-buffer-entry
+       "Historical Problems"
+       "Recorded before debug mode was enabled.")
+      (dolist (entry (nreverse records))
+        (clutch--append-problem-record-to-debug-buffer
+         (plist-get entry :buffer)
+         (plist-get entry :connection)
+         (plist-get entry :problem))))))
+
+(defun clutch--remember-problem-record (&rest args)
+  "Store the current problem record described by ARGS.
+Recognized keys are :buffer, :connection, and :problem.  Problem records are
+stored buffer-locally and, when CONNECTION is non-nil, in the shared
+connection-scoped registry."
+  (let* ((buffer (or (plist-get args :buffer) (current-buffer)))
+         (connection (plist-get args :connection))
+         (problem (copy-tree (plist-get args :problem))))
+    (when (and buffer (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (setq-local clutch--buffer-error-details problem)))
+    (when connection
+      (if problem
+          (puthash connection problem clutch--problem-records-by-conn)
+        (remhash connection clutch--problem-records-by-conn)))
+    (when problem
+      (clutch--append-problem-record-to-debug-buffer buffer connection problem))
+    problem))
+
+(defun clutch--forget-problem-record (&optional buffer connection)
+  "Forget the current problem record for BUFFER and CONNECTION."
+  (when (and buffer (buffer-live-p buffer))
+    (with-current-buffer buffer
+      (setq-local clutch--buffer-error-details nil)))
+  (when connection
+    (remhash connection clutch--problem-records-by-conn)))
+
+(defun clutch--forget-problem-records-for-connection (connection)
+  "Forget problem records for CONNECTION across all attached buffers."
+  (when connection
+    (remhash connection clutch--problem-records-by-conn)
+    (dolist (buf (buffer-list))
+      (when (and (buffer-live-p buf)
+                 (eq (buffer-local-value 'clutch-connection buf) connection))
+        (with-current-buffer buf
+          (setq-local clutch--buffer-error-details nil))))))
+
+(defun clutch--clear-connection-problem-capture (connection)
+  "Forget problem records and backend-local diagnostics for CONNECTION."
+  (when connection
+    (clutch--forget-problem-records-for-connection connection)
+    (clutch-db-clear-error-details connection)))
+
+(defun clutch--debug-sql-preview (sql)
+  "Return a compact single-line preview of SQL."
+  (when sql
+    (truncate-string-to-width
+     (replace-regexp-in-string "[\n\r\t ]+" " " (string-trim sql))
+     160 0 nil "...")))
+
+(defun clutch--debug-trim-events (events)
+  "Return EVENTS truncated to `clutch-debug-event-limit'."
+  (let ((limit (max 1 clutch-debug-event-limit)))
+    (cl-subseq events 0 (min limit (length events)))))
+
+(defun clutch--normalize-debug-event (event)
+  "Return EVENT normalized for storage."
+  (let ((normalized (copy-tree event)))
+    (unless (plist-get normalized :time)
+      (setq normalized
+            (plist-put normalized :time
+                       (format-time-string "%F %T"))))
+    (when-let* ((sql (plist-get normalized :sql)))
+      (setq normalized (plist-put normalized :sql-preview
+                                  (clutch--debug-sql-preview sql)))
+      (setq normalized (plist-put normalized :sql-length (length sql)))
+      (cl-remf normalized :sql))
+    normalized))
+
+(defun clutch--remember-debug-event (&rest event)
+  "Record EVENT for the current buffer and optional connection.
+Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
+:backend, :context, and :elapsed.  Recording is disabled unless
+`clutch-debug-mode' is non-nil."
+  (when clutch-debug-mode
+    (let* ((buffer (or (plist-get event :buffer) (current-buffer)))
+           (conn (plist-get event :connection))
+           (normalized (clutch--normalize-debug-event event)))
+      (cl-remf normalized :buffer)
+      (cl-remf normalized :connection)
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq-local clutch--debug-events
+                      (clutch--debug-trim-events
+                       (cons normalized clutch--debug-events)))))
+      (when conn
+        (puthash conn
+                 (clutch--debug-trim-events
+                  (cons normalized (gethash conn clutch--debug-events-by-conn)))
+                 clutch--debug-events-by-conn))
+      (clutch--append-debug-event-to-buffer buffer conn normalized)
+      normalized)))
 
 ;;;; Query execution engine
 
-(defun clutch--strip-leading-comments (sql)
-  "Strip leading SQL comments and whitespace from SQL.
-Handles single-line (--) and multi-line (/* */) comments."
-  (let ((s (string-trim-left sql)))
-    (while (or (string-prefix-p "--" s)
-               (string-prefix-p "/*" s))
-      (setq s (string-trim-left
-               (cond
-                ((string-prefix-p "--" s)
-                 (if-let* ((nl (string-search "\n" s)))
-                     (substring s (1+ nl))
-                   ""))
-                ((string-prefix-p "/*" s)
-                 (if-let* ((end (string-search "*/" s)))
-                     (substring s (+ end 2))
-                   ""))))))
-    s))
-
-(defun clutch--sql-starts-with-keyword-p (sql keywords)
-  "Return non-nil when SQL starts with one of KEYWORDS.
-Leading SQL comments are stripped before checking."
-  (let ((trimmed (clutch--strip-leading-comments sql)))
-    (string-match-p (concat "\\`" (regexp-opt keywords) "\\b")
-                    (upcase trimmed))))
-
-(defun clutch--destructive-query-p (sql)
-  "Return non-nil if SQL is a destructive operation."
-  (clutch--sql-starts-with-keyword-p
-   sql '("DELETE" "DROP" "TRUNCATE" "ALTER")))
-
-(defun clutch--schema-affecting-query-p (sql)
-  "Return non-nil if SQL is likely to invalidate cached schema."
-  (clutch--sql-starts-with-keyword-p
-   sql '("CREATE" "ALTER" "DROP" "TRUNCATE" "RENAME")))
-
-(defun clutch--sql-normalize-for-rewrite (sql)
-  "Return SQL trimmed for rewrite operations."
-  (string-trim-right
-   (replace-regexp-in-string ";\\s-*\\'" ""
-                             (clutch--strip-leading-comments sql))))
-
-(defun clutch--sql-main-op-keyword (sql)
-  "Return main top-level operation keyword for SQL, or nil."
-  (let* ((normalized (clutch--sql-normalize-for-rewrite sql))
-         (candidates
-          (cl-loop for kw in '("UPDATE" "DELETE" "SELECT" "INSERT" "REPLACE" "MERGE")
-                   for pos = (clutch-db-sql-find-top-level-clause normalized kw)
-                   when pos collect (cons kw pos)))
-         (first (car (sort candidates (lambda (a b) (< (cdr a) (cdr b)))))))
-    (car-safe first)))
-
 (defun clutch--risky-dml-p (sql)
   "Return non-nil when SQL is a top-level UPDATE/DELETE statement without WHERE."
-  (let ((normalized (clutch--sql-normalize-for-rewrite sql))
-        (main-op (clutch--sql-main-op-keyword sql)))
+  (let ((normalized (clutch-db-sql-normalize sql))
+        (main-op (clutch-db-sql-main-op-keyword sql)))
     (and (member main-op '("UPDATE" "DELETE"))
          (not (clutch-db-sql-find-top-level-clause normalized "WHERE")))))
 
@@ -1063,7 +1091,7 @@ Leading SQL comments are stripped before checking."
 
 (defun clutch--confirm-query-execution (sql)
   "Prompt for any confirmation required before executing SQL."
-  (when (clutch--destructive-query-p sql)
+  (when (clutch-db-sql-destructive-p sql)
     (unless (yes-or-no-p
              (format "Execute destructive query?\n  %s\n\nProceed? "
                      (truncate-string-to-width (string-trim sql) 80)))
@@ -1072,7 +1100,7 @@ Leading SQL comments are stripped before checking."
 
 (defun clutch--note-schema-affecting-query (sql connection)
   "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
-  (when (clutch--schema-affecting-query-p sql)
+  (when (clutch-db-sql-schema-affecting-p sql)
     (if (clutch-db-eager-schema-refresh-p connection)
         (clutch--set-schema-status connection 'stale)
       (clutch--refresh-schema-cache-async connection))))
@@ -1082,40 +1110,6 @@ Leading SQL comments are stripped before checking."
   (clutch--confirm-query-execution sql)
   (prog1 (clutch--run-db-query connection sql)
     (clutch--note-schema-affecting-query sql connection)))
-
-(defun clutch--select-query-p (sql)
-  "Return non-nil if SQL returns a result set.
-Matches SELECT, WITH, and introspection keywords (DESCRIBE, DESC,
-SHOW, EXPLAIN) that also return tabular results."
-  (clutch--sql-starts-with-keyword-p
-   sql '("SELECT" "WITH" "DESCRIBE" "DESC" "SHOW" "EXPLAIN")))
-
-(defun clutch--init-result-state (conn sql columns rows elapsed
-                                       &optional row-identity-prep
-                                       page-offset page-has-more
-                                       server-pageable server-rewritable
-                                       source-table)
-  "Initialize buffer-local state for a fresh query result.
-CONN is the connection, SQL the original query, COLUMNS and ROWS
-the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
-hidden row identity columns in COLUMNS.  PAGE-OFFSET is the zero-based row
-offset for ROWS, and PAGE-HAS-MORE records one-row lookahead.
-SERVER-PAGEABLE, SERVER-REWRITABLE, and SOURCE-TABLE describe whether clutch
-may treat the result as a re-executable relation source.
-Returns column names."
-  (setq-local clutch--last-query sql
-              clutch--base-query sql
-              clutch-connection conn
-              clutch--result-source-table source-table
-              clutch--result-server-pageable server-pageable
-              clutch--result-server-rewritable server-rewritable
-              clutch--sort-column nil
-              clutch--sort-descending nil
-              clutch--page-total-rows nil
-              clutch--order-by nil
-              clutch--aggregate-summary nil)
-  (clutch--install-result-page-state
-   columns rows elapsed 0 row-identity-prep page-offset page-has-more))
 
 (defun clutch--query-debug-summary (result)
   "Return a compact summary string for RESULT."
@@ -1151,27 +1145,8 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
                                                         &optional elapsed)
   "Record ERR for SQL on CONNECTION and abort execution from SOURCE-BUFFER.
 ELAPSED, when non-nil, is the failed execution duration in seconds."
-  (let* ((failure (clutch--remember-execute-error
-                   source-buffer connection sql err))
-         (message (car failure))
-         (summary (cdr failure))
-         (display (clutch--humanize-db-error-parts message))
-         (display-summary (or (plist-get display :summary) summary))
-         (hint (plist-get display :hint)))
-    (when (and (buffer-live-p source-buffer)
-               clutch--executing-sql-start
-               clutch--executing-sql-end)
-      (with-current-buffer source-buffer
-        (clutch--mark-failed-sql-region
-         clutch--executing-sql-start clutch--executing-sql-end
-         display-summary)))
-    (let ((buf (clutch--display-error-result
-                connection sql display-summary message elapsed hint)))
-      (when (and (buffer-live-p source-buffer)
-                 (buffer-live-p buf))
-        (with-current-buffer source-buffer
-          (setq-local clutch--last-result-buffer buf))))
-    (throw 'clutch--execution-aborted nil)))
+  (clutch--show-execution-error source-buffer connection sql err elapsed)
+  (throw 'clutch--execution-aborted nil))
 
 (defun clutch--execute-select (sql connection &optional result-context)
   "Execute a SELECT SQL query with pagination on CONNECTION.
@@ -1181,16 +1156,16 @@ Returns the query result."
   (let* ((page-size clutch-result-max-rows)
          (fetch-size (1+ page-size))
          (row-identity-prep
-          (clutch--prepare-row-identity-query connection sql))
+          (or (plist-get result-context :row-identity-prep)
+              (clutch--prepare-row-identity-query connection sql)))
          (identity-sql (plist-get row-identity-prep :sql))
          (server-pageable
           (if (plist-member result-context :server-pageable)
               (plist-get result-context :server-pageable)
             (not (clutch--sql-has-page-tail-p identity-sql))))
          (execution-sql (if server-pageable
-                            (let ((clutch-connection connection))
-                              (clutch--build-paged-sql
-                               identity-sql 0 fetch-size nil 0))
+                            (clutch-db-build-paged-sql
+                             connection identity-sql 0 fetch-size nil 0)
                           identity-sql))
          (start (float-time))
          (source-buffer (clutch--execute-source-buffer))
@@ -1205,40 +1180,13 @@ Returns the query result."
                     (clutch--abort-execution-on-db-error
                      source-buffer connection sql err
                      (- (float-time) start)))))
-         (elapsed (- (float-time) start))
-         (buf (get-buffer-create (clutch--result-buffer-name)))
-         (columns (clutch--apply-row-identity-column-metadata
-                   (clutch-db-result-columns result) row-identity-prep))
-         (visible-columns
-          (cl-remove-if (lambda (col) (plist-get col :hidden)) columns))
-         (server-rewritable
-          (if (plist-member result-context :server-rewritable)
-              (plist-get result-context :server-rewritable)
-            (and server-pageable
-                 (clutch--server-rewritable-result-p sql visible-columns))))
-         (source-table (plist-get result-context :source-table))
-         (page (if server-pageable
-                   (clutch--split-page-lookahead-rows
-                    (clutch-db-result-rows result) page-size)
-                 (cons (clutch-db-result-rows result) nil)))
-         (rows (car page))
-         (has-more (cdr page)))
+         (elapsed (- (float-time) start)))
     (clutch--remember-execute-debug-event
      connection "success" sql source-buffer
      (clutch--query-debug-summary result) elapsed)
-    (with-current-buffer buf
-      (clutch-result-mode)
-      (let ((col-names (clutch--init-result-state
-                        connection sql columns rows elapsed
-                        row-identity-prep 0 has-more
-                        server-pageable server-rewritable source-table)))
-        (clutch--load-fk-info)
-        (when col-names
-          (clutch--display-select-result col-names rows columns))))
-    (when (buffer-live-p source-buffer)
-      (with-current-buffer source-buffer
-        (setq-local clutch--last-result-buffer buf)))
-    (clutch--show-result-buffer buf)
+    (clutch-result--display-select
+     connection sql result elapsed row-identity-prep
+     server-pageable result-context source-buffer)
     result))
 
 (defun clutch--execute-dml (sql connection)
@@ -1258,86 +1206,8 @@ Returns the query result."
     (clutch--remember-execute-debug-event
      connection "success" sql nil (clutch--query-debug-summary result) elapsed)
     (clutch--note-schema-affecting-query sql connection)
-    (clutch--display-result result sql elapsed)
+    (clutch-result--display result sql elapsed)
     result))
-
-(defun clutch-result--effective-query ()
-  "Return the effective SQL for the current result workflow.
-Includes the active WHERE filter when one is applied."
-  (let ((base (or clutch--base-query clutch--last-query)))
-    (if (and base clutch--where-filter clutch--base-query)
-        (clutch--apply-where base clutch--where-filter)
-      base)))
-
-(defun clutch--sql-strip-top-level-tail (sql)
-  "Strip top-level ORDER/LIMIT/OFFSET tail clauses from SQL."
-  (let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY"))
-         (limit-pos (clutch-db-sql-find-top-level-clause sql "LIMIT"))
-         (offset-pos (clutch-db-sql-find-top-level-clause sql "OFFSET"))
-         (cut-pos (car (sort (delq nil (list order-pos limit-pos offset-pos)) #'<))))
-    (if cut-pos
-        (string-trim-right (substring sql 0 cut-pos))
-      sql)))
-
-(defun clutch--sql-rewrite-fallback (sql op arg)
-  "Fallback SQL rewrite for OP with ARG when structured rewrite fails."
-  (let ((trimmed (string-trim-right
-                  (replace-regexp-in-string ";\\s-*\\'" "" sql))))
-    (pcase op
-      ('where (format "SELECT * FROM (%s) %s WHERE %s"
-                      trimmed
-                      (clutch--sql-derived-table-alias "_clutch_filter")
-                      arg))
-      ('count (format "SELECT COUNT(*) FROM (%s) %s"
-                      (clutch--sql-strip-top-level-tail trimmed)
-                      (clutch--sql-derived-table-alias "_clutch_count")))
-      (_ (error "Unsupported rewrite op: %s" op)))))
-
-(defun clutch--sql-rewrite (sql op &optional arg)
-  "Rewrite SQL for OP with optional ARG.
-Uses top-level clause awareness with a derived-table fallback for complex SQL."
-  (condition-case nil
-      (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
-        (pcase op
-          ('where
-           (format "SELECT * FROM (%s) %s WHERE %s"
-                   normalized
-                   (clutch--sql-derived-table-alias "_clutch_filter")
-                   arg))
-          ('count
-           (format "SELECT COUNT(*) FROM (%s) %s"
-                   (clutch--sql-strip-top-level-tail normalized)
-                   (clutch--sql-derived-table-alias "_clutch_count")))
-          (_ (error "Unsupported rewrite op: %s" op))))
-    (error
-     (clutch--sql-rewrite-fallback sql op arg))))
-
-(defun clutch--build-count-sql (sql)
-  "Rewrite SQL as a COUNT(*) query.
-Uses the rewrite layer so complex SQL is handled via derived-table count."
-  (let ((normalized (clutch--sql-normalize-for-rewrite sql)))
-    (if (clutch--sql-has-page-tail-p normalized)
-        (format "SELECT COUNT(*) FROM (%s) %s"
-                normalized
-                (clutch--sql-derived-table-alias "_clutch_count"))
-      (clutch--sql-rewrite normalized 'count))))
-
-(defun clutch--apply-where (sql filter)
-  "Apply WHERE FILTER to SQL query string.
-Wraps SQL as a derived table and applies FILTER in an outer WHERE.
-This avoids brittle clause injection for CTE/UNION/subquery-heavy SQL."
-  (clutch--sql-rewrite sql 'where filter))
-
-(defun clutch--check-pending-changes ()
-  "Prompt to discard staged changes in the result buffer, if any.
-Signals `user-error' if the user declines."
-  (when-let* ((result-buf (get-buffer (clutch--result-buffer-name))))
-    (with-current-buffer result-buf
-      (when (and (or clutch--pending-edits
-                     clutch--pending-deletes
-                     clutch--pending-inserts)
-                 (not (yes-or-no-p "Discard staged changes and re-run query? ")))
-        (user-error "Execution cancelled")))))
 
 (defun clutch--abandon-query-connection (connection)
   "Drop CONNECTION after an unrecoverable query interruption."
@@ -1394,10 +1264,10 @@ Prompts for confirmation on destructive operations."
         (user-error
          "Connection closed.  Reconnect from the SQL buffer or REPL"))
     (clutch--ensure-connection))
-  (setq-local clutch--buffer-error-details nil)
-  (clutch--check-pending-changes)
   (let ((connection (or conn clutch-connection))
         (source-win (selected-window)))
+    (clutch--forget-problem-record (current-buffer) connection)
+    (clutch-result--check-pending-changes)
     (clutch-db-with-foreground-connection connection
       (clutch--confirm-query-execution sql)
       (setq clutch--executing-p t)
@@ -1408,7 +1278,7 @@ Prompts for confirmation on destructive operations."
           (condition-case nil
               (catch 'clutch--execution-aborted
                 (let ((clutch--source-window source-win))
-                  (if (clutch--select-query-p sql)
+                  (if (clutch-db-sql-select-query-p sql)
                       (clutch--execute-select sql connection result-context)
                     (clutch--execute-dml sql connection))))
             (quit
@@ -1417,79 +1287,6 @@ Prompts for confirmation on destructive operations."
           (select-window source-win))
         (setq clutch--executing-p nil)
         (clutch--update-mode-line)))))
-
-(defun clutch--trim-sql-bounds (beg end)
-  "Return (BEG . END) trimmed to non-whitespace between BEG and END."
-  (save-excursion
-    (goto-char beg)
-    (skip-chars-forward " \t\r\n" end)
-    (let ((tbeg (point)))
-      (goto-char end)
-      (skip-chars-backward " \t\r\n" beg)
-      (let ((tend (point)))
-        (when (< tbeg tend)
-          (cons tbeg tend))))))
-
-;;;; Error humanization
-
-(defconst clutch--db-error-hints
-  '(;; ClickHouse
-    ("Lightweight updates are not supported"
-     . "enable lightweight update: ALTER TABLE ... MODIFY SETTING enable_block_number_column = 1")
-    ("Lightweight deletes? \\(?:is\\|are\\) not supported"
-     . "enable lightweight delete: SET allow_experimental_lightweight_delete = 1")
-    ;; Oracle
-    ("No suitable driver found for jdbc:oracle:"
-     . "Oracle JDBC driver not installed; run M-x clutch-jdbc-install-driver RET oracle")
-    ("ORA-00942" . "table or view does not exist; check name and privileges")
-    ("ORA-01031" . "insufficient privileges")
-    ("ORA-00904" . "invalid column name")
-    ;; MySQL
-    ("Access denied for user" . "wrong username or password")
-    ("Unknown column" . "column does not exist; check spelling")
-    ;; PostgreSQL
-    ("relation .* does not exist" . "table does not exist; check schema and name")
-    ("permission denied" . "insufficient privileges")
-    ;; General
-    ("Connection refused" . "cannot connect; check host and port")
-    ("connect timed out\\|connection timeout" . "connection timed out; check network and firewall"))
-  "Alist of (REGEX . HINT) for known database error patterns.")
-
-(defun clutch--humanize-db-error-parts (msg)
-  "Return structured human-facing parts for database error MSG.
-The returned plist contains :summary and, when available, :hint."
-  (let ((cleaned (or msg ""))
-        (case-fold-search t))
-    ;; Strip "Database error: " prefix
-    (setq cleaned (replace-regexp-in-string
-                   "\\`Database error: " "" cleaned))
-    ;; Strip ClickHouse queryId suffix: (queryId= uuid-value)
-    (setq cleaned (replace-regexp-in-string
-                   "[ \t]*(queryId=[^)]*)" "" cleaned))
-    ;; Strip ClickHouse version suffix: (version N.N.N (official build))
-    (setq cleaned (replace-regexp-in-string
-                   "[ \t]*(version [^)]*([^)]*)[^)]*)" "" cleaned))
-    ;; Strip Java stack trace (from first "at " frame onward)
-    (when (string-match "\n[ \t]*at " cleaned)
-      (setq cleaned (substring cleaned 0 (match-beginning 0))))
-    ;; Normalize whitespace
-    (setq cleaned (string-trim
-                   (replace-regexp-in-string "[[:space:]\n\r]+" " " cleaned)))
-    (list :summary cleaned
-          :hint (cl-loop for (pattern . h) in clutch--db-error-hints
-                         when (string-match-p pattern cleaned)
-                         return h))))
-
-(defun clutch--humanize-db-error (msg)
-  "Return a user-friendly version of database error MSG.
-Strips internal noise (queryId, version, stack traces) and appends
-actionable hints for known error patterns."
-  (let* ((parts (clutch--humanize-db-error-parts msg))
-         (summary (plist-get parts :summary))
-         (hint (plist-get parts :hint)))
-    (if hint
-        (format "%s [%s]" summary hint)
-      summary)))
 
 (defun clutch--debug-workflow-message (message)
   "Return MESSAGE annotated with the single debug-buffer workflow."
@@ -1582,6 +1379,39 @@ Optional CONTEXT is merged into the debug event.  Return
 `(MESSAGE . SUMMARY)' for the failure."
   (clutch--remember-query-error buffer connection "execute" sql err context))
 
+(defun clutch--show-execution-error
+    (source-buffer connection sql err &optional elapsed context region)
+  "Record ERR for SQL on CONNECTION and render the execution error result.
+SOURCE-BUFFER is updated with the failed SQL marker and last result buffer
+when live.  ELAPSED records the failed duration.  CONTEXT is merged into
+stored diagnostics.  REGION is an optional (BEG . END) source range to mark.
+Return a plist with :message, :summary, and :display-summary."
+  (let* ((failure (clutch--remember-execute-error
+                   source-buffer connection sql err context))
+         (message (car failure))
+         (summary (cdr failure))
+         (display (clutch--humanize-db-error-parts message))
+         (display-summary (or (plist-get display :summary) summary))
+         (hint (plist-get display :hint))
+         (region (or region
+                     (and clutch--executing-sql-start
+                          clutch--executing-sql-end
+                          (cons clutch--executing-sql-start
+                                clutch--executing-sql-end)))))
+    (when (and (buffer-live-p source-buffer) region)
+      (with-current-buffer source-buffer
+        (clutch--mark-failed-sql-region
+         (car region) (cdr region) display-summary)))
+    (let ((buf (clutch-result--display-error
+                connection sql display-summary message elapsed hint)))
+      (when (and (buffer-live-p source-buffer)
+                 (buffer-live-p buf))
+        (with-current-buffer source-buffer
+          (setq-local clutch--last-result-buffer buf))))
+    (list :message message
+          :summary summary
+          :display-summary display-summary)))
+
 (defun clutch--execute-and-mark (sql beg end &optional conn)
   "Execute SQL on CONN and mark BEG..END on success."
   (pcase-let* ((`(,trim-beg . ,trim-end)
@@ -1598,15 +1428,11 @@ Optional CONTEXT is merged into the debug event.  Return
 
 (defun clutch--query-bounds-at-point ()
   "Return the SQL statement bounds around point as (BEG . END)."
-  (let ((delimiter "\\(;\\|^[[:space:]]*$\\)"))
-    (cons (save-excursion
-            (if (re-search-backward delimiter nil t)
-                (match-end 0)
-              (point-min)))
-          (save-excursion
-            (if (re-search-forward delimiter nil t)
-                (match-beginning 0)
-              (point-max))))))
+  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+         (offset (- (point) (point-min)))
+         (bounds (clutch-db-sql-blank-line-statement-bounds text offset)))
+    (cons (+ (point-min) (car bounds))
+          (+ (point-min) (cdr bounds)))))
 
 (defun clutch--statement-delimited-buffer-p ()
   "Return non-nil when the current buffer contains a top-level semicolon."
@@ -1635,11 +1461,7 @@ Optional CONTEXT is merged into the debug event.  Return
   (let ((sql
          (cond
           ((derived-mode-p 'clutch-result-mode)
-           (if (or clutch--pending-inserts
-                   clutch--pending-edits
-                   clutch--pending-deletes)
-               (string-trim-right (clutch-result--pending-sql-content))
-             (clutch-result--effective-query)))
+           (clutch-result--preview-execution-sql))
           ((use-region-p)
            (string-trim (buffer-substring-no-properties
                          (region-beginning) (region-end))))
@@ -1670,21 +1492,10 @@ long statements spanning multiple paragraphs are captured whole.
 Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
-         (len (length text))
-         (bounds (clutch-db-sql-semicolon-statement-bounds text offset)))
-    ;; Find the enclosing semicolons around point.
-    (let* ((beg (+ (point-min) (car bounds)))
-           (end (+ (point-min) (cdr bounds)))
-           (effective-offset
-            (clutch-db-sql-statement-effective-offset text offset))
-           (semicolon-edge (or (/= effective-offset offset)
-                               (and (< offset len)
-                                    (= (aref text offset) ?\;)))))
-      (if (or semicolon-edge
-              (when-let* ((trimmed (clutch--trim-sql-bounds beg end)))
-                (>= (point) (car trimmed))))
-          (cons beg end)
-        (cons (point) (point))))))
+         (bounds (clutch-db-sql-semicolon-statement-bounds-at-offset
+                  text offset t)))
+    (cons (+ (point-min) (car bounds))
+          (+ (point-min) (cdr bounds)))))
 
 (defun clutch--dwim-bounds-at-point ()
   "Return point-local SQL bounds for DWIM execute and preview workflows.
@@ -1766,36 +1577,14 @@ result buffer.  Stops and reports on the first error."
            (lambda (err spec)
              (pcase-let ((`(,stmt ,beg ,end) spec))
                (let* ((failure
-                       (clutch--remember-execute-error
-                        source-buffer clutch-connection stmt err
-                        (list :statement-index (1+ done))))
-                      (message (car failure))
-                      (summary (cdr failure))
-                      (display (clutch--humanize-db-error-parts message))
-                      (display-summary (or (plist-get display :summary)
-                                           summary))
-                      (hint (plist-get display :hint))
-                      (buf (clutch--display-error-result
-                            clutch-connection stmt display-summary message nil
-                            hint)))
-                 (cond
-                  ((and (buffer-live-p source-buffer) beg end)
-                   (with-current-buffer source-buffer
-                     (clutch--mark-failed-sql-region beg end display-summary)))
-                  ((and (buffer-live-p source-buffer)
-                        clutch--executing-sql-start
-                        clutch--executing-sql-end)
-                   (with-current-buffer source-buffer
-                     (clutch--mark-failed-sql-region
-                      clutch--executing-sql-start clutch--executing-sql-end
-                      display-summary))))
-                 (when (and (buffer-live-p source-buffer)
-                            (buffer-live-p buf))
-                   (with-current-buffer source-buffer
-                     (setq-local clutch--last-result-buffer buf)))
+                       (clutch--show-execution-error
+                        source-buffer clutch-connection stmt err nil
+                        (list :statement-index (1+ done))
+                        (and beg end (cons beg end))))
+                      (summary (plist-get failure :summary)))
                  (user-error "Statement %d failed: %s"
-                                     (1+ done)
-                                     (clutch--debug-workflow-message summary)))))))
+                             (1+ done)
+                             (clutch--debug-workflow-message summary)))))))
       (dolist (spec before-last)
         (pcase-let ((`(,stmt ,_beg ,_end) spec))
           (funcall clear-status spec)
@@ -1810,7 +1599,7 @@ result buffer.  Stops and reports on the first error."
              (funcall signal-statement-error err spec)))))
       (pcase-let ((`(,last ,beg ,end) last-spec))
         (cond
-         ((clutch--select-query-p last)
+         ((clutch-db-sql-select-query-p last)
           (when (> done 0)
             (message "%s statement%s %s"
                      (clutch--message-count done)

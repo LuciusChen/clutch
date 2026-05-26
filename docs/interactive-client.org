@@ -465,10 +465,11 @@ instead of attempting session-level schema switching.  Generic
 has an explicit implementation for that driver/backend; custom JDBC URLs such
 as KingbaseES do not gain schema switching automatically.
 
-For JDBC backends, clutch-jdbc-agent now isolates foreground SQL from metadata
-traffic by keeping separate primary and metadata JDBC sessions under one
-logical clutch connection.  This avoids Oracle-style contention between user
-queries and background schema/object introspection.
+For JDBC backends, [[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]]
+now isolates foreground SQL from metadata traffic by keeping separate primary
+and metadata JDBC sessions under one logical clutch connection.  This avoids
+Oracle-style contention between user queries and background schema/object
+introspection.
 
 Default actions only depend on the object type:
 

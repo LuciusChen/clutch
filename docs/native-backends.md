@@ -2,8 +2,8 @@
 
 `clutch` ships three non-JDBC backends that do not require a sidecar process:
 
-- `mysql` — external pure Emacs Lisp MySQL wire protocol client
-- `pg` — external PostgreSQL client from `pg-el`
+- [`mysql`](https://github.com/LuciusChen/mysql.el) — external pure Emacs Lisp MySQL wire protocol client
+- [`pg`](https://github.com/emarsden/pg-el) — external PostgreSQL client from [`pg-el`](https://github.com/emarsden/pg-el)
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
@@ -21,7 +21,8 @@ docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql
 docker run --name clutch-pg-16 -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
 ```
 
-Run the standalone MySQL protocol live suite from the `mysql.el` checkout:
+Run the standalone MySQL protocol live suite from the
+[`mysql.el`](https://github.com/LuciusChen/mysql.el) checkout:
 
 ```sh
 emacs -Q --batch -L . -l ert -l test/mysql-test.el \

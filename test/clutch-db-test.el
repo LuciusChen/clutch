@@ -77,11 +77,13 @@
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
-(declare-function clutch--jdbc-backend-p "clutch" (backend))
-(declare-function clutch--backend-display-name-from-params "clutch" (params))
-(declare-function clutch--build-conn "clutch" (params))
+(declare-function clutch--jdbc-backend-p "clutch-connection" (backend))
+(declare-function clutch--manual-backend-choices "clutch-connection" ())
+(declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
+(declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--format-value "clutch-ui" (value))
-(declare-function clutch--value-to-literal "clutch" (value))
+(declare-function clutch-db-value-to-literal "clutch-db"
+                  (conn value &optional fallback-format-fn))
 (declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function make-mysql-result "mysql" (&rest args))
 (declare-function mysql-conn-database "mysql" (conn))
@@ -197,6 +199,13 @@ connection as live and not busy."
    (clutch-db--normalize-connect-params
     'pg '(:host "127.0.0.1" :sslmode verify-ca))
    :type 'clutch-db-error))
+
+(ert-deftest clutch-db-test-normalize-connect-params-rejects-removed-read-timeout ()
+  "Removed connection timeout aliases should fail before reaching adapters."
+  (should-error
+   (clutch-db--normalize-connect-params
+    'mysql '(:host "127.0.0.1" :read-timeout 5))
+   :type 'user-error))
 
 ;;;; Unit tests — clutch-db-result struct
 
@@ -445,6 +454,28 @@ connection as live and not busy."
                            :type 'user-error)))
     (should (string-match-p "Manual commit is not supported by this connection"
                             (error-message-string err)))))
+
+(ert-deftest clutch-db-test-schema-transaction-effect-by-backend ()
+  "DDL transaction effects should live behind the backend interface."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (should-not (clutch-db-schema-transaction-effect
+               'opaque-conn "CREATE TABLE t (id int)"))
+  (should (eq (clutch-db-schema-transaction-effect
+               (make-mysql-conn :status-flags #x0002)
+               "CREATE TABLE t (id int)")
+              'clear))
+  (should (eq (clutch-db-schema-transaction-effect
+               (clutch-db-test--make-pgcon :database "test")
+               "CREATE TABLE t (id int)")
+              'dirty))
+  (should (eq (clutch-db-schema-transaction-effect
+               (make-clutch-jdbc-conn :params '(:driver oracle))
+               "CREATE TABLE t (id int)")
+              'clear))
+  (should-not (clutch-db-schema-transaction-effect
+               (make-clutch-jdbc-conn :params '(:driver sqlserver))
+               "CREATE TABLE t (id int)")))
 
 (ert-deftest clutch-db-test-jdbc-commit-fires-rpc ()
   "Clutch-db-commit should issue a commit RPC with the connection id."
@@ -789,45 +820,70 @@ connection as live and not busy."
       (should (clutch-db-refresh-schema-async conn #'ignore))
       (should (= captured-timeout 7)))))
 
-(ert-deftest clutch-db-test-mysql-refresh-schema-async-schedules-idle-call ()
-  "Native MySQL schema refresh should schedule idle work on the main thread."
+(ert-deftest clutch-db-test-native-async-schedules-idle-call ()
+  "Native metadata async methods should share the idle scheduling policy."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                                    :user "root" :database "mysql"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-list-tables)
-               (lambda (context)
-                 (should (eq context conn))
-                 '("users" "orders"))))
-        (should (eq (clutch-db-refresh-schema-async
-                     conn
-                     (lambda (tables)
-                       (setq callback-result tables)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result '("users" "orders")))))))
-
-(ert-deftest clutch-db-test-pg-refresh-schema-async-schedules-idle-call ()
-  "Native PostgreSQL schema refresh should schedule idle work on the main thread."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                          :user "postgres" :database "test"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-list-tables)
-               (lambda (context)
-                 (should (eq context conn))
-                 '("customers" "orders"))))
-        (should (eq (clutch-db-refresh-schema-async
-                     conn
-                     (lambda (tables)
-                       (setq callback-result tables)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result '("customers" "orders")))))))
+  (dolist (conn (list (make-mysql-conn :host "127.0.0.1" :port 3306
+                                       :user "root" :database "mysql")
+                      (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                                  :user "postgres"
+                                                  :database "test")))
+    (dolist (case '((refresh-schema . ("users" "orders"))
+                    (list-columns . ("id" "name"))
+                    (column-details . ((:name "id" :type "integer")))
+                    (table-comment . "Users table")
+                    (list-objects . ((:name "users_pkey" :type "INDEX")))))
+      (let ((op (car case))
+            (expected (cdr case))
+            callback-result
+            scheduled)
+        (clutch-db-test--with-immediate-idle-metadata scheduled
+          (cl-letf (((symbol-function 'clutch-db-list-tables)
+                     (lambda (context)
+                       (should (eq context conn))
+                       '("users" "orders")))
+                    ((symbol-function 'clutch-db-list-columns)
+                     (lambda (context table)
+                       (should (eq context conn))
+                       (should (equal table "users"))
+                       '("id" "name")))
+                    ((symbol-function 'clutch-db-column-details)
+                     (lambda (context table)
+                       (should (eq context conn))
+                       (should (equal table "users"))
+                       '((:name "id" :type "integer"))))
+                    ((symbol-function 'clutch-db-table-comment)
+                     (lambda (context table)
+                       (should (eq context conn))
+                       (should (equal table "users"))
+                       "Users table"))
+                    ((symbol-function 'clutch-db-list-objects)
+                     (lambda (context category)
+                       (should (eq context conn))
+                       (should (eq category 'indexes))
+                       '((:name "users_pkey" :type "INDEX")))))
+            (should
+             (eq
+              (pcase op
+                ('refresh-schema
+                 (clutch-db-refresh-schema-async
+                  conn (lambda (value) (setq callback-result value))))
+                ('list-columns
+                 (clutch-db-list-columns-async
+                  conn "users" (lambda (value) (setq callback-result value))))
+                ('column-details
+                 (clutch-db-column-details-async
+                  conn "users" (lambda (value) (setq callback-result value))))
+                ('table-comment
+                 (clutch-db-table-comment-async
+                  conn "users" (lambda (value) (setq callback-result value))))
+                ('list-objects
+                 (clutch-db-list-objects-async
+                  conn 'indexes (lambda (value) (setq callback-result value)))))
+              'fake-timer))
+            (should (equal scheduled '(0 nil)))
+            (should (equal callback-result expected))))))))
 
 (ert-deftest clutch-db-test-idle-metadata-call-reschedules-while-busy ()
   "Idle metadata calls should not run on a busy connection.
@@ -905,178 +961,6 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal callback-result '("id" "name")))
       (should (= query-count 1)))))
 
-(ert-deftest clutch-db-test-mysql-list-columns-async-schedules-idle-call ()
-  "Native MySQL column-name preheat should schedule idle work."
-  (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                                    :user "root" :database "mysql"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-list-columns)
-               (lambda (context table)
-                 (should (eq context conn))
-                 (should (equal table "users"))
-                 '("id" "name"))))
-        (should (eq (clutch-db-list-columns-async
-                     conn "users"
-                     (lambda (columns)
-                       (setq callback-result columns)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result '("id" "name")))))))
-
-(ert-deftest clutch-db-test-mysql-column-details-async-schedules-idle-call ()
-  "Native MySQL column-detail preheat should schedule idle work."
-  (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                                    :user "root" :database "mysql"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-column-details)
-               (lambda (context table)
-                 (should (eq context conn))
-                 (should (equal table "users"))
-                 '((:name "id" :type "bigint")))))
-        (should (eq (clutch-db-column-details-async
-                     conn "users"
-                     (lambda (details)
-                       (setq callback-result details)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result
-                       '((:name "id" :type "bigint"))))))))
-
-(ert-deftest clutch-db-test-mysql-table-comment-async-schedules-idle-call ()
-  "Native MySQL table-comment preheat should schedule idle work."
-  (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                                    :user "root" :database "mysql"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-table-comment)
-               (lambda (context table)
-                 (should (eq context conn))
-                 (should (equal table "users"))
-                 "Users table")))
-        (should (eq (clutch-db-table-comment-async
-                     conn "users"
-                     (lambda (comment)
-                       (setq callback-result comment)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result "Users table"))))))
-
-(ert-deftest clutch-db-test-mysql-list-objects-async-schedules-idle-call ()
-  "Native MySQL object warmup should schedule idle work."
-  (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                                    :user "root" :database "mysql"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-list-objects)
-               (lambda (context category)
-                 (should (eq context conn))
-                 (should (eq category 'indexes))
-                 '((:name "users_pkey" :type "INDEX")))))
-        (should (eq (clutch-db-list-objects-async
-                     conn 'indexes
-                     (lambda (entries)
-                       (setq callback-result entries)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result
-                       '((:name "users_pkey" :type "INDEX"))))))))
-
-(ert-deftest clutch-db-test-pg-list-columns-async-schedules-idle-call ()
-  "Native PostgreSQL column-name preheat should schedule idle work."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                          :user "postgres" :database "test"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-list-columns)
-               (lambda (context table)
-                 (should (eq context conn))
-                 (should (equal table "users"))
-                 '("id" "name"))))
-        (should (eq (clutch-db-list-columns-async
-                     conn "users"
-                     (lambda (columns)
-                       (setq callback-result columns)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result '("id" "name")))))))
-
-(ert-deftest clutch-db-test-pg-column-details-async-schedules-idle-call ()
-  "Native PostgreSQL column-detail preheat should schedule idle work."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                          :user "postgres" :database "test"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-column-details)
-               (lambda (context table)
-                 (should (eq context conn))
-                 (should (equal table "users"))
-                 '((:name "id" :type "integer")))))
-        (should (eq (clutch-db-column-details-async
-                     conn "users"
-                     (lambda (details)
-                       (setq callback-result details)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result
-                       '((:name "id" :type "integer"))))))))
-
-(ert-deftest clutch-db-test-pg-table-comment-async-schedules-idle-call ()
-  "Native PostgreSQL table-comment preheat should schedule idle work."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                          :user "postgres" :database "test"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-table-comment)
-               (lambda (context table)
-                 (should (eq context conn))
-                 (should (equal table "users"))
-                 "Users table")))
-        (should (eq (clutch-db-table-comment-async
-                     conn "users"
-                     (lambda (comment)
-                       (setq callback-result comment)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result "Users table"))))))
-
-(ert-deftest clutch-db-test-pg-list-objects-async-schedules-idle-call ()
-  "Native PostgreSQL object warmup should schedule idle work."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                          :user "postgres" :database "test"))
-        callback-result
-        scheduled)
-    (clutch-db-test--with-immediate-idle-metadata scheduled
-      (cl-letf (((symbol-function 'clutch-db-list-objects)
-               (lambda (context category)
-                 (should (eq context conn))
-                 (should (eq category 'indexes))
-                 '((:name "users_pkey" :type "INDEX")))))
-        (should (eq (clutch-db-list-objects-async
-                     conn 'indexes
-                     (lambda (entries)
-                       (setq callback-result entries)))
-                    'fake-timer))
-        (should (equal scheduled '(0 nil)))
-        (should (equal callback-result
-                       '((:name "users_pkey" :type "INDEX"))))))))
-
 (ert-deftest clutch-db-test-jdbc-list-columns-async-maps-column-names ()
   "JDBC async column-name preheat should normalize the returned names."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
@@ -1153,46 +1037,41 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                                                :database "default"))))
     (should (equal (clutch-jdbc--conn-catalog conn) "default"))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-omits-catalog ()
-  "ClickHouse table discovery should omit catalog from JDBC metadata RPC."
+(ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-uses-system-tables ()
+  "ClickHouse table discovery should query the current database."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
                                                :database "default")))
-        captured-op captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
-                 (setq captured-op op
-                       captured-params params)
-                 '(:tables ((:name "events" :type "TABLE" :schema "")
-                            (:name "daily_mv" :type "VIEW" :schema ""))))))
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-clutch-db-result
+                  :rows '(("events" "MergeTree")
+                          ("daily_mv" "View"))))))
       (should
        (equal (clutch-db-list-table-entries conn)
-              '((:name "events" :type "TABLE" :schema "")
-                (:name "daily_mv" :type "VIEW" :schema ""))))
-      (should (equal captured-op "get-tables"))
-      (should-not (alist-get 'catalog captured-params))
-      (should-not (alist-get 'schema captured-params)))))
+              '((:name "events" :type "TABLE" :schema "default"
+                 :source-schema "default")
+                (:name "daily_mv" :type "VIEW" :schema "default"
+                 :source-schema "default"))))
+      (should (string-match-p "FROM system\\.tables" captured-sql))
+      (should (string-match-p "database = 'default'" captured-sql)))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-omits-catalog ()
-  "ClickHouse table search should omit catalog from JDBC metadata RPC."
+(ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-filters-system-tables ()
+  "ClickHouse table search should filter discovered table entries by prefix."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
-                                               :database "default")))
-        captured-op captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
-                 (setq captured-op op
-                       captured-params params)
-                 '(:tables ((:name "clutch_live_smoke" :type "TABLE"
-                              :schema "" :source-schema ""))))))
+                                               :database "default"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--clickhouse-table-entries)
+               (lambda (_conn)
+                 '((:name "events" :type "TABLE" :schema "default")
+                   (:name "clutch_live_smoke" :type "TABLE"
+                    :schema "default" :source-schema "default")))))
       (should
        (equal (clutch-db-search-table-entries conn "clutch")
               '((:name "clutch_live_smoke" :type "TABLE"
-                 :schema "" :source-schema ""))))
-      (should (equal captured-op "search-tables"))
-      (should-not (alist-get 'catalog captured-params))
-      (should (equal (alist-get 'prefix captured-params) "clutch"))
-      (should-not (alist-get 'schema captured-params)))))
+                 :schema "default" :source-schema "default")))))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-column-details-omit-catalog ()
   "ClickHouse column metadata RPCs should omit catalog from metadata calls."
@@ -1221,76 +1100,19 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
 
-;;;; Unit tests — clutch-db-complete-tables (Oracle, cache-first)
+;;;; Unit tests — clutch-db-complete-tables (Oracle)
 
-(ert-deftest clutch-db-test-jdbc-complete-tables-uses-cache ()
-  "When schema cache is populated, complete-tables filters locally without RPC."
-  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
-                                      :params '(:driver oracle :user "scott")))
-         (schema (make-hash-table :test 'equal))
-         rpc-called)
-    (puthash "USERS" nil schema)
-    (puthash "ORDERS" nil schema)
-    (puthash "USER_ROLES" nil schema)
-    (cl-letf (((symbol-function 'clutch--schema-status-entry)
-               (lambda (_conn) '(:state ready)))
-              ((symbol-function 'clutch--schema-for-connection)
-               (lambda (_conn) schema))
-              ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (&rest _) (setq rpc-called t) nil)))
-      (let ((result (clutch-db-complete-tables conn "US")))
-        (should-not rpc-called)
-        (should (equal (sort (copy-sequence result) #'string<)
-                       '("USERS" "USER_ROLES")))))))
-
-(ert-deftest clutch-db-test-jdbc-complete-tables-ready-empty-cache-fallback-rpc ()
-  "Oracle completion should fall back to RPC when the ready cache has no matches."
-  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
-                                      :params '(:driver oracle :user "scott")))
-         (schema (make-hash-table :test 'equal))
-         captured-op)
-    (puthash "AUDIT_LOG" nil schema)
-    (cl-letf (((symbol-function 'clutch--schema-status-entry)
-               (lambda (_conn) '(:state ready)))
-              ((symbol-function 'clutch--schema-for-connection)
-               (lambda (_conn) schema))
-              ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
-                 (setq captured-op op)
-                 (should (equal (alist-get 'prefix params) "OR"))
-                 '(:tables ((:name "ORDERS"))))))
-      (let ((result (clutch-db-complete-tables conn "OR")))
-        (should (equal captured-op "search-tables"))
-        (should (equal result '("ORDERS")))))))
-
-(ert-deftest clutch-db-test-jdbc-complete-tables-stale-cache-fallback-rpc ()
-  "Oracle completion should ignore stale cache entries and fall back to RPC."
+(ert-deftest clutch-db-test-jdbc-complete-tables-searches-rpc-without-schema-cache-dependency ()
+  "JDBC completion should search remotely without reading Clutch schema cache."
   (let* ((conn (make-clutch-jdbc-conn :conn-id 5
                                       :params '(:driver oracle :user "scott")))
          captured-op)
     (cl-letf (((symbol-function 'clutch--schema-status-entry)
-               (lambda (_conn) '(:state stale)))
+               (lambda (&rest _)
+                 (ert-fail "JDBC backend should not read schema status")))
               ((symbol-function 'clutch--schema-for-connection)
-               (lambda (_conn)
-                 (error "stale cache should not be read")))
-              ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
-                 (setq captured-op op)
-                 (should (equal (alist-get 'prefix params) "US"))
-                 '(:tables ((:name "USERS_NEW"))))))
-      (let ((result (clutch-db-complete-tables conn "US")))
-        (should (equal captured-op "search-tables"))
-        (should (equal result '("USERS_NEW")))))))
-
-(ert-deftest clutch-db-test-jdbc-complete-tables-fallback-rpc ()
-  "When schema cache is nil for this connection, complete-tables fires search-tables RPC."
-  (let* ((conn (make-clutch-jdbc-conn :conn-id 5
-                                      :params '(:driver oracle :user "scott")))
-         captured-op)
-    (cl-letf (((symbol-function 'clutch--schema-status-entry)
-               (lambda (_conn) '(:state ready)))
-              ((symbol-function 'clutch--schema-for-connection)
-               (lambda (_conn) nil))
+               (lambda (&rest _)
+                 (ert-fail "JDBC backend should not read schema cache")))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional _timeout)
                  (setq captured-op op)
@@ -1504,6 +1326,22 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
           (should (file-exists-p (expand-file-name "drivers/mssql-jdbc.jar" tmpdir))))
       (delete-directory tmpdir t))))
 
+(ert-deftest clutch-db-test-jdbc-install-driver-uses-duckdb-artifact ()
+  "Installing DuckDB JDBC should use the Maven Central driver artifact."
+  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
+         (clutch-jdbc-agent-dir tmpdir)
+         requested-coords)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (coords dest)
+                     (setq requested-coords coords)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'duckdb)
+          (should (equal requested-coords
+                         "org.duckdb:duckdb_jdbc:1.5.3.0"))
+          (should (file-exists-p (expand-file-name "drivers/duckdb_jdbc.jar" tmpdir))))
+      (delete-directory tmpdir t))))
+
 ;;;; Unit tests — props normalization
 
 (ert-deftest clutch-db-test-jdbc-normalize-props-converts-plist ()
@@ -1610,6 +1448,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-jdbc-display-name-clickhouse ()
   "ClickHouse connections should display as \"ClickHouse\"."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver clickhouse))))
+    (should (eq (clutch-db-backend-key conn) 'clickhouse))
     (should (equal (clutch-db-display-name conn) "ClickHouse"))))
 
 (ert-deftest clutch-db-test-jdbc-install-driver-installs-clickhouse ()
@@ -1748,19 +1587,63 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "Test that backend features are correctly registered."
   (let ((mysql-features (alist-get 'mysql clutch-db--backend-features))
         (pg-features (alist-get 'pg clutch-db--backend-features))
-        (jdbc-features (alist-get 'jdbc clutch-db--backend-features)))
+        (jdbc-features (alist-get 'jdbc clutch-db--backend-features))
+        (clickhouse-features (clutch-db-backend-feature 'clickhouse)))
     ;; MySQL backend
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
     (should (eq (plist-get mysql-features :connect-fn) 'clutch-db-mysql-connect))
+    (should (equal (plist-get mysql-features :display-name) "MySQL"))
+    (should (= (plist-get mysql-features :default-port) 3306))
+    (should (eq (plist-get mysql-features :sql-product) 'mysql))
     ;; PostgreSQL backend
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'clutch-db-pg))
     (should (eq (plist-get pg-features :connect-fn) 'clutch-db-pg-connect))
+    (should (equal (plist-get pg-features :display-name) "PostgreSQL"))
+    (should (= (plist-get pg-features :default-port) 5432))
+    (should (eq (plist-get pg-features :sql-product) 'postgres))
     ;; Generic JDBC backend
     (should jdbc-features)
     (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))
-    (should (functionp (plist-get jdbc-features :connect-fn)))))
+    (should (functionp (plist-get jdbc-features :connect-fn)))
+    (should (eq (plist-get clickhouse-features :require) 'clutch-db-jdbc))
+    (should (equal (plist-get clickhouse-features :display-name) "ClickHouse"))
+    (should (= (plist-get clickhouse-features :default-port) 8123))))
+
+(ert-deftest clutch-db-test-backend-list-loads-optional-registries-in-order ()
+  "User-facing backend lists should be derived from the backend registry."
+  (let ((clutch-db--backend-features
+         '((mysql . (:require clutch-db-mysql))
+           (pg . (:require clutch-db-pg))
+           (sqlite . (:require clutch-db-sqlite)))))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional _filename _noerror)
+                 (when (eq feature 'clutch-db-jdbc)
+                   (setq clutch-db--backend-features
+                         (append clutch-db--backend-features
+                                 '((jdbc . (:require clutch-db-jdbc))
+                                   (oracle . (:require clutch-db-jdbc))
+                                   (clickhouse . (:require clutch-db-jdbc))))))
+                 t)))
+      (should (equal (clutch-db-backends t)
+                     '(mysql pg sqlite jdbc oracle clickhouse))))))
+
+(ert-deftest clutch-db-test-manual-backend-choices-follow-registry ()
+  "Manual connect choices should include registered concrete backends."
+  (require 'clutch)
+  (let ((choices (clutch--manual-backend-choices)))
+    (should (member 'mysql choices))
+    (should (member 'clickhouse choices))
+    (should-not (member 'jdbc choices))))
+
+(ert-deftest clutch-db-test-manual-backends-have-registry-metadata ()
+  "Manual connect prompts should get display names and ports from the registry."
+  (require 'clutch)
+  (dolist (backend (clutch--manual-backend-choices))
+    (should (clutch-db-backend-display-name backend))
+    (unless (eq backend 'sqlite)
+      (should (numberp (clutch-db-backend-default-port backend))))))
 
 (ert-deftest clutch-db-test-connect-requires-selected-backend-only ()
   "`clutch-db-connect' should require only the selected adapter."
@@ -1790,6 +1673,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let ((conn (make-clutch-jdbc-conn
                :params '(:driver jdbc :display-name "KingbaseES"))))
     (should (clutch--jdbc-backend-p 'jdbc))
+    (should (clutch--jdbc-backend-p 'clickhouse))
     (should (equal (clutch--backend-display-name-from-params
                     '(:backend jdbc :display-name "KingbaseES"))
                    "KingbaseES"))
@@ -1799,9 +1683,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "The generic JDBC backend should pass :url through to `clutch-db-connect'."
   (require 'clutch)
   (let (captured-backend captured-params)
-    (cl-letf (((symbol-function 'clutch--normalize-timeout-params)
-               (lambda (_backend params) params))
-              ((symbol-function 'clutch--resolve-password)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) "secret"))
               ((symbol-function 'clutch-db-connect)
                (lambda (backend params)
@@ -2102,6 +1984,16 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (string-match-p "ORDER BY created_at DESC LIMIT 10 OFFSET 0\\'" sql))
     (should-not (string-match-p "FETCH NEXT" sql))))
 
+(ert-deftest clutch-db-test-jdbc-oracle-source-table-name-canonicalizes-unquoted ()
+  "Oracle JDBC source tables should follow Oracle identifier case rules."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle))))
+    (should (equal (clutch-db--source-table-name conn "users") "USERS"))
+    (should (equal (clutch-db--source-table-name conn "APP.users") "USERS"))
+    (should (equal (clutch-db--source-table-name conn "\"MixedCase\"")
+                   "MixedCase"))
+    (should (equal (clutch-db--source-table-name conn "APP.\"MixedCase\"")
+                   "MixedCase"))))
+
 (ert-deftest clutch-db-test-jdbc-build-paged-sql-limit-offset-dialects ()
   "LIMIT/OFFSET JDBC dialects should not use OFFSET/FETCH."
   (dolist (params '((:driver redshift)
@@ -2171,7 +2063,24 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (= (clutch-db-port conn) 3307))
     (should (equal (clutch-db-user conn) "testuser"))
     (should (equal (clutch-db-database conn) "testdb"))
+    (should (eq (clutch-db-backend-key conn) 'mysql))
     (should (equal (clutch-db-display-name conn) "MySQL"))))
+
+(ert-deftest clutch-db-test-mysql-symbol-help-parses-help-result ()
+  "MySQL HELP parsing should live behind the backend interface."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :host "localhost"))
+        captured-sql)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-mysql-result
+                  :rows '(("ABS"
+                           "Syntax:\n\nABS(X)\n\nReturns absolute value.\nURL: https://example.invalid"
+                           ""))))))
+      (should (equal (clutch-db-symbol-help conn "abs")
+                     '(:sig "ABS(X)" :desc "Returns absolute value.")))
+      (should (equal captured-sql "HELP 'ABS'")))))
 
 (ert-deftest clutch-db-test-pg-metadata ()
   "Test PostgreSQL metadata accessors."
@@ -2182,6 +2091,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (= (clutch-db-port conn) 5433))
     (should (equal (clutch-db-user conn) "pguser"))
     (should (equal (clutch-db-database conn) "pgdb"))
+    (should (eq (clutch-db-backend-key conn) 'pg))
     (should (equal (clutch-db-display-name conn) "PostgreSQL"))))
 
 (ert-deftest clutch-db-test-pg-list-schemas-filters-system-schemas ()
@@ -2270,7 +2180,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                (lambda (&rest args)
                  (setq captured-args args)
                  (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                             :user "postgres" :database "test"))))
+                                             :user "postgres" :database "test")))
+              ((symbol-function 'pg-exec)
+               (lambda (&rest _args)
+                 (make-pgresult :tuples nil))))
       (clutch-db-pg-connect
        '(:host "127.0.0.1"
          :port 5432
@@ -2280,6 +2193,33 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
          :tls t))
       (should (eq (plist-get (nthcdr 2 captured-args) :tls-options) t))
       (should-not (plist-member (nthcdr 2 captured-args) :tls)))))
+
+(ert-deftest clutch-db-test-pg-connect-applies-timeout-defaults ()
+  "PostgreSQL connect should apply Clutch timeout defaults at the adapter boundary."
+  (require 'clutch-db-pg)
+  (let ((clutch-connect-timeout-seconds 12)
+        (clutch-read-idle-timeout-seconds 34)
+        (clutch-query-timeout-seconds 56)
+        captured-timeouts
+        executed-sql)
+    (cl-letf (((symbol-function 'pg-connect-plist)
+               (lambda (&rest _args)
+                 (setq captured-timeouts
+                       (list pg-connect-timeout pg-read-timeout))
+                 (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                                             :user "postgres" :database "test")))
+              ((symbol-function 'pg-exec)
+               (lambda (_conn sql)
+                 (setq executed-sql sql)
+                 (make-pgresult :tuples nil))))
+      (clutch-db-pg-connect
+       '(:host "127.0.0.1"
+         :port 5432
+         :database "test"
+         :user "postgres"
+         :password "secret"))
+      (should (equal captured-timeouts '(12 34)))
+      (should (equal executed-sql "SET statement_timeout = 56000")))))
 
 (ert-deftest clutch-db-test-mysql-connect-normalizes-tls-nil-to-ssl-mode ()
   "MySQL backend connect should pass canonical `:ssl-mode' to `mysql-connect'."
@@ -2301,6 +2241,27 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should-not (plist-member captured-args :clutch-tls-mode))
       (should (eq (plist-get captured-args :ssl-mode) 'disabled))
       (should-not (plist-member captured-args :tls)))))
+
+(ert-deftest clutch-db-test-mysql-connect-applies-timeout-defaults ()
+  "MySQL connect should apply Clutch timeout defaults at the adapter boundary."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((clutch-connect-timeout-seconds 12)
+        (clutch-read-idle-timeout-seconds 34)
+        captured-args)
+    (cl-letf (((symbol-function 'mysql-connect)
+               (lambda (&rest args)
+                 (setq captured-args args)
+                 (make-mysql-conn :host "127.0.0.1" :port 3306
+                                  :user "root" :database "mysql-wire"))))
+      (clutch-db-mysql-connect
+       '(:host "127.0.0.1"
+         :port 3306
+         :database "mysql"
+         :user "root"
+         :password "secret"))
+      (should (= (plist-get captured-args :connect-timeout) 12))
+      (should (= (plist-get captured-args :read-idle-timeout) 34)))))
 
 (ert-deftest clutch-db-test-mysql-connect-strips-pass-entry-before-wire-connect ()
   "MySQL backend connect should not pass `:pass-entry' to `mysql-connect'."
@@ -3231,19 +3192,56 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
       (should (= (length (clutch-db-result-rows result)) 1))
       (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
 
-(ert-deftest clutch-db-test-jdbc-mssql-live-dml ()
+(ert-deftest clutch-db-test-jdbc-mssql-live-result-workflow ()
   :tags '(:db-live :jdbc-live :mssql-live)
-  "SQL Server JDBC should handle temporary-table DML."
+  "SQL Server JDBC should handle real result workflows."
   (clutch-db-test--with-mssql conn
-    (let ((tbl (format "#cc_test_%d" (abs (random 9999)))))
-      (clutch-db-query conn
-       (format "CREATE TABLE %s (id INT PRIMARY KEY, val NVARCHAR(32))" tbl))
-      (let ((result (clutch-db-query conn
-                     (format "INSERT INTO %s VALUES (1, 'a')" tbl))))
-        (should (= (clutch-db-result-affected-rows result) 1)))
-      (let ((result (clutch-db-query conn
-                     (format "SELECT COUNT(*) AS n FROM %s" tbl))))
-        (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1"))))))
+    (let* ((tbl (format "cc_mssql_flow_%d" (abs (random 9999))))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
+           (base-sql (format "SELECT id, name, score FROM %s ORDER BY id" tbl)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, name NVARCHAR(32), score INT)"
+                     tbl))
+            (clutch-db-query
+             conn
+             (format "INSERT INTO %s (id, name, score) VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'cam', 30), (4, 'dan', 40), (5, 'eve', 50)"
+                     tbl))
+            (let* ((page-sql (clutch-db-build-paged-sql conn base-sql 0 2))
+                   (rows (clutch-db-result-rows
+                          (clutch-db-query conn page-sql))))
+              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
+                             '("1" "2"))))
+            (let* ((sort-sql (clutch-db-build-paged-sql
+                              conn base-sql 0 2 '("score" . "DESC")))
+                   (rows (clutch-db-result-rows
+                          (clutch-db-query conn sort-sql))))
+              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
+                             '("5" "4"))))
+            (let* ((filter-sql
+                    (clutch-db-apply-where
+                     conn base-sql
+                     (format "%s > 20" (clutch-db-escape-identifier conn "score"))))
+                   (count-sql (clutch-db-build-count-sql conn filter-sql))
+                   (count-rows (clutch-db-result-rows
+                                (clutch-db-query conn count-sql))))
+              (should (equal (format "%s" (caar count-rows)) "3")))
+            (should (equal (clutch-db-primary-key-columns conn tbl) '("id")))
+            (let ((update-result
+                   (clutch-db-execute-params
+                    conn
+                    (format "UPDATE %s SET name = ? WHERE id = ?" tbl)
+                    '("after" 3))))
+              (should (= (clutch-db-result-affected-rows update-result) 1))
+              (should (equal (clutch-db-result-rows
+                              (clutch-db-query
+                               conn
+                               (format "SELECT name FROM %s WHERE id = 3" tbl)))
+                             '(("after"))))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-schema ()
   :tags '(:db-live :jdbc-live :mssql-live)
@@ -3260,22 +3258,68 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "ClickHouse"))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-live-query ()
+(ert-deftest clutch-db-test-jdbc-clickhouse-live-result-workflow ()
   :tags '(:db-live :jdbc-live :clickhouse-live)
-  "ClickHouse JDBC query should return one row for SELECT 1."
+  "ClickHouse JDBC should handle real result workflows."
   (clutch-db-test--with-clickhouse conn
-    (let ((result (clutch-db-query conn "SELECT 1 AS n")))
-      (should (clutch-db-result-p result))
-      (should (= (length (clutch-db-result-rows result)) 1))
-      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
+    (let* ((tbl (format "cc_ch_flow_%d" (abs (random 9999))))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
+           (base-sql (format "SELECT id, name, score FROM %s ORDER BY id" tbl)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (id Int32, name String, score Int32) ENGINE = Memory"
+                     tbl))
+            (clutch-db-query
+             conn
+             (format "INSERT INTO %s (id, name, score) VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'cam', 30), (4, 'dan', 40), (5, 'eve', 50)"
+                     tbl))
+            (let* ((page-sql (clutch-db-build-paged-sql conn base-sql 0 2))
+                   (rows (clutch-db-result-rows
+                          (clutch-db-query conn page-sql))))
+              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
+                             '("1" "2"))))
+            (let* ((sort-sql (clutch-db-build-paged-sql
+                              conn base-sql 0 2 '("score" . "DESC")))
+                   (rows (clutch-db-result-rows
+                          (clutch-db-query conn sort-sql))))
+              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
+                             '("5" "4"))))
+            (let* ((filter-sql
+                    (clutch-db-apply-where
+                     conn base-sql
+                     (format "%s > 20" (clutch-db-escape-identifier conn "score"))))
+                   (count-sql (clutch-db-build-count-sql conn filter-sql))
+                   (count-rows (clutch-db-result-rows
+                                (clutch-db-query conn count-sql))))
+              (should (equal (format "%s" (caar count-rows)) "3")))
+            (let ((columns (clutch-db-list-columns conn tbl)))
+              (should (member "id" columns))
+              (should (member "name" columns))
+              (should (member "score" columns))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-live-schema ()
   :tags '(:db-live :jdbc-live :clickhouse-live)
-  "ClickHouse JDBC schema introspection should return table entries."
+  "ClickHouse JDBC schema introspection should return user table entries."
   (clutch-db-test--with-clickhouse conn
-    (let ((entries (clutch-db-list-table-entries conn)))
-      (should (listp entries))
-      (should (> (length entries) 0)))))
+    (let* ((tbl (format "cc_ch_schema_%d" (abs (random 9999))))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (id Int32, name String) ENGINE = Memory"
+                     tbl))
+            (let ((entries (clutch-db-list-table-entries conn)))
+              (should (listp entries))
+              (should (cl-find tbl entries
+                               :key (lambda (entry) (plist-get entry :name))
+                               :test #'string=))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 ;;;; Cross-backend consistency tests
 

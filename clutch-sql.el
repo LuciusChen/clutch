@@ -24,6 +24,7 @@
 
 (defvar clutch-connection)
 (defvar clutch-sql-completion-case-style)
+(defvar clutch--sql-keywords)
 
 (defvar-local clutch--tables-in-buffer-cache nil
   "Cached result for `clutch--tables-in-buffer' in the current buffer.")
@@ -37,7 +38,7 @@
 (defconst clutch--schema-inline-min-prefix-length 2
   "Minimum symbol prefix length before loading column hints synchronously.")
 
-(declare-function clutch--safe-completion-call "clutch" (thunk))
+(declare-function clutch--safe-completion-call "clutch-schema" (thunk))
 
 ;;;; SQL context, completion, eldoc, and xref
 
@@ -107,21 +108,10 @@
 (defun clutch--statement-bounds ()
   "Return (BEG . END) for the SQL statement surrounding point."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
-         (offset (- (point) (point-min))))
-    (if (clutch-db-sql-statement-breaks text)
-        (pcase-let ((`(,beg . ,end)
-                     (clutch-db-sql-semicolon-statement-bounds text offset)))
-          (cons (+ (point-min) beg) (+ (point-min) end)))
-      (let ((delim "\\(^[[:space:]]*$\\)"))
-        (cons
-         (save-excursion
-           (if (re-search-backward delim nil t)
-               (match-end 0)
-             (point-min)))
-         (save-excursion
-           (if (re-search-forward delim nil t)
-               (match-beginning 0)
-             (point-max))))))))
+         (offset (- (point) (point-min)))
+         (bounds (clutch-db-sql-context-statement-bounds text offset)))
+    (cons (+ (point-min) (car bounds))
+          (+ (point-min) (cdr bounds)))))
 
 (defun clutch--compute-tables-in-query-cache (schema)
   "Return a fresh cache plist for table-name analysis on SCHEMA."
@@ -164,69 +154,62 @@ The result is (BEG . END) containing POINT-OFFSET, or (0 . LEN) when
 POINT-OFFSET is at the top level."
   (let* ((len (length text))
          (stack nil)
-         (result (cons 0 len))
-         (i 0))
-    (while (< i len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment text i)))
-          (setq i skip)
-        (pcase (aref text i)
-          (?\( (push i stack)
-               (cl-incf i))
-          (?\) (when stack
-                 (let ((open (pop stack)))
-                   (when (and (<= open point-offset)
-                              (>= i point-offset))
-                     (when (< (- i open) (- (cdr result) (car result)))
-                       (setq result (cons (1+ open) i))))))
-               (cl-incf i))
-          (_ (cl-incf i)))))
+         (result (cons 0 len)))
+    (clutch-db-sql-scan-code
+     text 0 nil
+     (lambda (pos ch _depth)
+       (pcase ch
+         (?\( (push pos stack))
+         (?\) (when stack
+                (let ((open (pop stack)))
+                  (when (and (<= open point-offset)
+                             (>= pos point-offset)
+                             (< (- pos open) (- (cdr result) (car result))))
+                    (setq result (cons (1+ open) pos)))))))
+       nil))
     result))
+
+(defun clutch--union-branch-range-in-scope (text point-offset scope)
+  "Return the UNION branch range in TEXT for POINT-OFFSET within SCOPE.
+SCOPE is a (BEG . END) pair in TEXT coordinates.  UNION / UNION ALL keywords
+inside string literals, comments, or nested parentheses are ignored."
+  (pcase-let* ((`(,scope-beg . ,scope-end) scope)
+               (sub (substring text scope-beg scope-end))
+               (sub-len (length sub))
+               (sub-offset (max 0 (min sub-len (- point-offset scope-beg))))
+               (effective-offset (if (and (> sub-len 0)
+                                          (= sub-offset sub-len))
+                                     (1- sub-offset)
+                                   sub-offset))
+               (boundaries (list 0))
+               (case-fold-search t))
+    (clutch-db-sql-scan-code
+     sub 0 nil
+     (lambda (pos _ch depth)
+       (when (and (zerop depth)
+                  (string-match "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?" sub pos)
+                  (= (match-beginning 0) pos))
+         (push (match-beginning 0) boundaries)
+         (push (match-end 0) boundaries))
+       nil))
+    (push sub-len boundaries)
+    (setq boundaries (nreverse boundaries))
+    (let ((beg 0)
+          (end sub-len))
+      (while boundaries
+        (let ((boundary (pop boundaries)))
+          (cond
+           ((<= boundary effective-offset) (setq beg boundary))
+           (t (setq end boundary boundaries nil)))))
+      (cons (+ scope-beg beg) (+ scope-beg end)))))
 
 (defun clutch--union-branch-range (text point-offset)
   "Return (BEG . END) of the UNION branch in TEXT containing POINT-OFFSET.
 First narrows to the innermost parenthesized scope, then splits by
 UNION / UNION ALL at depth 0 within that scope."
-  (pcase-let* ((`(,scope-beg . ,scope-end)
-                (clutch--innermost-paren-range text point-offset))
-               (sub (substring text scope-beg scope-end))
-               (sub-offset (- point-offset scope-beg))
-               (sub-len (length sub))
-               (depth 0)
-               (boundaries (list 0))
-               (case-fold-search t)
-               (i 0))
-    ;; Collect positions of depth-0 UNION keywords within the scope.
-    (while (< i sub-len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sub i)))
-          (setq i skip)
-        (pcase (aref sub i)
-          (?\( (cl-incf depth) (cl-incf i))
-          (?\) (cl-decf depth) (cl-incf i))
-          (_
-           (if (and (zerop depth)
-                    (string-match "\\bunion\\b\\(?:\\s-+all\\b\\)?" sub i)
-                    (= (match-beginning 0) i))
-               (progn
-                 (push (match-beginning 0) boundaries)
-                 (push (match-end 0) boundaries)
-                 (setq i (match-end 0)))
-             (cl-incf i))))))
-    (push sub-len boundaries)
-    (setq boundaries (nreverse boundaries))
-    ;; Find the segment containing sub-offset, translate back to text coords.
-    ;; Point at the statement end belongs to the preceding branch.
-    (let ((beg 0)
-          (end sub-len)
-          (effective-offset (if (and (> sub-len 0)
-                                     (= sub-offset sub-len))
-                                (1- sub-offset)
-                              sub-offset)))
-      (while boundaries
-        (let ((b (pop boundaries)))
-          (cond
-           ((<= b effective-offset) (setq beg b))
-           (t (setq end b boundaries nil)))))
-      (cons (+ scope-beg beg) (+ scope-beg end)))))
+  (clutch--union-branch-range-in-scope
+   text point-offset
+   (clutch--innermost-paren-range text point-offset)))
 
 (defun clutch--extract-tables-and-aliases (text beg end)
   "Extract tables and alias mappings from TEXT between BEG and END.
@@ -303,35 +286,9 @@ When the statement has no UNION, returns all aliases."
   "Return (BEG . END) of the depth-0 UNION branch in TEXT containing POINT-OFFSET.
 Unlike `clutch--union-branch-range', does not narrow into parenthesized
 scopes first, so FROM/JOIN clauses remain visible from inside expressions."
-  (let ((len (length text))
-        (depth 0)
-        (boundaries (list 0))
-        (case-fold-search t)
-        (i 0))
-    (while (< i len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment text i)))
-          (setq i skip)
-        (pcase (aref text i)
-          (?\( (cl-incf depth) (cl-incf i))
-          (?\) (cl-decf depth) (cl-incf i))
-          (_
-           (if (and (zerop depth)
-                    (string-match "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?" text i)
-                    (= (match-beginning 0) i))
-               (progn
-                 (push (match-beginning 0) boundaries)
-                 (push (match-end 0) boundaries)
-                 (setq i (match-end 0)))
-             (cl-incf i))))))
-    (push len boundaries)
-    (setq boundaries (nreverse boundaries))
-    (let ((beg 0) (end len))
-      (while boundaries
-        (let ((b (pop boundaries)))
-          (cond
-           ((<= b point-offset) (setq beg b))
-           (t (setq end b boundaries nil)))))
-      (cons beg end))))
+  (clutch--union-branch-range-in-scope
+   text point-offset
+   (cons 0 (length text))))
 
 (defun clutch--find-alias-in-range (text masked alias stmt-beg search-beg search-end)
   "Search for ALIAS definition in TEXT between SEARCH-BEG and SEARCH-END.
@@ -479,11 +436,6 @@ This scans FROM/JOIN/UPDATE clauses in the SQL statement around point,
 bounded by semicolons or blank lines.  Falls back to
 `clutch--tables-in-buffer' when none are found."
   (plist-get (clutch--tables-in-query-cache-entry schema) :tables))
-
-(defun clutch--cached-columns (schema table)
-  "Return cached columns for TABLE from SCHEMA, or nil if not loaded."
-  (let ((cols (and schema (gethash table schema 'missing))))
-    (unless (eq cols 'missing) cols)))
 
 (defun clutch--identifier-match (identifier candidates)
   "Return canonical match for IDENTIFIER from string CANDIDATES, or nil.
@@ -1140,18 +1092,11 @@ control backend column loading."
 (defun clutch--completion-top-level-token-before (sql offset)
   "Return the last top-level SQL token in SQL before OFFSET."
   (let ((case-fold-search t)
-        (masked (clutch-db-sql-mask-literal-or-comment sql))
-        (depth 0)
-        token
-        (pos 0))
-    (while (< pos offset)
-      (pcase (aref masked pos)
-        (?\( (cl-incf depth)
-             (cl-incf pos))
-        (?\) (setq depth (max 0 (1- depth)))
-             (cl-incf pos))
-        (_
-         (if (and (zerop depth)
+        token)
+    (clutch-db-sql-scan-code
+     sql 0 (min offset (length sql))
+     (lambda (pos _ch depth)
+       (when (and (zerop depth)
                   (string-match
                    (rx word-start
                        (group
@@ -1161,14 +1106,13 @@ control backend column loading."
                             (seq "group" (+ (any " \t\n\r")) "by")
                             (seq "order" (+ (any " \t\n\r")) "by")))
                        word-end)
-                   masked pos)
+                   sql pos)
                   (= (match-beginning 0) pos)
                   (<= (match-end 0) offset))
-             (setq token (replace-regexp-in-string
-                          "[ \t\n\r]+" " "
-                          (upcase (match-string 1 masked)))
-                   pos (match-end 0))
-           (cl-incf pos)))))
+         (setq token (replace-regexp-in-string
+                      "[ \t\n\r]+" " "
+                      (upcase (match-string 1 sql)))))
+       nil))
     token))
 
 (defun clutch--completion-select-list-ready-p (sql start offset)
@@ -1276,8 +1220,9 @@ when completion triggers during an in-flight query)."
            (direct-table-candidates
             (when (and table-context-p
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
-              (clutch--safe-completion-call
-               (lambda () (clutch-db-complete-tables conn prefix)))))
+              (or (clutch--schema-table-candidates conn schema prefix)
+                  (clutch--safe-completion-call
+                   (lambda () (clutch-db-complete-tables conn prefix))))))
            (qualified-table (and qualifier
                                  (clutch--qualified-identifier-table schema beg)))
            (context-tables
@@ -1422,8 +1367,7 @@ SQL keyword/function docs are shown even without a connection."
        (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
      (when-let* ((conn clutch-connection)
                  ((clutch--connection-alive-p conn))
-                 ((not (clutch-db-busy-p conn)))
-                 ((string= "MySQL" (clutch-db-display-name conn))))
+                 ((not (clutch-db-busy-p conn))))
        (clutch--ensure-help-doc conn effective-sym))
      (clutch--eldoc-keyword-string effective-sym)))))
 

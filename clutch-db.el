@@ -30,6 +30,7 @@
 ;;
 ;; Defines a generic API via `cl-defgeneric' that database backends
 ;; (MySQL, PostgreSQL, etc.) implement via `cl-defmethod'.
+;; Also owns backend-neutral SQL helpers and database error normalization.
 ;;
 ;; Each backend provides a connection struct and methods dispatching
 ;; on that struct type.  clutch.el calls only these generics,
@@ -38,25 +39,75 @@
 ;;; Code:
 
 (require 'cl-lib)
-
-(declare-function auth-source-pass-entries "auth-source-pass" ())
-(declare-function auth-source-pass-parse-entry "auth-source-pass" (entry))
+(require 'subr-x)
 
 ;;;; Error types
 
 (define-error 'clutch-db-error "Database error")
 (define-error 'clutch-query-interrupted "Query interrupted" 'user-error)
 
-(defun clutch-db--pass-entry-by-suffix (suffix)
-  "Return the first pass entry path whose tail matches SUFFIX.
-Matches e.g. `dev-mysql' against `mysql/dev-mysql'.
-Returns nil when no matching entry is found or auth-source-pass is absent."
-  (when (and (fboundp 'auth-source-pass-entries)
-             (fboundp 'auth-source-pass-parse-entry))
-    (let* ((re (format "\\(^\\|/\\)%s$" (regexp-quote suffix)))
-           (entry (cl-find-if (lambda (e) (string-match-p re e))
-                              (auth-source-pass-entries))))
-      entry)))
+(defconst clutch--db-error-hints
+  '(;; ClickHouse
+    ("Lightweight updates are not supported"
+     . "enable lightweight update: ALTER TABLE ... MODIFY SETTING enable_block_number_column = 1")
+    ("Lightweight deletes? \\(?:is\\|are\\) not supported"
+     . "enable lightweight delete: SET allow_experimental_lightweight_delete = 1")
+    ;; Oracle
+    ("No suitable driver found for jdbc:oracle:"
+     . "Oracle JDBC driver not installed; run M-x clutch-jdbc-install-driver RET oracle")
+    ("ORA-00942" . "table or view does not exist; check name and privileges")
+    ("ORA-01031" . "insufficient privileges")
+    ("ORA-00904" . "invalid column name")
+    ;; MySQL
+    ("Access denied for user" . "wrong username or password")
+    ("Unknown column" . "column does not exist; check spelling")
+    ;; PostgreSQL
+    ("relation .* does not exist" . "table does not exist; check schema and name")
+    ("permission denied" . "insufficient privileges")
+    ;; General
+    ("Connection refused" . "cannot connect; check host and port")
+    ("connect timed out\\|connection timeout" . "connection timed out; check network and firewall"))
+  "Alist of (REGEX . HINT) for known database error patterns.")
+
+(defun clutch--humanize-db-error-parts (msg)
+  "Return structured human-facing parts for database error MSG.
+The returned plist contains :summary and, when available, :hint."
+  (let ((cleaned (or msg ""))
+        (case-fold-search t))
+    (setq cleaned (replace-regexp-in-string
+                   "\\`Database error: " "" cleaned))
+    (setq cleaned (replace-regexp-in-string
+                   "[ \t]*(queryId=[^)]*)" "" cleaned))
+    (setq cleaned (replace-regexp-in-string
+                   "[ \t]*(version [^)]*([^)]*)[^)]*)" "" cleaned))
+    (when (string-match "\n[ \t]*at " cleaned)
+      (setq cleaned (substring cleaned 0 (match-beginning 0))))
+    (setq cleaned (string-trim
+                   (replace-regexp-in-string "[[:space:]\n\r]+" " " cleaned)))
+    (list :summary cleaned
+          :hint (cl-loop for (pattern . h) in clutch--db-error-hints
+                         when (string-match-p pattern cleaned)
+                         return h))))
+
+(defun clutch--humanize-db-error (msg)
+  "Return a user-friendly version of database error MSG.
+Strips internal noise (queryId, version, stack traces) and appends
+actionable hints for known error patterns."
+  (let* ((parts (clutch--humanize-db-error-parts msg))
+         (summary (plist-get parts :summary))
+         (hint (plist-get parts :hint)))
+    (if hint
+        (format "%s [%s]" summary hint)
+      summary)))
+
+(defmacro clutch-db--translate-library-error (condition &rest body)
+  "Run BODY and translate backend CONDITION errors to `clutch-db-error'."
+  (declare (indent 1) (debug t))
+  `(condition-case err
+       (progn ,@body)
+     (,condition
+      (signal 'clutch-db-error
+              (list (error-message-string err))))))
 
 (defun clutch-db--normalize-symbol-option (value)
   "Return VALUE normalized to a lowercase symbol, or nil when absent."
@@ -67,6 +118,22 @@ Returns nil when no matching entry is found or auth-source-pass is absent."
    ((stringp value)
     (intern (downcase value)))
    (t value)))
+
+(defun clutch-db--reject-removed-connect-params (params)
+  "Signal for removed connection PARAMS and return PARAMS otherwise."
+  (when (plist-member params :read-timeout)
+    (user-error "Connection parameter :read-timeout was removed; use :read-idle-timeout"))
+  params)
+
+(defun clutch-db--apply-connect-defaults (params defaults)
+  "Return PARAMS with connection DEFAULTS filled in.
+DEFAULTS is an alist of (KEY . VALUE).  Existing non-nil values in PARAMS win."
+  (cl-loop with normalized = (copy-sequence params)
+           for (key . value) in defaults
+           do (setq normalized
+                    (plist-put normalized key
+                               (or (plist-get normalized key) value)))
+           finally return normalized))
 
 (defun clutch--json-serialize-text (value &optional context)
   "Return VALUE serialized as normal Emacs JSON text.
@@ -169,6 +236,7 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
 
 (defun clutch-db--normalize-connect-params (backend params)
   "Return connection PARAMS normalized for BACKEND."
+  (setq params (clutch-db--reject-removed-connect-params params))
   (pcase backend
     ('mysql (clutch-db--normalize-mysql-connect-params params))
     ('pg (clutch-db--normalize-pg-connect-params params))
@@ -185,6 +253,18 @@ datetime, other.
 ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
+
+(defun clutch-db-result-column-names (columns)
+  "Return column names from result COLUMNS as strings."
+  (mapcar (lambda (column)
+            (let ((name (plist-get column :name)))
+              (if (stringp name) name (format "%s" name))))
+          columns))
+
+(defun clutch-db-row-identity-values (row row-identity)
+  "Return a vector of identity values from ROW using ROW-IDENTITY."
+  (vconcat (mapcar (lambda (i) (nth i row))
+                   (plist-get row-identity :indices))))
 
 (defvar clutch-db--foreground-connections (make-hash-table :test 'eq)
   "Connections currently reserved by foreground Clutch commands.
@@ -212,6 +292,29 @@ Values are nesting counts.")
                (remhash ,conn-var clutch-db--foreground-connections))))))))
 
 ;;;; SQL helpers (literal-or-comment awareness)
+
+(defun clutch-db-sql-strip-leading-comments (sql)
+  "Strip leading SQL comments and whitespace from SQL."
+  (let ((s (string-trim-left sql)))
+    (while (or (string-prefix-p "--" s)
+               (string-prefix-p "/*" s))
+      (setq s (string-trim-left
+               (cond
+                ((string-prefix-p "--" s)
+                 (if-let* ((nl (string-search "\n" s)))
+                     (substring s (1+ nl))
+                   ""))
+                ((string-prefix-p "/*" s)
+                 (if-let* ((end (string-search "*/" s)))
+                     (substring s (+ end 2))
+                   ""))))))
+    s))
+
+(defun clutch-db-sql-normalize (sql)
+  "Return SQL trimmed for clause-aware analysis and rewrite."
+  (string-trim-right
+   (replace-regexp-in-string
+    ";\\s-*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
 
 (defun clutch-db-sql-skip-literal-or-comment (sql pos)
   "If POS in SQL starts a string literal or comment, return position past it.
@@ -270,6 +373,35 @@ are left intact.  Safe for multibyte strings (avoids `aset')."
         (cl-incf pos)))
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
+
+(defun clutch-db-sql-scan-code (sql start end fn)
+  "Scan SQL code characters from START to END, skipping strings/comments.
+FN is called with (POS CHAR DEPTH), where DEPTH is the parenthesis depth before
+CHAR is applied.  When FN returns non-nil, stop and return that value."
+  (let ((pos (or start 0))
+        (end (or end (length sql)))
+        (depth 0)
+        result)
+    (while (and (< pos end) (not result))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+          (setq pos (min skip end))
+        (let ((ch (aref sql pos)))
+          (setq result (funcall fn pos ch depth))
+          (unless result
+            (cond
+             ((= ch ?\() (cl-incf depth))
+             ((= ch ?\)) (setq depth (max 0 (1- depth)))))
+            (cl-incf pos)))))
+    result))
+
+(defun clutch-db-sql-matching-paren-position (sql open-pos)
+  "Return the matching close-paren position for OPEN-POS in SQL, or nil."
+  (clutch-db-sql-scan-code
+   sql open-pos nil
+   (lambda (pos ch depth)
+     (and (= ch ?\))
+          (= depth 1)
+          pos))))
 
 ;;;; SQL helpers (statement boundaries)
 
@@ -332,31 +464,93 @@ comments are ignored."
           (setq end break))))
     (cons beg end)))
 
+(defun clutch-db-sql--trim-bounds (text beg end)
+  "Return non-whitespace bounds in TEXT between BEG and END, or nil."
+  (while (and (< beg end)
+              (memq (aref text beg) '(?\s ?\t ?\r ?\n)))
+    (cl-incf beg))
+  (while (and (< beg end)
+              (memq (aref text (1- end)) '(?\s ?\t ?\r ?\n)))
+    (cl-decf end))
+  (when (< beg end)
+    (cons beg end)))
+
+(defun clutch-db-sql-semicolon-statement-bounds-at-offset
+    (text offset &optional strict-leading-space)
+  "Return zero-based semicolon statement bounds around OFFSET in TEXT.
+When STRICT-LEADING-SPACE is non-nil and OFFSET is before the trimmed
+statement body, return an empty range at OFFSET.  This lets execute-at-point
+avoid running the previous statement from blank space between semicolon
+delimited statements."
+  (let* ((bounds (clutch-db-sql-semicolon-statement-bounds text offset))
+         (effective-offset (clutch-db-sql-statement-effective-offset text offset))
+         (semicolon-edge (or (/= effective-offset offset)
+                             (and (< offset (length text))
+                                  (= (aref text offset) ?\;)))))
+    (if (and strict-leading-space
+             (not semicolon-edge)
+             (not (when-let* ((trimmed (clutch-db-sql--trim-bounds
+                                        text (car bounds) (cdr bounds))))
+                    (>= offset (car trimmed)))))
+        (cons offset offset)
+      bounds)))
+
+(defun clutch-db-sql-blank-line-statement-bounds (text offset)
+  "Return zero-based blank-line-delimited statement bounds around OFFSET."
+  (let ((len (length text))
+        (beg 0)
+        (end nil)
+        (pos 0))
+    (while (< pos len)
+      (let* ((line-start pos)
+             (newline (string-search "\n" text pos))
+             (line-end (or newline len))
+             (blank-p (string-match-p
+                       "\\`[ \t\r]*\\'"
+                       (substring text line-start line-end))))
+        (cond
+         ((and blank-p (<= line-end offset))
+          (setq beg (if newline (1+ line-end) line-end)))
+         ((and blank-p (not end) (> line-start offset))
+          (setq end line-start)))
+        (setq pos (if newline (1+ line-end) len))))
+    (cons beg (or end len))))
+
+(defun clutch-db-sql-context-statement-bounds (text offset)
+  "Return statement bounds for SQL context features in TEXT at OFFSET.
+Use semicolon-aware bounds when TEXT has top-level semicolons; otherwise fall
+back to blank-line paragraph bounds."
+  (if (clutch-db-sql-statement-breaks text)
+      (clutch-db-sql-semicolon-statement-bounds text offset)
+    (clutch-db-sql-blank-line-statement-bounds text offset)))
+
 ;;;; SQL helpers (top-level clause detection)
+
+(defun clutch-db-sql--top-level-clause-match (sql start patterns)
+  "Return (POS . PATTERN) for the first top-level PATTERNS match in SQL.
+START is the initial search offset.  PATTERNS are case-insensitive regex
+fragments matched with word boundaries."
+  (let ((case-fold-search t)
+        (matchers (mapcar (lambda (pattern)
+                            (cons pattern (format "\\b%s\\b" pattern)))
+                          patterns)))
+    (clutch-db-sql-scan-code
+     sql start nil
+     (lambda (pos _ch depth)
+       (and (zerop depth)
+            (catch 'match
+              (dolist (matcher matchers)
+                (when (and (string-match (cdr matcher) sql pos)
+                           (= (match-beginning 0) pos))
+                  (throw 'match (cons pos (car matcher)))))
+              nil))))))
 
 (defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)
   "Return start position of top-level PATTERN in SQL, or nil.
 PATTERN is matched case-insensitively with word boundaries.
 START defaults to 0."
-  (let ((pos (or start 0))
-        (depth 0)
-        (len (length sql))
-        (case-fold-search t)
-        (re (format "\\b%s\\b" pattern))
-        found)
-    (while (and (< pos len) (not found))
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
-          (setq pos skip)
-        (let ((ch (aref sql pos)))
-          (cond
-           ((= ch ?\() (cl-incf depth) (cl-incf pos))
-           ((= ch ?\)) (cl-decf depth) (cl-incf pos))
-           ((and (= depth 0)
-                 (string-match re sql pos)
-                 (= (match-beginning 0) pos))
-            (setq found pos))
-           (t (cl-incf pos))))))
-    found))
+  (car (clutch-db-sql--top-level-clause-match
+        sql (or start 0) (list pattern))))
 
 (defun clutch-db-sql-has-top-level-clause-p (sql pattern &optional start)
   "Return non-nil when SQL has top-level PATTERN starting at START."
@@ -370,12 +564,176 @@ START defaults to 0."
   "Return non-nil when SQL has a top-level OFFSET clause."
   (clutch-db-sql-has-top-level-clause-p sql "OFFSET"))
 
+(defun clutch-db-sql-starts-with-keyword-p (sql keywords)
+  "Return non-nil when SQL starts with one of KEYWORDS."
+  (let ((trimmed (clutch-db-sql-strip-leading-comments sql)))
+    (string-match-p (concat "\\`" (regexp-opt keywords) "\\b")
+                    (upcase trimmed))))
+
+(defun clutch-db-sql-leading-keyword (sql)
+  "Return the leading SQL keyword for SQL, or nil."
+  (let ((trimmed (clutch-db-sql-strip-leading-comments sql)))
+    (when (string-match "\\`\\([[:alpha:]]+\\)" trimmed)
+      (upcase (match-string 1 trimmed)))))
+
+(defun clutch-db-sql-main-op-keyword (sql)
+  "Return main top-level operation keyword for SQL, or nil."
+  (let* ((normalized (clutch-db-sql-normalize sql))
+         (match (clutch-db-sql--top-level-clause-match
+                 normalized 0
+                 '("UPDATE" "DELETE" "SELECT" "INSERT" "REPLACE" "MERGE"))))
+    (cdr match)))
+
+(defun clutch-db-sql-top-level-comma-p (sql start end)
+  "Return non-nil when SQL has a top-level comma between START and END."
+  (clutch-db-sql-scan-code
+   sql start end
+   (lambda (_pos ch depth)
+     (and (zerop depth) (= ch ?,)))))
+
+(defun clutch-db-sql-next-top-level-clause-position (sql start patterns)
+  "Return earliest top-level clause match in SQL after START for PATTERNS.
+PATTERNS is a list of case-insensitive regex fragments passed to
+`clutch-db-sql-find-top-level-clause'."
+  (car (clutch-db-sql--top-level-clause-match sql start patterns)))
+
+(defun clutch-db-sql-from-body-range (sql from-pos)
+  "Return `(START END)' for the top-level FROM body in SQL after FROM-POS."
+  (let ((start (+ from-pos 4)))
+    (list start
+          (or (clutch-db-sql-next-top-level-clause-position
+               sql start
+               '("WHERE" "GROUP\\s-+BY" "HAVING" "ORDER\\s-+BY"
+                 "LIMIT" "OFFSET" "FETCH" "FOR" "UNION" "INTERSECT"
+                 "EXCEPT"))
+              (length sql)))))
+
+(defconst clutch-db-sql--table-token-pattern
+  (concat "\\(?:`[^`]+`\\."
+          "\\)?`[^`]+`"
+          "\\|\\(?:\"[^\"]+\"\\.\\)?\"[^\"]+\""
+          "\\|\\(?:\\[[^]]+\\]\\.\\)?\\[[^]]+\\]"
+          "\\|[^[:space:],();]+")
+  "SQL table token pattern accepted by source-table helpers.")
+
+(defun clutch-db-sql-from-body-parts (body)
+  "Return `(TABLE ALIAS)' from simple FROM BODY."
+  (let ((case-fold-search t)
+        (pattern (concat "\\`\\s-*\\("
+                         clutch-db-sql--table-token-pattern
+                         "\\)"
+                         "\\(?:\\s-+\\(?:AS\\s-+\\)?"
+                         "\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\|[^[:space:]]+\\)"
+                         "\\)?\\s-*\\'")))
+    (and (string-match pattern body)
+         (list (match-string 1 body)
+               (match-string 2 body)))))
+
+(defun clutch-db-sql-table-qualifier (table)
+  "Return the exposed table qualifier from TABLE."
+  (cond
+   ((string-match "\\.\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\)\\'" table)
+    (match-string 1 table))
+   ((string-match "\\.\\([^.\"]+\\)\\'" table)
+    (match-string 1 table))
+   (t table)))
+
+(defun clutch-db-sql-table-name (table)
+  "Return the unquoted table name represented by TABLE."
+  (let ((name (clutch-db-sql-table-qualifier table)))
+    (cond
+     ((string-match "\\`\"\\([^\"]+\\)\"\\'" name)
+      (match-string 1 name))
+     ((string-match "\\``\\([^`]+\\)`\\'" name)
+      (match-string 1 name))
+     ((string-match "\\`\\[\\([^]]+\\)\\]\\'" name)
+      (match-string 1 name))
+     (t name))))
+
+(defun clutch-db-sql--source-table-token (sql &optional simple-only)
+  "Return the top-level source table token for SQL, or nil.
+When SIMPLE-ONLY is non-nil, require a direct single-table SELECT.  Derived
+tables, joins, comma joins, CTEs, UNION/INTERSECT/EXCEPT, and other ambiguous
+relations return nil.  The returned token preserves identifier quoting."
+  (let* ((normalized (clutch-db-sql-normalize sql))
+         (from-pos (clutch-db-sql-find-top-level-clause normalized "FROM")))
+    (when from-pos
+      (pcase-let* ((`(,start ,end)
+                    (clutch-db-sql-from-body-range normalized from-pos))
+                   (body (string-trim (substring normalized start end))))
+        (when (or (not simple-only)
+                  (and (clutch-db-sql-starts-with-keyword-p normalized '("SELECT"))
+                       (not (string-prefix-p "(" body))
+                       (not (clutch-db-sql-top-level-comma-p normalized start end))
+                       (not (clutch-db-sql-next-top-level-clause-position
+                             normalized 0 '("UNION" "INTERSECT" "EXCEPT")))
+                       (not (let ((join-pos
+                                   (clutch-db-sql-find-top-level-clause
+                                    normalized "JOIN" start)))
+                              (and join-pos (< join-pos end))))))
+          (if simple-only
+              (car (clutch-db-sql-from-body-parts body))
+            (when (string-match (concat "\\`\\s-*\\("
+                                        clutch-db-sql--table-token-pattern
+                                        "\\)")
+                                body)
+              (match-string 1 body))))))))
+
+(defun clutch-db-sql-source-table (sql &optional simple-only)
+  "Return the top-level source table name for SQL, or nil.
+When SIMPLE-ONLY is non-nil, require a direct single-table SELECT.  Derived
+tables, joins, comma joins, CTEs, UNION/INTERSECT/EXCEPT, and other ambiguous
+relations return nil."
+  (when-let* ((token (clutch-db-sql--source-table-token sql simple-only)))
+    (clutch-db-sql-table-name token)))
+
+(defun clutch-db-sql-destructive-p (sql)
+  "Return non-nil if SQL is a destructive operation."
+  (clutch-db-sql-starts-with-keyword-p
+   sql '("DELETE" "DROP" "TRUNCATE" "ALTER")))
+
+(defun clutch-db-sql-schema-affecting-p (sql)
+  "Return non-nil if SQL is likely to invalidate cached schema."
+  (clutch-db-sql-starts-with-keyword-p
+   sql '("CREATE" "ALTER" "DROP" "TRUNCATE" "RENAME")))
+
+(defun clutch-db-sql-select-query-p (sql)
+  "Return non-nil if SQL returns a result set."
+  (clutch-db-sql-starts-with-keyword-p
+   sql '("SELECT" "WITH" "DESCRIBE" "DESC" "SHOW" "EXPLAIN")))
+
 (defun clutch-db-sql-strip-top-level-order-by (sql)
   "Strip a top-level ORDER BY tail from SQL.
 Leaves nested ORDER BY clauses inside subqueries or window functions intact."
   (if-let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY")))
       (string-trim-right (substring sql 0 order-pos))
     sql))
+
+(defun clutch-db-sql-derived-table-body (sql)
+  "Return SQL normalized for derived-table wrapping.
+Top-level ORDER BY is removed when there is no top-level LIMIT/OFFSET because
+it is either semantically unnecessary or invalid in derived tables on dialects
+such as SQL Server.  Limited result sets keep their tail clauses so count and
+filter operations continue to target the user's visible result set."
+  (let ((normalized (clutch-db-sql-normalize sql)))
+    (if (or (clutch-db-sql-has-top-level-limit-p normalized)
+            (clutch-db-sql-has-top-level-offset-p normalized))
+        normalized
+      (clutch-db-sql-strip-top-level-order-by normalized))))
+
+(defun clutch-db-build-count-sql (conn sql)
+  "Return a COUNT(*) query for SQL using CONN's derived-table syntax."
+  (format "SELECT COUNT(*) FROM (%s) %s"
+          (clutch-db-sql-derived-table-body sql)
+          (clutch-db-derived-table-alias conn "_clutch_count")))
+
+(defun clutch-db-apply-where (conn sql filter)
+  "Return SQL wrapped as a derived table with outer WHERE FILTER.
+CONN supplies the dialect-specific derived-table alias syntax."
+  (format "SELECT * FROM (%s) %s WHERE %s"
+          (clutch-db-sql-derived-table-body sql)
+          (clutch-db-derived-table-alias conn "_clutch_filter")
+          filter))
 
 (defun clutch-db--build-limit-offset-paged-sql (base-sql page-num page-size
                                                          order-by escape-fn
@@ -399,7 +757,7 @@ PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
       (format "%s%s LIMIT %d OFFSET %d"
               sortable-sql (or order-clause "") page-size offset))))
 
-;;;; Generic interface — 18 methods dispatched on connection type
+;;;; Generic interface
 
 ;; Lifecycle
 
@@ -424,6 +782,13 @@ PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
 (cl-defgeneric clutch-db-init-connection (conn)
   "Perform post-connect initialization on CONN.
 For example, SET NAMES utf8mb4 on MySQL.")
+
+(cl-defgeneric clutch-db-backend-key (conn)
+  "Return the registered backend key for CONN, or nil when unknown.")
+
+(cl-defmethod clutch-db-backend-key ((_conn t))
+  "Fallback implementation for opaque connection objects."
+  nil)
 
 (cl-defgeneric clutch-db-manual-commit-p (conn)
   "Return non-nil when CONN is in manual-commit mode.")
@@ -460,6 +825,16 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
 (cl-defmethod clutch-db-set-auto-commit ((_conn t) _auto-commit)
   "Signal that the backend does not support runtime auto-commit changes."
   (user-error "Manual commit is not supported by this connection"))
+
+(cl-defgeneric clutch-db-schema-transaction-effect (conn sql)
+  "Return dirty-cache effect for successful schema SQL on CONN.
+SQL is known to affect schema metadata.  Return `dirty' when the SQL leaves
+uncommitted work, `clear' when it commits the transaction, or nil when the
+backend should preserve the current dirty state.")
+
+(cl-defmethod clutch-db-schema-transaction-effect ((_conn t) _sql)
+  "Preserve dirty state for backends without declared DDL transaction semantics."
+  nil)
 
 (cl-defgeneric clutch-db-eager-schema-refresh-p (conn)
   "Return non-nil when CONN should refresh schema synchronously on connect.")
@@ -543,22 +918,9 @@ Return the same shape as `clutch-db-query'.")
 Substitute PARAMS into SQL before calling `clutch-db-query'."
   (clutch-db-query
    conn
-   (clutch-db-substitute-params
-    sql params
-    (lambda (value)
-      (cond
-       ((null value) "NULL")
-       ((numberp value) (number-to-string value))
-       ((stringp value) (clutch-db-escape-literal conn value))
-       ((and (listp value)
-             (clutch-db-format-temporal value))
-        (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
-       ((or (hash-table-p value) (vectorp value))
-        (clutch-db-escape-literal
-         conn
-         (clutch--json-serialize-text value "parameter value")))
-       (t
-        (clutch-db-escape-literal conn (format "%S" value))))))))
+   (clutch-db-substitute-params sql params
+                                (lambda (value)
+                                  (clutch-db-value-to-literal conn value)))))
 
 (cl-defgeneric clutch-db-interrupt-query (conn)
   "Interrupt the current query on CONN.
@@ -581,8 +943,44 @@ when non-nil, overrides PAGE-NUM for last-window pagination.")
 (cl-defgeneric clutch-db-escape-identifier (conn name)
   "Escape NAME as a SQL identifier for CONN's dialect.")
 
+(cl-defgeneric clutch-db--source-table-name (conn token)
+  "Return backend-canonical source table name for SQL table TOKEN.")
+
+(cl-defmethod clutch-db--source-table-name ((_conn t) token)
+  "Return the default backend-canonical source table name for TOKEN."
+  (clutch-db-sql-table-name token))
+
 (cl-defgeneric clutch-db-escape-literal (conn value)
   "Escape VALUE as a SQL string literal for CONN's dialect.")
+
+(cl-defgeneric clutch-db-derived-table-alias (conn alias)
+  "Return CONN's derived-table alias clause for ALIAS.")
+
+(cl-defmethod clutch-db-derived-table-alias ((_conn t) alias)
+  "Return the default SQL derived-table alias clause for ALIAS."
+  (format "AS %s" alias))
+
+(defun clutch-db-value-to-literal (conn value &optional fallback-format-fn)
+  "Render VALUE as a SQL literal for CONN.
+FALLBACK-FORMAT-FN formats non-scalar result values before string escaping.
+When absent, non-scalar values fall back to `format' with `%S'."
+  (cond
+   ((null value) "NULL")
+   ((numberp value) (number-to-string value))
+   ((stringp value) (clutch-db-escape-literal conn value))
+   ((and (listp value)
+         (clutch-db-format-temporal value))
+    (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
+   ((or (hash-table-p value) (vectorp value))
+    (clutch-db-escape-literal
+     conn
+     (clutch--json-serialize-text value "parameter value")))
+   (t
+    (clutch-db-escape-literal
+     conn
+     (if fallback-format-fn
+         (funcall fallback-format-fn value)
+       (format "%S" value))))))
 
 (defun clutch-db-substitute-params (sql params render-fn)
   "Return SQL with PARAMS substituted using RENDER-FN.
@@ -735,6 +1133,15 @@ other backend-specific keys as needed.")
 (cl-defgeneric clutch-db-table-comment (conn table)
   "Return the comment string for TABLE on CONN, or nil if none.")
 
+(cl-defgeneric clutch-db-symbol-help (conn symbol)
+  "Return backend-specific help for SYMBOL on CONN.
+The return value is a plist with :sig and :desc, or nil when unsupported or
+unknown.")
+
+(cl-defmethod clutch-db-symbol-help ((_conn t) _symbol)
+  "Fallback implementation for backends without live symbol help."
+  nil)
+
 (cl-defgeneric clutch-db-table-comment-async (conn table callback &optional errback)
   "Start an asynchronous table-comment fetch for TABLE on CONN.
 CALLBACK receives the comment string or nil on success.  ERRBACK receives an
@@ -745,6 +1152,45 @@ nil when unsupported.")
                                              &optional _errback)
   "Backends without asynchronous table-comment support return nil."
   nil)
+
+(defmacro clutch-db--define-idle-metadata-methods (type backend-name)
+  "Define idle metadata async methods for connection TYPE.
+BACKEND-NAME is used only in generated docstrings."
+  `(progn
+     (cl-defmethod clutch-db-refresh-schema-async ((conn ,type) callback
+                                                   &optional errback)
+       ,(format "Refresh %s schema names on the main thread when idle."
+                backend-name)
+       (clutch-db--schedule-idle-metadata-call
+        conn callback errback #'clutch-db-list-tables))
+
+     (cl-defmethod clutch-db-list-columns-async ((conn ,type) table callback
+                                                 &optional errback)
+       ,(format "Fetch %s column names on the main thread when idle."
+                backend-name)
+       (clutch-db--schedule-idle-metadata-call
+        conn callback errback #'clutch-db-list-columns table))
+
+     (cl-defmethod clutch-db-column-details-async ((conn ,type) table callback
+                                                   &optional errback)
+       ,(format "Fetch %s column details on the main thread when idle."
+                backend-name)
+       (clutch-db--schedule-idle-metadata-call
+        conn callback errback #'clutch-db-column-details table))
+
+     (cl-defmethod clutch-db-table-comment-async ((conn ,type) table callback
+                                                  &optional errback)
+       ,(format "Fetch %s table comments on the main thread when idle."
+                backend-name)
+       (clutch-db--schedule-idle-metadata-call
+        conn callback errback #'clutch-db-table-comment table))
+
+     (cl-defmethod clutch-db-list-objects-async ((conn ,type) category callback
+                                                 &optional errback)
+       ,(format "Fetch %s object entries on the main thread when idle."
+                backend-name)
+       (clutch-db--schedule-idle-metadata-call
+        conn callback errback #'clutch-db-list-objects category))))
 
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")
@@ -814,12 +1260,54 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 ;;;; Connect dispatcher
 
 (defvar clutch-db--backend-features
-  '((mysql  . (:require clutch-db-mysql  :connect-fn clutch-db-mysql-connect))
-    (pg     . (:require clutch-db-pg     :connect-fn clutch-db-pg-connect))
-    (sqlite . (:require clutch-db-sqlite :connect-fn clutch-db-sqlite-connect)))
+  '((mysql  . (:require clutch-db-mysql
+	       :connect-fn clutch-db-mysql-connect
+	       :display-name "MySQL"
+	       :default-port 3306
+	       :sql-product mysql))
+    (pg     . (:require clutch-db-pg
+	       :connect-fn clutch-db-pg-connect
+	       :display-name "PostgreSQL"
+	       :default-port 5432
+	       :sql-product postgres))
+    (sqlite . (:require clutch-db-sqlite
+	       :connect-fn clutch-db-sqlite-connect
+	       :display-name "SQLite"
+	       :sql-product sqlite)))
   "Alist mapping backend symbols to their feature plists.
-Each plist has :require (the feature to load) and :connect-fn
-\(a function taking a plist of connection params and returning a conn).")
+Each plist has :require (the feature to load), :connect-fn (a function taking
+a plist of connection params and returning a conn), and optional UI metadata
+such as :display-name and :default-port.")
+
+(defun clutch-db-backend-feature (backend)
+  "Return the registered feature plist for BACKEND, loading JDBC if needed."
+  (or (alist-get backend clutch-db--backend-features)
+      (progn
+        (require 'clutch-db-jdbc nil t)
+        (alist-get backend clutch-db--backend-features))))
+
+(defun clutch-db-backends (&optional load-optional)
+  "Return registered backend symbols in user-facing order.
+When LOAD-OPTIONAL is non-nil, load optional backend registries such as JDBC
+before returning the list."
+  (when load-optional
+    (require 'clutch-db-jdbc nil t))
+  (mapcar #'car clutch-db--backend-features))
+
+(defun clutch-db-backend-display-name (backend)
+  "Return registered display name for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-db-backend-feature backend) :display-name)))
+
+(defun clutch-db-backend-default-port (backend)
+  "Return registered default TCP port for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-db-backend-feature backend) :default-port)))
+
+(defun clutch-db-backend-sql-product (backend)
+  "Return registered `sql-product' symbol for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-db-backend-feature backend) :sql-product)))
 
 (defun clutch-db-connect (backend params)
   "Connect to a database using BACKEND with PARAMS.
@@ -828,10 +1316,7 @@ PARAMS is a plist of connection parameters (:host, :port, :user,
 :password, :database, etc.).
 Returns a backend-specific connection object."
   (if-let* ((feature-plist
-             (or (alist-get backend clutch-db--backend-features)
-                 (progn
-                   (require 'clutch-db-jdbc nil t)
-                   (alist-get backend clutch-db--backend-features))))
+             (clutch-db-backend-feature backend))
             (connect-fn
              (progn
                (condition-case err

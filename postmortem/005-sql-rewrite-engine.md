@@ -1,5 +1,9 @@
 # 005 — SQL Rewrite Engine: Pagination, COUNT, and WHERE Filter
 
+Update: this record's "derived-table fallback is always semantically safe"
+lesson was later narrowed by
+`099-derived-table-rewrite-capability-gates.md`.
+
 ## Background
 
 clutch needs to rewrite user SQL for three purposes:

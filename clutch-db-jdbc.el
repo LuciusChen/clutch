@@ -46,11 +46,6 @@
 (require 'json)
 (require 'sql)
 
-;; These are loaded before JDBC completion methods are dispatched.  Keep them
-;; as declarations to avoid a hard schema/UI dependency from the backend.
-(declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
-(declare-function clutch--schema-status-entry "clutch-schema" (conn))
-
 ;;;; Configuration
 
 (defgroup clutch-jdbc nil
@@ -150,6 +145,8 @@ A stuck disconnect should not block the user or kill the agent.")
                   :filename "redshift-jdbc42.jar"))
     (clickhouse . (:maven "com.clickhouse:clickhouse-jdbc:0.9.8:all"
                    :filename "clickhouse-jdbc.jar"))
+    (duckdb     . (:maven "org.duckdb:duckdb_jdbc:1.5.3.0"
+                  :filename "duckdb_jdbc.jar"))
     (slf4j-api  . (:maven "org.slf4j:slf4j-api:2.0.16"
                    :filename "slf4j-api.jar"))
     (slf4j-nop  . (:maven "org.slf4j:slf4j-nop:2.0.16"
@@ -162,6 +159,16 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defconst clutch-jdbc--jdbc-drivers
   '(jdbc oracle sqlserver db2 snowflake redshift clickhouse)
   "Backend/driver symbols that are routed to the JDBC backend.")
+
+(defconst clutch-jdbc--driver-metadata
+  '((jdbc       . (:display-name "JDBC"))
+    (oracle     . (:display-name "Oracle"     :default-port 1521 :sql-product oracle))
+    (sqlserver  . (:display-name "SQL Server" :default-port 1433))
+    (db2        . (:display-name "DB2"        :default-port 50000))
+    (snowflake  . (:display-name "Snowflake"  :default-port 443))
+    (redshift   . (:display-name "Redshift"   :default-port 5439))
+    (clickhouse . (:display-name "ClickHouse" :default-port 8123)))
+  "User-facing metadata for JDBC-backed concrete drivers.")
 
 (defconst clutch-jdbc--driver-companions
   '((oracle oracle-i18n)
@@ -692,16 +699,12 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
 
 (defun clutch-jdbc--apply-timeout-defaults (params)
   "Return a copy of PARAMS with absent timeout keys set to their global defaults."
-  (let ((p (copy-sequence params)))
-    (setq p (plist-put p :connect-timeout
-                       (or (plist-get p :connect-timeout) clutch-connect-timeout-seconds)))
-    (setq p (plist-put p :read-idle-timeout
-                       (or (plist-get p :read-idle-timeout) clutch-read-idle-timeout-seconds)))
-    (setq p (plist-put p :query-timeout
-                       (or (plist-get p :query-timeout) clutch-query-timeout-seconds)))
-    (setq p (plist-put p :rpc-timeout
-                       (or (plist-get p :rpc-timeout) clutch-jdbc-rpc-timeout-seconds)))
-    p))
+  (clutch-db--apply-connect-defaults
+   (clutch-db--reject-removed-connect-params params)
+   `((:connect-timeout . ,clutch-connect-timeout-seconds)
+     (:read-idle-timeout . ,clutch-read-idle-timeout-seconds)
+     (:query-timeout . ,clutch-query-timeout-seconds)
+     (:rpc-timeout . ,clutch-jdbc-rpc-timeout-seconds))))
 
 (defun clutch-jdbc--setup-prerequisites (driver)
   "Ensure agent jar and DRIVER jar are present."
@@ -767,10 +770,16 @@ Returns a `clutch-jdbc-conn'."
 (dolist (driver clutch-jdbc--jdbc-drivers)
   (unless (alist-get driver clutch-db--backend-features)
     (let ((drv driver))
-      (push (cons drv
-                  (list :require 'clutch-db-jdbc
-                        :connect-fn (lambda (p) (clutch-db-jdbc-connect drv p))))
-            clutch-db--backend-features))))
+      (add-to-list
+       'clutch-db--backend-features
+       (cons drv
+             (append (copy-sequence
+                      (alist-get drv clutch-jdbc--driver-metadata))
+                     (list :require 'clutch-db-jdbc
+                           :connect-fn
+                           (lambda (p)
+                             (clutch-db-jdbc-connect drv p)))))
+       t))))
 
 ;;;; Lifecycle methods
 
@@ -798,6 +807,11 @@ pass `process-live-p' briefly; the identity check closes that window."
        clutch-jdbc--agent-process
        (eq (clutch-jdbc-conn-process conn) clutch-jdbc--agent-process)
        (process-live-p (clutch-jdbc-conn-process conn))))
+
+(cl-defmethod clutch-db-backend-key ((conn clutch-jdbc-conn))
+  "Return the registered backend key for JDBC CONN."
+  (or (plist-get (clutch-jdbc-conn-params conn) :driver)
+      'jdbc))
 
 (cl-defmethod clutch-db-error-details ((conn clutch-jdbc-conn))
   "Return the latest structured error details snapshot for JDBC CONN."
@@ -915,6 +929,13 @@ commits any pending transaction per the JDBC specification."
                     (clutch-jdbc--conn-rpc-timeout conn))
   (setf (clutch-jdbc-conn-params conn)
         (plist-put (clutch-jdbc-conn-params conn) :manual-commit (not auto-commit))))
+
+(cl-defmethod clutch-db-schema-transaction-effect ((conn clutch-jdbc-conn) _sql)
+  "Return schema SQL transaction effect for JDBC CONN.
+Oracle DDL commits the transaction; other JDBC drivers keep the default
+unknown effect."
+  (when (clutch-jdbc--oracle-conn-p conn)
+    'clear))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((conn clutch-jdbc-conn))
   "Return non-nil when CONN should refresh schema eagerly.
@@ -1151,6 +1172,22 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
       (clutch-jdbc--clickhouse-escape-identifier name)
     (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name))))
 
+(cl-defmethod clutch-db--source-table-name ((conn clutch-jdbc-conn) token)
+  "Return backend-canonical source table name for JDBC SQL table TOKEN."
+  (let ((name (cl-call-next-method)))
+    (if (and (clutch-jdbc--oracle-conn-p conn)
+             (not (string-match-p "\\`\\s-*\""
+                                  (clutch-db-sql-table-qualifier token))))
+        (upcase name)
+      name)))
+
+(cl-defmethod clutch-db-derived-table-alias ((conn clutch-jdbc-conn) alias)
+  "Return a JDBC derived-table alias clause for ALIAS on CONN.
+Oracle does not accept AS before a subquery alias."
+  (if (clutch-jdbc--oracle-conn-p conn)
+      (replace-regexp-in-string "\\`_+" "" alias)
+    (cl-call-next-method)))
+
 (defun clutch-jdbc--oracle-display-identifier (name)
   "Return Oracle DDL display form for identifier NAME.
 Leave simple uppercase identifiers unquoted so reconstructed DDL reads
@@ -1241,20 +1278,41 @@ when a catalog is supplied."
              (t (string-collate-lessp a b)))))))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
-  "Return table names for JDBC CONN using DatabaseMetaData.
+  "Return table names for JDBC CONN.
 For Oracle, defaults the schema filter to the connected username to avoid
-returning tables from SYS/SYSTEM and other visible schemas."
+returning tables from SYS/SYSTEM and other visible schemas.  ClickHouse uses
+system.tables because its JDBC metadata does not reliably enumerate the
+current database."
   (mapcar (lambda (entry) (plist-get entry :name))
           (clutch-db-list-table-entries conn)))
 
+(defun clutch-jdbc--clickhouse-table-entries (conn)
+  "Return ClickHouse table entries for CONN from system.tables."
+  (let* ((database (or (plist-get (clutch-jdbc-conn-params conn) :database)
+                       "default"))
+         (sql (format "SELECT name, engine FROM system.tables WHERE database = %s ORDER BY name"
+                      (clutch-db-escape-literal conn database))))
+    (mapcar
+     (lambda (row)
+       (pcase-let ((`(,name ,engine . ,_) row))
+         (list :name name
+               :type (if (and (stringp engine)
+                              (string-match-p "View\\'" engine))
+                         "VIEW"
+                       "TABLE")
+               :schema database
+               :source-schema database)))
+     (clutch-db-result-rows (clutch-db-query conn sql)))))
+
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-jdbc-conn))
   "Return table entry plists for JDBC CONN."
-  (let* ((result  (clutch-jdbc--rpc
-                   "get-tables"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     ,@(clutch-jdbc--metadata-scope-params conn))))
-         (entries (clutch-jdbc--collect-table-entries conn result)))
-    entries))
+  (if (clutch-jdbc--clickhouse-conn-p conn)
+      (clutch-jdbc--clickhouse-table-entries conn)
+    (let* ((result  (clutch-jdbc--rpc
+                     "get-tables"
+                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                       ,@(clutch-jdbc--metadata-scope-params conn)))))
+      (clutch-jdbc--collect-table-entries conn result))))
 
 (cl-defmethod clutch-db-list-schemas ((conn clutch-jdbc-conn))
   "Return visible schema names for JDBC CONN when supported."
@@ -1358,44 +1416,31 @@ Call CALLBACK on success or ERRBACK on failure."
             (plist-get result :columns))))
 
 (cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
-  "Return table name candidates matching PREFIX for JDBC CONN.
-For Oracle: uses the schema cache when available (no RPC); falls back to a
-`search-tables' RPC when the cache is absent or marked stale."
+  "Return table name candidates matching PREFIX for JDBC CONN."
   (when (clutch-jdbc--oracle-conn-p conn)
-    (if-let* ((schema-ready
-               (and (fboundp 'clutch--schema-status-entry)
-                    (eq (plist-get (clutch--schema-status-entry conn) :state) 'ready)))
-              (schema (and schema-ready
-                           (clutch--schema-for-connection conn))))
-        (let ((cached
-               (seq-filter (lambda (name)
-                             (string-prefix-p (upcase prefix) (upcase name)))
-                           (hash-table-keys schema))))
-          (if cached
-              cached
-            (let* ((result (clutch-jdbc--rpc
-                            "search-tables"
-                            `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                              (prefix  . ,prefix)
-                              ,@(clutch-jdbc--metadata-scope-params conn)))))
-              (mapcar (lambda (tbl) (plist-get tbl :name))
-                      (plist-get result :tables)))))
-      (let* ((result (clutch-jdbc--rpc
-                      "search-tables"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                        (prefix  . ,prefix)
-                        ,@(clutch-jdbc--metadata-scope-params conn)))))
-        (mapcar (lambda (tbl) (plist-get tbl :name))
-                (plist-get result :tables))))))
+    (let ((result (clutch-jdbc--rpc
+                   "search-tables"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                     (prefix  . ,prefix)
+                     ,@(clutch-jdbc--metadata-scope-params conn)))))
+      (mapcar (lambda (tbl) (plist-get tbl :name))
+              (plist-get result :tables)))))
 
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-jdbc-conn) prefix)
   "Return table entry plists matching PREFIX for JDBC CONN."
-  (let* ((result (clutch-jdbc--rpc
-                  "search-tables"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (prefix  . ,prefix)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
-    (plist-get result :tables)))
+  (if (clutch-jdbc--clickhouse-conn-p conn)
+      (seq-filter
+       (lambda (entry)
+         (string-prefix-p
+          (downcase prefix)
+          (downcase (plist-get entry :name))))
+       (clutch-jdbc--clickhouse-table-entries conn))
+    (let* ((result (clutch-jdbc--rpc
+                    "search-tables"
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                      (prefix  . ,prefix)
+                      ,@(clutch-jdbc--metadata-scope-params conn)))))
+      (plist-get result :tables))))
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
   "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
@@ -1674,14 +1719,9 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (cl-defmethod clutch-db-display-name ((conn clutch-jdbc-conn))
   "Return a display name for CONN based on the JDBC driver type."
   (or (plist-get (clutch-jdbc-conn-params conn) :display-name)
-      (pcase (plist-get (clutch-jdbc-conn-params conn) :driver)
-        ('oracle    "Oracle")
-        ('sqlserver "SQL Server")
-        ('db2       "DB2")
-        ('snowflake "Snowflake")
-        ('redshift  "Redshift")
-        ('clickhouse "ClickHouse")
-        (_          "JDBC"))))
+      (clutch-db-backend-display-name
+       (plist-get (clutch-jdbc-conn-params conn) :driver))
+      "JDBC"))
 
 ;;;; Agent installation helpers
 

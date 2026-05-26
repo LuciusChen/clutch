@@ -51,7 +51,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
-(declare-function clutch--effective-sql-product "clutch" (params))
+(declare-function clutch--effective-sql-product "clutch-connection" (params))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
@@ -59,17 +59,16 @@ Each value is a plist with at least :entries and :fetched-at.")
                   (name fallback face &rest icon-args))
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--connection-key "clutch-connection" (conn))
-(declare-function clutch--humanize-db-error "clutch-query" (msg))
-(declare-function clutch--clear-connection-problem-capture "clutch" (connection))
-(declare-function clutch--remember-recoverable-metadata-warning "clutch"
+(declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
+(declare-function clutch--remember-recoverable-metadata-warning "clutch-schema"
                   (connection op err &optional context))
 (declare-function clutch--remember-buffer-query-error-details "clutch-query"
                   (buffer connection sql err))
-(declare-function clutch--remember-debug-event "clutch" (&rest event))
-(declare-function clutch--refresh-current-schema "clutch" (&optional silent))
+(declare-function clutch--remember-debug-event "clutch-query" (&rest event))
+(declare-function clutch--refresh-current-schema "clutch-schema" (&optional silent))
 (declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
-(declare-function clutch--warn-completion-metadata-error-once "clutch" (message-text))
-(declare-function clutch--warn-schema-cache-state "clutch" (&optional conn))
+(declare-function clutch--warn-completion-metadata-error-once "clutch-schema" (message-text))
+(declare-function clutch--warn-schema-cache-state "clutch-schema" (&optional conn))
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
   "Return non-nil when ENTRY is permitted by ALLOWED-TYPES.
@@ -172,10 +171,11 @@ minibuffer has been quit.")
 
 (defun clutch--object-cache-complete-p (conn)
   "Return non-nil when CONN has a fully warmed object cache."
-  (equal (sort (copy-sequence (clutch--object-cache-loaded-categories conn))
-               (lambda (a b) (string< (symbol-name a) (symbol-name b))))
-         (sort (copy-sequence clutch--object-categories)
-               (lambda (a b) (string< (symbol-name a) (symbol-name b))))))
+  (let ((loaded (clutch--object-cache-loaded-categories conn)))
+    (and loaded
+         (cl-every (lambda (category)
+                     (memq category loaded))
+                   clutch--object-categories))))
 
 (defun clutch--make-object-type-cache (entries)
   "Return a hash table grouping ENTRIES by normalized object type."
@@ -895,56 +895,41 @@ selection can surface objects from different Oracle sources and types."
                      (eq (buffer-local-value 'clutch-connection buf) conn))
            return buf))
 
-(defun clutch--console-has-nonblank-content-p ()
-  "Return non-nil when the current console buffer has nonblank content."
-  (save-excursion
-    (goto-char (point-min))
-    (re-search-forward "[^[:space:]\n\r\t]" nil t)))
-
-(defun clutch--count-adjacent-newlines-before (pos)
-  "Return the number of contiguous whitespace newlines immediately before POS."
-  (save-excursion
-    (goto-char pos)
-    (let ((end (point)))
-      (skip-chars-backward " \t\n")
-      (cl-loop for ch across (buffer-substring-no-properties (point) end)
-               count (eq ch ?\n)))))
-
-(defun clutch--count-adjacent-newlines-after (pos)
-  "Return the number of contiguous whitespace newlines immediately after POS."
-  (save-excursion
-    (goto-char pos)
-    (let ((start (point)))
-      (skip-chars-forward " \t\n")
-      (cl-loop for ch across (buffer-substring-no-properties start (point))
-               count (eq ch ?\n)))))
-
-(defun clutch--console-nonblank-before-p (pos)
-  "Return non-nil when POS has nonblank console content before it."
-  (save-excursion
-    (goto-char pos)
-    (re-search-backward "[^[:space:]\n\r\t]" nil t)))
-
-(defun clutch--console-nonblank-after-p (pos)
-  "Return non-nil when POS has nonblank console content after it."
-  (save-excursion
-    (goto-char pos)
-    (re-search-forward "[^[:space:]\n\r\t]" nil t)))
-
 (defun clutch--insert-console-sql-block (sql)
   "Insert SQL into the current console with normalized blank-line spacing."
-  (if (not (clutch--console-has-nonblank-content-p))
-      (progn
-        (erase-buffer)
-        (insert sql))
-    (let* ((pos (point))
-           (before-p (clutch--console-nonblank-before-p pos))
-           (after-p (clutch--console-nonblank-after-p pos))
-           (before-nl (and before-p (clutch--count-adjacent-newlines-before pos)))
-           (after-nl (and after-p (clutch--count-adjacent-newlines-after pos)))
-           (prefix (if before-p (make-string (max 0 (- 2 before-nl)) ?\n) ""))
-           (suffix (if after-p (make-string (max 0 (- 2 after-nl)) ?\n) "")))
-      (insert prefix sql suffix))))
+  (let ((nonblank-re "[^[:space:]\n\r\t]"))
+    (if (not (save-excursion
+               (goto-char (point-min))
+               (re-search-forward nonblank-re nil t)))
+        (progn
+          (erase-buffer)
+          (insert sql))
+      (let* ((pos (point))
+             (before-p (save-excursion
+                         (goto-char pos)
+                         (re-search-backward nonblank-re nil t)))
+             (after-p (save-excursion
+                        (goto-char pos)
+                        (re-search-forward nonblank-re nil t)))
+             (before-nl
+              (and before-p
+                   (save-excursion
+                     (goto-char pos)
+                     (let ((end (point)))
+                       (skip-chars-backward " \t\n")
+                       (cl-count ?\n (buffer-substring-no-properties
+                                      (point) end))))))
+             (after-nl
+              (and after-p
+                   (save-excursion
+                     (goto-char pos)
+                     (let ((start (point)))
+                       (skip-chars-forward " \t\n")
+                       (cl-count ?\n (buffer-substring-no-properties
+                                      start (point))))))))
+        (insert (if before-p (make-string (max 0 (- 2 before-nl)) ?\n) "")
+                sql
+                (if after-p (make-string (max 0 (- 2 after-nl)) ?\n) ""))))))
 
 (defun clutch--object-fqname (entry)
   "Return a display FQNAME for object ENTRY."

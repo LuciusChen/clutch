@@ -27,17 +27,10 @@
 
 ;;; Code:
 
+(eval-and-compile
+  (require 'clutch-test-common))
+
 ;;;; Test configuration
-
-(require 'cl-lib)
-
-(require 'ert)
-
-(require 'clutch-db)
-
-(require 'clutch-db-jdbc)
-
-(require 'clutch)
 
 (defvar mysql-tls-verify-server)
 
@@ -52,6 +45,8 @@
 (defvar tramp-rpc-use-controlmaster)
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
+
+(declare-function make-clutch-db-sqlite-conn "clutch-db-sqlite" (&rest slot-value-pairs))
 
 (declare-function make-mysql-conn "mysql" (&rest args))
 
@@ -69,42 +64,16 @@
 
 (defvar clutch-test-database "mysql")
 
-;;;; Test helpers
+(defvar clutch-test-url nil
+  "Raw JDBC URL for generic live tests.")
 
-(defun clutch-test--debug-buffer-string ()
-  "Return the current dedicated clutch debug buffer contents."
-  (let ((buf (get-buffer clutch-debug-buffer-name)))
-    (should (buffer-live-p buf))
-    (with-current-buffer buf
-      (buffer-string))))
+(defvar clutch-test-display-name nil
+  "Display name for generic JDBC live tests.")
 
-(defun clutch-test--clear-problem-capture ()
-  "Clear captured problem records across test buffers."
-  (setq clutch--problem-records-by-conn
-        (make-hash-table :test 'eq :weakness 'key))
-  (dolist (buf (buffer-list))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (setq-local clutch--buffer-error-details nil)))))
+(defvar clutch-test-props nil
+  "JDBC connection properties for live tests.")
 
-(defun clutch-test--primary-row-identity (&optional table columns indices)
-  "Return primary-key row identity metadata for tests."
-  (let ((indices (or indices '(0))))
-    (list :kind 'primary-key
-          :name "PRIMARY"
-          :table (or table "users")
-          :columns (or columns '("id"))
-          :indices indices
-          :source-indices indices)))
-
-(defun clutch-test--completion-candidates (capf &optional prefix)
-  "Return CAPF completion candidates matching PREFIX.
-When PREFIX is nil, use the text between CAPF's bounds, matching the real
-`completion-at-point' filtering path."
-  (all-completions
-   (or prefix
-       (buffer-substring-no-properties (nth 0 capf) (nth 1 capf)))
-   (nth 2 capf)))
+(require 'clutch-test-sql)
 
 ;;;; Rendering — value formatting
 
@@ -156,8 +125,7 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
          (_ (puthash "k" "v" ht))
          (conn (make-clutch-jdbc-conn
                 :params '(:driver sqlserver :user "sa")))
-         (clutch-connection conn)
-         (result (clutch--value-to-literal ht)))
+         (result (clutch-db-value-to-literal conn ht #'clutch--format-value)))
     (should (stringp result))
     (should (string-match-p "\"k\"" result))
     (should (string-match-p "\"v\"" result))))
@@ -166,8 +134,7 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
   "JSON arrays should become quoted SQL string literals."
   (let* ((conn (make-clutch-jdbc-conn
                 :params '(:driver sqlserver :user "sa")))
-         (clutch-connection conn)
-         (result (clutch--value-to-literal [1 2 3])))
+         (result (clutch-db-value-to-literal conn [1 2 3] #'clutch--format-value)))
     (should (stringp result))
     (should (string-match-p "1" result))
     (should (string-match-p "2" result))))
@@ -222,24 +189,24 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
 
 (ert-deftest clutch-test-dispatch-view-json-category-serializes-non-string ()
   "JSON category should route non-string values to JSON viewer."
-  (let ((called nil)
-        (seen nil))
-    (cl-letf (((symbol-function 'clutch--view-json-value)
-               (lambda (s) (setq called t
-                                 seen s)))
+  (let (seen buffer-name)
+    (cl-letf (((symbol-function 'clutch--view-in-buffer)
+               (lambda (content name _setup)
+                 (setq seen content
+                       buffer-name name)))
               ((symbol-function 'clutch--json-value-to-string)
                (lambda (_val) "{\"ok\":true}")))
       (clutch--dispatch-view (vector 1 2) '(:type-category json))
-      (should called)
-      (should (equal seen "{\"ok\":true}")))))
+      (should (equal seen "{\"ok\":true}"))
+      (should (equal buffer-name "*clutch-json*")))))
 
 (ert-deftest clutch-test-dispatch-view-json-string-bypasses-serialize ()
   "String vals should be passed directly to the JSON viewer without re-serialization.
 This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX."
   (let ((seen nil)
         (serialize-called nil))
-    (cl-letf (((symbol-function 'clutch--view-json-value)
-               (lambda (s) (setq seen s)))
+    (cl-letf (((symbol-function 'clutch--view-in-buffer)
+               (lambda (content _name _setup) (setq seen content)))
               ((symbol-function 'clutch--json-value-to-string)
                (lambda (_v) (setq serialize-called t) "{}")))
       (clutch--dispatch-view "{\"name\":\"张三\"}" '(:type-category json))
@@ -262,39 +229,30 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 
 (ert-deftest clutch-test-dispatch-view-fallback-to-plain ()
   "Unknown values should open plain viewer rather than JSON viewer."
-  (let ((plain-called nil)
-        (json-called nil))
-    (cl-letf (((symbol-function 'clutch--view-plain-value)
-               (lambda (_v) (setq plain-called t)))
-              ((symbol-function 'clutch--view-json-value)
-               (lambda (_v) (setq json-called t))))
+  (let (buffer-name content)
+    (cl-letf (((symbol-function 'clutch--view-in-buffer)
+               (lambda (text name _setup)
+                 (setq content text
+                       buffer-name name))))
       (clutch--dispatch-view "hello" '(:type-category text))
-      (should plain-called)
-      (should-not json-called))))
+      (should (equal content "hello"))
+      (should (equal buffer-name "*clutch-value*")))))
 
 (ert-deftest clutch-test-dispatch-view-xml-content-overrides-blob ()
   "XML-like content should use XML viewer even when column type is blob."
-  (let ((xml-called nil)
-        (blob-called nil))
-    (cl-letf (((symbol-function 'clutch--view-xml-value)
-               (lambda (_v) (setq xml-called t)))
-              ((symbol-function 'clutch--view-binary-as-string)
-               (lambda (_v) (setq blob-called t))))
+  (let (buffer-name)
+    (cl-letf (((symbol-function 'clutch--view-in-buffer)
+               (lambda (_text name _setup) (setq buffer-name name))))
       (clutch--dispatch-view "<rss><item>1</item></rss>" '(:type-category blob))
-      (should xml-called)
-      (should-not blob-called))))
+      (should (equal buffer-name "*clutch-xml*")))))
 
 (ert-deftest clutch-test-dispatch-view-invalid-angle-text-not-xml ()
   "Invalid XML-like text should not be forced into XML viewer."
-  (let ((xml-called nil)
-        (plain-called nil))
-    (cl-letf (((symbol-function 'clutch--view-xml-value)
-               (lambda (_v) (setq xml-called t)))
-              ((symbol-function 'clutch--view-plain-value)
-               (lambda (_v) (setq plain-called t))))
+  (let (buffer-name)
+    (cl-letf (((symbol-function 'clutch--view-in-buffer)
+               (lambda (_text name _setup) (setq buffer-name name))))
       (clutch--dispatch-view "<abc" '(:type-category text))
-      (should-not xml-called)
-      (should plain-called))))
+      (should (equal buffer-name "*clutch-value*")))))
 
 (ert-deftest clutch-test-blob-view-string-has-size-and-hex ()
   "Blob preview should include size and hex output."
@@ -346,7 +304,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                (lambda (b &rest _args)
                  (setq buf b)
                  b)))
-      (clutch--view-xml-value "<root><a>1</a></root>")
+      (clutch--dispatch-view "<root><a>1</a></root>" '(:type-category text))
       (should fontified)
       (with-current-buffer buf
         (should (string-match-p "XML" (format "%s" header-line-format)))
@@ -363,8 +321,9 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                (lambda (b &rest _args)
                  (setq buf b)
                  b)))
-      (clutch--view-xml-value
-       "<?xml version=\"1.0\"?><overlay><zone>&#x6E7E;&#x5CB8;&#x30B1;&#x30FC;&#x30D6;&#x30EB;&#x7DB2;</zone><operator>&#x658E;&#x85E4;</operator></overlay>")
+      (clutch--dispatch-view
+       "<?xml version=\"1.0\"?><overlay><zone>&#x6E7E;&#x5CB8;&#x30B1;&#x30FC;&#x30D6;&#x30EB;&#x7DB2;</zone><operator>&#x658E;&#x85E4;</operator></overlay>"
+       '(:type-category text))
       (with-current-buffer buf
         (let ((text (buffer-string)))
           (should (string-match-p "湾岸ケーブル網" text))
@@ -373,24 +332,25 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 
 (ert-deftest clutch-test-value-to-literal-nil ()
   "Test NULL literal conversion."
-  (should (equal (clutch--value-to-literal nil) "NULL")))
+  (should (equal (clutch-db-value-to-literal 'fake-conn nil) "NULL")))
 
 (ert-deftest clutch-test-value-to-literal-number ()
   "Test numeric literal conversion."
-  (should (equal (clutch--value-to-literal 42) "42"))
-  (should (string-match-p "3\\.14" (clutch--value-to-literal 3.14)))
-  (should (equal (clutch--value-to-literal -1) "-1")))
+  (should (equal (clutch-db-value-to-literal 'fake-conn 42) "42"))
+  (should (string-match-p "3\\.14"
+                          (clutch-db-value-to-literal 'fake-conn 3.14)))
+  (should (equal (clutch-db-value-to-literal 'fake-conn -1) "-1")))
 
 (ert-deftest clutch-test-value-to-literal-string ()
   "Test string literal conversion (requires connection)."
   (require 'clutch-db-mysql)
   (require 'mysql)
   ;; String escaping requires a connection
-  (let ((clutch-connection (make-mysql-conn :host "localhost")))
-    (let ((result (clutch--value-to-literal "hello")))
+  (let ((conn (make-mysql-conn :host "localhost")))
+    (let ((result (clutch-db-value-to-literal conn "hello")))
       (should (stringp result))
       (should (string-prefix-p "'" result)))
-    (let ((result (clutch--value-to-literal "it's")))
+    (let ((result (clutch-db-value-to-literal conn "it's")))
       (should (string-match-p "\\\\'" result)))))
 
 ;;;; Rendering — padding
@@ -411,7 +371,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
   (let ((columns (list '(:name "id" :type-category numeric)
                        '(:name "name" :type-category text)
                        '(:name "data" :type-category json))))
-    (let ((names (clutch--column-names columns)))
+    (let ((names (clutch-db-result-column-names columns)))
       (should (equal names '("id" "name" "data"))))))
 
 (ert-deftest clutch-test-compute-column-widths ()
@@ -458,6 +418,27 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                   (:name "name")))
     (should (equal (clutch--visible-columns) '(1 2)))))
 
+(ert-deftest clutch-test-visible-column-names-skip-hidden-columns ()
+  "User-facing column choices should not include hidden row identity aliases."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("clutch__rid_0" "id" "name")
+                clutch--result-column-defs
+                '((:name "clutch__rid_0" :hidden t)
+                  (:name "id")
+                  (:name "name")))
+    (insert (propertize "name" 'clutch-col-idx 2))
+    (goto-char (point-min))
+    (let (candidates default)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &optional _predicate _require-match
+                                   _initial-input _hist def _inherit-input-method)
+                   (setq candidates collection
+                         default def)
+                   def)))
+        (should (equal (clutch-result--read-column) "name"))
+        (should (equal candidates '("id" "name")))
+        (should (equal default "name"))))))
+
 (ert-deftest clutch-test-row-identity-prep-injects-hidden-primary-key ()
   "Simple table SELECTs should receive hidden identity expressions."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
@@ -474,41 +455,34 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (equal (plist-get prep :sql)
                      "SELECT name, \"id\" AS \"clutch__rid_0\" FROM users WHERE active = 1")))))
 
-(ert-deftest clutch-test-row-identity-prep-skips-missing-ready-schema-table ()
-  "Ready schema cache misses should skip row identity metadata probes."
-  (let ((clutch--schema-cache (make-hash-table :test 'equal))
-        (clutch--schema-status-cache (make-hash-table :test 'equal))
-        (called nil))
-    (let ((schema (make-hash-table :test 'equal)))
-      (puthash "USERS" '("ID" "NAME") schema)
-      (puthash "fake-key" schema clutch--schema-cache))
-    (puthash "fake-key" '(:state ready :tables 1) clutch--schema-status-cache)
-    (cl-letf (((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t))
-              ((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "fake-key"))
+(ert-deftest clutch-test-row-identity-prep-uses-backend-source-table-name ()
+  "Row identity preparation should canonicalize source tables through the backend."
+  (let (requested-table)
+    (cl-letf (((symbol-function 'clutch-db--source-table-name)
+               (lambda (_conn token)
+                 (should (equal token "users"))
+                 "USERS"))
               ((symbol-function 'clutch-db-row-identity-candidates)
-               (lambda (_conn _table)
-                 (setq called t)
+               (lambda (_conn table)
+                 (setq requested-table table)
                  (list (list :kind 'primary-key
                              :name "PRIMARY"
-                             :columns '("id"))))))
-      (let* ((sql "SELECT * FROM missing_users")
-             (prep (clutch--prepare-row-identity-query 'fake-conn sql)))
-        (should-not called)
-        (should-not (plist-get prep :augmented))
-        (should (equal (plist-get prep :sql) sql))))))
+                             :columns '("ID")))))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id))))
+      (let ((prep (clutch--prepare-row-identity-query
+                   'fake-conn "SELECT name FROM users")))
+        (should (equal requested-table "USERS"))
+        (should (equal (plist-get prep :table) "USERS"))))))
 
-(ert-deftest clutch-test-row-identity-prep-oracle-select-star-qualifies-star ()
-  "Oracle SELECT * row identity injection should avoid SELECT *, expr syntax."
+(ert-deftest clutch-test-row-identity-prep-select-star-qualifies-star ()
+  "SELECT * row identity injection should qualify the star before adding columns."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
              (lambda (_conn _table)
                (list (list :kind 'row-locator
                            :name "ROWID"
                            :select-expressions '("ROWID")
                            :where-sql "ROWID = ?"))))
-            ((symbol-function 'clutch--connection-oracle-jdbc-p)
-             (lambda (_conn) t))
             ((symbol-function 'clutch-db-escape-identifier)
              (lambda (_conn id) (format "\"%s\"" id))))
     (dolist (case '(("SELECT * FROM users WHERE active = 1"
@@ -523,6 +497,21 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                    'oracle-conn (car case))))
         (should (plist-get prep :augmented))
         (should (equal (plist-get prep :sql) (cadr case)))))))
+
+(ert-deftest clutch-test-row-identity-prep-normalizes-leading-comments ()
+  "Leading comments should not disable row identity injection."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (let ((prep (clutch--prepare-row-identity-query
+                 'fake-conn "-- comment\nSELECT * FROM users;")))
+      (should (plist-get prep :augmented))
+      (should (equal (plist-get prep :sql)
+                     "SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM users")))))
 
 (ert-deftest clutch-test-row-identity-prep-skips-aggregate-selects ()
   "Aggregate SELECTs should not receive hidden row identity expressions."
@@ -753,14 +742,14 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                 (let ((before-top-ridx
                        (save-excursion
                          (goto-char (window-start win))
-                         (clutch-result--row-idx-at-line)))
+                         (clutch--row-idx-at-line)))
                       (before-line
                        (count-screen-lines (window-start win)
                                            (line-beginning-position))))
                   (clutch--refresh-display)
                   (should (= (save-excursion
                                (goto-char (window-start win))
-                               (clutch-result--row-idx-at-line))
+                               (clutch--row-idx-at-line))
                              before-top-ridx))
                   (should (= (count-screen-lines (window-start win)
                                                  (line-beginning-position))
@@ -768,7 +757,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                   (clutch--refresh-display)
                   (should (= (save-excursion
                                (goto-char (window-start win))
-                               (clutch-result--row-idx-at-line))
+                               (clutch--row-idx-at-line))
                              before-top-ridx))
                   (should (= (count-screen-lines (window-start win)
                                                  (line-beginning-position))
@@ -904,56 +893,49 @@ ROWS defaults to a small three-row sample."
       (should (eq (get-text-property 4 'face cell) 'clutch-fk-face))
       (should-not (get-text-property 5 'face cell)))))
 
-(ert-deftest clutch-test-display-select-result-records-source-table ()
-  "SELECT result rendering should cache the detected source table name."
-  (with-temp-buffer
-    (setq-local clutch--last-query "SELECT * FROM orders"
-                clutch--result-server-rewritable t)
-    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
-      (clutch--display-select-result '("id") '((1))
-                                     '((:name "id" :type-category numeric)))
-      (should (equal clutch--result-source-table "orders")))))
+(ert-deftest clutch-test-display-select-records-source-table ()
+  "SELECT result lifecycle should cache verified source table metadata."
+  (let ((result-name "*clutch-test-result*")
+        (result (make-clutch-db-result
+                 :columns '((:name "id" :type-category numeric))
+                 :rows '((1)))))
+    (dolist (case '(("SELECT * FROM orders" (:table "orders") nil)
+                    ("SELECT * FROM (SELECT * FROM orders) AS _clutch_filter WHERE id = 1"
+                     (:table "_clutch_filter")
+                     (:server-pageable t :server-rewritable t :source-table "orders"))))
+      (clutch-test--with-result-buffer (result-name)
+        (pcase-let ((`(,sql ,prep ,context) case))
+          (clutch-result--display-select
+           'fake-conn sql result 0 prep t context (current-buffer))
+          (with-current-buffer result-name
+            (should (equal clutch--result-source-table "orders"))))))))
 
-(ert-deftest clutch-test-display-select-result-preserves-source-table ()
-  "Internal rewrites should keep the verified source table metadata."
-  (with-temp-buffer
-    (setq-local clutch--last-query
-                "SELECT * FROM (SELECT * FROM orders) AS _clutch_filter WHERE id = 1"
-                clutch--result-server-rewritable t
-                clutch--result-source-table "orders")
-    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
-      (clutch--display-select-result '("id") '((1))
-                                     '((:name "id" :type-category numeric)))
-      (should (equal clutch--result-source-table "orders")))))
-
-(ert-deftest clutch-test-init-select-result-state-clears-source-table ()
-  "Non-paginated result initialization should not keep stale source metadata."
+(ert-deftest clutch-test-init-result-state-clears-stale-result-flags ()
+  "Result initialization should not keep stale source or DML metadata."
   (with-temp-buffer
     (setq-local clutch--result-source-table "users"
                 clutch--result-server-pageable t
-                clutch--result-server-rewritable t)
-    (clutch--init-select-result-state
-     '("name") '((:name "name" :type-category text)) '(("alice")))
+                clutch--result-server-rewritable t
+                clutch--dml-result t)
+    (clutch-result--init-state
+     'fake-conn "SELECT name FROM users"
+     '((:name "name" :type-category text)) '(("alice")) nil
+     nil 0 nil nil nil nil)
     (should-not clutch--result-source-table)
     (should-not clutch--result-server-pageable)
-    (should-not clutch--result-server-rewritable)))
+    (should-not clutch--result-server-rewritable)
+    (should-not clutch--dml-result)))
 
-(ert-deftest clutch-test-result-source-table-prefers-buffer-state ()
-  "Result edit paths should use the recorded source table before reparsing SQL."
+(ert-deftest clutch-test-result-source-table-uses-recorded-state ()
+  "Result edit paths should use only recorded source table metadata."
   (with-temp-buffer
     (setq-local clutch--result-source-table "orders"
                 clutch--last-query "SELECT * FROM stale_table")
-    (should (equal (clutch-result--source-table) "orders"))
     (should (equal (clutch--result-source-table-or-user-error "Stage UPDATE")
-                   "orders"))))
-
-(ert-deftest clutch-test-result-source-table-rejects-nonrewritable-query-result ()
-  "Arbitrary query results should not infer a writable table from first FROM."
+                   "orders")))
   (with-temp-buffer
-    (setq-local clutch--result-server-rewritable nil
-                clutch--result-source-table nil
-                clutch--last-query "SELECT a.*, b.* FROM a JOIN b ON a.id = b.id LIMIT 10")
-    (should-not (clutch-result--source-table))
+    (setq-local clutch--result-source-table nil
+                clutch--last-query "SELECT * FROM users")
     (should-error (clutch--result-source-table-or-user-error "Stage UPDATE")
                   :type 'user-error)))
 
@@ -1405,22 +1387,57 @@ ROWS defaults to a small three-row sample."
                 clutch--result-server-pageable t
                 clutch--result-server-rewritable t
                 clutch--result-columns '("id" "name")
+                clutch--row-identity
+                (clutch-test--primary-row-identity "t" '("id") '(0))
                 clutch--where-filter nil)
     (let (captured)
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _args) "id"))
                 ((symbol-function 'read-string) (lambda (&rest _args) "> 5"))
+                ((symbol-function 'clutch-db-escape-identifier)
+                 (lambda (_conn id) (format "`%s`" id)))
                 ((symbol-function 'clutch--execute)
                  (lambda (sql conn &optional result-context)
-                   (setq captured (list sql conn result-context)))))
+                   (setq captured
+                         (list sql conn
+                               (plist-get result-context :source-table)
+                               (plist-get
+                                (plist-get result-context :row-identity-prep)
+                                :sql))))))
         (clutch-result-apply-filter)
         (should (equal captured
-                       (list (clutch--apply-where "SELECT * FROM t" "id > 5")
+                       (list (clutch-db-apply-where
+                              'fake-conn "SELECT * FROM t" "`id` > 5")
                              'fake-conn
-                             '(:server-pageable t
-                               :server-rewritable t
-                               :source-table "t"))))
-        (should (equal clutch--where-filter "id > 5"))
+                             "t"
+                             (clutch-db-apply-where
+                              'fake-conn
+                              "SELECT t.*, `id` AS `clutch__rid_0` FROM t"
+                              "`id` > 5"))))
+        (should (equal clutch--where-filter "`id` > 5"))
         (should (equal clutch--base-query "SELECT * FROM t"))))))
+
+(ert-deftest clutch-test-apply-filter-defaults-to-visible-active-column ()
+  "WHERE filtering should translate active column indices through visible columns."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--last-query "SELECT * FROM t"
+                clutch--result-server-pageable t
+                clutch--result-server-rewritable t
+                clutch--result-columns '("clutch__rid_0" "id" "name")
+                clutch--result-column-defs
+                '((:name "clutch__rid_0" :hidden t)
+                  (:name "id")
+                  (:name "name"))
+                clutch--header-active-col 1
+                clutch--where-filter nil)
+    (let (seen)
+      (cl-letf (((symbol-function 'clutch--read-where-filter)
+                 (lambda (_current columns default-col &optional _conn)
+                   (setq seen (list columns default-col))
+                   "id > 1"))
+                ((symbol-function 'clutch--execute) #'ignore))
+        (clutch-result-apply-filter)
+        (should (equal seen '(("id" "name") "id")))))))
 
 (ert-deftest clutch-test-apply-filter-empty-condition-clears-filter ()
   "Clearing a WHERE filter should reset the stored clause."
@@ -1665,7 +1682,7 @@ ROWS defaults to a small three-row sample."
   "Shell commands should receive the current cell value as stdin."
   (with-temp-buffer
     (let (captured)
-      (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+      (cl-letf (((symbol-function 'clutch--cell-at-point)
                  (lambda () '(0 1 "hello world")))
                 ((symbol-function 'clutch--view-in-buffer)
                  (lambda (val &rest _args)
@@ -1677,7 +1694,7 @@ ROWS defaults to a small three-row sample."
   "Shell commands should receive formatted text for non-string cell values."
   (with-temp-buffer
     (let (captured)
-      (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+      (cl-letf (((symbol-function 'clutch--cell-at-point)
                  (lambda () '(0 1 42)))
                 ((symbol-function 'clutch--view-in-buffer)
                  (lambda (val &rest _args)
@@ -1689,744 +1706,6 @@ ROWS defaults to a small three-row sample."
   "Shell commands should error when point is not on a result cell."
   (with-temp-buffer
     (should-error (clutch-result-shell-command-on-cell "cat") :type 'user-error)))
-
-;;;; SQL parsing — query classification
-
-(ert-deftest clutch-test-schema-affecting-query-p ()
-  "DDL-like statements should mark schema stale."
-  (should (clutch--schema-affecting-query-p "CREATE TABLE t (id INT)"))
-  (should (clutch--schema-affecting-query-p "alter table t add column x int"))
-  (should (clutch--schema-affecting-query-p "DROP VIEW v"))
-  (should-not (clutch--schema-affecting-query-p "DELETE FROM t"))
-  (should-not (clutch--schema-affecting-query-p "SELECT * FROM t")))
-
-(ert-deftest clutch-test-destructive-query-p ()
-  "Test destructive query detection."
-  (should (clutch--destructive-query-p "DROP TABLE users"))
-  (should (clutch--destructive-query-p "TRUNCATE users"))
-  (should (clutch--destructive-query-p "DELETE FROM users"))
-  (should (clutch--destructive-query-p "delete from users where id=1"))
-  ;; With leading comment
-  (should (clutch--destructive-query-p "-- cleanup\nDROP TABLE users"))
-  (should-not (clutch--destructive-query-p "SELECT * FROM users"))
-  (should-not (clutch--destructive-query-p "UPDATE users SET name='x'")))
-
-(ert-deftest clutch-test-risky-dml-p ()
-  "Risky DML should detect UPDATE/DELETE without top-level WHERE."
-  (should (clutch--risky-dml-p "UPDATE users SET name='x'"))
-  (should (clutch--risky-dml-p "DELETE FROM users"))
-  (should (clutch--risky-dml-p "WITH x AS (SELECT 1) UPDATE users SET name='x'"))
-  (should-not (clutch--risky-dml-p "UPDATE users SET name='x' WHERE id=1"))
-  (should-not (clutch--risky-dml-p "DELETE FROM users WHERE id=1"))
-  (should-not (clutch--risky-dml-p "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"))
-  (should-not (clutch--risky-dml-p "WITH x AS (SELECT 1) SELECT * FROM x"))
-  (should-not (clutch--risky-dml-p "SELECT * FROM users")))
-
-(ert-deftest clutch-test-select-query-p ()
-  "Test SELECT query detection."
-  (should (clutch--select-query-p "SELECT * FROM users"))
-  (should (clutch--select-query-p "select id from users"))
-  (should (clutch--select-query-p "  SELECT * FROM t"))
-  (should (clutch--select-query-p "WITH cte AS (SELECT 1) SELECT * FROM cte"))
-  ;; With leading comments — previously broke SELECT detection
-  (should (clutch--select-query-p "-- get users\nSELECT * FROM users"))
-  (should (clutch--select-query-p "/* all */\nSELECT * FROM users"))
-  (should (clutch--select-query-p "-- a\n-- b\nSELECT 1"))
-  ;; Result-set introspection commands also route through the SELECT/result path.
-  (should (clutch--select-query-p "SHOW TABLES"))
-  (should (clutch--select-query-p "DESCRIBE users"))
-  (should (clutch--select-query-p "EXPLAIN SELECT * FROM t"))
-  (should-not (clutch--select-query-p "INSERT INTO users VALUES (1)"))
-  (should-not (clutch--select-query-p "UPDATE users SET name='x'")))
-
-;;;; SQL parsing — statement bounds
-
-(ert-deftest clutch-test-statement-bounds ()
-  "Statement bounds should handle semicolon-delimited SQL edge cases."
-  (dolist (case '(("blank lines"
-                   "SELECT *\nFROM users\n\nWHERE id = 1"
-                   "users"
-                   "SELECT *\nFROM users\n\nWHERE id = 1")
-                  ("middle statement"
-                   "SELECT 1;\nSELECT 2;\nSELECT 3"
-                   "SELECT 2"
-                   "SELECT 2")
-                  ("first statement"
-                   "SELECT 1;\nSELECT 2"
-                   "SELECT 1"
-                   "SELECT 1")
-                  ("semicolon in string"
-                   "SELECT 'a;b' AS v;"
-                   "SELECT"
-                   "SELECT 'a;b' AS v")
-                  ("semicolon in comment"
-                   "SELECT 1 -- foo;\nFROM t;"
-                   "SELECT"
-                   "SELECT 1 -- foo;\nFROM t")))
-    (pcase-let ((`(,label ,sql ,point-token ,expected) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (insert sql)
-          (goto-char (point-min))
-          (search-forward point-token)
-          (let ((bounds (clutch--statement-bounds-at-point)))
-            (should (equal (string-trim
-                            (buffer-substring-no-properties
-                             (car bounds) (cdr bounds)))
-                           expected))))))))
-
-(ert-deftest clutch-test-sql-context-statement-bounds ()
-  "SQL context bounds should share semicolon-aware statement parsing."
-  (dolist (case '(("semicolon in string"
-                   "SELECT 'a;b' AS semi;\nSELECT 2"
-                   "semi"
-                   "SELECT 'a;b' AS semi")
-                  ("semicolon in comment"
-                   "SELECT 1 -- ignored;\nFROM users;\nSELECT 2"
-                   "users"
-                   "SELECT 1 -- ignored;\nFROM users")
-                  ("blank-line fallback"
-                   "SELECT 1\n\nSELECT 2"
-                   "2"
-                   "SELECT 2")))
-    (pcase-let ((`(,label ,sql ,point-token ,expected) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (insert sql)
-          (goto-char (point-min))
-          (search-forward point-token)
-          (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
-            (should (equal (string-trim
-                            (buffer-substring-no-properties beg end))
-                           expected))))))))
-
-(ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
-  "DWIM execution should prefer semicolon-delimited statement bounds."
-  (with-temp-buffer
-    (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")
-    (goto-char (point-min))
-    (search-forward "third")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (sql beg end &optional _conn)
-                   (setq captured
-                         (list sql
-                               (string-trim
-                                (buffer-substring-no-properties beg end)))))))
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured
-                       '("INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"
-                         "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')")))))))
-
-(ert-deftest clutch-test-execute-dwim-at-semicolon-edge ()
-  "DWIM execution should handle semicolon-edge cursor positions."
-  (with-temp-buffer
-    (insert "SELECT 1;\n\nSELECT 2;")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (sql beg end &optional _conn)
-                   (setq captured
-                         (list sql
-                               (string-trim
-                                (buffer-substring-no-properties beg end)))))))
-        (goto-char (point-min))
-        (search-forward "1")
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured '("SELECT 1" "SELECT 1")))
-        (forward-char 1)
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured '("SELECT 1" "SELECT 1")))
-        (forward-char 1)
-        (should-error (clutch-execute-dwim (point) (point))
-                      :type 'user-error)
-        (search-forward "SELECT 2")
-        (goto-char (match-beginning 0))
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured '("SELECT 2" "SELECT 2")))))))
-
-(ert-deftest clutch-test-execute-dwim-falls-back-to-query-bounds-without-semicolons ()
-  "DWIM execution should keep blank-line query parsing when no top-level semicolon exists."
-  (with-temp-buffer
-    (insert "SELECT 1\n\nSELECT 2")
-    (goto-char (point-max))
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (sql beg end &optional _conn)
-                   (setq captured
-                         (list sql
-                               (string-trim
-                                (buffer-substring-no-properties beg end)))))))
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured '("SELECT 2" "SELECT 2")))))))
-
-(ert-deftest clutch-test-execute-buffer-splits-multiple-statements ()
-  "Buffer execution should split semicolon-delimited statements."
-  (with-temp-buffer
-    (let ((sql "INSERT INTO demo VALUES (1);\nINSERT INTO demo VALUES (2);")
-          executed ensured single-call)
-      (insert sql)
-      (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 (lambda ()
-                   (setq ensured t)))
-                ((symbol-function 'clutch--execute-statements)
-                 (lambda (stmts)
-                   (setq executed stmts)))
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (&rest _args)
-                   (setq single-call t))))
-        (clutch-execute-buffer)
-        (should ensured)
-        (should (equal (mapcar #'car executed)
-                       '("INSERT INTO demo VALUES (1)"
-                         "INSERT INTO demo VALUES (2)")))
-        (should-not single-call)))))
-
-(ert-deftest clutch-test-execute-region-marks-each-successful-statement ()
-  "Region execution should move the fringe marker statement by statement."
-  (with-temp-buffer
-    (insert "  INSERT INTO demo VALUES (1);\n\n"
-            "  UPDATE demo SET seen = 1 WHERE id = 1;\n"
-            "  UPDATE demo SET seen = 0 WHERE id = 2;")
-    (let ((clutch-connection 'fake-conn)
-          (original-marker (symbol-function 'clutch--mark-executed-sql-region))
-          ensured
-          starts
-          marks)
-      (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 (lambda ()
-                   (setq ensured t)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql)
-                   (push (list sql (overlayp clutch--executed-sql-overlay))
-                         starts)
-                   'ok))
-                ((symbol-function 'clutch--mark-executed-sql-region)
-                 (lambda (beg end)
-                   (push (string-trim
-                          (buffer-substring-no-properties beg end))
-                         marks)
-                   (funcall original-marker beg end)))
-                ((symbol-function 'message) #'ignore))
-        (clutch-execute-region (point-min) (point-max)))
-      (should ensured)
-      (should (equal (mapcar #'car (reverse starts))
-                     '("INSERT INTO demo VALUES (1)"
-                       "UPDATE demo SET seen = 1 WHERE id = 1"
-                       "UPDATE demo SET seen = 0 WHERE id = 2")))
-      (should (equal (mapcar #'cadr (reverse starts))
-                     '(nil nil nil)))
-      (should (equal (reverse marks)
-                     '("INSERT INTO demo VALUES (1)"
-                       "UPDATE demo SET seen = 1 WHERE id = 1"
-                       "UPDATE demo SET seen = 0 WHERE id = 2")))
-      (should (overlayp clutch--executed-sql-overlay))
-      (should (= (overlay-start clutch--executed-sql-overlay)
-                 (save-excursion
-                   (goto-char (point-max))
-                   (line-beginning-position)))))))
-
-(ert-deftest clutch-test-execute-statements-marks-final-select ()
-  "A final SELECT in a statement batch should keep its source bounds."
-  (let (final-select)
-    (cl-letf (((symbol-function 'clutch--run-db-query) (lambda (&rest _) 'ok))
-              ((symbol-function 'clutch--execute-and-mark)
-               (lambda (sql beg end &optional _conn)
-                 (setq final-select (list sql beg end))))
-              ((symbol-function 'message) #'ignore))
-      (clutch--execute-statements
-       '(("UPDATE demo SET seen = 1 WHERE id = 1" 1 25)
-         ("SELECT * FROM demo" 27 45))))
-    (should (equal final-select '("SELECT * FROM demo" 27 45)))))
-
-;;;; SQL parsing — table and alias extraction
-
-(ert-deftest clutch-test-tables-in-buffer-caches-until-buffer-changes ()
-  "Table lookup in the buffer should reuse cached results until text changes."
-  (with-temp-buffer
-    (insert "SELECT * FROM users")
-    (let ((schema (make-hash-table :test 'equal))
-          first-cache)
-      (puthash "users" t schema)
-      (puthash "posts" t schema)
-      (should (equal (clutch--tables-in-buffer schema) '("users")))
-      (setq first-cache clutch--tables-in-buffer-cache)
-      (should (equal (clutch--tables-in-buffer schema) '("users")))
-      (should (eq clutch--tables-in-buffer-cache first-cache))
-      (goto-char (point-max))
-      (insert " JOIN posts")
-      (should (equal (clutch--tables-in-buffer schema) '("users" "posts")))
-      (should-not (eq clutch--tables-in-buffer-cache first-cache)))))
-
-(ert-deftest clutch-test-tables-in-query-caches-within-statement ()
-  "Statement table lookup should reuse cached results until statement or text changes."
-  (with-temp-buffer
-    (insert "SELECT * FROM users JOIN posts ON users.id = posts.user_id;\n\nSELECT * FROM logs")
-    (let ((schema (make-hash-table :test 'equal))
-          first-cache second-cache)
-      (puthash "users" t schema)
-      (puthash "posts" t schema)
-      (puthash "logs" t schema)
-      (goto-char (point-min))
-      (should (equal (sort (copy-sequence (clutch--tables-in-query schema)) #'string<)
-                     '("posts" "users")))
-      (setq first-cache clutch--tables-in-query-cache)
-      (search-forward "users.id")
-      (should (equal (sort (copy-sequence (clutch--tables-in-query schema)) #'string<)
-                     '("posts" "users")))
-      (should (eq clutch--tables-in-query-cache first-cache))
-      (goto-char (point-max))
-      (should (equal (clutch--tables-in-query schema) '("logs")))
-      (setq second-cache clutch--tables-in-query-cache)
-      (should-not (eq second-cache first-cache))
-      (goto-char (point-max))
-      (insert " WHERE level = 'error'")
-      (should (equal (clutch--tables-in-query schema) '("logs")))
-      (should-not (eq clutch--tables-in-query-cache second-cache)))))
-
-(ert-deftest clutch-test-table-scan-does-not-consume-join-as-previous-table-alias ()
-  "JOIN should not be consumed as the previous table's optional alias.
-Otherwise the scanner skips past the JOIN token and misses the joined table."
-  (with-temp-buffer
-    (insert "select p.title from users join posts p on users.id = p.user_id")
-    (let ((entry (clutch--compute-tables-in-query-cache nil)))
-      (should (equal (plist-get entry :statement-tables)
-                     '("users" "posts")))
-      (should (equal (plist-get entry :statement-aliases)
-                     '(("p" . "posts")))))))
-
-(ert-deftest clutch-test-union-all-alias-scoped-to-branch ()
-  "The same alias in different UNION ALL branches should resolve branch-locally.
-It should not always resolve to the first occurrence."
-  ;; Cursor in the second branch: t. should complete with posts columns.
-  (with-temp-buffer
-    (insert "select t.id from users t\nunion all\nselect t.ti from posts t")
-    (goto-char (point-min))
-    (search-forward "t.ti")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "users" '("id" "name") schema)
-      (puthash "posts" '("title" "body") schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "should not queue async loads when branch columns are cached"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "title" candidates))
-          (should-not (member "name" candidates)))))))
-
-(ert-deftest clutch-test-union-all-alias-scoped-inside-subquery ()
-  "UNION ALL inside a subquery should still scope aliases per branch."
-  ;; Outer: select ... from (...) data_view
-  ;; Inner: two branches with same alias t for different tables.
-  (with-temp-buffer
-    (insert (concat "select data_view.id from (\n"
-                    "  select t.id from users t\n"
-                    "  union all\n"
-                    "  select t.ti from posts t\n"
-                    ") data_view"))
-    (goto-char (point-min))
-    (search-forward "t.ti")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "users" '("id" "name") schema)
-      (puthash "posts" '("title" "body") schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "should not queue async loads when branch columns are cached"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "title" candidates))
-          (should-not (member "name" candidates)))))))
-
-(ert-deftest clutch-test-extract-tables-and-aliases ()
-  "Clutch--extract-tables-and-aliases should preserve table and alias order.
-It should retain duplicates for callers that deduplicate later."
-  (let* ((sql "SELECT a.id FROM users a JOIN orders b ON a.id = b.uid JOIN users c")
-         (result (clutch--extract-tables-and-aliases sql 0 (length sql)))
-         (tables (car result))
-         (aliases (cdr result)))
-    ;; Tables in order, including duplicate "users".
-    (should (equal tables '("users" "orders" "users")))
-    ;; Aliases in order.
-    (should (equal aliases '(("a" . "users") ("b" . "orders") ("c" . "users"))))
-    ;; delete-dups (as used by the cache) removes the second "users".
-    (should (equal (delete-dups (copy-sequence tables)) '("users" "orders")))))
-
-(ert-deftest clutch-test-extract-tables-and-aliases-handles-schema-qualified-table-without-alias ()
-  "Schema-qualified tables without aliases should still parse cleanly."
-  (let* ((sql "SELECT * FROM test.users")
-         (result (clutch--extract-tables-and-aliases sql 0 (length sql))))
-    (should (equal (car result) '("users")))
-    (should-not (cdr result))))
-
-(ert-deftest clutch-test-extract-tables-and-aliases-handles-multiline-from-clause ()
-  "Table extraction should survive multiline FROM clauses with indentation."
-  (with-temp-buffer
-    (clutch-mode)
-    (let* ((sql "SELECT
-    case_code
-FROM
-    section9_cases_wide
-ORDER BY id")
-           (result (clutch--extract-tables-and-aliases sql 0 (length sql))))
-      (should (equal (car result) '("section9_cases_wide")))
-      (should-not (cdr result)))))
-
-(ert-deftest clutch-test-statement-table-identifiers-handle-multiline-from-clause ()
-  "Statement table scanning should survive multiline FROM clauses."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "SELECT
-    case_code
-FROM
-    section9_cases_wide
-ORDER BY id")
-    (should (equal (clutch--statement-table-identifiers)
-                   '("section9_cases_wide")))))
-
-(ert-deftest clutch-test-statement-table-identifiers-in-sql-covers-common-dml-and-ddl ()
-  "SQL-string table scanning should cover agent-context DML and DDL inputs."
-  (should (equal (clutch--statement-table-identifiers-in-sql
-                  "SELECT 'FROM ignored' FROM public.users u JOIN orders o ON o.user_id = u.id")
-                 '("users" "orders")))
-  (should (equal (clutch--statement-table-identifiers-in-sql
-                  "DELETE FROM logs WHERE id = 1; ALTER TABLE users ADD COLUMN flag int;")
-                 '("logs" "users")))
-  (should (equal (clutch--statement-table-identifiers-in-sql
-                  "CREATE UNIQUE INDEX orders_user_idx ON sales.orders (user_id);")
-                 '("orders")))
-  (should (equal (clutch--statement-table-identifiers-in-sql
-                  "CREATE INDEX orders_user_idx\n  ON sales.orders (user_id);")
-                 '("orders"))))
-
-(ert-deftest clutch-test-normalize-table-token-strips-quotes-from-schema-qualified ()
-  "Quoted schema-qualified names like \"HR\".\"EMPLOYEES\" should normalize cleanly.
-They should become a bare table name."
-  (should (equal (clutch--normalize-statement-table-token "\"HR\".\"EMPLOYEES\"")
-                 "EMPLOYEES"))
-  (should (equal (clutch--normalize-statement-table-token "`db`.`table`")
-                 "table"))
-  (should (equal (clutch--normalize-statement-table-token "schema.table")
-                 "table"))
-  (should (equal (clutch--normalize-statement-table-token "\"EMPLOYEES\"")
-                 "EMPLOYEES"))
-  (should (equal (clutch--normalize-statement-table-token "users")
-                 "users")))
-
-;;;; SQL parsing — string and comment awareness
-
-(ert-deftest clutch-test-strip-leading-comments ()
-  "Test stripping leading SQL comments."
-  (should (equal (clutch--strip-leading-comments "SELECT 1") "SELECT 1"))
-  (should (equal (clutch--strip-leading-comments "  SELECT 1") "SELECT 1"))
-  ;; Single-line comment
-  (should (equal (clutch--strip-leading-comments "-- hello\nSELECT 1")
-                 "SELECT 1"))
-  ;; Multiple single-line comments
-  (should (equal (clutch--strip-leading-comments "-- a\n-- b\nSELECT 1")
-                 "SELECT 1"))
-  ;; Multi-line comment
-  (should (equal (clutch--strip-leading-comments "/* foo */SELECT 1")
-                 "SELECT 1"))
-  ;; Mixed
-  (should (equal (clutch--strip-leading-comments "/* foo */\n-- bar\nSELECT 1")
-                 "SELECT 1"))
-  ;; Only comments
-  (should (equal (clutch--strip-leading-comments "-- nothing") "")))
-
-(ert-deftest clutch-test-skip-literal-or-comment-single-quote ()
-  "Skip a single-quoted string literal."
-  (should (= (clutch-db-sql-skip-literal-or-comment "'hello'" 0) 7))
-  ;; Escaped quote via ''
-  (should (= (clutch-db-sql-skip-literal-or-comment "'it''s'" 0) 7))
-  ;; Unterminated — return length.
-  (should (= (clutch-db-sql-skip-literal-or-comment "'hello" 0) 6))
-  ;; Not at a literal — return nil.
-  (should-not (clutch-db-sql-skip-literal-or-comment "SELECT" 0)))
-
-(ert-deftest clutch-test-skip-literal-or-comment-line-comment ()
-  "Skip a -- line comment."
-  (should (= (clutch-db-sql-skip-literal-or-comment "-- comment\ncode" 0) 11))
-  ;; Comment at end of string (no newline).
-  (should (= (clutch-db-sql-skip-literal-or-comment "-- comment" 0) 10)))
-
-(ert-deftest clutch-test-skip-literal-or-comment-block-comment ()
-  "Skip a /* block comment */."
-  (should (= (clutch-db-sql-skip-literal-or-comment "/* block */" 0) 11))
-  ;; Unterminated.
-  (should (= (clutch-db-sql-skip-literal-or-comment "/* open" 0) 7)))
-
-(ert-deftest clutch-test-skip-literal-or-comment-ignores-double-quote ()
-  "Double-quoted identifiers are NOT literals — should return nil."
-  (should-not (clutch-db-sql-skip-literal-or-comment "\"User Table\"" 0)))
-
-(ert-deftest clutch-test-skip-literal-or-comment-ignores-backtick ()
-  "Backtick identifiers are NOT literals — should return nil."
-  (should-not (clutch-db-sql-skip-literal-or-comment "`user_table`" 0)))
-
-(ert-deftest clutch-test-mask-literal-or-comment ()
-  "Mask string literals and comments but preserve identifiers."
-  (let ((masked (clutch-db-sql-mask-literal-or-comment
-                 "select 'union all' from t -- limit")))
-    (should (= (length masked) (length "select 'union all' from t -- limit")))
-    ;; String content masked.
-    (should (string-match-p "select '         ' from t" masked))
-    ;; Comment masked.
-    (should-not (string-match-p "limit" masked))
-    ;; Delimiters preserved.
-    (should (string-match-p "from t" masked)))
-  ;; Double-quoted identifiers are NOT masked.
-  (let ((masked (clutch-db-sql-mask-literal-or-comment
-                 "select * from \"User Table\" u")))
-    (should (string-match-p "\"User Table\"" masked)))
-  ;; Multibyte string content must not trigger aset errors.
-  (let* ((sql "select case when '全提' then '即存' end from t")
-         (masked (clutch-db-sql-mask-literal-or-comment sql)))
-    (should (= (length masked) (length sql)))
-    (should (string-match-p "from t" masked))
-    (should-not (string-match-p "全提" masked))
-    (should-not (string-match-p "即存" masked))))
-
-(ert-deftest clutch-test-find-top-level-clause-skips-string ()
-  "LIMIT inside a string literal should not be found."
-  (should-not (clutch-db-sql-find-top-level-clause
-               "select 'limit 10' from t" "LIMIT")))
-
-(ert-deftest clutch-test-find-top-level-clause-skips-comment ()
-  "LIMIT inside a comment should not be found, but a real one should."
-  (should (clutch-db-sql-find-top-level-clause
-           "select /* limit */ from t limit 5" "LIMIT"))
-  (should (clutch-db-sql-find-top-level-clause
-           "select -- limit\nfrom t limit 5" "LIMIT")))
-
-(ert-deftest clutch-test-extract-tables-skips-string-literal ()
-  "FROM inside a string literal should not produce a table."
-  (let* ((sql "select 'from users' from orders o")
-         (result (clutch--extract-tables-and-aliases sql 0 (length sql))))
-    (should (equal (car result) '("orders")))
-    (should (equal (cdr result) '(("o" . "orders"))))))
-
-(ert-deftest clutch-test-extract-tables-preserves-quoted-identifier ()
-  "Backtick-quoted identifiers should still be extracted.
-Double-quoted multi-word identifiers are a pre-existing regex limitation."
-  (let* ((sql "select * from `order_items` oi join \"users\" u")
-         (result (clutch--extract-tables-and-aliases sql 0 (length sql)))
-         (tables (car result))
-         (aliases (cdr result)))
-    (should (member "order_items" tables))
-    (should (member "users" tables))
-    (should (assoc "oi" aliases))
-    (should (assoc "u" aliases))))
-
-(ert-deftest clutch-test-union-branch-skips-string-union ()
-  "UNION inside a string should not split branches."
-  (let* ((sql "select 'union all' from a union all select * from b")
-         ;; Point in the first branch (before the real UNION).
-         (range (clutch--union-branch-range sql 5)))
-    ;; The range should NOT start after the string — only split at real UNION.
-    (should (= (car range) 0))
-    (should (< (car range) 26))))
-
-(ert-deftest clutch-test-innermost-paren-skips-string-parens ()
-  "Parentheses inside string literals should not affect depth tracking."
-  (let* ((sql "select (a, ')', b) from t")
-         (range (clutch--innermost-paren-range sql 9)))
-    ;; Point at 'a' inside the real parens — range should be (8 . 17).
-    ;; ( is at 7, ) is at 17; result is (1+ open) . close-pos.
-    (should (= (car range) 8))
-    (should (= (cdr range) 17))))
-
-;;;; SQL parsing — WHERE and COUNT rewriting
-
-(ert-deftest clutch-test-ensure-where-guard-blocks-missing-where ()
-  "Generated DML statements must contain top-level WHERE."
-  (should-error
-   (clutch-result--ensure-where-guard '("UPDATE t SET x=1") "UPDATE")
-   :type 'user-error)
-  (should-error
-   (clutch-result--ensure-where-guard '("DELETE FROM t") "DELETE")
-   :type 'user-error)
-  (should (null (clutch-result--ensure-where-guard
-                 '("UPDATE t SET x=1 WHERE id=1" "DELETE FROM t WHERE id=1")
-                 "UPDATE"))))
-
-(ert-deftest clutch-test-apply-where ()
-  "Test WHERE filter application to SQL."
-  ;; Simple case wraps query and applies outer WHERE
-  (should (string-match-p
-           "SELECT \\* FROM (SELECT \\* FROM t) AS _clutch_filter WHERE id = 1"
-           (clutch--apply-where "SELECT * FROM t" "id = 1")))
-  ;; Query with existing WHERE is wrapped safely
-  (let ((result (clutch--apply-where "SELECT * FROM t WHERE x > 0" "id = 1")))
-    (should (string-match-p "FROM (SELECT \\* FROM t WHERE x > 0)" result))
-    (should (string-match-p "WHERE id = 1\\'" result))))
-
-(ert-deftest clutch-test-apply-where-with-cte ()
-  "Test WHERE filter wrapping for CTE SQL."
-  (let* ((sql "WITH x AS (SELECT id FROM t) SELECT * FROM x")
-         (result (clutch--apply-where sql "id > 10")))
-    (should (string-match-p "^SELECT \\* FROM (WITH x AS" result))
-    (should (string-match-p "WHERE id > 10\\'" result))))
-
-(ert-deftest clutch-test-apply-where-with-union ()
-  "Test WHERE filter wrapping for UNION SQL."
-  (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b)")
-         (result (clutch--apply-where sql "id > 10")))
-    (should (string-match-p "^SELECT \\* FROM (.*UNION ALL.*) AS _clutch_filter" result))
-    (should (string-match-p "WHERE id > 10\\'" result))))
-
-(ert-deftest clutch-test-apply-where-normalizes-comments-and-semicolon ()
-  "WHERE rewrite should strip leading comments and trailing semicolons."
-  (let* ((sql "-- head comment\n/* block */\nSELECT id FROM t;")
-         (result (clutch--apply-where sql "id > 10")))
-    (should (string-prefix-p
-             "SELECT * FROM (SELECT id FROM t) AS _clutch_filter WHERE id > 10"
-             result))
-    (should-not (string-match-p ";\\s-*) AS _clutch_filter" result))))
-
-(ert-deftest clutch-test-build-count-sql-preserves-top-level-limit-offset ()
-  "Count SQL should count the current limited result set."
-  (let ((result (clutch--build-count-sql
-                 "SELECT id, name FROM users ORDER BY created_at DESC LIMIT 10 OFFSET 20")))
-    (should (string-match-p
-             "^SELECT COUNT(\\*) FROM (SELECT id, name FROM users ORDER BY created_at DESC LIMIT 10 OFFSET 20) AS _clutch_count\\'"
-             result))))
-
-(ert-deftest clutch-test-build-count-sql-with-cte ()
-  "Count SQL should wrap CTE query safely."
-  (let* ((sql "WITH x AS (SELECT id FROM t ORDER BY id) SELECT * FROM x ORDER BY id")
-         (result (clutch--build-count-sql sql)))
-    (should (string-match-p "^SELECT COUNT(\\*) FROM (WITH x AS" result))
-    (should (string-match-p ") AS _clutch_count\\'" result))
-    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
-
-(ert-deftest clutch-test-build-count-sql-with-distinct ()
-  "Count SQL should preserve DISTINCT semantics via derived-table wrapping."
-  (let* ((sql "SELECT DISTINCT user_id FROM visits ORDER BY user_id")
-         (result (clutch--build-count-sql sql)))
-    (should (string-match-p
-             "^SELECT COUNT(\\*) FROM (SELECT DISTINCT user_id FROM visits) AS _clutch_count\\'"
-             result))))
-
-(ert-deftest clutch-test-build-count-sql-keeps-inner-order-by ()
-  "Count SQL should not remove ORDER BY inside nested subqueries."
-  (let* ((sql "SELECT * FROM (SELECT id FROM t ORDER BY created_at DESC) s ORDER BY id")
-         (result (clutch--build-count-sql sql)))
-    (should (string-match-p "SELECT id FROM t ORDER BY created_at DESC" result))
-    (should (string-match-p "AS _clutch_count\\'" result))
-    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
-
-(ert-deftest clutch-test-build-count-sql-with-union-top-order ()
-  "Count SQL should drop only top-level ORDER BY for UNION queries."
-  (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b) ORDER BY id")
-         (result (clutch--build-count-sql sql)))
-    (should (string-match-p "UNION ALL" result))
-    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
-
-(ert-deftest clutch-test-build-count-sql-with-union-limit-offset ()
-  "Count SQL should preserve top-level LIMIT/OFFSET on UNION queries."
-  (let* ((sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 50 OFFSET 100")
-         (result (clutch--build-count-sql sql)))
-    (should (string-match-p "UNION ALL" result))
-    (should (string-match-p "LIMIT 50\\s-+OFFSET 100\\s-*) AS _clutch_count\\'" result))))
-
-(ert-deftest clutch-test-build-count-sql-keeps-window-order-by ()
-  "Count SQL should keep ORDER BY inside window OVER clauses."
-  (let* ((sql "SELECT row_number() OVER (ORDER BY created_at DESC) AS rn FROM t ORDER BY rn LIMIT 5")
-         (result (clutch--build-count-sql sql)))
-    (should (string-match-p "OVER (ORDER BY created_at DESC)" result))
-    (should (string-match-p "ORDER BY rn\\s-+LIMIT 5\\s-*) AS _clutch_count\\'" result))))
-
-(ert-deftest clutch-test-build-count-sql-strips-trailing-semicolon ()
-  "Count SQL should normalize trailing semicolons."
-  (let ((result (clutch--build-count-sql "SELECT * FROM users;")))
-    (should-not (string-match-p ";\\s-*) AS _clutch_count\\'" result))
-    (should (string-match-p "SELECT \\* FROM users" result))))
-
-(ert-deftest clutch-test-build-count-sql-strips-leading-comments ()
-  "Count SQL should ignore leading SQL comments."
-  (let* ((sql "-- comment\n/* block */\nSELECT id FROM t ORDER BY id")
-         (result (clutch--build-count-sql sql)))
-    (should (string-prefix-p "SELECT COUNT(*) FROM (SELECT id FROM t)" result))
-    (should-not (string-match-p "ORDER BY id\\s-*) AS _clutch_count\\'" result))))
-
-(ert-deftest clutch-test-build-count-sql-omits-as-for-oracle-derived-table ()
-  "Oracle count rewrite should not use AS before a derived-table alias."
-  (cl-letf (((symbol-function 'clutch--connection-oracle-jdbc-p)
-             (lambda (&rest _) t)))
-    (should (equal (clutch--build-count-sql
-                    "SELECT id FROM t FETCH FIRST 50 ROWS ONLY")
-                   "SELECT COUNT(*) FROM (SELECT id FROM t FETCH FIRST 50 ROWS ONLY) clutch_count"))))
-
-(ert-deftest clutch-test-apply-where-omits-as-for-oracle-derived-table ()
-  "Oracle WHERE rewrite should not use AS before a derived-table alias."
-  (cl-letf (((symbol-function 'clutch--connection-oracle-jdbc-p)
-             (lambda (&rest _) t)))
-    (should (equal (clutch--apply-where "SELECT * FROM t" "id = 1")
-                   "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))))
-
-;;;; SQL parsing — LIMIT detection and paging SQL
-
-(ert-deftest clutch-test-db-sql-has-top-level-limit-p ()
-  "Test LIMIT clause detection."
-  (should (clutch-db-sql-has-top-level-limit-p "SELECT * FROM t LIMIT 10"))
-  (should (clutch-db-sql-has-top-level-limit-p "select * from t limit 10"))
-  (should (clutch-db-sql-has-top-level-limit-p
-           "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"))
-  (should (clutch-db-sql-has-top-level-limit-p
-           "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 20"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "SELECT * FROM (SELECT * FROM t LIMIT 5) AS s"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "(SELECT id FROM a LIMIT 1) UNION ALL (SELECT id FROM b)"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "WITH x AS (SELECT * FROM t LIMIT 3) SELECT * FROM x"))
-  (should-not (clutch-db-sql-has-top-level-limit-p "SELECT * FROM t"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "SELECT * FROM t WHERE limitation = 1")))
-
-(ert-deftest clutch-test-build-paged-sql-delegates-page-tailed-query ()
-  "Page-tailed SQL should not be wrapped before backend pagination."
-  (let ((clutch-connection 'fake-conn)
-        captured)
-    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-               (lambda (_conn sql page-num page-size &optional order-by page-offset)
-                 (push (list sql page-num page-size order-by page-offset) captured)
-                 "SELECT * FROM page")))
-      (clutch--build-paged-sql
-       "SELECT * FROM users ORDER BY created_at DESC LIMIT 1000" 1 500)
-      (clutch--build-paged-sql
-       "SELECT * FROM users ORDER BY created_at DESC OFFSET 20"
-       0 500 '("name" . "ASC"))
-      (should (equal (nreverse captured)
-                     '(("SELECT * FROM users ORDER BY created_at DESC LIMIT 1000"
-                        1 500 nil nil)
-                       ("SELECT * FROM users ORDER BY created_at DESC OFFSET 20"
-                        0 500 ("name" . "ASC") nil)))))))
-
-(ert-deftest clutch-test-split-page-lookahead-rows-trims-extra-row ()
-  "Lookahead splitting should keep page-size rows and report whether more exist."
-  (should (equal (clutch--split-page-lookahead-rows '((1) (2) (3)) 2)
-                 '(((1) (2)) . t)))
-  (should (equal (clutch--split-page-lookahead-rows '((1) (2)) 2)
-                 '(((1) (2)) . nil))))
 
 ;;;; Schema cache — refresh and status
 
@@ -2896,16 +2175,12 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (calls 0))
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "dev-key"))
-              ((symbol-function 'clutch--run-db-query)
-               (lambda (_conn _sql)
+              ((symbol-function 'clutch-db-symbol-help)
+               (lambda (_conn _symbol)
                  (cl-incf calls)
                  (if (= calls 1)
                      (signal 'clutch-db-error '("help boom"))
-                   (make-clutch-db-result
-                    :columns '("name" "description" "example")
-                    :rows '(("ABS"
-                             "Syntax:\n\nABS(X)\n\nReturns absolute value."
-                             "")))))))
+                   '(:sig "ABS(X)" :desc "Returns absolute value.")))))
       (should-not (clutch--ensure-help-doc 'fake-conn "abs"))
       (should (string-match-p "ABS(X)"
                               (clutch--ensure-help-doc 'fake-conn "abs")))
@@ -2957,7 +2232,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (clutch--column-details-status-cache (make-hash-table :test 'equal))
         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
         (clutch--column-details-active-cache (make-hash-table :test 'equal))
-        (clutch--column-details-ticket-counter 0)
+        (clutch--metadata-ticket-counter 0)
         callback)
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "dev-key"))
@@ -2970,7 +2245,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
               ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore))
       (clutch--ensure-column-details-async 'fake-conn "users")
       (clutch--set-column-details-status
-       'fake-conn "users" 'loading nil (clutch--begin-column-details-ticket))
+       'fake-conn "users" 'loading nil (clutch--begin-metadata-ticket))
       (funcall callback (list (list :name "stale_col" :type "int")))
       (should-not (clutch--cached-column-details 'fake-conn "users")))))
 
@@ -2980,7 +2255,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (clutch--column-details-status-cache (make-hash-table :test 'equal))
         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
         (clutch--column-details-active-cache (make-hash-table :test 'equal))
-        (clutch--column-details-ticket-counter 0)
+        (clutch--metadata-ticket-counter 0)
         (alive t)
         callback)
     (cl-letf (((symbol-function 'clutch--connection-key)
@@ -3003,7 +2278,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (clutch--column-details-status-cache (make-hash-table :test 'equal))
         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
         (clutch--column-details-active-cache (make-hash-table :test 'equal))
-        (clutch--column-details-ticket-counter 0)
+        (clutch--metadata-ticket-counter 0)
         refreshed
         calls)
     (cl-letf (((symbol-function 'clutch--connection-key)
@@ -3060,8 +2335,8 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                        ('conn-a "conn-a")
                        ('conn-b "conn-b")
                        (_ "other"))))
-                  ((symbol-function 'clutch--cached-result-column-details)
-                   (lambda (_conn _sql _col-names)
+                  ((symbol-function 'clutch--result-column-details)
+                   (lambda (_conn _table _col-names)
                      details)))
           (with-current-buffer buf-a
             (clutch-result-mode)
@@ -3144,1298 +2419,22 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
     (setq-local clutch--result-column-details nil)
     (should-not (clutch--column-info-string 0))))
 
-(ert-deftest clutch-test-resolve-column-details-maps-by-name ()
+(ert-deftest clutch-test-result-column-details-maps-by-name ()
   "Detail resolution matches result columns to cached details by name."
-  (cl-letf (((symbol-function 'clutch-result--table-from-sql)
-             (lambda (_) "users"))
-            ((symbol-function 'clutch--cached-column-details)
+  (cl-letf (((symbol-function 'clutch--cached-column-details)
              (lambda (_conn _table)
                (list (list :name "ID" :type "INT" :nullable nil)
                      (list :name "NAME" :type "VARCHAR" :nullable t)))))
-    (let ((result (clutch--resolve-result-column-details
-                   'dummy-conn "SELECT id, name FROM users" '("id" "name"))))
+    (let ((result (clutch--result-column-details
+                   'dummy-conn "users" '("id" "name"))))
       (should (= (length result) 2))
       (should (equal (plist-get (nth 0 result) :type) "INT"))
       (should (equal (plist-get (nth 1 result) :type) "VARCHAR")))))
 
-(ert-deftest clutch-test-resolve-column-details-nil-for-no-table ()
+(ert-deftest clutch-test-result-column-details-nil-for-no-table ()
   "Detail resolution returns nil when no source table is detected."
-  (cl-letf (((symbol-function 'clutch-result--table-from-sql)
-             (lambda (_) nil)))
-    (should-not (clutch--resolve-result-column-details
-                 'dummy "SELECT 1+1" '("col1")))))
-
-;;;; Completion — SQL keywords
-
-(ert-deftest clutch-test-sql-keyword-completion-case-insensitive ()
-  "Test case-insensitive matching (input \"sel\" matches \"SELECT\")."
-  (with-temp-buffer
-    (insert "sel")
-    (let* ((result (clutch-sql-keyword-completion-at-point))
-           (candidates (clutch-test--completion-candidates result)))
-      (should result)
-      (should (member "SELECT" candidates)))))
-
-(ert-deftest clutch-test-sql-keyword-completion-includes-zero-arg-functions ()
-  "Installed keyword CAPF should include zero-argument SQL functions."
-  (with-temp-buffer
-    (insert "cur")
-    (let (captured)
-      (setq-local completion-at-point-functions nil)
-      (clutch--install-completion-capfs)
-      (cl-letf ((completion-in-region-function
-                 (lambda (start end collection &optional predicate)
-                   (setq captured
-                         (all-completions
-                          (buffer-substring-no-properties start end)
-                          collection predicate))
-                   t)))
-        (should (completion-at-point))
-        (should (member "CURRENT_DATABASE()" captured))))))
-
-(ert-deftest clutch-test-sql-keyword-completion-chain-case-insensitive ()
-  "The installed CAPF chain should complete lowercase keyword prefixes."
-  (with-temp-buffer
-    (insert "sele")
-    (let (captured)
-      (setq-local completion-at-point-functions nil)
-      (clutch--install-completion-capfs)
-      (cl-letf ((completion-in-region-function
-                 (lambda (start end collection &optional predicate)
-                   (setq captured
-                         (all-completions
-                          (buffer-substring-no-properties start end)
-                          collection predicate))
-                   t)))
-        (should (completion-at-point))
-        (should (member "SELECT" captured))))))
-
-(ert-deftest clutch-test-sql-keyword-completion-no-prefix ()
-  "Test that keyword capf returns nil with no word at point."
-  (with-temp-buffer
-    (insert " ")
-    (let ((result (clutch-sql-keyword-completion-at-point)))
-      (should-not result))))
-
-(ert-deftest clutch-test-sql-keyword-completion-honors-lowercase-style ()
-  "Keyword completion should honor `clutch-sql-completion-case-style'."
-  (let ((clutch-sql-completion-case-style 'lower))
-    (with-temp-buffer
-      (insert "sel")
-      (let* ((result (clutch-sql-keyword-completion-at-point))
-             (candidates (clutch-test--completion-candidates result)))
-        (should result)
-        (should (member "select" candidates))
-        (should-not (member "SELECT" candidates))))
-    (with-temp-buffer
-      (insert "gro")
-      (let* ((result (clutch-sql-keyword-completion-at-point))
-             (candidates (clutch-test--completion-candidates result)))
-        (should result)
-        (should (member "group by" candidates))
-        (should-not (member "GROUP BY" candidates))))))
-
-(ert-deftest clutch-test-sql-keyword-completion-uses-complete-clause-phrases ()
-  "Keyword completion should offer complete multi-word clause heads."
-  (dolist (case '(("gro" "GROUP BY" "GROUP")
-                  ("ord" "ORDER BY" "ORDER")
-                  ("par" "PARTITION BY" "PARTITION")
-                  ("pri" "PRIMARY KEY" "PRIMARY")
-                  ("for" "FOREIGN KEY" "FOREIGN")))
-    (pcase-let ((`(,prefix ,phrase ,first-token) case))
-      (with-temp-buffer
-        (insert prefix)
-        (let* ((result (clutch-sql-keyword-completion-at-point))
-               (candidates (clutch-test--completion-candidates result)))
-          (should (member phrase candidates))
-          (should-not (member first-token candidates)))))))
-
-(ert-deftest clutch-test-sql-keyword-completion-keeps-additive-phrase-bases ()
-  "Additive keyword phrases should not hide valid first-token completions."
-  (dolist (case '(("inn" "INNER" "INNER JOIN")
-                  ("lef" "LEFT" "LEFT JOIN")
-                  ("rig" "RIGHT" "RIGHT JOIN")
-                  ("cro" "CROSS" "CROSS JOIN")
-                  ("uni" "UNION" "UNION ALL")
-                  ("is" "IS" "IS NULL" "IS NOT NULL")
-                  ("not" "NOT" "NOT NULL")))
-    (pcase-let ((`(,prefix . ,expected) case))
-      (with-temp-buffer
-        (insert prefix)
-        (let* ((result (clutch-sql-keyword-completion-at-point))
-               (candidates (clutch-test--completion-candidates result)))
-          (dolist (candidate expected)
-            (should (member candidate candidates))))))))
-
-(ert-deftest clutch-test-keyword-capf-exit-function-inserts-space-on-exact ()
-  "Keyword CAPF exit-function should insert a trailing space for status `exact'."
-  (with-temp-buffer
-    (insert "FROM")
-    (let* ((capf (clutch-sql-keyword-completion-at-point))
-           (exit-fn (plist-get (cdddr capf) :exit-function)))
-      (funcall exit-fn "FROM" 'exact)
-      (should (equal (buffer-string) "FROM ")))))
-
-(ert-deftest clutch-test-keyword-capf-exit-function-skips-space-after-call ()
-  "Keyword CAPF exit-function should not add a space after function calls."
-  (with-temp-buffer
-    (insert "cur")
-    (let* ((capf (clutch-sql-keyword-completion-at-point))
-           (exit-fn (plist-get (cdddr capf) :exit-function)))
-      (funcall exit-fn "CURRENT_DATABASE()" 'exact)
-      (should (equal (buffer-string) "cur")))))
-
-;;;; Completion — identifiers and columns
-
-(ert-deftest clutch-test-completion-at-point-keyword-phrase-exit-inserts-space ()
-  "Connection-aware completion should space accepted keyword phrases."
-  (with-temp-buffer
-    (insert "select * from users gro")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "users" '("id") schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t)))
-        (let* ((capf (clutch-completion-at-point))
-               (exit-fn (plist-get (cdddr capf) :exit-function)))
-          (delete-region (car capf) (cadr capf))
-          (insert "GROUP BY")
-          (funcall exit-fn "GROUP BY" 'finished)
-          (should (equal (buffer-string)
-                         "select * from users GROUP BY ")))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-current-columns-at-empty-sql-slots ()
-  "CAPF should complete visible columns at empty SQL expression positions."
-  (dolist (sql '("select | from users u join orders o on u.id = o.user_id"
-                 "select * from users u join orders o on u.id = o.user_id where |"
-                 "select * from users u join orders o on u.id = o.user_id group by |"
-                 "select * from users u join orders o on u.id = o.user_id order by |"
-                 "select * from users u join orders o on |"))
-    (with-temp-buffer
-      (clutch-mode)
-      (insert sql)
-      (goto-char (point-min))
-      (search-forward "|")
-      (delete-char -1)
-      (let ((schema (make-hash-table :test 'equal))
-            (clutch-connection 'fake)
-            captured
-            annotation-function)
-        (puthash "users" '("id" "name") schema)
-        (puthash "orders" '("id" "user_id") schema)
-        (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                   (lambda (&optional _conn) schema))
-                  ((symbol-function 'clutch-db-busy-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch-db-completion-sync-columns-p)
-                   (lambda (_conn) t))
-                  (completion-in-region-function
-                   (lambda (_start _end collection &optional predicate)
-                     (setq captured (all-completions "" collection predicate)
-                           annotation-function
-                           (plist-get completion-extra-properties
-                                     :annotation-function))
-                     t)))
-          (let* ((capf (clutch-completion-at-point))
-                 (props (nthcdr 3 capf))
-                 (annotation-function (plist-get props :annotation-function)))
-            (should capf)
-            (should (equal (all-completions "" (nth 2 capf)
-                                            (plist-get props :predicate))
-                           '("u.id" "u.name" "o.id" "o.user_id")))
-            (should annotation-function)
-            (should (equal (substring-no-properties
-                            (funcall annotation-function "u.id"))
-                           "  u (users)")))
-          (let ((command (local-key-binding (kbd "C-c TAB"))))
-            (let ((this-command command))
-              (call-interactively command)))
-          (should (equal captured '("u.id" "u.name" "o.id" "o.user_id")))
-          (should annotation-function)
-          (should (equal (substring-no-properties
-                          (funcall annotation-function "u.id"))
-                         "  u (users)")))))))
-
-(ert-deftest clutch-test-complete-at-point-keeps-empty-column-completion-active ()
-  "Manual empty-column completion should keep its completion region valid."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "select  from users")
-    (goto-char (point-min))
-    (search-forward "select ")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          completion-predicate)
-      (puthash "users" '("id" "name") schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                (completion-in-region-function
-                 (lambda (_start _end _collection &optional _predicate)
-                   (setq completion-predicate
-                         completion-in-region-mode-predicate)
-                   t)))
-        (call-interactively #'clutch-complete-at-point)
-        (should completion-predicate)
-        (should (funcall completion-predicate))))))
-
-(ert-deftest clutch-test-insert-completion-at-point-uses-enum-candidates ()
-  "Insert buffer completion should return enum candidates for the current field."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("severity" "is_ship_blocked" "owner")
-                        clutch--result-column-defs '((:name "severity" :type-category text)
-                                                     (:name "is_ship_blocked" :type-category numeric)
-                                                     (:name "owner" :type-category text))))
-          (with-temp-buffer
-            (insert "severity: \nis_ship_blocked: \nowner: alice\n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
-            (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "severity" :type "enum('low','medium','high','critical')")
-                               (list :name "is_ship_blocked" :type "tinyint(1)")
-                               (list :name "owner" :type "varchar(255)")))))
-              (goto-char (point-min))
-              (goto-char (clutch-result-insert--current-field-value-position))
-              (pcase-let ((`(,beg ,end ,candidates . ,_)
-                           (clutch-result-insert-completion-at-point)))
-                (should (= beg end))
-                (should (equal candidates '("low" "medium" "high" "critical"))))
-              (forward-line 1)
-              (goto-char (clutch-result-insert--current-field-value-position))
-              (pcase-let ((`(,_beg ,_end ,candidates . ,_)
-                           (clutch-result-insert-completion-at-point)))
-                (should (equal candidates '("0" "1"))))
-              (forward-line 1)
-              (goto-char (clutch-result-insert--current-field-value-position))
-              (should-not (clutch-result-insert-completion-at-point)))))
-      (kill-buffer result-buf))))
-
-(ert-deftest clutch-test-insert-complete-field-falls-back-to-completing-read ()
-  "Insert completion command should fall back when CAPF does not handle it."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
-        (insert-buf (generate-new-buffer "*clutch-insert-temp*"))
-        completion-called)
-    (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("severity")
-                        clutch--result-column-defs '((:name "severity" :type-category text))))
-          (with-current-buffer insert-buf
-            (erase-buffer)
-            (insert "severity: \n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
-            (cl-letf (((symbol-function 'completion-at-point) (lambda () nil))
-                      ((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "severity"
-                                     :type "enum('low','medium','high','critical')"))))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _args)
-                         (setq completion-called t)
-                         "critical")))
-              (goto-char (point-min))
-              (goto-char (clutch-result-insert--current-field-value-start))
-              (clutch-result-insert-complete-field)
-              (should completion-called)
-              (should (equal (buffer-string) "severity: critical\n")))))
-      (kill-buffer result-buf)
-      (kill-buffer insert-buf))))
-
-(ert-deftest clutch-test-edit-complete-field-propagates-capf-errors ()
-  "Edit completion should not swallow `completion-at-point' failures."
-  (with-temp-buffer
-    (setq-local clutch-result-edit--column-name "severity")
-    (clutch--result-edit-mode 1)
-    (cl-letf (((symbol-function 'completion-at-point)
-               (lambda ()
-                 (error "CAPF boom"))))
-      (should-error (clutch-result-edit-complete-field) :type 'error))))
-
-(ert-deftest clutch-test-insert-complete-field-propagates-capf-errors ()
-  "Insert completion should not swallow `completion-at-point' failures."
-  (with-temp-buffer
-    (insert "severity: \n")
-    (clutch-result-insert-mode 1)
-    (cl-letf (((symbol-function 'completion-at-point)
-               (lambda ()
-                 (error "CAPF boom"))))
-      (goto-char (point-min))
-      (goto-char (clutch-result-insert--current-field-value-start))
-      (should-error (clutch-result-insert-complete-field) :type 'error))))
-
-(ert-deftest clutch-test-completion-at-point-keeps-short-prefix-table-only ()
-  "Non-keyword short prefixes should not load columns eagerly."
-  (with-temp-buffer
-    (insert "x")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          called)
-      (puthash "xaccounts" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (&rest _args)
-                   (setq called t)
-                   '("id"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "xaccounts" candidates))
-          (should-not called))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-cached-columns-for-small-statement-scope ()
-  "Identifier completion should reuse cached columns and sync-load cache misses."
-  (with-temp-buffer
-    (insert "us")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          loaded)
-      (puthash "users" '("id" "name") schema)
-      (puthash "orders" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users" "orders")))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (_conn _schema table)
-                   (setq loaded table)
-                   '("order_id" "user_id")))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "sync completion should not queue async column loads"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf "")))
-          (should capf)
-          (should (equal loaded "orders"))
-          (should (member "id" candidates))
-          (should (member "order_id" candidates))
-          (should (member "users" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-keeps-statement-scope-candidates-tight ()
-  "Statement-scoped column completion should not leak unrelated schema tables."
-  (with-temp-buffer
-    (insert "select us from users join posts on users.id = posts.user_id")
-    (goto-char (point-min))
-    (search-forward "us")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "users" nil schema)
-      (puthash "posts" nil schema)
-      (puthash "logs" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users" "posts")))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "should not queue async loads when statement columns are cached"))))
-        (puthash "users" '("user_id" "user_name") schema)
-        (puthash "posts" '("post_id" "user_id") schema)
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf "")))
-          (should capf)
-          (should (member "users" candidates))
-          (should (member "posts" candidates))
-          (should (member "user_id" candidates))
-          (should-not (member "logs" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-sync-loads-columns-for-small-statement-scope ()
-  "Native statement-scoped completion should sync-load columns on cache miss."
-  (with-temp-buffer
-    (insert "us")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          loaded)
-      (puthash "users" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users")))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (_conn _schema table)
-                   (setq loaded table)
-                   '("id" "name")))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "sync completion should not queue async column loads"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf "")))
-          (should capf)
-          (should (equal loaded "users"))
-          (should (member "id" candidates))
-          (should (member "users" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-qualified-table-for-cached-column-loading ()
-  "Qualified completion should only use cached columns for the referenced table."
-  (dolist (case '(("select * from users u join posts p on u." "u.")
-                  ("select users. from users" "users.")))
-    (pcase-let ((`(,sql ,marker) case))
-      (with-temp-buffer
-        (clutch-mode)
-        (insert sql)
-        (goto-char (point-min))
-        (search-forward marker)
-        (let ((schema (make-hash-table :test 'equal))
-              (clutch-connection 'fake)
-              captured)
-          (puthash "users" '("id" "name") schema)
-          (puthash "posts" '("title" "body") schema)
-          (push (lambda ()
-                  (list (point) (point) '("generic") :exclusive 'no))
-                completion-at-point-functions)
-          (run-hooks 'corfu-mode-hook)
-          (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                     (lambda () schema))
-                    ((symbol-function 'clutch-db-busy-p)
-                     (lambda (_conn) nil))
-                    ((symbol-function 'clutch-db-completion-sync-columns-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch--ensure-columns-async)
-                     (lambda (&rest _args)
-                       (ert-fail "should not queue async loads when target is cached")))
-                    (completion-in-region-function
-                     (lambda (start end collection &optional predicate)
-                       (setq captured
-                             (all-completions
-                              (buffer-substring-no-properties start end)
-                              collection predicate))
-                       t)))
-            (let ((command (local-key-binding (kbd "TAB"))))
-              (let ((this-command command))
-                (call-interactively command)))
-            (should (equal captured '("id" "name")))
-            (should-not (member "generic" captured))
-            (should-not (member "title" captured))
-            (should (eq (plist-get (nthcdr 3 (clutch-completion-at-point))
-                                   :company-prefix-length)
-                        t))))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-direct-table-candidates-without-schema-cache ()
-  "Direct backend table completion should work without a schema cache."
-  (with-temp-buffer
-    (insert "select * from zj_")
-    (goto-char (point-max))
-    (let ((clutch-connection 'fake))
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () nil))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-complete-tables)
-                 (lambda (_conn prefix)
-                   (should (equal prefix "zj_"))
-                   '("ZJ_NCBUSINESSDATA" "ZJ_SYS_PARA"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "ZJ_NCBUSINESSDATA" candidates))
-          (should (member "ZJ_SYS_PARA" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-prefers-table-candidates-in-from-context ()
-  "FROM/JOIN table completion should not be shadowed by SQL keyword completion."
-  (with-temp-buffer
-    (insert "select * from or")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          captured)
-      (puthash "ORDERS" nil schema)
-      (setq-local completion-at-point-functions nil)
-      (clutch--install-completion-capfs)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                (completion-in-region-function
-                 (lambda (start end collection &optional predicate)
-                   (setq captured
-                         (list :input (buffer-substring-no-properties start end)
-                               :candidates (all-completions
-                                            (buffer-substring-no-properties start end)
-                                            collection predicate)))
-                   t)))
-        (should (completion-at-point))
-        (should (equal (plist-get captured :input) "or"))
-        (should (equal (plist-get captured :candidates) '("ORDERS")))))))
-
-(ert-deftest clutch-test-completion-at-point-defers-to-keywords-for-keyword-prefixes ()
-  "Statement-start keyword prefixes should not be shadowed by schema tables."
-  (with-temp-buffer
-    (insert "sele")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "SELECT_LOG" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil)))
-        (should-not (clutch-completion-at-point))
-        (let* ((capf (clutch-sql-keyword-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "SELECT" candidates))
-          (should-not (member "SELECT_LOG" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-chain-keeps-keywords-with-statement-context ()
-  "The installed CAPF chain should still offer keywords with statement tables."
-  (with-temp-buffer
-    (insert "sele from users")
-    (goto-char (point-min))
-    (search-forward "sele")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          captured)
-      (puthash "users" '("id" "name") schema)
-      (setq-local completion-at-point-functions nil)
-      (clutch--install-completion-capfs)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users")))
-                (completion-in-region-function
-                 (lambda (start end collection &optional predicate)
-                   (setq captured
-                         (all-completions
-                          (buffer-substring-no-properties start end)
-                          collection predicate))
-                   t)))
-        (should (completion-at-point))
-        (should (member "SELECT" captured))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
-  "Direct backend column completion should avoid synchronous ensure-columns."
-  (with-temp-buffer
-    (insert "select pa from ZJ_SYS_PARA")
-    (goto-char (point-min))
-    (search-forward "pa")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "ZJ_SYS_PARA" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (&rest _args)
-                   (error "Should not synchronously load columns")))
-                ((symbol-function 'clutch-db-complete-columns)
-                 (lambda (_conn table prefix)
-                   (should (equal table "ZJ_SYS_PARA"))
-                   (should (equal prefix "pa"))
-                   '("PARA_ID" "PARA_NAME"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "PARA_ID" candidates))
-          (should (member "PARA_NAME" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-alias-qualified-table-for-direct-column-loading ()
-  "Alias-qualified completion should only query direct columns for the referenced table."
-  (with-temp-buffer
-    (insert "select u.pa from ZJ_SYS_PARA u join ZJ_LOG p on u.id = p.para_id")
-    (goto-char (point-min))
-    (search-forward "pa")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          seen)
-      (puthash "ZJ_SYS_PARA" nil schema)
-      (puthash "ZJ_LOG" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (&rest _args)
-                   (error "Should not synchronously load columns")))
-                ((symbol-function 'clutch-db-complete-columns)
-                 (lambda (_conn table prefix)
-                   (push table seen)
-                   (should (equal prefix "pa"))
-                   (pcase table
-                     ("ZJ_SYS_PARA" '("PARA_ID" "PARA_NAME"))
-                     ("ZJ_LOG" '("PAYLOAD"))
-                     (_ nil)))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (equal seen '("ZJ_SYS_PARA")))
-          (should (member "PARA_ID" candidates))
-          (should (member "PARA_NAME" candidates))
-          (should-not (member "PAYLOAD" candidates))
-          (should-not (member "ZJ_SYS_PARA" candidates))
-          (should-not (member "ZJ_LOG" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-lowercases-identifiers-when-configured ()
-  "Identifier completion should honor lowercase case style."
-  (let ((clutch-sql-completion-case-style 'lower))
-    (with-temp-buffer
-      (insert "select pa from ZJ_SYS_PARA")
-      (goto-char (point-min))
-      (search-forward "pa")
-      (let ((schema (make-hash-table :test 'equal))
-            (clutch-connection 'fake))
-        (puthash "ZJ_SYS_PARA" nil schema)
-        (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                   (lambda () schema))
-                  ((symbol-function 'clutch-db-busy-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch--tables-in-current-statement)
-                   (lambda (_schema) '("ZJ_SYS_PARA")))
-                  ((symbol-function 'clutch-db-completion-sync-columns-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch-db-complete-columns)
-                   (lambda (_conn table prefix)
-                     (should (equal table "ZJ_SYS_PARA"))
-                     (should (equal prefix "pa"))
-                     '("PARA_ID" "PARA_NAME"))))
-          (let* ((capf (clutch-completion-at-point))
-                 (candidates (clutch-test--completion-candidates capf "")))
-            (should capf)
-            (should (member "zj_sys_para" candidates))
-            (should (member "para_id" candidates))
-            (should-not (member "ZJ_SYS_PARA" candidates))))))))
-
-(ert-deftest clutch-test-completion-at-point-swallows-oracle-i18n-completion-errors ()
-  "Oracle completion should fail soft when orai18n.jar is missing."
-  (let ((clutch--oracle-i18n-warning-shown nil)
-        warned)
-    (with-temp-buffer
-      (insert "select * from zj_")
-      (goto-char (point-max))
-      (let ((clutch-connection 'fake))
-        (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                   (lambda () nil))
-                  ((symbol-function 'clutch-db-busy-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch-db-complete-tables)
-                   (lambda (_conn _prefix)
-                     (signal 'clutch-db-error
-                             '("Non supported character set (add orai18n.jar in your classpath): ZHS16GBK"))))
-                  ((symbol-function 'message)
-                   (lambda (fmt &rest args)
-                     (setq warned (apply #'format fmt args)))))
-          (should-not (clutch-completion-at-point))
-          (should (string-match-p "orai18n.jar" warned))
-          (setq warned nil)
-          (should-not (clutch-completion-at-point))
-          (should-not warned))))))
-
-;;;; Eldoc — schema and column info
-
-(ert-deftest clutch-test-eldoc-schema-string-skips-large-statement-scope ()
-  "Eldoc should not synchronously load columns across too many tables."
-  (with-temp-buffer
-    (let ((schema (make-hash-table :test 'equal))
-          called)
-      (puthash "users" nil schema)
-      (cl-letf (((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("a" "b" "c" "d")))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (&rest _args)
-                   (setq called t)
-                   nil)))
-        (should-not (clutch--eldoc-schema-string 'fake schema "id"))
-        (should-not called)))))
-
-(ert-deftest clutch-test-eldoc-schema-string-uses-current-statement-columns ()
-  "Eldoc should resolve column info from cached current-statement tables."
-  (with-temp-buffer
-    (let ((schema (make-hash-table :test 'equal)))
-      (puthash "users" '("id" "name") schema)
-      (cl-letf (((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users")))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch--eldoc-column-string)
-                 (lambda (_conn table col-name)
-                   (format "%s.%s bigint" table col-name))))
-        (should (equal (clutch--eldoc-schema-string 'fake schema "id")
-                       "users.id bigint"))))))
-
-(ert-deftest clutch-test-eldoc-schema-string-sync-loads-current-statement-columns ()
-  "Native backends should sync-load current statement columns for eldoc."
-  (with-temp-buffer
-    (let ((schema (make-hash-table :test 'equal))
-          called)
-      (puthash "users" nil schema)
-      (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users")))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (_conn _schema table)
-                   (setq called table)
-                   '("id" "name")))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "eldoc should not fall back to async-only column loading here")))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch--eldoc-column-string)
-                 (lambda (_conn table col-name)
-                   (format "%s.%s bigint" table col-name))))
-        (should (equal (clutch--eldoc-schema-string 'fake schema "id")
-                       "users.id bigint"))
-        (should (equal called "users"))))))
-
-(ert-deftest clutch-test-eldoc-schema-string-skips-sync-load-when-connection-busy ()
-  "Eldoc should not synchronously load columns while CONN is busy.
-Instead it should queue async warmup and return nil until metadata is ready."
-  (with-temp-buffer
-    (let ((schema (make-hash-table :test 'equal))
-          async-called)
-      (puthash "users" nil schema)
-      (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users")))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (&rest _args)
-                   (signal 'clutch-db-error
-                           '("sync column load should not run while busy"))))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (_conn _schema table)
-                   (setq async-called table)
-                   t)))
-        (should-not (clutch--eldoc-schema-string 'fake schema "id"))
-        (should (equal async-called "users"))))))
-
-(ert-deftest clutch-test-eldoc-schema-string-uses-cached-columns-when-sync-loads-disabled ()
-  "Eldoc should not synchronously load columns when backend disables it."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "ZJ_SYS_PARA" '("PARA_ID" "PARA_NAME") schema)
-    (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch--cached-table-comment)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'clutch--table-comment-cached-p)
-               (lambda (&rest _args) t))
-              ((symbol-function 'clutch--ensure-table-comment-async)
-               #'ignore)
-              ((symbol-function 'clutch-db-database)
-               (lambda (_conn) "ORCL")))
-      (should (string-match-p "ZJ_SYS_PARA"
-                              (clutch--eldoc-schema-string 'fake schema "ZJ_SYS_PARA")))
-      (should (string-match-p "2 cols"
-                              (clutch--eldoc-schema-string 'fake schema "ZJ_SYS_PARA"))))))
-
-(ert-deftest clutch-test-eldoc-on-schema-qualifier-resolves-table-name ()
-  "Eldoc on the schema part of schema.table should resolve to the table."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "SELECT * FROM test.users;")
-    (goto-char (point-min))
-    (search-forward "test.users")
-    (goto-char (match-beginning 0))
-    (let ((schema (make-hash-table :test 'equal)))
-      (puthash "users" '("id") schema)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--cached-columns)
-                 (lambda (_schema _table) '("id")))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "testdb"))
-                ((symbol-function 'clutch--eldoc-column-string)
-                 (lambda (_conn table col-name)
-                   (format "%s.%s bigint" table col-name))))
-        (let ((eldoc (clutch--eldoc-function)))
-          (should (stringp eldoc))
-          (should (string-match-p "users" eldoc))
-          (should (string-match-p "1 col" eldoc)))))))
-
-(ert-deftest clutch-test-eldoc-on-uppercase-column-uses-cached-lowercase-metadata ()
-  "Uppercase SQL identifiers should still match lowercase cached columns."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "SELECT ID FROM users;")
-    (goto-char (point-min))
-    (search-forward "ID")
-    (goto-char (match-beginning 0))
-    (let ((schema (make-hash-table :test 'equal)))
-      (puthash "users" '("id") schema)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "testdb"))
-                ((symbol-function 'clutch--eldoc-column-string)
-                 (lambda (_conn table col-name)
-                   (format "%s.%s bigint" table col-name))))
-        (should (equal (clutch--eldoc-function)
-                       "users.id bigint"))))))
-
-(ert-deftest clutch-test-eldoc-qualified-column-bypasses-statement-table-limit ()
-  "Alias-qualified field eldoc should not be blocked by large join scopes."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "SELECT d.id
-FROM accounts a
-JOIN customers c ON c.account_id = a.id
-JOIN invoices i ON i.customer_id = c.id
-JOIN orders_large d ON d.invoice_id = i.id;")
-    (goto-char (point-min))
-    (search-forward "d.id")
-    (goto-char (+ (match-beginning 0) 2))
-    (let ((schema (make-hash-table :test 'equal))
-          called)
-      (dolist (table '("accounts" "customers" "invoices" "orders_large"))
-        (puthash table nil schema))
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema)
-                   '("accounts" "customers" "invoices" "orders_large")))
-                ((symbol-function 'clutch--table-aliases-in-current-statement)
-                 (lambda (_schema)
-                   '(("a" . "accounts")
-                     ("c" . "customers")
-                     ("i" . "invoices")
-                     ("d" . "orders_large"))))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (_conn _schema table)
-                   (setq called table)
-                   (should (equal table "orders_large"))
-                   '("id" "invoice_id")))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "testdb"))
-                ((symbol-function 'clutch--eldoc-column-string)
-                 (lambda (_conn table col-name)
-                   (format "%s.%s bigint" table col-name))))
-        (should (equal (clutch--eldoc-function)
-                       "orders_large.id bigint"))
-        (should (equal called "orders_large"))))))
-
-(ert-deftest clutch-test-eldoc-field-resolves-multiline-from-table ()
-  "Field eldoc should work when FROM and the table name are on separate lines."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "SELECT
-    case_code, operative_name
-FROM
-    section9_cases_wide
-ORDER BY id")
-    (goto-char (point-min))
-    (search-forward "case_code")
-    (goto-char (match-beginning 0))
-    (let ((schema (make-hash-table :test 'equal))
-          called)
-      (puthash "section9_cases_wide" nil schema)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (_conn _schema table)
-                   (setq called table)
-                   '("case_code" "operative_name")))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "testdb"))
-                ((symbol-function 'clutch--eldoc-column-string)
-                 (lambda (_conn table col-name)
-                   (format "%s.%s text" table col-name))))
-        (should (equal (clutch--eldoc-function)
-                       "section9_cases_wide.case_code text"))
-        (should (equal called "section9_cases_wide"))))))
-
-(ert-deftest clutch-test-eldoc-schema-string-queues-background-metadata-on-cache-miss ()
-  "Eldoc should queue background metadata when a table cache entry is empty."
-  (let ((schema (make-hash-table :test 'equal))
-        queued-columns queued-comments)
-    (puthash "users" nil schema)
-    (cl-letf (((symbol-function 'clutch--cached-table-comment)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'clutch--table-comment-cached-p)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'clutch--ensure-columns-async)
-               (lambda (_conn _schema table)
-                 (push table queued-columns)
-                 t))
-              ((symbol-function 'clutch--ensure-table-comment-async)
-               (lambda (_conn table)
-                 (push table queued-comments)
-                 t))
-              ((symbol-function 'clutch-db-database)
-               (lambda (_conn) "appdb")))
-      (let ((doc (clutch--eldoc-schema-string 'fake schema "users")))
-        (should (stringp doc))
-        (should (equal queued-columns '("users")))
-        (should (equal queued-comments '("users")))))))
-
-;;;; Xref — alias jump
-
-(ert-deftest clutch-test-xref-alias-jump-basic ()
-  "Alias `u' in a WHERE clause should jump to its FROM-clause definition."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT u.* FROM users u WHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users"))
-                       :statement-tables '("users")))))
-      ;; Move to the `u' in `u.id'
-      (goto-char (point-min))
-      (search-forward "u.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          ;; Verify the character at pos is `u' after `users '
-          (should (eq (char-after pos) ?u))
-          (goto-char pos)
-          (should (looking-back "users " (- pos 10))))))))
-
-(ert-deftest clutch-test-xref-alias-jump-qualified ()
-  "Qualified reference `u.name' should resolve qualifier `u' as the alias."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT u.name FROM users u")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users"))
-                       :statement-tables '("users")))))
-      ;; Move to `name' in `u.name'
-      (goto-char (point-min))
-      (search-forward "u.name")
-      (goto-char (+ (match-beginning 0) 2)) ;; on `name'
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?u))
-          ;; `u' after `users ' in FROM
-          (goto-char pos)
-          (should (looking-back "users " (- pos 10))))))))
-
-(ert-deftest clutch-test-xref-alias-join ()
-  "Alias `o' should jump to the JOIN definition, not the FROM alias."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT o.total FROM users u JOIN orders o ON o.uid = u.id")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users") ("o" . "orders"))
-                       :statement-tables '("users" "orders")))))
-      ;; Move to `o' in `o.total'
-      (goto-char (point-min))
-      (search-forward "o.total")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "o"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?o))
-          (goto-char pos)
-          (should (looking-back "orders " (- pos 10))))))))
-
-(ert-deftest clutch-test-xref-non-alias-returns-no-definitions ()
-  "A non-alias symbol should return the symbol but no definitions."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT name FROM users u")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users"))
-                       :statement-tables '("users")))))
-      ;; Move to `name' (not an alias, not qualified)
-      (goto-char (point-min))
-      (search-forward "name")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "name"))
-        (should-not (xref-backend-definitions 'clutch id))))))
-
-(ert-deftest clutch-test-xref-alias-union-scoped ()
-  "In a UNION query, alias jump should target the current branch's definition."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("a" . "users") ("a" . "orders"))
-                       :statement-tables '("users" "orders")))))
-      ;; Move to `a' in second branch (after UNION ALL)
-      (goto-char (point-min))
-      (search-forward "UNION ALL\n")
-      (search-forward "a.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "a"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?a))
-          ;; Should be in the second branch (after "orders ")
-          (goto-char pos)
-          (should (looking-back "orders " (- pos 10))))))))
-
-(ert-deftest clutch-test-xref-alias-inside-parens ()
-  "An alias inside SUM(...) or CASE should still find the FROM definition."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT SUM(fopd.goods_num) FROM\n    ffp_order_plan_detail fopd WHERE fopd.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      ;; cursor on fopd inside SUM(...)
-      (goto-char (point-min))
-      (search-forward "SUM(fopd")
-      (goto-char (- (point) 4)) ;; on `fopd' inside parens
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "fopd"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (equal (buffer-substring-no-properties pos (+ pos 4)) "fopd"))
-          (goto-char pos)
-          (should (looking-back "ffp_order_plan_detail " (- pos 30))))))))
-
-(ert-deftest clutch-test-xref-alias-multiline-from ()
-  "Alias lookup should work when FROM and table name are on separate lines."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT\n    fopd.goods_num\nFROM\n    ffp_order_plan_detail fopd\n    LEFT JOIN ffp_order_plan fop ON fop.plan_id = fopd.plan_id\nWHERE\n    fopd.plan_id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      ;; Move to `fopd' in WHERE clause
-      (goto-char (point-min))
-      (search-forward "fopd.plan_id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "fopd"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?f))
-          (should (equal (buffer-substring-no-properties pos (+ pos 4)) "fopd"))
-          (goto-char pos)
-          (should (looking-back "ffp_order_plan_detail " (- pos 30))))))))
-
-(ert-deftest clutch-test-xref-alias-no-schema-cache ()
-  "Alias lookup should work even when the schema cache is not warmed."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT u.name FROM users u WHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) nil)))
-      (goto-char (point-min))
-      (search-forward "u.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?u))
-          (goto-char pos)
-          (should (looking-back "users " (- pos 10))))))))
-
-(ert-deftest clutch-test-xref-alias-no-schema-union-scoped ()
-  "Without schema cache, alias resolution should still scope to UNION branch."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      ;; cursor in second branch
-      (goto-char (point-min))
-      (search-forward "UNION ALL\n")
-      (search-forward "a.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "a"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?a))
-          (goto-char pos)
-          (should (looking-back "orders " (- pos 10))))))))
-
-(ert-deftest clutch-test-xref-alias-quoted ()
-  "Alias lookup should handle quoted alias identifiers like `\"u\"'."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward "\"u\".id")
-      (goto-char (+ (match-beginning 0) 1)) ;; on `u' inside quotes
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          ;; Should land on the `"' of `"u"' in FROM clause
-          (should (eq (char-after pos) ?\")))))))
-
-(ert-deftest clutch-test-xref-ignores-alias-in-comment ()
-  "Alias lookup should not jump on alias-like text inside a comment."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT * FROM users u -- use u.id here\nWHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward "u.id here")
-      (goto-char (match-beginning 0))
-      (should-not
-       (xref-backend-definitions
-        'clutch
-        (xref-backend-identifier-at-point 'clutch))))))
-
-(ert-deftest clutch-test-xref-ignores-alias-in-string ()
-  "Alias lookup should not jump on alias-like text inside a string."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT 'u.id' AS note FROM users u WHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward "u.id'")
-      (goto-char (match-beginning 0))
-      (should-not
-       (xref-backend-definitions
-        'clutch
-        (xref-backend-identifier-at-point 'clutch))))))
-
-(ert-deftest clutch-test-xref-alias-quoted-multiword ()
-  "Alias lookup should handle double-quoted multi-word identifiers."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT \"User Name\".id FROM users \"User Name\" WHERE \"User Name\".id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward ".id")
-      (backward-char 2)
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "User Name"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?\")))))))
+  (should-not (clutch--result-column-details
+               'dummy nil '("col1"))))
 
 ;;;; Edit — cell editing
 
@@ -4460,7 +2459,7 @@ plist of additional buffer-local variables to set."
 DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-current-buffer result-buf
     (setq-local clutch--result-source-table table))
-  (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+  (cl-letf (((symbol-function 'clutch--cell-at-point)
              (lambda () cell))
             ((symbol-function 'clutch--ensure-column-details)
              (lambda (_conn _table &optional _strict)
@@ -4480,7 +2479,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       clutch--result-rows '((1 "low" "alice"))
                       clutch--pending-inserts '((("severity" . "high")
                                                  ("owner" . "bob"))))
-          (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+          (cl-letf (((symbol-function 'clutch--cell-at-point)
                      (lambda () (list 1 1 "high")))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
@@ -4528,7 +2527,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      'clutch--result-source-table "users"
                      'clutch--last-query "SELECT * FROM users")))
     (unwind-protect
-        (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+        (cl-letf (((symbol-function 'clutch--cell-at-point)
                    (lambda () '(0 1 "alice"))))
           (with-current-buffer result-buf
             (let ((err (should-error (clutch-result-edit-cell)
@@ -4971,7 +2970,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         clutch--row-identity (clutch-test--primary-row-identity
                                               "shipping_incidents" '("id") '(0))
                         clutch--pending-edits '((([1] . 1) . "high"))))
-          (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
+          (cl-letf (((symbol-function 'clutch--row-idx-at-line)
                      (lambda () 0))
                     ((symbol-function 'clutch--ensure-column-details)
                      (lambda (_conn _table)
@@ -5051,7 +3050,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                                      (:name "label" :type-category text))
                         clutch--result-rows '((42 "duplicate me"))
                         clutch--filtered-rows nil))
-          (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
+          (cl-letf (((symbol-function 'clutch--row-idx-at-line)
                      (lambda () 0))
                     ((symbol-function 'clutch--ensure-column-details)
                      (lambda (_conn _table)
@@ -5219,7 +3218,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--result-source-table "users"
                 clutch--result-rows '((1 "before"))
                 clutch--filtered-rows nil)
-    (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
+    (cl-letf (((symbol-function 'clutch--selected-row-indices) (lambda () '(0)))
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (condition-case err
           (progn
@@ -5266,8 +3265,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                           :columns (mapcar (lambda (i) (nth i columns))
                                            pk-indices)
                           :indices pk-indices))
-                   (stmt (clutch-result--build-delete-stmt
-                          table row columns row-identity)))
+                   (identity-vec (clutch-db-row-identity-values
+                                  row row-identity))
+                   (stmt (clutch-result--build-delete-stmt-for-identity
+                          table identity-vec row-identity)))
               (should (equal (car stmt) sql))
               (should (equal (cdr stmt) params))
               (should-not (member nil (cdr stmt))))))))))
@@ -5297,7 +3298,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                       "users" '("id") '(0)))
     (setq-local clutch--filtered-rows nil)
     (setq-local clutch--pending-deletes nil)
-    (cl-letf (((symbol-function 'clutch-result--selected-row-indices) (lambda () '(0)))
+    (cl-letf (((symbol-function 'clutch--selected-row-indices) (lambda () '(0)))
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch-result-delete-rows)
       (should (equal clutch--pending-deletes (list (vector 42)))))))
@@ -5383,7 +3384,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch--pending-deletes (list (vector 42)))
     (setq-local clutch--pending-edits nil)
     (setq-local clutch--pending-inserts nil)
-    (cl-letf (((symbol-function 'clutch-result--row-idx-at-line) (lambda () 0))
+    (cl-letf (((symbol-function 'clutch--row-idx-at-line) (lambda () 0))
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch-result-discard-pending-at-point)
       (should (null clutch--pending-deletes)))))
@@ -5396,7 +3397,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch--pending-inserts (list '(("id" . "99") ("name" . "new"))))
     (setq-local clutch--pending-deletes nil)
     (setq-local clutch--pending-edits nil)
-    (cl-letf (((symbol-function 'clutch-result--row-idx-at-line)
+    (cl-letf (((symbol-function 'clutch--row-idx-at-line)
                (lambda () 1))  ; ridx=1 >= nrows=1 → insert slot 0
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch-result-discard-pending-at-point)
@@ -5413,14 +3414,14 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--pending-edits (list (cons (cons (vector 42) 1) "carol"))
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil)
-    (cl-letf (((symbol-function 'clutch-result--row-idx-at-line) (lambda () 0))
+    (cl-letf (((symbol-function 'clutch--row-idx-at-line) (lambda () 0))
               ((symbol-function 'clutch--col-idx-at-point) (lambda () 1))
               ((symbol-function 'clutch--refresh-display) #'ignore))
       (clutch-result-discard-pending-at-point)
       (should (null clutch--pending-edits)))))
 
 (ert-deftest clutch-test-check-pending-changes-blocks-when-deletes-pending ()
-  "`clutch--check-pending-changes' should signal when discard is declined."
+  "`clutch-result--check-pending-changes' should signal when discard is declined."
   (let ((buf (generate-new-buffer "*clutch-result*")))
     (unwind-protect
         (with-current-buffer buf
@@ -5430,7 +3431,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (cl-letf (((symbol-function 'get-buffer)
                      (lambda (_name) buf))
                     ((symbol-function 'yes-or-no-p) (lambda (_) nil)))
-            (should-error (clutch--check-pending-changes) :type 'user-error)))
+            (should-error (clutch-result--check-pending-changes)
+                          :type 'user-error)))
       (kill-buffer buf))))
 
 (ert-deftest clutch-test-commit-ordering-insert-update-delete ()
@@ -5953,6 +3955,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 (setq-local clutch-connection 'fake-conn
                             clutch--result-source-table "users"
                             clutch--result-columns '("id" "name")
+                            clutch--last-query "SELECT id, name FROM users"
                             clutch--result-column-defs '((:name "id" :type-category numeric)
                                                          (:name "name" :type-category text))
                             clutch--row-identity
@@ -5972,8 +3975,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                            (lambda (&rest _args) path))
                           ((symbol-function 'clutch-result--collect-all-export-rows)
                            (lambda () '((1 "a,b"))))
-                          ((symbol-function 'clutch--simple-insert-source-table)
-                           (lambda (&optional _sql) "users"))
                           ((symbol-function 'clutch--ensure-column-details)
                            (lambda (_conn _table &optional _strict)
                              (list (list :name "id")
@@ -6008,9 +4009,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--result-columns '("id" "name")
                 clutch--result-rows '((999 "current-page-only"))
                 clutch--last-query "SELECT id, name FROM users")
-    (cl-letf (((symbol-function 'clutch--simple-insert-source-table)
-               (lambda () "users"))
-              ((symbol-function 'clutch-db-escape-identifier)
+    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn s) (format "\"%s\"" s)))
               ((symbol-function 'clutch-db-escape-literal)
                (lambda (_conn s) (format "'%s'" s))))
@@ -6052,7 +4051,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (setq-local clutch--last-query
                 "SELECT u.id, p.title FROM users u JOIN posts p ON p.user_id = u.id")
-    (should-not (clutch--simple-insert-source-table))
     (should (equal (clutch--insert-target-table) "MY_TABLE"))))
 
 (ert-deftest clutch-test-copy-rows-as-insert-uses-placeholder-for-ambiguous-source ()
@@ -6063,13 +4061,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--result-rows '((1))
                 clutch--last-query
                 "SELECT u.id FROM users u JOIN posts p ON p.user_id = u.id")
-    (cl-letf (((symbol-function 'clutch-result--cell-at-point)
+    (cl-letf (((symbol-function 'clutch--cell-at-point)
                (lambda () (list 0 0 1)))
               ((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn s) s))
               ((symbol-function 'clutch-db-escape-literal)
                (lambda (_conn s) (format "'%s'" s))))
-      (clutch-result--copy-rows-as-insert)
+      (clutch-result--copy-rows 'insert)
       (should (equal (current-kill 0) "INSERT INTO MY_TABLE (id) VALUES (1);")))))
 
 (ert-deftest clutch-test-insert-content-uses-placeholder-for-ambiguous-source ()
@@ -6114,7 +4112,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (_conn s) (format "\"%s\"" s)))
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn s) (format "'%s'" s))))
-        (clutch-result--copy-rows-as-update)
+        (clutch-result--copy-rows 'update)
         (should
          (equal (current-kill 0)
                 (concat
@@ -6134,7 +4132,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                         "users" '("id") '(0))
                   clutch--result-rows '((1 "a")))
       (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () (list 0 1 "a")))
                 ((symbol-function 'clutch--ensure-column-details)
                  (lambda (_conn _table &optional _strict)
@@ -6144,7 +4142,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (_conn s) (format "\"%s\"" s)))
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn s) (format "'%s'" s))))
-        (clutch-result--copy-rows-as-update)
+        (clutch-result--copy-rows 'update)
         (should (equal (current-kill 0)
                        "UPDATE \"users\" SET \"name\" = 'a' WHERE \"id\" = 1"))))))
 
@@ -6155,7 +4153,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--result-rows '((1 "alpha") (2 "beta"))
                 clutch--filtered-rows '((2 "beta")))
     (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-              ((symbol-function 'clutch-result--cell-at-point)
+              ((symbol-function 'clutch--cell-at-point)
                (lambda () (list 0 1 "beta")))
               ((symbol-function 'clutch-result--build-update-statements-for-rows)
                (lambda (rows col-indices op)
@@ -6163,7 +4161,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (should (equal col-indices '(1)))
                  (should (equal op "copy UPDATE SQL"))
                  '("UPDATE users SET name = 'beta' WHERE id = 2"))))
-      (clutch-result--copy-rows-as-update))))
+      (clutch-result--copy-rows 'update))))
 
 (ert-deftest clutch-test-build-csv-lines-with-filter-uses-visible-row ()
   "CSV copy should use filtered display rows for visible row indices."
@@ -6171,7 +4169,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-rows '((1 "alpha") (2 "beta"))
                 clutch--filtered-rows '((2 "beta")))
-    (should (equal (clutch-result--build-csv-lines '(0) '(1))
+    (should (equal (clutch--csv-lines-for-rows
+                    (clutch-result--rows-for-display-indices '(0)) '(1))
                    '("name" "beta")))))
 
 (ert-deftest clutch-test-build-insert-statements-with-filter-uses-visible-row ()
@@ -6185,7 +4184,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                (lambda (_conn s) s))
               ((symbol-function 'clutch-db-escape-literal)
                (lambda (_conn s) (format "'%s'" s))))
-      (should (equal (clutch-result--build-insert-statements '(0) '(1) "users")
+      (should (equal (clutch-result--build-insert-statements-for-rows
+                      (clutch-result--rows-for-display-indices '(0))
+                      '(1) "users")
                      '("INSERT INTO users (name) VALUES ('beta');"))))))
 
 (ert-deftest clutch-test-copy-update-errors-when-only-pk-column-is-selected ()
@@ -6194,17 +4195,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-column-defs '((:name "id" :type-category numeric)
                                              (:name "name" :type-category text))
+                clutch--result-source-table "users"
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0)))
-    (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
-               (lambda (_op) "users")))
-      (let ((err (should-error
-                  (clutch-result--build-update-statements-for-rows
-                   '((1 "a")) '(0) "copy UPDATE SQL")
-                  :type 'user-error)))
-        (should (string-match-p
-                 "Cannot copy UPDATE SQL: no writable source columns selected"
-                 (error-message-string err)))))))
+    (let ((err (should-error
+                (clutch-result--build-update-statements-for-rows
+                 '((1 "a")) '(0) "copy UPDATE SQL")
+                :type 'user-error)))
+      (should (string-match-p
+               "Cannot copy UPDATE SQL: no writable source columns selected"
+               (error-message-string err))))))
 
 (ert-deftest clutch-test-copy-update-errors-on-non-source-columns ()
   "UPDATE copy should reject alias or computed columns."
@@ -6214,11 +4214,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--result-column-defs '((:name "id" :type-category numeric)
                                              (:name "name" :type-category text)
                                              (:name "computed_total" :type-category numeric))
+                clutch--result-source-table "users"
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0)))
-    (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
-               (lambda (_op) "users"))
-              ((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
                        (list :name "name")))))
@@ -6237,11 +4236,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--result-columns '("id" "generated_name")
                 clutch--result-column-defs '((:name "id" :type-category numeric)
                                              (:name "generated_name" :type-category text))
+                clutch--result-source-table "users"
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0)))
-    (cl-letf (((symbol-function 'clutch--result-source-table-or-user-error)
-               (lambda (_op) "users"))
-              ((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
                        (list :name "generated_name" :generated t)))))
@@ -6391,8 +4389,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                                (:name "email"))
                   clutch--result-rows (list (vector "rid-1" 1 "ada@example.com")
                                             (vector "rid-2" 2 "bob@example.com")))
-      (cl-letf (((symbol-function 'clutch--apply-where)
-                 (lambda (sql filter)
+      (cl-letf (((symbol-function 'clutch-db-apply-where)
+                 (lambda (_conn sql filter)
                    (format "SELECT * FROM (%s) AS clutch_q WHERE %s" sql filter))))
         (setq copied (clutch-test--copy-agent-context))))
     (should (string-match-p
@@ -6439,18 +4437,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Selection priority should be region > current row."
   (with-temp-buffer
     (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-              ((symbol-function 'clutch-result--rows-in-region)
+              ((symbol-function 'clutch--rows-in-region)
                (lambda (_beg _end) '(2 3)))
-              ((symbol-function 'clutch-result--row-idx-at-line)
+              ((symbol-function 'clutch--row-idx-at-line)
                (lambda () 1))
               ((symbol-function 'region-beginning) (lambda () 10))
               ((symbol-function 'region-end) (lambda () 20)))
-      (should (equal (clutch-result--selected-row-indices) '(2 3)))))
+      (should (equal (clutch--selected-row-indices) '(2 3)))))
   (with-temp-buffer
     (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-              ((symbol-function 'clutch-result--row-idx-at-line)
+              ((symbol-function 'clutch--row-idx-at-line)
                (lambda () 4)))
-      (should (equal (clutch-result--selected-row-indices) '(4))))))
+      (should (equal (clutch--selected-row-indices) '(4))))))
 
 (ert-deftest clutch-test-aggregate-current-column-without-region ()
   "Aggregate should use current cell when region is inactive."
@@ -6459,7 +4457,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (setq-local clutch--result-columns '("id" "score"))
       (setq-local clutch--result-rows '((1 "1.5") (2 "2.5") (3 "x") (4 4)))
       (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () '(1 1 "2.5"))))
         (clutch-result-aggregate)
         (let ((summary (current-kill 0)))
@@ -6493,7 +4491,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 2) 1)))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () '(0 1 "1"))))
         (clutch-result-aggregate)
         (let ((summary (current-kill 0)))
@@ -6514,7 +4512,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 ((symbol-function 'clutch-result--start-refine)
                  (lambda (_rect callback)
                    (funcall callback '((0 2) . (1)))))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () '(0 1 "1"))))
         (clutch-result-aggregate t)
         (let ((summary (current-kill 0)))
@@ -6543,7 +4541,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   (r2c0 r2c1 r2c2)))
     (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
               ((symbol-function 'region-end) (lambda () 20))
-              ((symbol-function 'clutch-result--cell-at-or-near)
+              ((symbol-function 'clutch--cell-at-or-near)
                (lambda (pos)
                  (if (= pos 10) '(0 1 nil) '(2 1 nil)))))
       (should (equal (clutch-result--region-cells)
@@ -6573,7 +4571,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'use-region-p)
                  (lambda () nil))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () '(2 3 "alice"))))
         (clutch-result-copy 'tsv)
         (should (equal (current-kill 0) "alice"))))))
@@ -6594,7 +4592,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        (lambda (_flag _args) nil))
                       ((symbol-function 'use-region-p)
                        (lambda () nil))
-                      ((symbol-function 'clutch-result--cell-at-point)
+                      ((symbol-function 'clutch--cell-at-point)
                        (lambda () '(0 1 "alice"))))
               (funcall command)
               (should (equal (current-kill 0) expected-text)))))))))
@@ -6641,7 +4639,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch--result-rows '((a0 a1)))
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () '(0 1 a1))))
         (clutch-result-copy 'csv)
         (should (equal (current-kill 0) "c1\na1"))))))
@@ -6652,16 +4650,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (let (kill-ring kill-ring-yank-pointer)
       (setq-local clutch-connection 'fake-conn)
       (setq-local clutch--result-columns '("id" "name" "age"))
-      (setq-local clutch--result-rows '((1 "a" 10) (2 "b" 20)))
+      (setq-local clutch--result-rows '((1 "a" 10) (2 "b" 20))
+                  clutch--last-query "SELECT id, name, age FROM t")
       (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1) 0 1)))
-                ((symbol-function 'clutch--simple-insert-source-table)
-                 (lambda (&optional _sql) "t"))
                 ((symbol-function 'clutch-db-escape-identifier)
                  (lambda (_conn s) (format "\"%s\"" s)))
-                ((symbol-function 'clutch--value-to-literal)
-                 (lambda (v) (format "'%s'" v))))
+                ((symbol-function 'clutch-db-value-to-literal)
+                 (lambda (_conn v &optional _formatter) (format "'%s'" v))))
         (clutch-result-copy 'insert)
         (should (string-match-p "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('1', 'a');"
                                 (current-kill 0)))
@@ -6673,17 +4670,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local clutch--result-columns '("id" "name"))
-    (setq-local clutch--result-rows '((1 "a")))
+    (setq-local clutch--result-rows '((1 "a"))
+                clutch--last-query "SELECT id, name FROM t")
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch-result--cell-at-point)
+                ((symbol-function 'clutch--cell-at-point)
                  (lambda () '(0 1 "a")))
-                ((symbol-function 'clutch--simple-insert-source-table)
-                 (lambda (&optional _sql) "t"))
                 ((symbol-function 'clutch-db-escape-identifier)
                  (lambda (_conn s) (format "\"%s\"" s)))
-                ((symbol-function 'clutch--value-to-literal)
-                 (lambda (v) (format "'%s'" v))))
+                ((symbol-function 'clutch-db-value-to-literal)
+                 (lambda (_conn v &optional _formatter) (format "'%s'" v))))
         (clutch-result-copy 'insert)
         (should (equal (current-kill 0)
                        "INSERT INTO \"t\" (\"name\") VALUES ('a');"))))))
@@ -6822,7 +4818,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--page-current 0
                 clutch--page-has-more t)
     (let (executed-page)
-      (cl-letf (((symbol-function 'clutch--execute-page)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
                  (lambda (p) (setq executed-page p))))
         (clutch-result-next-page)
         (should (= executed-page 1))))))
@@ -6838,7 +4834,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (setq-local clutch--page-current 3)
     (let (executed-page)
-      (cl-letf (((symbol-function 'clutch--execute-page)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
                  (lambda (p) (setq executed-page p))))
         (clutch-result-prev-page)
         (should (= executed-page 2))))))
@@ -6854,7 +4850,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (setq-local clutch--page-current 5)
     (let (executed-page)
-      (cl-letf (((symbol-function 'clutch--execute-page)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
                  (lambda (p) (setq executed-page p))))
         (clutch-result-first-page)
         (should (= executed-page 0))))))
@@ -6866,7 +4862,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--page-total-rows 237
                 clutch-result-max-rows 50)
     (let (executed-page executed-offset)
-      (cl-letf (((symbol-function 'clutch--execute-page-at-offset)
+      (cl-letf (((symbol-function 'clutch-result--execute-page-at-offset)
                  (lambda (offset page)
                    (setq executed-offset offset
                          executed-page page))))
@@ -6891,7 +4887,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 clutch--page-total-rows 578
                 clutch-result-max-rows 500)
     (let (executed-page executed-offset)
-      (cl-letf (((symbol-function 'clutch--execute-page-at-offset)
+      (cl-letf (((symbol-function 'clutch-result--execute-page-at-offset)
                  (lambda (offset page)
                    (setq executed-offset offset
                          executed-page page))))
@@ -6944,13 +4940,31 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-result-sort-by-column-desc)
         (should (equal sort-args '("created_at" t)))))))
 
+(ert-deftest clutch-test-sort-rejects-hidden-row-identity-column ()
+  "Server-side sort should only accept visible user columns."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable t
+                clutch--result-columns '("clutch__rid_0" "id" "name")
+                clutch--result-column-defs
+                '((:name "clutch__rid_0" :hidden t)
+                  (:name "id")
+                  (:name "name")))
+    (let (paged)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
+                 (lambda (&rest _args) (setq paged t))))
+        (let ((err (should-error (clutch-result--sort "clutch__rid_0" nil)
+                                 :type 'user-error)))
+          (should (string-match-p "Column clutch__rid_0 not found"
+                                  (error-message-string err))))
+        (should-not paged)))))
+
 (ert-deftest clutch-test-sort-errors-for-nonrewritable-query-result ()
   "Server-side sorting should not rewrite arbitrary query results."
   (with-temp-buffer
     (setq-local clutch--result-server-rewritable nil
                 clutch--result-columns '("id" "name" "id"))
     (let (paged)
-      (cl-letf (((symbol-function 'clutch--execute-page)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
                  (lambda (&rest _args) (setq paged t))))
         (let ((err (should-error (clutch-result--sort "id" nil)
                                  :type 'user-error)))
@@ -6959,28 +4973,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should-not paged)))))
 
 ;;;; Connection — build, timeout, and lifecycle
-
-(ert-deftest clutch-test-connection-oracle-jdbc-p-returns-nil-for-non-jdbc-connections ()
-  "Oracle JDBC detection should return nil for non-JDBC connections."
-  (should-not (clutch--connection-oracle-jdbc-p 'fake-conn)))
-
-(ert-deftest clutch-test-connection-oracle-jdbc-p-propagates-jdbc-param-errors ()
-  "Oracle JDBC detection should not hide JDBC plist access failures."
-  (let* ((sentinel (list :driver 'oracle))
-         (conn (make-clutch-jdbc-conn :params sentinel)))
-    (cl-letf (((symbol-function 'plist-get)
-               (lambda (plist prop &optional _default)
-                 (if (eq plist sentinel)
-                     (signal 'wrong-type-argument '(listp sentinel))
-                   (let ((tail plist)
-                         found)
-                     (while tail
-                       (when (eq (car tail) prop)
-                         (setq found (cadr tail)
-                               tail nil))
-                       (setq tail (cddr tail)))
-                     found)))))
-      (should-error (clutch--connection-oracle-jdbc-p conn) :type 'wrong-type-argument))))
 
 (ert-deftest clutch-test-backend-key-from-conn-returns-nil-for-unknown-non-jdbc-backends ()
   "Backend key detection should return nil when the connection is not JDBC."
@@ -7002,10 +4994,10 @@ The function catches `clutch-db-error' and `wrong-type-argument' to avoid
 crashing the UI layer."
   (let* ((sentinel (list :driver 'oracle))
          (conn (make-clutch-jdbc-conn :params sentinel)))
-    (cl-letf (((symbol-function 'plist-get)
-               (lambda (plist prop)
-                 (if (eq plist sentinel)
-                     (signal 'clutch-db-error '("backend key boom"))
+	  (cl-letf (((symbol-function 'plist-get)
+	             (lambda (plist prop)
+	               (if (eq plist sentinel)
+	                   (signal 'clutch-db-error '("backend key boom"))
                    (let ((tail plist)
                          found)
                      (while tail
@@ -7014,9 +5006,21 @@ crashing the UI layer."
                              tail nil))
                        (setq tail (cddr tail)))
                      found))))
-              ((symbol-function 'clutch-db-display-name)
-               (lambda (_conn) nil)))
-      (should-not (clutch--backend-key-from-conn conn)))))
+	            ((symbol-function 'clutch-db-display-name)
+	             (lambda (_conn) nil)))
+	    (should-not (clutch--backend-key-from-conn conn)))))
+
+(ert-deftest clutch-test-backend-key-from-params-prefers-concrete-backend ()
+  "Concrete :backend should win over generic JDBC :driver metadata."
+  (should (eq (clutch--backend-key-from-params
+               '(:backend oracle :driver jdbc))
+              'oracle))
+  (should (eq (clutch--backend-key-from-params
+               '(:backend jdbc :driver oracle))
+              'oracle))
+  (should (eq (clutch--backend-key-from-params
+               '(:backend jdbc :driver jdbc :display-name "KingbaseES"))
+              'jdbc)))
 
 (ert-deftest clutch-test-connection-key ()
   "Test connection key generation."
@@ -7143,26 +5147,25 @@ crashing the UI layer."
        "/ssh:devbox:/workspace/")
       :tramp-default-directory))))
 
-(ert-deftest clutch-test-build-conn-includes-native-timeouts-for-network-backends ()
-  "Test that `clutch--build-conn' passes timeout defaults to mysql/pg."
-  (let ((clutch-connect-timeout-seconds 11)
-        (clutch-read-idle-timeout-seconds 42)
-        (clutch-query-timeout-seconds 13)
-        captured)
+(ert-deftest clutch-test-build-conn-leaves-timeout-defaults-to-backends ()
+  "Connection building should not synthesize backend timeout defaults."
+  (let (captured)
     (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) nil))
               ((symbol-function 'clutch-db-connect)
-                (lambda (_backend params)
+               (lambda (_backend params)
                  (setq captured params)
                  'fake-conn)))
-      (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306 :user "u"))
-      (should (equal (plist-get captured :connect-timeout) 11))
-      (should (equal (plist-get captured :read-idle-timeout) 42))
-      (should-not (plist-member captured :query-timeout))
-      (clutch--build-conn '(:backend pg :host "127.0.0.1" :port 5432 :user "u"))
-      (should (equal (plist-get captured :connect-timeout) 11))
-      (should (equal (plist-get captured :read-idle-timeout) 42))
-      (should (equal (plist-get captured :query-timeout) 13)))))
+      (dolist (params '((:backend mysql :host "127.0.0.1" :port 3306 :user "u")
+                        (:backend pg :host "127.0.0.1" :port 5432 :user "u")
+                        (:backend oracle :host "db" :port 1521 :user "u")
+                        (:backend sqlite :database ":memory:")))
+        (setq captured nil)
+        (clutch--build-conn params)
+        (should-not (plist-member captured :connect-timeout))
+        (should-not (plist-member captured :read-idle-timeout))
+        (should-not (plist-member captured :query-timeout))
+        (should-not (plist-member captured :rpc-timeout))))))
 
 (ert-deftest clutch-test-build-conn-rewrites-network-endpoint-through-ssh-tunnel ()
   "SSH-backed connections should target the local forwarded port."
@@ -7694,25 +5697,6 @@ crashing the UI layer."
           (should (string-match-p "inspect" message-text)))
       (kill-buffer buffer))))
 
-(ert-deftest clutch-test-build-conn-includes-jdbc-timeouts ()
-  "Test that `clutch--build-conn' passes timeout defaults to JDBC backends."
-  (let ((clutch-connect-timeout-seconds 11)
-        (clutch-read-idle-timeout-seconds 12)
-        (clutch-query-timeout-seconds 13)
-        (clutch-jdbc-rpc-timeout-seconds 14)
-        captured)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (_backend params)
-                 (setq captured params)
-                 'fake-conn)))
-      (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
-      (should (equal (plist-get captured :connect-timeout) 11))
-      (should (equal (plist-get captured :read-idle-timeout) 12))
-      (should (equal (plist-get captured :query-timeout) 13))
-      (should (equal (plist-get captured :rpc-timeout) 14)))))
-
 (ert-deftest clutch-test-build-conn-errors-early-when-jdbc-pass-entry-is-unresolved ()
   "JDBC connections should fail fast when :pass-entry resolves to no password."
   (let (connect-called)
@@ -7732,7 +5716,7 @@ crashing the UI layer."
 (ert-deftest clutch-test-resolve-password-errors-when-pass-entry-cannot-be-read ()
   "Unreadable pass entries should fail before the backend sees auth."
   (let (connect-called)
-    (cl-letf (((symbol-function 'clutch-db--pass-entry-by-suffix)
+    (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
                (lambda (_suffix) "mysql/zj_online"))
               ((symbol-function 'auth-source-pass-parse-entry)
                (lambda (_entry) nil))
@@ -7753,7 +5737,7 @@ crashing the UI layer."
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
   (condition-case err
-      (cl-letf (((symbol-function 'clutch-db--pass-entry-by-suffix)
+      (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
                  (lambda (_suffix) nil))
                 ((symbol-function 'auth-source-search)
                  (lambda (&rest _args)
@@ -7868,6 +5852,14 @@ crashing the UI layer."
                                                :port 3306
                                                :user "u"
                                                :database "db"))))
+
+(ert-deftest clutch-test-effective-sql-product-uses-backend-registry ()
+  "Connection SQL products should be derived from backend metadata."
+  (should (eq (clutch--effective-sql-product '(:backend pg)) 'postgres))
+  (should (eq (clutch--effective-sql-product '(:backend oracle)) 'oracle))
+  (should (eq (clutch--effective-sql-product
+               '(:backend clickhouse :sql-product mysql))
+              'mysql)))
 
 (ert-deftest clutch-test-build-conn-errors-without-backend ()
   "Building a connection should fail fast when :backend is missing."
@@ -8013,6 +6005,37 @@ crashing the UI layer."
       (should (string-match-p "Backend" backend-prompt))
       (should (= port-default 5432)))))
 
+(ert-deftest clutch-test-read-connection-params-uses-clickhouse-registry-port ()
+  "Manual ClickHouse connections should use the backend registry default port."
+  (let ((clutch-connection-alist nil)
+        port-default)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _args) "clickhouse"))
+              ((symbol-function 'read-string)
+               (lambda (prompt &optional _initial _history default-value _inherit)
+                 (pcase prompt
+                   ("Host (127.0.0.1): " "127.0.0.1")
+                   ("User: " "default")
+                   ("SSH host from ~/.ssh/config (optional): " "")
+                   ("Database (optional): " "default")
+                   (_ (or default-value "")))))
+              ((symbol-function 'read-number)
+               (lambda (_prompt default)
+                 (setq port-default default)
+                 default))
+              ((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'read-passwd)
+               (lambda (&rest _args) "")))
+      (should (equal (clutch--read-connection-params)
+                     '(:backend clickhouse
+                       :host "127.0.0.1"
+                       :port 8123
+                       :user "default"
+                       :password ""
+                       :database "default")))
+      (should (= port-default 8123)))))
+
 ;;;; Connection — transaction and auto-commit
 
 (ert-deftest clutch-test-tx-header-line-and-update ()
@@ -8152,22 +6175,23 @@ crashing the UI layer."
                (lambda (_conn _sql) '(:ok t)))
               ((symbol-function 'clutch-db-manual-commit-p)
                (lambda (_conn) t))
-              ((symbol-function 'clutch--backend-key-from-conn)
-               (lambda (_conn) 'pg))
+              ((symbol-function 'clutch-db-schema-transaction-effect)
+               (lambda (_conn _sql) 'dirty))
               ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
       (clutch--run-db-query conn "CREATE TABLE demo (id int)")
       (should (clutch--tx-dirty-p conn)))))
 
-(ert-deftest clutch-test-run-db-query-keeps-native-mysql-ddl-clean ()
-  "MySQL DDL should not mark manual-commit connections dirty."
+(ert-deftest clutch-test-run-db-query-clears-dirty-on-autocommit-ddl ()
+  "Auto-committing DDL should clear manual-commit dirty state."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
         (conn 'fake-conn))
+    (puthash conn t clutch--tx-dirty-cache)
     (cl-letf (((symbol-function 'clutch-db-query)
                (lambda (_conn _sql) '(:ok t)))
               ((symbol-function 'clutch-db-manual-commit-p)
                (lambda (_conn) t))
-              ((symbol-function 'clutch--backend-key-from-conn)
-               (lambda (_conn) 'mysql))
+              ((symbol-function 'clutch-db-schema-transaction-effect)
+               (lambda (_conn _sql) 'clear))
               ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
       (clutch--run-db-query conn "CREATE TABLE demo (id int)")
       (should-not (clutch--tx-dirty-p conn)))))
@@ -8185,8 +6209,8 @@ crashing the UI layer."
       (clutch--run-db-query conn "COMMIT")
       (should-not (clutch--tx-dirty-p conn)))))
 
-(ert-deftest clutch-test-run-db-query-clears-dirty-on-oracle-ddl ()
-  "Oracle schema-affecting DDL should clear [TX*] after auto-commit."
+(ert-deftest clutch-test-run-db-query-preserves-dirty-on-unknown-ddl ()
+  "Unknown DDL transaction semantics should preserve manual-commit dirty state."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
         (conn 'fake-conn))
     (puthash conn t clutch--tx-dirty-cache)
@@ -8194,11 +6218,11 @@ crashing the UI layer."
                (lambda (_conn _sql) '(:ok t)))
               ((symbol-function 'clutch-db-manual-commit-p)
                (lambda (_conn) t))
-              ((symbol-function 'clutch--connection-oracle-jdbc-p)
-               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-schema-transaction-effect)
+               (lambda (_conn _sql) nil))
               ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
       (clutch--run-db-query conn "ALTER TABLE demo ADD x NUMBER")
-      (should-not (clutch--tx-dirty-p conn)))))
+      (should (clutch--tx-dirty-p conn)))))
 
 (ert-deftest clutch-test-commit-errors-in-autocommit-mode ()
   "Clutch-commit should signal user-error when the connection is not in manual-commit mode."
@@ -8850,10 +6874,10 @@ This applies when the buffer owns the connection."
                        (lambda (_conn) t))
                       ((symbol-function 'clutch--connection-key)
                        (lambda (conn) (symbol-name conn)))
-                      ((symbol-function 'clutch--display-dml-result) #'ignore)
-                      ((symbol-function 'clutch--show-result-buffer)
+                      ((symbol-function 'clutch-result--display-dml) #'ignore)
+                      ((symbol-function 'clutch-result--show-buffer)
                        (lambda (buf) (setq result-buf buf) buf)))
-              (clutch--display-result result "UPDATE demo SET x = 1" 0.1))
+              (clutch-result--display result "UPDATE demo SET x = 1" 0.1))
             (with-current-buffer result-buf
               (should (equal clutch--connection-params
                              '(:backend mysql :database "db")))
@@ -8869,7 +6893,6 @@ This applies when the buffer owns the connection."
                         ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
                         ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
                         ((symbol-function 'clutch--refresh-result-status-line) #'ignore)
-                        ((symbol-function 'clutch--update-position-indicator) #'ignore)
                         ((symbol-function 'clutch--connection-key)
                          (lambda (conn) (symbol-name conn)))
                         ((symbol-function 'message) #'ignore))
@@ -10061,28 +8084,44 @@ This applies when the buffer owns the connection."
 ;;;; Execute — query execution and error handling
 
 (ert-deftest clutch-test-collect-all-export-rows-paged ()
-  "Collect all export rows by paging when base query has no top-level LIMIT."
+  "Collect filtered export rows by paging without losing row identity."
   (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn)
-    (setq-local clutch--base-query "SELECT id FROM t")
-    (setq-local clutch--last-query "SELECT id FROM t")
-    (setq-local clutch--where-filter nil)
-    (setq-local clutch--result-server-pageable t)
-    (setq-local clutch--order-by nil)
-    (let ((clutch-result-max-rows 2))
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--build-paged-sql)
-                 (lambda (_sql page-num _page-size _order-by &optional _page-offset)
-                   (format "SELECT id FROM t -- page:%d" page-num)))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (_conn sql)
-                   (let ((rows (cond ((string-match-p "page:0\\'" sql) '((1) (2)))
-                                     ((string-match-p "page:1\\'" sql) '((3)))
-                                     (t nil))))
-                     (make-clutch-db-result :rows rows)))))
-        (should (equal (clutch-result--collect-all-export-rows)
-                       '((1) (2) (3))))))))
+    (let (captured-base)
+      (setq-local clutch-connection 'fake-conn
+                  clutch--base-query "SELECT name FROM t"
+                  clutch--last-query "SELECT name FROM t"
+                  clutch--where-filter "name LIKE 'ann%'"
+                  clutch--result-source-table "t"
+                  clutch--result-server-pageable t
+                  clutch--order-by nil
+                  clutch--row-identity
+                  (clutch-test--primary-row-identity "t" '("id") '(1)))
+      (let ((clutch-result-max-rows 2))
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-apply-where)
+                   (lambda (_conn sql filter)
+                     (format "FILTER[%s]{%s}" filter sql)))
+                  ((symbol-function 'clutch-db-escape-identifier)
+                   (lambda (_conn id) (format "`%s`" id)))
+                  ((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (_conn sql page-num _page-size _order-by
+                           &optional _page-offset)
+                     (unless captured-base
+                       (setq captured-base sql))
+                     (format "SELECT name FROM t -- page:%d" page-num)))
+                  ((symbol-function 'clutch-db-query)
+                   (lambda (_conn sql)
+                     (let ((rows (cond ((string-match-p "page:0\\'" sql)
+                                        '(("ann" 1) ("anna" 2)))
+                                       ((string-match-p "page:1\\'" sql)
+                                        '(("annie" 3)))
+                                       (t nil))))
+                       (make-clutch-db-result :rows rows)))))
+          (should (equal (clutch-result--collect-all-export-rows)
+                         '(("ann" 1) ("anna" 2) ("annie" 3))))
+          (should (equal captured-base
+                         "FILTER[name LIKE 'ann%']{SELECT name, `id` AS `clutch__rid_0` FROM t}")))))))
 
 (ert-deftest clutch-test-collect-all-export-rows-with-top-level-limit ()
   "Export should reuse already fetched rows for nonpageable limited results."
@@ -10096,7 +8135,7 @@ This applies when the buffer owns the connection."
     (let ((calls 0))
       (cl-letf (((symbol-function 'clutch--connection-alive-p)
                  (lambda (_conn) t))
-                ((symbol-function 'clutch--build-paged-sql)
+                ((symbol-function 'clutch-db-build-paged-sql)
                  (lambda (&rest _args)
                    (error "Should not paginate")))
                 ((symbol-function 'clutch-db-query)
@@ -10119,9 +8158,9 @@ This applies when the buffer owns the connection."
     (let ((clutch-result-max-rows 2)
           seen-order-by)
       (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--build-paged-sql)
-                 (lambda (_sql page-num _page-size order-by
+                (lambda (_conn) t))
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn _sql page-num _page-size order-by
                          &optional _page-offset)
                    (setq seen-order-by order-by)
                    (format "SELECT id FROM t LIMIT 3 -- page:%d" page-num)))
@@ -10176,23 +8215,15 @@ This applies when the buffer owns the connection."
                (lambda (_conn _sql)
                  (make-clutch-db-result
                   :columns '((:name "id") (:name "name") (:name "clutch__rid_0"))
-                  :rows '((1 "a" 1)))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result)
-               (lambda (&rest _args)
-                 (setq captured-pk clutch--cached-pk-indices))))
-      (unwind-protect
-          (progn
-            (clutch--execute-select "SELECT * FROM users" 'fake-conn)
-            (should (equal captured-pk '(0)))
-            (with-current-buffer result-name
-              (should clutch--result-server-pageable)
-              (should clutch--result-server-rewritable)))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((1 "a" 1))))))
+      (clutch-test--with-result-buffer
+          (result-name (lambda (&rest _args)
+                         (setq captured-pk clutch--cached-pk-indices)))
+        (clutch--execute-select "SELECT * FROM users" 'fake-conn)
+        (should (equal captured-pk '(0)))
+        (with-current-buffer result-name
+          (should clutch--result-server-pageable)
+          (should clutch--result-server-rewritable))))))
 
 (ert-deftest clutch-test-execute-select-fetches-one-row-lookahead ()
   "Initial SELECT execution should trim lookahead rows before rendering."
@@ -10212,23 +8243,15 @@ This applies when the buffer owns the connection."
                (lambda (_conn _sql)
                  (make-clutch-db-result
                   :columns '((:name "id"))
-                  :rows '((1) (2) (3)))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result) #'ignore))
-      (unwind-protect
-          (progn
-            (clutch--execute-select "SELECT id FROM users" 'fake-conn)
-            (should (= captured-page-size 3))
-            (should (= captured-offset 0))
-            (with-current-buffer result-name
-              (should (equal clutch--result-rows '((1) (2))))
-              (should clutch--page-has-more)
-              (should (= clutch--page-offset 0))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((1) (2) (3))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch--execute-select "SELECT id FROM users" 'fake-conn)
+        (should (= captured-page-size 3))
+        (should (= captured-offset 0))
+        (with-current-buffer result-name
+          (should (equal clutch--result-rows '((1) (2))))
+          (should clutch--page-has-more)
+          (should (= clutch--page-offset 0)))))))
 
 (ert-deftest clutch-test-execute-select-keeps-page-tailed-query-flat ()
   "Initial SELECT execution should not wrap a user-limited result set."
@@ -10245,22 +8268,14 @@ This applies when the buffer owns the connection."
                  (setq captured-sql sql)
                  (make-clutch-db-result
                   :columns '((:name "id"))
-                  :rows '((1)))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result) #'ignore))
-      (unwind-protect
-          (progn
-            (clutch--execute-select "SELECT id FROM users OFFSET 20" 'fake-conn)
-            (should (equal captured-sql "SELECT id FROM users OFFSET 20"))
-            (with-current-buffer result-name
-              (should-not clutch--result-server-pageable)
-              (should-not clutch--result-server-rewritable)
-              (should-not clutch--page-has-more)))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((1))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch--execute-select "SELECT id FROM users OFFSET 20" 'fake-conn)
+        (should (equal captured-sql "SELECT id FROM users OFFSET 20"))
+        (with-current-buffer result-name
+          (should-not clutch--result-server-pageable)
+          (should-not clutch--result-server-rewritable)
+          (should-not clutch--page-has-more))))))
 
 (ert-deftest clutch-test-execute-select-keeps-page-tailed-complex-query-flat ()
   "Complex query results with user LIMIT should execute as result sets, not wrappers."
@@ -10278,23 +8293,15 @@ This applies when the buffer owns the connection."
                  (setq captured-sql query)
                  (make-clutch-db-result
                   :columns '((:name "id") (:name "name") (:name "id"))
-                  :rows '((1 "a" 1) (2 "b" 2)))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result) #'ignore))
-      (unwind-protect
-          (progn
-            (clutch--execute-select sql 'fake-conn)
-            (should (equal captured-sql sql))
-            (with-current-buffer result-name
-              (should-not clutch--result-server-pageable)
-              (should-not clutch--result-server-rewritable)
-              (should-not clutch--page-has-more)
-              (should (equal clutch--result-rows '((1 "a" 1) (2 "b" 2))))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((1 "a" 1) (2 "b" 2))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch--execute-select sql 'fake-conn)
+        (should (equal captured-sql sql))
+        (with-current-buffer result-name
+          (should-not clutch--result-server-pageable)
+          (should-not clutch--result-server-rewritable)
+          (should-not clutch--page-has-more)
+          (should (equal clutch--result-rows '((1 "a" 1) (2 "b" 2)))))))))
 
 (ert-deftest clutch-test-execute-select-keeps-page-tailed-duplicate-alias-query-flat ()
   "Page-tailed queries with duplicate projected labels should not be wrapped."
@@ -10312,21 +8319,13 @@ This applies when the buffer owns the connection."
                  (setq captured-sql query)
                  (make-clutch-db-result
                   :columns '((:name "dup") (:name "dup"))
-                  :rows '((1 "a")))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result) #'ignore))
-      (unwind-protect
-          (progn
-            (clutch--execute-select sql 'fake-conn)
-            (should (equal captured-sql sql))
-            (with-current-buffer result-name
-              (should-not clutch--result-server-pageable)
-              (should-not clutch--result-server-rewritable)))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((1 "a"))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch--execute-select sql 'fake-conn)
+        (should (equal captured-sql sql))
+        (with-current-buffer result-name
+          (should-not clutch--result-server-pageable)
+          (should-not clutch--result-server-rewritable))))))
 
 (ert-deftest clutch-test-execute-select-duplicate-labels-are-not-rewritable ()
   "Duplicate result labels should remain pageable but not relation-rewritable."
@@ -10345,56 +8344,41 @@ This applies when the buffer owns the connection."
                (lambda (_conn _query)
                  (make-clutch-db-result
                   :columns '((:name "dup") (:name "dup"))
-                  :rows '((1 "a")))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result) #'ignore))
-      (unwind-protect
-          (progn
-            (clutch--execute-select sql 'fake-conn)
-            (should (equal captured-build-sql sql))
-            (with-current-buffer result-name
-              (should clutch--result-server-pageable)
-              (should-not clutch--result-server-rewritable)))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((1 "a"))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch--execute-select sql 'fake-conn)
+        (should (equal captured-build-sql sql))
+        (with-current-buffer result-name
+          (should clutch--result-server-pageable)
+          (should-not clutch--result-server-rewritable))))))
 
 (ert-deftest clutch-test-execute-select-honors-result-context-overrides ()
   "Internal filter SQL should keep the verified relation source capabilities."
   (let ((clutch--source-window (selected-window))
         (result-context
          '(:server-pageable t
-           :server-rewritable t
-           :source-table "users"))
+           :row-identity-prep
+           (:sql "SELECT id, name, `id` AS `clutch__rid_0` FROM users")))
         (result-name "*clutch-test-result*")
-        (sql "SELECT * FROM (SELECT id, name FROM users) AS _clutch_filter WHERE id > 1"))
+        (sql "SELECT * FROM (SELECT id, name FROM users) AS _clutch_filter WHERE id > 1")
+        captured-base-sql)
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
                (lambda (_conn base-sql _page-num _page-size
                               &optional _order-by _page-offset)
+                 (setq captured-base-sql base-sql)
                  base-sql))
               ((symbol-function 'clutch-db-row-identity-candidates)
-               (lambda (&rest _args) nil))
+               (lambda (&rest _args)
+                 (error "Should use context row identity prep")))
               ((symbol-function 'clutch--run-db-query)
                (lambda (_conn _query)
                  (make-clutch-db-result
                   :columns '((:name "id") (:name "name"))
-                  :rows '((2 "bob")))))
-              ((symbol-function 'clutch--result-buffer-name)
-               (lambda () result-name))
-              ((symbol-function 'clutch--show-result-buffer) #'ignore)
-              ((symbol-function 'clutch--load-fk-info) #'ignore)
-              ((symbol-function 'clutch--display-select-result) #'ignore))
-      (unwind-protect
-          (progn
-            (clutch--execute-select sql 'fake-conn result-context)
-            (with-current-buffer result-name
-              (should clutch--result-server-pageable)
-              (should clutch--result-server-rewritable)
-              (should (equal clutch--result-source-table "users"))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))))))
+                  :rows '((2 "bob"))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch--execute-select sql 'fake-conn result-context)
+        (should (string-match-p "`id` AS `clutch__rid_0`"
+                                captured-base-sql))))))
 
 (ert-deftest clutch-test-execute-select-remembers-result-buffer-on-source-buffer ()
   "SELECT execution should attach the result buffer to the source buffer."
@@ -10415,19 +8399,13 @@ This applies when the buffer owns the connection."
                          (lambda (_conn _sql)
                            (make-clutch-db-result
                             :columns '((:name "id"))
-                            :rows '((1)))))
-                        ((symbol-function 'clutch--result-buffer-name)
-                         (lambda () result-name))
-                        ((symbol-function 'clutch--show-result-buffer) #'ignore)
-                        ((symbol-function 'clutch--load-fk-info) #'ignore)
-                        ((symbol-function 'clutch--display-select-result) #'ignore))
-                (clutch--execute-select "SELECT id FROM users" 'fake-conn)
-                (should (eq clutch--last-result-buffer
-                            (get-buffer result-name)))))))
+                            :rows '((1))))))
+                (clutch-test--with-result-buffer (result-name)
+                  (clutch--execute-select "SELECT id FROM users" 'fake-conn)
+                  (should (eq clutch--last-result-buffer
+                              (get-buffer result-name))))))))
       (when (buffer-live-p source)
-        (kill-buffer source))
-      (when-let* ((buf (get-buffer result-name)))
-        (kill-buffer buf)))))
+        (kill-buffer source)))))
 
 (ert-deftest clutch-test-require-risky-dml-confirmation-cancels ()
   "Risky DML should be cancelled unless user types YES."
@@ -10488,8 +8466,8 @@ This applies when the buffer owns the connection."
     (setq-local clutch--base-query "SELECT * FROM t"
                 clutch--last-query "SELECT * FROM t WHERE id > 0"
                 clutch--where-filter "id = 1")
-    (cl-letf (((symbol-function 'clutch--apply-where)
-               (lambda (sql filter)
+    (cl-letf (((symbol-function 'clutch-db-apply-where)
+               (lambda (_conn sql filter)
                  (format "FILTER[%s]{%s}" filter sql))))
       (should (equal (clutch-result--effective-query)
                      "FILTER[id = 1]{SELECT * FROM t}")))))
@@ -10499,16 +8477,24 @@ This applies when the buffer owns the connection."
   (with-temp-buffer
     (let (captured-base)
       (setq-local clutch-connection 'fake-conn
-                  clutch--base-query "SELECT * FROM t"
+                  clutch--base-query "SELECT name FROM t"
                   clutch--where-filter "id = 1"
+                  clutch--result-source-table "t"
                   clutch--result-server-pageable t
+                  clutch--row-identity
+                  (clutch-test--primary-row-identity "t" '("id") '(1))
                   clutch-result-max-rows 500)
-      (cl-letf (((symbol-function 'clutch--apply-where)
-                 (lambda (sql filter)
+      (cl-letf (((symbol-function 'clutch-db-apply-where)
+                 (lambda (_conn sql filter)
                    (format "FILTER[%s]{%s}" filter sql)))
+                ((symbol-function 'clutch-db-escape-identifier)
+                 (lambda (_conn id) (format "`%s`" id)))
+                ((symbol-function 'clutch-db-row-identity-candidates)
+                 (lambda (&rest _)
+                   (error "Should reuse result row identity")))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-                ((symbol-function 'clutch--build-paged-sql)
-                 (lambda (sql _page-num _page-size
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn sql _page-num _page-size
                               &optional _order-by _page-offset)
                    (setq captured-base sql)
                    "SELECT * FROM paged"))
@@ -10517,8 +8503,9 @@ This applies when the buffer owns the connection."
                    (make-clutch-db-result :columns nil :rows nil)))
                 ((symbol-function 'clutch--refresh-display) #'ignore)
                 ((symbol-function 'message) #'ignore))
-        (clutch--execute-page 0)
-        (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))))))
+        (clutch-result--execute-page 0)
+        (should (equal captured-base
+                       "FILTER[id = 1]{SELECT name, `id` AS `clutch__rid_0` FROM t}"))))))
 
 (ert-deftest clutch-test-execute-page-fetches-lookahead-and-trims-visible-rows ()
   "Paging should fetch one extra row to distinguish exact last pages."
@@ -10529,10 +8516,9 @@ This applies when the buffer owns the connection."
                   clutch--result-server-pageable t
                   clutch-result-max-rows 2)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--prepare-row-identity-query)
-                 (lambda (_conn sql) (list :sql sql)))
-                ((symbol-function 'clutch--build-paged-sql)
-                 (lambda (_sql _page-num page-size _order-by &optional page-offset)
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn _sql _page-num page-size _order-by
+                         &optional page-offset)
                    (setq captured-page-size page-size
                          captured-offset page-offset)
                    "SELECT id FROM t LIMIT 3 OFFSET 2"))
@@ -10543,7 +8529,7 @@ This applies when the buffer owns the connection."
                     :rows '((3) (4) (5)))))
                 ((symbol-function 'clutch--refresh-display) #'ignore)
                 ((symbol-function 'message) #'ignore))
-        (clutch--execute-page 1)
+        (clutch-result--execute-page 1)
         (should (= captured-page-size 3))
         (should (= captured-offset 2))
         (should (equal clutch--result-rows '((3) (4))))
@@ -10559,12 +8545,12 @@ This applies when the buffer owns the connection."
                   clutch--base-query "SELECT * FROM t"
                   clutch--where-filter "id = 1"
                   clutch--result-server-rewritable t)
-      (cl-letf (((symbol-function 'clutch--apply-where)
-                 (lambda (sql filter)
+      (cl-letf (((symbol-function 'clutch-db-apply-where)
+                 (lambda (_conn sql filter)
                    (format "FILTER[%s]{%s}" filter sql)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-                ((symbol-function 'clutch--build-count-sql)
-                 (lambda (sql)
+                ((symbol-function 'clutch-db-build-count-sql)
+                 (lambda (_conn sql)
                    (setq captured-base sql)
                    "SELECT COUNT(*)"))
                 ((symbol-function 'clutch-db-query)
@@ -10585,7 +8571,7 @@ This applies when the buffer owns the connection."
                 clutch--last-query clutch--base-query)
     (let (queried)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--build-count-sql)
+                ((symbol-function 'clutch-db-build-count-sql)
                  (lambda (&rest _args) (error "Should not build COUNT SQL")))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (&rest _args) (setq queried t))))
@@ -10607,8 +8593,8 @@ This applies when the buffer owns the connection."
                  (lambda ()
                    (setq ensured t)
                    (setq-local clutch-connection 'new-conn)))
-                ((symbol-function 'clutch--build-paged-sql)
-                 (lambda (_sql _page-num _page-size
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn _sql _page-num _page-size
                               &optional _order-by _page-offset)
                    "SELECT * FROM paged"))
                 ((symbol-function 'clutch-db-query)
@@ -10617,7 +8603,7 @@ This applies when the buffer owns the connection."
                    (make-clutch-db-result :columns nil :rows nil)))
                 ((symbol-function 'clutch--refresh-display) #'ignore)
                 ((symbol-function 'message) #'ignore))
-        (clutch--execute-page 0)
+        (clutch-result--execute-page 0)
         (should ensured)
         (should (eq captured-conn 'new-conn))))))
 
@@ -10631,8 +8617,8 @@ This applies when the buffer owns the connection."
                   clutch--result-server-pageable t
                   clutch-result-max-rows 100)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--build-paged-sql)
-                 (lambda (_sql _page-num _page-size
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn _sql _page-num _page-size
                               &optional _order-by _page-offset)
                    "SELECT * FROM t LIMIT 100 OFFSET 0"))
                 ((symbol-function 'clutch--backend-key-from-conn)
@@ -10645,7 +8631,7 @@ This applies when the buffer owns the connection."
                    (signal 'clutch-db-error (list raw-message))
                  (clutch-db-error
                   (clutch--humanize-db-error (error-message-string err))))))
-          (should-error (clutch--execute-page 0) :type 'user-error)
+          (should-error (clutch-result--execute-page 0) :type 'user-error)
           (let* ((details clutch--buffer-error-details)
                  (diag (plist-get details :diag))
                  (event (car clutch--debug-events)))
@@ -10672,9 +8658,9 @@ This applies when the buffer owns the connection."
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn _sql)
                    (make-clutch-db-result :affected-rows 1)))
-                ((symbol-function 'clutch--schema-affecting-query-p)
+                ((symbol-function 'clutch-db-sql-schema-affecting-p)
                  (lambda (_sql) nil))
-                ((symbol-function 'clutch--display-result)
+                ((symbol-function 'clutch-result--display)
                  (lambda (result sql _elapsed)
                    (setq rendered (list result sql)))))
         (should (clutch--execute-dml "UPDATE demo SET enabled = 1" 'fake-conn))
@@ -10692,8 +8678,8 @@ This applies when the buffer owns the connection."
                  (lambda ()
                    (setq ensured t)
                    (setq-local clutch-connection 'new-conn)))
-                ((symbol-function 'clutch--build-count-sql)
-                 (lambda (_sql) "SELECT COUNT(*)"))
+                ((symbol-function 'clutch-db-build-count-sql)
+                 (lambda (_conn _sql) "SELECT COUNT(*)"))
                 ((symbol-function 'clutch-db-query)
                  (lambda (conn _sql)
                    (setq captured-conn conn)
@@ -10712,8 +8698,8 @@ This applies when the buffer owns the connection."
       (setq-local clutch-connection 'fake-conn
                   clutch--base-query "SELECT * FROM t"
                   clutch--where-filter "id = 1")
-      (cl-letf (((symbol-function 'clutch--apply-where)
-                 (lambda (sql filter)
+      (cl-letf (((symbol-function 'clutch-db-apply-where)
+                 (lambda (_conn sql filter)
                    (format "FILTER[%s]{%s}" filter sql)))
                 ((symbol-function 'clutch--execute)
                  (lambda (sql &optional conn)
@@ -10729,8 +8715,8 @@ This applies when the buffer owns the connection."
     (let (captured)
       (setq-local clutch--base-query "SELECT * FROM t"
                   clutch--where-filter "id = 1")
-      (cl-letf (((symbol-function 'clutch--apply-where)
-                 (lambda (sql filter)
+      (cl-letf (((symbol-function 'clutch-db-apply-where)
+                 (lambda (_conn sql filter)
                    (format "FILTER[%s]{%s}" filter sql)))
                 ((symbol-function 'clutch--preview-sql-buffer)
                  (lambda (sql)
@@ -10810,7 +8796,7 @@ This applies when the buffer owns the connection."
           (setq-local clutch-connection 'fake-conn)
           (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                      (lambda (_conn) 'mysql))
-                    ((symbol-function 'clutch--display-error-result)
+                    ((symbol-function 'clutch-result--display-error)
                      (lambda (_conn sql summary message &optional _elapsed hint)
                        (setq displayed (list sql summary message hint))
                        (current-buffer)))
@@ -10866,7 +8852,7 @@ This applies when the buffer owns the connection."
           (signal 'clutch-db-error (list raw-message))
         (clutch-db-error
          (setq err caught)))
-      (cl-letf (((symbol-function 'clutch--display-error-result)
+      (cl-letf (((symbol-function 'clutch-result--display-error)
                  (lambda (_conn sql summary message &optional elapsed hint)
                    (setq displayed (list sql summary message elapsed hint))
                    (current-buffer)))
@@ -10907,10 +8893,10 @@ This applies when the buffer owns the connection."
           (insert "SELECT missing_col FROM dual")
           (cl-letf (((symbol-function 'clutch--connection-alive-p)
                      (lambda (_conn) nil))
-                    ((symbol-function 'clutch--show-result-buffer)
+                    ((symbol-function 'clutch-result--show-buffer)
                      (lambda (buf) (setq shown buf) buf)))
             (setq result-buf
-                  (clutch--display-error-result
+                  (clutch-result--display-error
                    clutch-connection
                    (buffer-string)
                    "ORA-00904: invalid column name"
@@ -10976,10 +8962,10 @@ This applies when the buffer owns the connection."
           (clutch--executing-p nil))
       (puthash clutch-connection t clutch--tx-dirty-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
-                ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--update-mode-line) (lambda () nil))
-                ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                 ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
                 ((symbol-function 'clutch-db-disconnect)
@@ -11000,14 +8986,14 @@ This applies when the buffer owns the connection."
           spinner-started
           execute-saw-spinner)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
                 ((symbol-function 'clutch--spinner-start)
                  (lambda () (setq spinner-started t)))
                 ((symbol-function 'clutch--update-mode-line) #'ignore)
                 ((symbol-function 'redisplay) #'ignore)
-                ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                 ((symbol-function 'clutch--execute-select)
                  (lambda (&rest _args)
                    (setq execute-saw-spinner spinner-started))))
@@ -11025,12 +9011,12 @@ This applies when the buffer owns the connection."
           (header-line-format " result header")
           seen-header)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
                 ((symbol-function 'clutch--spinner-start) #'ignore)
                 ((symbol-function 'redisplay) #'ignore)
-                ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                 ((symbol-function 'clutch--execute-select)
                  (lambda (&rest _args)
                    (setq seen-header header-line-format))))
@@ -11049,10 +9035,10 @@ This applies when the buffer owns the connection."
            (clutch-connection conn)
            (clutch--executing-p nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
-                ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--update-mode-line) (lambda () nil))
-                ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                 ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
                 ((symbol-function 'clutch-db-interrupt-query)
@@ -11132,12 +9118,12 @@ This applies when the buffer owns the connection."
   (let ((called nil)
         (clutch-connection 'fake-conn))
     (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
-              ((symbol-function 'clutch--check-pending-changes) #'ignore)
-              ((symbol-function 'clutch--destructive-query-p) (lambda (_sql) nil))
+              ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+              ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
               ((symbol-function 'clutch--require-risky-dml-confirmation)
                (lambda (sql) (setq called sql)))
               ((symbol-function 'clutch--update-mode-line) (lambda () nil))
-              ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+              ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
               ((symbol-function 'clutch--execute-select) (lambda (&rest _args) 'ok)))
       (clutch--execute "UPDATE users SET x=1" clutch-connection)
       (should (equal called "UPDATE users SET x=1")))))
@@ -11156,14 +9142,14 @@ This applies when the buffer owns the connection."
                       ((symbol-function 'clutch--connection-alive-p)
                        (lambda (conn) (eq conn 'fake-conn)))
                       ((symbol-function 'clutch--try-reconnect) (lambda () nil))
-                      ((symbol-function 'clutch--check-pending-changes) #'ignore)
-                      ((symbol-function 'clutch--destructive-query-p)
+                      ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                      ((symbol-function 'clutch-db-sql-destructive-p)
                        (lambda (_sql) nil))
                       ((symbol-function 'clutch--require-risky-dml-confirmation)
                        #'ignore)
                       ((symbol-function 'clutch--spinner-start) #'ignore)
                       ((symbol-function 'clutch--update-mode-line) #'ignore)
-                      ((symbol-function 'clutch--select-query-p) (lambda (_sql) t))
+                      ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                       ((symbol-function 'clutch--execute-select)
                        (lambda (_sql conn &optional _result-context)
                          (setq captured-conn conn)
@@ -11186,7 +9172,7 @@ This applies when the buffer owns the connection."
                    (make-clutch-db-result :affected-rows 1)))
                 ((symbol-function 'clutch--require-risky-dml-confirmation)
                  (lambda (sql) (push sql risky-sqls)))
-                ((symbol-function 'clutch--schema-affecting-query-p)
+                ((symbol-function 'clutch-db-sql-schema-affecting-p)
                  (lambda (_sql) nil))
                 ((symbol-function 'yes-or-no-p)
                  (lambda (_prompt)
@@ -11209,7 +9195,7 @@ This applies when the buffer owns the connection."
       (cl-letf (((symbol-function 'clutch--run-db-query)
                  (lambda (_conn _sql)
                    (make-clutch-db-result :affected-rows 0)))
-                ((symbol-function 'clutch--schema-affecting-query-p)
+                ((symbol-function 'clutch-db-sql-schema-affecting-p)
                  (lambda (_sql) t))
                 ((symbol-function 'clutch-db-eager-schema-refresh-p)
                  (lambda (_conn) nil))
@@ -11490,7 +9476,7 @@ This applies when the buffer owns the connection."
                    (make-clutch-db-result
                     :columns '((:name "id"))
                     :rows '((1)))))
-                ((symbol-function 'clutch--column-names)
+                ((symbol-function 'clutch-db-result-column-names)
                  (lambda (_columns) '("id")))
                 ((symbol-function 'clutch--render-static-table)
                  (lambda (_col-names _rows _columns) "| id |\n| 1 |"))
@@ -13327,23 +11313,115 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
 
 ;;;; Live integration tests
 
+(defun clutch-test--live-connect-params ()
+  "Return connection params for `clutch-test--with-conn'."
+  (let ((params (if clutch-test-url
+                    (list :url clutch-test-url)
+                  (list :host clutch-test-host
+                        :port clutch-test-port
+                        :database clutch-test-database))))
+    (when clutch-test-user
+      (setq params (plist-put params :user clutch-test-user)))
+    (when clutch-test-password
+      (setq params (plist-put params :password clutch-test-password)))
+    (when clutch-test-display-name
+      (setq params (plist-put params :display-name clutch-test-display-name)))
+    (when clutch-test-props
+      (setq params (plist-put params :props clutch-test-props)))
+    params))
+
+(defun clutch-test--duckdb-live-p ()
+  "Return non-nil when live tests target DuckDB through generic JDBC."
+  (and (eq clutch-test-backend 'jdbc)
+       (stringp clutch-test-url)
+       (string-match-p "\\`jdbc:duckdb:" clutch-test-url)))
+
+(defun clutch-test--clickhouse-live-p ()
+  "Return non-nil when live tests target ClickHouse."
+  (eq clutch-test-backend 'clickhouse))
+
+(defun clutch-test--live-name-member-p (name names)
+  "Return non-nil when NAME appears in NAMES, ignoring metadata case."
+  (cl-find name names :test #'string-equal-ignore-case))
+
+(defun clutch-test--updateable-live-backend-p ()
+  "Return non-nil when generic live workflow SQL is valid for the backend."
+  (or (memq clutch-test-backend '(mysql pg sqlserver oracle))
+      (clutch-test--duckdb-live-p)))
+
+(defun clutch-test--result-live-backend-p ()
+  "Return non-nil when result workflow SQL is valid for the backend."
+  (or (clutch-test--updateable-live-backend-p)
+      (clutch-test--clickhouse-live-p)))
+
+(defun clutch-test--live-column-type (kind)
+  "Return a live-test SQL column type for KIND."
+  (pcase kind
+    ('int (if (clutch-test--clickhouse-live-p) "Int32" "INT"))
+    ('string (if (clutch-test--clickhouse-live-p) "String" "VARCHAR(64)"))
+    (_ (error "Unknown live test column kind: %S" kind))))
+
+(defun clutch-test--live-create-table-sql (table columns)
+  "Return CREATE TABLE SQL for TABLE with COLUMNS.
+COLUMNS entries have the shape (NAME KIND . ATTRS)."
+  (format "CREATE TABLE %s (%s)%s"
+          table
+          (mapconcat
+           (lambda (column)
+             (pcase-let ((`(,name ,kind . ,attrs) column))
+               (format "%s %s%s"
+                       name
+                       (clutch-test--live-column-type kind)
+                       (if (and (memq 'primary attrs)
+                                (not (clutch-test--clickhouse-live-p)))
+                           " PRIMARY KEY"
+                         ""))))
+           columns
+           ", ")
+          (if (clutch-test--clickhouse-live-p) " ENGINE = Memory" "")))
+
+(defun clutch-test--live-row-prefix-strings (row count)
+  "Return the first COUNT values from ROW formatted as strings."
+  (mapcar (lambda (value) (format "%s" value))
+          (seq-take row count)))
+
+(defun clutch-test--live-row-ids (rows)
+  "Return the first-column identifiers from live ROWS as numbers."
+  (mapcar (lambda (row) (string-to-number (format "%s" (car row))))
+          rows))
+
 (defmacro clutch-test--with-conn (var &rest body)
   "Execute BODY with VAR bound to a live connection.
-Skips if `clutch-test-password' is nil."
+Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (declare (indent 1))
-  `(if (null clutch-test-password)
-       (ert-skip "Set clutch-test-password to enable live tests")
+  `(if (and (null clutch-test-password)
+            (null clutch-test-url))
+       (ert-skip "Set clutch-test-password or clutch-test-url to enable live tests")
      (let ((mysql-tls-verify-server nil))
        (let ((,var (clutch-db-connect
                     clutch-test-backend
-                    (list :host clutch-test-host
-                          :port clutch-test-port
-                          :user clutch-test-user
-                          :password clutch-test-password
-                          :database clutch-test-database))))
+                    (clutch-test--live-connect-params))))
          (unwind-protect
              (progn ,@body)
            (clutch-db-disconnect ,var))))))
+
+(defmacro clutch-test--with-live-result-buffer (name &rest body)
+  "Run BODY with live SELECT results isolated to result buffer NAME."
+  (declare (indent 1) (debug (form body)))
+  `(let ((clutch-test--result-name ,name))
+     (cl-letf (((symbol-function 'clutch-result--buffer-name)
+                (lambda () clutch-test--result-name)))
+       (unwind-protect
+           (progn ,@body)
+         (when-let* ((buf (get-buffer clutch-test--result-name)))
+           (kill-buffer buf))))))
+
+(defun clutch-test--execute-live-select (conn sql)
+  "Execute SQL through the result UI path for live connection CONN."
+  (with-temp-buffer
+    (let ((clutch-connection conn)
+          (clutch--source-window (selected-window)))
+      (clutch--execute-select sql conn))))
 
 (ert-deftest clutch-test-live-schema-introspection ()
   :tags '(:clutch-live)
@@ -13352,21 +11430,22 @@ Skips if `clutch-test-password' is nil."
     (let* ((table (format "clutch_schema_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))"
-                    table)))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string)))))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
-            (clutch-db-query conn create-sql)
-            (let ((tables (clutch-db-list-tables conn)))
-              (should (listp tables))
-              (should (member table tables)))
-            (let ((columns (clutch-db-list-columns conn table)))
-              (should (listp columns))
-              (should (member "id" columns))
-              (should (member "name" columns)))
-            (let ((pk-cols (clutch-db-primary-key-columns conn table)))
-              (should (equal pk-cols '("id")))))
+	      (clutch-db-query conn create-sql)
+	      (let ((tables (clutch-db-list-tables conn)))
+	        (should (listp tables))
+	        (should (clutch-test--live-name-member-p table tables)))
+	      (let ((columns (clutch-db-list-columns conn table)))
+	        (should (listp columns))
+	        (should (clutch-test--live-name-member-p "id" columns))
+	        (should (clutch-test--live-name-member-p "name" columns)))
+	      (let ((pk-cols (clutch-db-primary-key-columns conn table)))
+	        (unless (clutch-test--clickhouse-live-p)
+	          (should (equal (mapcar #'downcase pk-cols) '("id"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-object-describe-uses-real-table-and-index-metadata ()
@@ -13379,8 +11458,8 @@ Skips if `clutch-test-password' is nil."
            (index (format "idx_clutch_obj_desc_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))"
-                    table))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
            (index-sql
             (format "CREATE INDEX %s ON %s (name)" index table)))
       (let ((clutch--object-cache (make-hash-table :test 'equal))
@@ -13426,8 +11505,8 @@ Skips if `clutch-test-password' is nil."
     (let* ((table (format "clutch_paged_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))"
-                    table))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
            (insert-sql
             (format "INSERT INTO %s (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
                     table))
@@ -13437,30 +11516,38 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (let* ((paged (clutch-db-build-paged-sql conn base-sql 0 2))
-                   (rows (clutch-db-result-rows
-                          (clutch-db-query conn paged))))
-              (should (string-match-p "LIMIT" paged))
-              (should (= (length rows) 2)))
-            (let* ((paged (clutch-db-build-paged-sql
-                           conn base-sql 0 2 '("id" . "DESC")))
-                   (rows (clutch-db-result-rows
-                          (clutch-db-query conn paged))))
-              (should (string-match-p "ORDER BY" paged))
-              (should (equal rows '((3 "c") (2 "b"))))))
+	      (let* ((paged (clutch-db-build-paged-sql conn base-sql 0 2))
+	             (rows (clutch-db-result-rows
+	                    (clutch-db-query conn paged))))
+	        (let ((paged-upper (upcase paged)))
+	          (should (or (string-match-p "LIMIT" paged-upper)
+	                      (string-match-p "OFFSET" paged-upper)
+	                      (string-match-p "ROWNUM" paged-upper)
+	                      (string-match-p "FETCH" paged-upper))))
+	        (should (= (length rows) 2)))
+	      (let* ((sort-column (if (eq clutch-test-backend 'oracle) "ID" "id"))
+	             (paged (clutch-db-build-paged-sql
+	                     conn base-sql 0 2 (cons sort-column "DESC")))
+	             (rows (clutch-db-result-rows
+	                    (clutch-db-query conn paged))))
+	        (should (string-match-p "ORDER BY" paged))
+	        (should (equal (mapcar (lambda (row)
+	                                 (list (format "%s" (car row)) (cadr row)))
+	                               rows)
+	                       '(("3" "c") ("2" "b"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-result-filter-sort-page-count-export-workflow ()
   :tags '(:clutch-live)
   "Result buffer workflows should run real backend queries end-to-end."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "Result workflow live test currently covers MySQL/PostgreSQL"))
+  (unless (clutch-test--result-live-backend-p)
+    (ert-skip "Result workflow live test covers MySQL/PostgreSQL/SQL Server/Oracle/ClickHouse/DuckDB"))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_result_flow_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64), score INT)"
-                    table))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string) (score int))))
            (insert-sql
             (format
              "INSERT INTO %s (id, name, score) VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'cam', 30), (4, 'dan', 40), (5, 'eve', 50)"
@@ -13472,53 +11559,62 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (let ((clutch-result-max-rows 2))
-              (with-temp-buffer
-                (let ((clutch-connection conn)
-                      (clutch--source-window (selected-window)))
-                  (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                             (lambda () result-name)))
-                    (clutch--execute-select select-sql conn)))))
-            (with-current-buffer result-name
-              (set-window-buffer (selected-window) (current-buffer))
-              (setq-local clutch-result-max-rows 2)
-              (should (equal (mapcar #'car clutch--result-rows) '(1 2)))
-              (should (string-match-p "ann" (buffer-string)))
-              (should clutch--page-has-more)
-              (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                         (lambda () result-name))
-                        ((symbol-function 'message) #'ignore))
-                (clutch-result-count-total)
-                (should (= clutch--page-total-rows 5))
-                (clutch-result-last-page)
-                (should (= clutch--page-current 2))
-                (should (= clutch--page-offset 3))
-                (should-not clutch--page-has-more)
-                (should (equal (mapcar #'car clutch--result-rows) '(4 5)))
-                (should (string-match-p "eve" (buffer-string)))
-                (clutch-result--sort "score" t)
-                (should (equal (mapcar #'car clutch--result-rows) '(5 4)))
-                (should (string-match-p "dan" (buffer-string)))
-                (clutch-result-next-page)
-                (should (= clutch--page-current 1))
+            (clutch-test--with-live-result-buffer result-name
+              (let ((clutch-result-max-rows 2))
+                (clutch-test--execute-live-select conn select-sql))
+              (with-current-buffer result-name
+                (set-window-buffer (selected-window) (current-buffer))
+                (setq-local clutch-result-max-rows 2)
+                (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                               '(1 2)))
+                (should (string-match-p "ann" (buffer-string)))
                 (should clutch--page-has-more)
-                (should (equal (mapcar #'car clutch--result-rows) '(3 2)))
-                (cl-letf (((symbol-function 'completing-read)
-                           (lambda (&rest _args) "score"))
-                          ((symbol-function 'read-string)
-                           (lambda (&rest _args) "> 20")))
-                  (clutch-result-apply-filter))
-                (should (equal clutch--where-filter "score > 20"))
-                (should (= clutch--page-current 0))
-                (should (equal (sort (mapcar #'car clutch--result-rows) #'<)
-                               '(3 4)))
-                (clutch-result-count-total)
-                (should (= clutch--page-total-rows 3))
-                (let ((rows (clutch-result--collect-all-export-rows)))
-                  (should (equal (sort (mapcar #'car rows) #'<)
-                                 '(3 4 5)))))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
+                (cl-letf (((symbol-function 'message) #'ignore))
+                  (clutch-result-count-total)
+                  (should (= clutch--page-total-rows 5))
+                  (clutch-result-last-page)
+                  (should (= clutch--page-current 2))
+                  (should (= clutch--page-offset 3))
+                  (should-not clutch--page-has-more)
+                  (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                 '(4 5)))
+                  (should (string-match-p "eve" (buffer-string)))
+                  (let ((score-column
+                         (cl-find "score" clutch--result-columns
+                                  :test #'string-equal-ignore-case)))
+                    (should score-column)
+                    (clutch-result--sort score-column t))
+                  (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                 '(5 4)))
+                  (should (string-match-p "dan" (buffer-string)))
+                  (clutch-result-next-page)
+                  (should (= clutch--page-current 1))
+                  (should clutch--page-has-more)
+                  (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                 '(3 2)))
+                  (let ((score-column
+                         (cl-find "score" clutch--result-columns
+                                  :test #'string-equal-ignore-case)))
+                    (should score-column)
+                    (cl-letf (((symbol-function 'completing-read)
+                               (lambda (&rest _args) score-column))
+                              ((symbol-function 'read-string)
+                               (lambda (&rest _args) "> 20")))
+                      (clutch-result-apply-filter))
+                    (should (equal clutch--where-filter
+                                   (format "%s > 20"
+                                           (clutch-db-escape-identifier
+                                            conn score-column)))))
+                  (should (= clutch--page-current 0))
+                  (should (equal (sort (clutch-test--live-row-ids
+                                        clutch--result-rows)
+                                       #'<)
+                                 '(3 4)))
+                  (clutch-result-count-total)
+                  (should (= clutch--page-total-rows 3))
+                  (let ((rows (clutch-result--collect-all-export-rows)))
+                    (should (equal (sort (clutch-test--live-row-ids rows) #'<)
+                                   '(3 4 5))))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-mysql-limited-join-duplicate-columns-executes-flat ()
@@ -13555,23 +11651,17 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn create-b)
             (clutch-db-query conn insert-a)
             (clutch-db-query conn insert-b)
-            (let ((clutch-result-max-rows 1))
-              (with-temp-buffer
-                (let ((clutch-connection conn)
-                      (clutch--source-window (selected-window)))
-                  (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                             (lambda () result-name)))
-                    (clutch--execute-select select-sql conn)))))
-            (with-current-buffer result-name
-              (should (equal clutch--result-columns
-                             '("id" "name" "id" "label")))
-              (should (= (length clutch--result-rows) 2))
-              (should-not clutch--page-has-more)
-              (should-not clutch--result-server-pageable)
-              (should-not clutch--result-server-rewritable)
-              (should-not clutch--result-source-table)))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
+            (clutch-test--with-live-result-buffer result-name
+              (let ((clutch-result-max-rows 1))
+                (clutch-test--execute-live-select conn select-sql))
+              (with-current-buffer result-name
+                (should (equal clutch--result-columns
+                               '("id" "name" "id" "label")))
+                (should (= (length clutch--result-rows) 2))
+                (should-not clutch--page-has-more)
+                (should-not clutch--result-server-pageable)
+                (should-not clutch--result-server-rewritable)
+                (should-not clutch--result-source-table))))
         (ignore-errors (clutch-db-query conn drop-b))
         (ignore-errors (clutch-db-query conn drop-a))))))
 
@@ -13592,30 +11682,24 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (with-temp-buffer
-              (let ((clutch-connection conn)
-                    (clutch--source-window (selected-window)))
-                (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                           (lambda () result-name)))
-                  (clutch--execute-select select-sql conn))))
-            (with-current-buffer result-name
-              (should (equal (plist-get clutch--row-identity :kind) 'row-locator))
-              (should (equal (plist-get clutch--row-identity :name) "ctid"))
-              (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                         (lambda () result-name))
-                        ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-                (clutch-result--apply-edit 0 0 "after")
-                (should clutch--pending-edits)
-                (clutch-result-commit)
-                (should-not clutch--pending-edits)
-                (should (equal (caar clutch--result-rows) "after"))))
+            (clutch-test--with-live-result-buffer result-name
+              (clutch-test--execute-live-select conn select-sql)
+              (with-current-buffer result-name
+                (should (equal (plist-get clutch--row-identity :kind)
+                               'row-locator))
+                (should (equal (plist-get clutch--row-identity :name) "ctid"))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t)))
+                  (clutch-result--apply-edit 0 0 "after")
+                  (should clutch--pending-edits)
+                  (clutch-result-commit)
+                  (should-not clutch--pending-edits)
+                  (should (equal (caar clutch--result-rows) "after")))))
             (let ((rows (clutch-db-result-rows
                          (clutch-db-query
                           conn
                           (format "SELECT name FROM %s" table)))))
               (should (equal rows '(("after"))))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-pg-ctid-aggregate-select-skips-row-identity-injection ()
@@ -13636,31 +11720,25 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (with-temp-buffer
-              (let ((clutch-connection conn)
-                    (clutch--source-window (selected-window)))
-                (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                           (lambda () result-name)))
-                  (let* ((result (clutch--execute-select select-sql conn))
-                         (rows (clutch-db-result-rows result)))
-                    (should (equal rows '((2))))))))
-            (with-current-buffer result-name
-              (should (string-match-p "2" (buffer-string)))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
+            (clutch-test--with-live-result-buffer result-name
+              (let* ((result (clutch-test--execute-live-select conn select-sql))
+                     (rows (clutch-db-result-rows result)))
+                (should (equal (format "%s" (caar rows)) "2")))
+              (with-current-buffer result-name
+                (should (string-match-p "2" (buffer-string))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-aggregate-select-skips-row-identity-injection ()
   :tags '(:clutch-live)
   "Aggregate SELECT execution should not inject row identity into live SQL."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "Aggregate row identity live test currently covers MySQL/PostgreSQL"))
+  (unless (clutch-test--result-live-backend-p)
+    (ert-skip "Aggregate row identity live test covers MySQL/PostgreSQL/SQL Server/Oracle/ClickHouse/DuckDB"))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_issue12_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))"
-                    table))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
            (insert-sql
             (format "INSERT INTO %s (id, name) VALUES (1, 'a'), (2, 'b')"
                     table))
@@ -13671,30 +11749,25 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (with-temp-buffer
-              (let ((clutch-connection conn)
-                    (clutch--source-window (selected-window)))
-                (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                           (lambda () result-name)))
-                  (let* ((result (clutch--execute-select select-sql conn))
-                         (rows (clutch-db-result-rows result)))
-                    (should (equal rows '((2))))))))
-            (with-current-buffer result-name
-              (should (string-match-p "2" (buffer-string)))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
+            (clutch-test--with-live-result-buffer result-name
+              (let* ((result (clutch-test--execute-live-select conn select-sql))
+                     (rows (clutch-db-result-rows result)))
+                (should (equal (format "%s" (caar rows)) "2")))
+              (with-current-buffer result-name
+                (should (string-match-p "2" (buffer-string))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-edit-field-and-commit-persists ()
   :tags '(:clutch-live)
   "Edit through a real SELECT result and commit the persisted row change."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "Edit live test currently covers MySQL/PostgreSQL"))
+  (unless (clutch-test--updateable-live-backend-p)
+    (ert-skip "Edit live test covers MySQL/PostgreSQL/SQL Server/Oracle/DuckDB"))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_edit_commit_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-             (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))" table))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
            (insert-sql
              (format "INSERT INTO %s (id, name) VALUES (1, 'before')" table))
            (select-sql
@@ -13705,43 +11778,44 @@ Skips if `clutch-test-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (with-temp-buffer
-              (let ((clutch-connection conn)
-                    (clutch--source-window (selected-window)))
-                (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                           (lambda () result-name)))
-                  (clutch--execute-select select-sql conn))))
-            (with-current-buffer result-name
-              (should (equal (seq-take (car clutch--result-rows) 2)
-                             '(1 "before")))
-              (should (equal (plist-get clutch--row-identity :columns) '("id")))
-              (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                         (lambda () result-name))
-                        ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-                (clutch-result--apply-edit 0 1 "after")
-                (should clutch--pending-edits)
-                (clutch-result-commit)
-                (should-not clutch--pending-edits)
-                (should (equal (seq-take (car clutch--result-rows) 2)
-                               '(1 "after")))))
+            (clutch-test--with-live-result-buffer result-name
+              (clutch-test--execute-live-select conn select-sql)
+              (with-current-buffer result-name
+                (should (equal (clutch-test--live-row-prefix-strings
+                                (car clutch--result-rows) 2)
+                               '("1" "before")))
+                (should (equal (mapcar #'downcase
+                                       (plist-get clutch--row-identity :columns))
+                               '("id")))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t)))
+                  (clutch-result--apply-edit 0 1 "after")
+                  (should clutch--pending-edits)
+                  (clutch-result-commit)
+                  (should-not clutch--pending-edits)
+                  (should (equal (clutch-test--live-row-prefix-strings
+                                  (car clutch--result-rows) 2)
+                                 '("1" "after"))))))
             (let* ((res (clutch-db-query conn select-sql))
                    (rows (clutch-db-result-rows res)))
-              (should (equal rows '((1 "after"))))))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
+              (should (equal (mapcar (lambda (row)
+                                       (clutch-test--live-row-prefix-strings
+                                        row 2))
+                                     rows)
+                             '(("1" "after"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-insert-and-delete-commit-persists ()
   :tags '(:clutch-live)
   "Insert and delete staging should persist through real backend commits."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "Insert/delete live test currently covers MySQL/PostgreSQL"))
+  (unless (clutch-test--updateable-live-backend-p)
+    (ert-skip "Insert/delete live test covers MySQL/PostgreSQL/SQL Server/Oracle/DuckDB"))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_insert_delete_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
-            (format "CREATE TABLE %s (id INT PRIMARY KEY, name VARCHAR(64))"
-                    table))
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
            (select-sql (format "SELECT id, name FROM %s ORDER BY id" table))
            (result-name (format " *clutch-insert-delete-live-%d*" (emacs-pid)))
            insert-buf)
@@ -13749,72 +11823,67 @@ Skips if `clutch-test-password' is nil."
           (progn
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
-            (with-temp-buffer
-              (let ((clutch-connection conn)
-                    (clutch--source-window (selected-window)))
-                (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                           (lambda () result-name)))
-                  (clutch--execute-select select-sql conn))))
-            (with-current-buffer result-name
-              (should-not clutch--result-rows)
-              (cl-letf (((symbol-function 'pop-to-buffer)
-                         (lambda (buf &rest _args)
-                           (setq insert-buf buf)
-                           buf)))
-                (clutch-result-insert-row)))
-            (with-current-buffer insert-buf
-              (unless (save-excursion
-                        (goto-char (point-min))
-                        (re-search-forward "^name.*: " nil t))
-                (cl-letf (((symbol-function 'message) #'ignore))
-                  (clutch-result-insert-toggle-field-layout)))
-              (goto-char (point-min))
-              (should (re-search-forward "^id.*: " nil t))
-              (insert "1")
-              (goto-char (point-min))
-              (should (re-search-forward "^name.*: " nil t))
-              (insert "ann")
-              (cl-letf (((symbol-function 'quit-window) #'ignore)
-                        ((symbol-function 'message) #'ignore))
-                (clutch-result-insert-commit)))
-            (with-current-buffer result-name
-              (should (equal clutch--pending-inserts
-                             '((("id" . "1") ("name" . "ann")))))
-              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                        ((symbol-function 'clutch--result-buffer-name)
-                         (lambda () result-name))
-                        ((symbol-function 'message) #'ignore))
-                (clutch-result-commit))
-              (should-not clutch--pending-inserts))
-            (should (equal (clutch-db-result-rows
-                            (clutch-db-query conn select-sql))
-                           '((1 "ann"))))
-            (with-temp-buffer
-              (let ((clutch-connection conn)
-                    (clutch--source-window (selected-window)))
-                (cl-letf (((symbol-function 'clutch--result-buffer-name)
-                           (lambda () result-name)))
-                  (clutch--execute-select select-sql conn))))
-            (with-current-buffer result-name
-              (should (equal (seq-take (car clutch--result-rows) 2)
-                             '(1 "ann")))
-              (cl-letf (((symbol-function 'clutch-result--selected-row-indices)
-                         (lambda () '(0)))
-                        ((symbol-function 'message) #'ignore))
-                (clutch-result-delete-rows))
-              (should (equal clutch--pending-deletes (list (vector 1))))
-              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                        ((symbol-function 'clutch--result-buffer-name)
-                         (lambda () result-name))
-                        ((symbol-function 'message) #'ignore))
-                (clutch-result-commit))
-              (should-not clutch--pending-deletes))
+            (clutch-test--with-live-result-buffer result-name
+              (clutch-test--execute-live-select conn select-sql)
+              (with-current-buffer result-name
+                (should-not clutch--result-rows)
+                (cl-letf (((symbol-function 'pop-to-buffer)
+                           (lambda (buf &rest _args)
+                             (setq insert-buf buf)
+                             buf)))
+                  (clutch-result-insert-row)))
+              (with-current-buffer insert-buf
+                (unless (save-excursion
+                          (goto-char (point-min))
+                          (re-search-forward "^name.*: " nil t))
+                  (cl-letf (((symbol-function 'message) #'ignore))
+                    (clutch-result-insert-toggle-field-layout)))
+                (goto-char (point-min))
+                (should (re-search-forward "^id.*: " nil t))
+                (insert "1")
+                (goto-char (point-min))
+                (should (re-search-forward "^name.*: " nil t))
+                (insert "ann")
+                (cl-letf (((symbol-function 'quit-window) #'ignore)
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result-insert-commit)))
+              (with-current-buffer result-name
+                (let ((insert (car clutch--pending-inserts)))
+                  (should (equal (cdr (assoc-string "id" insert t)) "1"))
+                  (should (equal (cdr (assoc-string "name" insert t)) "ann")))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t))
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result-commit))
+                (should-not clutch--pending-inserts))
+              (should (equal (mapcar (lambda (row)
+                                       (clutch-test--live-row-prefix-strings
+                                        row 2))
+                                     (clutch-db-result-rows
+                                      (clutch-db-query conn select-sql)))
+                             '(("1" "ann"))))
+              (clutch-test--execute-live-select conn select-sql)
+              (with-current-buffer result-name
+                (should (equal (clutch-test--live-row-prefix-strings
+                                (car clutch--result-rows) 2)
+                               '("1" "ann")))
+                (cl-letf (((symbol-function 'clutch--selected-row-indices)
+                           (lambda () '(0)))
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result-delete-rows))
+                (should (equal (mapcar (lambda (identity)
+                                         (format "%s" (aref identity 0)))
+                                       clutch--pending-deletes)
+                               '("1")))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t))
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result-commit))
+                (should-not clutch--pending-deletes)))
             (should-not (clutch-db-result-rows
                          (clutch-db-query conn select-sql))))
         (when (buffer-live-p insert-buf)
           (kill-buffer insert-buf))
-        (when-let* ((buf (get-buffer result-name)))
-          (kill-buffer buf))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 ;;; clutch-test.el ends here

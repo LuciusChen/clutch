@@ -3,8 +3,8 @@
 * JDBC Backend (clutch-db-jdbc.el)
 
 =clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
-protocol implementation.  It delegates JDBC work to =clutch-jdbc-agent=, a
-small JVM sidecar.  Java 17+ is required.
+protocol implementation.  It delegates JDBC work to
+[[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]], a small JVM sidecar.  Java 17+ is required.
 
 For the wire protocol, RPC inventory, runtime session model, and startup/error
 semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
@@ -17,9 +17,10 @@ semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
 | =sqlserver=    | Microsoft SQL Server| Maven Central       | 1433         |
 | =redshift=     | Amazon Redshift     | Maven Central       | 5439         |
 | =snowflake=    | Snowflake           | Maven Central       | —            |
+| =clickhouse=   | ClickHouse          | Maven Central       | 8123         |
 | =db2=          | IBM DB2             | Manual download     | 50000        |
 
-Any other JDBC-compatible database (ClickHouse, TiDB, Hive, KingbaseES, etc.)
+DuckDB, TiDB, Hive, KingbaseES, and other JDBC-compatible databases
 can be used through the generic =jdbc= backend by passing
 =:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
 directory.  Use =:display-name= if you want the UI to show a friendly backend
@@ -38,12 +39,14 @@ If you prefer to pre-install everything up front:
 ;; Download clutch-jdbc-agent.jar:
 (clutch-jdbc-ensure-agent)
 
-;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift):
+;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift, ClickHouse, DuckDB):
 (clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
 (clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
 (clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar plus SLF4J jars from Maven Central
+(clutch-jdbc-install-driver 'duckdb)      ; duckdb_jdbc.jar from Maven Central
 ;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
 #+end_src
 
@@ -123,6 +126,11 @@ artifact from Maven Central rather than a nonexistent plain
                           :host "ch.corp.com"
                           :database "default"
                           :user "default" :password ""))
+
+        ;; DuckDB (local embedded database through generic JDBC URL)
+        ("duckdb" . (:backend jdbc
+                      :url "jdbc:duckdb:/path/to/analytics.duckdb"
+                      :display-name "DuckDB"))
 
         ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
         ;; Use :backend jdbc with a full JDBC URL when no native backend exists.
