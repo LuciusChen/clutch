@@ -66,25 +66,25 @@ backend adapters
 
 ### File Responsibilities
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `clutch.el` | ~856 | Package entry point, customization, autoloaded public commands, mode assembly |
-| `clutch-connection.el` | ~2042 | Connection lifecycle, auth-source/pass lookup, transports, reconnect/disconnect, transaction state |
-| `clutch-query.el` | ~1802 | Query consoles, SQL execution, statement detection, row-identity preparation, SQL rewrite orchestration |
-| `clutch-result.el` | ~2803 | Result/record/value commands, pagination, sorting, filtering, export, context export |
-| `clutch-ui.el` | ~1697 | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh |
-| `clutch-edit.el` | ~2079 | Staged edit, insert, delete, validation, JSON sub-editors, mutation commit workflow |
-| `clutch-object.el` | ~1810 | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
-| `clutch-schema.el` | ~858 | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat, recoverable metadata warnings |
-| `clutch-sql.el` | ~1376 | SQL context parsing, completion, Eldoc, xref |
-| `clutch-db.el` | ~1368 | Backend facade, result struct, shared SQL helpers, capability gates, error normalization |
-| `clutch-db-mysql.el` | ~715 | MySQL backend adapter, type-category mapping, mysql.el boundary wrappers |
-| `clutch-db-pg.el` | ~1175 | PostgreSQL backend adapter, OID-to-type mapping, pg-el boundary wrappers |
-| `clutch-db-sqlite.el` | ~399 | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
-| `clutch-db-jdbc.el` | ~1817 | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
-| External dependency: `mysql` | n/a | Pure Elisp MySQL wire protocol client (separate package) |
-| External dependency: `pg` | n/a | PostgreSQL client from upstream `pg-el` (separate package) |
-| Optional package: `ob-clutch` | n/a | Org-Babel integration bridge (separate package) |
+| File | Purpose |
+|------|---------|
+| `clutch.el` | Package entry point, customization, autoloaded public commands, mode assembly |
+| `clutch-connection.el` | Connection lifecycle, auth-source/pass lookup, transports, reconnect/disconnect, transaction state |
+| `clutch-query.el` | Query consoles, SQL execution, statement detection, row-identity preparation, SQL rewrite orchestration |
+| `clutch-result.el` | Result/record/value commands, pagination, sorting, filtering, export, context export |
+| `clutch-ui.el` | Result rendering, header/footer/modeline display, row/column navigation, result metadata refresh |
+| `clutch-edit.el` | Staged edit, insert, delete, validation, JSON sub-editors, mutation commit workflow |
+| `clutch-object.el` | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
+| `clutch-schema.el` | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat, recoverable metadata warnings |
+| `clutch-sql.el` | SQL context parsing, completion, Eldoc, xref |
+| `clutch-db.el` | Backend facade, result struct, shared SQL helpers, capability gates, error normalization |
+| `clutch-db-mysql.el` | MySQL backend adapter, type-category mapping, mysql.el boundary wrappers |
+| `clutch-db-pg.el` | PostgreSQL backend adapter, OID-to-type mapping, pg-el boundary wrappers |
+| `clutch-db-sqlite.el` | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
+| `clutch-db-jdbc.el` | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
+| External dependency: `mysql` | Pure Elisp MySQL wire protocol client (separate package) |
+| External dependency: `pg` | PostgreSQL client from upstream `pg-el` (separate package) |
+| Optional package: `ob-clutch` | Org-Babel integration bridge (separate package) |
 
 For JDBC-backed databases, one logical clutch connection now maps to two JDBC
 sessions inside the sidecar:
@@ -984,9 +984,10 @@ Controlled by `clutch-csv-export-default-coding-system`:
 
 ---
 
-## 16. Generic Interface (cl-defgeneric Methods)
+## 16. Backend API Surface
 
-Current `clutch-db.el` generic surface, grouped by responsibility:
+Current `clutch-db.el` facade and backend generic surface, grouped by
+responsibility:
 
 ### Connection and transactions
 
@@ -999,10 +1000,12 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 | `clutch-db-error-details (conn)` / `clutch-db-clear-error-details (conn)` | Structured backend error detail access |
 | `clutch-db-init-connection (conn)` | Backend-specific post-connect initialization |
 | `clutch-db-manual-commit-p (conn)` | Report whether the connection is in manual-commit mode |
+| `clutch-db-manual-commit-supported-p (conn)` | Report whether the backend supports Clutch-managed manual commit |
 | `clutch-db-commit (conn)` / `clutch-db-rollback (conn)` | Transaction control |
 | `clutch-db-set-auto-commit (conn auto-commit)` | Toggle auto-commit |
 | `clutch-db-interrupt-query (conn)` | Attempt recoverable interrupt for the active query |
 | `clutch-db-busy-p (conn)` | Report whether the backend is busy |
+| `clutch-db-schema-transaction-effect (conn sql)` | Report backend DDL transaction effect for schema-changing SQL |
 | `clutch-db-user (conn)` / `clutch-db-host (conn)` / `clutch-db-port (conn)` / `clutch-db-database (conn)` / `clutch-db-display-name (conn)` | UI/identity accessors |
 
 ### Query execution and SQL helpers
@@ -1011,9 +1014,10 @@ Current `clutch-db.el` generic surface, grouped by responsibility:
 |--------|-------------|
 | `clutch-db-query (conn sql)` | Execute SQL and return a `clutch-db-result` |
 | `clutch-db-execute-params (conn sql params)` | Execute parameterized SQL with bound values |
-| `clutch-db-build-paged-sql (conn base-sql page-num page-size &optional order-by where-clause)` | Build paged SQL for a backend |
+| `clutch-db-build-paged-sql (conn base-sql page-num page-size &optional order-by page-offset)` | Build paged SQL for a backend |
 | `clutch-db-escape-identifier (conn name)` | Quote/escape identifiers |
 | `clutch-db-escape-literal (conn value)` | Render literal SQL values for preview/fallback paths |
+| `clutch-db-derived-table-alias (conn alias)` | Render a backend-correct derived-table alias clause |
 
 ### Schema, completion, and metadata
 
