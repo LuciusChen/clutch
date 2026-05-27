@@ -4579,6 +4579,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
   "Public CSV and TSV copy commands should copy through the real entry point."
   (dolist (case '((clutch-result-copy-csv "name\nalice")
+                  (clutch-result-copy-org-table "| name |\n|---|\n| alice |")
                   (clutch-result-copy-tsv "alice")))
     (pcase-let ((`(,command ,expected-text) case))
       (ert-info ((symbol-name command))
@@ -4619,6 +4620,20 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                    (funcall callback '((0 2) . (2))))))
         (clutch-result--copy-fmt 'csv)
         (should (equal (current-kill 0) "score\n10\n30"))))))
+
+(ert-deftest clutch-test-copy-org-table-escapes-table-sensitive-content ()
+  "Org table copy should keep one logical table row per result row."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("name" "note")
+                clutch--result-rows '(("alice" "a|b")
+                                      ("bob" "x\ny")))
+    (let (kill-ring kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
+                ((symbol-function 'clutch-result--region-rectangle-indices)
+                 (lambda () '((0 1) 0 1))))
+        (clutch-result-copy 'org-table)
+        (should (equal (current-kill 0)
+                       "| name | note |\n|---+---|\n| alice | a\\vertb |\n| bob | x\\ny |"))))))
 
 (ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
   "Unified CSV copy should use rectangle row/column bounds when region is active."

@@ -1212,7 +1212,7 @@ RECT is (ROW-INDICES . COL-INDICES)."
 
 (defun clutch-result-copy (format &optional rect)
   "Unified copy entry point for result buffer.
-FORMAT is one of symbols: `tsv', `csv', `insert', `update'.
+FORMAT is one of symbols: `tsv', `csv', `org-table', `insert', `update'.
 When RECT is non-nil, use it as precomputed rectangle bounds.  If region
 is active, copy rectangle bounds from region endpoints.
 Otherwise, copy the current cell."
@@ -1227,6 +1227,8 @@ Otherwise, copy the current cell."
            (clutch-result--yank-cell-value val)))))
     ('csv
      (clutch-result--copy-rows 'csv rect))
+    ('org-table
+     (clutch-result--copy-rows 'org-table rect))
     ('insert
      (clutch-result--copy-rows 'insert rect))
     ('update
@@ -1258,6 +1260,12 @@ Otherwise, copy the current cell."
   (clutch-result--copy-fmt 'csv))
 
 ;;;###autoload
+(defun clutch-result-copy-org-table ()
+  "Copy as an Org table with header."
+  (interactive)
+  (clutch-result--copy-fmt 'org-table))
+
+;;;###autoload
 (defun clutch-result-copy-insert ()
   "Copy as INSERT statements."
   (interactive)
@@ -1280,6 +1288,7 @@ Enable --refine to exclude rows/columns interactively before copying
    :pad-keys t
    ("t" "TSV"             clutch-result-copy-tsv)
    ("c" "CSV with header" clutch-result-copy-csv)
+   ("o" "Org table"       clutch-result-copy-org-table)
    ("i" "INSERT"          clutch-result-copy-insert)
    ("u" "UPDATE"          clutch-result-copy-update)])
 
@@ -2196,6 +2205,7 @@ rectangle and inactive regions fall back to the current cell."
   "Return copy output lines for KIND using ROWS and COL-INDICES."
   (pcase kind
     ('csv (clutch--csv-lines-for-rows rows col-indices))
+    ('org-table (clutch--org-table-lines-for-rows rows col-indices))
     ('insert
      (clutch-result--build-insert-statements-for-rows
       rows col-indices (clutch--insert-target-table)))
@@ -2215,11 +2225,12 @@ rectangle and inactive regions fall back to the current cell."
     (kill-new (mapconcat #'identity lines "\n"))
     (deactivate-mark)
     (pcase kind
-      ('csv
+      ((or 'csv 'org-table)
        (message "Copied %s row%s as %s (%s col%s)"
                 (clutch--message-count (length indices))
                 (if (= (length indices) 1) "" "s")
-                (clutch--message-keyword "CSV")
+                (clutch--message-keyword
+                 (if (eq kind 'csv) "CSV" "Org table"))
                 (clutch--message-count (length col-indices))
                 (if (= (length col-indices) 1) "" "s")))
       ((or 'insert 'update)
@@ -2245,6 +2256,28 @@ rectangle and inactive regions fall back to the current cell."
           (cl-loop for row in rows
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat #'clutch--csv-escape vals ",")))))
+
+(defun clutch--org-table-lines-for-rows (rows col-indices)
+  "Return Org table lines for ROWS using COL-INDICES."
+  (cl-labels
+      ((cell (val)
+         (let ((s (clutch--format-value val)))
+           (setq s (replace-regexp-in-string "[\r\n]+" "\\\\n" s))
+           (string-replace "|" "\\vert" s)))
+       (table-row (values)
+         (format "| %s |" (mapconcat #'cell values " | "))))
+    (let* ((col-names (clutch--column-names-for-indices col-indices))
+           (separator
+            (format "|%s|"
+                    (mapconcat #'identity
+                               (make-list (length col-indices) "---")
+                               "+"))))
+      (cons (table-row col-names)
+            (cons separator
+                  (cl-loop for row in rows
+                           for vals = (mapcar (lambda (i) (nth i row))
+                                              col-indices)
+                           collect (table-row vals)))))))
 
 ;;;###autoload
 (defun clutch-result-export ()

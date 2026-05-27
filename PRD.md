@@ -256,7 +256,7 @@ query is still running.
 | `C-c C-c` | `clutch-result-commit` | Commit staged INSERT/UPDATE/DELETE changes |
 | `C-c C-k` | `clutch-result-discard-pending-at-point` | Discard pending change at point |
 | `C-c C-p` | `clutch-preview-execution-sql` | Preview pending batch or effective query |
-| `c` | `clutch-result-copy-dispatch` | Copy transient (TSV / CSV / INSERT / UPDATE) |
+| `c` | `clutch-result-copy-dispatch` | Copy transient (TSV / CSV / Org table / INSERT / UPDATE) |
 | `e` | `clutch-result-export` | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | `v` | `clutch-result-view-value` | View current cell value |
 | `V` | `clutch-result-live-view-value` | Open the live cell viewer that follows point |
@@ -473,7 +473,7 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-first-page` / `clutch-result-last-page` | Jump to the first page / last row window |
 | `clutch-result-next-cell` / `clutch-result-prev-cell` | Move across cells |
 | `clutch-result-down-cell` / `clutch-result-up-cell` | Move down/up within the current column |
-| `clutch-result-copy-tsv` / `clutch-result-copy-csv` | Copy the current cell/selection as TSV / CSV |
+| `clutch-result-copy-tsv` / `clutch-result-copy-csv` / `clutch-result-copy-org-table` | Copy the current cell/selection as TSV / CSV / Org table |
 | `clutch-result-copy-insert` / `clutch-result-copy-update` | Copy rows as INSERT / UPDATE statements |
 | `clutch-result-copy-dispatch` | Open the copy transient |
 | `clutch-result-export` | Export all rows as CSV / INSERT / UPDATE (copy or file) |
@@ -971,7 +971,8 @@ Connections are cached in `ob-clutch--connection-cache` (hash-table keyed by `ba
 | **INSERT SQL** | text/plain | Replayable row inserts |
 | **UPDATE SQL** | text/plain | Replayable row updates |
 
-TSV remains available from the copy transient for cell/selection-oriented copy,
+TSV and Org table remain available from the copy transient for
+cell/selection-oriented copy,
 but full-buffer export currently targets CSV / INSERT / UPDATE only.
 
 ### CSV Encoding Options
