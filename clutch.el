@@ -5,7 +5,7 @@
 ;; Assisted-by: OpenAI Codex:gpt-5.5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (mysql "0.2.1") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (mysql "0.2.2") (pg "0.40") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
