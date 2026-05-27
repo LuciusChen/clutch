@@ -47,6 +47,7 @@ jobs:
             --eval "(require 'package)" \
             --eval "(package-initialize)" \
             -L . \
+            -L test \
             -l ert \
             -l clutch \
             -l test/clutch-test.el \
@@ -58,6 +59,7 @@ jobs:
             --eval "(require 'package)" \
             --eval "(package-initialize)" \
             -L . \
+            -L test \
             -l ert \
             -l clutch-db-jdbc \
             -l test/clutch-db-test.el \
