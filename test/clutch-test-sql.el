@@ -658,12 +658,12 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
              result))
     (should-not (string-match-p ";\\s-*) AS _clutch_filter" result))))
 
-(ert-deftest clutch-test-apply-where-strips-top-level-order-by ()
-  "WHERE rewrite should not leave top-level ORDER BY inside the derived table."
+(ert-deftest clutch-test-apply-where-preserves-top-level-order-by ()
+  "WHERE rewrite should preserve the user's visible result ordering."
   (let* ((sql "SELECT id, name FROM users ORDER BY created_at DESC")
          (result (clutch-db-apply-where 'fake-conn sql "id > 10")))
     (should (equal result
-                   "SELECT * FROM (SELECT id, name FROM users) AS _clutch_filter WHERE id > 10"))))
+                   "SELECT * FROM (SELECT id, name FROM users ORDER BY created_at DESC) AS _clutch_filter WHERE id > 10"))))
 
 (ert-deftest clutch-test-apply-where-preserves-limited-result-set ()
   "WHERE rewrite should preserve LIMIT/OFFSET result-set boundaries."
