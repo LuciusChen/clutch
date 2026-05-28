@@ -48,9 +48,13 @@ capability, or password-plugin code.
 ## SSH Tunnels
 
 For saved clutch connections, `:ssh-host` starts a local SSH forward through
-the named host in `~/.ssh/config` before the native backend connects.  The
-database `:host` / `:port` remain the remote endpoint as seen from the bastion
-host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally.
+the named host in `~/.ssh/config` before the native backend connects by default.
+The database `:host` / `:port` remain the remote endpoint as seen from the
+bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT`
+internally.
+Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be
+directly reachable on some machines; clutch probes that TCP endpoint briefly
+and skips the SSH tunnel when it is reachable.
 
 This SSH path is intentionally OpenSSH-first:
 
@@ -258,8 +262,8 @@ Relevant variables:
 
 - SQLite does not use `:host`, `:port`, or `:user`
 - Network timeout settings do not apply
-- `:ssh-host` and `:tramp` do not apply to SQLite; those transports forward
-  structured TCP endpoints, while SQLite opens a file
+- `:ssh-host`, `:ssh-tunnel`, and `:tramp` do not apply to SQLite; those
+  transports forward structured TCP endpoints, while SQLite opens a file
 - Schema/database switching is not part of the SQLite path
 
 ## Shared Native-Backend Notes

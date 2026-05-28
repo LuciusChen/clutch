@@ -190,7 +190,8 @@ everything in one repository, this is a breaking packaging change:
 - Every entry must specify =:backend= (=mysql=, =pg=, =sqlite=, or a JDBC driver
   symbol such as =oracle=).
 - SQLite is local and file-based: only =:database= is required; use =":memory:"=
-  for a transient database.  Do not combine SQLite with =:ssh-host= or =:tramp=.
+  for a transient database.  Do not combine SQLite with =:ssh-host=,
+  =:ssh-tunnel=, or =:tramp=.
 - =:password= is optional for network backends; see [[*Password Management][Password Management]] for
   auth-source integration.
 - Network backends accept =:connect-timeout= and =:read-idle-timeout=.
@@ -324,10 +325,15 @@ For bastion-style access, add =:ssh-host= to a saved network connection:
                :ssh-host "bastion-prod"))
 #+end_src
 
-clutch then starts a local SSH tunnel with your normal OpenSSH setup and
+By default, clutch starts a local SSH tunnel with your normal OpenSSH setup and
 connects the database client through the forwarded local port automatically.
 The SSH authentication itself is expected to come from your existing
 =~/.ssh/config=, =ssh-agent=, host aliases, =ProxyJump=, and known_hosts.
+
+When the same saved connection is shared between machines where the database
+endpoint is sometimes directly reachable, add =:ssh-tunnel direct-first=.
+Clutch then probes the direct =:host= / =:port= first and only starts the SSH
+tunnel when that TCP endpoint is not reachable.
 
 If the first connection still needs a key passphrase or host-key confirmation,
 run =M-x clutch-prepare-ssh-host= once for that host alias, or press =S= from

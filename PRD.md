@@ -549,6 +549,7 @@ Connection profile plist keys:
 | `:sql-product` | symbol | SQL highlight product for `sql-mode` |
 | `:pass-entry` | string | Pass store suffix for password lookup |
 | `:ssh-host` | string | OpenSSH host alias from `~/.ssh/config` used for an automatic local tunnel |
+| `:ssh-tunnel` | symbol | `always` (default) or `direct-first`; the latter probes the direct host/port before using `:ssh-host` |
 | `:display-name` | string | Friendly backend label shown in the UI |
 | `:url` | string | Full JDBC URL (JDBC backends; overrides host/port/database; not combined with `:ssh-host` in v1) |
 | `:props` | alist | Extra JDBC connection properties |

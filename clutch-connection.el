@@ -77,6 +77,9 @@
 (defconst clutch--ssh-tunnel-ready-poll-interval 0.05
   "Seconds between SSH tunnel readiness checks.")
 
+(defconst clutch--ssh-direct-first-probe-timeout 1.0
+  "Seconds to wait when probing a direct endpoint before SSH fallback.")
+
 ;; Forward declarations — sibling module functions
 (declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
 (declare-function clutch--forget-problem-record "clutch-query" (&optional buffer connection))
@@ -201,10 +204,10 @@
         (setq remote (plist-put remote :host host)))
       (when-let* ((port (plist-get params :port)))
         (setq remote (plist-put remote :port port)))
-      (when-let* ((ssh-host (plist-get params :ssh-host)))
+      (when-let* ((ssh-host (plist-get tunnel :ssh-host)))
         (setq remote (plist-put remote :ssh-host ssh-host)))
       (when-let* ((tramp-default-directory
-                   (plist-get params :tramp-default-directory)))
+                   (plist-get tunnel :tramp-default-directory)))
         (setq remote (plist-put remote :tramp-default-directory
                                 tramp-default-directory)))
       (when-let* ((kind (plist-get tunnel :kind)))
@@ -1011,13 +1014,23 @@ cannot be read."
          (ssh (and (stringp ssh-host)
                    (not (string-empty-p ssh-host))))
          (tramp (and (stringp tramp-default-directory)
-                     (not (string-empty-p tramp-default-directory)))))
+                     (not (string-empty-p tramp-default-directory))))
+         (ssh-mode (plist-get params :ssh-tunnel)))
     (cond
      ((and ssh tramp)
       (user-error
        "Connection cannot combine :ssh-host with :tramp"))
+     ((and ssh-mode (not ssh))
+      (user-error "Connection :ssh-tunnel requires :ssh-host"))
      (ssh 'ssh)
      (tramp 'tramp))))
+
+(defun clutch--ssh-tunnel-mode (params)
+  "Return the SSH tunnel mode from PARAMS."
+  (let ((mode (or (plist-get params :ssh-tunnel) 'always)))
+    (unless (memq mode '(always direct-first))
+      (user-error "Connection :ssh-tunnel must be always or direct-first"))
+    mode))
 
 (defun clutch--tramp-origin-compatible-p (params)
   "Return non-nil when PARAMS can use an inferred TRAMP origin."
@@ -1670,20 +1683,53 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
           "or /rpc:host:/path/, and container paths such as "
           "/docker:container:/path/ or /podman:container:/path/")))))))
 
+(defun clutch--tcp-endpoint-open-p (host port timeout)
+  "Return non-nil when HOST:PORT accepts a TCP connection within TIMEOUT."
+  (let (proc)
+    (condition-case nil
+        (unwind-protect
+            (progn
+              (setq proc
+                    (make-network-process
+                     :name "clutch-direct-probe"
+                     :host host
+                     :service port
+                     :nowait t
+                     :noquery t))
+              (let ((deadline (+ (float-time) timeout)))
+                (while (and (eq (process-status proc) 'connect)
+                            (< (float-time) deadline))
+                  (accept-process-output
+                   proc clutch--ssh-tunnel-ready-poll-interval)))
+              (eq (process-status proc) 'open))
+          (when (and proc (process-live-p proc))
+            (delete-process proc)))
+      (file-error nil)
+      (error nil))))
+
 (defun clutch--prepare-connect-params (params)
   "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS.
 When PARAMS request a transport, CONNECT-PARAMS targets the local forwarded
 port and TRANSPORT contains the live process metadata."
   (setq params (clutch--canonicalize-connection-params params))
   (if-let* ((kind (clutch--connection-transport-kind params)))
-      (let* ((transport (pcase kind
-                          ('ssh (clutch--start-ssh-tunnel params))
-                          ('tramp (clutch--start-tramp-tcp-forward params))))
-             (connect-params (copy-sequence params)))
-        (setq connect-params (plist-put connect-params :host "127.0.0.1"))
-        (setq connect-params (plist-put connect-params :port
-                                        (plist-get transport :local-port)))
-        (list connect-params transport))
+      (if (and (eq kind 'ssh)
+               (eq (clutch--ssh-tunnel-mode params) 'direct-first)
+               (progn
+                 (clutch--validate-network-forward-params params "SSH tunnels")
+                 (clutch--tcp-endpoint-open-p
+                  (plist-get params :host)
+                  (plist-get params :port)
+                  clutch--ssh-direct-first-probe-timeout)))
+          (list params nil)
+        (let* ((transport (pcase kind
+                            ('ssh (clutch--start-ssh-tunnel params))
+                            ('tramp (clutch--start-tramp-tcp-forward params))))
+               (connect-params (copy-sequence params)))
+          (setq connect-params (plist-put connect-params :host "127.0.0.1"))
+          (setq connect-params (plist-put connect-params :port
+                                          (plist-get transport :local-port)))
+          (list connect-params transport)))
     (list params nil)))
 
 (defun clutch--make-connection-error-details (params err)
@@ -1751,6 +1797,7 @@ Returns a live connection object or signals a `user-error'."
                  (db-params (cl-loop for (k v) on connect-params by #'cddr
                                      unless (memq k '(:sql-product :backend :password :pass-entry
                                                                    :ssh-host
+                                                                   :ssh-tunnel
                                                                    :tramp
                                                                    :tramp-default-directory))
                                      append (list k v)))

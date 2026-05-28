@@ -216,7 +216,8 @@ Underlined to indicate clickable (RET to follow)."
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM] [:pass-entry STR]
-           [:ssh-host SSH-HOST] [:tramp TRAMP-DIRECTORY]
+           [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
+           [:tramp TRAMP-DIRECTORY]
            [:url STR] [:display-name STR] [:props ALIST]
            [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
            [:connect-timeout N] [:read-idle-timeout N]
@@ -237,6 +238,9 @@ are `disable', `prefer', `require', and `verify-full'.
 clutch starts `ssh -N -L ... SSH-HOST' automatically, so this currently
 requires structured `:host' / `:port' params and does not apply to `:url'
 based JDBC entries.
+:ssh-tunnel controls when that tunnel is used.  The default `always'
+preserves the explicit tunnel behavior; `direct-first' probes `:host' / `:port'
+briefly and skips the tunnel when the database endpoint is already reachable.
 :tramp enables the same local forward from an ssh-like TRAMP directory such as
 /ssh:host:/path/ or /rpc:host:/path/.  `:tramp-default-directory' is also
 accepted as a longer spelling.
@@ -260,6 +264,9 @@ Password resolution order:
                                     (:sql-product symbol)
                                     (:pass-entry string)
                                     (:ssh-host string)
+                                    (:ssh-tunnel
+                                     (choice (const always)
+                                             (const direct-first)))
                                     (:tramp string)
                                     (:tramp-default-directory string)
                                     (:url string)

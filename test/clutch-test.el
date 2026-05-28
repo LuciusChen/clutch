@@ -5214,6 +5214,57 @@ crashing the UI layer."
                                 :ssh-host)
                      "bastion-prod")))))
 
+(ert-deftest clutch-test-build-conn-direct-first-selects-direct-or-ssh ()
+  "Direct-first SSH mode should probe direct TCP before tunneling."
+  (dolist (direct-open '(t nil))
+    (ert-info ((format "direct-open=%S" direct-open))
+      (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+            (clutch--connection-transport-cache (make-hash-table :test 'eq))
+            captured probed tunnel-params)
+        (cl-letf (((symbol-function 'clutch--resolve-password)
+                   (lambda (_params) nil))
+                  ((symbol-function 'clutch--tcp-endpoint-open-p)
+                   (lambda (host port timeout)
+                     (setq probed (list host port timeout))
+                     direct-open))
+                  ((symbol-function 'clutch--start-ssh-tunnel)
+                   (lambda (params)
+                     (setq tunnel-params params)
+                     '(:process fake-proc :local-port 40123
+                       :ssh-host "bastion-prod")))
+                  ((symbol-function 'clutch-db-connect)
+                   (lambda (_backend params)
+                     (setq captured params)
+                     'fake-conn)))
+          (should (eq (clutch--build-conn
+                       '(:backend pg
+                         :host "db.internal"
+                         :port 5432
+                         :user "alice"
+                         :database "appdb"
+                         :ssh-host "bastion-prod"
+                         :ssh-tunnel direct-first))
+                      'fake-conn))
+          (should (equal probed
+                         (list "db.internal" 5432
+                               clutch--ssh-direct-first-probe-timeout)))
+          (should-not (plist-member captured :ssh-tunnel))
+          (if direct-open
+              (progn
+                (should (equal (plist-get captured :host) "db.internal"))
+                (should (= (plist-get captured :port) 5432))
+                (should-not tunnel-params)
+                (should-not (gethash 'fake-conn
+                                     clutch--connection-transport-cache)))
+            (should (equal (plist-get tunnel-params :ssh-host) "bastion-prod"))
+            (should (equal (plist-get captured :host) "127.0.0.1"))
+            (should (= (plist-get captured :port) 40123))
+            (should (equal (plist-get
+                            (gethash 'fake-conn
+                                     clutch--connection-transport-cache)
+                            :ssh-host)
+                           "bastion-prod"))))))))
+
 (ert-deftest clutch-test-build-conn-rewrites-network-endpoint-through-tramp-forward ()
   "TRAMP-backed connections should target the local forwarded port."
   (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
@@ -5296,6 +5347,18 @@ crashing the UI layer."
       :port 5432
       :ssh-host "bastion-prod"
       :tramp "/ssh:devbox:/workspace/"))
+   :type 'user-error))
+
+(ert-deftest clutch-test-prepare-connect-params-validates-ssh-tunnel-mode ()
+  "SSH tunnel mode should be explicit and tied to :ssh-host."
+  (should-error
+   (clutch--prepare-connect-params
+    '(:backend pg :host "db" :port 5432 :ssh-tunnel direct-first))
+   :type 'user-error)
+  (should-error
+   (clutch--prepare-connect-params
+    '(:backend pg :host "db" :port 5432 :ssh-host "bastion-prod"
+      :ssh-tunnel sometimes))
    :type 'user-error))
 
 (ert-deftest clutch-test-build-conn-stops-ssh-tunnel-when-db-connect-fails ()
