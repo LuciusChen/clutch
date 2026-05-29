@@ -216,7 +216,7 @@ Return DEFAULT when CONN has no cache entry or TABLE is absent."
   (cl-incf clutch--metadata-ticket-counter))
 
 (defun clutch--metadata-ticket-current-p (conn table ticket cache-table)
-  "Return non-nil when TICKET is still current for TABLE in CACHE-TABLE."
+  "Return non-nil when TICKET is current for CONN and TABLE in CACHE-TABLE."
   (and conn
        (clutch--connection-alive-p conn)
        (eql (plist-get (clutch--metadata-table-status conn table cache-table)

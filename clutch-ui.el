@@ -1284,7 +1284,7 @@ RENDER-STATE contains render lookup tables for staged UI state."
 
 (defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows row-positions
                                                         render-state)
-  "Append ghost rows for staged inserts below the real data rows.
+  "Append ghost rows for staged INSERT operations below the real data rows.
 VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
 NROWS is the count of real rows (used to compute ghost row indices).
 ROW-POSITIONS stores line starts keyed by rendered row index.
@@ -1633,8 +1633,8 @@ Falls back to the same row (any column), then point-min."
     (max 3 (length (number-to-string global-last)))))
 
 (defun clutch--refresh-display ()
-  "Re-render the current result table after width-affecting changes.
-Preserves cursor position (row + column) and the top visible row."
+  "Re-render the current result table after column-width recalculation.
+Preserve cursor position (row + column) and the top visible row."
   (when clutch--column-widths
     (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                           (clutch--row-idx-at-line)))
@@ -1664,7 +1664,7 @@ Preserves cursor position (row + column) and the top visible row."
               (set-window-start win top-pos))))))))
 
 (defun clutch--window-size-change (frame)
-  "Handle window size changes for clutch display buffers in FRAME."
+  "Handle window resizing for clutch display buffers in FRAME."
   (dolist (win (window-list frame 'no-mini))
     (let ((buf (window-buffer win)))
       (when (buffer-local-value 'clutch--column-widths buf)

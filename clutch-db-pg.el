@@ -316,7 +316,7 @@
     (puthash conn t clutch-db-pg--tx-failed-cache)))
 
 (defun clutch-db-pg--begin-query-p (sql)
-  "Return non-nil when SQL starts a PostgreSQL transaction."
+  "Return non-nil for PostgreSQL transaction-start SQL."
   (let ((case-fold-search t)
         (trimmed (clutch-db-sql-strip-leading-comments sql)))
     (string-match-p

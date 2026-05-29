@@ -591,7 +591,7 @@ WHERE predicate."
     statements))
 
 (defun clutch-result--build-pending-insert-statements ()
-  "Build INSERT statement specs from staged inserts."
+  "Build INSERT statement specs for staged new rows."
   (let ((table (or clutch--result-source-table
                    (user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
@@ -676,8 +676,8 @@ an affected row count other than one."
 
 ;;;###autoload
 (defun clutch-result-commit ()
-  "Commit all staged changes: INSERT new rows, UPDATE edits, DELETE rows.
-Executes in order: INSERTs first, then UPDATEs, then DELETEs."
+  "Commit all staged row mutations: INSERT, UPDATE, DELETE.
+Execute INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
   (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
     (user-error "No staged changes"))
@@ -1026,7 +1026,7 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
      (plist-get field :value))))
 
 (defun clutch-result-insert--json-field-p (field)
-  "Return non-nil when structured FIELD stores JSON."
+  "Return non-nil for structured JSON FIELD values."
   (let* ((name (plist-get field :name))
          (detail (or (plist-get field :detail)
                      (clutch-result-insert--column-detail name)))
@@ -1808,7 +1808,7 @@ ROWS is a list of string lists."
            (nreverse rows)))))
 
 (defun clutch-result-insert--header-row-p (row row-count)
-  "Return non-nil when ROW looks like a column-name header in ROW-COUNT rows."
+  "Return non-nil for ROW as a column-name header among ROW-COUNT rows."
   (let ((all-cols (clutch-result-insert--all-column-names)))
     (and (> row-count 1)
          row
@@ -1855,7 +1855,7 @@ ROWS is a list of string lists."
                nil)))
 
 (defun clutch-result-insert--stage-imported-rows (rows)
-  "Stage imported ROWS as inserts in the parent result buffer."
+  "Stage imported ROWS as INSERT operations in the parent result buffer."
   (unless (buffer-live-p clutch-result-insert--result-buffer)
     (user-error "Result buffer no longer exists"))
   (with-current-buffer clutch-result-insert--result-buffer
@@ -1972,7 +1972,7 @@ Skips columns with empty values."
            (clutch-result-insert--valid-time-value-p time-part)))))
 
 (defun clutch-result-insert--valid-numeric-value-p (value)
-  "Return non-nil when VALUE looks like a valid numeric literal."
+  "Return non-nil for VALUE matching a numeric literal."
   (string-match-p
    "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\(?:[eE][+-]?[0-9]+\\)?\\'"
    value))

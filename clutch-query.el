@@ -491,7 +491,7 @@ window rather than replacing the current window."
     pos))
 
 (defun clutch--row-identity-looking-at-keyword-p (sql pos keyword)
-  "Return non-nil when SQL at POS starts with KEYWORD as a token."
+  "Return non-nil for KEYWORD as a token at POS in SQL."
   (let* ((len (length sql))
          (end (+ pos (length keyword)))
          (case-fold-search t))
@@ -516,7 +516,7 @@ window rather than replacing the current window."
       (clutch--row-identity-looking-at-keyword-p sql pos "OVER"))))
 
 (defun clutch--row-identity-select-list-has-aggregate-p (sql)
-  "Return non-nil when SQL's outer SELECT list contains a non-window aggregate."
+  "Return non-nil for a non-window aggregate in SQL's outer SELECT list."
   (let ((case-fold-search t))
     (when (string-match "\\`\\s-*select\\b" sql)
       (let* ((start (match-end 0))
@@ -1435,7 +1435,7 @@ Return a plist with :message, :summary, and :display-summary."
           (+ (point-min) (cdr bounds)))))
 
 (defun clutch--statement-delimited-buffer-p ()
-  "Return non-nil when the current buffer contains a top-level semicolon."
+  "Return non-nil when the current buffer has a top-level semicolon."
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
     (consp (clutch-db-sql-statement-breaks text))))
 

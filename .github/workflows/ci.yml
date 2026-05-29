@@ -42,57 +42,16 @@ jobs:
             --eval "(dolist (pkg '(transient mysql pg package-lint)) (unless (package-installed-p pkg) (package-install pkg)))"
 
       - name: Run main ERT suite
-        run: |
-          emacs -Q --batch \
-            --eval "(require 'package)" \
-            --eval "(package-initialize)" \
-            -L . \
-            -L test \
-            -l ert \
-            -l clutch \
-            -l test/clutch-test.el \
-            --eval "(ert-run-tests-batch-and-exit)"
+        run: test/run-ci.sh main
 
       - name: Run database backend ERT suite
-        run: |
-          emacs -Q --batch \
-            --eval "(require 'package)" \
-            --eval "(package-initialize)" \
-            -L . \
-            -L test \
-            -l ert \
-            -l clutch-db-jdbc \
-            -l test/clutch-db-test.el \
-            --eval "(ert-run-tests-batch-and-exit)"
+        run: test/run-ci.sh db
 
       - name: Byte compile
-        run: |
-          emacs -Q --batch \
-            --eval "(require 'package)" \
-            --eval "(package-initialize)" \
-            -L . \
-            -f batch-byte-compile \
-            *.el
+        run: test/run-ci.sh byte-compile
 
       - name: Package lint
-        run: |
-          emacs -Q --batch \
-            --eval "(require 'package)" \
-            --eval "(setq package-archives '((\"melpa\" . \"https://melpa.org/packages/\")))" \
-            --eval "(package-initialize)" \
-            --eval "(package-refresh-contents)" \
-            -L . \
-            -l package-lint \
-            --eval "(setq package-lint-main-file \"clutch.el\")" \
-            -f package-lint-batch-and-exit \
-            clutch*.el
+        run: test/run-ci.sh package-lint
 
       - name: Checkdoc package files
-        run: |
-          emacs -Q --batch \
-            --eval "(require 'package)" \
-            --eval "(package-initialize)" \
-            -L . \
-            --eval "(require 'checkdoc)" \
-            --eval "(dolist (file (directory-files default-directory t \"^clutch.*\\.el$\")) (checkdoc-file file))" \
-            --eval "(when (get-buffer \"*warn*\") (with-current-buffer \"*warn*\" (goto-char (point-min)) (when (re-search-forward \"^Warning\" nil t) (princ (buffer-string)) (kill-emacs 1))))"
+        run: test/run-ci.sh checkdoc

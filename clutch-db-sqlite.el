@@ -118,7 +118,7 @@ Use \":memory:\" for a transient in-memory database."
 ;;;; Query helpers
 
 (defun clutch-db-sqlite--select-p (sql)
-  "Return non-nil if SQL is a statement that returns rows."
+  "Return non-nil for row-yielding SQL statements."
   (let ((case-fold-search t))
     (or (string-match-p "\\`\\s-*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\)" sql)
         (clutch-db-sql-has-top-level-clause-p sql "RETURNING"))))

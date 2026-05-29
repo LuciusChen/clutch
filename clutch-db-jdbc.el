@@ -846,7 +846,7 @@ Emacs RPC timeout."
   (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
 
 (defun clutch-jdbc--url-prefix-p (conn prefix)
-  "Return non-nil when JDBC CONN URL starts with PREFIX."
+  "Return non-nil for JDBC CONN URLs with PREFIX."
   (let ((url (plist-get (clutch-jdbc-conn-params conn) :url)))
     (and (stringp url)
          (string-prefix-p prefix url))))
@@ -899,12 +899,12 @@ Supports common `jdbc:subprotocol://host[:port]/database' URLs."
   "Oracle schemas hidden from interactive schema switching by default.")
 
 (cl-defmethod clutch-db-manual-commit-p ((conn clutch-jdbc-conn))
-  "Return non-nil when JDBC CONN runs with auto-commit disabled."
+  "Return non-nil for JDBC CONN with auto-commit disabled."
   (let ((params (clutch-jdbc-conn-params conn)))
     (clutch-jdbc--manual-commit-mode (plist-get params :driver) params)))
 
 (cl-defmethod clutch-db-manual-commit-supported-p ((_conn clutch-jdbc-conn))
-  "Return non-nil because JDBC supports runtime auto-commit changes."
+  "Return non-nil for JDBC runtime auto-commit toggling."
   t)
 
 (cl-defmethod clutch-db-commit ((conn clutch-jdbc-conn))
@@ -1174,7 +1174,7 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
     (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name))))
 
 (cl-defmethod clutch-db--source-table-name ((conn clutch-jdbc-conn) token)
-  "Return backend-canonical source table name for JDBC SQL table TOKEN."
+  "Return source table name for JDBC CONN and SQL table TOKEN."
   (let ((name (cl-call-next-method)))
     (if (and (clutch-jdbc--oracle-conn-p conn)
              (not (string-match-p "\\`\\s-*\""
@@ -1803,7 +1803,7 @@ COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
       (message "Downloaded driver to %s" dest))))
 
 (defun clutch-jdbc--oracle-driver-symbol-p (driver)
-  "Return non-nil when DRIVER selects an Oracle JDBC jar."
+  "Return non-nil for DRIVER symbols that use an Oracle JDBC jar."
   (memq driver '(oracle oracle-8 oracle-11)))
 
 (defun clutch-jdbc--disable-conflicting-oracle-jars (selected-filename)

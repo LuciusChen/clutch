@@ -317,7 +317,7 @@ Values are nesting counts.")
     ";\\s-*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
 
 (defun clutch-db-sql-skip-literal-or-comment (sql pos)
-  "If POS in SQL starts a string literal or comment, return position past it.
+  "If POS in SQL is at a string literal or comment, return position past it.
 Handles single-quoted strings (with '' escape), -- line comments, and
 /* block comments */.  Double-quoted identifiers and backticks are NOT
 treated as literals.  Returns nil when POS is at normal code."
@@ -496,7 +496,7 @@ delimited statements."
       bounds)))
 
 (defun clutch-db-sql-blank-line-statement-bounds (text offset)
-  "Return zero-based blank-line-delimited statement bounds around OFFSET."
+  "Return zero-based blank-line-delimited bounds in TEXT around OFFSET."
   (let ((len (length text))
         (beg 0)
         (end nil)
@@ -565,7 +565,7 @@ START defaults to 0."
   (clutch-db-sql-has-top-level-clause-p sql "OFFSET"))
 
 (defun clutch-db-sql-starts-with-keyword-p (sql keywords)
-  "Return non-nil when SQL starts with one of KEYWORDS."
+  "Return non-nil for SQL with one of KEYWORDS as the leading token."
   (let ((trimmed (clutch-db-sql-strip-leading-comments sql)))
     (string-match-p (concat "\\`" (regexp-opt keywords) "\\b")
                     (upcase trimmed))))
@@ -698,7 +698,7 @@ relations return nil."
    sql '("CREATE" "ALTER" "DROP" "TRUNCATE" "RENAME")))
 
 (defun clutch-db-sql-select-query-p (sql)
-  "Return non-nil if SQL returns a result set."
+  "Return non-nil for SQL that yields a result set."
   (clutch-db-sql-starts-with-keyword-p
    sql '("SELECT" "WITH" "DESCRIBE" "DESC" "SHOW" "EXPLAIN")))
 
@@ -832,7 +832,7 @@ For example, SET NAMES utf8mb4 on MySQL.")
 AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
 
 (cl-defmethod clutch-db-set-auto-commit ((_conn t) _auto-commit)
-  "Signal that the backend does not support runtime auto-commit changes."
+  "Signal unsupported runtime auto-commit toggling for this backend."
   (user-error "Manual commit is not supported by this connection"))
 
 (cl-defgeneric clutch-db-schema-transaction-effect (conn sql)
@@ -953,7 +953,7 @@ when non-nil, overrides PAGE-NUM for last-window pagination.")
   "Escape NAME as a SQL identifier for CONN's dialect.")
 
 (cl-defgeneric clutch-db--source-table-name (conn token)
-  "Return backend-canonical source table name for SQL table TOKEN.")
+  "Return source table name for CONN and SQL table TOKEN.")
 
 (cl-defmethod clutch-db--source-table-name ((_conn t) token)
   "Return the default backend-canonical source table name for TOKEN."

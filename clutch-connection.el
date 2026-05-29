@@ -1050,7 +1050,7 @@ cannot be read."
       dir)))
 
 (defun clutch--connection-origin-summary (params)
-  "Return a compact connection identity for PARAMS origin prompts."
+  "Return a compact connection identity for PARAMS origin prompt text."
   (let ((host (plist-get params :host))
         (port (plist-get params :port))
         (database (or (plist-get params :database)
@@ -1758,7 +1758,7 @@ port and TRANSPORT contains the live process metadata."
       db-params)))
 
 (defun clutch--direct-first-connect-params (backend connect-params)
-  "Return CONNECT-PARAMS with short provisional direct-connect timeouts."
+  "Return CONNECT-PARAMS with short provisional timeouts for BACKEND."
   (let* ((jdbc (clutch--jdbc-backend-p backend))
          (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
          (params (copy-sequence connect-params))

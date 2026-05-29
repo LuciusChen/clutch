@@ -229,11 +229,11 @@ Return non-nil when the wire protocol is synchronized again."
 ;;;; Transaction methods
 
 (cl-defmethod clutch-db-manual-commit-p ((conn mysql-conn))
-  "Return non-nil when MySQL CONN runs with autocommit disabled."
+  "Return non-nil for MySQL CONN with autocommit disabled."
   (not (mysql-autocommit-p conn)))
 
 (cl-defmethod clutch-db-manual-commit-supported-p ((_conn mysql-conn))
-  "Return non-nil because MySQL supports runtime autocommit changes."
+  "Return non-nil for MySQL runtime autocommit toggling."
   t)
 
 (cl-defmethod clutch-db-commit ((conn mysql-conn))

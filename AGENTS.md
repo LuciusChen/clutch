@@ -207,19 +207,7 @@ This command should return no matches. Internal `clutch--*` and backend-local
 ### 2. Run all test files
 
 ```bash
-# Ensure external package dependencies (`mysql` and `pg`) are installed or on load-path.
-
-# Main UI/logic tests
-emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
-  --eval '(setq load-prefer-newer t)' \
-  -l ert -l clutch-test \
-  -f ert-run-tests-batch-and-exit
-
-# Database backend tests
-emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
-  --eval '(setq load-prefer-newer t)' \
-  -l ert -l clutch-db-test \
-  -f ert-run-tests-batch-and-exit
+./test/run-ci.sh main db
 ```
 
 Default ERT runs skip live tests when credentials are unset. For changes touching
@@ -227,7 +215,7 @@ query execution, row identity, result-buffer workflows, object metadata, or nati
 backend adapters, also run the real MySQL/PostgreSQL live suite:
 
 ```bash
-./test/run-native-live-tests.sh
+./test/run-ci.sh native-live
 ```
 
 The native live runner starts or reuses local containers, preferring Podman on
@@ -238,9 +226,7 @@ separate because they require external credentials.
 ### 3. Byte-compile with zero warnings
 
 ```bash
-emacs -batch -L . -L ../mysql.el -L ../pg-el \
-  --eval '(setq load-prefer-newer t)' \
-  -f batch-byte-compile *.el
+./test/run-ci.sh byte-compile
 ```
 
 ### 4. Run package-lint on the package entry file
@@ -255,8 +241,7 @@ Do not move `Package-Requires` into split files to satisfy per-file lint; set
 directly.
 
 ```bash
-emacs -Q --batch -L ../package-lint -l package-lint \
-  -f package-lint-batch-and-exit clutch.el
+./test/run-ci.sh package-lint checkdoc
 ```
 
 ### 5. Update tests when behavior changes

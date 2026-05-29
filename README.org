@@ -513,6 +513,12 @@ set.  Treat those runs as unit/regression coverage, not as proof that real
 database workflows still work.  Test commands use =load-prefer-newer= so stale
 =.elc= files cannot mask source changes during local verification.
 
+The non-live CI gate used by GitHub Actions can be run locally:
+
+#+begin_src sh
+./test/run-ci.sh all
+#+end_src
+
 ** Native live tests
 
 =test/run-native-live-tests.sh= runs the MySQL and PostgreSQL live suites against
@@ -521,7 +527,7 @@ requires OrbStack-backed Docker unless explicitly overridden.  It covers both
 the UI-level result workflows and backend-level native adapter tests:
 
 #+begin_src sh
-./test/run-native-live-tests.sh
+./test/run-ci.sh native-live
 #+end_src
 
 The live runner validates real SELECT execution, pagination/sort/filter/count,

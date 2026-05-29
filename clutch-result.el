@@ -173,13 +173,13 @@ so callers cannot apply WHERE before hidden identity columns are injected."
   (plist-get (clutch-result--current-query-plan) :sql))
 
 (defun clutch-result--pending-changes-p ()
-  "Return non-nil when the current result buffer has staged changes."
+  "Return non-nil for staged row mutations in the current result buffer."
   (or clutch--pending-edits
       clutch--pending-deletes
       clutch--pending-inserts))
 
 (defun clutch-result--confirm-discard-pending (prompt cancel-message)
-  "Ask before discarding staged result changes.
+  "Ask before discarding staged result mutations.
 PROMPT is passed to `yes-or-no-p'.  Signal `user-error' with CANCEL-MESSAGE
 when the user declines."
   (when (and (clutch-result--pending-changes-p)
@@ -187,8 +187,8 @@ when the user declines."
     (user-error "%s" cancel-message)))
 
 (defun clutch-result--check-pending-changes ()
-  "Prompt to discard staged changes in the current connection result buffer.
-Signals `user-error' if the user declines."
+  "Prompt to discard staged row mutations in the current connection result buffer.
+Signal `user-error' if the user declines."
   (when-let* ((result-buf (get-buffer (clutch-result--buffer-name))))
     (with-current-buffer result-buf
       (clutch-result--confirm-discard-pending
@@ -375,7 +375,7 @@ PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination."
                  (if (= (length rows) 1) "" "s"))))))
 
 (defun clutch-result--execute-page-at-offset (page-offset &optional page-num)
-  "Execute the result page whose first row starts at PAGE-OFFSET.
+  "Execute result page for PAGE-OFFSET as its first row offset.
 PAGE-NUM records the logical page index for navigation when provided."
   (clutch-result--execute-page
    (or page-num
@@ -509,6 +509,18 @@ If the result has columns, shows a table; otherwise shows DML summary."
 
 ;;;; Cell navigation
 
+(defun clutch--previous-property-run-beginning (prop)
+  "Return the beginning of the previous non-nil PROP run before point."
+  (let ((pos (point))
+        found)
+    (while (and (not found) (> pos (point-min)))
+      (setq pos (previous-single-property-change pos prop nil (point-min)))
+      (when (get-text-property (max (point-min) (1- pos)) prop)
+        (setq found
+              (previous-single-property-change (1- pos) prop nil
+                                               (point-min)))))
+    found))
+
 ;;;###autoload
 (defun clutch-result-next-cell ()
   "Move point to the next cell (right, then wrap to next row)."
@@ -532,9 +544,8 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (when-let* ((beg (previous-single-property-change
                       (1+ (point)) 'clutch-col-idx nil (point-min))))
       (goto-char beg))
-    (if-let* ((m (text-property-search-backward 'clutch-col-idx nil
-                                                (lambda (_val cur) cur))))
-        (goto-char (prop-match-beginning m))
+    (if-let* ((beg (clutch--previous-property-run-beginning 'clutch-col-idx)))
+        (goto-char beg)
       (goto-char start)))
   (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
@@ -1978,7 +1989,7 @@ When FORCE is non-nil, refresh even if the source cell has not changed."
           (clutch--live-view-follow-mode 1))))))
 
 (defun clutch--live-view-source-post-command ()
-  "Refresh the attached live viewer after point moves in a source buffer."
+  "Refresh the attached live viewer after point movement in a source buffer."
   (if (not (buffer-live-p clutch--live-view-buffer))
       (clutch--live-view-detach-source (current-buffer))
     (let ((viewer clutch--live-view-buffer)
@@ -1999,7 +2010,7 @@ When FORCE is non-nil, refresh even if the source cell has not changed."
     (message "Live viewer refreshed")))
 
 (defun clutch--live-view-toggle-freeze ()
-  "Toggle whether the live viewer follows source-buffer point changes."
+  "Toggle live viewer tracking of source-buffer point."
   (interactive)
   (setq-local clutch--live-view-frozen (not clutch--live-view-frozen))
   (setq-local header-line-format
