@@ -1,5 +1,8 @@
 # 100 -- SSH Tunnel Mode Belongs to the Connection Profile
 
+Superseded by
+[`101 -- Direct-First Requires Database Connection Success`](101-direct-first-db-connect-fallback.md).
+
 ## Background
 
 `:ssh-host` originally had one clear meaning: build an OpenSSH local forward

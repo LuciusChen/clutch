@@ -332,8 +332,8 @@ The SSH authentication itself is expected to come from your existing
 
 When the same saved connection is shared between machines where the database
 endpoint is sometimes directly reachable, add =:ssh-tunnel direct-first=.
-Clutch then probes the direct =:host= / =:port= first and only starts the SSH
-tunnel when that TCP endpoint is not reachable.
+Clutch then tries the direct route briefly and falls back to the SSH tunnel when
+the TCP endpoint is not reachable or the direct database connection fails.
 
 If the first connection still needs a key passphrase or host-key confirmation,
 run =M-x clutch-prepare-ssh-host= once for that host alias, or press =S= from

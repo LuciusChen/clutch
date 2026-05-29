@@ -740,6 +740,7 @@ Returns a `clutch-jdbc-conn'."
          (props    (clutch-jdbc--normalize-props (plist-get normalized-params :props)))
          (connect-timeout (plist-get normalized-params :connect-timeout))
          (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
+         (rpc-timeout (plist-get normalized-params :rpc-timeout))
          (result   (clutch-jdbc--rpc
                     "connect"
                     `((url      . ,url)
@@ -752,7 +753,7 @@ Returns a `clutch-jdbc-conn'."
                       ,@(when read-idle-timeout
                           `((network-timeout-seconds . ,read-idle-timeout)))
                       ,@(when props `((props . ,props))))
-                    connect-timeout)))
+                    rpc-timeout)))
     (let ((conn (make-clutch-jdbc-conn
                  :process  clutch-jdbc--agent-process
                  :conn-id  (plist-get result :conn-id)

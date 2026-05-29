@@ -77,8 +77,11 @@
 (defconst clutch--ssh-tunnel-ready-poll-interval 0.05
   "Seconds between SSH tunnel readiness checks.")
 
-(defconst clutch--ssh-direct-first-probe-timeout 1.0
+(defconst clutch--ssh-direct-first-probe-timeout 0.25
   "Seconds to wait when probing a direct endpoint before SSH fallback.")
+
+(defconst clutch--ssh-direct-first-connect-timeout 0.5
+  "Seconds to wait for a provisional direct database connection.")
 
 ;; Forward declarations — sibling module functions
 (declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
@@ -1707,6 +1710,19 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
       (file-error nil)
       (error nil))))
 
+(defun clutch--prepare-forwarded-connect-params (params transport)
+  "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS through TRANSPORT."
+  (let ((connect-params (copy-sequence params)))
+    (setq connect-params (plist-put connect-params :host "127.0.0.1"))
+    (setq connect-params (plist-put connect-params :port
+                                    (plist-get transport :local-port)))
+    (list connect-params transport)))
+
+(defun clutch--prepare-ssh-connect-params (params)
+  "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS through an SSH tunnel."
+  (clutch--prepare-forwarded-connect-params
+   params (clutch--start-ssh-tunnel params)))
+
 (defun clutch--prepare-connect-params (params)
   "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS.
 When PARAMS request a transport, CONNECT-PARAMS targets the local forwarded
@@ -1722,15 +1738,49 @@ port and TRANSPORT contains the live process metadata."
                   (plist-get params :port)
                   clutch--ssh-direct-first-probe-timeout)))
           (list params nil)
-        (let* ((transport (pcase kind
-                            ('ssh (clutch--start-ssh-tunnel params))
-                            ('tramp (clutch--start-tramp-tcp-forward params))))
-               (connect-params (copy-sequence params)))
-          (setq connect-params (plist-put connect-params :host "127.0.0.1"))
-          (setq connect-params (plist-put connect-params :port
-                                          (plist-get transport :local-port)))
-          (list connect-params transport)))
+        (pcase kind
+          ('ssh (clutch--prepare-ssh-connect-params params))
+          ('tramp
+           (clutch--prepare-forwarded-connect-params
+            params (clutch--start-tramp-tcp-forward params)))))
     (list params nil)))
+
+(defun clutch--backend-connect-params (connect-params)
+  "Return backend-facing params from CONNECT-PARAMS."
+  (let ((password (plist-get connect-params :password))
+        (db-params (cl-loop for (k v) on connect-params by #'cddr
+                            unless (memq k '(:sql-product :backend :password
+                                             :pass-entry :ssh-host :ssh-tunnel
+                                             :tramp :tramp-default-directory))
+                            append (list k v))))
+    (if password
+        (append db-params (list :password password))
+      db-params)))
+
+(defun clutch--direct-first-connect-params (backend connect-params)
+  "Return CONNECT-PARAMS with short provisional direct-connect timeouts."
+  (let* ((jdbc (clutch--jdbc-backend-p backend))
+         (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
+         (params (copy-sequence connect-params))
+         (connect-timeout (plist-get params :connect-timeout))
+         (connect-timeout (if (and (numberp connect-timeout)
+                                   (> connect-timeout 0))
+                              (min connect-timeout limit)
+                            limit))
+         (connect-timeout (if jdbc (max 1 connect-timeout) connect-timeout)))
+    (setq params
+          (plist-put params :connect-timeout connect-timeout))
+    (if jdbc
+        (let* ((rpc-timeout (plist-get params :rpc-timeout))
+               (rpc-timeout (if (and (numberp rpc-timeout)
+                                     (> rpc-timeout 0))
+                                (min rpc-timeout (1+ connect-timeout))
+                              (1+ connect-timeout))))
+          (setq params
+                (plist-put params :rpc-timeout rpc-timeout)))
+      (setq params
+            (plist-put params :read-idle-timeout connect-timeout)))
+    params))
 
 (defun clutch--make-connection-error-details (params err)
   "Return structured error details for a failed connection attempt.
@@ -1793,31 +1843,48 @@ Returns a live connection object or signals a `user-error'."
           (setq backend (plist-get effective-params :backend))
           (let* ((prepared (clutch--prepare-connect-params effective-params))
                  (connect-params (car prepared))
-                 (password (plist-get connect-params :password))
-                 (db-params (cl-loop for (k v) on connect-params by #'cddr
-                                     unless (memq k '(:sql-product :backend :password :pass-entry
-                                                                   :ssh-host
-                                                                   :ssh-tunnel
-                                                                   :tramp
-                                                                   :tramp-default-directory))
-                                     append (list k v)))
-                 (db-params (if password
-                                (append db-params (list :password password))
-                              db-params)))
+                 (direct-first-fallback
+                  (and (plist-get effective-params :ssh-host)
+                       (eq (clutch--ssh-tunnel-mode effective-params)
+                           'direct-first)
+                       (null (cadr prepared))))
+                 conn)
             (setq transport (cadr prepared))
-            (let ((conn (clutch-db-connect backend db-params)))
-              (clutch--remember-connection-transport conn effective-params transport)
-              (when clutch-debug-mode
-                (clutch--remember-debug-event
-                 :connection conn
-                 :op "connect"
-                 :phase "success"
-                 :backend backend
-                 :summary (condition-case nil
-                              (format "Connected to %s" (clutch--connection-key conn))
-                            (error "Connected"))
-                 :context (clutch--debug-connection-context backend effective-params)))
-              conn)))
+            (condition-case direct-err
+                (progn
+                  (setq conn
+                        (clutch-db-connect
+                         backend
+                         (clutch--backend-connect-params
+                          (if direct-first-fallback
+                              (clutch--direct-first-connect-params
+                               backend connect-params)
+                            connect-params))))
+                  (when direct-first-fallback
+                    (clutch-db--restore-connection-timeouts conn connect-params)))
+              (clutch-db-error
+               (if direct-first-fallback
+                   (let ((fallback (clutch--prepare-ssh-connect-params
+                                    effective-params)))
+                     (setq transport (cadr fallback))
+                     (setq conn
+                           (clutch-db-connect
+                            backend (clutch--backend-connect-params
+                                     (car fallback)))))
+                 (signal (car direct-err) (cdr direct-err)))))
+            (clutch--remember-connection-transport conn effective-params transport)
+            (when clutch-debug-mode
+              (clutch--remember-debug-event
+               :connection conn
+               :op "connect"
+               :phase "success"
+               :backend backend
+               :summary (condition-case nil
+                            (format "Connected to %s" (clutch--connection-key conn))
+                          (error "Connected"))
+               :context (clutch--debug-connection-context
+                         backend effective-params)))
+            conn))
       (clutch-db-error
        (when transport
          (clutch--stop-connection-transport transport))
@@ -1835,7 +1902,7 @@ Returns a live connection object or signals a `user-error'."
             :summary message
             :context (clutch--debug-connection-context backend effective-params)))
          (user-error "%s"
-                              (clutch--debug-workflow-message message)))))))
+                     (clutch--debug-workflow-message message)))))))
 
 (defun clutch-open-connection (params)
   "Open a database connection from PARAMS using Clutch connection rules.

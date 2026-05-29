@@ -787,6 +787,11 @@ PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
   "Perform post-connect initialization on CONN.
 For example, SET NAMES utf8mb4 on MySQL.")
 
+(cl-defgeneric clutch-db--restore-connection-timeouts (conn params)
+  "Restore connection-level timeout state on CONN from PARAMS."
+  (ignore conn params)
+  nil)
+
 (cl-defgeneric clutch-db-backend-key (conn)
   "Return the registered backend key for CONN, or nil when unknown.")
 

@@ -214,6 +214,14 @@ Return non-nil when the wire protocol is synchronized again."
      (signal 'clutch-db-error
              (list (format "Init failed: %s" (error-message-string err)))))))
 
+(cl-defmethod clutch-db--restore-connection-timeouts ((conn mysql-conn) params)
+  "Restore MySQL CONN timeout state from PARAMS."
+  (let* ((params (clutch-db-mysql--apply-timeout-defaults
+                  (clutch-db--normalize-connect-params 'mysql params)))
+         (read-idle-timeout (plist-get params :read-idle-timeout)))
+    (when read-idle-timeout
+      (setf (mysql-conn-read-idle-timeout conn) read-idle-timeout))))
+
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
   "MySQL schema refresh should not block connect."
   nil)

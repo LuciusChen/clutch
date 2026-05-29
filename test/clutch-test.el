@@ -5220,7 +5220,7 @@ crashing the UI layer."
     (ert-info ((format "direct-open=%S" direct-open))
       (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
             (clutch--connection-transport-cache (make-hash-table :test 'eq))
-            captured probed tunnel-params)
+            captured probed tunnel-params attempts restored)
         (cl-letf (((symbol-function 'clutch--resolve-password)
                    (lambda (_params) nil))
                   ((symbol-function 'clutch--tcp-endpoint-open-p)
@@ -5234,8 +5234,12 @@ crashing the UI layer."
                        :ssh-host "bastion-prod")))
                   ((symbol-function 'clutch-db-connect)
                    (lambda (_backend params)
+                     (setq attempts (append attempts (list params)))
                      (setq captured params)
-                     'fake-conn)))
+                     'fake-conn))
+                  ((symbol-function 'clutch-db--restore-connection-timeouts)
+                   (lambda (conn params)
+                     (setq restored (list conn params)))))
           (should (eq (clutch--build-conn
                        '(:backend pg
                          :host "db.internal"
@@ -5249,21 +5253,91 @@ crashing the UI layer."
                          (list "db.internal" 5432
                                clutch--ssh-direct-first-probe-timeout)))
           (should-not (plist-member captured :ssh-tunnel))
+          (should (= (length attempts) 1))
           (if direct-open
               (progn
                 (should (equal (plist-get captured :host) "db.internal"))
                 (should (= (plist-get captured :port) 5432))
+                (should (= (plist-get captured :connect-timeout)
+                           clutch--ssh-direct-first-connect-timeout))
+                (should (= (plist-get captured :read-idle-timeout)
+                           clutch--ssh-direct-first-connect-timeout))
+                (should-not (plist-member captured :rpc-timeout))
+                (should (equal (car restored) 'fake-conn))
+                (should (equal (plist-get (cadr restored) :host)
+                               "db.internal"))
                 (should-not tunnel-params)
                 (should-not (gethash 'fake-conn
                                      clutch--connection-transport-cache)))
             (should (equal (plist-get tunnel-params :ssh-host) "bastion-prod"))
             (should (equal (plist-get captured :host) "127.0.0.1"))
             (should (= (plist-get captured :port) 40123))
+            (should-not (plist-member captured :connect-timeout))
+            (should-not (plist-member captured :read-idle-timeout))
+            (should-not restored)
             (should (equal (plist-get
                             (gethash 'fake-conn
                                      clutch--connection-transport-cache)
                             :ssh-host)
                            "bastion-prod"))))))))
+
+(ert-deftest clutch-test-build-conn-direct-first-falls-back-after-db-error ()
+  "Direct-first should require a successful direct database connection."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+        attempts tunnel-params restored)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--tcp-endpoint-open-p)
+               (lambda (_host _port _timeout) t))
+              ((symbol-function 'clutch--start-ssh-tunnel)
+               (lambda (params)
+                 (setq tunnel-params params)
+                 '(:process fake-proc :local-port 40123
+                   :ssh-host "bastion-prod")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (_backend params)
+                 (setq attempts (append attempts (list params)))
+                 (if (equal (plist-get params :host) "db.internal")
+                     (signal 'clutch-db-error
+                             '("Connection closed by server"))
+                   'fake-conn)))
+              ((symbol-function 'clutch-db--restore-connection-timeouts)
+               (lambda (conn params)
+                 (setq restored (list conn params)))))
+      (should (eq (clutch--build-conn
+                   '(:backend oracle
+                     :host "db.internal"
+                     :port 1521
+                     :user "alice"
+                     :database "ORCL"
+                     :ssh-host "bastion-prod"
+                     :ssh-tunnel direct-first))
+                  'fake-conn))
+      (should (= (length attempts) 2))
+      (should (equal (plist-get (nth 0 attempts) :host) "db.internal"))
+      (should (= (plist-get (nth 0 attempts) :connect-timeout) 1))
+      (should (= (plist-get (nth 0 attempts) :rpc-timeout) 2))
+      (should-not (plist-member (nth 0 attempts) :read-idle-timeout))
+      (should (equal (plist-get (nth 1 attempts) :host) "127.0.0.1"))
+      (should (= (plist-get (nth 1 attempts) :port) 40123))
+      (should-not (plist-member (nth 1 attempts) :connect-timeout))
+      (should-not (plist-member (nth 1 attempts) :read-idle-timeout))
+      (should (equal (plist-get tunnel-params :ssh-host) "bastion-prod"))
+      (should-not restored)
+      (should (equal (plist-get (gethash 'fake-conn
+                                          clutch--connection-transport-cache)
+                                :ssh-host)
+                     "bastion-prod")))))
+
+(ert-deftest clutch-test-db-mysql-restore-connection-timeouts ()
+  "Restoring MySQL timeout state should undo provisional direct-connect limits."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :read-idle-timeout 1)))
+    (clutch-db--restore-connection-timeouts
+     conn '(:host "db.internal" :user "alice" :read-idle-timeout 42))
+    (should (= (mysql-conn-read-idle-timeout conn) 42))))
 
 (ert-deftest clutch-test-build-conn-rewrites-network-endpoint-through-tramp-forward ()
   "TRAMP-backed connections should target the local forwarded port."
@@ -6721,6 +6795,34 @@ crashing the UI layer."
                          :user "system"))))
     (should (equal (clutch--connection-display-key conn)
                    "system@127.0.0.1:54321"))))
+
+(ert-deftest clutch-test-jdbc-connect-uses-rpc-timeout-for-connect-rpc ()
+  "JDBC connect should keep login timeout separate from RPC timeout."
+  (require 'clutch-db-jdbc)
+  (let ((clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+        (clutch-connect-timeout-seconds 10)
+        (clutch-read-idle-timeout-seconds 30)
+        (clutch-query-timeout-seconds 40)
+        (clutch-jdbc-rpc-timeout-seconds 50)
+        captured-params
+        captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional timeout-seconds)
+                 (setq captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 7))))
+      (clutch-db-jdbc-connect
+       'oracle
+       '(:host "db.internal"
+         :port 1521
+         :database "ORCL"
+         :user "alice"
+         :connect-timeout 1
+         :rpc-timeout 2))
+      (should (= captured-timeout 2))
+      (should (= (alist-get 'connect-timeout-seconds captured-params) 1)))))
 
 ;;;; Connection — reconnect and disconnect
 
