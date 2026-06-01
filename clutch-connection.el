@@ -495,6 +495,16 @@ Also remember PARAMS and PRODUCT."
   (clutch--refresh-transaction-ui conn)
   conn)
 
+(defun clutch--clear-reconnect-metadata-caches (old-conn new-conn old-key)
+  "Clear schema-scoped metadata when replacing OLD-CONN with NEW-CONN.
+OLD-KEY is OLD-CONN's key captured before the old connection is released.
+The old and new connections often share the same logical connection key, so
+stale `refreshing' schema state must not survive a successful reconnect."
+  (when old-key
+    (clutch--clear-connection-metadata-caches old-conn old-key))
+  (when new-conn
+    (clutch--clear-connection-metadata-caches new-conn)))
+
 (defun clutch--try-reconnect ()
   "Attempt to re-establish the connection for the current logical session.
 Find reconnect params from the current buffer or any attached buffer that
@@ -511,6 +521,7 @@ Returns non-nil on success, nil on failure."
         (let ((conn (clutch--build-conn params)))
           (clutch--clear-tx-dirty old-conn)
           (clutch--release-connection-transport old-conn)
+          (clutch--clear-reconnect-metadata-caches old-conn conn nil)
           (clutch--rebind-connection-buffers old-conn conn params product)
           (clutch--finalize-rebound-connection conn)
           (message "Reconnected to %s" (clutch--connection-key conn))
@@ -533,8 +544,7 @@ PRODUCT is the effective SQL product for the new logical session."
     (unless (clutch--connection-alive-p new-conn)
       (setq new-conn (clutch--build-conn params)))
     (clutch--rebind-connection-buffers old-conn new-conn params product)
-    (clutch--clear-connection-metadata-caches old-conn old-key)
-    (clutch--clear-connection-metadata-caches new-conn)
+    (clutch--clear-reconnect-metadata-caches old-conn new-conn old-key)
     (clutch--finalize-rebound-connection new-conn)))
 
 (defun clutch--ensure-connection ()
@@ -2029,6 +2039,7 @@ params; see `clutch-connection-alist' for details."
         (clutch--do-disconnect old-conn))
       (unless (clutch--connection-alive-p conn)
         (setq conn (clutch--build-conn params)))
+      (clutch--clear-reconnect-metadata-caches old-conn conn nil)
       (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
