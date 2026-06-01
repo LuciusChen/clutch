@@ -8589,14 +8589,14 @@ This applies when the buffer owns the connection."
 
 (ert-deftest clutch-test-require-risky-dml-confirmation-cancels ()
   "Risky DML should be cancelled unless user types YES."
-  (cl-letf (((symbol-function 'clutch--risky-dml-p) (lambda (_sql) t))
+  (cl-letf (((symbol-function 'clutch--risky-dml-reason) (lambda (_sql) "no WHERE"))
             ((symbol-function 'read-string) (lambda (&rest _args) "NO")))
     (should-error (clutch--require-risky-dml-confirmation "UPDATE users SET x=1")
                   :type 'user-error)))
 
 (ert-deftest clutch-test-require-risky-dml-confirmation-accepts-yes ()
   "Risky DML should proceed when user types YES."
-  (cl-letf (((symbol-function 'clutch--risky-dml-p) (lambda (_sql) t))
+  (cl-letf (((symbol-function 'clutch--risky-dml-reason) (lambda (_sql) "no WHERE"))
             ((symbol-function 'read-string) (lambda (&rest _args) "YES")))
     (should (null (clutch--require-risky-dml-confirmation "UPDATE users SET x=1")))))
 

@@ -31,15 +31,35 @@
   (should-not (clutch-db-sql-destructive-p "UPDATE users SET name='x'")))
 
 (ert-deftest clutch-test-risky-dml-p ()
-  "Risky DML should detect UPDATE/DELETE without top-level WHERE."
-  (should (clutch--risky-dml-p "UPDATE users SET name='x'"))
-  (should (clutch--risky-dml-p "DELETE FROM users"))
-  (should (clutch--risky-dml-p "WITH x AS (SELECT 1) UPDATE users SET name='x'"))
-  (should-not (clutch--risky-dml-p "UPDATE users SET name='x' WHERE id=1"))
-  (should-not (clutch--risky-dml-p "DELETE FROM users WHERE id=1"))
-  (should-not (clutch--risky-dml-p "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"))
-  (should-not (clutch--risky-dml-p "WITH x AS (SELECT 1) SELECT * FROM x"))
-  (should-not (clutch--risky-dml-p "SELECT * FROM users")))
+  "Risky DML should detect UPDATE/DELETE without effective WHERE."
+  (dolist (sql '("UPDATE users SET name='x'"
+                 "DELETE FROM users"
+                 "WITH x AS (SELECT 1) UPDATE users SET name='x'"
+                 "UPDATE users SET name='x' WHERE 1=1"
+                 "DELETE FROM users WHERE 1=1"
+                 "UPDATE users SET name='x' WHERE 1 = 1"
+                 "DELETE FROM users WHERE (1=1)"
+                 "UPDATE users SET name='x' WHERE true"
+                 "DELETE FROM users WHERE TRUE"
+                 "UPDATE users SET name='x' WHERE 1"
+                 "UPDATE users SET name='x' WHERE 2=2"
+                 "UPDATE users SET name='x' WHERE 1=1 RETURNING id"
+                 "DELETE FROM users WHERE 1=1 -- all rows"
+                 "UPDATE users SET name='x' WHERE 1=1 OR id=5"
+                 "UPDATE users SET name='x' WHERE id=5 OR 1=1"
+                 "UPDATE users SET name='x' WHERE (id=5 OR 1=1)"
+                 "UPDATE users SET name='x' WHERE 1=1 AND TRUE"))
+    (should (clutch--risky-dml-p sql)))
+  (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
+                 "DELETE FROM users WHERE id=1"
+                 "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
+                 "UPDATE users SET name='x' WHERE 1=1 AND id=5"
+                 "UPDATE users SET name='x' WHERE (id=5 OR 1=1) AND status='active'"
+                 "UPDATE users SET name='x' WHERE note='1=1'"
+                 "DELETE FROM users WHERE status='active'"
+                 "WITH x AS (SELECT 1) SELECT * FROM x"
+                 "SELECT * FROM users"))
+    (should-not (clutch--risky-dml-p sql))))
 
 (ert-deftest clutch-test-select-query-p ()
   "Test SELECT query detection."

@@ -1075,17 +1075,86 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
 
 ;;;; Query execution engine
 
-(defun clutch--risky-dml-p (sql)
-  "Return non-nil when SQL is a top-level UPDATE/DELETE statement without WHERE."
+(defun clutch--risky-dml-where-condition (sql)
+  "Return top-level WHERE condition expression from normalized SQL, or nil."
+  (when-let* ((where-pos (clutch-db-sql-find-top-level-clause sql "WHERE")))
+    (let* ((cond-start (+ where-pos 5))
+           (cond-end (or (clutch-db-sql-next-top-level-clause-position
+                          sql cond-start
+                          '("RETURNING" "ORDER\\s-+BY" "LIMIT" "OFFSET"
+                            "FETCH" "GROUP\\s-+BY" "HAVING" "UNION"
+                            "INTERSECT" "EXCEPT" "FOR\\s-+UPDATE"
+                            "OPTION"))
+                         (length sql))))
+      (string-trim (substring sql cond-start cond-end)))))
+
+(defun clutch--risky-dml-trivially-true-expression-p (expr)
+  "Return non-nil when EXPR is visibly true without row data."
+  (cl-labels
+      ((code (expr)
+         (string-trim (clutch-db-sql-mask-literal-or-comment expr)))
+       (strip-parens (expr)
+         (let ((expr (code expr)))
+           (while (and (> (length expr) 1)
+                       (= (aref expr 0) ?\()
+                       (let ((close
+                              (clutch-db-sql-matching-paren-position expr 0)))
+                         (and close (= close (1- (length expr))))))
+             (setq expr (code (substring expr 1 (1- (length expr))))))
+           expr))
+       (split-keyword (expr keyword)
+         (let ((case-fold-search t)
+               (pattern (format "\\b%s\\b" keyword))
+               (start 0)
+               parts)
+           (clutch-db-sql-scan-code
+            expr 0 nil
+            (lambda (pos _ch depth)
+              (when (and (zerop depth)
+                         (string-match pattern expr pos)
+                         (= (match-beginning 0) pos))
+                (push (string-trim (substring expr start pos)) parts)
+                (setq start (match-end 0)))
+              nil))
+           (nreverse (cons (string-trim (substring expr start)) parts))))
+       (literal-true-p (expr)
+         (let ((expr (strip-parens expr))
+               (case-fold-search t))
+           (or (string-match-p "\\`\\(?:TRUE\\|1\\)\\'" expr)
+               (and (string-match
+                     "\\`\\([0-9]+\\)\\s-*=\\s-*\\([0-9]+\\)\\'" expr)
+                    (string= (match-string 1 expr)
+                             (match-string 2 expr))))))
+       (true-p (expr)
+         (let ((expr (strip-parens expr)))
+           (or (literal-true-p expr)
+               (let ((parts (split-keyword expr "OR")))
+                 (and (cdr parts)
+                      (cl-some #'true-p parts)))
+               (let ((parts (split-keyword expr "AND")))
+                 (and (cdr parts)
+                      (cl-every #'true-p parts)))))))
+    (true-p expr)))
+
+(defun clutch--risky-dml-reason (sql)
+  "Return a confirmation reason for risky DML SQL, or nil."
   (let ((normalized (clutch-db-sql-normalize sql))
         (main-op (clutch-db-sql-main-op-keyword sql)))
-    (and (member main-op '("UPDATE" "DELETE"))
-         (not (clutch-db-sql-find-top-level-clause normalized "WHERE")))))
+    (when (member main-op '("UPDATE" "DELETE"))
+      (if-let* ((where (clutch--risky-dml-where-condition normalized)))
+          (and (clutch--risky-dml-trivially-true-expression-p where)
+               "WHERE is always true")
+        "no WHERE"))))
+
+(defun clutch--risky-dml-p (sql)
+  "Return non-nil when SQL is a top-level UPDATE/DELETE without effective WHERE."
+  (clutch--risky-dml-reason sql))
 
 (defun clutch--require-risky-dml-confirmation (sql)
   "Require explicit typed confirmation for risky DML SQL."
-  (when (clutch--risky-dml-p sql)
-    (let ((token (read-string "High-risk DML (no WHERE). Type YES to continue: ")))
+  (when-let* ((reason (clutch--risky-dml-reason sql)))
+    (let ((token (read-string
+                  (format "High-risk DML (%s). Type YES to continue: " reason))))
       (unless (string= token "YES")
         (user-error "Query cancelled")))))
 
