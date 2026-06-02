@@ -405,14 +405,48 @@ without consulting syntax tables."
       (cdr (clutch--xref-symbol-at-point)))))
 
 (defun clutch--xref-alias-at-point ()
-  "Return the normalized alias name at point, or nil.
-Handles both bare aliases (`u') and qualified references (`u.name').
-Normalizes quoted identifiers to match the alias cache."
+  "Return the normalized statement alias at point, or nil.
+Handles both bare aliases (`u') and qualified references (`u.name'), but does
+not treat schema qualifiers in `schema.table' as aliases."
   (when-let* ((hit (clutch--xref-symbol-at-point))
               (beg (car hit))
-              (sym (cdr hit))
-              (raw (or (clutch--xref-qualified-identifier-qualifier beg) sym)))
-    (clutch--normalize-statement-table-token raw)))
+              (sym (cdr hit)))
+    (let* ((sym-alias (clutch--normalize-statement-table-token sym))
+           (qualifier-alias
+            (when-let* ((qualifier (clutch--xref-qualified-identifier-qualifier
+                                    beg)))
+              (clutch--normalize-statement-table-token qualifier))))
+      (cond
+       ((and qualifier-alias
+             (clutch--find-alias-definition-position qualifier-alias))
+        qualifier-alias)
+       ((and sym-alias
+             (clutch--find-alias-definition-position sym-alias))
+        sym-alias)))))
+
+(defun clutch--xref-source-table-at-point ()
+  "Return the normalized source table at point, or nil."
+  (when-let* ((hit (clutch--xref-symbol-at-point)))
+    (pcase-let* ((`(,stmt-beg . ,stmt-end) (clutch--statement-bounds))
+                 (text (buffer-substring-no-properties stmt-beg stmt-end))
+                 (masked (clutch-db-sql-mask-literal-or-comment text))
+                 (target (- (car hit) stmt-beg))
+                 (case-fold-search t)
+                 (pos 0))
+      (catch 'found
+        (while (string-match
+                (rx word-start
+                    (or "from" "join" "update" "into")
+                    (+ (any " \t\n\r"))
+                    (group (+ (any alnum "_$#.`\""))))
+                masked pos)
+          (let ((table-beg (match-beginning 1))
+                (table-end (match-end 1)))
+            (when (and (<= table-beg target) (< target table-end))
+              (throw 'found
+                     (clutch--normalize-statement-table-token
+                      (match-string 1 text))))
+            (setq pos (max table-end (1+ pos)))))))))
 
 (cl-defmethod xref-backend-identifier-at-point ((_backend (eql 'clutch)))
   "Return the identifier at point, preferring normalized alias names."
@@ -422,9 +456,14 @@ Normalizes quoted identifiers to match the alias cache."
 
 (cl-defmethod xref-backend-definitions ((_backend (eql 'clutch)) identifier)
   "Return xref location of alias IDENTIFIER definition in the current statement."
-  (when-let* ((pos (clutch--find-alias-definition-position identifier)))
-    (list (xref-make (format "%s (alias)" identifier)
-                     (xref-make-buffer-location (current-buffer) pos)))))
+  (if-let* ((pos (clutch--find-alias-definition-position identifier)))
+      (list (xref-make (format "%s (alias)" identifier)
+                       (xref-make-buffer-location (current-buffer) pos)))
+    (when-let* ((table (clutch--xref-source-table-at-point))
+                ((string-equal (downcase identifier) (downcase table))))
+	      (user-error
+	       "%s is already a source table in this statement; xref jumps SQL aliases only; use C-c C-d or C-c C-j for table lookup"
+	       table))))
 
 (cl-defmethod xref-backend-references ((_backend (eql 'clutch)) _identifier)
   "Not yet implemented."

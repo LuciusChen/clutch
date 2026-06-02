@@ -9,6 +9,43 @@
 (eval-and-compile
   (require 'clutch-test-common))
 
+;;;; SQL test helpers
+
+(defmacro clutch-test-sql--with-xref-buffer (spec &rest body)
+  "Run BODY in a temporary clutch SQL buffer for xref tests.
+SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
+:tables, and :connection-alive."
+  (declare (indent 1) (debug (sexp body)))
+  (let ((sql (plist-get spec :sql))
+        (schema (plist-get spec :schema))
+        (aliases (plist-get spec :aliases))
+        (tables (plist-get spec :tables))
+        (has-live-stub (memq :connection-alive spec))
+        (live-p (plist-get spec :connection-alive)))
+    `(with-temp-buffer
+       (clutch-mode)
+       (setq-local clutch-connection 'fake-conn)
+       (insert ,sql)
+       (goto-char (point-min))
+       (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                  (lambda (&optional _conn) ,schema))
+                 ,@(when (or aliases tables)
+                     `(((symbol-function 'clutch--tables-in-query-cache-entry)
+                        (lambda (_schema)
+                          (list :beg (point-min) :end (point-max)
+                                :statement-aliases ,aliases
+                                :statement-tables ,tables)))))
+                 ,@(when has-live-stub
+                     `(((symbol-function 'clutch--connection-alive-p)
+                        (lambda (_conn) ,live-p)))))
+         ,@body))))
+
+(defun clutch-test-sql--xref-definition-position (identifier)
+  "Return the first xref definition buffer position for IDENTIFIER."
+  (let* ((defs (xref-backend-definitions 'clutch identifier))
+         (loc (xref-item-location (car defs))))
+    (xref-buffer-location-position loc)))
+
 ;;;; SQL parsing — query classification
 
 (ert-deftest clutch-test-schema-affecting-query-p ()
@@ -1272,7 +1309,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 (ert-deftest clutch-test-completion-at-point-uses-direct-table-candidates-without-schema-cache ()
   "Direct backend table completion should work without a schema cache."
   (with-temp-buffer
-    (insert "select * from zj_")
+    (insert "select * from app_")
     (goto-char (point-max))
     (let ((clutch-connection 'fake))
       (cl-letf (((symbol-function 'clutch--schema-for-connection)
@@ -1281,13 +1318,13 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                  (lambda (_conn) nil))
                 ((symbol-function 'clutch-db-complete-tables)
                  (lambda (_conn prefix)
-                   (should (equal prefix "zj_"))
-                   '("ZJ_NCBUSINESSDATA" "ZJ_SYS_PARA"))))
+                   (should (equal prefix "app_"))
+                   '("APP_EVENT_DATA" "APP_CONFIG"))))
         (let* ((capf (clutch-completion-at-point))
                (candidates (clutch-test--completion-candidates capf)))
           (should capf)
-          (should (member "ZJ_NCBUSINESSDATA" candidates))
-          (should (member "ZJ_SYS_PARA" candidates)))))))
+          (should (member "APP_EVENT_DATA" candidates))
+          (should (member "APP_CONFIG" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-uses-ready-schema-table-candidates-before-direct-rpc ()
   "Table completion should use ready schema matches before backend completion."
@@ -1447,12 +1484,12 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
 (ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
   "Direct backend column completion should avoid synchronous ensure-columns."
   (with-temp-buffer
-    (insert "select pa from ZJ_SYS_PARA")
+    (insert "select con from APP_CONFIG")
     (goto-char (point-min))
-    (search-forward "pa")
+    (search-forward "con")
     (let ((schema (make-hash-table :test 'equal))
           (clutch-connection 'fake))
-      (puthash "ZJ_SYS_PARA" nil schema)
+      (puthash "APP_CONFIG" nil schema)
       (cl-letf (((symbol-function 'clutch--schema-for-connection)
                  (lambda () schema))
                 ((symbol-function 'clutch-db-busy-p)
@@ -1464,26 +1501,26 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                    (error "Should not synchronously load columns")))
                 ((symbol-function 'clutch-db-complete-columns)
                  (lambda (_conn table prefix)
-                   (should (equal table "ZJ_SYS_PARA"))
-                   (should (equal prefix "pa"))
-                   '("PARA_ID" "PARA_NAME"))))
+                   (should (equal table "APP_CONFIG"))
+                   (should (equal prefix "con"))
+                   '("CONFIG_ID" "CONFIG_NAME"))))
         (let* ((capf (clutch-completion-at-point))
                (candidates (clutch-test--completion-candidates capf)))
           (should capf)
-          (should (member "PARA_ID" candidates))
-          (should (member "PARA_NAME" candidates)))))))
+          (should (member "CONFIG_ID" candidates))
+          (should (member "CONFIG_NAME" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-uses-alias-qualified-table-for-direct-column-loading ()
   "Alias-qualified completion should only query direct columns for the referenced table."
   (with-temp-buffer
-    (insert "select u.pa from ZJ_SYS_PARA u join ZJ_LOG p on u.id = p.para_id")
+    (insert "select u.con from APP_CONFIG u join APP_LOG p on u.id = p.config_id")
     (goto-char (point-min))
-    (search-forward "pa")
+    (search-forward "con")
     (let ((schema (make-hash-table :test 'equal))
           (clutch-connection 'fake)
           seen)
-      (puthash "ZJ_SYS_PARA" nil schema)
-      (puthash "ZJ_LOG" nil schema)
+      (puthash "APP_CONFIG" nil schema)
+      (puthash "APP_LOG" nil schema)
       (cl-letf (((symbol-function 'clutch--schema-for-connection)
                  (lambda () schema))
                 ((symbol-function 'clutch-db-busy-p)
@@ -1496,57 +1533,57 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
                 ((symbol-function 'clutch-db-complete-columns)
                  (lambda (_conn table prefix)
                    (push table seen)
-                   (should (equal prefix "pa"))
+                   (should (equal prefix "con"))
                    (pcase table
-                     ("ZJ_SYS_PARA" '("PARA_ID" "PARA_NAME"))
-                     ("ZJ_LOG" '("PAYLOAD"))
+                     ("APP_CONFIG" '("CONFIG_ID" "CONFIG_NAME"))
+                     ("APP_LOG" '("PAYLOAD"))
                      (_ nil)))))
         (let* ((capf (clutch-completion-at-point))
                (candidates (clutch-test--completion-candidates capf)))
           (should capf)
-          (should (equal seen '("ZJ_SYS_PARA")))
-          (should (member "PARA_ID" candidates))
-          (should (member "PARA_NAME" candidates))
+          (should (equal seen '("APP_CONFIG")))
+          (should (member "CONFIG_ID" candidates))
+          (should (member "CONFIG_NAME" candidates))
           (should-not (member "PAYLOAD" candidates))
-          (should-not (member "ZJ_SYS_PARA" candidates))
-          (should-not (member "ZJ_LOG" candidates)))))))
+          (should-not (member "APP_CONFIG" candidates))
+          (should-not (member "APP_LOG" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-lowercases-identifiers-when-configured ()
   "Identifier completion should honor lowercase case style."
   (let ((clutch-sql-completion-case-style 'lower))
     (with-temp-buffer
-      (insert "select pa from ZJ_SYS_PARA")
+      (insert "select con from APP_CONFIG")
       (goto-char (point-min))
-      (search-forward "pa")
+      (search-forward "con")
       (let ((schema (make-hash-table :test 'equal))
             (clutch-connection 'fake))
-        (puthash "ZJ_SYS_PARA" nil schema)
+        (puthash "APP_CONFIG" nil schema)
         (cl-letf (((symbol-function 'clutch--schema-for-connection)
                    (lambda () schema))
                   ((symbol-function 'clutch-db-busy-p)
                    (lambda (_conn) nil))
                   ((symbol-function 'clutch--tables-in-current-statement)
-                   (lambda (_schema) '("ZJ_SYS_PARA")))
+                   (lambda (_schema) '("APP_CONFIG")))
                   ((symbol-function 'clutch-db-completion-sync-columns-p)
                    (lambda (_conn) nil))
                   ((symbol-function 'clutch-db-complete-columns)
                    (lambda (_conn table prefix)
-                     (should (equal table "ZJ_SYS_PARA"))
-                     (should (equal prefix "pa"))
-                     '("PARA_ID" "PARA_NAME"))))
+                     (should (equal table "APP_CONFIG"))
+                     (should (equal prefix "con"))
+                     '("CONFIG_ID" "CONFIG_NAME"))))
           (let* ((capf (clutch-completion-at-point))
                  (candidates (clutch-test--completion-candidates capf "")))
             (should capf)
-            (should (member "zj_sys_para" candidates))
-            (should (member "para_id" candidates))
-            (should-not (member "ZJ_SYS_PARA" candidates))))))))
+            (should (member "app_config" candidates))
+            (should (member "config_id" candidates))
+            (should-not (member "APP_CONFIG" candidates))))))))
 
 (ert-deftest clutch-test-completion-at-point-swallows-oracle-i18n-completion-errors ()
   "Oracle completion should fail soft when orai18n.jar is missing."
   (let ((clutch--oracle-i18n-warning-shown nil)
         warned)
     (with-temp-buffer
-      (insert "select * from zj_")
+      (insert "select * from app_")
       (goto-char (point-max))
       (let ((clutch-connection 'fake))
         (cl-letf (((symbol-function 'clutch--schema-for-connection)
@@ -1661,7 +1698,7 @@ Instead it should queue async warmup and return nil until metadata is ready."
 (ert-deftest clutch-test-eldoc-schema-string-uses-cached-columns-when-sync-loads-disabled ()
   "Eldoc should not synchronously load columns when backend disables it."
   (let ((schema (make-hash-table :test 'equal)))
-    (puthash "ZJ_SYS_PARA" '("PARA_ID" "PARA_NAME") schema)
+    (puthash "APP_CONFIG" '("CONFIG_ID" "CONFIG_NAME") schema)
     (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
                (lambda (_conn) nil))
               ((symbol-function 'clutch--cached-table-comment)
@@ -1672,10 +1709,10 @@ Instead it should queue async warmup and return nil until metadata is ready."
                #'ignore)
               ((symbol-function 'clutch-db-database)
                (lambda (_conn) "ORCL")))
-      (should (string-match-p "ZJ_SYS_PARA"
-                              (clutch--eldoc-schema-string 'fake schema "ZJ_SYS_PARA")))
+      (should (string-match-p "APP_CONFIG"
+                              (clutch--eldoc-schema-string 'fake schema "APP_CONFIG")))
       (should (string-match-p "2 cols"
-                              (clutch--eldoc-schema-string 'fake schema "ZJ_SYS_PARA"))))))
+                              (clutch--eldoc-schema-string 'fake schema "APP_CONFIG"))))))
 
 (ert-deftest clutch-test-eldoc-on-schema-qualifier-resolves-table-name ()
   "Eldoc on the schema part of schema.table should resolve to the table."
@@ -1864,288 +1901,204 @@ ORDER BY id")
 
 (ert-deftest clutch-test-xref-alias-jump-basic ()
   "Alias `u' in a WHERE clause should jump to its FROM-clause definition."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT u.* FROM users u WHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users"))
-                       :statement-tables '("users")))))
-      ;; Move to the `u' in `u.id'
-      (goto-char (point-min))
-      (search-forward "u.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          ;; Verify the character at pos is `u' after `users '
-          (should (eq (char-after pos) ?u))
-          (goto-char pos)
-          (should (looking-back "users " (- pos 10))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT u.* FROM users u WHERE u.id = 1"
+       :schema 'fake-schema
+       :aliases '(("u" . "users"))
+       :tables '("users"))
+    (search-forward "u.id")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "u"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?u))
+        (goto-char pos)
+        (should (looking-back "users " (- pos 10)))))))
 
 (ert-deftest clutch-test-xref-alias-jump-qualified ()
   "Qualified reference `u.name' should resolve qualifier `u' as the alias."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT u.name FROM users u")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users"))
-                       :statement-tables '("users")))))
-      ;; Move to `name' in `u.name'
-      (goto-char (point-min))
-      (search-forward "u.name")
-      (goto-char (+ (match-beginning 0) 2)) ;; on `name'
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?u))
-          ;; `u' after `users ' in FROM
-          (goto-char pos)
-          (should (looking-back "users " (- pos 10))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT u.name FROM users u"
+       :schema 'fake-schema
+       :aliases '(("u" . "users"))
+       :tables '("users"))
+    (search-forward "u.name")
+    (goto-char (+ (match-beginning 0) 2))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "u"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?u))
+        (goto-char pos)
+        (should (looking-back "users " (- pos 10)))))))
 
 (ert-deftest clutch-test-xref-alias-join ()
   "Alias `o' should jump to the JOIN definition, not the FROM alias."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT o.total FROM users u JOIN orders o ON o.uid = u.id")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users") ("o" . "orders"))
-                       :statement-tables '("users" "orders")))))
-      ;; Move to `o' in `o.total'
-      (goto-char (point-min))
-      (search-forward "o.total")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "o"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?o))
-          (goto-char pos)
-          (should (looking-back "orders " (- pos 10))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT o.total FROM users u JOIN orders o ON o.uid = u.id"
+       :schema 'fake-schema
+       :aliases '(("u" . "users") ("o" . "orders"))
+       :tables '("users" "orders"))
+    (search-forward "o.total")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "o"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?o))
+        (goto-char pos)
+        (should (looking-back "orders " (- pos 10)))))))
 
 (ert-deftest clutch-test-xref-non-alias-returns-no-definitions ()
   "A non-alias symbol should return the symbol but no definitions."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT name FROM users u")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("u" . "users"))
-                       :statement-tables '("users")))))
-      ;; Move to `name' (not an alias, not qualified)
-      (goto-char (point-min))
-      (search-forward "name")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "name"))
-        (should-not (xref-backend-definitions 'clutch id))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT name FROM users u"
+       :schema 'fake-schema
+       :aliases '(("u" . "users"))
+       :tables '("users"))
+    (search-forward "name")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "name"))
+      (should-not (xref-backend-definitions 'clutch id)))))
+
+(ert-deftest clutch-test-xref-schema-qualified-table-keeps-table-symbol ()
+  "A schema qualifier in `schema.table' should not be treated as an alias."
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT * FROM app_schema.order_items")
+    (search-forward "order_items")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "order_items"))
+      (let ((err (should-error (xref-backend-definitions 'clutch id)
+                               :type 'user-error)))
+        (should (string-match-p "source table"
+                                (error-message-string err)))))))
+
+(ert-deftest clutch-test-xref-source-table-explains-alias-boundary ()
+  "M-. on a source table should explain that xref only jumps aliases."
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT * FROM customer_accounts")
+    (search-forward "customer_accounts")
+    (goto-char (match-beginning 0))
+    (let ((err (should-error (xref-find-definitions "customer_accounts")
+                             :type 'user-error)))
+      (should (string-match-p "source table"
+                              (error-message-string err))))))
 
 (ert-deftest clutch-test-xref-alias-union-scoped ()
   "In a UNION query, alias jump should target the current branch's definition."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) 'fake-schema))
-              ((symbol-function 'clutch--tables-in-query-cache-entry)
-               (lambda (_schema)
-                 (list :beg (point-min) :end (point-max)
-                       :statement-aliases '(("a" . "users") ("a" . "orders"))
-                       :statement-tables '("users" "orders")))))
-      ;; Move to `a' in second branch (after UNION ALL)
-      (goto-char (point-min))
-      (search-forward "UNION ALL\n")
-      (search-forward "a.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "a"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?a))
-          ;; Should be in the second branch (after "orders ")
-          (goto-char pos)
-          (should (looking-back "orders " (- pos 10))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a"
+       :schema 'fake-schema
+       :aliases '(("a" . "users") ("a" . "orders"))
+       :tables '("users" "orders"))
+    (search-forward "UNION ALL\n")
+    (search-forward "a.id")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "a"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?a))
+        (goto-char pos)
+        (should (looking-back "orders " (- pos 10)))))))
 
 (ert-deftest clutch-test-xref-alias-inside-parens ()
   "An alias inside SUM(...) or CASE should still find the FROM definition."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT SUM(fopd.goods_num) FROM\n    ffp_order_plan_detail fopd WHERE fopd.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      ;; cursor on fopd inside SUM(...)
-      (goto-char (point-min))
-      (search-forward "SUM(fopd")
-      (goto-char (- (point) 4)) ;; on `fopd' inside parens
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "fopd"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (equal (buffer-substring-no-properties pos (+ pos 4)) "fopd"))
-          (goto-char pos)
-          (should (looking-back "ffp_order_plan_detail " (- pos 30))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT SUM(opd.goods_num) FROM\n    order_plan_detail opd WHERE opd.id = 1")
+    (search-forward "SUM(opd")
+    (goto-char (- (point) 3))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "opd"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (equal (buffer-substring-no-properties pos (+ pos 3)) "opd"))
+        (goto-char pos)
+        (should (looking-back "order_plan_detail " (- pos 30)))))))
 
 (ert-deftest clutch-test-xref-alias-multiline-from ()
   "Alias lookup should work when FROM and table name are on separate lines."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT\n    fopd.goods_num\nFROM\n    ffp_order_plan_detail fopd\n    LEFT JOIN ffp_order_plan fop ON fop.plan_id = fopd.plan_id\nWHERE\n    fopd.plan_id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      ;; Move to `fopd' in WHERE clause
-      (goto-char (point-min))
-      (search-forward "fopd.plan_id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "fopd"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?f))
-          (should (equal (buffer-substring-no-properties pos (+ pos 4)) "fopd"))
-          (goto-char pos)
-          (should (looking-back "ffp_order_plan_detail " (- pos 30))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT\n    opd.goods_num\nFROM\n    order_plan_detail opd\n    LEFT JOIN order_plan op ON op.plan_id = opd.plan_id\nWHERE\n    opd.plan_id = 1")
+    (search-forward "opd.plan_id")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "opd"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?o))
+        (should (equal (buffer-substring-no-properties pos (+ pos 3)) "opd"))
+        (goto-char pos)
+        (should (looking-back "order_plan_detail " (- pos 30)))))))
 
 (ert-deftest clutch-test-xref-alias-no-schema-cache ()
   "Alias lookup should work even when the schema cache is not warmed."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT u.name FROM users u WHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) nil)))
-      (goto-char (point-min))
-      (search-forward "u.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?u))
-          (goto-char pos)
-          (should (looking-back "users " (- pos 10))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT u.name FROM users u WHERE u.id = 1"
+       :connection-alive nil)
+    (search-forward "u.id")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "u"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?u))
+        (goto-char pos)
+        (should (looking-back "users " (- pos 10)))))))
 
 (ert-deftest clutch-test-xref-alias-no-schema-union-scoped ()
   "Without schema cache, alias resolution should still scope to UNION branch."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      ;; cursor in second branch
-      (goto-char (point-min))
-      (search-forward "UNION ALL\n")
-      (search-forward "a.id")
-      (goto-char (match-beginning 0))
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "a"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?a))
-          (goto-char pos)
-          (should (looking-back "orders " (- pos 10))))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a")
+    (search-forward "UNION ALL\n")
+    (search-forward "a.id")
+    (goto-char (match-beginning 0))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "a"))
+      (let ((pos (clutch-test-sql--xref-definition-position id)))
+        (should (eq (char-after pos) ?a))
+        (goto-char pos)
+        (should (looking-back "orders " (- pos 10)))))))
 
 (ert-deftest clutch-test-xref-alias-quoted ()
   "Alias lookup should handle quoted alias identifiers like `\"u\"'."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward "\"u\".id")
-      (goto-char (+ (match-beginning 0) 1)) ;; on `u' inside quotes
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "u"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          ;; Should land on the `"' of `"u"' in FROM clause
-          (should (eq (char-after pos) ?\")))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1")
+    (search-forward "\"u\".id")
+    (goto-char (+ (match-beginning 0) 1))
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "u"))
+      (should (eq (char-after (clutch-test-sql--xref-definition-position id))
+                  ?\")))))
 
 (ert-deftest clutch-test-xref-ignores-alias-in-comment ()
   "Alias lookup should not jump on alias-like text inside a comment."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT * FROM users u -- use u.id here\nWHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward "u.id here")
-      (goto-char (match-beginning 0))
-      (should-not
-       (xref-backend-definitions
-        'clutch
-        (xref-backend-identifier-at-point 'clutch))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT * FROM users u -- use u.id here\nWHERE u.id = 1")
+    (search-forward "u.id here")
+    (goto-char (match-beginning 0))
+    (should-not
+     (xref-backend-definitions
+      'clutch
+      (xref-backend-identifier-at-point 'clutch)))))
 
 (ert-deftest clutch-test-xref-ignores-alias-in-string ()
   "Alias lookup should not jump on alias-like text inside a string."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT 'u.id' AS note FROM users u WHERE u.id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward "u.id'")
-      (goto-char (match-beginning 0))
-      (should-not
-       (xref-backend-definitions
-        'clutch
-        (xref-backend-identifier-at-point 'clutch))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT 'u.id' AS note FROM users u WHERE u.id = 1")
+    (search-forward "u.id'")
+    (goto-char (match-beginning 0))
+    (should-not
+     (xref-backend-definitions
+      'clutch
+      (xref-backend-identifier-at-point 'clutch)))))
 
 (ert-deftest clutch-test-xref-alias-quoted-multiword ()
   "Alias lookup should handle double-quoted multi-word identifiers."
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'fake-conn)
-    (insert "SELECT \"User Name\".id FROM users \"User Name\" WHERE \"User Name\".id = 1")
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) nil)))
-      (goto-char (point-min))
-      (search-forward ".id")
-      (backward-char 2)
-      (let ((id (xref-backend-identifier-at-point 'clutch)))
-        (should (equal id "User Name"))
-        (let* ((defs (xref-backend-definitions 'clutch id))
-               (loc (xref-item-location (car defs)))
-               (pos (xref-buffer-location-position loc)))
-          (should (eq (char-after pos) ?\")))))))
+  (clutch-test-sql--with-xref-buffer
+      (:sql "SELECT \"User Name\".id FROM users \"User Name\" WHERE \"User Name\".id = 1")
+    (search-forward ".id")
+    (backward-char 2)
+    (let ((id (xref-backend-identifier-at-point 'clutch)))
+      (should (equal id "User Name"))
+      (should (eq (char-after (clutch-test-sql--xref-definition-position id))
+                  ?\")))))
 
 (provide 'clutch-test-sql)
 

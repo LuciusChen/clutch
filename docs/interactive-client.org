@@ -21,11 +21,14 @@
 | =C-c ?=     | Transient menu             |
 
 Standard editing integrations still apply in =clutch-mode=: xref lookup uses
-=M-.= through the buffer-local xref backend.  CAPF completion handles SQL
-identifiers, including empty column positions such as =select | from users=.
-=TAB= completes columns after a table or alias dot, then falls back to
-indentation elsewhere; other completion stays on normal CAPF keys such as
-=M-TAB= inherited from Emacs.
+=M-.= through the buffer-local xref backend for SQL alias navigation, so =M-.=
+on =u= or =u.name= jumps to the alias definition in the current statement.
+Schema-qualified table names such as =schema.table= are not treated as aliases;
+use =C-c C-d= or =C-c C-j= for object lookup and table description.  CAPF
+completion handles SQL identifiers, including empty column positions such as
+=select | from users=.  =TAB= completes columns after a table or alias dot,
+then falls back to indentation elsewhere; other completion stays on normal CAPF
+keys such as =M-TAB= inherited from Emacs.
 
 * Result Browser (clutch-result-mode) Key Bindings
 
@@ -455,7 +458,7 @@ intentionally small and shared across Embark and Transient:
 
 =C-c C-l= switches the current schema/database on the active connection and
 refreshes metadata for the new context.  Oracle/JDBC connections can switch
-business schemas such as =zj_test= and =cjh_test= within one connection,
+business schemas such as =sales= and =analytics= within one connection,
 PostgreSQL-style wire connections use =SET search_path TO ...=, and MySQL
 connections map schema switching to =USE database=.  ClickHouse is handled
 separately: it has databases rather than runtime schemas, so =C-c C-l=
@@ -465,7 +468,7 @@ instead of attempting session-level schema switching.  Generic
 has an explicit implementation for that driver/backend; custom JDBC URLs such
 as KingbaseES do not gain schema switching automatically.
 
-For JDBC backends, [[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]]
+For JDBC backends, [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]]
 now isolates foreground SQL from metadata traffic by keeping separate primary
 and metadata JDBC sessions under one logical clutch connection.  This avoids
 Oracle-style contention between user queries and background schema/object

@@ -9,25 +9,10 @@ An Emacs database client with an interactive data browsing UI.
 Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite
 through Emacs built-in =sqlite-*= functions, plus Oracle, SQL Server, DB2,
 Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through a
-lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]], Java 17+).
+lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
 
-- =clutch-db.el= — generic database interface (=cl-defgeneric= dispatch)
-- =clutch-db-mysql.el= — MySQL backend adapter
-- =clutch-db-pg.el= — PostgreSQL backend adapter
-- =clutch-db-sqlite.el= — SQLite backend adapter (uses Emacs 29.1+ built-in sqlite)
-- =clutch-db-jdbc.el= — JDBC backend adapter (Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and any JDBC-compatible database)
-- =clutch.el= — package entry point, customization, debug capture, console persistence, and public interactive commands
-- =clutch-connection.el= — connection lifecycle, reconnect, transaction state, backend identity, and header-line status
-- =clutch-query.el= — SQL-buffer execution workflow, query rewriting orchestration, and REPL execution
-- =clutch-result.el= / =clutch-ui.el= — result, record, value-viewer, navigation, and table rendering UI
-- =clutch-object.el= / =clutch-schema.el= — object discovery/describe flow plus schema and metadata cache lifecycle
-- =clutch-edit.el= — staged insert/update/delete editing workflow
-- =clutch-sql.el= — SQL context parsing, completion, and xref helpers
-- External native protocol dependencies:
-  - [[https://github.com/LuciusChen/mysql.el][=mysql=]] — pure Elisp MySQL wire protocol client
-  - [[https://github.com/emarsden/pg-el][=pg=]] — PostgreSQL client from [[https://github.com/emarsden/pg-el][=pg-el=]]
-
-For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package.
+Architecture and module ownership are recorded in [[file:PRD.md][PRD.md]].
+For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 #+CAPTION: Query console with result pane, value viewer, and footer status.
 [[file:docs/screenshots/clutch-overview.png]]
@@ -116,12 +101,12 @@ Install =clutch= from MELPA or another package archive:
 Package-manager installs also install the core native backend protocol
 packages:
 
-- [[https://github.com/LuciusChen/mysql.el][=mysql=]] for =:backend mysql=
-- [[https://github.com/emarsden/pg-el][=pg=]] for =:backend pg=
+- [[https://github.com/LuciusChen/mysql.el][mysql]] for =:backend mysql=
+- [[https://github.com/emarsden/pg-el][pg]] for =:backend pg=
 
 SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
 =clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
-For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package.
+For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 For source checkouts, add =clutch= and any native protocol backend checkout you
 use to =load-path= explicitly:
@@ -139,13 +124,13 @@ This release separates protocol and Org-Babel packages from the main
 =clutch= package.  If you are upgrading from an older checkout that bundled
 everything in one repository, this is a breaking packaging change:
 
-- [[https://github.com/LuciusChen/mysql.el][=mysql.el=]] is no longer bundled in this repository.  Package-manager installs
+- [[https://github.com/LuciusChen/mysql.el][mysql.el]] is no longer bundled in this repository.  Package-manager installs
   of =clutch= install the =mysql= package as a dependency; source checkouts must
   add =mysql.el= to =load-path= for =:backend mysql=.
-- [[https://github.com/emarsden/pg-el][=pg.el=]] is no longer bundled in this repository.  Package-manager installs of
+- [[https://github.com/emarsden/pg-el][pg.el]] is no longer bundled in this repository.  Package-manager installs of
   =clutch= install the =pg= package as a dependency; source checkouts must add
   =pg-el= to =load-path= for =:backend pg=.
-- [[https://github.com/LuciusChen/ob-clutch][=ob-clutch.el=]] is no longer bundled; install =ob-clutch= separately for
+- [[https://github.com/LuciusChen/ob-clutch][ob-clutch.el]] is no longer bundled; install =ob-clutch= separately for
   Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
 
@@ -257,31 +242,13 @@ toggle/disconnect stays blocked until you commit or roll back.
 
 ** Password Management
 
-=:password= is optional in connection entries. When omitted (or nil), the
-password is looked up via Emacs's built-in =auth-source= library, which supports:
+Connection entries may include =:password=, but auth-source is preferred.  When
+=:password= is omitted, clutch resolves credentials through:
 
-- =~/.authinfo= / =~/.authinfo.gpg= (netrc format)
-- =pass= (the Unix password manager), when =auth-source-pass= is enabled
-
-*** ~/.authinfo example
-
-#+begin_src text
-machine 127.0.0.1 login root password secret port 3306
-#+end_src
-
-Connection entry without hardcoded password:
-
-#+begin_src emacs-lisp
-("dev-mysql" . (:backend mysql
-                :host "127.0.0.1" :port 3306
-                :user "root" :database "mydb"))
-#+end_src
-
-*** pass example — connection name as entry name (recommended)
-
-When =auth-source-pass= is loaded, clutch automatically looks up a pass
-entry whose path ends with the connection name.  The entry can live
-anywhere in the pass store — subdirectories are fine:
+- pass entries via =auth-source-pass=, matching the connection name suffix or
+  an explicit =:pass-entry=
+- standard =auth-source-search= by =:host=, =:user=, and =:port=
+- an interactive =read-passwd= prompt as the final fallback
 
 #+begin_src emacs-lisp
 (require 'auth-source-pass)
@@ -292,27 +259,16 @@ anywhere in the pass store — subdirectories are fine:
                          :user "alice" :database "mydb"))))
 #+end_src
 
-Store the password under any path that ends with the connection name:
-
 #+begin_src sh
 pass insert mysql/dev-mysql   ;; or just: pass insert dev-mysql
 #+end_src
-
-The pass store reveals only =mysql/dev-mysql= — no host or username.
-Use =:pass-entry "other-name"= to override the suffix when the entry
-name must differ from the connection name.
 
 For JDBC connections (including Org-Babel blocks), an explicit =:pass-entry=
 that resolves to no password now fails fast in Emacs instead of sending a null
 password to the driver.  If you use =pass=, make sure =auth-source-pass= is
 enabled first.
 
-*** Fallback: standard auth-source lookup
-
-If no pass entry matches the connection name, clutch falls back to
-standard =auth-source-search= by =:host=, =:user=, and =:port=.  This
-covers =~/.authinfo=, =~/.authinfo.gpg=, and pass entries named after
-the host.  See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][auth-source manual]] for details.
+See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][auth-source manual]] for supported credential stores.
 
 ** SSH Tunnels via ~/.ssh/config
 
@@ -325,63 +281,29 @@ For bastion-style access, add =:ssh-host= to a saved network connection:
                :ssh-host "bastion-prod"))
 #+end_src
 
-By default, clutch starts a local SSH tunnel with your normal OpenSSH setup and
-connects the database client through the forwarded local port automatically.
-The SSH authentication itself is expected to come from your existing
-=~/.ssh/config=, =ssh-agent=, host aliases, =ProxyJump=, and known_hosts.
+Clutch opens a local SSH forward through your normal OpenSSH configuration.
+Use =M-x clutch-prepare-ssh-host=, or =S= from =C-c ?=, when the first SSH use
+needs host-key confirmation or a key passphrase.  The batch tunnel itself uses
+non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure
+=AddKeysToAgent= when needed.
 
-When the same saved connection is shared between machines where the database
-endpoint is sometimes directly reachable, add =:ssh-tunnel direct-first=.
-Clutch then tries the direct route briefly and falls back to the SSH tunnel when
-the TCP endpoint is not reachable or the direct database connection fails.
-
-If the first connection still needs a key passphrase or host-key confirmation,
-run =M-x clutch-prepare-ssh-host= once for that host alias, or press =S= from
-the =C-c ?= transient menu.  That opens a normal interactive =ssh= session and
-leaves =clutch-connect= on the usual non-interactive path afterward.
-
-The batch tunnel does not prompt for SSH credentials.  If interactive =ssh HOST=
-succeeds but clutch still reports SSH authentication failure, make sure your
-OpenSSH setup can authenticate non-interactively too, for example via
-=ssh-agent= and =AddKeysToAgent=.
-
-This keeps the Emacs flow simple:
-
-- configure SSH once in OpenSSH
-- keep database passwords in =auth-source=
-- connect with the usual =M-x clutch-connect= or =M-x clutch-query-console=
-
-Current limitation: SSH tunneling is only wired up for structured
-=:host= / =:port= entries, so JDBC profiles that rely on a raw =:url= still
-need a manual tunnel for now.
+Add =:ssh-tunnel direct-first= when the same profile should try a direct
+connection before falling back to SSH.  SSH forwarding applies to structured
+=:host= / =:port= entries; raw JDBC =:url= profiles still need manual tunnels.
+Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** TRAMP-aware Connection Origin
 
 Opening a TRAMP buffer does not globally change clutch.  TRAMP is considered
-only when =clutch-connect= or =clutch-query-console= creates a connection, and
-the chosen origin is stored so reconnect, completion, refresh, and query
-execution keep using the same route.
-
-For a saved connection that should always use a remote-machine or container
-endpoint, configure =:tramp= explicitly.  The =:host= / =:port= pair is the
-database endpoint as seen from that TRAMP origin:
+only when a connection is created, and the chosen origin is stored for later
+reconnect, completion, refresh, and query execution.  Configure =:tramp= when a
+profile should always use a remote-machine or container endpoint:
 
 #+begin_src emacs-lisp
 ("remote-pg" . (:backend pg
                  :host "127.0.0.1" :port 55433
                  :user "app" :database "appdb"
                  :tramp "/ssh:devbox:/workspace/"))
-#+end_src
-
-For a dev container where the database is reachable from inside the container
-network, point =:tramp= at the container and keep =:host= / =:port= in the
-container's view:
-
-#+begin_src emacs-lisp
-("container-pg" . (:backend pg
-                   :host "db" :port 5432
-                   :user "app" :database "appdb"
-                   :tramp "/docker:vscode@app:/workspace/"))
 #+end_src
 
 Without =:ssh-host= or =:tramp=, commands invoked from a TRAMP buffer can infer
@@ -391,25 +313,8 @@ that buffer's remote context.  =clutch-tramp-context-policy= controls this:
 - =ask= (default): ask before using the current TRAMP context
 - =auto=: use the current TRAMP context without asking
 
-Supported and unsupported cases:
-
-- Supported TRAMP methods are ssh-like paths: =/ssh:=, =/scp:=, =/rsync:=, and
-  =/rpc:= when using tramp-rpc.  SSH-like hop chains are mapped to OpenSSH
-  =ProxyJump=.  Clutch uses the local OpenSSH client for these paths; it does
-  not require =nc=, =netcat=, or =socat= on the SSH host.
-- Container TRAMP methods =/docker:= and =/podman:= are supported through a
-  local TCP listener plus =docker exec= or =podman exec=.  OrbStack works through
-  its Docker-compatible =docker= CLI.
-- Container relays require =socat=, =nc=, =netcat=, or =bash= inside the
-  container that owns the TRAMP buffer.  SSH-hop container paths such as
-  =/ssh:devbox|podman:app:/workspace/= run the container runtime on the SSH
-  host.
-- A TRAMP buffer opened by typing a password does not automatically lend that
-  password to clutch.  SSH-like paths still need non-interactive OpenSSH auth or
-  a reusable ControlMaster.  When tramp-rpc has an active ControlMaster, clutch
-  can reuse its ControlPath for =/rpc:=.
-- Forwarding only applies to structured =:host= / =:port= entries.  SQLite is a
-  local file open, and raw JDBC =:url= profiles are not rewritten.
+Supported origin types, container relay requirements, and forwarding limits are
+documented in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** Working with SQL files
 
@@ -457,6 +362,8 @@ Common entry points:
 - =C-c C-c= executes the region or statement at point
 - Standard completion completes SQL identifiers at point, including empty
   column positions; =C-c TAB= invokes it explicitly
+- =M-.= jumps SQL aliases to their statement definition; object lookup uses
+  =C-c C-d= / =C-c C-j=
 - =C-c ?= opens the transient menu
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
@@ -468,13 +375,13 @@ Common entry points:
 
 ** JDBC Backend
 
-JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through the [[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]] sidecar.  For setup, driver installation, connection examples, Oracle notes, and transaction behavior, see [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
+JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through the [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] sidecar.  For setup, driver installation, connection examples, Oracle notes, and transaction behavior, see [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
 
 For the sidecar wire protocol and agent internals, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]].
 
 ** Org-Babel Integration
 
-Org-Babel integration lives in the separate [[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package and supports saved clutch connections plus MySQL, PostgreSQL, SQLite, and generic JDBC-backed =clutch= source blocks.  For setup, block examples, header arguments, and connection caching, see [[file:docs/org-babel.org][docs/org-babel.org]].
+Org-Babel integration lives in the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package and supports saved clutch connections plus MySQL, PostgreSQL, SQLite, and generic JDBC-backed =clutch= source blocks.  For setup, block examples, header arguments, and connection caching, see [[file:docs/org-babel.org][docs/org-babel.org]].
 
 ** Timeouts, Interrupts, and Customization
 
@@ -489,56 +396,27 @@ behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backe
 
 ** Unit tests (no server required)
 
-=test/clutch-test.el= — UI layer, covering value formatting and cell rendering,
-column width and single-page result layout, insert and edit buffer workflow
-(TAB navigation, local validation, JSON sub-editor, enum/temporal completion),
-staged-commit lifecycle (row-identity based edit/insert/delete, discard, commit
-ordering), object workflow and schema refresh state, SQL keyword completion
-(CAPF), and REPL behavior.
-
-=test/clutch-db-test.el= — database backend layer, covering JDBC
-connection and timeout mapping, query-timeout clamping, transaction
-(commit/rollback/autocommit toggle), schema refresh, cursor pagination, driver
-installation (Oracle, SQL Server, Redshift, DuckDB), agent JAR validation and lifecycle,
-=clutch-db-live-p= identity check, row identity candidates, RPC timeout kill,
-native backend adapter mapping (mysql / pg / sqlite), and cross-backend value
-formatting and null handling.
-
-The pure protocol packages ([[https://github.com/LuciusChen/mysql.el][=mysql=]] and [[https://github.com/emarsden/pg-el][=pg=]]) and the
-Org-Babel bridge ([[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]]) now live in separate repositories and carry
-their own focused test suites.
-
-Default ERT runs intentionally skip live tests when database credentials are not
-set.  Treat those runs as unit/regression coverage, not as proof that real
-database workflows still work.  Test commands use =load-prefer-newer= so stale
-=.elc= files cannot mask source changes during local verification.
-
 The non-live CI gate used by GitHub Actions can be run locally:
 
 #+begin_src sh
 ./test/run-ci.sh all
 #+end_src
 
-** Native live tests
+Default ERT runs intentionally skip live tests when database credentials are not
+set.  Treat those runs as unit/regression coverage, not proof that real
+database workflows still work.  External protocol packages and the Org-Babel
+bridge live in separate repositories and carry their own focused test suites.
 
-=test/run-native-live-tests.sh= runs the MySQL and PostgreSQL live suites against
-local containers.  On Linux it prefers Podman when available; on macOS it
-requires OrbStack-backed Docker unless explicitly overridden.  It covers both
-the UI-level result workflows and backend-level native adapter tests:
+** Native live tests
 
 #+begin_src sh
 ./test/run-ci.sh native-live
 #+end_src
 
-The live runner validates real SELECT execution, pagination/sort/filter/count,
-export collection, object describe metadata, staged insert/update/delete commit,
-aggregate SELECT row-identity behavior, PostgreSQL =ctid= row locators, and MySQL
-index-detail scoping.  It stubs only Emacs UI boundaries such as display-buffer
-selection and confirmation prompts; query execution, metadata, staging SQL, and
-commit paths run against the live databases.  JDBC live suites for Oracle, SQL
-Server, ClickHouse, and DuckDB remain environment-driven and are skipped by default.
-
-See =AGENTS.md= §Pre-Commit Checklist for exact unit and live test commands.
+The native live runner starts or reuses local containers and covers MySQL and
+PostgreSQL UI/backend workflows against real databases.  JDBC live suites remain
+environment-driven and are skipped by default.  Contributor release gates are
+listed in =AGENTS.md= §Pre-Commit Checklist.
 
 * Roadmap
 

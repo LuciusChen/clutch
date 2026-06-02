@@ -4,7 +4,7 @@
 
 =clutch-db-jdbc.el= adds support for databases that have no pure Elisp wire
 protocol implementation.  It delegates JDBC work to
-[[https://github.com/LuciusChen/clutch-jdbc-agent][=clutch-jdbc-agent=]], a small JVM sidecar.  Java 17+ is required.
+[[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], a small JVM sidecar.  Java 17+ is required.
 
 For the wire protocol, RPC inventory, runtime session model, and startup/error
 semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].

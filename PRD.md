@@ -182,11 +182,13 @@ by `clutch--connection-key`: `clutch--schema-cache`,
 | `TAB` / `<tab>` | `clutch-complete-qualified-or-indent` | Complete columns after a table/alias dot, otherwise indent |
 | `C-c ?` | Transient dispatch | Main command menu |
 
-`clutch-mode` installs a buffer-local xref backend and CAPF pipeline.  `M-.`
-uses the xref backend, regular completion remains available through normal CAPF
-commands such as `M-TAB`, `C-c TAB` invokes clutch's manual SQL identifier
-completion, and `TAB` is explicitly limited to qualifier-dot column completion
-with indentation as the fallback.
+`clutch-mode` installs a buffer-local xref backend and CAPF pipeline.  `M-.` is
+SQL alias navigation, not object lookup: it jumps aliases and alias-qualified
+columns to their current-statement alias definition, while schema-qualified
+table objects stay on `C-c C-j` / `C-c C-d`.  Regular completion remains
+available through normal CAPF commands such as `M-TAB`, `C-c TAB` invokes
+clutch's manual SQL identifier completion, and `TAB` is explicitly limited to
+qualifier-dot column completion with indentation as the fallback.
 
 ---
 
@@ -909,56 +911,21 @@ Field names are read-only (`font-lock-face clutch-insert-field-name-face`, `read
 
 ## 14. Org-Babel Integration
 
-### Supported Block Types
+Org-Babel support lives in the separate `ob-clutch` package.  The product
+contract is:
 
-```org
-#+begin_src mysql
-  SELECT * FROM users LIMIT 10;
-#+end_src
+- named MySQL/PostgreSQL/SQLite blocks and the generic `clutch` block are
+  implemented by `ob-clutch`, not the main `clutch` package
+- saved `clutch-connection-alist` profiles supply backend and connection
+  parameters when a block uses `:connection`
+- inline JDBC blocks use the generic `clutch` block with an explicit `:backend`
+- block execution reuses cached live connections within the Emacs session and
+  disconnects them on exit
+- SELECT-like results render as Org tables; DML and errors render as textual
+  result values
 
-#+begin_src postgresql
-  SELECT COUNT(*) FROM events;
-#+end_src
-
-#+begin_src sqlite
-  SELECT name FROM sqlite_master WHERE type='table';
-#+end_src
-
-#+begin_src clutch :backend oracle
-  SELECT * FROM USER_TABLES;
-#+end_src
-
-#+begin_src clutch :backend snowflake
-  SELECT CURRENT_DATABASE(), CURRENT_WAREHOUSE();
-#+end_src
-```
-
-### Header Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `:connection NAME` | Use named profile from `clutch-connection-alist`; this supplies the backend when using a saved connection |
-| `:backend SYM` | Backend: `mysql`, `pg`, `postgresql`, `sqlite`, `jdbc`, `oracle`, `sqlserver`, `clickhouse`, `snowflake`, `redshift`, `db2`; required for inline params when `:connection` is absent |
-| `:host HOST` | Database host (inline, without `:connection`) |
-| `:port PORT` | Database port |
-| `:user USER` | Database user |
-| `:password PASS` | Password (not recommended; prefer `:pass-entry`) |
-| `:database DB` | Database/schema name |
-| `:pass-entry ENTRY` | Pass store entry for password resolution |
-| `:results table` | Output format (`table` is default) |
-
-### Connection Caching
-
-Connections are cached in `ob-clutch--connection-cache` (hash-table keyed by `backend:params`):
-- Reused across multiple blocks in the same session
-- Liveness checked via `clutch-db-live-p` before reuse
-- All connections disconnected on `kill-emacs-hook`
-
-### Result Format
-
-- **SELECT**: Org table with header row and `hline` separator
-- **DML**: `"Affected rows: N"` string
-- **Error**: error message as string
+User-facing setup, examples, header arguments, and caching details are in
+`docs/org-babel.org`.
 
 ---
 
@@ -1056,75 +1023,23 @@ responsibility:
 
 ## 17. JDBC Agent Protocol
 
-### Overview
+The JDBC backend delegates driver work to `clutch-jdbc-agent.jar`.  The product
+contract is:
 
-The JDBC agent (`clutch-jdbc-agent.jar`) is a JVM sidecar process communicating
-via stdin/stdout with one JSON object per line.  A single logical clutch JDBC
-connection owns separate foreground and metadata JDBC sessions so background
-introspection does not contend with user SQL.
+- the Elisp side and JVM sidecar communicate over stdin/stdout using one JSON
+  object per line
+- each logical clutch JDBC connection owns separate foreground and metadata JDBC
+  sessions
+- foreground SQL, transactions, and DDL use the primary session; schema/object
+  introspection uses the metadata session
+- cancellation remains recoverable for foreground statements
+- errors return structured diagnostics with redacted context, and verbose debug
+  payloads are opt-in
+- driver jars are loaded from the agent `drivers/` directory or installed
+  through clutch's curated driver installer
 
-### Request Format
-
-```json
-{"id":1,"op":"execute","params":{"conn-id":0,"sql":"SELECT 1"}}
-```
-
-### Response Format
-
-```json
-{"id":1,"ok":true,"result":{"cursor-id":0}}
-{"id": 1, "ok": false, "error": "Unknown connection id: 5"}
-```
-
-### Supported Operations
-
-| Op | Description |
-|----|-------------|
-| `connect` | Open JDBC connection (`auto-commit` optional), returns `conn-id` |
-| `disconnect` | Close a connection |
-| `commit` | Commit the current transaction on a connection |
-| `rollback` | Roll back the current transaction on a connection |
-| `set-auto-commit` | Toggle JDBC auto-commit |
-| `set-current-schema` | Update the effective schema/database for both JDBC sessions |
-| `cancel` | Cancel the currently running statement for a connection |
-| `execute` | Execute SQL, returns `cursor-id` for SELECT |
-| `fetch` | Fetch next batch from cursor, returns `rows`, `columns`, `done` |
-| `get-schemas` | List available schemas/databases |
-| `get-tables` | List schema/browser tables |
-| `search-tables` | Prefix search for table/object entries |
-| `get-columns` | List columns for table |
-| `search-columns` | Prefix search for columns |
-| `get-primary-keys` | List primary keys |
-| `get-foreign-keys` | List foreign keys |
-| `get-indexes` / `get-index-columns` | Index metadata, including unique indexes used for row identity |
-| `get-sequences` / `get-procedures` / `get-functions` / `get-triggers` | Non-table object discovery |
-| `get-procedure-params` / `get-function-params` | Routine parameter metadata |
-| `get-object-source` / `get-object-ddl` | Source or DDL text |
-| `get-referencing-objects` | Objects referencing a target table/object |
-
-### Type Conversion (Java → JSON)
-
-| Java Type | JSON Representation |
-|-----------|---------------------|
-| `null` | `null` |
-| `Boolean` | `true` / `false` |
-| `Integer`, `Long`, `Short`, `Byte` | number |
-| `Double`, `Float` | number (NaN/Infinity → string) |
-| `BigDecimal` | string (via `toPlainString()`) |
-| `Timestamp` | ISO-8601 string |
-| `Date` | ISO-8601 date string |
-| `Time` | ISO-8601 time string |
-| `Clob` | `{"__type":"clob","length":N,"preview":"..."}` (first 256 chars) |
-| `Blob`, `byte[]` | `{"__type":"blob","length":N}` |
-| Other | `rs.getString(col)` fallback |
-
-### Driver Loading
-
-1. Scan `drivers/` directory next to jar
-2. `URLClassLoader` + `ServiceLoader<java.sql.Driver>` to discover drivers
-3. Wrap in `DriverShim` (required for `DriverManager` acceptance from external classloader)
-4. Register via `DriverManager.registerDriver()`
-5. Log loaded driver class names to stderr
+The wire format, operation inventory, type conversion rules, and Java-side
+runtime model are documented in `docs/jdbc-agent-protocol.md`.
 
 ---
 

@@ -3,7 +3,7 @@
 * Org-Babel Integration
 
 Execute SQL directly in org files via the separate
-[[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package.  It
+[[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.  It
 bridges clutch connections into Org-Babel block types for MySQL, PostgreSQL,
 SQLite, and the generic =clutch= backend used for JDBC databases.
 
@@ -66,7 +66,7 @@ Generic form with explicit backend — required for JDBC databases:
 : #+end_src
 
 Compatibility entry files live in the
-[[https://github.com/LuciusChen/ob-clutch][=ob-clutch=]] package:
+[[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package:
 - =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= — thin language entry points for the named block types.
 - =ob-clutch.el= — core execution logic; also registers the generic =clutch= block type.
 

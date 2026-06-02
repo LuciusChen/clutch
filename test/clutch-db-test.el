@@ -745,13 +745,13 @@ connection as live and not busy."
                              (:name "TYPE" :type "VARCHAR2" :nullable :json-false)
                              (:name "ACTION" :type "VARCHAR2" :nullable :json-false)
                              (:name "mixedCase" :type "VARCHAR2" :nullable :json-false))))))
-      (let ((ddl (clutch-db-show-create-table conn "ZJ_NCBUSINESSDATA")))
-        (should (string-match-p "CREATE TABLE ZJ_NCBUSINESSDATA" ddl))
+      (let ((ddl (clutch-db-show-create-table conn "APP_EVENT_DATA")))
+        (should (string-match-p "CREATE TABLE APP_EVENT_DATA" ddl))
         (should (string-match-p "PK_MAIN CHAR" ddl))
         (should (string-match-p "\"TYPE\" VARCHAR2" ddl))
         (should (string-match-p "\"ACTION\" VARCHAR2" ddl))
         (should (string-match-p "\"mixedCase\" VARCHAR2" ddl))
-        (should-not (string-match-p "\"ZJ_NCBUSINESSDATA\"" ddl))
+        (should-not (string-match-p "\"APP_EVENT_DATA\"" ddl))
         (should-not (string-match-p "\"PK_MAIN\"" ddl))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-row-identity-falls-back-to-rowid ()
@@ -1488,13 +1488,13 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-jdbc-conn-schema-oracle-defaults-to-user ()
   "Oracle with no explicit :schema returns the uppercased :user as the schema."
   (let ((conn (make-clutch-jdbc-conn
-               :params '(:driver oracle :user "zjsy"))))
-    (should (equal (clutch-jdbc--conn-schema conn) "ZJSY"))))
+               :params '(:driver oracle :user "app_user"))))
+    (should (equal (clutch-jdbc--conn-schema conn) "APP_USER"))))
 
 (ert-deftest clutch-db-test-jdbc-conn-schema-explicit-overrides-default ()
   "An explicit :schema is returned as-is, even for Oracle."
   (let ((conn (make-clutch-jdbc-conn
-               :params '(:driver oracle :user "zjsy" :schema "REPORTING"))))
+               :params '(:driver oracle :user "app_user" :schema "REPORTING"))))
     (should (equal (clutch-jdbc--conn-schema conn) "REPORTING"))))
 
 (ert-deftest clutch-db-test-jdbc-conn-schema-non-oracle-returns-nil ()
@@ -1507,32 +1507,32 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "Oracle JDBC schema listing should filter common system schemas."
   (let ((conn (make-clutch-jdbc-conn
                :conn-id 7
-               :params '(:driver oracle :user "zjsy" :rpc-timeout 9))))
+               :params '(:driver oracle :user "app_user" :rpc-timeout 9))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
                (lambda (_op _params &optional _timeout-seconds)
-                 '(:schemas ("SYS" "SYSTEM" "ZJSY" "CJH_TEST" "ZJ_TEST")))))
+                 '(:schemas ("SYS" "SYSTEM" "APP_USER" "ANALYTICS" "SALES")))))
       (should (equal (clutch-db-list-schemas conn)
-                     '("ZJSY" "CJH_TEST" "ZJ_TEST"))))))
+                     '("APP_USER" "ANALYTICS" "SALES"))))))
 
 (ert-deftest clutch-db-test-jdbc-set-current-schema-updates-params ()
   "Oracle JDBC schema switching should update both JDBC sessions and persist :schema."
   (let ((conn (make-clutch-jdbc-conn
                :conn-id 7
-               :params '(:driver oracle :user "zjsy" :rpc-timeout 9)))
+               :params '(:driver oracle :user "app_user" :rpc-timeout 9)))
         captured-op captured-params captured-timeout)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
                (lambda (op params &optional timeout-seconds)
                  (setq captured-op op
                        captured-params params
                        captured-timeout timeout-seconds)
-                 '(:conn-id 7 :schema "CJH_TEST"))))
-      (should (equal (clutch-db-set-current-schema conn "cjh_test") "CJH_TEST"))
+                 '(:conn-id 7 :schema "ANALYTICS"))))
+      (should (equal (clutch-db-set-current-schema conn "analytics") "ANALYTICS"))
       (should (equal captured-op "set-current-schema"))
       (should (= (alist-get 'conn-id captured-params) 7))
-      (should (equal (alist-get 'schema captured-params) "CJH_TEST"))
+      (should (equal (alist-get 'schema captured-params) "ANALYTICS"))
       (should (= captured-timeout 9))
       (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
-                     "CJH_TEST")))))
+                     "ANALYTICS")))))
 
 (ert-deftest clutch-db-test-jdbc-set-current-schema-rejects-generic-driver ()
   "Generic JDBC connections should keep schema switching unsupported."
@@ -1545,15 +1545,15 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
   "MySQL schema switching should execute USE and update the connection database."
-  (let ((conn (make-mysql-conn :database "zj_test"))
+  (let ((conn (make-mysql-conn :database "sales"))
         executed-sql)
     (cl-letf (((symbol-function 'mysql-query)
                (lambda (_conn sql)
                  (setq executed-sql sql)
                  (make-mysql-result :connection conn :affected-rows 0))))
-      (should (equal (clutch-db-set-current-schema conn "cjh_test") "cjh_test"))
-      (should (equal executed-sql "USE `cjh_test`"))
-      (should (equal (mysql-current-database conn) "cjh_test")))))
+      (should (equal (clutch-db-set-current-schema conn "analytics") "analytics"))
+      (should (equal executed-sql "USE `analytics`"))
+      (should (equal (mysql-current-database conn) "analytics")))))
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
