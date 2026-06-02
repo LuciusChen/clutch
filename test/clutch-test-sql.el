@@ -715,12 +715,24 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
              result))
     (should-not (string-match-p ";\\s-*) AS _clutch_filter" result))))
 
-(ert-deftest clutch-test-apply-where-preserves-top-level-order-by ()
-  "WHERE rewrite should preserve the user's visible result ordering."
+(ert-deftest clutch-test-apply-where-strips-unbounded-top-level-order-by ()
+  "WHERE rewrite should not wrap unbounded top-level ORDER BY."
   (let* ((sql "SELECT id, name FROM users ORDER BY created_at DESC")
          (result (clutch-db-apply-where 'fake-conn sql "id > 10")))
     (should (equal result
-                   "SELECT * FROM (SELECT id, name FROM users ORDER BY created_at DESC) AS _clutch_filter WHERE id > 10"))))
+                   "SELECT * FROM (SELECT id, name FROM users) AS _clutch_filter WHERE id > 10"))))
+
+(ert-deftest clutch-test-count-filtered-ordered-query-strips-inner-order-by ()
+  "COUNT over filtered SQL should not keep an invalid inner ORDER BY."
+  (let* ((filtered (clutch-db-apply-where
+                    'fake-conn
+                    "SELECT id, name FROM users ORDER BY created_at DESC"
+                    "id > 10"))
+         (result (clutch-db-build-count-sql 'fake-conn filtered)))
+    (should (string-prefix-p
+             "SELECT COUNT(*) FROM (SELECT * FROM (SELECT id, name FROM users)"
+             result))
+    (should-not (string-match-p "ORDER BY created_at" result))))
 
 (ert-deftest clutch-test-apply-where-preserves-limited-result-set ()
   "WHERE rewrite should preserve LIMIT/OFFSET result-set boundaries."

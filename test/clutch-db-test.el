@@ -68,6 +68,8 @@
 (defvar clutch-db-mysql--connection-params)
 (defvar clutch-db-mysql-cancel-timeout-seconds)
 (defvar clutch-db-pg--oid-bool)
+(defvar clutch-db-test--live-name-counter 0
+  "Counter used to generate isolated live database object names.")
 (declare-function clutch-db-mysql--type-category "clutch-db-mysql" (type character-set))
 (declare-function clutch-db-mysql--convert-columns "clutch-db-mysql" (columns))
 (declare-function clutch-db-mysql-connect "clutch-db-mysql" (params))
@@ -135,6 +137,13 @@
                 'user (plist-get params :user)
                 'password (plist-get params :password)))
     conn))
+
+(defun clutch-db-test--live-name (prefix)
+  "Return an isolated live database object name using PREFIX."
+  (format "%s_%d_%d"
+          prefix
+          (emacs-pid)
+          (cl-incf clutch-db-test--live-name-counter)))
 
 (defmacro clutch-db-test--with-local-mysql-tls (&rest body)
   "Run BODY with MySQL TLS verification disabled for local self-signed certs."
@@ -2642,26 +2651,26 @@ Skips if `clutch-db-test-pg-password' is nil."
   :tags '(:db-live :pg-live)
   "Test PostgreSQL schema introspection."
   (clutch-db-test--with-pg conn
-    ;; Create a test table for schema tests
-    (clutch-db-query conn
-     "CREATE TEMPORARY TABLE _schema_test (id SERIAL PRIMARY KEY, name TEXT)")
-    ;; list-tables (temporary tables not in pg_tables, so just check it runs)
-    (let ((tables (clutch-db-list-tables conn)))
-      (should (listp tables)))
-    ;; Create a real table for column/DDL tests
-    (clutch-db-query conn
-     "CREATE TABLE IF NOT EXISTS _schema_real (id SERIAL PRIMARY KEY, name TEXT)")
-    ;; list-columns
-    (let ((columns (clutch-db-list-columns conn "_schema_real")))
-      (should (listp columns))
-      (should (member "id" columns))
-      (should (member "name" columns)))
-    ;; show-create-table (synthesized DDL)
-    (let ((ddl (clutch-db-show-create-table conn "_schema_real")))
-      (should (stringp ddl))
-      (should (string-match-p "CREATE TABLE" ddl)))
-    ;; Cleanup
-    (clutch-db-query conn "DROP TABLE IF EXISTS _schema_real")))
+    (let* ((table (clutch-db-test--live-name "clutch_schema"))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (id SERIAL PRIMARY KEY, name TEXT)"
+                     table))
+            (let ((tables (clutch-db-list-tables conn)))
+              (should (listp tables))
+              (should (member table tables)))
+            (let ((columns (clutch-db-list-columns conn table)))
+              (should (listp columns))
+              (should (member "id" columns))
+              (should (member "name" columns)))
+            (let ((ddl (clutch-db-show-create-table conn table)))
+              (should (stringp ddl))
+              (should (string-match-p "CREATE TABLE" ddl))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()
   :tags '(:db-live :pg-live)
@@ -2807,19 +2816,12 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
 (ert-deftest clutch-db-test-jdbc-oracle-live-manual-commit ()
   :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC commit RPC should persist DML."
-  (if (null clutch-db-test-jdbc-oracle-password)
-      (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
-    (require 'clutch-db-jdbc)
-    (let ((conn (clutch-db-connect
-                 'oracle
-                 (list :host clutch-db-test-jdbc-oracle-host
-                       :port clutch-db-test-jdbc-oracle-port
-                       :user clutch-db-test-jdbc-oracle-user
-                       :password clutch-db-test-jdbc-oracle-password
-                       :database clutch-db-test-jdbc-oracle-service)))
-          (tbl (format "CC_TEST_%d" (abs (random 9999)))))
+  (clutch-db-test--with-oracle conn
+    (let* ((tbl (clutch-db-test--live-name "CC_TEST"))
+           (drop-sql (format "DROP TABLE %s" tbl)))
       (unwind-protect
           (progn
+            (ignore-errors (clutch-db-query conn drop-sql))
             (should (clutch-db-manual-commit-p conn))
             (clutch-db-query conn (format "CREATE TABLE %s (id NUMBER)" tbl))
             ;; DDL auto-commits in Oracle; subsequent DML starts a new tx.
@@ -2828,33 +2830,24 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
             (let ((result (clutch-db-query
                            conn (format "SELECT COUNT(*) FROM %s" tbl))))
               (should (equal (caar (clutch-db-result-rows result)) "1"))))
-        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" tbl)))
-        (clutch-db-disconnect conn)))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-rollback ()
   :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC rollback RPC should discard uncommitted DML."
-  (if (null clutch-db-test-jdbc-oracle-password)
-      (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
-    (require 'clutch-db-jdbc)
-    (let ((conn (clutch-db-connect
-                 'oracle
-                 (list :host clutch-db-test-jdbc-oracle-host
-                       :port clutch-db-test-jdbc-oracle-port
-                       :user clutch-db-test-jdbc-oracle-user
-                       :password clutch-db-test-jdbc-oracle-password
-                       :database clutch-db-test-jdbc-oracle-service)))
-          (tbl (format "CC_RB_%d" (abs (random 9999)))))
+  (clutch-db-test--with-oracle conn
+    (let* ((tbl (clutch-db-test--live-name "CC_RB"))
+           (drop-sql (format "DROP TABLE %s" tbl)))
       (unwind-protect
           (progn
+            (ignore-errors (clutch-db-query conn drop-sql))
             (clutch-db-query conn (format "CREATE TABLE %s (id NUMBER)" tbl))
             (clutch-db-query conn (format "INSERT INTO %s VALUES (1)" tbl))
             (clutch-db-rollback conn)
             (let ((result (clutch-db-query
                            conn (format "SELECT COUNT(*) FROM %s" tbl))))
               (should (equal (caar (clutch-db-result-rows result)) "0"))))
-        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" tbl)))
-        (clutch-db-disconnect conn)))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-toggle-auto-commit ()
   :tags '(:db-live :jdbc-live :oracle-live)
@@ -2873,9 +2866,11 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC schema introspection should list tables and columns."
   (clutch-db-test--with-oracle conn
-    (let ((tbl (format "CC_SCHEMA_%d" (abs (random 9999)))))
+    (let* ((tbl (clutch-db-test--live-name "CC_SCHEMA"))
+           (drop-sql (format "DROP TABLE %s" tbl)))
       (unwind-protect
           (progn
+            (ignore-errors (clutch-db-query conn drop-sql))
             (clutch-db-query conn
              (format "CREATE TABLE %s (id NUMBER PRIMARY KEY, name VARCHAR2(64))" tbl))
             (let ((tables (clutch-db-list-tables conn)))
@@ -2884,17 +2879,18 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
               (should (member "ID" cols))
               (should (member "NAME" cols))))
         (ignore-errors
-          (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+          (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-uses-unique-not-null ()
   :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC should use a non-null unique key when no primary key exists."
   (clutch-db-test--with-oracle conn
-    (let* ((suffix (abs (random 9999)))
-           (tbl (format "CC_UID_%d" suffix))
-           (idx (format "CC_UID_UQ_%d" suffix)))
+    (let* ((tbl (clutch-db-test--live-name "CC_UID"))
+           (idx (clutch-db-test--live-name "CC_UID_UQ"))
+           (drop-sql (format "DROP TABLE %s" tbl)))
       (unwind-protect
           (progn
+            (ignore-errors (clutch-db-query conn drop-sql))
             (clutch-db-query
              conn
              (format "CREATE TABLE %s (code VARCHAR2(32) NOT NULL, name VARCHAR2(64), CONSTRAINT %s UNIQUE (code))"
@@ -2905,15 +2901,17 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
               (should (equal (plist-get candidate :name) idx))
               (should (equal (plist-get candidate :columns) '("CODE")))))
         (ignore-errors
-          (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+          (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-falls-back-to-rowid ()
   :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC should use ROWID to update a table without a logical key."
   (clutch-db-test--with-oracle conn
-    (let ((tbl (format "CC_ROWID_%d" (abs (random 9999)))))
+    (let* ((tbl (clutch-db-test--live-name "CC_ROWID"))
+           (drop-sql (format "DROP TABLE %s" tbl)))
       (unwind-protect
           (progn
+            (ignore-errors (clutch-db-query conn drop-sql))
             (clutch-db-query conn
                              (format "CREATE TABLE %s (name VARCHAR2(64))"
                                      tbl))
@@ -2947,7 +2945,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
                                        tbl rowid)))
                              '(("after"))))))
         (ignore-errors
-          (clutch-db-query conn (format "DROP TABLE %s" tbl)))))))
+          (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-cancel-keeps-connection-usable ()
   :tags '(:db-live :jdbc-live :oracle-live)
@@ -2980,7 +2978,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   :tags '(:db-live :jdbc-live :oracle-live)
   "Wire-level Oracle JDBC errors should return structured diagnostics."
   (clutch-db-test--with-oracle conn
-    (let* ((token (format "definitely_missing_%d" (abs (random 999999))))
+    (let* ((token (clutch-db-test--live-name "definitely_missing"))
            (request-id
             (clutch-jdbc--send
              "execute"
@@ -3008,7 +3006,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   "Wire-level Oracle JDBC errors should carry opt-in backend debug payloads."
   (let ((clutch-debug-mode t))
     (clutch-db-test--with-oracle conn
-      (let* ((token (format "definitely_missing_%d" (abs (random 999999))))
+      (let* ((token (clutch-db-test--live-name "definitely_missing"))
              (request-id
               (clutch-jdbc--send
                "execute"
@@ -3034,7 +3032,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   "High-level Oracle JDBC query errors should stay on the current connection."
   (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
     (clutch-db-test--with-oracle conn
-      (let ((token (format "definitely_missing_%d" (abs (random 999999)))))
+      (let ((token (clutch-db-test--live-name "definitely_missing")))
         (condition-case err
             (progn
               (clutch-db-query conn (format "SELECT %s FROM DUAL" token))
@@ -3058,7 +3056,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   (let ((clutch-debug-mode t)
         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
     (clutch-db-test--with-oracle conn
-      (let ((token (format "definitely_missing_%d" (abs (random 999999)))))
+      (let ((token (clutch-db-test--live-name "definitely_missing")))
         (condition-case err
             (progn
               (clutch-db-query conn (format "SELECT %s FROM DUAL" token))
@@ -3076,7 +3074,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   :tags '(:db-live :jdbc-live :oracle-live)
   "Wire-level Oracle schema-switch failures should expose generated SQL."
   (clutch-db-test--with-oracle conn
-    (let* ((token (format "MISSING_SCHEMA_%d" (abs (random 999999))))
+    (let* ((token (clutch-db-test--live-name "MISSING_SCHEMA"))
            (request-id
             (clutch-jdbc--send
              "set-current-schema"
@@ -3105,7 +3103,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   "High-level Oracle schema-switch failures should stay on the current connection."
   (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
     (clutch-db-test--with-oracle conn
-      (let ((token (format "MISSING_SCHEMA_%d" (abs (random 999999)))))
+      (let ((token (clutch-db-test--live-name "MISSING_SCHEMA")))
         (condition-case err
             (progn
               (clutch-db-set-current-schema conn token)
@@ -3139,9 +3137,9 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
                          :user clutch-db-test-jdbc-oracle-user
                          :password clutch-db-test-jdbc-oracle-password
                          :database clutch-db-test-jdbc-oracle-service)))
-           (user (format "CCLP_%d" (abs (random 999999))))
+           (user (clutch-db-test--live-name "CCLP"))
            (password "CcLowpriv123")
-           (table-name "CC_LOWPRIV_TABLE"))
+           (table-name (clutch-db-test--live-name "CC_LOWPRIV_TABLE")))
       (unwind-protect
           (progn
             (clutch-db-query
@@ -3197,7 +3195,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   :tags '(:db-live :jdbc-live :mssql-live)
   "SQL Server JDBC should handle real result workflows."
   (clutch-db-test--with-mssql conn
-    (let* ((tbl (format "cc_mssql_flow_%d" (abs (random 9999))))
+    (let* ((tbl (clutch-db-test--live-name "cc_mssql_flow"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
            (base-sql (format "SELECT id, name, score FROM %s ORDER BY id" tbl)))
       (unwind-protect
@@ -3263,7 +3261,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   :tags '(:db-live :jdbc-live :clickhouse-live)
   "ClickHouse JDBC should handle real result workflows."
   (clutch-db-test--with-clickhouse conn
-    (let* ((tbl (format "cc_ch_flow_%d" (abs (random 9999))))
+    (let* ((tbl (clutch-db-test--live-name "cc_ch_flow"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
            (base-sql (format "SELECT id, name, score FROM %s ORDER BY id" tbl)))
       (unwind-protect
@@ -3306,7 +3304,7 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
   :tags '(:db-live :jdbc-live :clickhouse-live)
   "ClickHouse JDBC schema introspection should return user table entries."
   (clutch-db-test--with-clickhouse conn
-    (let* ((tbl (format "cc_ch_schema_%d" (abs (random 9999))))
+    (let* ((tbl (clutch-db-test--live-name "cc_ch_schema"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" tbl)))
       (unwind-protect
           (progn

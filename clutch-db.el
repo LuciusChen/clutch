@@ -711,19 +711,22 @@ Leaves nested ORDER BY clauses inside subqueries or window functions intact."
 
 (defun clutch-db-sql-derived-table-body (sql)
   "Return SQL normalized for derived-table wrapping.
-This preserves user-visible query semantics such as top-level ORDER BY."
-  (clutch-db-sql-normalize sql))
+Top-level ORDER BY is removed when there is no top-level LIMIT/OFFSET because
+it is invalid inside derived tables on some dialects and cannot change the
+derived row set.  Limited result sets keep their tail clauses so wrapping
+targets the user's visible result set."
+  (let ((normalized (clutch-db-sql-normalize sql)))
+    (if (or (clutch-db-sql-has-top-level-limit-p normalized)
+            (clutch-db-sql-has-top-level-offset-p normalized))
+        normalized
+      (clutch-db-sql-strip-top-level-order-by normalized))))
 
 (defun clutch-db-sql-count-derived-table-body (sql)
   "Return SQL normalized for COUNT(*) derived-table wrapping.
 Top-level ORDER BY is removed when there is no top-level LIMIT/OFFSET because
 it cannot affect the row count.  Limited result sets keep their tail clauses so
 counts target the user's visible result set."
-  (let ((normalized (clutch-db-sql-normalize sql)))
-    (if (or (clutch-db-sql-has-top-level-limit-p normalized)
-            (clutch-db-sql-has-top-level-offset-p normalized))
-        normalized
-      (clutch-db-sql-strip-top-level-order-by normalized))))
+  (clutch-db-sql-derived-table-body sql))
 
 (defun clutch-db-build-count-sql (conn sql)
   "Return a COUNT(*) query for SQL using CONN's derived-table syntax."
