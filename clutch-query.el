@@ -77,6 +77,7 @@
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--saved-connection-params "clutch-connection" (name))
 (declare-function clutch--read-manual-connection-params "clutch-connection" (&optional sqlite-file))
+(declare-function clutch--read-saved-connection-choice "clutch-connection" (prompt names))
 (declare-function clutch--read-sqlite-file-params "clutch-connection" ())
 (declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
@@ -302,16 +303,7 @@ console window; (3) nil, meaning use the selected window."
 
 (defun clutch--read-query-console-choice (names)
   "Read a query console choice from NAMES; no match means new."
-  (let ((read-choice
-         (lambda ()
-           (let ((completion-extra-properties
-                  '(:affixation-function clutch--connection-candidates-affixation)))
-             (completing-read "Console: "
-                              names nil nil nil nil "")))))
-    (if (boundp 'vertico-preselect)
-        (cl-progv '(vertico-preselect) '(prompt)
-          (funcall read-choice))
-      (funcall read-choice))))
+  (clutch--read-saved-connection-choice "Console: " names))
 
 (defun clutch--read-query-console-target ()
   "Read a saved connection name or an ad hoc connection target."

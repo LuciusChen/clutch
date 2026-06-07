@@ -6068,6 +6068,41 @@ crashing the UI layer."
             (should (equal (funcall reader) expected))
             (should required)))))))
 
+(ert-deftest clutch-test-read-connection-params-no-match-prompts-manual-when-saved ()
+  "No-match connect choices should collect temporary connection params."
+  (dolist (choice '("" "new-sqlite"))
+    (ert-info ((format "choice %S" choice))
+      (let ((clutch-connection-alist
+             '(("alpha" . (:backend mysql :database "app_a"))))
+            connection-candidates
+            connection-require-match
+            connection-default
+            backend-require-match)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &optional _predicate require-match
+                                   _initial-input _hist def _inherit)
+                     (pcase prompt
+                       ("Connection: "
+                        (setq connection-candidates collection
+                              connection-require-match require-match
+                              connection-default def)
+                        choice)
+                       ("Backend: "
+                        (setq backend-require-match require-match)
+                        "sqlite")
+                       (_ (error "Unexpected prompt: %s" prompt)))))
+                  ((symbol-function 'read-string)
+                   (lambda (prompt &optional _initial _history default-value _inherit)
+                     (pcase prompt
+                       ("Database (:memory:): " (or default-value ""))
+                       (_ (error "Unexpected prompt: %s" prompt))))))
+          (should (equal (clutch--read-connection-params)
+                         '(:backend sqlite :database ":memory:")))
+          (should (equal connection-candidates '("alpha")))
+          (should-not connection-require-match)
+          (should (equal connection-default ""))
+          (should backend-require-match))))))
+
 (ert-deftest clutch-test-read-connection-params-prompts-for-backend-when-unsaved ()
   "Manual connection prompts should collect an explicit backend first."
   (let ((clutch-connection-alist nil)

@@ -384,8 +384,9 @@ a different saved or temporary connection, call =clutch-query-console= again;
 press RET with no matching connection to create another temporary connection.
 
 In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps the generic connect
-picker.  For SQLite files, use the query-console path instead of opening the
-database file itself as an editor buffer.
+picker: select a saved connection, or press RET with no matching connection to
+enter temporary params.  For SQLite files, use the query-console path instead
+of opening the database file itself as an editor buffer.
 
 =clutch-switch-console= lists all open console buffers via =completing-read= for
 fast switching between active connections.

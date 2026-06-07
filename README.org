@@ -330,10 +330,12 @@ manually — the query console is not required.
 #+end_src
 
 In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps that generic
-connect flow.  For SQLite files, prefer =M-x clutch-query-sqlite-file=, or
-=M-x clutch-query-console= followed by RET with no matching connection and
-backend =sqlite=; both open a connected SQL console rather than using the
-database file buffer as the editor.  In query-console buffers, =C-c C-e=
+connect flow: select a saved connection, or press RET with no matching
+connection to enter temporary params.  For SQLite files, prefer
+=M-x clutch-query-sqlite-file=, or =M-x clutch-query-console= followed by RET
+with no matching connection and backend =sqlite=; both open a connected SQL
+console rather than using the database file buffer as the editor.  In
+query-console buffers, =C-c C-e=
 reconnects the connection already associated with that console, without
 reopening the global connection picker.
 To switch to another saved or temporary connection, use =M-x clutch-query-console=.
