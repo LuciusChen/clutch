@@ -5846,6 +5846,33 @@ crashing the UI layer."
                  "Database password lookup failed for pass entry mysql/app-prod. Unlock pass/auth-source-pass and retry")))
       (should-not connect-called))))
 
+(ert-deftest clutch-test-resolve-password-falls-back-when-pass-store-missing ()
+  "Missing pass stores should not block host/user/port auth-source lookup."
+  (let (auth-source-args)
+    (cl-letf (((symbol-function 'auth-source-pass-entries)
+               (lambda ()
+                 (signal 'file-missing
+                         '("Opening directory" "No such file or directory"
+                           "/home/user/.password-store"))))
+              ((symbol-function 'auth-source-pass-parse-entry)
+               (lambda (_entry)
+                 (ert-fail "No pass entry should be parsed when listing fails")))
+              ((symbol-function 'auth-source-search)
+               (lambda (&rest args)
+                 (setq auth-source-args args)
+                 (list (list :secret "postgres")))))
+      (should (equal (clutch--resolve-password
+                      '(:host "127.0.0.1"
+                        :user "postgres"
+                        :port 5432
+                        :pass-entry "local-pg"))
+                     "postgres"))
+      (should (equal auth-source-args
+                     '(:host "127.0.0.1"
+                       :user "postgres"
+                       :port 5432
+                       :max 1))))))
+
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
   (let ((err (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)

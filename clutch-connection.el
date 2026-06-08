@@ -887,12 +887,15 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 (defun clutch--pass-entry-by-suffix (suffix)
   "Return the first pass entry path whose tail matches SUFFIX.
 Matches e.g. `dev-mysql' against `mysql/dev-mysql'.
-Returns nil when no matching entry is found or auth-source-pass is absent."
+Returns nil when no matching entry is found, auth-source-pass is absent, or
+the pass store cannot be enumerated."
   (when (and (fboundp 'auth-source-pass-entries)
              (fboundp 'auth-source-pass-parse-entry))
     (let ((re (format "\\(^\\|/\\)%s$" (regexp-quote suffix))))
       (cl-find-if (lambda (entry) (string-match-p re entry))
-                  (auth-source-pass-entries)))))
+                  (condition-case nil
+                      (auth-source-pass-entries)
+                    (file-missing nil))))))
 
 (defun clutch--resolve-pass-entry-password (entry)
   "Return the password from pass ENTRY.
