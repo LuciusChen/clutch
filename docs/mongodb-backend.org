@@ -1,0 +1,153 @@
+#+TITLE: clutch MongoDB Backend Guide
+
+* MongoDB Backend
+
+The =mongodb= backend is Clutch's ordinary MongoDB backend.  The default
+document surface connects through the external =mongo.el= native protocol
+package and uses supported MongoDB Shell / MQL helper syntax in query buffers,
+not SQL and not arbitrary JavaScript evaluation.
+
+This is =Basic document support=.  It covers connection setup, helper-based
+query execution, database/collection metadata, top-level document key display,
+and read-only result grids.  It does not expose relational row editing,
+relationship metadata, SQL completion, or the generic manual-commit UI used by
+full SQL backends.
+
+MongoDB SQL Interface is an optional JDBC surface of the same backend:
+
+- =(:backend mongodb ...)= connects to ordinary MongoDB deployments.
+- =(:backend mongodb :surface sql-interface ...)= connects to MongoDB SQL
+  Interface JDBC endpoints.
+
+The manual connection prompt shows one =mongodb= backend for MongoDB.  See
+[[file:backend-support.org][docs/backend-support.org]] for the project-wide support-level policy, and see
+the =mongo.el= repository's =docs/native-client.org= for native protocol
+capabilities.
+
+** Requirements
+
+The default document surface requires the =mongo.el= package on =load-path=.
+It does not require Java, =mongosh=, or a JDBC jar.
+
+MongoDB SQL Interface endpoints require the JDBC sidecar and MongoDB JDBC
+driver jar:
+
+#+begin_src emacs-lisp
+(clutch-jdbc-ensure-agent)
+(clutch-jdbc-install-driver 'mongodb)
+#+end_src
+
+=clutch-jdbc-install-driver 'mongodb= downloads the official MongoDB SQL
+Interface JDBC driver and stores it as
+=~/.emacs.d/clutch-jdbc/drivers/mongodb-jdbc.jar=.
+
+** Connection Examples
+
+#+begin_src emacs-lisp
+(setq clutch-connection-alist
+      '(("local-mongo" . (:backend mongodb
+                           :host "127.0.0.1"
+                           :port 27017
+                           :database "app"))
+
+        ("local-mongo-auth" . (:backend mongodb
+                                :host "127.0.0.1"
+                                :port 27017
+                                :database "app"
+                                :auth-database "admin"
+                                :user "root"
+                                :pass-entry "local-mongo-auth"))
+
+        ("local-mongo-tls" . (:backend mongodb
+                               :host "127.0.0.1"
+                               :port 27017
+                               :database "app"
+                               :tls t))
+
+        ("local-mongo-socket" . (:backend mongodb
+                                  :url "mongodb://%2Ftmp%2Fmongodb-27017.sock/app"))
+
+        ("atlas-sql" . (:backend mongodb
+                         :surface sql-interface
+                         :url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
+                         :database "analytics"
+                         :user "reporter"
+                         :pass-entry "atlas-sql"))))
+#+end_src
+
+Structured params connect to =host:port= through =mongo.el=.  =:url= accepts
+=mongodb://...= and =mongodb+srv://...= for the native document surface.  Common
+native params such as =:tls=, =:auth-database=, =:user=, =:password=,
+=:pass-entry=, =:app-name=, read/write concern, read preference, timeouts,
+SOCKS5 proxy settings, and other =mongo.el=-supported options are passed
+through to =mongo.el=.
+
+Use =:password= only when the password is already available in memory.  For
+saved connections, prefer =:pass-entry= and let Clutch resolve it through
+=auth-source-pass= / =auth-source= before opening the native connection.
+Unauthenticated local MongoDB connections do not need =:user=, =:password=, or
+=:pass-entry=.
+
+** Query Buffers
+
+Query buffers use =clutch-mongodb-mode=.  The mode is Clutch UI code: it
+fontifies and completes a supported MongoDB Shell / MQL helper surface, then
+the backend translates those helpers into native =mongo.el= command calls.
+
+Supported helper families include:
+
+- collection reads: =find=, =findOne=, =aggregate=, =countDocuments=,
+  =estimatedDocumentCount=, =distinct=, and =explain=
+- collection writes: =insertOne=, =insertMany=, =updateOne=, =updateMany=,
+  =replaceOne=, =deleteOne=, and =deleteMany=
+- metadata/admin helpers: =getCollectionNames=, =getCollectionInfos=,
+  =createCollection=,
+  =dropDatabase=, =listIndexes=, =createIndex=, =dropIndex=, =runCommand=, and
+  =adminCommand=
+- database helpers: =db.getName()=, =db.getSiblingDB(...)=, and
+  =db.aggregate(...)=
+
+BSON constructors such as =ObjectId()=, =ISODate()=, =Timestamp()=,
+=Int32()=, =Long()=, =NumberInt()=, =NumberLong()=, =Decimal128()=, and
+=NumberDecimal()= encode as native BSON wrapper values before being sent to
+=mongo.el=.
+
+This parser is intentionally not a general JavaScript runtime.  Unsupported
+helpers and Mongo shell-only syntax such as regex literals should fail clearly
+instead of being passed to a shell process.
+
+** Clutch Mapping
+
+Clutch maps MongoDB concepts onto the generic database contract:
+
+- schemas are MongoDB databases
+- tables are collections
+- columns are sampled top-level document keys
+- nested documents and arrays render as JSON-valued cells
+
+MongoDB result grids are read-only.  Staged SQL =UPDATE= / =DELETE= workflows,
+SQL-style manual transaction toggles, and row identity editing remain disabled
+for the native document surface.
+
+MongoDB SQL Interface is different: it is a JDBC SQL surface selected with
+=:surface sql-interface=, uses SQL query buffers, and requires an endpoint that
+actually provides MongoDB SQL Interface.
+
+** Live Tests
+
+MongoDB live coverage is tagged =:mongodb-live=.  The live runner starts or
+reuses a local MongoDB container and uses the native protocol:
+
+#+begin_src sh
+./test/run-ci.sh native-live
+#+end_src
+
+Manual local container example:
+
+#+begin_src sh
+docker run -d --name clutch-mongo-live -p 27017:27017 mongo:7
+#+end_src
+
+MongoDB SQL Interface JDBC live tests are separate and remain tagged
+=:mongodb-surface-sql-live= because they require an Atlas or Enterprise
+Advanced SQL Interface endpoint.

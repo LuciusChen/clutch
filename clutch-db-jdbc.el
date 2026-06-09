@@ -64,7 +64,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "e0a9b4d78505fe6946be0a21ad9b7588db986f414786d28ac8e4ebd72260fcaf"
+  "4eeff237d9a20dd5328f7586b25d8cf7d5f4fc2a361be85667e08c299f665be4"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -75,7 +75,8 @@ Set this to nil to disable checksum verification for a locally built jar."
   :type 'string
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-jvm-args '("-Xss512k")
+(defcustom clutch-jdbc-agent-jvm-args '("-Xss512k"
+                                        "-Dpolyglot.engine.WarnInterpreterOnly=false")
   "Extra JVM arguments passed when starting clutch-jdbc-agent.
 Examples:
   (\"-Xss512k\")          — smaller thread stack, faster startup (default)
@@ -147,6 +148,8 @@ A stuck disconnect should not block the user or kill the agent.")
                    :filename "clickhouse-jdbc.jar"))
     (duckdb     . (:maven "org.duckdb:duckdb_jdbc:1.5.3.0"
                   :filename "duckdb_jdbc.jar"))
+    (mongodb    . (:maven "org.mongodb:mongodb-jdbc:3.0.6:all"
+                  :filename "mongodb-jdbc.jar"))
     (slf4j-api  . (:maven "org.slf4j:slf4j-api:2.0.16"
                    :filename "slf4j-api.jar"))
     (slf4j-nop  . (:maven "org.slf4j:slf4j-nop:2.0.16"
@@ -161,13 +164,28 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
   "Backend/driver symbols that are routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-metadata
-  '((jdbc       . (:display-name "JDBC"))
-    (oracle     . (:display-name "Oracle"     :default-port 1521 :sql-product oracle))
-    (sqlserver  . (:display-name "SQL Server" :default-port 1433))
-    (db2        . (:display-name "DB2"        :default-port 50000))
-    (snowflake  . (:display-name "Snowflake"  :default-port 443))
-    (redshift   . (:display-name "Redshift"   :default-port 5439))
-    (clickhouse . (:display-name "ClickHouse" :default-port 8123)))
+  '((jdbc       . (:display-name "JDBC"
+                  :support-level basic
+                  :manual-choice nil))
+    (oracle     . (:display-name "Oracle"
+                  :default-port 1521
+                  :support-level full
+                  :sql-product oracle))
+    (sqlserver  . (:display-name "SQL Server"
+                  :default-port 1433
+                  :support-level full))
+    (db2        . (:display-name "DB2"
+                  :default-port 50000
+                  :support-level basic))
+    (snowflake  . (:display-name "Snowflake"
+                  :default-port 443
+                  :support-level basic))
+    (redshift   . (:display-name "Redshift"
+                  :default-port 5439
+                  :support-level basic))
+    (clickhouse . (:display-name "ClickHouse"
+                  :default-port 8123
+                  :support-level basic)))
   "User-facing metadata for JDBC-backed concrete drivers.")
 
 (defconst clutch-jdbc--driver-companions
@@ -187,8 +205,15 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
   "A JDBC connection managed by clutch-jdbc-agent."
   process   ; the shared agent process
   conn-id   ; integer handle in the agent's ConnectionManager
+  driver    ; internal JDBC driver implementation symbol
   params    ; original connection plist (for metadata)
   busy)     ; non-nil while a query is running
+
+(defun clutch-jdbc--conn-driver (conn)
+  "Return the internal JDBC driver implementation for CONN."
+  (or (clutch-jdbc-conn-driver conn)
+      (plist-get (clutch-jdbc-conn-params conn) :driver)
+      'jdbc))
 
 ;;;; Agent process (one shared process for all JDBC connections)
 
@@ -651,12 +676,41 @@ diagnostics when non-nil.  Return the request id."
 
 ;;;; JDBC URL builder
 
+(defun clutch-jdbc--mongodb-surface-sql-url (params)
+  "Build a MongoDB SQL Interface JDBC URL from PARAMS.
+The MongoDB JDBC driver's query database is passed separately as the
+driver-specific `database' property; the optional URL path remains available
+for the MongoDB default auth database."
+  (let* ((host (or (plist-get params :host) "localhost"))
+         (port (plist-get params :port))
+         (auth-db (or (plist-get params :auth-database)
+                      (plist-get params :auth-source))))
+    (format "jdbc:mongodb://%s%s%s"
+            host
+            (if port (format ":%d" port) "")
+            (if (and auth-db (not (string-empty-p auth-db)))
+                (format "/%s" auth-db)
+              ""))))
+
+(defun clutch-jdbc--mongodb-surface-sql-jdbc-url-p (url)
+  "Return non-nil when URL is a MongoDB SQL Interface JDBC URL."
+  (and (stringp url)
+       (or (string-prefix-p "jdbc:mongodb:" url)
+           (string-prefix-p "jdbc:mongodb+srv:" url))))
+
 (defun clutch-jdbc--build-url (driver params)
   "Build a JDBC URL for DRIVER using connection PARAMS plist.
 If :url is present in PARAMS it is used as-is (allows full override).
 Otherwise constructs a URL from :host, :port, and :database (service name)
 or :sid (Oracle SID-style connection)."
-  (or (plist-get params :url)
+  (or (and (eq driver 'mongodb)
+           (when-let* ((url (plist-get params :url)))
+             (unless (clutch-jdbc--mongodb-surface-sql-jdbc-url-p url)
+               (signal 'clutch-db-error
+                       (list "MongoDB SQL Interface JDBC URLs must start with jdbc:mongodb:")))
+             url))
+      (and (not (eq driver 'mongodb))
+           (plist-get params :url))
       (let ((host     (or (plist-get params :host) "localhost"))
             (port     (plist-get params :port))
             (database (plist-get params :database))
@@ -683,19 +737,85 @@ or :sid (Oracle SID-style connection)."
           ('clickhouse
            (format "jdbc:clickhouse://%s:%d/%s"
                    host (or port 8123) database))
+          ('mongodb
+           (clutch-jdbc--mongodb-surface-sql-url params))
           (_
            (error "Unknown JDBC driver %s; provide :url directly" driver))))))
 
+(defun clutch-jdbc--prop-value (props key)
+  "Return string-keyed connection property KEY from PROPS, or nil."
+  (cdr (assoc-string key props t)))
+
+(defun clutch-jdbc--mongodb-surface-sql-props (params)
+  "Return JDBC properties for MongoDB SQL Interface PARAMS.
+The official MongoDB JDBC driver requires the driver-specific `database'
+property even when the URL includes a default auth database."
+  (let* ((props (copy-sequence
+                 (clutch-jdbc--normalize-props (plist-get params :props))))
+         (database (plist-get params :database))
+         (prop-database (clutch-jdbc--prop-value props "database")))
+    (cond
+     ((and prop-database database
+           (not (string-equal prop-database database)))
+      (signal 'clutch-db-error
+              (list (format "Conflicting MongoDB database values: :database %S and :props database %S"
+                            database prop-database))))
+     (prop-database props)
+     ((and database (not (string-empty-p database)))
+      (cons (cons "database" database) props))
+     (t
+      (signal 'clutch-db-error
+              (list "MongoDB SQL Interface JDBC connections require :database or :props ((\"database\" . ...))"))))))
+
+(defun clutch-jdbc--driver-props (driver params)
+  "Return normalized JDBC connection properties for DRIVER and PARAMS."
+  (if (clutch-jdbc--mongodb-driver-p driver params)
+      (clutch-jdbc--mongodb-surface-sql-props params)
+    (clutch-jdbc--normalize-props (plist-get params :props))))
+
+(defun clutch-jdbc--mongodb-surface-sql-p (params)
+  "Return non-nil when PARAMS request MongoDB SQL Interface."
+  (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
+        '(sql sql-interface)))
+
+(defun clutch-jdbc--effective-driver (driver params)
+  "Return internal JDBC driver for user-facing DRIVER and PARAMS."
+  (cond
+   ((eq driver 'mongodb)
+    (if (clutch-jdbc--mongodb-surface-sql-p params)
+        'mongodb
+      (signal 'clutch-db-error
+              (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
+   (t driver)))
+
 ;;;; Connect function
+
+(defun clutch-jdbc--mongodb-driver-p (driver params)
+  "Return non-nil when DRIVER/PARAMS represent MongoDB SQL Interface JDBC."
+  (or (and (eq driver 'mongodb)
+           (clutch-jdbc--mongodb-surface-sql-p params))
+      (clutch-jdbc--mongodb-surface-sql-jdbc-url-p
+       (plist-get params :url))))
+
+(defun clutch-jdbc--manual-commit-capable-p (driver params)
+  "Return non-nil when DRIVER/PARAMS can expose JDBC transaction controls."
+  (not (clutch-jdbc--mongodb-driver-p driver params)))
 
 (defun clutch-jdbc--manual-commit-mode (driver params)
   "Return non-nil when DRIVER with PARAMS should use manual-commit mode.
 Oracle defaults to manual-commit when `clutch-jdbc-oracle-manual-commit' is
 non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
-  (if (plist-member params :manual-commit)
-      (plist-get params :manual-commit)
+  (cond
+   ((not (clutch-jdbc--manual-commit-capable-p driver params))
+    (when (plist-get params :manual-commit)
+      (signal 'clutch-db-error
+              (list "MongoDB JDBC does not support Clutch manual-commit controls")))
+    nil)
+   ((plist-member params :manual-commit)
+    (plist-get params :manual-commit))
+   (t
     (and (eq driver 'oracle)
-         clutch-jdbc-oracle-manual-commit)))
+         clutch-jdbc-oracle-manual-commit))))
 
 (defun clutch-jdbc--apply-timeout-defaults (params)
   "Return a copy of PARAMS with absent timeout keys set to their global defaults."
@@ -715,21 +835,42 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
               (filename (plist-get spec :filename))
               (dest (expand-file-name filename (clutch-jdbc--drivers-dir))))
     (unless (file-exists-p dest)
-      (cond
+      (let ((install-driver (clutch-jdbc--driver-install-symbol driver))
+            (label (clutch-jdbc--driver-install-label driver)))
+        (cond
        ((plist-get spec :maven)
-        (user-error "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
-                    (capitalize (symbol-name driver))
-                    driver))
+        (user-error
+         "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
+         label install-driver))
+       ((plist-get spec :url)
+        (user-error
+         "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
+         label install-driver))
        ((plist-get spec :manual)
         (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
-                    (capitalize (symbol-name driver))
-                    (plist-get spec :manual) dest))))))
+                    label
+                    (plist-get spec :manual) dest)))))))
+
+(defun clutch-jdbc--driver-install-symbol (driver)
+  "Return the public install command symbol for internal DRIVER."
+  driver)
+
+(defun clutch-jdbc--driver-install-label (driver)
+  "Return a user-facing driver label for DRIVER."
+  (pcase driver
+    ('mongodb "MongoDB SQL Interface")
+    (_ (capitalize (symbol-name driver)))))
 
 (defun clutch-db-jdbc-connect (driver params)
   "Connect to a JDBC data source of type DRIVER using PARAMS plist.
 DRIVER is a symbol (e.g. \\='oracle, \\='sqlserver) captured by the
 registration closure — users do not pass it directly.
 Returns a `clutch-jdbc-conn'."
+  (let ((driver (clutch-jdbc--effective-driver driver params)))
+    (clutch-db-jdbc-connect--internal driver params)))
+
+(defun clutch-db-jdbc-connect--internal (driver params)
+  "Connect to JDBC DRIVER using PARAMS after driver dispatch is resolved."
   (clutch-jdbc--setup-prerequisites driver)
   (clutch-jdbc--ensure-agent)
   (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
@@ -737,7 +878,7 @@ Returns a `clutch-jdbc-conn'."
          (url      (clutch-jdbc--build-url driver normalized-params))
          (user     (plist-get normalized-params :user))
          (password (plist-get normalized-params :password))
-         (props    (clutch-jdbc--normalize-props (plist-get normalized-params :props)))
+         (props    (clutch-jdbc--driver-props driver normalized-params))
          (connect-timeout (plist-get normalized-params :connect-timeout))
          (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
          (rpc-timeout (plist-get normalized-params :rpc-timeout))
@@ -754,11 +895,19 @@ Returns a `clutch-jdbc-conn'."
                           `((network-timeout-seconds . ,read-idle-timeout)))
                       ,@(when props `((props . ,props))))
                     rpc-timeout)))
-    (let ((conn (make-clutch-jdbc-conn
-                 :process  clutch-jdbc--agent-process
-                 :conn-id  (plist-get result :conn-id)
-                 :params   (plist-put normalized-params :driver driver)
-                 :busy     nil)))
+    (let* ((conn-params (plist-put normalized-params :driver driver))
+           (conn-params (if (eq driver 'mongodb)
+                            (plist-put conn-params :backend 'mongodb)
+                          conn-params))
+           (conn-params (if (eq driver 'mongodb)
+                            (plist-put conn-params :surface 'sql-interface)
+                          conn-params))
+           (conn (make-clutch-jdbc-conn
+                  :process  clutch-jdbc--agent-process
+                  :conn-id  (plist-get result :conn-id)
+                  :driver   driver
+                  :params   conn-params
+                  :busy     nil)))
       (puthash (clutch-jdbc-conn-conn-id conn) conn clutch-jdbc--connections-by-id)
       conn)))
 
@@ -811,8 +960,10 @@ pass `process-live-p' briefly; the identity check closes that window."
 
 (cl-defmethod clutch-db-backend-key ((conn clutch-jdbc-conn))
   "Return the registered backend key for JDBC CONN."
-  (or (plist-get (clutch-jdbc-conn-params conn) :driver)
-      'jdbc))
+  (let ((driver (clutch-jdbc--conn-driver conn)))
+    (if (eq driver 'mongodb)
+        'mongodb
+      (or driver 'jdbc))))
 
 (cl-defmethod clutch-db-error-details ((conn clutch-jdbc-conn))
   "Return the latest structured error details snapshot for JDBC CONN."
@@ -843,7 +994,7 @@ Emacs RPC timeout."
 
 (defun clutch-jdbc--oracle-conn-p (conn)
   "Return non-nil when CONN is an Oracle JDBC connection."
-  (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle))
+  (eq (clutch-jdbc--conn-driver conn) 'oracle))
 
 (defun clutch-jdbc--url-prefix-p (conn prefix)
   "Return non-nil for JDBC CONN URLs with PREFIX."
@@ -857,15 +1008,27 @@ Emacs RPC timeout."
 
 (defun clutch-jdbc--limit-offset-conn-p (conn)
   "Return non-nil when JDBC CONN should use LIMIT/OFFSET pagination."
-  (let ((driver (plist-get (clutch-jdbc-conn-params conn) :driver)))
+  (let ((driver (clutch-jdbc--conn-driver conn)))
     (or (memq driver '(redshift clickhouse))
+        (clutch-jdbc--mongodb-conn-p conn)
         (clutch-jdbc--duckdb-conn-p conn)
         (clutch-jdbc--url-prefix-p conn "jdbc:redshift:")
         (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:"))))
 
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
-  (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'clickhouse))
+  (eq (clutch-jdbc--conn-driver conn) 'clickhouse))
+
+(defun clutch-jdbc--mongodb-conn-p (conn)
+  "Return non-nil when CONN is any MongoDB JDBC connection."
+  (clutch-jdbc--mongodb-driver-p
+   (clutch-jdbc--conn-driver conn)
+   (clutch-jdbc-conn-params conn)))
+
+(defun clutch-jdbc--table-like-entry-p (conn entry)
+  "Return non-nil when ENTRY should be used as a table-like object for CONN."
+  (ignore conn)
+  (clutch-jdbc--entry-type= entry "TABLE"))
 
 (defun clutch-jdbc--clickhouse-simple-identifier-p (name)
   "Return non-nil when NAME is a bare ClickHouse identifier."
@@ -885,7 +1048,7 @@ fall back to backticks when quoting is required."
 Supports common `jdbc:subprotocol://host[:port]/database' URLs."
   (when (and url
              (string-match
-              "\\`jdbc:[^:]+://\\([^/:;?]+\\)\\(?::\\([0-9]+\\)\\)?/\\([^/?;]+\\)"
+              "\\`\\(?:jdbc:\\)?[^:]+://\\([^/:;?]+\\)\\(?::\\([0-9]+\\)\\)?/\\([^/?;]+\\)"
               url))
     (list :host (match-string 1 url)
           :port (when-let* ((port (match-string 2 url)))
@@ -901,20 +1064,29 @@ Supports common `jdbc:subprotocol://host[:port]/database' URLs."
 (cl-defmethod clutch-db-manual-commit-p ((conn clutch-jdbc-conn))
   "Return non-nil for JDBC CONN with auto-commit disabled."
   (let ((params (clutch-jdbc-conn-params conn)))
-    (clutch-jdbc--manual-commit-mode (plist-get params :driver) params)))
+    (and (clutch-jdbc--manual-commit-capable-p
+          (clutch-jdbc--conn-driver conn) params)
+         (clutch-jdbc--manual-commit-mode
+          (clutch-jdbc--conn-driver conn) params))))
 
-(cl-defmethod clutch-db-manual-commit-supported-p ((_conn clutch-jdbc-conn))
-  "Return non-nil for JDBC runtime auto-commit toggling."
-  t)
+(cl-defmethod clutch-db-manual-commit-supported-p ((conn clutch-jdbc-conn))
+  "Return non-nil for JDBC CONN runtime auto-commit toggling."
+  (let ((params (clutch-jdbc-conn-params conn)))
+    (clutch-jdbc--manual-commit-capable-p
+     (clutch-jdbc--conn-driver conn) params)))
 
 (cl-defmethod clutch-db-commit ((conn clutch-jdbc-conn))
   "Commit the current transaction on JDBC CONN."
+  (unless (clutch-db-manual-commit-supported-p conn)
+    (user-error "Manual commit is not supported by this connection"))
   (clutch-jdbc--rpc "commit"
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                     (clutch-jdbc--conn-rpc-timeout conn)))
 
 (cl-defmethod clutch-db-rollback ((conn clutch-jdbc-conn))
   "Roll back the current transaction on JDBC CONN."
+  (unless (clutch-db-manual-commit-supported-p conn)
+    (user-error "Manual commit is not supported by this connection"))
   (clutch-jdbc--rpc "rollback"
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                     (clutch-jdbc--conn-rpc-timeout conn)))
@@ -924,6 +1096,8 @@ Supports common `jdbc:subprotocol://host[:port]/database' URLs."
 AUTO-COMMIT non-nil enables auto-commit (disables manual-commit); nil
 enables manual-commit.  When switching to auto-commit, the JDBC driver
 commits any pending transaction per the JDBC specification."
+  (unless (clutch-db-manual-commit-supported-p conn)
+    (user-error "Manual commit is not supported by this connection"))
   (clutch-jdbc--rpc "set-auto-commit"
                     `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
                       (auto-commit . ,(if auto-commit t clutch-jdbc--json-false)))
@@ -972,14 +1146,21 @@ This is allowed in the hot path."
   "Return normalized table entry plists from get-tables RESULT on CONN.
 Supports both the current plist-list payload under :tables and the older
 cursor-style :rows format used in tests."
-  (or (plist-get result :tables)
-      (mapcar
-       #'clutch-jdbc--table-entry-from-row
-       (let* ((first-rows (plist-get result :rows))
-              (cursor-id  (plist-get result :cursor-id)))
-         (if (eq t (plist-get result :done))
-             first-rows
-           (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id)))))))
+  (mapcar (lambda (entry)
+            (clutch-jdbc--normalize-table-entry conn entry))
+          (or (plist-get result :tables)
+              (mapcar
+               #'clutch-jdbc--table-entry-from-row
+               (let* ((first-rows (plist-get result :rows))
+                      (cursor-id  (plist-get result :cursor-id)))
+                 (if (eq t (plist-get result :done))
+                     first-rows
+                   (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id))))))))
+
+(defun clutch-jdbc--normalize-table-entry (conn entry)
+  "Return table ENTRY normalized for JDBC CONN."
+  (ignore conn)
+  (copy-sequence entry))
 
 (defun clutch-jdbc--entry-type= (entry type)
   "Return non-nil when ENTRY has TYPE, case-insensitively."
@@ -1000,8 +1181,8 @@ cursor-style :rows format used in tests."
     (cond
      ((string-match-p "INT\\|SMALLINT\\|BIGINT\\|TINYINT\\|NUMBER\\|NUMERIC\\|DECIMAL\\|FLOAT\\|DOUBLE\\|REAL" t-upper) 'numeric)
      ((string-match-p "BOOL" t-upper)                           'text)
-     ((string-match-p "JSON" t-upper)                           'json)
-     ((string-match-p "BLOB\\|BINARY\\|VARBINARY\\|RAW\\|IMAGE" t-upper) 'blob)
+     ((string-match-p "JSON\\|DOCUMENT\\|ARRAY" t-upper)        'json)
+     ((string-match-p "BLOB\\|BINARY\\|VARBINARY\\|RAW\\|IMAGE\\|BINDATA" t-upper) 'blob)
      ((string-match-p "TIMESTAMP\\|DATETIME" t-upper)           'datetime)
      ((string-match-p "DATE" t-upper)                           'date)
      ((string-match-p "TIME$" t-upper)                          'time)
@@ -1089,11 +1270,12 @@ Clob plists become their :preview string."
                                            (clutch-jdbc--fetch-all conn cursor-id))))
                      (columns     (clutch-jdbc--make-columns
                                    (plist-get result :columns)
-                                   (plist-get result :col-types))))
+                                   (plist-get result :col-types)))
+                     (rows        (mapcar #'clutch-jdbc--normalize-row all-rows)))
                 (make-clutch-db-result
                  :connection conn
                  :columns    columns
-                 :rows       (mapcar #'clutch-jdbc--normalize-row all-rows)))))
+                 :rows       rows))))
         (clutch-db-error (signal (car err) (cdr err))))
     (setf (clutch-jdbc-conn-busy conn) nil)))
 
@@ -1317,13 +1499,14 @@ current database."
 
 (cl-defmethod clutch-db-list-schemas ((conn clutch-jdbc-conn))
   "Return visible schema names for JDBC CONN when supported."
-  (when (clutch-jdbc--oracle-conn-p conn)
+  (cond
+   ((clutch-jdbc--oracle-conn-p conn)
     (let* ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
            (result (clutch-jdbc--rpc
                     "get-schemas"
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                     rpc-timeout)))
-      (clutch-jdbc--visible-schemas conn (plist-get result :schemas)))))
+      (clutch-jdbc--visible-schemas conn (plist-get result :schemas))))))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-jdbc-conn))
   "Return the effective schema for JDBC CONN."
@@ -1331,17 +1514,19 @@ current database."
 
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-jdbc-conn) schema)
   "Switch JDBC CONN to SCHEMA."
-  (unless (clutch-jdbc--oracle-conn-p conn)
-    (user-error "Schema switching is currently supported only for Oracle JDBC"))
-  (let ((schema (upcase schema)))
-    (clutch-jdbc--rpc
-     "set-current-schema"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (schema . ,schema))
-     (clutch-jdbc--conn-rpc-timeout conn))
-    (setf (clutch-jdbc-conn-params conn)
-          (plist-put (clutch-jdbc-conn-params conn) :schema schema))
-    schema))
+  (cond
+   ((clutch-jdbc--oracle-conn-p conn)
+    (let ((schema (upcase schema)))
+      (clutch-jdbc--rpc
+       "set-current-schema"
+       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+         (schema . ,schema))
+       (clutch-jdbc--conn-rpc-timeout conn))
+       (setf (clutch-jdbc-conn-params conn)
+             (plist-put (clutch-jdbc-conn-params conn) :schema schema))
+       schema))
+   (t
+    (user-error "Schema switching is currently supported only for Oracle JDBC"))))
 
 (cl-defmethod clutch-db-browseable-object-entries ((conn clutch-jdbc-conn))
   "Return the fast browseable object snapshot for JDBC CONN.
@@ -1363,7 +1548,8 @@ Call CALLBACK on success or ERRBACK on failure."
          (funcall callback
                   (mapcar (lambda (entry) (plist-get entry :name))
                           (seq-filter (lambda (entry)
-                                        (clutch-jdbc--entry-type= entry "TABLE"))
+                                        (clutch-jdbc--table-like-entry-p
+                                         conn entry))
                                       (clutch-jdbc--collect-table-entries conn result))))))
      errback
      rpc-timeout
@@ -1441,13 +1627,15 @@ Call CALLBACK on success or ERRBACK on failure."
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                       (prefix  . ,prefix)
                       ,@(clutch-jdbc--metadata-scope-params conn)))))
-      (plist-get result :tables))))
+      (mapcar (lambda (entry)
+                (clutch-jdbc--normalize-table-entry conn entry))
+              (plist-get result :tables)))))
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
   "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (driver (plist-get params :driver)))
-    (when (eq driver 'oracle)
+  (let ((driver (clutch-jdbc--conn-driver conn)))
+    (cond
+     ((eq driver 'oracle)
       (let* ((result (clutch-jdbc--rpc
                       "search-columns"
                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -1455,13 +1643,12 @@ Call CALLBACK on success or ERRBACK on failure."
                         (prefix  . ,prefix)
                         ,@(clutch-jdbc--metadata-scope-params conn)))))
         (mapcar (lambda (col) (plist-get col :name))
-                (plist-get result :columns))))))
+                (plist-get result :columns)))))))
 
 (cl-defmethod clutch-db-show-create-table ((conn clutch-jdbc-conn) table)
   "Return a best-effort DDL for TABLE on JDBC CONN.
 Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
-  (let* ((params (clutch-jdbc-conn-params conn))
-         (driver (plist-get params :driver)))
+  (let ((driver (clutch-jdbc--conn-driver conn)))
     (let* ((result (clutch-jdbc--rpc
                     "get-columns"
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -1622,7 +1809,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (defun clutch-jdbc--rowid-identity (conn)
   "Return a JDBC row locator candidate for CONN, or nil."
   (condition-case _err
-      (when (eq (plist-get (clutch-jdbc-conn-params conn) :driver) 'oracle)
+      (when (eq (clutch-jdbc--conn-driver conn) 'oracle)
         (list :kind 'row-locator
               :name "ROWID"
               :select-expressions '("ROWID")
@@ -1720,8 +1907,10 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
 (cl-defmethod clutch-db-display-name ((conn clutch-jdbc-conn))
   "Return a display name for CONN based on the JDBC driver type."
   (or (plist-get (clutch-jdbc-conn-params conn) :display-name)
+      (and (eq (clutch-jdbc--conn-driver conn) 'mongodb)
+           "MongoDB")
       (clutch-db-backend-display-name
-       (plist-get (clutch-jdbc-conn-params conn) :driver))
+       (clutch-jdbc--conn-driver conn))
       "JDBC"))
 
 ;;;; Agent installation helpers
@@ -1757,10 +1946,10 @@ Fetches from GitHub Releases."
 
 ;;;###autoload
 (defun clutch-jdbc-install-driver (driver)
-  "Download the JDBC driver for DRIVER symbol from Maven Central."
+  "Download the JDBC driver for DRIVER symbol."
   (interactive
    (list (intern (completing-read "Driver: "
-                                  (mapcar #'car clutch-jdbc--driver-sources)
+                                  (clutch-jdbc--installable-drivers)
                                   nil t))))
   (let* ((spec       (alist-get driver clutch-jdbc--driver-sources))
          (filename   (plist-get spec :filename))
@@ -1772,6 +1961,8 @@ Fetches from GitHub Releases."
       (message "Driver already installed: %s" dest))
      ((plist-get spec :maven)
       (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest))
+     ((plist-get spec :url)
+      (clutch-jdbc--download-url-driver (plist-get spec :url) dest))
      (t
       (message "Manual download required for %s.\nURL: %s\nPlace as: %s"
                driver (plist-get spec :manual) dest)))
@@ -1787,6 +1978,12 @@ Fetches from GitHub Releases."
       (clutch-jdbc--stop-agent)
       (message "Installed JDBC driver(s); shared clutch-jdbc-agent restarted on next use"))))
 
+(defun clutch-jdbc--installable-drivers ()
+  "Return public driver symbols accepted by `clutch-jdbc-install-driver'."
+  (cl-loop for (driver . spec) in clutch-jdbc--driver-sources
+           unless (plist-get spec :internal)
+           collect driver))
+
 (defun clutch-jdbc--download-maven-driver (coords dest)
   "Download a Maven artifact at COORDS to DEST.
 COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
@@ -1801,6 +1998,12 @@ COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
       (message "Downloading %s from Maven Central..." coords)
       (url-copy-file url dest)
       (message "Downloaded driver to %s" dest))))
+
+(defun clutch-jdbc--download-url-driver (url dest)
+  "Download a JDBC driver from URL to DEST."
+  (message "Downloading JDBC driver from %s..." url)
+  (url-copy-file url dest)
+  (message "Downloaded driver to %s" dest))
 
 (defun clutch-jdbc--oracle-driver-symbol-p (driver)
   "Return non-nil for DRIVER symbols that use an Oracle JDBC jar."

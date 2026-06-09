@@ -1,14 +1,16 @@
 # Native Backends
 
-`clutch` ships three non-JDBC backends that do not require a sidecar process:
+`clutch` uses non-JDBC backends that do not require the JDBC sidecar:
 
 - [`mysql`](https://github.com/LuciusChen/mysql.el) — external pure Emacs Lisp MySQL wire protocol client
 - [`pg`](https://github.com/emarsden/pg-el) — external PostgreSQL client from [`pg-el`](https://github.com/emarsden/pg-el)
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
+- `clutch-db-mongodb.el` over external `mongo.el` — native MongoDB document adapter
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
-[`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).
+[`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are
+defined in [`docs/backend-support.org`](./backend-support.org).
 
 ## Live Testing
 
@@ -17,8 +19,8 @@ or Docker-compatible runtime works.  The examples below use Docker only as a
 portable way to start test servers.
 
 ```sh
-docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8.0
-docker run --name clutch-pg-16 -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
+docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8.0
+docker run --name clutch-pg-16 -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
 ```
 
 Run the standalone MySQL protocol live suite from the
@@ -40,6 +42,16 @@ checkout:
 The runner starts or reuses local Docker/OrbStack containers and executes both
 UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live`
 tests.  Default ERT runs skip those live tags unless credentials are provided.
+
+MongoDB backend details live in
+[`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses
+the external `mongo.el` native client by default; Clutch owns the adapter,
+query-buffer helper parsing, result-grid mapping, and SQL Interface surface
+selection. Protocol capability details are documented in the `mongo.el`
+repository.
+
+MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires
+the JDBC sidecar plus the MongoDB JDBC driver jar.
 
 Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and
 MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake,

@@ -39,9 +39,47 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Architecture and Implementation
 
-- **Interface / implementation separation**: `mysql` and upstream `pg` are external protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
+- **Interface / implementation separation**: `mysql`, upstream `pg`, and `mongo` are external protocol libraries with no UI. `clutch.el` depends on `clutch-db.el`, not protocol layers directly.
 - **External dependency boundaries stay explicit**: `mysql` and `pg` are required package dependencies. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
-- **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
+- **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `mongo--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
+- **MongoDB is one backend**: User configuration must use `:backend mongodb` for
+  MongoDB.  The ordinary document surface uses native `mongo.el`; MongoDB SQL
+  Interface is only `:surface sql-interface` on the same backend.  Do not add a
+  second public SQL-specific MongoDB backend, driver, feature, or manual chooser
+  entry.
+- **MongoDB protocol belongs in `mongo.el`**: Clutch owns query-console syntax,
+  completion, result rendering, saved connections, and auth-source/pass
+  resolution.  BSON, wire messages, auth, sessions, server selection, cursors,
+  and pooling belong in `mongo.el` behind public `mongo-` APIs.
+- **MongoDB helper syntax stays basic**: Clutch's native MongoDB query adapter
+  may translate a documented, small set of `db.*` helper forms into public
+  `mongo-` calls, but it must not grow toward full `mongosh` compatibility.
+  Do not add arbitrary JavaScript evaluation, broad BSON constructor emulation,
+  regex literal parsing, change-stream helpers, or long-tail cursor options
+  without first moving the responsibility into a separate package/API and
+  updating the support-level contract.
+- **MongoDB residue must stay classified**: Clutch may keep only caller-facing
+  MongoDB code: `clutch-db-mongodb.el` as the adapter from public `mongo-` APIs
+  to Clutch's generic database contract; `clutch-mongodb-mode` for query-buffer
+  syntax, highlighting, and completion; and MongoDB SQL Interface JDBC routing
+  inside `clutch-db-jdbc.el` for `:backend mongodb :surface sql-interface`.
+  Clutch must not contain BSON codecs, wire framing, URI/SRV parsing, auth,
+  sessions, transactions, server selection, cursors, retry logic, compression,
+  pooling, `mongosh` dependencies, or direct `mongo--*` calls.  The internal
+  JDBC driver key `mongodb` may exist only inside the JDBC surface and tests;
+  user-facing configuration examples must not use `:driver mongodb`.
+- **MongoDB client handles stay opaque**: The native adapter may store the
+  public `mongo-conn` object returned by `mongo-connect`, but it should name it
+  as `client` or connection state.  Do not expose protocol-layer words such as
+  `wire`, `socket`, `pool`, `topology`, `OP_MSG`, or `serviceId` as Clutch
+  adapter state or user-documentation concepts.
+- **MongoDB connection params are opaque to Clutch**: Clutch may collect saved
+  connection params, resolve `:password` from `:pass-entry` / auth-source, and
+  pass the resulting plist to public `mongo-` APIs.  It must not parse
+  `mongodb://` / `mongodb+srv://` URLs, synthesize MongoDB URIs, infer SRV/TLS
+  semantics, or duplicate `mongo.el`'s effective database logic.  When Clutch
+  needs the effective database or endpoint, read it from public `mongo-`
+  connection accessors or add a public API in `mongo.el`.
 - **Single responsibility per file**: Do not mix protocol code with rendering code.
 - **Keep `clutch.el` as the entry point**: External consumers should continue to load `(require 'clutch)`. When implementation moves out, `clutch.el` becomes the assembler, not a grab bag.
 - **Split by stable workflow boundaries**: Prefer complete responsibilities such as result UI, object workflow, staged mutation flow, or schema/cache lifecycle. Do not split by vague internal labels like `common`, `utils`, or `helpers`, and do not split only to make `clutch.el` shorter.
@@ -198,11 +236,74 @@ Read every changed line before committing.
 Also check that clutch does not depend on external private APIs:
 
 ```bash
-rg -n -P "(?<![A-Za-z0-9-])(mysql|nerd-icons|tramp-rpc)--[A-Za-z0-9-]+" clutch*.el test/*.el
+rg -n -P "(?<![A-Za-z0-9-])(mysql|mongo|nerd-icons|tramp-rpc)--[A-Za-z0-9-]+" clutch*.el test/*.el
 ```
 
 This command should return no matches. Internal `clutch--*` and backend-local
 `clutch-db-foo--*` symbols are allowed inside this repo.
+
+Also check that MongoDB protocol implementation residue has not drifted back
+into Clutch:
+
+```bash
+rg -n "require 'mongo-(wire|bson|params|auth)|mongo--|mongosh" clutch*.el test/*.el
+```
+
+This command should return no matches. Clutch may `(require 'mongo)` and call
+public `mongo-` APIs, but BSON, wire protocol, auth, URI parsing, pooling, and
+shell executable dependencies belong outside this repo.
+
+Also check that Clutch has not reintroduced MongoDB URI parsing or synthesis:
+
+```bash
+rg -n "clutch-db-mongodb--.*(uri|url)|url-hexify-string|url-unhex-string" clutch-db-mongodb.el test/*.el
+```
+
+This command should return no matches.  `:url` may be passed through as an
+opaque saved connection parameter, but MongoDB URL interpretation belongs in
+`mongo.el`.
+
+Also check that Clutch's native MongoDB adapter has not reintroduced
+protocol-layer naming:
+
+```bash
+rg -n "conn-wire|:wire|OP_MSG|wire protocol|MongoDB wire" clutch-db-mongodb.el
+```
+
+This command should return no matches.  Clutch may hold a public `mongo-conn`
+as an opaque client handle; wire/protocol terminology belongs in `mongo.el`.
+
+Also check that Clutch user docs do not duplicate detailed MongoDB protocol
+capability prose:
+
+```bash
+rg -n "OP_MSG|wire compression|BSON wrappers|SASLprep|server selection|load-balanced|serviceId|lsid|endSessions|speculative SCRAM" README.org docs PRD.md
+```
+
+This command should return no matches.  Clutch docs may say that ordinary
+MongoDB uses the external `mongo.el` native client, then link to `mongo.el` for
+protocol details.
+
+Also check that MongoDB SQL Interface has not reappeared as a second backend or
+driver:
+
+```bash
+rg -n "mongodb[-_]sql(|[-_]interface)" clutch*.el test/*.el README.org docs
+```
+
+This command should return no matches.  Prose may say "MongoDB SQL Interface"
+as the product name, but symbols and configuration examples must use
+`:backend mongodb :surface sql-interface`.
+
+Also check that user-facing documentation does not recommend the internal JDBC
+driver key as configuration:
+
+```bash
+rg -n ":driver +'?mongodb|:driver +mongodb" README.org docs PRD.md
+```
+
+This command should return no matches.  `:driver 'mongodb` may appear only as
+internal JDBC connection state or in tests that reject old public config.
 
 ### 2. Run all test files
 
@@ -212,7 +313,7 @@ This command should return no matches. Internal `clutch--*` and backend-local
 
 Default ERT runs skip live tests when credentials are unset. For changes touching
 query execution, row identity, result-buffer workflows, object metadata, or native
-backend adapters, also run the real MySQL/PostgreSQL live suite:
+backend adapters, also run the real MySQL/PostgreSQL/MongoDB live suite:
 
 ```bash
 ./test/run-ci.sh native-live
@@ -220,8 +321,8 @@ backend adapters, also run the real MySQL/PostgreSQL live suite:
 
 The native live runner starts or reuses local containers, preferring Podman on
 Linux and OrbStack-backed Docker on macOS. It runs both UI-level `:clutch-live`
-tests and backend-level `:pg-live` / `:mysql-live` tests. JDBC live tests remain
-separate because they require external credentials.
+tests and backend-level `:pg-live` / `:mysql-live` / `:mongodb-live` tests. JDBC
+live tests remain separate because they require external credentials.
 
 ### 3. Byte-compile with zero warnings
 
@@ -234,7 +335,8 @@ separate because they require external credentials.
 `clutch` is one package split across multiple implementation files, so
 `package-lint` should run on the package entry file rather than on extracted
 modules as if they were standalone packages.  For local straight checkouts,
-make sure package metadata for external deps (`transient`, `mysql`, `pg`) is
+make sure package metadata for external deps (`transient`, `mysql`, `pg`,
+`mongo`) is
 available to `package.el` in the batch session before running the command.
 Do not move `Package-Requires` into split files to satisfy per-file lint; set
 `package-lint-main-file` to `clutch.el` when linting implementation files

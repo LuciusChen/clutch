@@ -4,13 +4,19 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 emacs_bin="${EMACS:-emacs}"
 
-load_paths=("$repo" "$repo/test")
+load_paths=()
 
 add_load_path() {
   if [[ -d "$1" ]]; then
     load_paths+=("$1")
   fi
 }
+
+add_load_path "$repo/../mongo.el"
+add_load_path "$repo/../mysql.el"
+add_load_path "$repo/../pg-el"
+add_load_path "$repo"
+add_load_path "$repo/test"
 
 if [[ -n "${CLUTCH_EXTRA_LOAD_PATH:-}" ]]; then
   IFS=: read -r -a extra_paths <<<"$CLUTCH_EXTRA_LOAD_PATH"
@@ -45,7 +51,7 @@ Targets:
   byte-compile   Byte-compile distributable clutch*.el files.
   package-lint   Run package-lint with clutch.el as package metadata source.
   checkdoc       Run checkdoc on distributable clutch*.el files.
-  native-live    Run MySQL/PostgreSQL live tests against local containers.
+  native-live    Run MySQL/PostgreSQL/MongoDB live tests against local containers.
 EOF
 }
 

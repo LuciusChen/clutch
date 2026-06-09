@@ -79,6 +79,8 @@
 (declare-function clutch--read-manual-connection-params "clutch-connection" (&optional sqlite-file))
 (declare-function clutch--read-sqlite-file-params "clutch-connection" ())
 (declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
+(declare-function clutch--backend-key-from-params "clutch-connection" (params))
+(declare-function clutch--mongodb-surface-sql-params-p "clutch-connection" (params))
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
 (declare-function clutch--prepare-connection-origin-params
@@ -94,6 +96,7 @@
                               server-pageable result-context source-buffer))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
 (declare-function clutch-mode "clutch" ())
+(declare-function clutch-mongodb-mode "clutch" ())
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
@@ -162,7 +165,7 @@ When nil, console persistence falls back to `clutch--console-name'.")
             (lambda (buf)
               (and (buffer-live-p buf)
                    (with-current-buffer buf
-                     (and (derived-mode-p 'clutch-mode)
+                     (and (clutch--query-buffer-p)
                           (clutch--console-buffer-storage-match-p
                            storage-name)))))
             (buffer-list)))
@@ -170,12 +173,25 @@ When nil, console persistence falls back to `clutch--console-name'.")
        (lambda (buf)
          (and (buffer-live-p buf)
               (with-current-buffer buf
-                (and (derived-mode-p 'clutch-mode)
+                (and (clutch--query-buffer-p)
                      (equal clutch--console-name name)
                      (or (not storage-name)
                          (and (not clutch--console-storage-name)
                               (not clutch--connection-params)))))))
        (buffer-list))))
+
+(defun clutch--query-console-major-mode (params)
+  "Return the major mode function for query console PARAMS."
+  (if (and (eq (clutch--backend-key-from-params params) 'mongodb)
+           (not (clutch--mongodb-surface-sql-params-p params)))
+      #'clutch-mongodb-mode
+    #'clutch-mode))
+
+(defun clutch--ensure-query-console-major-mode (params)
+  "Ensure the current buffer uses the query console mode for PARAMS."
+  (let ((mode (clutch--query-console-major-mode params)))
+    (unless (eq major-mode mode)
+      (funcall mode))))
 
 (defun clutch--update-console-buffer-name ()
   "Rename the current console buffer to reflect schema status."
@@ -357,6 +373,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
               (buffer-local-value 'clutch-connection existing)))
         (progn
           (with-current-buffer existing
+            (clutch--ensure-query-console-major-mode params)
             (let ((existing-params (or clutch--connection-params params)))
               (setq-local clutch--console-name name)
               (setq-local clutch--console-storage-name storage-name)
@@ -380,8 +397,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
              (is-new (zerop (buffer-size buf))))
         (select-window (or (clutch--console-window-for buf) (selected-window)))
         (switch-to-buffer buf)
-        (unless (derived-mode-p 'clutch-mode)
-          (clutch-mode))
+        (clutch--ensure-query-console-major-mode params)
         (setq-local clutch--console-name name)
         (setq-local clutch--console-storage-name storage-name)
         (setq-local clutch--console-ad-hoc-params ad-hoc-params)

@@ -169,6 +169,19 @@ The current Elisp client closes cursor state implicitly by fetching until the
 agent replies with `done=true`; it does not issue a separate `close-cursor`
 RPC.
 
+`execute` accepts:
+
+- `conn-id`
+- `sql`
+- `fetch-size`
+- `query-timeout-seconds`
+
+`fetch` accepts:
+
+- `cursor-id`
+- `fetch-size`
+- `query-timeout-seconds`
+
 ## Error semantics
 
 There are three distinct failure classes:

@@ -49,6 +49,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
+(declare-function clutch-jdbc--mongodb-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
@@ -59,6 +60,7 @@ Each value is a plist with at least :entries and :fetched-at.")
                   (name fallback face &rest icon-args))
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--connection-key "clutch-connection" (conn))
+(declare-function clutch--query-buffer-p "clutch-connection" ())
 (declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
 (declare-function clutch--remember-recoverable-metadata-warning "clutch-schema"
                   (connection op err &optional context))
@@ -702,7 +704,8 @@ allowed by ALLOWED-TYPES."
                    (clutch--table-like-entry-p entry))
                (clutch--object-type-allowed-p entry allowed-types)
                (not (with-current-buffer buf
-                      (derived-mode-p 'clutch-mode 'clutch-repl-mode))))
+                      (or (clutch--query-buffer-p)
+                          (derived-mode-p 'clutch-repl-mode)))))
       entry)))
 
 (defun clutch--symbol-has-local-completions-p (symbol entries)
@@ -888,10 +891,10 @@ selection can surface objects from different Oracle sources and types."
    (clutch-db-browseable-object-entries conn)))
 
 (defun clutch--find-console-for-conn (conn)
-  "Return the `clutch-mode' buffer that owns CONN, or nil."
+  "Return the query console buffer that owns CONN, or nil."
   (cl-loop for buf in (buffer-list)
            when (and (with-current-buffer buf
-                       (derived-mode-p 'clutch-mode))
+                       (clutch--query-buffer-p))
                      (eq (buffer-local-value 'clutch-connection buf) conn))
            return buf))
 
@@ -1360,9 +1363,31 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                                            (plist-get context :params)
                                            (plist-get context :product)))))
 
+(defun clutch--object-browse-query (conn entry)
+  "Return a query-console browse query for ENTRY on CONN."
+  (if (clutch--mongodb-document-conn-p conn)
+      (format "db.getCollection(%s).find();"
+              (clutch--json-serialize-text
+               (plist-get entry :name)
+               "MongoDB collection name"))
+    (format "SELECT * FROM %s;"
+            (clutch--object-sql-name conn entry))))
+
+(defun clutch--mongodb-document-conn-p (conn)
+  "Return non-nil when CONN uses MongoDB's document query surface."
+  (and (eq (clutch--backend-key-from-conn conn) 'mongodb)
+       (not (clutch--mongodb-surface-sql-conn-p conn))))
+
+(defun clutch--mongodb-surface-sql-conn-p (conn)
+  "Return non-nil when CONN is the MongoDB SQL Interface JDBC surface."
+  (and (fboundp 'clutch-jdbc--mongodb-conn-p)
+       (condition-case nil
+           (clutch-jdbc--mongodb-conn-p conn)
+         (error nil))))
+
 ;;;###autoload
 (defun clutch-object-browse (&optional entry)
-  "Insert SELECT * FROM ENTRY into a query console.
+  "Insert a row-browse query for ENTRY into a query console.
 When ENTRY is nil, use the current table-like object."
   (interactive)
   (let* ((context (clutch--command-connection-context))
@@ -1376,9 +1401,8 @@ When ENTRY is nil, use the current table-like object."
     (let* ((conn (or clutch-connection
                      (plist-get context :connection)
                      (user-error "No active connection")))
-           (sql (format "SELECT * FROM %s;"
-                        (clutch--object-sql-name conn entry)))
-           (console (or (and (derived-mode-p 'clutch-mode)
+           (sql (clutch--object-browse-query conn entry))
+           (console (or (and (clutch--query-buffer-p)
                              (eq clutch-connection conn)
                              (current-buffer))
                         (clutch--find-console-for-conn conn)
@@ -1665,7 +1689,8 @@ passed to the fallback reader."
   (interactive)
   (let* ((prompt "Jump to object: ")
          (entry (or entry
-                    (if-let* (((derived-mode-p 'clutch-mode 'clutch-repl-mode))
+                    (if-let* (((or (clutch--query-buffer-p)
+                                   (derived-mode-p 'clutch-repl-mode)))
                               (at-point (clutch-object-at-point))
                               ((clutch--table-like-entry-p at-point))
                               ((clutch--object-type-allowed-p

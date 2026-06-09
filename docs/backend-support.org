@@ -1,0 +1,49 @@
+#+TITLE: clutch Backend Support Levels
+
+* Support Levels
+
+Clutch separates database support by the surface it can honestly expose, not
+only by whether a connection can be opened.
+
+| Level | Meaning | Examples |
+|-------+---------+----------|
+| Full SQL support | SQL-first database where clutch targets the normal query, metadata, result grid, completion, pagination, and staged mutation workflows where the backend can provide row identity and transactions. | MySQL, PostgreSQL, SQLite, Oracle, SQL Server |
+| Full SQL model, generic entry | SQL-first database that fits the core clutch model, but currently enters through generic JDBC configuration instead of a dedicated manual backend prompt. | DuckDB |
+| Basic SQL / query-first support | JDBC-backed SQL or SQL-like database where querying and metadata are supported, while edits, transactions, row identity, or dialect behavior may be partial. | ClickHouse, Snowflake, Redshift, DB2, generic JDBC |
+| Basic document support | Non-relational backend with a read-oriented grid/metadata mapping, but not the SQL row-editing model. | MongoDB via =mongodb= |
+| Advanced SQL surface | A SQL/JDBC endpoint for a non-relational database. It is useful only when that product actually provides the SQL surface. | MongoDB SQL Interface via =(:backend mongodb :surface sql-interface)= |
+| Unsupported / future contract | Databases that need a different UI and backend contract before clutch should claim support. | Redis, Cassandra, Elasticsearch, Couchbase |
+
+* MongoDB Boundary
+
+=mongodb= is the normal MongoDB backend.  It connects to ordinary =mongod=
+deployments through the external =mongo.el= native client and evaluates
+supported MongoDB Shell / MQL helper commands.  Normal MongoDB connections do
+not require Java or a JDBC driver jar.  Protocol capabilities and connection
+option semantics are documented in the =mongo.el= repository; Clutch should not
+duplicate that driver-level behavior in its own adapter.
+
+MongoDB SQL Interface is not another backend.  It is the optional
+=:surface sql-interface= mode of =mongodb= and should be used only for Atlas or
+self-managed deployments that actually expose that SQL Interface endpoint.
+That surface requires the JDBC sidecar and MongoDB JDBC driver jar.
+
+* DuckDB Boundary
+
+DuckDB belongs with SQL-first databases, not with document/basic support.  Its
+data model, query language, metadata, and mutation behavior are close to the
+core clutch SQL workflow.  The current integration is through the generic JDBC
+backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC
+driver, so the entry point is less polished than first-class native/manual
+backends.
+
+* Redis And Similar Systems
+
+Redis is not a MongoDB-like document backend for clutch purposes.  It is a
+key/value and data-structure server with command-oriented workflows, different
+metadata, different result shapes, and no table/collection row identity model.
+
+Redis support should not be claimed through the MongoDB adapter pattern.  It
+would need a separate basic non-relational contract, for example key browsing,
+type-aware value viewers, command execution, TTL metadata, and explicit limits
+around edits and transactions.

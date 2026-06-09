@@ -6,13 +6,17 @@ emacs_bin="${EMACS:-emacs}"
 os_name="$(uname -s)"
 
 pg_name="${CLUTCH_TEST_PG_CONTAINER:-clutch-pg-live}"
-pg_port="${CLUTCH_TEST_PG_PORT:-5432}"
+pg_port="${CLUTCH_TEST_PG_PORT:-55432}"
 mysql_name="${CLUTCH_TEST_MYSQL_CONTAINER:-clutch-mysql-live}"
-mysql_port="${CLUTCH_TEST_MYSQL_PORT:-3306}"
+mysql_port="${CLUTCH_TEST_MYSQL_PORT:-55306}"
+mongo_name="${CLUTCH_TEST_MONGO_CONTAINER:-clutch-mongo-live}"
+mongo_port="${CLUTCH_TEST_MONGO_PORT:-57017}"
 pg_image="${CLUTCH_TEST_PG_IMAGE:-docker.io/library/postgres:16}"
 mysql_image="${CLUTCH_TEST_MYSQL_IMAGE:-docker.io/library/mysql:8.0}"
+mongo_image="${CLUTCH_TEST_MONGO_IMAGE:-docker.io/library/mongo:7}"
 
 started=()
+temp_paths=()
 container_runtime=""
 
 log() {
@@ -71,6 +75,11 @@ cleanup() {
       ctr rm -f "$name" >/dev/null 2>&1 || true
     done
   fi
+  if ((${#temp_paths[@]})); then
+    for path in "${temp_paths[@]}"; do
+      rm -rf "$path" >/dev/null 2>&1 || true
+    done
+  fi
 }
 trap cleanup EXIT
 
@@ -113,9 +122,11 @@ start_pg() {
   log "Starting PostgreSQL container $pg_name on 127.0.0.1:$pg_port"
   run_container \
     --name "$pg_name" \
+    -e POSTGRES_INITDB_ARGS=--auth-host=md5 \
     -e POSTGRES_PASSWORD=test \
     -p "127.0.0.1:${pg_port}:5432" \
-    "$pg_image"
+    "$pg_image" \
+    -c password_encryption=md5
   started+=("$pg_name")
 }
 
@@ -131,6 +142,19 @@ start_mysql() {
     -p "127.0.0.1:${mysql_port}:3306" \
     "$mysql_image"
   started+=("$mysql_name")
+}
+
+start_mongo() {
+  if container_running_p "$mongo_name"; then
+    log "Reusing MongoDB container $mongo_name"
+    return
+  fi
+  log "Starting MongoDB container $mongo_name on 127.0.0.1:$mongo_port"
+  run_container \
+    --name "$mongo_name" \
+    -p "127.0.0.1:${mongo_port}:27017" \
+    "$mongo_image"
+  started+=("$mongo_name")
 }
 
 wait_pg() {
@@ -159,8 +183,24 @@ wait_mysql() {
   return 1
 }
 
+wait_mongo() {
+  log "Waiting for MongoDB readiness"
+  for _ in {1..120}; do
+    if ctr exec "$mongo_name" mongosh --quiet --eval "db.adminCommand({ ping: 1 }).ok" >/dev/null 2>&1; then
+      log "MongoDB ready: $(container_summary "$mongo_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "MongoDB container did not become ready" >&2
+  return 1
+}
+
 emacs_load_args=(
   --batch -Q
+  -L "$repo/../mongo.el"
+  -L "$repo/../mysql.el"
+  -L "$repo/../pg-el"
   -L "$repo"
   -L "$repo/test"
   -L "$HOME/.emacs.d/straight/repos/mysql.el"
@@ -200,15 +240,26 @@ run_db_live_mysql() {
     --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
 }
 
+run_db_live_mongodb() {
+  log "Running backend live tests against MongoDB native protocol"
+  "$emacs_bin" "${emacs_load_args[@]}" \
+    -l ert -l clutch-db-test \
+    --eval "(setq clutch-db-test-mongodb-live-enabled t clutch-db-test-mongodb-url \"mongodb://127.0.0.1:${mongo_port}/clutch_test\")" \
+    --eval "(ert-run-tests-batch-and-exit '(tag :mongodb-live))"
+}
+
 select_container_runtime
 require_orbstack_docker
 show_container_environment
 start_pg
 start_mysql
+start_mongo
 wait_pg
 wait_mysql
+wait_mongo
 
 run_clutch_live_pg
 run_clutch_live_mysql
 run_db_live_pg
 run_db_live_mysql
+run_db_live_mongodb

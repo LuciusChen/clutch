@@ -246,11 +246,19 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
   "Return a descriptive string for CONN like \"user@host:port/db\"."
   (if (eq (clutch--backend-key-from-conn conn) 'sqlite)
       (format "sqlite:%s" (or (clutch-db-database conn) ""))
-    (format "%s@%s:%s/%s"
-            (or (clutch-db-user conn) "?")
-            (or (clutch--connection-remote-host conn) "?")
+    (format "%s:%s/%s"
+            (clutch--connection-user-host
+             (clutch-db-user conn)
+             (clutch--connection-remote-host conn))
             (or (clutch--connection-remote-port conn) "?")
             (or (clutch-db-database conn) ""))))
+
+(defun clutch--connection-user-host (user host)
+  "Return HOST or USER@HOST when USER is non-empty."
+  (let ((host (or host "?")))
+    (if (and (stringp user) (not (string-empty-p user)))
+        (format "%s@%s" user host)
+      host)))
 
 (defun clutch--default-port-for-connection (conn)
   "Return the default port for CONN's backend, or nil when not applicable."
@@ -261,15 +269,14 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
   "Return a compact display identity for CONN for use in UI only."
   (if (eq (clutch--backend-key-from-conn conn) 'sqlite)
       (clutch--sqlite-database-display-label (clutch-db-database conn) t)
-    (let* ((user (or (clutch-db-user conn) "?"))
+    (let* ((user (clutch-db-user conn))
            (host (or (clutch--connection-remote-host conn) "?"))
            (port (clutch--connection-remote-port conn))
            (transport-label (clutch--connection-transport-label conn))
            (default-port (clutch--default-port-for-connection conn)))
       (concat
-       (format "%s@%s%s"
-               user
-               host
+       (format "%s%s"
+               (clutch--connection-user-host user host)
                (if (and port default-port (equal port default-port))
                    ""
                  (if port
@@ -324,6 +331,10 @@ interactive readers inspect shared customization such as
            (clutch-db-manual-commit-supported-p conn)
          ((clutch-db-error cl-no-applicable-method wrong-type-argument) nil))))
 
+(defun clutch--query-buffer-p ()
+  "Return non-nil when the current buffer is a clutch query console."
+  (derived-mode-p 'clutch-mode 'clutch-mongodb-mode))
+
 (defun clutch--refresh-transaction-ui (conn)
   "Refresh transaction indicators for buffers attached to CONN."
   (when conn
@@ -332,7 +343,8 @@ interactive readers inspect shared customization such as
         (with-current-buffer buf
           (when (and clutch-connection
                      (eq clutch-connection conn)
-                     (derived-mode-p 'clutch-mode 'clutch-repl-mode))
+                     (or (clutch--query-buffer-p)
+                         (derived-mode-p 'clutch-repl-mode)))
             (clutch--update-mode-line)))))))
 
 (defun clutch--set-tx-dirty (conn)
@@ -473,7 +485,7 @@ Also store PARAMS and PRODUCT when present."
       (with-current-buffer buf
         (clutch--bind-connection-context new-conn params product)
         (cond
-         ((derived-mode-p 'clutch-mode)
+         ((clutch--query-buffer-p)
           (when clutch--console-name
             (clutch--update-console-buffer-name))
           (clutch--update-mode-line))
@@ -579,7 +591,7 @@ using the stored params.  Signals a user-error if not recoverable."
                                                  clutch--conn-sql-product)))
                ((derived-mode-p 'clutch-result-mode)
                 (clutch--refresh-result-status-line))
-               ((derived-mode-p 'clutch-mode)
+               ((clutch--query-buffer-p)
                 (clutch--update-console-buffer-name)
                 (clutch--update-mode-line))))))))))
 
@@ -613,7 +625,8 @@ using the stored params.  Signals a user-error if not recoverable."
     (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
     (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
     (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF"))
-    (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00")))
+    (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00"))
+    (mongodb    . ((devicon . "nf-dev-mongodb")            ""  :color "#47A248")))
   "Alist mapping backend symbols to icon specs.
 Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
 ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
@@ -649,7 +662,13 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
   (pcase backend
     ((or 'pg 'postgresql) 'pg)
     ((or 'mysql 'mariadb) 'mysql)
+    ((or 'mongo 'mongodb) 'mongodb)
     (_ (and (memq backend (clutch-db-backends t)) backend))))
+
+(defun clutch--mongodb-surface-sql-params-p (params)
+  "Return non-nil when PARAMS select MongoDB SQL Interface."
+  (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
+        '(sql sql-interface)))
 
 (defun clutch--backend-key-from-params (params)
   "Return backend icon key for connection PARAMS, or nil."
@@ -673,7 +692,15 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 
 (defun clutch--manual-backend-choices ()
   "Return backend choices offered by manual connection readers."
-  (remq 'jdbc (clutch-db-backends t)))
+  (cl-remove-if-not #'clutch-db-backend-manual-choice-p
+                    (clutch-db-backends t)))
+
+(defun clutch--backend-support-annotation (key)
+  "Return manual chooser support annotation for backend KEY, or nil."
+  (pcase (clutch-db-backend-support-level key)
+    ('basic "Basic")
+    ('experimental "Experimental")
+    (_ nil)))
 
 (defun clutch--completion-backend-icon-prefix (key)
   "Return a minibuffer completion icon prefix for backend KEY."
@@ -740,7 +767,8 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
      (let ((key (intern candidate)))
        (list candidate
              (clutch--completion-backend-icon-prefix key)
-             "")))
+             (clutch--completion-annotation
+              (list (clutch--backend-support-annotation key))))))
    candidates))
 
 (defun clutch--connection-backend-segment (&optional conn params)
@@ -849,7 +877,10 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--update-mode-line ()
   "Update buffer-local execution UI with connection status."
-  (let* ((base (if (derived-mode-p 'clutch-repl-mode) "clutch-repl" "clutch"))
+  (let* ((base (cond
+                ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
+                ((derived-mode-p 'clutch-mongodb-mode) "clutch-mongo")
+                (t "clutch")))
          (spinner (clutch--spinner-string)))
     (setq mode-name
           (if (and clutch--executing-p spinner)
@@ -858,7 +889,8 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (when (derived-mode-p 'clutch-result-mode)
     (when (fboundp 'clutch--refresh-footer-timing)
       (clutch--refresh-footer-timing)))
-  (when (derived-mode-p 'clutch-mode 'clutch-repl-mode)
+  (when (or (clutch--query-buffer-p)
+            (derived-mode-p 'clutch-repl-mode))
     ;; Use :eval so line-number-display-width is recomputed on each redraw,
     ;; keeping alignment correct when display-line-numbers-mode is toggled.
     (setq header-line-format '((:eval (clutch--build-connection-header-line)))))
@@ -870,6 +902,20 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Return non-nil when BACKEND is handled by JDBC."
   (eq (plist-get (clutch-db-backend-feature backend) :require)
       'clutch-db-jdbc))
+
+(defun clutch--jdbc-connection-params-p (params)
+  "Return non-nil when PARAMS will execute through the JDBC backend."
+  (let ((backend (clutch--backend-key-from-params params)))
+    (or (clutch--jdbc-backend-p backend)
+        (and (eq backend 'mongodb)
+             (clutch--mongodb-surface-sql-params-p params)))))
+
+(defun clutch--params-nonempty-user-p (params)
+  "Return non-nil when PARAMS contain a non-empty :user value."
+  (let ((user (plist-get params :user)))
+    (and user
+         (not (and (stringp user)
+                   (string-empty-p user))))))
 
 ;;;; Password resolution and connection building
 
@@ -973,14 +1019,29 @@ cannot be read."
       (or (and entry (clutch--resolve-pass-entry-password entry))
           (clutch--resolve-auth-source-password params))))))
 
+(defun clutch--canonicalize-backend-aliases (params)
+  "Return PARAMS with public backend aliases normalized."
+  (let ((out (copy-sequence params)))
+    (when (eq (plist-get out :backend) 'mongo)
+      (setq out (plist-put out :backend 'mongodb)))
+    (when (and (eq (plist-get out :backend) 'mongodb)
+               (plist-member out :driver))
+      (user-error
+       "MongoDB connections do not accept :driver; use :surface sql-interface for SQL Interface"))
+    (when-let* ((surface (plist-get out :surface)))
+      (setq out (plist-put out :surface
+                           (clutch-db--normalize-symbol-option surface))))
+    out))
+
 (defun clutch--canonicalize-connection-params (params)
   "Return PARAMS with public connection aliases normalized."
-  (let ((has-tramp (plist-member params :tramp))
-        (has-tramp-default-directory
-         (plist-member params :tramp-default-directory))
-        (tramp (plist-get params :tramp))
-        (tramp-default-directory
-         (plist-get params :tramp-default-directory)))
+  (let* ((params (clutch--canonicalize-backend-aliases params))
+         (has-tramp (plist-member params :tramp))
+         (has-tramp-default-directory
+          (plist-member params :tramp-default-directory))
+         (tramp (plist-get params :tramp))
+         (tramp-default-directory
+          (plist-get params :tramp-default-directory)))
     (cond
      ((not has-tramp) params)
      ((and has-tramp-default-directory
@@ -1769,7 +1830,9 @@ port and TRANSPORT contains the live process metadata."
 
 (defun clutch--direct-first-connect-params (backend connect-params)
   "Return CONNECT-PARAMS with short provisional timeouts for BACKEND."
-  (let* ((jdbc (clutch--jdbc-backend-p backend))
+  (let* ((jdbc (or (clutch--jdbc-backend-p backend)
+                   (and (eq backend 'mongodb)
+                        (clutch--mongodb-surface-sql-params-p connect-params))))
          (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
          (params (copy-sequence connect-params))
          (connect-timeout (plist-get params :connect-timeout))
@@ -1828,8 +1891,9 @@ same credentials as the successful foreground connection."
   (let* ((backend (or (plist-get params :backend)
                       (user-error "Connection params require :backend")))
          (password (clutch--resolve-password params)))
-    (when (and (clutch--jdbc-backend-p backend)
+    (when (and (clutch--jdbc-connection-params-p params)
                (plist-get params :pass-entry)
+               (clutch--params-nonempty-user-p params)
                (null password))
       (user-error
        (concat "No password resolved for JDBC connection %s (:pass-entry %s). "

@@ -1276,23 +1276,32 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :connect-fn clutch-db-mysql-connect
 	       :display-name "MySQL"
 	       :default-port 3306
+	       :support-level full
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
 	       :connect-fn clutch-db-pg-connect
 	       :display-name "PostgreSQL"
 	       :default-port 5432
+	       :support-level full
 	       :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
 	       :connect-fn clutch-db-sqlite-connect
 	       :display-name "SQLite"
-	       :sql-product sqlite)))
+	       :support-level full
+	       :sql-product sqlite))
+    (mongodb . (:require clutch-db-mongodb
+                :connect-fn clutch-db-mongodb-connect
+                :display-name "MongoDB"
+                :default-port 27017
+                :support-level basic)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
 a plist of connection params and returning a conn), and optional UI metadata
-such as :display-name and :default-port.")
+such as :display-name, :default-port, :support-level, and :manual-choice.")
 
 (defun clutch-db-backend-feature (backend)
-  "Return the registered feature plist for BACKEND, loading JDBC if needed."
+  "Return the registered feature plist for BACKEND.
+Load optional registries if needed."
   (or (alist-get backend clutch-db--backend-features)
       (progn
         (require 'clutch-db-jdbc nil t)
@@ -1315,6 +1324,18 @@ before returning the list."
   "Return registered default TCP port for BACKEND, or nil."
   (and backend
        (plist-get (clutch-db-backend-feature backend) :default-port)))
+
+(defun clutch-db-backend-support-level (backend)
+  "Return registered support level for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-db-backend-feature backend) :support-level)))
+
+(defun clutch-db-backend-manual-choice-p (backend)
+  "Return non-nil when BACKEND should appear in manual connection prompts."
+  (when-let* ((features (clutch-db-backend-feature backend)))
+    (if (plist-member features :manual-choice)
+        (plist-get features :manual-choice)
+      t)))
 
 (defun clutch-db-backend-sql-product (backend)
   "Return registered `sql-product' symbol for BACKEND, or nil."

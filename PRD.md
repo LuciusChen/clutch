@@ -14,8 +14,8 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, plus built-in SQLite
-- JDBC sidecar support for Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs
+- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, built-in SQLite, and native MongoDB through the external `mongo.el` client
+- JDBC sidecar support for Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB SQL Interface, and generic JDBC URLs
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
@@ -36,8 +36,8 @@ clutch integrates directly into Emacs, offering:
 
 clutch follows a **modular backend-facade architecture** with clear project
 boundaries.  UI/workflow modules depend on the `clutch-db.el` facade, while
-backend adapters contain database-specific protocol, SQL dialect, and metadata
-behavior.
+backend adapters contain database-specific integration, SQL dialect, and
+metadata behavior.
 
 ```
 clutch.el
@@ -61,6 +61,7 @@ backend adapters
   clutch-db-mysql.el     external mysql.el wire protocol client
   clutch-db-pg.el        external pg-el client
   clutch-db-sqlite.el    Emacs sqlite-* functions
+  clutch-db-mongodb.el   MongoDB document adapter over external mongo.el
   clutch-db-jdbc.el      JVM sidecar plus JDBC drivers
 ```
 
@@ -81,9 +82,11 @@ backend adapters
 | `clutch-db-mysql.el` | MySQL backend adapter, type-category mapping, mysql.el boundary wrappers |
 | `clutch-db-pg.el` | PostgreSQL backend adapter, OID-to-type mapping, pg-el boundary wrappers |
 | `clutch-db-sqlite.el` | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
+| `clutch-db-mongodb.el` | MongoDB basic document backend over external `mongo.el` |
 | `clutch-db-jdbc.el` | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
 | External dependency: `mysql` | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | PostgreSQL client from upstream `pg-el` (separate package) |
+| External dependency: `mongo` | Native MongoDB client from `mongo.el` (separate package) |
 | Optional package: `ob-clutch` | Org-Babel integration bridge (separate package) |
 
 For JDBC-backed databases, one logical clutch connection now maps to two JDBC
@@ -100,25 +103,31 @@ user queries on the same JDBC session.
 
 ### Native / In-Process Backends
 
-| Backend | Emacs Version | Implementation | Notes |
-|---------|---------------|----------------|-------|
-| **MySQL** | 29.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
-| **PostgreSQL** | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
-| **SQLite** | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
+| Backend | Support Level | Emacs Version | Implementation | Notes |
+|---------|---------------|---------------|----------------|-------|
+| **MySQL** | Full SQL support | 29.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **PostgreSQL** | Full SQL support | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
+| **SQLite** | Full SQL support | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
+| **MongoDB** | Basic native document support | 29.1+ | `mongo.el` | Ordinary local `mongodb://` deployments; query buffers use supported MongoDB Shell / MQL helper syntax, not SQL or arbitrary JavaScript |
 
 ### JDBC Backends (via JVM Sidecar)
 
-| Backend | Driver | Version | Source |
-|---------|--------|---------|--------|
-| **Oracle** | `ojdbc8` | 19.21.0.0 | Maven Central (auto-download) |
-| **Oracle i18n** | `orai18n` | 21.13.0.0 | Maven Central (optional, for non-ASCII) |
-| **SQL Server** | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
-| **Snowflake** | `snowflake-jdbc` | 3.14.4 | Maven Central (auto-download) |
-| **Amazon Redshift** | `redshift-jdbc42` | 2.1.0.30 | Maven Central (auto-download) |
-| **ClickHouse** | `clickhouse-jdbc` | 0.9.8:all | Maven Central (auto-download) |
-| **DuckDB** | `duckdb_jdbc` | 1.5.3.0 | Maven Central (auto-download; connect through generic JDBC URL) |
-| **DB2** | `db2jcc4` | — | Manual installation from IBM |
-| **Generic JDBC** | any | — | Drop jar into `clutch-jdbc-agent-dir/drivers/` |
+| Backend | Support Level | Driver | Version | Source |
+|---------|---------------|--------|---------|--------|
+| **Oracle** | Full SQL support | `ojdbc8` | 19.21.0.0 | Maven Central (auto-download) |
+| **Oracle i18n** | Companion driver | `orai18n` | 21.13.0.0 | Maven Central (optional, for non-ASCII) |
+| **SQL Server** | Full SQL support | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
+| **Snowflake** | Basic SQL / query-first support | `snowflake-jdbc` | 3.14.4 | Maven Central (auto-download) |
+| **Amazon Redshift** | Basic SQL / query-first support | `redshift-jdbc42` | 2.1.0.30 | Maven Central (auto-download) |
+| **ClickHouse** | Basic SQL / query-first support | `clickhouse-jdbc` | 0.9.8:all | Maven Central (auto-download) |
+| **DuckDB** | Full SQL model, generic JDBC entry | `duckdb_jdbc` | 1.5.3.0 | Maven Central (auto-download; connect through generic JDBC URL) |
+| **MongoDB SQL Interface surface** | Advanced basic SQL surface | `mongodb-jdbc` | 3.0.6:all | Maven Central (connect with `:backend mongodb :surface sql-interface`; requires JDBC sidecar and driver jar) |
+| **DB2** | Basic SQL / query-first support | `db2jcc4` | — | Manual installation from IBM |
+| **Generic JDBC** | Basic SQL / query-first support | any | — | Drop jar into `clutch-jdbc-agent-dir/drivers/` |
+
+Backend support levels are defined in `docs/backend-support.org`.  Redis-style
+key/value systems are not covered by the MongoDB adapter and require a future
+non-relational backend contract before clutch should claim support.
 
 ---
 
@@ -1055,10 +1064,11 @@ runtime model are documented in `docs/jdbc-agent-protocol.md`.
 - Result buffers support per-table/per-column displayers through
   `clutch-register-column-displayer`.
 - Result buffers can pipe the current cell through a shell command with `|`.
-- Live coverage is split by backend path: native MySQL/PostgreSQL suites run
-  through `test/run-native-live-tests.sh`, SQLite is covered in-process, and
-  environment-driven JDBC live suites cover Oracle, SQL Server, ClickHouse, and
-  DuckDB user workflows against real databases.
+- Live coverage is split by backend path: native MySQL/PostgreSQL/MongoDB
+  suites run through `test/run-native-live-tests.sh`, SQLite is covered
+  in-process, and environment-driven JDBC live suites cover Oracle, SQL Server,
+  ClickHouse, DuckDB, and MongoDB SQL Interface user workflows against real
+  databases.
 
 ---
 

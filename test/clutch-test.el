@@ -16,8 +16,8 @@
 ;;   ./test/run-native-live-tests.sh
 ;;
 ;; Manual live setup:
-;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8
-;;   docker run -d -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
+;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8
+;;   docker run -d -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
 ;;
 ;; Run unit tests from the repository root:
 ;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
@@ -5011,6 +5011,17 @@ crashing the UI layer."
       (should (string-match-p "root" key))
       (should (string-match-p "test" key)))))
 
+(ert-deftest clutch-test-connection-key-omits-empty-user-prefix ()
+  "Connection keys should not show ?@ when a backend has no user."
+  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+             (lambda (_conn) 'mongodb))
+            ((symbol-function 'clutch-db-user) (lambda (_conn) nil))
+            ((symbol-function 'clutch-db-host) (lambda (_conn) "127.0.0.1"))
+            ((symbol-function 'clutch-db-port) (lambda (_conn) 27017))
+            ((symbol-function 'clutch-db-database) (lambda (_conn) "app")))
+    (should (equal (clutch--connection-key 'fake-conn)
+                   "127.0.0.1:27017/app"))))
+
 (ert-deftest clutch-test-connection-display-key-prefers-remote-ssh-endpoint ()
   "Connection labels should keep the remote endpoint visible when SSH is used."
   (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
@@ -5825,6 +5836,61 @@ crashing the UI layer."
        :type 'user-error)
       (should-not connect-called))))
 
+(ert-deftest clutch-test-build-conn-allows-passwordless-mongodb-pass-entry ()
+  "Saved passwordless MongoDB connections should not require auth-source."
+  (let (captured-backend captured-params)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (setq captured-backend backend
+                       captured-params params)
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
+      (should (eq (clutch--build-conn
+                   '(:backend mongodb
+                     :host "127.0.0.1"
+                     :port 27017
+                     :database "app"
+                     :pass-entry "mongdb"))
+                  'fake-conn))
+      (should (eq captured-backend 'mongodb))
+      (should (equal captured-params
+                     '(:host "127.0.0.1"
+                       :port 27017
+                       :database "app"))))))
+
+(ert-deftest clutch-test-build-conn-materializes-mongodb-pass-entry ()
+  "Authenticated native MongoDB should receive resolved pass-entry passwords."
+  (let (captured-backend captured-params)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) "secret"))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (setq captured-backend backend
+                       captured-params params)
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
+      (should (eq (clutch--build-conn
+                   '(:backend mongodb
+                     :host "127.0.0.1"
+                     :port 27017
+                     :database "app"
+                     :auth-database "admin"
+                     :user "root"
+                     :pass-entry "mongo-root"))
+                  'fake-conn))
+      (should (eq captured-backend 'mongodb))
+      (should (equal captured-params
+                     '(:host "127.0.0.1"
+                       :port 27017
+                       :database "app"
+                       :auth-database "admin"
+                       :user "root"
+                       :password "secret"))))))
+
 (ert-deftest clutch-test-resolve-password-errors-when-pass-entry-cannot-be-read ()
   "Unreadable pass entries should fail before the backend sees auth."
   (let (connect-called)
@@ -6134,6 +6200,57 @@ crashing the UI layer."
                        :password ""
                        :database "default")))
       (should (= port-default 8123)))))
+
+(ert-deftest clutch-test-read-connection-params-uses-mongodb-registry-port ()
+  "Manual MongoDB connections should use the backend registry default port."
+  (let ((clutch-connection-alist nil)
+        port-default)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _args) "mongodb"))
+              ((symbol-function 'read-string)
+               (lambda (prompt &optional _initial _history default-value _inherit)
+                 (pcase prompt
+                   ("Host (127.0.0.1): " "cluster0.a.query.mongodb.net")
+                   ("User: " "reporter")
+                   ("SSH host from ~/.ssh/config (optional): " "")
+                   ("Database (optional): " "analytics")
+                   (_ (or default-value "")))))
+              ((symbol-function 'read-number)
+               (lambda (_prompt default)
+                 (setq port-default default)
+                 default))
+              ((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'read-passwd)
+               (lambda (&rest _args) "secret")))
+      (should (equal (clutch--read-connection-params)
+                     '(:backend mongodb
+                       :host "cluster0.a.query.mongodb.net"
+                       :port 27017
+                       :user "reporter"
+                       :password "secret"
+                       :database "analytics")))
+      (should (= port-default 27017)))))
+
+(ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongo-alias ()
+  "The public mongo alias should normalize to the registered mongodb backend."
+  (should (equal (clutch--canonicalize-connection-params
+                  '(:backend mongo :database "analytics"))
+                 '(:backend mongodb :database "analytics"))))
+
+(ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongodb-surface-sql-surface ()
+  "MongoDB SQL Interface should be a surface on the MongoDB backend."
+  (should (equal (clutch--canonicalize-connection-params
+                  '(:backend mongo :surface "sql-interface" :database "analytics"))
+                 '(:backend mongodb :surface sql-interface :database "analytics"))))
+
+(ert-deftest clutch-test-canonicalize-connection-params-rejects-mongodb-driver-option ()
+  "MongoDB should not accept a public driver option."
+  (dolist (driver '(mongo mongodb jdbc))
+    (should-error
+     (clutch--canonicalize-connection-params
+      `(:backend mongodb :driver ,driver :database "analytics"))
+     :type 'user-error)))
 
 ;;;; Connection — transaction and auto-commit
 
@@ -6622,6 +6739,15 @@ crashing the UI layer."
     (should (equal (clutch--connection-display-key 'fake-conn)
                    "scott@dbhost:1522"))))
 
+(ert-deftest clutch-test-connection-display-key-omits-empty-user-prefix ()
+  "Connection display keys should not show ?@ when user is absent."
+  (cl-letf (((symbol-function 'clutch-db-user) (lambda (_conn) nil))
+            ((symbol-function 'clutch-db-host) (lambda (_conn) "127.0.0.1"))
+            ((symbol-function 'clutch-db-port) (lambda (_conn) 27017))
+            ((symbol-function 'clutch-db-display-name) (lambda (_conn) "MongoDB")))
+    (should (equal (clutch--connection-display-key 'fake-conn)
+                   "127.0.0.1"))))
+
 (ert-deftest clutch-test-connection-display-key-shows-sqlite-file-name ()
   "SQLite display labels should not fall back to user/host placeholders."
   (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
@@ -6659,6 +6785,173 @@ crashing the UI layer."
       (should (equal (substring-no-properties (nth 1 row))
                      "[sqlite] "))
       (should (equal (nth 2 row) "")))))
+
+(ert-deftest clutch-test-backend-candidates-affixation-marks-basic-support ()
+  "Backend candidates should mark basic-support backends."
+  (cl-letf (((symbol-function 'clutch--nerd-icons-available-p)
+             (lambda () nil)))
+    (let ((row (car (clutch--backend-candidates-affixation '("mongodb")))))
+      (should (equal (nth 0 row) "mongodb"))
+      (should (equal (nth 1 row) ""))
+      (should (string-match-p "Basic" (substring-no-properties (nth 2 row)))))))
+
+(ert-deftest clutch-test-mongodb-completion-uses-shell-and-collection-candidates ()
+  "MongoDB completion should offer shell methods and cached collections."
+  (let ((schema (make-hash-table :test 'equal)))
+    (puthash "users" nil schema)
+    (puthash "orders" nil schema)
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) schema)))
+      (with-temp-buffer
+        (clutch-mongodb-mode)
+        (should (derived-mode-p 'prog-mode))
+        (should-not (derived-mode-p 'js-mode))
+        (should (eq indent-line-function #'clutch-mongodb-indent-line))
+        (should (equal comment-start "// "))
+        (insert "db.")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "" (nth 2 capf))))
+          (should (equal (car capf) (point)))
+          (should (equal (cadr capf) (point)))
+          (should (member "users" candidates))
+          (should (member "orders" candidates))
+          (should (member "getCollectionNames()" candidates)))
+        (erase-buffer)
+        (insert "db.users.")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "" (nth 2 capf))))
+          (should (member "find()" candidates))
+          (should (member "aggregate()" candidates)))
+        (erase-buffer)
+        (insert "db.users.fi")
+        (cl-letf (((symbol-function 'completion-in-region)
+                   (lambda (beg end collection &optional _predicate)
+                     (delete-region beg end)
+                     (insert (car (all-completions
+                                   "fi" collection)))
+                     t)))
+          (clutch-mongodb-complete-at-point)
+          (should (equal (buffer-string) "db.users.find()")))))))
+
+(ert-deftest clutch-test-mongodb-completion-offers-mql-operators-and-fields ()
+  "MongoDB completion should offer MQL operators and sampled field names."
+  (let ((schema (make-hash-table :test 'equal)))
+    (puthash "orders" '("status" "userId" "items.productId") schema)
+    (puthash "products" '("sku" "category") schema)
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) schema)))
+      (with-temp-buffer
+        (clutch-mongodb-mode)
+        (insert "db.orders.aggregate([{$")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "$" (nth 2 capf))))
+          (should (member "$match" candidates))
+          (should (member "$lookup" candidates))
+          (should (member "$sum" candidates))
+          (should (member "$dateTrunc" candidates))
+          (should (member "$vectorSearch" candidates)))
+        (erase-buffer)
+        (insert "db.orders.find({st")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "st" (nth 2 capf))))
+          (should (member "status" candidates))
+          (should-not (member "find()" candidates)))
+        (erase-buffer)
+        (insert "db.orders.aggregate([{$group:{_id:\"$u")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "$u" (nth 2 capf))))
+          (should (member "$userId" candidates)))
+        (erase-buffer)
+        (insert "db.orders.aggregate([{$lookup:{from:\"pro")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "pro" (nth 2 capf))))
+          (should (member "products" candidates)))
+        (erase-buffer)
+        (insert "db.orders.aggregate([{$merge:{into:\"pro")
+        (let* ((capf (clutch-mongodb-completion-at-point))
+               (candidates (all-completions "pro" (nth 2 capf))))
+          (should (member "products" candidates)))))))
+
+(ert-deftest clutch-test-mongodb-completion-inserts-key-colon ()
+  "MongoDB field and operator completion should add a key separator."
+  (let ((schema (make-hash-table :test 'equal)))
+    (puthash "orders" '("status" "userId") schema)
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) schema)))
+      (with-temp-buffer
+        (clutch-mongodb-mode)
+        (insert "db.orders.find({st")
+        (pcase-let ((`(,beg ,end ,collection . ,plist)
+                     (clutch-mongodb-completion-at-point)))
+          (delete-region beg end)
+          (insert "status")
+          (funcall (plist-get plist :exit-function) "status" 'finished)
+          (should (equal (buffer-string) "db.orders.find({status: ")))
+        (erase-buffer)
+        (insert "db.orders.aggregate([{$m")
+        (pcase-let ((`(,beg ,end ,collection . ,plist)
+                     (clutch-mongodb-completion-at-point)))
+          (delete-region beg end)
+          (insert "$match")
+          (funcall (plist-get plist :exit-function) "$match" 'finished)
+          (should (equal (buffer-string)
+                         "db.orders.aggregate([{$match: ")))))))
+
+(ert-deftest clutch-test-mongodb-mode-indents-mql-pipeline ()
+  "MongoDB mode should indent MQL pipelines without deriving from JS mode."
+  (with-temp-buffer
+    (clutch-mongodb-mode)
+    (insert "db.demo_orders.aggregate([\n{$match:{status:\"paid\"}},\n{$group:{_id:\"$userId\"}}\n])")
+    (indent-region (point-min) (point-max))
+    (should (equal (buffer-string)
+                   "db.demo_orders.aggregate([\n  {$match:{status:\"paid\"}},\n  {$group:{_id:\"$userId\"}}\n])"))))
+
+(ert-deftest clutch-test-mongodb-mode-fontifies-mql-structure ()
+  "MongoDB mode should distinguish MQL operators, keys, methods, and strings."
+  (with-temp-buffer
+    (clutch-mongodb-mode)
+    (insert "db.orders.aggregate([{$match:{status:\"paid\"}}])")
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "orders")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'clutch-mongodb-namespace-face))
+    (search-forward "aggregate")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'clutch-mongodb-method-face))
+    (search-forward "$match")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'clutch-mongodb-operator-face))
+    (search-forward "status")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'clutch-mongodb-key-face))
+    (search-forward "paid")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'font-lock-string-face))))
+
+(ert-deftest clutch-test-object-browse-query-uses-mongodb-shell-syntax ()
+  "MongoDB object browsing should insert a shell query, not SELECT SQL."
+  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+             (lambda (_conn) 'mongodb))
+            ((symbol-function 'clutch-jdbc-conn-p)
+             (lambda (_conn) nil))
+            ((symbol-function 'clutch--object-sql-name)
+             (lambda (&rest _args)
+               (error "SQL formatter should not run for MongoDB"))))
+    (should (equal (clutch--object-browse-query 'mongo-conn '(:name "users"))
+                   "db.getCollection(\"users\").find();"))))
+
+(ert-deftest clutch-test-object-browse-query-uses-sql-for-mongodb-surface-sql ()
+  "MongoDB SQL Interface object browsing should insert SELECT SQL."
+  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+             (lambda (_conn) 'mongodb))
+            ((symbol-function 'clutch-jdbc--mongodb-conn-p)
+             (lambda (_conn) t))
+            ((symbol-function 'clutch--object-sql-name)
+             (lambda (_conn entry)
+               (plist-get entry :name))))
+    (should (equal (clutch--object-browse-query 'mongo-sql-conn '(:name "users"))
+                   "SELECT * FROM users;"))))
 
 (ert-deftest clutch-test-connection-state-icon-uses-database-check-outline ()
   "Connected state icon should use the requested database-check-outline glyph."
@@ -7395,6 +7688,54 @@ This applies when the buffer owns the connection."
             (should (equal clutch--console-name name))
             (should (equal clutch--console-ad-hoc-params params))
             (should (eq (current-buffer) (get-buffer buffer-name)))))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-query-console-mongodb-uses-mongodb-mode ()
+  "MongoDB query consoles should use MQL editing, not SQL or JS mode."
+  (let* ((name "mongo-local")
+         (buffer-name (clutch--console-buffer-base-name name))
+         (params '(:backend mongodb
+                   :host "127.0.0.1"
+                   :port 27017
+                   :database "app"))
+         built)
+    (unwind-protect
+        (clutch-test--with-query-console-build-stubs (built nil 'mongodb-conn)
+          (clutch-query-console (list :name name :params params))
+          (should (equal built params))
+          (should (eq major-mode 'clutch-mongodb-mode))
+          (should (derived-mode-p 'prog-mode))
+          (should-not (derived-mode-p 'js-mode))
+          (should-not (derived-mode-p 'sql-mode))
+          (should (eq indent-line-function #'clutch-mongodb-indent-line))
+          (should (memq #'clutch-mongodb-completion-at-point
+                        completion-at-point-functions))
+          (should-not (memq #'clutch-completion-at-point
+                            completion-at-point-functions)))
+      (when-let* ((buf (get-buffer buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-query-console-mongodb-surface-sql-uses-sql-mode ()
+  "MongoDB SQL Interface consoles should use SQL editing under the MongoDB backend."
+  (let* ((name "mongo-sql-local")
+         (buffer-name (clutch--console-buffer-base-name name))
+         (params '(:backend mongodb
+                   :surface sql-interface
+                   :host "cluster0.a.query.mongodb.net"
+                   :database "analytics"))
+         built)
+    (unwind-protect
+        (clutch-test--with-query-console-build-stubs (built nil 'mongodb-conn)
+          (clutch-query-console (list :name name :params params))
+          (should (equal built params))
+          (should (eq major-mode 'clutch-mode))
+          (should (derived-mode-p 'sql-mode))
+          (should-not (derived-mode-p 'js-mode))
+          (should (memq #'clutch-completion-at-point
+                        completion-at-point-functions))
+          (should-not (memq #'clutch-mongodb-completion-at-point
+                            completion-at-point-functions)))
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf)))))
 
