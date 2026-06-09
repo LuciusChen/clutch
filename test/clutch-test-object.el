@@ -7,7 +7,8 @@
 ;;; Code:
 
 (eval-and-compile
-  (require 'clutch-test-common))
+  (require 'clutch-test-common)
+  (require 'clutch-document))
 
 ;;;; Object test helpers
 
@@ -23,6 +24,7 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
            (with-current-buffer console
              (insert ,initial)
              (setq-local clutch-connection ,conn)
+             (setq-local clutch--query-buffer-local-p t)
              (cl-letf (((symbol-function 'derived-mode-p)
                         (lambda (&rest modes) (memq 'clutch-mode modes)))
                        ((symbol-function 'pop-to-buffer)
@@ -143,6 +145,9 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
                (lambda (entry) (setq show-entry entry))))
       (clutch-object-default-action '(:name "orders" :type "TABLE"))
       (should (equal browse-entry '(:name "orders" :type "TABLE")))
+      (setq browse-entry nil)
+      (clutch-object-default-action '(:name "users" :type "COLLECTION"))
+      (should (equal browse-entry '(:name "users" :type "COLLECTION")))
       (should-not show-entry))))
 
 (ert-deftest clutch-test-object-default-action-routes-non-table-types-to-definition ()
@@ -745,6 +750,47 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
         (should-not resolved-called)
         (should (equal action-call
                        '((:name "users" :type "TABLE") browse)))))))
+
+(ert-deftest clutch-test-jump-on-collection-at-point-in-mongodb-console-browses ()
+  "Jump should treat MongoDB collections as primary browseable objects."
+  (let ((clutch--object-cache (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (clutch-mongodb-mode)
+      (insert "db.users.find()")
+      (search-backward "users")
+      (setq-local clutch-connection 'fake-mongodb-conn)
+      (let (read-args action-call)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch--connection-key)
+                   (lambda (_conn) "mongodb-test"))
+                  ((symbol-function 'clutch-db-browseable-object-entries)
+                   (lambda (_conn)
+                     '((:name "users" :schema "app" :type "COLLECTION")
+                       (:name "orders" :schema "app" :type "COLLECTION"))))
+                  ((symbol-function 'clutch--schedule-object-warmup)
+                   #'ignore)
+                  ((symbol-function 'clutch--resolve-object-dwim)
+                   (lambda (&rest _args)
+                     (ert-fail "MongoDB collection at point should resolve directly")))
+                  ((symbol-function 'clutch-object-read)
+                   (lambda (prompt &optional table-like-only initial-input category allowed-types)
+                     (setq read-args
+                           (list prompt table-like-only initial-input category allowed-types))
+                     '(:name "users" :schema "app" :type "COLLECTION")))
+                  ((symbol-function 'clutch--run-object-action)
+                   (lambda (entry action-id)
+                     (setq action-call (list entry action-id)))))
+          (clutch-jump)
+          (should (equal read-args
+                         (list "Jump to object: "
+                               nil
+                               "users"
+                               nil
+                               clutch-primary-object-types)))
+          (should (equal action-call
+                         '((:name "users" :schema "app" :type "COLLECTION")
+                           browse))))))))
 
 (ert-deftest clutch-test-object-read-filters-by-allowed-types ()
   "Object reader should honor an explicit allowed type set."

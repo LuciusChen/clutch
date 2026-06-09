@@ -10,7 +10,7 @@
 
 (require 'ert)
 
-(require 'clutch-db)
+(require 'clutch-backend)
 
 (require 'clutch-db-jdbc)
 

@@ -33,7 +33,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'mysql)
 
 ;;;; Type-category mapping

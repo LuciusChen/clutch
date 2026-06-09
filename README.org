@@ -8,7 +8,7 @@
 An Emacs database client with an interactive data browsing UI.
 Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite
 through Emacs built-in =sqlite-*= functions, MongoDB through the external
-=mongo.el= native client, plus Oracle, SQL Server, DB2, Snowflake, Redshift,
+=mongodb.el= native client, plus Oracle, SQL Server, DB2, Snowflake, Redshift,
 ClickHouse, DuckDB, and generic JDBC URLs through a
 lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
 
@@ -27,7 +27,7 @@ For Org-Babel integration, install the separate [[https://github.com/LuciusChen/
 | SQLite | Full SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
 | Oracle / SQL Server | Full SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
 | DuckDB | Full SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |
-| MongoDB | Basic native document support; optional SQL Interface surface | Normal connections use external =mongo.el= native protocol support plus Clutch's MongoDB Shell / MQL helper query buffers; SQL Interface endpoints use =:surface sql-interface= and require the JDBC driver |
+| MongoDB | Basic native document support; optional SQL Interface surface | Normal connections use external =mongodb.el= native protocol support plus Clutch's MongoDB Shell / MQL helper query buffers; SQL Interface endpoints use =:surface sql-interface= and require the JDBC driver |
 | ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Useful through JDBC, with backend-specific limits around edits, transactions, and dialect behavior |
 
 See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-level policy and non-relational boundary.
@@ -105,12 +105,14 @@ Install =clutch= from MELPA or another package archive:
 (package-install 'clutch)
 #+end_src
 
-Package-manager installs also install the core native backend protocol
+Package-manager installs also install the required native backend protocol
 packages:
 
 - [[https://github.com/LuciusChen/mysql.el][mysql]] for =:backend mysql=
 - [[https://github.com/emarsden/pg-el][pg]] for =:backend pg=
-- [[https://github.com/LuciusChen/mongo.el][mongo]] for =:backend mongodb=
+
+MongoDB is a lazy optional backend.  Install [[https://github.com/LuciusChen/mongodb.el][mongodb.el]] separately when using
+=:backend mongodb=.
 
 SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
 =clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
@@ -123,7 +125,7 @@ use to =load-path= explicitly:
 (add-to-list 'load-path "/path/to/clutch")
 (add-to-list 'load-path "/path/to/mysql.el") ; only for :backend mysql
 (add-to-list 'load-path "/path/to/pg-el")    ; only for :backend pg
-(add-to-list 'load-path "/path/to/mongo.el") ; only for :backend mongodb
+(add-to-list 'load-path "/path/to/mongodb.el") ; only for :backend mongodb
 (require 'clutch)
 #+end_src
 
@@ -139,9 +141,8 @@ everything in one repository, this is a breaking packaging change:
 - [[https://github.com/emarsden/pg-el][pg.el]] is no longer bundled in this repository.  Package-manager installs of
   =clutch= install the =pg= package as a dependency; source checkouts must add
   =pg-el= to =load-path= for =:backend pg=.
-- [[https://github.com/LuciusChen/mongo.el][mongo.el]] is no longer bundled in this repository.  Package-manager installs
-  of =clutch= install the =mongo= package as a dependency; source checkouts must
-  add =mongo.el= to =load-path= for =:backend mongodb=.
+- [[https://github.com/LuciusChen/mongodb.el][mongodb.el]] is no longer bundled in this repository.  Install it separately
+  and add =mongodb.el= to =load-path= for =:backend mongodb= source checkouts.
 - [[https://github.com/LuciusChen/ob-clutch][ob-clutch.el]] is no longer bundled; install =ob-clutch= separately for
   Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
@@ -389,9 +390,9 @@ Common entry points:
 
 ** MongoDB Backend
 
-MongoDB is basic native document support through =mongo.el=.  It connects to
+MongoDB is basic native document support through =mongodb.el=.  It connects to
 ordinary MongoDB deployments through =mongodb://...= URLs or structured
-=:host= / =:port= params accepted by =mongo.el=.  It lists collections,
+=:host= / =:port= params accepted by =mongodb.el=.  It lists collections,
 expands top-level document keys into result columns, and evaluates supported
 MongoDB Shell / MQL helper commands such as
 =db.users.find({active: true}).limit(20)=.

@@ -15,7 +15,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-query)
 (require 'clutch-object)

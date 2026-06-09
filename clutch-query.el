@@ -33,7 +33,7 @@
 
 ;;; Code:
 
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-connection)
 (require 'cl-lib)
 
@@ -56,6 +56,8 @@
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch-console-yank-cleanup t)
+(defvar clutch--query-buffer-local-p)
+(defvar clutch--query-mode-line-name)
 
 ;; Forward declarations — functions from sibling modules
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
@@ -74,6 +76,7 @@
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--spinner-start "clutch-connection" ())
 (declare-function clutch--update-mode-line "clutch-connection" ())
+(declare-function clutch--disconnect-on-kill "clutch-connection" ())
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--saved-connection-params "clutch-connection" (name))
 (declare-function clutch--read-manual-connection-params "clutch-connection" (&optional sqlite-file))
@@ -81,7 +84,6 @@
 (declare-function clutch--read-sqlite-file-params "clutch-connection" ())
 (declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
 (declare-function clutch--backend-key-from-params "clutch-connection" (params))
-(declare-function clutch--mongodb-surface-sql-params-p "clutch-connection" (params))
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
 (declare-function clutch--prepare-connection-origin-params
@@ -97,7 +99,6 @@
                               server-pageable result-context source-buffer))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
 (declare-function clutch-mode "clutch" ())
-(declare-function clutch-mongodb-mode "clutch" ())
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
@@ -113,8 +114,8 @@
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
-(declare-function clutch-db-interrupt-query "clutch-db" (conn))
-(declare-function clutch-db-clear-error-details "clutch-db" (conn))
+(declare-function clutch-db-interrupt-query "clutch-backend" (conn))
+(declare-function clutch-db-clear-error-details "clutch-backend" (conn))
 
 ;;;; Query console
 
@@ -128,6 +129,35 @@ When nil, console persistence falls back to `clutch--console-name'.")
 
 (defvar-local clutch--console-ad-hoc-params nil
   "Connection params for a query console not backed by a saved profile.")
+
+(defun clutch--install-query-keybindings (map)
+  "Install common query-console key bindings into MAP."
+  (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
+  (define-key map (kbd "C-c C-r") #'clutch-execute-region)
+  (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
+  (define-key map (kbd "C-c C-e") #'clutch-connect)
+  (define-key map (kbd "C-c C-m") #'clutch-commit)
+  (define-key map (kbd "C-c C-u") #'clutch-rollback)
+  (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
+  (define-key map (kbd "C-c C-j") #'clutch-jump)
+  (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
+  (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
+  (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
+  (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
+  (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
+  (define-key map (kbd "C-c ?") #'clutch-dispatch)
+  map)
+
+(defun clutch--query-mode-common-setup (&optional mode-line-name)
+  "Install common local state for clutch query editing modes.
+MODE-LINE-NAME is the base name shown while the buffer is idle."
+  (setq-local clutch--query-buffer-local-p t)
+  (setq-local clutch--query-mode-line-name (or mode-line-name "clutch"))
+  (set-buffer-file-coding-system 'utf-8-unix nil t)
+  (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
+  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t)
+  (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
+  (clutch--update-mode-line))
 
 (defun clutch--console-buffer-base-name (name)
   "Return canonical buffer name for console NAME."
@@ -183,10 +213,10 @@ When nil, console persistence falls back to `clutch--console-name'.")
 
 (defun clutch--query-console-major-mode (params)
   "Return the major mode function for query console PARAMS."
-  (if (and (eq (clutch--backend-key-from-params params) 'mongodb)
-           (not (clutch--mongodb-surface-sql-params-p params)))
-      #'clutch-mongodb-mode
-    #'clutch-mode))
+  (or (clutch-backend-query-mode
+       (clutch--backend-key-from-params params)
+       params)
+      #'clutch-mode))
 
 (defun clutch--ensure-query-console-major-mode (params)
   "Ensure the current buffer uses the query console mode for PARAMS."

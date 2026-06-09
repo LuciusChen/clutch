@@ -5,7 +5,8 @@
 - [`mysql`](https://github.com/LuciusChen/mysql.el) — external pure Emacs Lisp MySQL wire protocol client
 - [`pg`](https://github.com/emarsden/pg-el) — external PostgreSQL client from [`pg-el`](https://github.com/emarsden/pg-el)
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
-- `clutch-db-mongodb.el` over external `mongo.el` — native MongoDB document adapter
+- `clutch-mongodb.el` over external `mongodb.el` — native MongoDB document adapter
+- `clutch-document.el` — document query-console layer for MongoDB native buffers
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
@@ -45,9 +46,9 @@ tests.  Default ERT runs skip those live tags unless credentials are provided.
 
 MongoDB backend details live in
 [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses
-the external `mongo.el` native client by default; Clutch owns the adapter,
+the external `mongodb.el` native client by default; Clutch owns the adapter,
 query-buffer helper parsing, result-grid mapping, and SQL Interface surface
-selection. Protocol capability details are documented in the `mongo.el`
+selection. Protocol capability details are documented in the `mongodb.el`
 repository.
 
 MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires

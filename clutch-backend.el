@@ -1,4 +1,4 @@
-;;; clutch-db.el --- Database backend protocol facade -*- lexical-binding: t; -*-
+;;; clutch-backend.el --- Database backend protocol facade -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -1271,76 +1271,112 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 
 ;;;; Connect dispatcher
 
-(defvar clutch-db--backend-features
+(defvar clutch-backend--registry
   '((mysql  . (:require clutch-db-mysql
 	       :connect-fn clutch-db-mysql-connect
 	       :display-name "MySQL"
 	       :default-port 3306
 	       :support-level full
+	       :data-model relational
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
 	       :connect-fn clutch-db-pg-connect
 	       :display-name "PostgreSQL"
 	       :default-port 5432
 	       :support-level full
+	       :data-model relational
 	       :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
 	       :connect-fn clutch-db-sqlite-connect
 	       :display-name "SQLite"
 	       :support-level full
+	       :data-model relational
 	       :sql-product sqlite))
-    (mongodb . (:require clutch-db-mongodb
-                :connect-fn clutch-db-mongodb-connect
+    (mongodb . (:require clutch-mongodb
+                :connect-fn clutch-mongodb-connect
                 :display-name "MongoDB"
                 :default-port 27017
-                :support-level basic)))
+                :support-level basic
+                :data-model document
+                :query-mode clutch-mongodb-mode
+                :query-mode-require clutch-document
+                :surfaces ((sql . (:query-mode clutch-mode))
+                           (sql-interface . (:query-mode clutch-mode))))))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
 a plist of connection params and returning a conn), and optional UI metadata
-such as :display-name, :default-port, :support-level, and :manual-choice.")
+such as :display-name, :default-port, :support-level, :data-model,
+:query-mode, :surfaces, and :manual-choice.")
 
-(defun clutch-db-backend-feature (backend)
+(defun clutch-backend-feature (backend)
   "Return the registered feature plist for BACKEND.
 Load optional registries if needed."
-  (or (alist-get backend clutch-db--backend-features)
+  (or (alist-get backend clutch-backend--registry)
       (progn
         (require 'clutch-db-jdbc nil t)
-        (alist-get backend clutch-db--backend-features))))
+        (alist-get backend clutch-backend--registry))))
 
-(defun clutch-db-backends (&optional load-optional)
+(defun clutch-backends (&optional load-optional)
   "Return registered backend symbols in user-facing order.
 When LOAD-OPTIONAL is non-nil, load optional backend registries such as JDBC
 before returning the list."
   (when load-optional
     (require 'clutch-db-jdbc nil t))
-  (mapcar #'car clutch-db--backend-features))
+  (mapcar #'car clutch-backend--registry))
 
-(defun clutch-db-backend-display-name (backend)
+(defun clutch-backend-display-name (backend)
   "Return registered display name for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :display-name)))
+       (plist-get (clutch-backend-feature backend) :display-name)))
 
-(defun clutch-db-backend-default-port (backend)
+(defun clutch-backend-default-port (backend)
   "Return registered default TCP port for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :default-port)))
+       (plist-get (clutch-backend-feature backend) :default-port)))
 
-(defun clutch-db-backend-support-level (backend)
+(defun clutch-backend-support-level (backend)
   "Return registered support level for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :support-level)))
+       (plist-get (clutch-backend-feature backend) :support-level)))
 
-(defun clutch-db-backend-manual-choice-p (backend)
+(defun clutch-backend-data-model (backend)
+  "Return registered data model for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-backend-feature backend) :data-model)))
+
+(defun clutch-backend-manual-choice-p (backend)
   "Return non-nil when BACKEND should appear in manual connection prompts."
-  (when-let* ((features (clutch-db-backend-feature backend)))
+  (when-let* ((features (clutch-backend-feature backend)))
     (if (plist-member features :manual-choice)
         (plist-get features :manual-choice)
       t)))
 
-(defun clutch-db-backend-sql-product (backend)
+(defun clutch-backend-sql-product (backend)
   "Return registered `sql-product' symbol for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :sql-product)))
+       (plist-get (clutch-backend-feature backend) :sql-product)))
+
+(defun clutch-backend-query-mode (backend &optional params)
+  "Return query-console major mode for BACKEND and PARAMS, or nil.
+Backends may register a default :query-mode and optional surface-specific
+entries in :surfaces.  Each surface entry is an alist element whose car is a
+surface symbol and whose cdr may contain :query-mode and
+:query-mode-require."
+  (when-let* ((features (and backend (clutch-backend-feature backend))))
+    (let* ((surface (clutch-db--normalize-symbol-option
+                     (plist-get params :surface)))
+           (surface-features
+            (and surface (alist-get surface (plist-get features :surfaces))))
+           (require-feature
+            (if surface-features
+                (plist-get surface-features :query-mode-require)
+              (plist-get features :query-mode-require)))
+           (query-mode
+            (or (plist-get surface-features :query-mode)
+                (plist-get features :query-mode))))
+      (when require-feature
+        (require require-feature))
+      query-mode)))
 
 (defun clutch-db-connect (backend params)
   "Connect to a database using BACKEND with PARAMS.
@@ -1349,7 +1385,7 @@ PARAMS is a plist of connection parameters (:host, :port, :user,
 :password, :database, etc.).
 Returns a backend-specific connection object."
   (if-let* ((feature-plist
-             (clutch-db-backend-feature backend))
+             (clutch-backend-feature backend))
             (connect-fn
              (progn
                (condition-case err
@@ -1397,5 +1433,5 @@ time (with :hours only) plists returned by the protocol layers."
                 (if negative "-" "")
                 hours minutes seconds))))))
 
-(provide 'clutch-db)
-;;; clutch-db.el ends here
+(provide 'clutch-backend)
+;;; clutch-backend.el ends here

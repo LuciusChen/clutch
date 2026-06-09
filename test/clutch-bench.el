@@ -23,7 +23,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 
 (defvar clutch-bench-iterations 30
   "Number of iterations per query benchmark.")

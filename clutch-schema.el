@@ -14,7 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'subr-x)
 
 (defvar clutch--schema-cache (make-hash-table :test 'equal)

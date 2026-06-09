@@ -17,10 +17,10 @@ only by whether a connection can be opened.
 * MongoDB Boundary
 
 =mongodb= is the normal MongoDB backend.  It connects to ordinary =mongod=
-deployments through the external =mongo.el= native client and evaluates
+deployments through the external =mongodb.el= native client and evaluates
 supported MongoDB Shell / MQL helper commands.  Normal MongoDB connections do
 not require Java or a JDBC driver jar.  Protocol capabilities and connection
-option semantics are documented in the =mongo.el= repository; Clutch should not
+option semantics are documented in the =mongodb.el= repository; Clutch should not
 duplicate that driver-level behavior in its own adapter.
 
 MongoDB SQL Interface is not another backend.  It is the optional

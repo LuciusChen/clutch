@@ -25,9 +25,9 @@ Keep one user-facing backend symbol:
 - MongoDB SQL Interface is a surface of the `mongodb` backend, not another
   backend or user-visible driver
 
-The ordinary document surface uses the external `mongo.el` native MongoDB
+The ordinary document surface uses the external `mongodb.el` native MongoDB
 protocol package.  Clutch owns the adapter and the supported MongoDB
-Shell/MQL helper syntax, then translates that helper surface into `mongo.el`
+Shell/MQL helper syntax, then translates that helper surface into `mongodb.el`
 command/helper calls.  This avoids making a local `mongod` depend on Atlas /
 Enterprise SQL Interface availability, while still keeping the protocol code
 outside the Clutch UI package.
@@ -43,7 +43,7 @@ surface selection:
 
 ## Consequences
 
-Default `mongodb` connections use native `mongo.el` command execution, not SQL
+Default `mongodb` connections use native `mongodb.el` command execution, not SQL
 and not a shell JavaScript runtime.  Collections map to Clutch table metadata,
 sampled top-level document keys map to columns, and nested document/array values
 render as JSON cells.
@@ -64,9 +64,9 @@ bounded edit semantics before clutch should claim even basic support.
 
 The protocol/client boundary is now enforced by public API names:
 
-- Clutch may call public `mongo-` symbols
-- Clutch must not call private `mongo--*` symbols from the external package
-- protocol details and protocol capability docs belong in `mongo.el`
+- Clutch may call public `mongodb-` symbols
+- Clutch must not call private `mongodb--*` symbols from the external package
+- protocol details and protocol capability docs belong in `mongodb.el`
 
 ## Non-goals
 

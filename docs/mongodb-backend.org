@@ -3,7 +3,7 @@
 * MongoDB Backend
 
 The =mongodb= backend is Clutch's ordinary MongoDB backend.  The default
-document surface connects through the external =mongo.el= native protocol
+document surface connects through the external =mongodb.el= native protocol
 package and uses supported MongoDB Shell / MQL helper syntax in query buffers,
 not SQL and not arbitrary JavaScript evaluation.
 
@@ -21,12 +21,12 @@ MongoDB SQL Interface is an optional JDBC surface of the same backend:
 
 The manual connection prompt shows one =mongodb= backend for MongoDB.  See
 [[file:backend-support.org][docs/backend-support.org]] for the project-wide support-level policy, and see
-the =mongo.el= repository's =docs/native-client.org= for native protocol
+the =mongodb.el= repository's =docs/native-client.org= for native protocol
 capabilities.
 
 ** Requirements
 
-The default document surface requires the =mongo.el= package on =load-path=.
+The default document surface requires the =mongodb.el= package on =load-path=.
 It does not require Java, =mongosh=, or a JDBC jar.
 
 MongoDB SQL Interface endpoints require the JDBC sidecar and MongoDB JDBC
@@ -45,26 +45,26 @@ Interface JDBC driver and stores it as
 
 #+begin_src emacs-lisp
 (setq clutch-connection-alist
-      '(("local-mongo" . (:backend mongodb
+      '(("local-mongodb" . (:backend mongodb
                            :host "127.0.0.1"
                            :port 27017
                            :database "app"))
 
-        ("local-mongo-auth" . (:backend mongodb
+        ("local-mongodb-auth" . (:backend mongodb
                                 :host "127.0.0.1"
                                 :port 27017
                                 :database "app"
                                 :auth-database "admin"
                                 :user "root"
-                                :pass-entry "local-mongo-auth"))
+                                :pass-entry "local-mongodb-auth"))
 
-        ("local-mongo-tls" . (:backend mongodb
+        ("local-mongodb-tls" . (:backend mongodb
                                :host "127.0.0.1"
                                :port 27017
                                :database "app"
                                :tls t))
 
-        ("local-mongo-socket" . (:backend mongodb
+        ("local-mongodb-socket" . (:backend mongodb
                                   :url "mongodb://%2Ftmp%2Fmongodb-27017.sock/app"))
 
         ("atlas-sql" . (:backend mongodb
@@ -75,12 +75,12 @@ Interface JDBC driver and stores it as
                          :pass-entry "atlas-sql"))))
 #+end_src
 
-Structured params connect to =host:port= through =mongo.el=.  =:url= accepts
+Structured params connect to =host:port= through =mongodb.el=.  =:url= accepts
 =mongodb://...= and =mongodb+srv://...= for the native document surface.  Common
 native params such as =:tls=, =:auth-database=, =:user=, =:password=,
 =:pass-entry=, =:app-name=, read/write concern, read preference, timeouts,
-SOCKS5 proxy settings, and other =mongo.el=-supported options are passed
-through to =mongo.el=.
+SOCKS5 proxy settings, and other =mongodb.el=-supported options are passed
+through to =mongodb.el=.
 
 Use =:password= only when the password is already available in memory.  For
 saved connections, prefer =:pass-entry= and let Clutch resolve it through
@@ -90,9 +90,18 @@ Unauthenticated local MongoDB connections do not need =:user=, =:password=, or
 
 ** Query Buffers
 
-Query buffers use =clutch-mongodb-mode=.  The mode is Clutch UI code: it
+Native MongoDB query buffers use =clutch-mongodb-mode= from
+=clutch-document.el=, the document query-console layer.  The mode is Clutch UI code: it
 fontifies and completes a supported MongoDB Shell / MQL helper surface, then
-the backend translates those helpers into native =mongo.el= command calls.
+the backend translates those helpers into native =mongodb.el= command calls.
+It keeps the shared execute, object, schema/database, and completion shortcuts,
+but does not bind SQL-only transaction controls or SQL preview.  =C-c ?= opens
+the MongoDB document-console dispatch menu.
+
+Completion intentionally covers common helper, stage, operator, collection, and
+sampled field names for basic support.  It is not an exhaustive MongoDB server
+feature catalog; long-tail operators can still be typed manually when the
+backend helper parser and =mongodb.el= command layer support the query shape.
 
 Supported helper families include:
 
@@ -110,7 +119,7 @@ Supported helper families include:
 BSON constructors such as =ObjectId()=, =ISODate()=, =Timestamp()=,
 =Int32()=, =Long()=, =NumberInt()=, =NumberLong()=, =Decimal128()=, and
 =NumberDecimal()= encode as native BSON wrapper values before being sent to
-=mongo.el=.
+=mongodb.el=.
 
 This parser is intentionally not a general JavaScript runtime.  Unsupported
 helpers and Mongo shell-only syntax such as regex literals should fail clearly
@@ -145,7 +154,7 @@ reuses a local MongoDB container and uses the native protocol:
 Manual local container example:
 
 #+begin_src sh
-docker run -d --name clutch-mongo-live -p 27017:27017 mongo:7
+docker run -d --name clutch-mongodb-live -p 27017:27017 mongodb:7
 #+end_src
 
 MongoDB SQL Interface JDBC live tests are separate and remain tagged

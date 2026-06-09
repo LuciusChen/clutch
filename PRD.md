@@ -14,7 +14,7 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, built-in SQLite, and native MongoDB through the external `mongo.el` client
+- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, built-in SQLite, and native MongoDB through the external `mongodb.el` client
 - JDBC sidecar support for Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB SQL Interface, and generic JDBC URLs
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
@@ -35,7 +35,7 @@ clutch integrates directly into Emacs, offering:
 ## 2. Architecture
 
 clutch follows a **modular backend-facade architecture** with clear project
-boundaries.  UI/workflow modules depend on the `clutch-db.el` facade, while
+boundaries.  UI/workflow modules depend on the `clutch-backend.el` facade, while
 backend adapters contain database-specific integration, SQL dialect, and
 metadata behavior.
 
@@ -52,16 +52,17 @@ workflow modules
   clutch-object.el       object discovery, describe buffers, object actions
   clutch-schema.el       schema refresh lifecycle and metadata caches
   clutch-sql.el          SQL context, completion, Eldoc, xref
+  clutch-document.el     document database query-buffer modes
 
 backend facade
-  clutch-db.el           generic API, result struct, shared SQL helpers,
+  clutch-backend.el      generic API, result struct, shared SQL helpers,
                          capability gates, error normalization
 
 backend adapters
   clutch-db-mysql.el     external mysql.el wire protocol client
   clutch-db-pg.el        external pg-el client
   clutch-db-sqlite.el    Emacs sqlite-* functions
-  clutch-db-mongodb.el   MongoDB document adapter over external mongo.el
+  clutch-mongodb.el      MongoDB document adapter over external mongodb.el
   clutch-db-jdbc.el      JVM sidecar plus JDBC drivers
 ```
 
@@ -78,15 +79,16 @@ backend adapters
 | `clutch-object.el` | Object discovery, object cache/warmup, describe buffers, object actions, optional Embark integration |
 | `clutch-schema.el` | Schema refresh lifecycle, metadata caches, async column/comment/detail preheat, recoverable metadata warnings |
 | `clutch-sql.el` | SQL context parsing, completion, Eldoc, xref |
-| `clutch-db.el` | Backend facade, result struct, shared SQL helpers, capability gates, error normalization |
+| `clutch-document.el` | Document database query-buffer modes, currently MongoDB native helper/MQL syntax and completion |
+| `clutch-backend.el` | Backend facade, result struct, shared SQL helpers, capability gates, error normalization |
 | `clutch-db-mysql.el` | MySQL backend adapter, type-category mapping, mysql.el boundary wrappers |
 | `clutch-db-pg.el` | PostgreSQL backend adapter, OID-to-type mapping, pg-el boundary wrappers |
 | `clutch-db-sqlite.el` | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
-| `clutch-db-mongodb.el` | MongoDB basic document backend over external `mongo.el` |
+| `clutch-mongodb.el` | MongoDB basic document backend over external `mongodb.el` |
 | `clutch-db-jdbc.el` | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
 | External dependency: `mysql` | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | PostgreSQL client from upstream `pg-el` (separate package) |
-| External dependency: `mongo` | Native MongoDB client from `mongo.el` (separate package) |
+| External dependency: `mongodb` | Native MongoDB client from `mongodb.el` (separate package) |
 | Optional package: `ob-clutch` | Org-Babel integration bridge (separate package) |
 
 For JDBC-backed databases, one logical clutch connection now maps to two JDBC
@@ -108,7 +110,7 @@ user queries on the same JDBC session.
 | **MySQL** | Full SQL support | 29.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
 | **PostgreSQL** | Full SQL support | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | Full SQL support | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
-| **MongoDB** | Basic native document support | 29.1+ | `mongo.el` | Ordinary local `mongodb://` deployments; query buffers use supported MongoDB Shell / MQL helper syntax, not SQL or arbitrary JavaScript |
+| **MongoDB** | Basic native document support | 29.1+ | `mongodb.el` | Ordinary local `mongodb://` deployments; query buffers use supported MongoDB Shell / MQL helper syntax, not SQL or arbitrary JavaScript |
 
 ### JDBC Backends (via JVM Sidecar)
 
@@ -190,6 +192,11 @@ by `clutch--connection-key`: `clutch--schema-cache`,
 | `C-c TAB` / `C-c <tab>` | `clutch-complete-at-point` | Complete SQL identifiers, including empty column positions |
 | `TAB` / `<tab>` | `clutch-complete-qualified-or-indent` | Complete columns after a table/alias dot, otherwise indent |
 | `C-c ?` | Transient dispatch | Main command menu |
+
+Native MongoDB query consoles use `clutch-mongodb-mode`, which keeps the same
+execute/object/schema shortcuts but omits SQL-only transaction controls and
+SQL preview.  `C-c ?` opens a document-console dispatch menu rather than the
+SQL dispatch menu.
 
 `clutch-mode` installs a buffer-local xref backend and CAPF pipeline.  `M-.` is
 SQL alias navigation, not object lookup: it jumps aliases and alias-qualified
@@ -594,7 +601,7 @@ Connection profile plist keys:
 | `clutch-query-timeout-seconds` | `30` | natnum | Server-side statement timeout (PG, JDBC) |
 | `clutch-jdbc-rpc-timeout-seconds` | `30` | natnum | Global JDBC agent RPC timeout |
 | `clutch-object-warmup-idle-delay-seconds` | `0.5` | number | Idle delay before background object warmup starts |
-| `clutch-primary-object-types` | `("TABLE" "VIEW" "SYNONYM")` | repeat string | Primary object types used by `clutch-jump` |
+| `clutch-primary-object-types` | `("TABLE" "VIEW" "SYNONYM" "COLLECTION")` | repeat string | Primary object types used by `clutch-jump` |
 | `clutch-sql-completion-case-style` | `'preserve` | choice | Preserve, lowercase, or uppercase inserted completion text |
 | `clutch-schema-cache-install-batch-size` | `500` | natnum | Batch size for idle schema-cache installation |
 | `clutch-debug-event-limit` | `25` | natnum | Maximum debug events retained in `*clutch-debug*` |
@@ -964,7 +971,7 @@ Controlled by `clutch-csv-export-default-coding-system`:
 
 ## 16. Backend API Surface
 
-Current `clutch-db.el` facade and backend generic surface, grouped by
+Current `clutch-backend.el` facade and backend generic surface, grouped by
 responsibility:
 
 ### Connection and transactions

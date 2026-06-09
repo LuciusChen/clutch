@@ -37,7 +37,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 
 (declare-function sqlite-available-p "sqlite" ())
 (declare-function sqlite-open        "sqlite" (file))

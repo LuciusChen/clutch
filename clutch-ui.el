@@ -16,7 +16,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'clutch-db)
+(require 'clutch-backend)
 
 (defvar clutch--executing-p)
 (declare-function clutch--spinner-string "clutch-connection" ())

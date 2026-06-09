@@ -33,7 +33,7 @@
 
 ;;; Code:
 
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-schema)
 (require 'auth-source)
 (require 'cl-lib)
@@ -263,7 +263,7 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
 (defun clutch--default-port-for-connection (conn)
   "Return the default port for CONN's backend, or nil when not applicable."
   (let ((backend (clutch--backend-key-from-conn conn)))
-    (and backend (clutch-db-backend-default-port backend))))
+    (and backend (clutch-backend-default-port backend))))
 
 (defun clutch--connection-display-key (conn)
   "Return a compact display identity for CONN for use in UI only."
@@ -320,6 +320,12 @@ interactive readers inspect shared customization such as
 (defvar clutch--tx-dirty-cache (make-hash-table :test 'eq :weakness 'key)
   "Connections with uncommitted DML.")
 
+(defvar-local clutch--query-buffer-local-p nil
+  "Non-nil when the current buffer is a clutch query console.")
+
+(defvar-local clutch--query-mode-line-name nil
+  "Base mode-line name for the current clutch query console.")
+
 (defun clutch--tx-dirty-p (conn)
   "Return non-nil when CONN has uncommitted DML."
   (and conn (gethash conn clutch--tx-dirty-cache)))
@@ -333,7 +339,7 @@ interactive readers inspect shared customization such as
 
 (defun clutch--query-buffer-p ()
   "Return non-nil when the current buffer is a clutch query console."
-  (derived-mode-p 'clutch-mode 'clutch-mongodb-mode))
+  (bound-and-true-p clutch--query-buffer-local-p))
 
 (defun clutch--refresh-transaction-ui (conn)
   "Refresh transaction indicators for buffers attached to CONN."
@@ -652,9 +658,9 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
              (condition-case nil
                  (clutch-db-display-name conn)
                ((cl-no-applicable-method wrong-type-argument) nil))))
-        (cl-loop for backend in (clutch-db-backends)
+        (cl-loop for backend in (clutch-backends)
                  when (equal display-name
-                             (clutch-db-backend-display-name backend))
+                             (clutch-backend-display-name backend))
                  return backend))))
 
 (defun clutch--normalize-backend-key (backend)
@@ -662,8 +668,8 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
   (pcase backend
     ((or 'pg 'postgresql) 'pg)
     ((or 'mysql 'mariadb) 'mysql)
-    ((or 'mongo 'mongodb) 'mongodb)
-    (_ (and (memq backend (clutch-db-backends t)) backend))))
+    ((or 'mongodb 'mongodb) 'mongodb)
+    (_ (and (memq backend (clutch-backends t)) backend))))
 
 (defun clutch--mongodb-surface-sql-params-p (params)
   "Return non-nil when PARAMS select MongoDB SQL Interface."
@@ -681,23 +687,23 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
 (defun clutch--effective-sql-product (params)
   "Return the SQL product to use for connection PARAMS."
   (or (plist-get params :sql-product)
-      (clutch-db-backend-sql-product
+      (clutch-backend-sql-product
        (clutch--backend-key-from-params params))))
 
 (defun clutch--backend-display-name-from-params (params)
   "Return UI backend name for connection PARAMS, or nil."
   (or (plist-get params :display-name)
-      (clutch-db-backend-display-name
+      (clutch-backend-display-name
        (clutch--backend-key-from-params params))))
 
 (defun clutch--manual-backend-choices ()
   "Return backend choices offered by manual connection readers."
-  (cl-remove-if-not #'clutch-db-backend-manual-choice-p
-                    (clutch-db-backends t)))
+  (cl-remove-if-not #'clutch-backend-manual-choice-p
+                    (clutch-backends t)))
 
 (defun clutch--backend-support-annotation (key)
   "Return manual chooser support annotation for backend KEY, or nil."
-  (pcase (clutch-db-backend-support-level key)
+  (pcase (clutch-backend-support-level key)
     ('basic "Basic")
     ('experimental "Experimental")
     (_ nil)))
@@ -879,7 +885,8 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Update buffer-local execution UI with connection status."
   (let* ((base (cond
                 ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
-                ((derived-mode-p 'clutch-mongodb-mode) "clutch-mongo")
+                ((clutch--query-buffer-p)
+                 (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
          (spinner (clutch--spinner-string)))
     (setq mode-name
@@ -900,7 +907,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--jdbc-backend-p (backend)
   "Return non-nil when BACKEND is handled by JDBC."
-  (eq (plist-get (clutch-db-backend-feature backend) :require)
+  (eq (plist-get (clutch-backend-feature backend) :require)
       'clutch-db-jdbc))
 
 (defun clutch--jdbc-connection-params-p (params)
@@ -1025,7 +1032,7 @@ cannot be read."
 (defun clutch--canonicalize-backend-aliases (params)
   "Return PARAMS with public backend aliases normalized."
   (let ((out (copy-sequence params)))
-    (when (eq (plist-get out :backend) 'mongo)
+    (when (eq (plist-get out :backend) 'mongodb)
       (setq out (plist-put out :backend 'mongodb)))
     (when (and (eq (plist-get out :backend) 'mongodb)
                (plist-member out :driver))
@@ -2031,7 +2038,7 @@ raw database string."
             (clutch--read-sqlite-file-params)
           (list :backend 'sqlite
                 :database (read-string "Database (:memory:): " nil nil ":memory:")))
-      (let* ((port-default (clutch-db-backend-default-port backend))
+      (let* ((port-default (clutch-backend-default-port backend))
              (host (read-string "Host (127.0.0.1): " nil nil "127.0.0.1"))
              (port (if port-default
                        (read-number (format "Port (%d): " port-default)

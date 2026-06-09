@@ -76,6 +76,7 @@
 (require 'clutch-test-sql)
 (require 'clutch-test-console)
 (require 'clutch-test-object)
+(require 'clutch-document)
 
 ;;;; Rendering — value formatting
 
@@ -5880,7 +5881,7 @@ crashing the UI layer."
                      :database "app"
                      :auth-database "admin"
                      :user "root"
-                     :pass-entry "mongo-root"))
+                     :pass-entry "mongodb-root"))
                   'fake-conn))
       (should (eq captured-backend 'mongodb))
       (should (equal captured-params
@@ -6294,21 +6295,21 @@ crashing the UI layer."
                        :database "analytics")))
       (should (= port-default 27017)))))
 
-(ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongo-alias ()
-  "The public mongo alias should normalize to the registered mongodb backend."
+(ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongodb-alias ()
+  "The public mongodb alias should normalize to the registered mongodb backend."
   (should (equal (clutch--canonicalize-connection-params
-                  '(:backend mongo :database "analytics"))
+                  '(:backend mongodb :database "analytics"))
                  '(:backend mongodb :database "analytics"))))
 
 (ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongodb-surface-sql-surface ()
   "MongoDB SQL Interface should be a surface on the MongoDB backend."
   (should (equal (clutch--canonicalize-connection-params
-                  '(:backend mongo :surface "sql-interface" :database "analytics"))
+                  '(:backend mongodb :surface "sql-interface" :database "analytics"))
                  '(:backend mongodb :surface sql-interface :database "analytics"))))
 
 (ert-deftest clutch-test-canonicalize-connection-params-rejects-mongodb-driver-option ()
   "MongoDB should not accept a public driver option."
-  (dolist (driver '(mongo mongodb jdbc))
+  (dolist (driver '(mongodb mongodb jdbc))
     (should-error
      (clutch--canonicalize-connection-params
       `(:backend mongodb :driver ,driver :database "analytics"))
@@ -6911,7 +6912,7 @@ crashing the UI layer."
           (should (member "$lookup" candidates))
           (should (member "$sum" candidates))
           (should (member "$dateTrunc" candidates))
-          (should (member "$vectorSearch" candidates)))
+          (should-not (member "$vectorSearch" candidates)))
         (erase-buffer)
         (insert "db.orders.find({st")
         (let* ((capf (clutch-mongodb-completion-at-point))
@@ -6959,6 +6960,25 @@ crashing the UI layer."
           (should (equal (buffer-string)
                          "db.orders.aggregate([{$match: ")))))))
 
+(ert-deftest clutch-test-mongodb-mode-keymap-keeps-document-actions-only ()
+  "MongoDB query buffers should not expose SQL transaction or preview keys."
+  (with-temp-buffer
+    (clutch-mongodb-mode)
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-c"))
+                #'clutch-execute-dwim))
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-j"))
+                #'clutch-jump))
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-d"))
+                #'clutch-describe-dwim))
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-o"))
+                #'clutch-act-dwim))
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-l"))
+                #'clutch-switch-schema))
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c ?"))
+                #'clutch-mongodb-dispatch))
+    (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a" "C-c C-p"))
+      (should-not (lookup-key clutch-mongodb-mode-map (kbd key))))))
+
 (ert-deftest clutch-test-mongodb-mode-indents-mql-pipeline ()
   "MongoDB mode should indent MQL pipelines without deriving from JS mode."
   (with-temp-buffer
@@ -7000,7 +7020,7 @@ crashing the UI layer."
             ((symbol-function 'clutch--object-sql-name)
              (lambda (&rest _args)
                (error "SQL formatter should not run for MongoDB"))))
-    (should (equal (clutch--object-browse-query 'mongo-conn '(:name "users"))
+    (should (equal (clutch--object-browse-query 'mongodb-conn '(:name "users"))
                    "db.getCollection(\"users\").find();"))))
 
 (ert-deftest clutch-test-object-browse-query-uses-sql-for-mongodb-surface-sql ()
@@ -7012,7 +7032,7 @@ crashing the UI layer."
             ((symbol-function 'clutch--object-sql-name)
              (lambda (_conn entry)
                (plist-get entry :name))))
-    (should (equal (clutch--object-browse-query 'mongo-sql-conn '(:name "users"))
+    (should (equal (clutch--object-browse-query 'mongodb-surface-sql-conn '(:name "users"))
                    "SELECT * FROM users;"))))
 
 (ert-deftest clutch-test-connection-state-icon-uses-database-check-outline ()
@@ -7755,7 +7775,7 @@ This applies when the buffer owns the connection."
 
 (ert-deftest clutch-test-query-console-mongodb-uses-mongodb-mode ()
   "MongoDB query consoles should use MQL editing, not SQL or JS mode."
-  (let* ((name "mongo-local")
+  (let* ((name "mongodb-local")
          (buffer-name (clutch--console-buffer-base-name name))
          (params '(:backend mongodb
                    :host "127.0.0.1"
@@ -7780,7 +7800,7 @@ This applies when the buffer owns the connection."
 
 (ert-deftest clutch-test-query-console-mongodb-surface-sql-uses-sql-mode ()
   "MongoDB SQL Interface consoles should use SQL editing under the MongoDB backend."
-  (let* ((name "mongo-sql-local")
+  (let* ((name "mongodb-surface-sql-local")
          (buffer-name (clutch--console-buffer-base-name name))
          (params '(:backend mongodb
                    :surface sql-interface

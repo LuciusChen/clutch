@@ -5,7 +5,7 @@
 ;; Assisted-by: OpenAI Codex:gpt-5.5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (mongo "0.1.0") (mysql "0.2.2") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (mysql "0.2.2") (pg "0.40") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
@@ -39,7 +39,7 @@
 
 ;;; Code:
 
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-query)
 (require 'sql)
@@ -64,11 +64,6 @@
   "Interactive database lens."
   :group 'comm
   :prefix "clutch-")
-
-(defcustom clutch-mongodb-indent-offset 2
-  "Number of spaces for each nested level in MongoDB query buffers."
-  :type 'integer
-  :group 'clutch)
 
 (defface clutch-field-name-face
   '((((class color) (background light))
@@ -149,26 +144,6 @@
 (defface clutch-null-face
   '((t :inherit shadow :slant italic))
   "Face for NULL values."
-  :group 'clutch)
-
-(defface clutch-mongodb-operator-face
-  '((t :inherit font-lock-builtin-face))
-  "Face for MongoDB MQL operators such as `$match' and `$lookup'."
-  :group 'clutch)
-
-(defface clutch-mongodb-key-face
-  '((t :inherit font-lock-variable-name-face))
-  "Face for MongoDB document keys before a colon."
-  :group 'clutch)
-
-(defface clutch-mongodb-method-face
-  '((t :inherit font-lock-function-name-face))
-  "Face for MongoDB shell method names such as `find' and `aggregate'."
-  :group 'clutch)
-
-(defface clutch-mongodb-namespace-face
-  '((t :inherit font-lock-type-face))
-  "Face for MongoDB namespace names such as `db' and collection names."
   :group 'clutch)
 
 (defconst clutch--cell-generated-placeholder :clutch-generated-placeholder
@@ -422,7 +397,7 @@ background object discovery starts."
   :type 'number
   :group 'clutch)
 
-(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM")
+(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM" "COLLECTION")
   "Object types preferred by clutch's primary object entrypoint.
 When nil, the primary entrypoint includes all schema object types."
   :type '(repeat string)
@@ -641,32 +616,6 @@ automatically when it drops.")
 
 ;;;; Query editing major modes
 
-(defun clutch--install-query-keybindings (map)
-  "Install common query-console key bindings into MAP."
-  (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
-  (define-key map (kbd "C-c C-r") #'clutch-execute-region)
-  (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
-  (define-key map (kbd "C-c C-e") #'clutch-connect)
-  (define-key map (kbd "C-c C-m") #'clutch-commit)
-  (define-key map (kbd "C-c C-u") #'clutch-rollback)
-  (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
-  (define-key map (kbd "C-c C-j") #'clutch-jump)
-  (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
-  (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
-  (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
-  (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
-  (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
-  (define-key map (kbd "C-c ?") #'clutch-dispatch)
-  map)
-
-(defun clutch--query-mode-common-setup ()
-  "Install common local state for clutch query editing modes."
-  (set-buffer-file-coding-system 'utf-8-unix nil t)
-  (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
-  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t)
-  (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
-  (clutch--update-mode-line))
-
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
@@ -700,116 +649,6 @@ Key bindings:
   (add-hook 'eldoc-documentation-functions
             #'clutch--eldoc-function nil t)
   (add-hook 'xref-backend-functions #'clutch--xref-backend nil t))
-
-(defvar clutch-mongodb-mode-syntax-table
-  (let ((table (make-syntax-table prog-mode-syntax-table)))
-    (modify-syntax-entry ?_ "w" table)
-    (modify-syntax-entry ?$ "_" table)
-    (modify-syntax-entry ?/ ". 124b" table)
-    (modify-syntax-entry ?* ". 23" table)
-    (modify-syntax-entry ?\n "> b" table)
-    table)
-  "Syntax table for `clutch-mongodb-mode'.")
-
-(defconst clutch-mongodb--function-keywords
-  '("adminCommand" "aggregate" "countDocuments" "createCollection"
-    "createIndex" "deleteMany" "deleteOne" "distinct" "drop" "dropDatabase"
-    "dropIndex" "find" "findOne" "getCollection" "getCollectionInfos"
-    "getCollectionNames" "getName" "getSiblingDB" "insertMany" "insertOne"
-    "listIndexes" "replaceOne" "runCommand" "updateMany" "updateOne")
-  "MongoDB shell function names highlighted in `clutch-mongodb-mode'.")
-
-(defconst clutch-mongodb--constructor-keywords
-  '("Decimal128" "ISODate" "Int32" "Long" "NumberDecimal" "NumberInt"
-    "NumberLong" "ObjectId" "Timestamp")
-  "Supported MongoDB BSON constructor names highlighted in `clutch-mongodb-mode'.")
-
-(defconst clutch-mongodb-font-lock-keywords
-  `((,(regexp-opt '("db") 'symbols) . 'clutch-mongodb-namespace-face)
-    ("\\.\\([[:alpha:]_][[:alnum:]_]*\\)\\_>\\s-*("
-     1 'clutch-mongodb-method-face)
-    ("\\.\\([[:alpha:]_][[:alnum:]_]*\\)\\_>"
-     1 'clutch-mongodb-namespace-face)
-    (,(regexp-opt clutch-mongodb--constructor-keywords 'symbols)
-     . font-lock-type-face)
-    ("\\$[[:alpha:]_][[:alnum:]_]*\\_>" . 'clutch-mongodb-operator-face)
-    ("\\_<\\([[:alpha:]_][[:alnum:]_]*\\)\\_>\\s-*:"
-     1 'clutch-mongodb-key-face)
-    ("\\_<-?[0-9]+\\(?:\\.[0-9]+\\)?\\_>" . font-lock-constant-face)
-    (,(regexp-opt '("true" "false" "null") 'symbols)
-     . font-lock-constant-face))
-  "Font-lock keywords for MongoDB Shell and MQL query buffers.")
-
-(defun clutch-mongodb--object-array-depth-before-line ()
-  "Return MongoDB object/array delimiter depth before the current line."
-  (save-excursion
-    (let ((limit (line-beginning-position))
-          (depth 0))
-      (goto-char (point-min))
-      (while (< (point) limit)
-        (unless (nth 8 (syntax-ppss))
-          (pcase (char-after)
-            ((or ?\[ ?{)
-             (setq depth (1+ depth)))
-            ((or ?\] ?})
-             (setq depth (max 0 (1- depth))))))
-        (forward-char 1))
-      depth)))
-
-(defun clutch-mongodb--calculate-indentation ()
-  "Return indentation for the current MongoDB query line."
-  (save-excursion
-    (back-to-indentation)
-    (let* ((depth (clutch-mongodb--object-array-depth-before-line))
-           (closing-delimiter-p (looking-at-p "[]})]")))
-      (* clutch-mongodb-indent-offset
-         (max 0 (- depth (if closing-delimiter-p 1 0)))))))
-
-(defun clutch-mongodb-indent-line ()
-  "Indent the current MongoDB query line."
-  (interactive)
-  (let ((indent (clutch-mongodb--calculate-indentation))
-        (offset (- (current-column) (current-indentation))))
-    (indent-line-to indent)
-    (when (> offset 0)
-      (move-to-column (+ indent offset)))))
-
-(defvar clutch-mongodb-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map prog-mode-map)
-    (clutch--install-query-keybindings map)
-    (define-key map (kbd "C-c TAB") #'clutch-mongodb-complete-at-point)
-    (define-key map (kbd "C-c <tab>") #'clutch-mongodb-complete-at-point)
-    (define-key map (kbd "TAB") #'clutch-mongodb-complete-or-indent)
-    (define-key map (kbd "<tab>") #'clutch-mongodb-complete-or-indent)
-    map)
-  "Keymap for `clutch-mongodb-mode'.")
-
-;;;###autoload
-(define-derived-mode clutch-mongodb-mode prog-mode "clutch-mongo"
-  "Major mode for editing and executing MongoDB Shell and MQL queries.
-
-\\<clutch-mongodb-mode-map>
-Key bindings:
-  \\[clutch-execute-dwim]	Execute region or statement/query at point
-  \\[clutch-execute-region]	Execute region
-  \\[clutch-execute-buffer]	Execute buffer
-  \\[clutch-connect]	Connect to server
-  \\[clutch-jump]	Object jump
-  \\[clutch-describe-dwim]	Describe object
-  \\[clutch-act-dwim]	Object actions
-  \\[clutch-switch-schema]	Switch database
-  \\[clutch-mongodb-complete-at-point]	Complete MongoDB shell identifier
-  \\[clutch-mongodb-complete-or-indent]	Complete property or indent
-  \\[clutch-preview-execution-sql]	Preview execution"
-  :syntax-table clutch-mongodb-mode-syntax-table
-  (setq-local comment-start "// ")
-  (setq-local comment-end "")
-  (setq-local comment-start-skip "\\(?://+\\|/\\*+\\)\\s-*")
-  (setq-local font-lock-defaults '(clutch-mongodb-font-lock-keywords))
-  (setq-local indent-line-function #'clutch-mongodb-indent-line)
-  (clutch--query-mode-common-setup)
-  (clutch--install-mongodb-completion-capfs))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.mysql\\'" . clutch-mode))

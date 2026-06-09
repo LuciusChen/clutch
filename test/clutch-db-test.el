@@ -18,7 +18,7 @@
 ;; Manual live setup:
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
-;;   docker run -d -p 127.0.0.1:57017:27017 mongo:7
+;;   docker run -d -p 127.0.0.1:57017:27017 mongodb:7
 ;;
 ;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql
 ;; client retries with TLS when the server requires a secure channel; local
@@ -39,9 +39,10 @@
 (require 'cl-lib)
 (require 'ert)
 (require 'eieio)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-db-jdbc)
-(require 'clutch-db-mongodb)
+(require 'clutch-mongodb)
+(require 'mongodb)
 
 (eval-when-compile
   (require 'pg))
@@ -86,7 +87,7 @@
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--format-value "clutch-ui" (value))
-(declare-function clutch-db-value-to-literal "clutch-db"
+(declare-function clutch-db-value-to-literal "clutch-backend"
                   (conn value &optional fallback-format-fn))
 (declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function make-mysql-result "mysql" (&rest args))
@@ -1195,25 +1196,55 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 ;;;; Unit tests — native MongoDB Clutch adapter
 
-;; Protocol-level mongo.el tests live in the standalone mongo.el repository.
+;; Protocol-level mongodb.el tests live in the standalone mongodb.el repository.
 
 (defun clutch-db-test--make-mongodb-conn (&optional database client)
   "Return a lightweight native MongoDB Clutch connection for unit tests."
-  (make-clutch-db-mongodb-conn
+  (make-clutch-mongodb-conn
    :params (list :database (or database "app"))
    :database (or database "app")
-   :client (or client 'mongo-client)
+   :client (or client 'mongodb-client)
    :closed nil
    :busy nil))
 
+(ert-deftest clutch-db-test-mongodb-ensure-mongodb-api-reloads-stale-feature ()
+  "Native MongoDB should retry loading mongodb.el when a stale feature lacks APIs."
+  (let (loaded)
+    (cl-letf (((symbol-function 'fboundp)
+               (lambda (symbol)
+                 (or (not (eq symbol 'mongodb-connect))
+                     loaded)))
+              ((symbol-function 'locate-library)
+               (lambda (library)
+                 (and (equal library "mongodb") "/tmp/mongodb.el")))
+              ((symbol-function 'load)
+               (lambda (file &rest _args)
+                 (setq loaded file)
+                 t)))
+      (clutch-mongodb--ensure-mongodb-client-api)
+      (should (equal loaded "/tmp/mongodb.el")))))
+
+(ert-deftest clutch-db-test-mongodb-ensure-mongodb-api-errors-for-old-mongodb ()
+  "Native MongoDB should report a clear dependency error for old mongodb.el APIs."
+  (cl-letf (((symbol-function 'fboundp)
+             (lambda (symbol)
+               (not (eq symbol 'mongodb-connect))))
+            ((symbol-function 'locate-library)
+             (lambda (library)
+               (and (equal library "mongodb") "/tmp/old-mongodb.el")))
+            ((symbol-function 'load)
+             (lambda (&rest _args) t)))
+    (should-error (clutch-mongodb--ensure-mongodb-client-api)
+                  :type 'clutch-db-error)))
+
 (ert-deftest clutch-db-test-mongodb-connect-passes-native-params ()
-  "Native MongoDB should pass saved params directly to `mongo-connect'."
+  "Native MongoDB should pass saved params directly to `mongodb-connect'."
   (let (captured-params)
-    (cl-letf (((symbol-function 'mongo-connect)
+    (cl-letf (((symbol-function 'mongodb-connect)
                (lambda (params)
                  (setq captured-params params)
-                 (make-mongo-conn :database "app" :closed nil))))
-      (let ((conn (clutch-db-mongodb-connect
+                 (make-mongodb-conn :database "app" :closed nil))))
+      (let ((conn (clutch-mongodb-connect
                    '(:host "127.0.0.1"
                      :port 27017
                      :database "app"
@@ -1225,7 +1256,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
         (should (eq (clutch-db-backend-key conn) 'mongodb))
         (should (equal (clutch-db-display-name conn) "MongoDB"))
         (should (equal (clutch-db-database conn) "app"))
-        (should (mongo-conn-p (clutch-db-mongodb-conn-client conn)))
+        (should (mongodb-conn-p (clutch-mongodb-conn-client conn)))
         (should (equal captured-params
                        '(:host "127.0.0.1"
                          :port 27017
@@ -1237,11 +1268,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                          :props (("retryWrites" . "true")))))))))
 
 (ert-deftest clutch-db-test-mongodb-connect-uses-url-database ()
-  "Native MongoDB should use the database reported by `mongo-connect'."
-  (cl-letf (((symbol-function 'mongo-connect)
+  "Native MongoDB should use the database reported by `mongodb-connect'."
+  (cl-letf (((symbol-function 'mongodb-connect)
              (lambda (_params)
-               (make-mongo-conn :database "analytics" :closed nil))))
-    (let ((conn (clutch-db-mongodb-connect
+               (make-mongodb-conn :database "analytics" :closed nil))))
+    (let ((conn (clutch-mongodb-connect
                  '(:url "mongodb+srv://cluster.example.net/analytics?retryWrites=true"))))
       (should (equal (clutch-db-database conn) "analytics")))))
 
@@ -1252,8 +1283,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                (lambda (driver params)
                  (setq captured-driver driver
                        captured-params params)
-                 'jdbc-conn)))
-      (should (eq (clutch-db-mongodb-connect
+                 'jdbc-conn))
+              ((symbol-function 'clutch-mongodb--ensure-mongodb-client-api)
+               (lambda ()
+                 (ert-fail "SQL Interface should not load native mongodb.el API"))))
+      (should (eq (clutch-mongodb-connect
                    '(:surface "sql-interface"
                      :host "cluster0.a.query.mongodb.net"
                      :database "analytics"))
@@ -1266,7 +1300,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   "Native MongoDB query results should flatten top-level document keys."
-  (cl-letf (((symbol-function 'clutch-db-mongodb--eval)
+  (cl-letf (((symbol-function 'clutch-mongodb--eval)
              (lambda (_conn code)
                (should (equal code "db.users.find()"))
                '((("_id" . (("$oid" . "64f")))
@@ -1291,7 +1325,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
-  (cl-letf (((symbol-function 'clutch-db-mongodb--eval)
+  (cl-letf (((symbol-function 'clutch-mongodb--eval)
              (lambda (_conn _code) '(1 2 3))))
     (let* ((conn (clutch-db-test--make-mongodb-conn))
            (result (clutch-db-query conn "[1, 2, 3]")))
@@ -1301,10 +1335,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal (clutch-db-result-rows result)
                      '((1) (2) (3)))))))
 
-(ert-deftest clutch-db-test-mongodb-eval-translates-find-helper-to-mongo-api ()
-  "Native MongoDB eval should translate shell helpers to mongo.el calls."
+(ert-deftest clutch-db-test-mongodb-eval-translates-find-helper-to-mongodb-api ()
+  "Native MongoDB eval should translate shell helpers to mongodb.el calls."
   (let (captured)
-    (cl-letf (((symbol-function 'mongo-find)
+    (cl-letf (((symbol-function 'mongodb-find)
                (lambda (client database collection filter projection limit skip
                              &optional options)
                  (setq captured
@@ -1313,7 +1347,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                  (list (list (cons "_id" "a")
                              (cons "name" "Ann"))))))
       (let* ((conn (clutch-db-test--make-mongodb-conn "app" 'client))
-             (value (clutch-db-mongodb--eval
+             (value (clutch-mongodb--eval
                      conn
                      "db.users.find({active: true}, {name: 1}).limit(20)")))
         (should (equal value '((("_id" . "a") ("name" . "Ann")))))
@@ -1323,11 +1357,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
           (should (eq client 'client))
           (should (equal database "app"))
           (should (equal collection "users"))
-          (should (mongo-document-p filter))
-          (should (equal (mongo-document-pairs filter)
+          (should (mongodb-document-p filter))
+          (should (equal (mongodb-document-pairs filter)
                          '(("active" . t))))
-          (should (mongo-document-p projection))
-          (should (equal (mongo-document-pairs projection)
+          (should (mongodb-document-p projection))
+          (should (equal (mongodb-document-pairs projection)
                          '(("name" . 1))))
           (should (= limit 20))
           (should (null skip))
@@ -1336,14 +1370,14 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-eval-translates-find-chain-options ()
   "Native MongoDB eval should translate supported find cursor options."
   (let (captured)
-    (cl-letf (((symbol-function 'mongo-find)
+    (cl-letf (((symbol-function 'mongodb-find)
                (lambda (client database collection filter projection limit skip
                              &optional options)
                  (setq captured
                        (list client database collection filter projection
                              limit skip options))
                  nil)))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.users.find({active: true}, {name: 1})"
@@ -1359,17 +1393,17 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
         (should (eq client 'client))
         (should (equal database "app"))
         (should (equal collection "users"))
-        (should (mongo-document-p filter))
-        (should (equal (mongo-document-pairs filter)
+        (should (mongodb-document-p filter))
+        (should (equal (mongodb-document-pairs filter)
                        '(("active" . t))))
-        (should (mongo-document-p projection))
-          (should (equal (mongo-document-pairs projection)
+        (should (mongodb-document-p projection))
+          (should (equal (mongodb-document-pairs projection)
                          '(("name" . 1))))
           (should (= limit 10))
           (should (= skip 5))
         (let ((sort (cdr (assoc "sort" options))))
-          (should (mongo-document-p sort))
-          (should (equal (mongo-document-pairs sort)
+          (should (mongodb-document-p sort))
+          (should (equal (mongodb-document-pairs sort)
                          '(("createdAt" . -1))))
           (should (= (cdr (assoc "maxTimeMS" options)) 250))
           (should (= (cdr (assoc "batchSize" options)) 50))
@@ -1379,7 +1413,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-find-chain-boolean-options-validate ()
   "Native MongoDB cursor boolean helpers should reject non-boolean values."
   (should-error
-   (clutch-db-mongodb--eval
+   (clutch-mongodb--eval
     (clutch-db-test--make-mongodb-conn "app" 'client)
     "db.users.find({}).allowDiskUse('yes')")
    :type 'clutch-db-error))
@@ -1387,13 +1421,13 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
   "Native MongoDB eval should translate aggregate options and helper chains."
   (let (captured)
-    (cl-letf (((symbol-function 'mongo-aggregate)
+    (cl-letf (((symbol-function 'mongodb-aggregate)
                (lambda (client database collection pipeline &optional options)
                  (setq captured
                        (list client database collection pipeline options))
                  '((("_id" . "active") ("n" . 2))))))
       (let ((value
-             (clutch-db-mongodb--eval
+             (clutch-mongodb--eval
               (clutch-db-test--make-mongodb-conn "app" 'client)
               (concat
                "db.users.aggregate([{$match: {active: true}}], "
@@ -1411,10 +1445,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (vectorp pipeline))
       (should (= (length pipeline) 1))
       (let ((stage (aref pipeline 0)))
-        (should (mongo-document-p stage))
-        (should (assoc "$match" (mongo-document-pairs stage))))
-      (should (mongo-document-p options))
-      (let ((pairs (mongo-document-pairs options)))
+        (should (mongodb-document-p stage))
+        (should (assoc "$match" (mongodb-document-pairs stage))))
+      (should (mongodb-document-p options))
+      (let ((pairs (mongodb-document-pairs options)))
         (should (eq (cdr (assoc "allowDiskUse" pairs)) t))
         (should (equal (cdr (assoc "comment" pairs)) "chain"))
         (should (= (cdr (assoc "batchSize" pairs)) 25))
@@ -1423,12 +1457,12 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-eval-translates-database-aggregate ()
   "Native MongoDB eval should translate db.aggregate() to database aggregate."
   (let (calls)
-    (cl-letf (((symbol-function 'mongo-aggregate-database)
+    (cl-letf (((symbol-function 'mongodb-aggregate-database)
                (lambda (client database pipeline &optional options)
                  (push (list client database pipeline options) calls)
                  `((("database" . ,database))))))
       (let ((value
-             (clutch-db-mongodb--eval
+             (clutch-mongodb--eval
               (clutch-db-test--make-mongodb-conn "app" 'client)
               (concat
                "db.aggregate([{$documents: [{n: 1}]}], "
@@ -1442,30 +1476,30 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal database "app"))
       (should (vectorp pipeline))
       (let ((stage (aref pipeline 0)))
-        (should (mongo-document-p stage))
-        (should (assoc "$documents" (mongo-document-pairs stage))))
-      (should (mongo-document-p options))
-      (should (equal (mongo-document-pairs options)
+        (should (mongodb-document-p stage))
+        (should (assoc "$documents" (mongodb-document-pairs stage))))
+      (should (mongodb-document-p options))
+      (should (equal (mongodb-document-pairs options)
                      '(("comment" . "db-agg")))))
     (pcase-let ((`(,client ,database ,pipeline ,options) (cadr calls)))
       (should (eq client 'client))
       (should (equal database "admin"))
       (should (vectorp pipeline))
       (let ((stage (aref pipeline 0)))
-        (should (mongo-document-p stage))
-        (should (assoc "$currentOp" (mongo-document-pairs stage))))
+        (should (mongodb-document-p stage))
+        (should (assoc "$currentOp" (mongodb-document-pairs stage))))
       (should-not options))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-explain-chain ()
   "Native MongoDB eval should translate find/aggregate explain chains."
   (let (calls)
-    (cl-letf (((symbol-function 'mongo-explain)
+    (cl-letf (((symbol-function 'mongodb-explain)
                (lambda (client database command &optional verbosity)
                  (push (list client database command verbosity) calls)
                  (list (cons "ok" 1)
                        (cons "queryPlanner"
                              (list (cons "namespace" "app.users")))))))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.users.find({active: true}).limit(5).explain(true);"
@@ -1491,7 +1525,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-explain-chain-verbosity-validates ()
   "Native MongoDB explain helper should reject non-string/non-boolean verbosity."
   (should-error
-   (clutch-db-mongodb--eval
+   (clutch-mongodb--eval
     (clutch-db-test--make-mongodb-conn "app" 'client)
     "db.users.find({}).explain({mode: 'executionStats'})")
    :type 'clutch-db-error))
@@ -1499,33 +1533,33 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-eval-translates-count-distinct-index-helpers ()
   "Native MongoDB eval should translate count, distinct, and index helpers."
   (let (calls)
-    (cl-letf (((symbol-function 'mongo-count-documents)
+    (cl-letf (((symbol-function 'mongodb-count-documents)
                (lambda (client database collection filter &optional options)
                  (push (list 'count client database collection filter options)
                        calls)
                  7))
-              ((symbol-function 'mongo-distinct)
+              ((symbol-function 'mongodb-distinct)
                (lambda (client database collection field &optional filter options)
                  (push (list 'distinct client database collection field
                              filter options)
                        calls)
                  '("a" "b")))
-              ((symbol-function 'mongo-list-indexes)
+              ((symbol-function 'mongodb-list-indexes)
                (lambda (client database collection)
                  (push (list 'list-indexes client database collection) calls)
                  '((("name" . "_id_")))))
-              ((symbol-function 'mongo-create-index)
+              ((symbol-function 'mongodb-create-index)
                (lambda (client database collection keys &optional options)
                  (push (list 'create-index client database collection keys
                              options)
                        calls)
                  '(("ok" . 1))))
-              ((symbol-function 'mongo-drop-index)
+              ((symbol-function 'mongodb-drop-index)
                (lambda (client database collection index)
                  (push (list 'drop-index client database collection index)
                        calls)
                  '(("ok" . 1)))))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.users.countDocuments({active: true}, {limit: 10});"
@@ -1541,11 +1575,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (eq client 'client))
       (should (equal database "app"))
       (should (equal collection "users"))
-      (should (mongo-document-p filter))
-      (should (equal (mongo-document-pairs filter)
+      (should (mongodb-document-p filter))
+      (should (equal (mongodb-document-pairs filter)
                      '(("active" . t))))
-      (should (mongo-document-p options))
-      (should (equal (mongo-document-pairs options)
+      (should (mongodb-document-p options))
+      (should (equal (mongodb-document-pairs options)
                      '(("limit" . 10)))))
     (pcase-let ((`(count ,_client ,_database ,_collection ,filter ,options)
                  (nth 1 calls)))
@@ -1555,8 +1589,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                             ,filter ,options)
                  (nth 2 calls)))
       (should (equal field "name"))
-      (should (mongo-document-p filter))
-      (should (equal (mongo-document-pairs filter)
+      (should (mongodb-document-p filter))
+      (should (equal (mongodb-document-pairs filter)
                      '(("active" . t))))
       (should-not options))
     (should (equal (nth 3 calls)
@@ -1564,26 +1598,26 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (pcase-let ((`(create-index ,_client ,_database ,_collection ,keys
                                 ,options)
                  (nth 4 calls)))
-      (should (mongo-document-p keys))
-      (should (equal (mongo-document-pairs keys)
+      (should (mongodb-document-p keys))
+      (should (equal (mongodb-document-pairs keys)
                      '(("active" . 1))))
-      (should (mongo-document-p options))
-      (should (equal (mongo-document-pairs options)
+      (should (mongodb-document-p options))
+      (should (equal (mongodb-document-pairs options)
                      '(("name" . "active_idx")))))
     (should (equal (nth 5 calls)
                    '(drop-index client "app" "users" "active_idx")))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-update-helpers ()
-  "Native MongoDB eval should translate update helpers to mongo.el calls."
+  "Native MongoDB eval should translate update helpers to mongodb.el calls."
   (let (calls)
-    (cl-letf (((symbol-function 'mongo-update)
+    (cl-letf (((symbol-function 'mongodb-update)
                (lambda (client database collection filter update
                              &optional multi options)
                  (push (list client database collection filter update
                              multi options)
                        calls)
                  '(("ok" . 1)))))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.users.updateOne({name: 'Ann'}, {$set: {seen: true}}, "
@@ -1598,41 +1632,41 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (eq client 'client))
       (should (equal database "app"))
       (should (equal collection "users"))
-      (should (mongo-document-p filter))
-      (should (equal (mongo-document-pairs filter)
+      (should (mongodb-document-p filter))
+      (should (equal (mongodb-document-pairs filter)
                      '(("name" . "Ann"))))
-      (should (mongo-document-p update))
+      (should (mongodb-document-p update))
       (let ((set-doc (cdr (assoc "$set"
-                                  (mongo-document-pairs update)))))
-        (should (mongo-document-p set-doc))
-        (should (equal (mongo-document-pairs set-doc)
+                                  (mongodb-document-pairs update)))))
+        (should (mongodb-document-p set-doc))
+        (should (equal (mongodb-document-pairs set-doc)
                        '(("seen" . t)))))
       (should-not multi)
-      (should (mongo-document-p options))
-      (should (equal (mongo-document-pairs options)
+      (should (mongodb-document-p options))
+      (should (equal (mongodb-document-pairs options)
                      '(("upsert" . t)))))
     (pcase-let ((`(,_client ,_database ,_collection ,filter ,update
                    ,multi ,options)
                  (cadr calls)))
-      (should (mongo-document-p filter))
-      (should (equal (mongo-document-pairs filter)
+      (should (mongodb-document-p filter))
+      (should (equal (mongodb-document-pairs filter)
                      '(("active" . t))))
-      (should (mongo-document-p update))
+      (should (mongodb-document-p update))
       (let ((inc-doc (cdr (assoc "$inc"
-                                  (mongo-document-pairs update)))))
-        (should (mongo-document-p inc-doc))
-        (should (equal (mongo-document-pairs inc-doc)
+                                  (mongodb-document-pairs update)))))
+        (should (mongodb-document-p inc-doc))
+        (should (equal (mongodb-document-pairs inc-doc)
                        '(("visits" . 1)))))
       (should (eq multi t))
       (should-not options))
     (pcase-let ((`(,_client ,_database ,_collection ,filter ,replacement
                    ,multi ,options)
                  (caddr calls)))
-      (should (mongo-document-p filter))
-      (should (equal (mongo-document-pairs filter)
+      (should (mongodb-document-p filter))
+      (should (equal (mongodb-document-pairs filter)
                      '(("_id" . "b"))))
-      (should (mongo-document-p replacement))
-      (should (equal (mongo-document-pairs replacement)
+      (should (mongodb-document-p replacement))
+      (should (equal (mongodb-document-pairs replacement)
                      '(("_id" . "b")
                        ("name" . "Bob"))))
       (should-not multi)
@@ -1640,99 +1674,99 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mongodb-mql-parses-isodate-constructor ()
   "Native MongoDB MQL parsing should turn ISODate() into BSON datetimes."
-  (should (= (clutch-db-mongodb--mql-iso-date-millis
+  (should (= (clutch-mongodb--mql-iso-date-millis
               "2024-01-02T03:04:05.678Z")
              1704164645678))
-  (should (= (clutch-db-mongodb--mql-iso-date-millis
+  (should (= (clutch-mongodb--mql-iso-date-millis
               "1970-01-01T00:00:00+08:00")
              -28800000))
   (let (captured-filter)
-    (cl-letf (((symbol-function 'mongo-find)
+    (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
                               _projection _limit _skip &optional _options)
                  (setq captured-filter filter)
                  nil)))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        "db.events.find({createdAt: ISODate('2024-01-02T03:04:05.678Z')})"))
-    (should (mongo-document-p captured-filter))
+    (should (mongodb-document-p captured-filter))
     (let ((value (cdr (assoc "createdAt"
-                             (mongo-document-pairs captured-filter)))))
-      (should (mongo-datetime-p value))
-      (should (= (mongo-datetime-millis value) 1704164645678)))))
+                             (mongodb-document-pairs captured-filter)))))
+      (should (mongodb-datetime-p value))
+      (should (= (mongodb-datetime-millis value) 1704164645678)))))
 
 (ert-deftest clutch-db-test-mongodb-mql-parses-timestamp-constructor ()
   "Native MongoDB MQL parsing should turn Timestamp() into BSON timestamps."
   (let (captured-filter)
-    (cl-letf (((symbol-function 'mongo-find)
+    (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
                               _projection _limit _skip &optional _options)
                  (setq captured-filter filter)
                  nil)))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        "db.events.find({ts: Timestamp(1700000000, 7)})"))
-    (should (mongo-document-p captured-filter))
+    (should (mongodb-document-p captured-filter))
     (let ((value (cdr (assoc "ts"
-                             (mongo-document-pairs captured-filter)))))
-      (should (mongo-timestamp-p value))
-      (should (= (mongo-timestamp-seconds value) 1700000000))
-      (should (= (mongo-timestamp-increment value) 7)))))
+                             (mongodb-document-pairs captured-filter)))))
+      (should (mongodb-timestamp-p value))
+      (should (= (mongodb-timestamp-seconds value) 1700000000))
+      (should (= (mongodb-timestamp-increment value) 7)))))
 
 (ert-deftest clutch-db-test-mongodb-mql-parses-explicit-integer-constructors ()
   "Native MongoDB MQL parsing should preserve explicit int32/int64 constructors."
   (let (captured-filter)
-    (cl-letf (((symbol-function 'mongo-find)
+    (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
                               _projection _limit _skip &optional _options)
                  (setq captured-filter filter)
                  nil)))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.events.find({"
         "a: Int32('7'), b: NumberInt(8), "
         "c: Long(7), d: NumberLong('9223372036854775807')"
         "})")))
-    (should (mongo-document-p captured-filter))
-    (let* ((pairs (mongo-document-pairs captured-filter))
+    (should (mongodb-document-p captured-filter))
+    (let* ((pairs (mongodb-document-pairs captured-filter))
            (a (cdr (assoc "a" pairs)))
            (b (cdr (assoc "b" pairs)))
            (c (cdr (assoc "c" pairs)))
            (d (cdr (assoc "d" pairs))))
-      (should (mongo-int32-p a))
-      (should (= (mongo-int32-value a) 7))
-      (should (mongo-int32-p b))
-      (should (= (mongo-int32-value b) 8))
-      (should (mongo-int64-p c))
-      (should (= (mongo-int64-value c) 7))
-      (should (mongo-int64-p d))
-      (should (= (mongo-int64-value d) 9223372036854775807)))))
+      (should (mongodb-int32-p a))
+      (should (= (mongodb-int32-value a) 7))
+      (should (mongodb-int32-p b))
+      (should (= (mongodb-int32-value b) 8))
+      (should (mongodb-int64-p c))
+      (should (= (mongodb-int64-value c) 7))
+      (should (mongodb-int64-p d))
+      (should (= (mongodb-int64-value d) 9223372036854775807)))))
 
 (ert-deftest clutch-db-test-mongodb-mql-parses-decimal128-constructor ()
   "Native MongoDB MQL parsing should preserve Decimal128 constructors."
   (let (captured-filter)
-    (cl-letf (((symbol-function 'mongo-find)
+    (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
                               _projection _limit _skip &optional _options)
                  (setq captured-filter filter)
                  nil)))
-      (clutch-db-mongodb--eval
+      (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        "db.metrics.find({price: Decimal128('12.3400'), tax: NumberDecimal('1.23')})"))
-    (should (mongo-document-p captured-filter))
-    (let* ((pairs (mongo-document-pairs captured-filter))
+    (should (mongodb-document-p captured-filter))
+    (let* ((pairs (mongodb-document-pairs captured-filter))
            (price (cdr (assoc "price" pairs)))
            (tax (cdr (assoc "tax" pairs))))
-      (should (mongo-decimal128-p price))
-      (should (equal (mongo-decimal128-value price) "12.3400"))
-      (should (mongo-decimal128-p tax))
-      (should (equal (mongo-decimal128-value tax) "1.23")))))
+      (should (mongodb-decimal128-p price))
+      (should (equal (mongodb-decimal128-value price) "12.3400"))
+      (should (mongodb-decimal128-p tax))
+      (should (equal (mongodb-decimal128-value tax) "1.23")))))
 
 (ert-deftest clutch-db-test-mongodb-mql-rejects-regex-literals ()
   "Native MongoDB MQL parsing should keep regex literals outside basic support."
   (should-error
-   (clutch-db-mongodb--eval
+   (clutch-mongodb--eval
     (clutch-db-test--make-mongodb-conn "app" 'client)
     "db.users.find({name: /ann/i})")
    :type 'clutch-db-error))
@@ -1740,31 +1774,31 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 (ert-deftest clutch-db-test-mongodb-run-command-uses-current-database ()
   "Native MongoDB db.runCommand() should execute on the current database."
   (let (captured)
-    (cl-letf (((symbol-function 'mongo-command)
+    (cl-letf (((symbol-function 'mongodb-command)
                (lambda (client database command &optional _timeout)
                  (setq captured (list client database command))
                  '(("ok" . 1)))))
       (should (equal
-               (clutch-db-mongodb--eval
+               (clutch-mongodb--eval
                 (clutch-db-test--make-mongodb-conn "app" 'client)
                 "db.runCommand({ping: 1})")
                '(("ok" . 1)))))
     (pcase-let ((`(,client ,database ,command) captured))
       (should (eq client 'client))
       (should (equal database "app"))
-      (should (mongo-document-p command))
-      (should (equal (mongo-document-pairs command)
+      (should (mongodb-document-p command))
+      (should (equal (mongodb-document-pairs command)
                      '(("ping" . 1)))))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-create-collection ()
   "Native MongoDB db.createCollection() should call the protocol helper."
   (let (captured)
-    (cl-letf (((symbol-function 'mongo-create-collection)
+    (cl-letf (((symbol-function 'mongodb-create-collection)
                (lambda (client database collection &optional options)
                  (setq captured (list client database collection options))
                  '(("ok" . 1)))))
       (should (equal
-               (clutch-db-mongodb--eval
+               (clutch-mongodb--eval
                 (clutch-db-test--make-mongodb-conn "app" 'client)
                 "db.createCollection('events', {capped: true, size: 4096})")
                '(("ok" . 1)))))
@@ -1772,23 +1806,23 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (eq client 'client))
       (should (equal database "app"))
       (should (equal collection "events"))
-      (should (mongo-document-p options))
-      (should (equal (mongo-document-pairs options)
+      (should (mongodb-document-p options))
+      (should (equal (mongodb-document-pairs options)
                      '(("capped" . t)
                        ("size" . 4096)))))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-sibling-db-helpers ()
   "Native MongoDB getSiblingDB() should target commands at the sibling database."
   (let (commands collections finds)
-    (cl-letf (((symbol-function 'mongo-command)
+    (cl-letf (((symbol-function 'mongodb-command)
                (lambda (client database command &optional _timeout)
                  (push (list client database command) commands)
                  '(("ok" . 1))))
-              ((symbol-function 'mongo-create-collection)
+              ((symbol-function 'mongodb-create-collection)
                (lambda (client database collection &optional options)
                  (push (list client database collection options) collections)
                  '(("ok" . 1))))
-              ((symbol-function 'mongo-find)
+              ((symbol-function 'mongodb-find)
                (lambda (client database collection filter projection limit skip
                              &optional options)
                  (push (list client database collection filter projection
@@ -1796,17 +1830,17 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                        finds)
                  '((("_id" . "a"))))))
       (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
-        (should (equal (clutch-db-mongodb--eval conn "db.getName()")
+        (should (equal (clutch-mongodb--eval conn "db.getName()")
                        "app"))
-        (should (equal (clutch-db-mongodb--eval
+        (should (equal (clutch-mongodb--eval
                         conn
                         "db.getSiblingDB('analytics')")
                        "analytics"))
-        (should (equal (clutch-db-mongodb--eval
+        (should (equal (clutch-mongodb--eval
                         conn
                         "db.getSiblingDB('analytics').getName()")
                        "analytics"))
-        (clutch-db-mongodb--eval
+        (clutch-mongodb--eval
          conn
          (concat
           "db.getSiblingDB('analytics').runCommand({ping: 1});"
@@ -1822,8 +1856,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (pcase-let ((`(,client ,database ,command) (car commands)))
       (should (eq client 'client))
       (should (equal database "analytics"))
-      (should (mongo-document-p command))
-      (should (equal (mongo-document-pairs command)
+      (should (mongodb-document-p command))
+      (should (equal (mongodb-document-pairs command)
                      '(("ping" . 1)))))
     (pcase-let ((`(,client ,database ,collection ,options)
                  (car collections)))
@@ -1837,19 +1871,19 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (eq client 'client))
       (should (equal database "analytics"))
       (should (equal collection "users"))
-      (should (equal (mongo-document-pairs filter)
+      (should (equal (mongodb-document-pairs filter)
                      '(("_id" . "a")))))
     (pcase-let ((`(,_client ,database ,collection ,filter ,_projection
                           ,_limit ,_skip ,_options)
                  (cadr finds)))
       (should (equal database "analytics"))
       (should (equal collection "orders"))
-      (should (equal (mongo-document-pairs filter)
+      (should (equal (mongodb-document-pairs filter)
                      '(("_id" . "b")))))))
 
-(ert-deftest clutch-db-test-mongodb-metadata-uses-mongo-helpers ()
+(ert-deftest clutch-db-test-mongodb-metadata-uses-mongodb-helpers ()
   "Native MongoDB metadata should map databases and collections into Clutch objects."
-  (cl-letf (((symbol-function 'clutch-db-mongodb--eval)
+  (cl-letf (((symbol-function 'clutch-mongodb--eval)
              (lambda (_conn code)
                (cond
                 ((equal code "db.getCollectionNames()")
@@ -1876,13 +1910,20 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mongodb-set-current-schema-updates-database ()
   "Native MongoDB schema switching should change the logical database."
-  (let* ((client (make-mongo-conn :database "app" :closed nil))
+  (let* ((client (make-mongodb-conn :database "app" :closed nil))
          (conn (clutch-db-test--make-mongodb-conn "app" client)))
     (should (equal (clutch-db-current-schema conn) "app"))
     (clutch-db-set-current-schema conn "analytics")
     (should (equal (clutch-db-current-schema conn) "analytics"))
-    (should (equal (mongo-conn-database client) "analytics"))
-    (should (equal (clutch-db-database conn) "analytics"))))
+    (should (equal (clutch-db-database conn) "analytics"))
+    (let (captured-database)
+      (cl-letf (((symbol-function 'mongodb-find)
+                 (lambda (_client database _collection _filter
+                                  _projection _limit _skip &optional _options)
+                   (setq captured-database database)
+                   nil)))
+        (clutch-db-query conn "db.users.find()"))
+      (should (equal captured-database "analytics")))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-list-table-entries-uses-system-tables ()
   "ClickHouse table discovery should query the current database."
@@ -2449,11 +2490,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-backend-features ()
   "Test that backend features are correctly registered."
-  (let ((mysql-features (alist-get 'mysql clutch-db--backend-features))
-        (pg-features (alist-get 'pg clutch-db--backend-features))
-        (jdbc-features (clutch-db-backend-feature 'jdbc))
-        (clickhouse-features (clutch-db-backend-feature 'clickhouse))
-        (mongodb-features (clutch-db-backend-feature 'mongodb)))
+  (let ((mysql-features (alist-get 'mysql clutch-backend--registry))
+        (pg-features (alist-get 'pg clutch-backend--registry))
+        (jdbc-features (clutch-backend-feature 'jdbc))
+        (clickhouse-features (clutch-backend-feature 'clickhouse))
+        (mongodb-features (clutch-backend-feature 'mongodb)))
     ;; MySQL backend
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
@@ -2475,37 +2516,67 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))
     (should (functionp (plist-get jdbc-features :connect-fn)))
     (should (eq (plist-get jdbc-features :support-level) 'basic))
-    (should-not (clutch-db-backend-manual-choice-p 'jdbc))
+    (should-not (clutch-backend-manual-choice-p 'jdbc))
     (should (eq (plist-get clickhouse-features :require) 'clutch-db-jdbc))
     (should (equal (plist-get clickhouse-features :display-name) "ClickHouse"))
     (should (= (plist-get clickhouse-features :default-port) 8123))
     (should (eq (plist-get clickhouse-features :support-level) 'basic))
-    (should (eq (plist-get mongodb-features :require) 'clutch-db-mongodb))
+    (should (eq (plist-get mongodb-features :require) 'clutch-mongodb))
     (should (eq (plist-get mongodb-features :connect-fn)
-                'clutch-db-mongodb-connect))
+                'clutch-mongodb-connect))
     (should (equal (plist-get mongodb-features :display-name) "MongoDB"))
     (should (= (plist-get mongodb-features :default-port) 27017))
     (should (eq (plist-get mongodb-features :support-level) 'basic))
-    (should (clutch-db-backend-manual-choice-p 'mongodb))
-    (should-not (clutch-db-backend-feature 'mongodb-surface-sql))))
+    (should (clutch-backend-manual-choice-p 'mongodb))
+    (should-not (clutch-backend-feature 'mongodb-surface-sql))))
 
 (ert-deftest clutch-db-test-backend-list-loads-optional-registries-in-order ()
   "User-facing backend lists should be derived from the backend registry."
-  (let ((clutch-db--backend-features
+  (let ((clutch-backend--registry
          '((mysql . (:require clutch-db-mysql))
            (pg . (:require clutch-db-pg))
            (sqlite . (:require clutch-db-sqlite)))))
     (cl-letf (((symbol-function 'require)
                (lambda (feature &optional _filename _noerror)
                  (when (eq feature 'clutch-db-jdbc)
-                   (setq clutch-db--backend-features
-                         (append clutch-db--backend-features
+                   (setq clutch-backend--registry
+                         (append clutch-backend--registry
                                  '((jdbc . (:require clutch-db-jdbc))
                                    (oracle . (:require clutch-db-jdbc))
                                    (clickhouse . (:require clutch-db-jdbc))))))
                  t)))
-      (should (equal (clutch-db-backends t)
+      (should (equal (clutch-backends t)
                      '(mysql pg sqlite jdbc oracle clickhouse))))))
+
+(ert-deftest clutch-db-test-backend-registry-exposes-data-models ()
+  "Backend metadata should distinguish relational and document data models."
+  (should (eq (clutch-backend-data-model 'mysql) 'relational))
+  (should (eq (clutch-backend-data-model 'pg) 'relational))
+  (should (eq (clutch-backend-data-model 'sqlite) 'relational))
+  (should (eq (clutch-backend-data-model 'mongodb) 'document)))
+
+(ert-deftest clutch-db-test-backend-query-mode-follows-surface-metadata ()
+  "Query console modes should come from backend registry surface metadata."
+  (let ((clutch-backend--registry
+         '((mongodb . (:query-mode clutch-mongodb-mode
+                       :query-mode-require clutch-document
+                       :surfaces ((sql-interface . (:query-mode clutch-mode)))))))
+        required)
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional _filename _noerror)
+                 (push feature required)
+                 t)))
+      (should (eq (clutch-backend-query-mode
+                   'mongodb
+                   '(:backend mongodb))
+                  'clutch-mongodb-mode))
+      (should (equal required '(clutch-document)))
+      (setq required nil)
+      (should (eq (clutch-backend-query-mode
+                   'mongodb
+                   '(:backend mongodb :surface sql-interface))
+                  'clutch-mode))
+      (should-not required))))
 
 (ert-deftest clutch-db-test-manual-backend-choices-follow-registry ()
   "Manual connect choices should include registered concrete backends."
@@ -2521,13 +2592,13 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   "Manual connect prompts should get display names and ports from the registry."
   (require 'clutch)
   (dolist (backend (clutch--manual-backend-choices))
-    (should (clutch-db-backend-display-name backend))
+    (should (clutch-backend-display-name backend))
     (unless (eq backend 'sqlite)
-      (should (numberp (clutch-db-backend-default-port backend))))))
+      (should (numberp (clutch-backend-default-port backend))))))
 
 (ert-deftest clutch-db-test-connect-requires-selected-backend-only ()
   "`clutch-db-connect' should require only the selected adapter."
-  (let ((clutch-db--backend-features
+  (let ((clutch-backend--registry
          '((mysql . (:require clutch-db-mysql :connect-fn clutch-db-mysql-connect))
            (pg . (:require clutch-db-pg :connect-fn clutch-db-pg-connect))))
         required)
@@ -2613,7 +2684,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-jdbc-driver-backend-loads-jdbc-on-demand ()
   "Driver-style JDBC backends should load `clutch-db-jdbc' on demand."
-  (let ((clutch-db--backend-features
+  (let ((clutch-backend--registry
          '((mysql . (:require clutch-db-mysql :connect-fn clutch-db-mysql-connect))
            (pg . (:require clutch-db-pg :connect-fn clutch-db-pg-connect))
            (sqlite . (:require clutch-db-sqlite :connect-fn clutch-db-sqlite-connect))))
@@ -2629,7 +2700,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                                       :connect-fn (lambda (params)
                                                     (setq captured-params params)
                                                     'fake-conn)))
-                          clutch-db--backend-features)
+                          clutch-backend--registry)
                     t)
                    (_ t))))
               ((symbol-function 'clutch-db-init-connection)
@@ -3351,7 +3422,7 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
   (declare (indent 1))
   `(if (not (clutch-db-test--mongodb-live-configured-p))
        (ert-skip "Set clutch-db-test-mongodb-live-enabled and connection data to enable native MongoDB live tests")
-     (require 'clutch-db-mongodb)
+     (require 'clutch-mongodb)
      (let ((,var (clutch-db-connect
                   'mongodb
                   (clutch-db-test--mongodb-live-params))))

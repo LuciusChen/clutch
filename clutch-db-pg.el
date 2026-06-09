@@ -33,7 +33,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'pg)
 
 (defvar pg-connect-timeout)

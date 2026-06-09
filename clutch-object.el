@@ -14,7 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'sql)
 (require 'subr-x)
 (require 'transient)
@@ -113,7 +113,7 @@ temporarily unavailable."
   "Metadata categories loaded into clutch object pickers.")
 
 (defconst clutch--object-type-order
-  '("TABLE" "VIEW" "SYNONYM" "INDEX" "SEQUENCE"
+  '("TABLE" "VIEW" "SYNONYM" "COLLECTION" "INDEX" "SEQUENCE"
     "PROCEDURE" "FUNCTION" "TRIGGER")
   "Display order for grouped clutch object completion candidates.")
 
@@ -249,7 +249,7 @@ minibuffer has been quit.")
 (defun clutch--table-like-entry-p (entry)
   "Return non-nil when ENTRY can be browsed as rows."
   (member (upcase (or (plist-get entry :type) ""))
-          '("TABLE" "VIEW" "SYNONYM")))
+          '("TABLE" "VIEW" "SYNONYM" "COLLECTION")))
 
 (defun clutch--normalize-object-type (type)
   "Return a normalized object TYPE string."
@@ -264,6 +264,7 @@ minibuffer has been quit.")
     ("TABLE" "Tables")
     ("VIEW" "Views")
     ("SYNONYM" "Synonyms")
+    ("COLLECTION" "Collections")
     ("INDEX" "Indexes")
     ("SEQUENCE" "Sequences")
     ("PROCEDURE" "Procedures")
@@ -457,7 +458,7 @@ When REFRESH is non-nil, bypass any cached per-type entries."
         (clutch--store-object-cache-type-entries
          conn type
          (pcase type
-           ((or "TABLE" "VIEW" "SYNONYM")
+           ((or "TABLE" "VIEW" "SYNONYM" "COLLECTION")
             (clutch--filter-object-entries-by-type
              (clutch--browseable-object-entries conn)
              type))

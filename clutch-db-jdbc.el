@@ -42,7 +42,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'json)
 (require 'sql)
 
@@ -166,26 +166,33 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defconst clutch-jdbc--driver-metadata
   '((jdbc       . (:display-name "JDBC"
                   :support-level basic
+                  :data-model relational
                   :manual-choice nil))
     (oracle     . (:display-name "Oracle"
                   :default-port 1521
                   :support-level full
+                  :data-model relational
                   :sql-product oracle))
     (sqlserver  . (:display-name "SQL Server"
                   :default-port 1433
-                  :support-level full))
+                  :support-level full
+                  :data-model relational))
     (db2        . (:display-name "DB2"
                   :default-port 50000
-                  :support-level basic))
+                  :support-level basic
+                  :data-model relational))
     (snowflake  . (:display-name "Snowflake"
                   :default-port 443
-                  :support-level basic))
+                  :support-level basic
+                  :data-model relational))
     (redshift   . (:display-name "Redshift"
                   :default-port 5439
-                  :support-level basic))
+                  :support-level basic
+                  :data-model relational))
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
-                  :support-level basic)))
+                  :support-level basic
+                  :data-model relational)))
   "User-facing metadata for JDBC-backed concrete drivers.")
 
 (defconst clutch-jdbc--driver-companions
@@ -918,10 +925,10 @@ Returns a `clutch-jdbc-conn'."
 ;; in the user's params plist (:backend is stripped by clutch--build-conn
 ;; before the connect-fn is called).
 (dolist (driver clutch-jdbc--jdbc-drivers)
-  (unless (alist-get driver clutch-db--backend-features)
+  (unless (alist-get driver clutch-backend--registry)
     (let ((drv driver))
       (add-to-list
-       'clutch-db--backend-features
+       'clutch-backend--registry
        (cons drv
              (append (copy-sequence
                       (alist-get drv clutch-jdbc--driver-metadata))
@@ -1909,7 +1916,7 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
   (or (plist-get (clutch-jdbc-conn-params conn) :display-name)
       (and (eq (clutch-jdbc--conn-driver conn) 'mongodb)
            "MongoDB")
-      (clutch-db-backend-display-name
+      (clutch-backend-display-name
        (clutch-jdbc--conn-driver conn))
       "JDBC"))
 

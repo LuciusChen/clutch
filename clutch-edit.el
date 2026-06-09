@@ -14,7 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'json)
 
 (defvar-local clutch--cached-pk-indices nil
@@ -55,12 +55,12 @@
 (declare-function clutch--cell-at-point "clutch-ui" ())
 (declare-function clutch--row-idx-at-line "clutch-ui" ())
 (declare-function clutch--selected-row-indices "clutch-ui" ())
-(declare-function clutch-db-escape-identifier "clutch-db" (conn name))
-(declare-function clutch-db-result-affected-rows "clutch-db" (result))
-(declare-function clutch-db-result-p "clutch-db" (result))
-(declare-function clutch-db-sql-find-top-level-clause "clutch-db" (sql pattern &optional start))
-(declare-function clutch-db-substitute-params "clutch-db" (sql params render-fn))
-(declare-function clutch-db-foreign-keys "clutch-db" (conn table))
+(declare-function clutch-db-escape-identifier "clutch-backend" (conn name))
+(declare-function clutch-db-result-affected-rows "clutch-backend" (result))
+(declare-function clutch-db-result-p "clutch-backend" (result))
+(declare-function clutch-db-sql-find-top-level-clause "clutch-backend" (sql pattern &optional start))
+(declare-function clutch-db-substitute-params "clutch-backend" (sql params render-fn))
+(declare-function clutch-db-foreign-keys "clutch-backend" (conn table))
 
 ;;;; Cell editing (C-c ')
 
