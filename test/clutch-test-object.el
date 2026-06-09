@@ -252,9 +252,57 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
 (ert-deftest clutch-test-object-action-inapt-flags-reflect-target-type ()
   "Object action transient flags should reflect the current target type."
   (let ((clutch--object-action-entry '(:name "ORDERS" :type "TABLE")))
-    (should (clutch--object-act-jump-target-inapt-p)))
+    (should (clutch--object-act-jump-target-inapt-p))
+    (should (clutch--object-act-mongodb-collection-inapt-p)))
   (let ((clutch--object-action-entry '(:name "ORDER_IDX" :type "INDEX")))
-    (should-not (clutch--object-act-jump-target-inapt-p))))
+    (should-not (clutch--object-act-jump-target-inapt-p))
+    (should (clutch--object-act-mongodb-collection-inapt-p)))
+  (let ((clutch--object-action-entry '(:name "users" :type "COLLECTION")))
+    (should (clutch--object-act-jump-target-inapt-p))
+    (should-not (clutch--object-act-mongodb-collection-inapt-p))))
+
+(ert-deftest clutch-test-object-list-indexes-executes-mongodb-helper ()
+  "MongoDB collection index action should execute listIndexes helper syntax."
+  (let (captured)
+    (with-temp-buffer
+      (setq-local clutch-connection 'mongo-conn
+                  clutch--connection-params nil
+                  clutch--conn-sql-product nil)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mongodb))
+                ((symbol-function 'clutch--execute)
+                 (lambda (sql conn &optional result-context)
+                   (setq captured (list sql conn result-context))))
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 #'ignore)
+                ((symbol-function 'clutch--remember-current-object)
+                 #'ignore))
+        (clutch-object-list-indexes '(:name "users" :type "COLLECTION"))))
+    (should (equal captured
+                   '("db.getCollection(\"users\").listIndexes();"
+                     mongo-conn nil)))))
+
+(ert-deftest clutch-test-object-explain-sample-executes-mongodb-helper ()
+  "MongoDB collection explain action should execute a sample explain helper."
+  (let (captured)
+    (with-temp-buffer
+      (setq-local clutch-connection 'mongo-conn
+                  clutch--connection-params nil
+                  clutch--conn-sql-product nil)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mongodb))
+                ((symbol-function 'clutch--execute)
+                 (lambda (sql conn &optional result-context)
+                   (setq captured (list sql conn result-context))))
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 #'ignore)
+                ((symbol-function 'clutch--remember-current-object)
+                 #'ignore))
+        (clutch-object-explain-sample-query
+         '(:name "users" :type "COLLECTION"))))
+    (should (equal captured
+                   '("db.getCollection(\"users\").find({}).limit(1).explain(\"executionStats\");"
+                     mongo-conn nil)))))
 
 (ert-deftest clutch-test-copy-object-fqname-prompts-for-fqname ()
   "Copy-fqname should use an fqname-specific prompt."
@@ -488,6 +536,35 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
        :type 'clutch-db-error)
       (should (= detail-calls 1))
       (should (= list-columns-calls 0)))))
+
+(ert-deftest clutch-test-object-describe-collection-shows-fields-and-indexes ()
+  "Collection describe should expose sampled fields and MongoDB indexes."
+  (cl-letf (((symbol-function 'clutch--ensure-column-details)
+             (lambda (_conn collection &optional strict)
+               (should (equal collection "orders"))
+               (should strict)
+               '((:name "_id" :type "BSON" :type-category json :nullable t)
+                 (:name "status" :type "BSON" :type-category json :nullable t))))
+            ((symbol-function 'clutch-db-list-columns)
+             (lambda (&rest _args)
+               (ert-fail "Column fallback should not run when details exist")))
+            ((symbol-function 'clutch--object-related-entries)
+             (lambda (_conn entry type &optional refresh)
+               (should (equal entry '(:name "orders" :type "COLLECTION")))
+               (should (equal type "INDEX"))
+               (should refresh)
+               '((:name "_id_" :type "INDEX" :target-table "orders")
+                 (:name "status_idx" :type "INDEX"
+                  :target-table "orders" :unique t)))))
+    (let ((text (clutch--object-describe-text
+                 'fake-conn '(:name "orders" :type "COLLECTION"))))
+      (should (string-match-p "orders (COLLECTION)" text))
+      (should (string-match-p "Fields (2)" text))
+      (should (string-match-p "_id[[:space:]]+BSON" text))
+      (should (string-match-p "status[[:space:]]+BSON" text))
+      (should (string-match-p "Indexes (2)" text))
+      (should (string-match-p "_id_" text))
+      (should (string-match-p "status_idx[[:space:]]+UNIQUE" text)))))
 
 (ert-deftest clutch-test-object-describe-populates-problem-record-in-source-buffer ()
   "Describe failures should populate a problem record in the invoking buffer."
@@ -1574,18 +1651,25 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
                          (clutch--embark-action-specs
                           (lambda (spec)
                             (not (eq (plist-get spec :id) 'jump-target)))))
-                 '(describe show-definition copy-name copy-fqname))))
+                 '(describe show-definition list-indexes explain-sample
+                            copy-name copy-fqname))))
 
 (ert-deftest clutch-test-embark-target-action-specs-keep-jump-target ()
   "Target-capable Embark menus should keep jump-target."
   (should (equal (mapcar (lambda (spec) (plist-get spec :id))
                          (clutch--embark-action-specs))
-                 '(describe show-definition jump-target copy-name copy-fqname))))
+                 '(describe show-definition list-indexes explain-sample
+                            jump-target copy-name copy-fqname))))
 
 (ert-deftest clutch-test-embark-command-label-uses-shared-label ()
   "Embark command labels should reuse the shared object action wording."
   (should (equal (clutch--embark-command-label 'clutch-object-show-ddl-or-source)
                  "Show definition"))
+  (should (equal (clutch--embark-command-label 'clutch-object-list-indexes)
+                 "List indexes"))
+  (should (equal (clutch--embark-command-label
+                  'clutch-object-explain-sample-query)
+                 "Explain sample query"))
   (should (equal (clutch--embark-command-label 'clutch-object-default-action)
                  "Default action")))
 

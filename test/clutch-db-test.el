@@ -1298,6 +1298,39 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                        :host "cluster0.a.query.mongodb.net"
                        :database "analytics"))))))
 
+(ert-deftest clutch-db-test-mongodb-list-index-objects ()
+  "Native MongoDB indexes should map into Clutch object metadata."
+  (let* ((conn (clutch-db-test--make-mongodb-conn "app" 'client))
+         (id-index (mongodb-document
+                    `(("name" . "_id_")
+                      ("key" . ,(mongodb-document '(("_id" . 1)))))))
+         (email-index (mongodb-document
+                       `(("name" . "email_idx")
+                         ("key" . ,(mongodb-document '(("email" . 1))))
+                         ("unique" . t)))))
+    (cl-letf (((symbol-function 'mongodb-list-collections)
+               (lambda (_client _database &optional _filter _options)
+                 '("users")))
+              ((symbol-function 'mongodb-list-indexes)
+               (lambda (_client database collection)
+                 (should (equal database "app"))
+                 (should (equal collection "users"))
+                 (list id-index email-index))))
+      (let* ((entries (clutch-db-list-objects conn 'indexes))
+             (email-entry (cadr entries)))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :identity))
+                               entries)
+                       '("users._id_" "users.email_idx")))
+        (should (equal (plist-get email-entry :name) "email_idx"))
+        (should (equal (plist-get email-entry :schema) "app"))
+        (should (equal (plist-get email-entry :target-table) "users"))
+        (should (eq (plist-get email-entry :unique) t))
+        (should (equal (clutch-db-object-details conn email-entry)
+                       '((:name "email" :position 1 :descend "ASC"))))
+        (should (string-match-p
+                 "\"name\":\"email_idx\""
+                 (clutch-db-show-create-object conn email-entry)))))))
+
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   "Native MongoDB query results should flatten top-level document keys."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
@@ -3996,6 +4029,11 @@ Skips if `clutch-db-test-pg-password' is nil."
                "db.getCollection(%S).deleteMany({});"
                "db.getCollection(%S).insertOne({_id: 'sample', field: 1})")
               collection collection))
+            (clutch-db-query
+             conn
+             (format
+              "db.getCollection(%S).createIndex({field: 1}, {name: 'field_idx'})"
+              collection))
             (should (member (clutch-db-current-schema conn)
                             (clutch-db-list-schemas conn)))
             (should (member collection (clutch-db-list-tables conn)))
@@ -4009,6 +4047,19 @@ Skips if `clutch-db-test-pg-password' is nil."
             (let ((columns (clutch-db-list-columns conn collection)))
               (should (member "_id" columns))
               (should (member "field" columns)))
+            (let* ((indexes (clutch-db-list-objects conn 'indexes))
+                   (index (seq-find
+                           (lambda (entry)
+                             (and (equal (plist-get entry :name) "field_idx")
+                                  (equal (plist-get entry :target-table)
+                                         collection)))
+                           indexes)))
+              (should index)
+              (should (equal (clutch-db-object-details conn index)
+                             '((:name "field" :position 1 :descend "ASC"))))
+              (should (string-match-p
+                       "\"name\":\"field_idx\""
+                       (clutch-db-show-create-object conn index))))
             (should (string-match-p
                      collection
                      (clutch-db-show-create-table conn collection))))

@@ -1112,6 +1112,8 @@ helper call."
   "Return VALUE recursively normalized for `json-encode'."
   (cond
    ((eq value :false) json-false)
+   ((mongodb-document-p value)
+    (clutch-mongodb--json-encodable (mongodb-document-elements value)))
    ((clutch-mongodb--alist-p value)
     (mapcar (lambda (pair)
               (cons (car pair)
@@ -1124,6 +1126,55 @@ helper call."
 (defun clutch-mongodb--json-encode-text (value)
   "Return VALUE encoded as JSON text for MongoDB result display."
   (json-encode (clutch-mongodb--json-encodable value)))
+
+(defun clutch-mongodb--document-value (document key)
+  "Return KEY's value from MongoDB DOCUMENT."
+  (cdr (assoc key (mongodb-document-elements document))))
+
+(defun clutch-mongodb--index-direction (value)
+  "Return a display direction for a MongoDB index key VALUE."
+  (cond
+   ((eq value 1) "ASC")
+   ((eq value -1) "DESC")
+   ((stringp value) (upcase value))
+   (t (format "%s" value))))
+
+(defun clutch-mongodb--index-key-details (key-document)
+  "Return object-detail rows for MongoDB index KEY-DOCUMENT."
+  (cl-loop for pair in (mongodb-document-elements key-document)
+           for position from 1
+           collect (list :name (car pair)
+                         :position position
+                         :descend (clutch-mongodb--index-direction
+                                   (cdr pair)))))
+
+(defun clutch-mongodb--index-entry (conn collection document)
+  "Return a Clutch index entry for MongoDB index DOCUMENT on COLLECTION in CONN."
+  (let ((name (clutch-mongodb--document-value document "name"))
+        (key (clutch-mongodb--document-value document "key"))
+        (database (clutch-mongodb-conn-database conn)))
+    (list :name name
+          :type "INDEX"
+          :schema database
+          :source-schema database
+          :target-table collection
+          :identity (format "%s.%s" collection name)
+          :unique (eq (clutch-mongodb--document-value document "unique") t)
+          :key key
+          :definition document)))
+
+(defun clutch-mongodb--index-document (conn entry)
+  "Return the MongoDB index document for object ENTRY on CONN."
+  (or (plist-get entry :definition)
+      (when-let* ((collection (plist-get entry :target-table))
+                  (name (plist-get entry :name)))
+        (seq-find
+         (lambda (document)
+           (equal (clutch-mongodb--document-value document "name") name))
+         (mongodb-list-indexes
+          (clutch-mongodb-conn-client conn)
+          (clutch-mongodb-conn-database conn)
+          collection)))))
 
 (defun clutch-mongodb--ordered-keys (docs)
   "Return stable top-level keys for DOCS, keeping _id first when present."
@@ -1305,6 +1356,35 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
                       (clutch--json-serialize-text collection
                                                    "MongoDB collection name")))))
     (clutch-mongodb--json-encode-text info)))
+
+(cl-defmethod clutch-db-list-objects ((conn clutch-mongodb-conn) category)
+  "Return MongoDB object entries in CATEGORY for CONN."
+  (pcase category
+    ('indexes
+     (cl-loop for collection in (clutch-db-list-tables conn)
+              append
+              (mapcar (lambda (document)
+                        (clutch-mongodb--index-entry conn collection document))
+                      (mongodb-list-indexes
+                       (clutch-mongodb-conn-client conn)
+                       (clutch-mongodb-conn-database conn)
+                       collection))))
+    (_ nil)))
+
+(cl-defmethod clutch-db-object-details ((conn clutch-mongodb-conn) entry)
+  "Return MongoDB object details for ENTRY on CONN."
+  (pcase (upcase (or (plist-get entry :type) ""))
+    ("INDEX"
+     (when-let* ((document (clutch-mongodb--index-document conn entry))
+                 (key (clutch-mongodb--document-value document "key")))
+       (clutch-mongodb--index-key-details key)))))
+
+(cl-defmethod clutch-db-show-create-object ((conn clutch-mongodb-conn) entry)
+  "Return MongoDB object metadata for ENTRY on CONN as JSON."
+  (pcase (upcase (or (plist-get entry :type) ""))
+    ("INDEX"
+     (when-let* ((document (clutch-mongodb--index-document conn entry)))
+       (clutch-mongodb--json-encode-text document)))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-mongodb-conn) _table)
   "Return nil; MongoDB collections have no SQL table comments."

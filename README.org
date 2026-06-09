@@ -393,9 +393,12 @@ Common entry points:
 MongoDB is basic native document support through =mongodb.el=.  It connects to
 ordinary MongoDB deployments through =mongodb://...= URLs or structured
 =:host= / =:port= params accepted by =mongodb.el=.  It lists collections,
-expands top-level document keys into result columns, and evaluates supported
+expands top-level document keys into result columns, maps collection indexes
+into object metadata, and evaluates supported
 MongoDB Shell / MQL helper commands such as
 =db.users.find({active: true}).limit(20)=.
+Collection object actions can describe sampled fields and indexes, browse
+documents, show collection metadata, list indexes, and run a sample explain.
 It is basic document support, not a full =mongosh= JavaScript runtime.
 For connection examples, query behavior, metadata mapping, and live tests, see
 [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
