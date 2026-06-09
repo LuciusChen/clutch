@@ -933,12 +933,15 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 (defun clutch--pass-entry-by-suffix (suffix)
   "Return the first pass entry path whose tail matches SUFFIX.
 Matches e.g. `dev-mysql' against `mysql/dev-mysql'.
-Returns nil when no matching entry is found or auth-source-pass is absent."
+Returns nil when no matching entry is found, auth-source-pass is absent, or
+the pass store cannot be enumerated."
   (when (and (fboundp 'auth-source-pass-entries)
              (fboundp 'auth-source-pass-parse-entry))
     (let ((re (format "\\(^\\|/\\)%s$" (regexp-quote suffix))))
       (cl-find-if (lambda (entry) (string-match-p re entry))
-                  (auth-source-pass-entries)))))
+                  (condition-case nil
+                      (auth-source-pass-entries)
+                    (file-missing nil))))))
 
 (defun clutch--resolve-pass-entry-password (entry)
   "Return the password from pass ENTRY.
@@ -2047,6 +2050,20 @@ raw database string."
                 (list :password pw
                       :database (unless (string-empty-p db) db)))))))
 
+(defun clutch--read-saved-connection-choice (prompt names)
+  "Read a saved connection choice from NAMES using PROMPT.
+Return the raw minibuffer input so callers can treat empty or unmatched input
+as a request for a temporary connection."
+  (let ((read-choice
+         (lambda ()
+           (let ((completion-extra-properties
+                  '(:affixation-function clutch--connection-candidates-affixation)))
+             (completing-read prompt names nil nil nil nil "")))))
+    (if (boundp 'vertico-preselect)
+        (cl-progv '(vertico-preselect) '(prompt)
+          (funcall read-choice))
+      (funcall read-choice))))
+
 (defun clutch--connect-params-for-current-buffer ()
   "Return connection params appropriate for the current buffer."
   (cond
@@ -2062,19 +2079,19 @@ raw database string."
 
 (defun clutch--read-connection-params ()
   "Prompt the user for connection parameters and return a params plist.
-Offers saved connections from `clutch-connection-alist' when non-empty,
-otherwise prompts for :backend first, then for the backend-specific
-connection parameters.
+Offers saved connections from `clutch-connection-alist' when non-empty.  Empty
+or unmatched input starts the temporary connection flow, matching
+`clutch-query-console'.  Otherwise prompts for :backend first, then for the
+backend-specific connection parameters.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
   (clutch--ensure-clutch-loaded)
-  (if clutch-connection-alist
-      (let* ((name (let ((completion-extra-properties
-                          '(:affixation-function clutch--connection-candidates-affixation)))
-                     (completing-read "Connection: "
-                                      (mapcar #'car clutch-connection-alist)
-                                      nil t))))
-        (clutch--saved-connection-params name))
-    (clutch--read-manual-connection-params)))
+  (let* ((names (mapcar #'car clutch-connection-alist))
+         (choice (if names
+                     (clutch--read-saved-connection-choice "Connection: " names)
+                   "")))
+    (if (member choice names)
+        (clutch--saved-connection-params choice)
+      (clutch--read-manual-connection-params))))
 
 ;;;; Interactive connect/disconnect
 
@@ -2082,7 +2099,7 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
 (defun clutch-connect ()
   "Connect to a database server interactively.
 If `clutch-connection-alist' is non-empty, offer saved connections via
-  `completing-read'.  Otherwise prompt for each parameter.
+  `completing-read'.  Empty or unmatched input prompts for each parameter.
 The password is resolved via `auth-source' when not in the connection
 params; see `clutch-connection-alist' for details."
   (interactive)

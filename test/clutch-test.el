@@ -5912,6 +5912,33 @@ crashing the UI layer."
                  "Database password lookup failed for pass entry mysql/app-prod. Unlock pass/auth-source-pass and retry")))
       (should-not connect-called))))
 
+(ert-deftest clutch-test-resolve-password-falls-back-when-pass-store-missing ()
+  "Missing pass stores should not block host/user/port auth-source lookup."
+  (let (auth-source-args)
+    (cl-letf (((symbol-function 'auth-source-pass-entries)
+               (lambda ()
+                 (signal 'file-missing
+                         '("Opening directory" "No such file or directory"
+                           "/home/user/.password-store"))))
+              ((symbol-function 'auth-source-pass-parse-entry)
+               (lambda (_entry)
+                 (ert-fail "No pass entry should be parsed when listing fails")))
+              ((symbol-function 'auth-source-search)
+               (lambda (&rest args)
+                 (setq auth-source-args args)
+                 (list (list :secret "postgres")))))
+      (should (equal (clutch--resolve-password
+                      '(:host "127.0.0.1"
+                        :user "postgres"
+                        :port 5432
+                        :pass-entry "local-pg"))
+                     "postgres"))
+      (should (equal auth-source-args
+                     '(:host "127.0.0.1"
+                       :user "postgres"
+                       :port 5432
+                       :max 1))))))
+
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
   (let ((err (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
@@ -6133,6 +6160,41 @@ crashing the UI layer."
                      (lambda (&rest _args) "alpha")))
             (should (equal (funcall reader) expected))
             (should required)))))))
+
+(ert-deftest clutch-test-read-connection-params-no-match-prompts-manual-when-saved ()
+  "No-match connect choices should collect temporary connection params."
+  (dolist (choice '("" "new-sqlite"))
+    (ert-info ((format "choice %S" choice))
+      (let ((clutch-connection-alist
+             '(("alpha" . (:backend mysql :database "app_a"))))
+            connection-candidates
+            connection-require-match
+            connection-default
+            backend-require-match)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &optional _predicate require-match
+                                   _initial-input _hist def _inherit)
+                     (pcase prompt
+                       ("Connection: "
+                        (setq connection-candidates collection
+                              connection-require-match require-match
+                              connection-default def)
+                        choice)
+                       ("Backend: "
+                        (setq backend-require-match require-match)
+                        "sqlite")
+                       (_ (error "Unexpected prompt: %s" prompt)))))
+                  ((symbol-function 'read-string)
+                   (lambda (prompt &optional _initial _history default-value _inherit)
+                     (pcase prompt
+                       ("Database (:memory:): " (or default-value ""))
+                       (_ (error "Unexpected prompt: %s" prompt))))))
+          (should (equal (clutch--read-connection-params)
+                         '(:backend sqlite :database ":memory:")))
+          (should (equal connection-candidates '("alpha")))
+          (should-not connection-require-match)
+          (should (equal connection-default ""))
+          (should backend-require-match))))))
 
 (ert-deftest clutch-test-read-connection-params-prompts-for-backend-when-unsaved ()
   "Manual connection prompts should collect an explicit backend first."
