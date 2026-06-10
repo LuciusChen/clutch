@@ -18,7 +18,7 @@
 ;; Manual live setup:
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
-;;   docker run -d -p 127.0.0.1:57017:27017 mongodb:7
+;;   docker run -d -p 127.0.0.1:57017:27017 mongo:7
 ;;
 ;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql
 ;; client retries with TLS when the server requires a secure channel; local

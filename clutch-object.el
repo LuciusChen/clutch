@@ -1172,6 +1172,90 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
                       "")))
           indexes))
 
+(defun clutch--object-json-bool (value)
+  "Return VALUE as an Emacs JSON boolean."
+  (if value t :false))
+
+(defun clutch--object-json-field (field)
+  "Return a JSON-serializable MongoDB describe field object for FIELD."
+  (if (plist-get field :name)
+      (let ((category (plist-get field :type-category)))
+        (delq nil
+              `((name . ,(plist-get field :name))
+                ,(when (plist-get field :type)
+                   `(type . ,(plist-get field :type)))
+                ,(when category
+                   `(typeCategory . ,(format "%s" category)))
+                ,(when (plist-member field :nullable)
+                   `(nullable . ,(clutch--object-json-bool
+                                  (plist-get field :nullable))))
+                ,(when (plist-get field :comment)
+                   `(comment . ,(plist-get field :comment))))))
+    `((name . ,(format "%s" field)))))
+
+(defun clutch--object-json-index (index)
+  "Return a JSON-serializable MongoDB describe index object for INDEX."
+  (delq nil
+        `((name . ,(plist-get index :name))
+          ,(when (plist-get index :target-table)
+             `(collection . ,(plist-get index :target-table)))
+          ,(when (plist-member index :unique)
+             `(unique . ,(clutch--object-json-bool
+                          (plist-get index :unique)))))))
+
+(defun clutch--object-json-index-key (column)
+  "Return a JSON-serializable MongoDB index key object for COLUMN."
+  (delq nil
+        `((name . ,(plist-get column :name))
+          ,(when (plist-get column :position)
+             `(position . ,(plist-get column :position)))
+          ,(when (plist-get column :descend)
+             `(direction . ,(plist-get column :descend))))))
+
+(defun clutch--object-describe-json-document (conn entry)
+  "Return a JSON-serializable MongoDB describe document for ENTRY on CONN."
+  (let ((name (plist-get entry :name))
+        (type (clutch--object-type-string entry)))
+    (pcase type
+      ("COLLECTION"
+       (let* ((details (or (clutch--ensure-column-details conn name t)
+                           (clutch-db-list-columns conn name)))
+              (indexes (clutch--object-related-entries conn entry "INDEX" t)))
+         (delq nil
+               `((name . ,name)
+                 (type . ,type)
+                 ,(when (plist-get entry :schema)
+                    `(database . ,(plist-get entry :schema)))
+                 (fields . ,(vconcat (mapcar #'clutch--object-json-field
+                                              details)))
+                 (indexes . ,(vconcat (mapcar #'clutch--object-json-index
+                                               indexes)))))))
+      ("INDEX"
+       (let ((keys (clutch-db-object-details conn entry)))
+         (delq nil
+               `((name . ,name)
+                 (type . ,type)
+                 ,(when (plist-get entry :target-table)
+                    `(collection . ,(plist-get entry :target-table)))
+                 ,(when (plist-member entry :unique)
+                    `(unique . ,(clutch--object-json-bool
+                                 (plist-get entry :unique))))
+                 (keys . ,(vconcat (mapcar #'clutch--object-json-index-key
+                                            keys)))))))
+      (_
+       (delq nil
+             `((name . ,name)
+               (type . ,type)
+               ,(when (plist-get entry :schema)
+                  `(database . ,(plist-get entry :schema)))))))))
+
+(defun clutch--object-describe-json-text (conn entry)
+  "Return pretty JSON describe text for MongoDB ENTRY on CONN."
+  (clutch--object-json-metadata-text
+   (clutch--json-serialize-text
+    (clutch--object-describe-json-document conn entry)
+    "MongoDB object description")))
+
 (defun clutch--object-describe-sections (conn entry)
   "Return describe sections for ENTRY on CONN."
   (pcase (clutch--object-type-string entry)
@@ -1225,28 +1309,30 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
 
 (defun clutch--object-describe-text (conn entry)
   "Return describe text for ENTRY on CONN."
-  (let* ((header (format "%s (%s)"
-                         (clutch--object-fqname entry)
-                         (clutch--object-type-string entry)))
-         (sections (delq nil
-                         (append
-                          (list (cons "Summary"
-                                      (clutch--object-summary-lines entry)))
-                          (clutch--object-describe-sections conn entry)))))
-    (string-join
-     (cons
-      header
-      (mapcar
-       (lambda (section)
-         (let* ((title (car section))
-                (lines (cdr section))
-                (count (length lines))
-                (display-title (if (member title '("Summary" "Comment"))
-                                   title
-                                 (format "%s (%d)" title count))))
-           (format "%s\n%s" display-title (string-join lines "\n"))))
-       sections))
-     "\n\n")))
+  (if (clutch--mongodb-document-conn-p conn)
+      (clutch--object-describe-json-text conn entry)
+    (let* ((header (format "%s (%s)"
+                           (clutch--object-fqname entry)
+                           (clutch--object-type-string entry)))
+           (sections (delq nil
+                           (append
+                            (list (cons "Summary"
+                                        (clutch--object-summary-lines entry)))
+                            (clutch--object-describe-sections conn entry)))))
+      (string-join
+       (cons
+        header
+        (mapcar
+         (lambda (section)
+           (let* ((title (car section))
+                  (lines (cdr section))
+                  (count (length lines))
+                  (display-title (if (member title '("Summary" "Comment"))
+                                     title
+                                   (format "%s (%d)" title count))))
+             (format "%s\n%s" display-title (string-join lines "\n"))))
+         sections))
+       "\n\n"))))
 
 (defun clutch--fontify-object-describe ()
   "Apply lightweight highlighting to the current describe buffer."

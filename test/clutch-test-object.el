@@ -700,6 +700,47 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
       (should (string-match-p "_id_" text))
       (should (string-match-p "status_idx[[:space:]]+UNIQUE" text)))))
 
+(ert-deftest clutch-test-object-describe-mongodb-collection-renders-json ()
+  "Native MongoDB collection describe should display formatted JSON metadata."
+  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+             (lambda (_conn) 'mongodb))
+            ((symbol-function 'clutch--ensure-column-details)
+             (lambda (_conn collection &optional strict)
+               (should (equal collection "orders"))
+               (should strict)
+               '((:name "_id" :type "BSON<ObjectId>"
+                  :type-category json :nullable t)
+                 (:name "status" :type "BSON<string>"
+                  :type-category text :nullable t
+                  :comment "present in 2/3 sampled documents"))))
+            ((symbol-function 'clutch-db-list-columns)
+             (lambda (&rest _args)
+               (ert-fail "Column fallback should not run when details exist")))
+            ((symbol-function 'clutch--object-related-entries)
+             (lambda (_conn entry type &optional refresh)
+               (should (equal entry
+                              '(:name "orders" :type "COLLECTION"
+                                :schema "app")))
+               (should (equal type "INDEX"))
+               (should refresh)
+               '((:name "_id_" :type "INDEX" :target-table "orders"
+                  :unique t)
+                 (:name "status_idx" :type "INDEX"
+                  :target-table "orders" :unique nil)))))
+    (let ((text (clutch--object-describe-text
+                 'mongo-conn
+                 '(:name "orders" :type "COLLECTION" :schema "app"))))
+      (should (string-prefix-p "{\n" text))
+      (should (string-match-p "\"name\": \"orders\"" text))
+      (should (string-match-p "\"database\": \"app\"" text))
+      (should (string-match-p "\"fields\": \\[" text))
+      (should (string-match-p "\"typeCategory\": \"json\"" text))
+      (should (string-match-p "present in 2/3 sampled documents" text))
+      (should (string-match-p "\"indexes\": \\[" text))
+      (should (string-match-p "\"unique\": true" text))
+      (should (string-match-p "\"unique\": false" text))
+      (should-not (string-match-p "^Fields" text)))))
+
 (ert-deftest clutch-test-object-describe-populates-problem-record-in-source-buffer ()
   "Describe failures should populate a problem record in the invoking buffer."
   (let ((clutch--column-details-cache (make-hash-table :test 'equal))

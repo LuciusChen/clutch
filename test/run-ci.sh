@@ -12,7 +12,7 @@ add_load_path() {
   fi
 }
 
-add_load_path "$repo/../mongo.el"
+add_load_path "$repo/../mongodb.el"
 add_load_path "$repo/../mysql.el"
 add_load_path "$repo/../pg-el"
 add_load_path "$repo"

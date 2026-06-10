@@ -198,7 +198,7 @@ wait_mongo() {
 
 emacs_load_args=(
   --batch -Q
-  -L "$repo/../mongo.el"
+  -L "$repo/../mongodb.el"
   -L "$repo/../mysql.el"
   -L "$repo/../pg-el"
   -L "$repo"

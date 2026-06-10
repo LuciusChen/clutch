@@ -453,10 +453,6 @@ cleaned up in the pasted region only."
 (defvar clutch-debug-mode nil
   "Non-nil when Clutch debug capture is enabled.")
 
-(defvar-local clutch--executing-p nil
-  "Non-nil while a query is executing in this buffer.
-Used to update the mode-line with a spinner during execution.")
-
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
 Dynamically bound by `clutch--execute' so result buffers open

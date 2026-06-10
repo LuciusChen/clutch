@@ -39,7 +39,6 @@
 
 ;; Forward declarations — variables defined in clutch.el
 (defvar clutch-connection)
-(defvar clutch--executing-p)
 (defvar clutch--conn-sql-product)
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
@@ -58,6 +57,10 @@
 (defvar clutch-console-yank-cleanup t)
 (defvar clutch--query-buffer-local-p)
 (defvar clutch--query-mode-line-name)
+
+(defvar-local clutch--executing-p nil
+  "Non-nil while a query is executing in this buffer.
+Used to update the mode-line with a spinner during execution.")
 
 ;; Forward declarations — functions from sibling modules
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
