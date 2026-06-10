@@ -15,6 +15,7 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'json)
 (require 'sql)
 (require 'subr-x)
 (require 'transient)
@@ -994,6 +995,14 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
         (goto-char (point-min))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
+(defun clutch--object-json-metadata-text (text)
+  "Return TEXT pretty-printed as JSON metadata."
+  (ignore (json-parse-string text))
+  (with-temp-buffer
+    (insert text)
+    (json-pretty-print-buffer)
+    (string-trim-right (buffer-string))))
+
 (defun clutch--object-definition-text (conn entry)
   "Return the definition text for ENTRY on CONN."
   (let ((type (upcase (or (plist-get entry :type) ""))))
@@ -1378,6 +1387,8 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
       (let ((text (clutch--object-definition-text conn entry)))
         (unless text
           (user-error "DDL/source unavailable for %s %s" type name))
+        (when (clutch--mongodb-document-conn-p conn)
+          (setq text (clutch--object-json-metadata-text text)))
         (clutch--remember-current-object entry)
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
@@ -1499,6 +1510,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
         (unless text
           (user-error "Validation metadata unavailable for %s"
                       (clutch--object-display-name entry)))
+        (setq text (clutch--object-json-metadata-text text))
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
                                          (plist-get context :product)
@@ -1523,6 +1535,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
         (unless text
           (user-error "Collection stats unavailable for %s"
                       (clutch--object-display-name entry)))
+        (setq text (clutch--object-json-metadata-text text))
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
                                          (plist-get context :product)
@@ -1779,15 +1792,23 @@ passed to the fallback reader."
 
 (defun clutch--object-act-jump-target-inapt-p ()
   "Return non-nil when forward jumps are unavailable for the action target."
+  (not (clutch--object-act-jump-target-p)))
+
+(defun clutch--object-act-jump-target-p ()
+  "Return non-nil when the current action target supports forward jumps."
   (let ((entry clutch--object-action-entry))
-    (or (null entry)
-        (not (clutch--object-supports-jump-target-p entry)))))
+    (and entry
+         (clutch--object-supports-jump-target-p entry))))
 
 (defun clutch--object-act-mongodb-collection-inapt-p ()
   "Return non-nil when MongoDB collection actions are unavailable."
+  (not (clutch--object-act-mongodb-collection-p)))
+
+(defun clutch--object-act-mongodb-collection-p ()
+  "Return non-nil when the current action target is a MongoDB collection."
   (let ((entry clutch--object-action-entry))
-    (or (null entry)
-        (not (clutch--mongodb-collection-entry-p entry)))))
+    (and entry
+         (clutch--mongodb-collection-entry-p entry))))
 
 (defun clutch--object-act-describe ()
   "Describe the current object action target."
@@ -1847,6 +1868,7 @@ passed to the fallback reader."
     ("s" (lambda () (clutch--object-action-label 'show-definition))
      clutch--object-act-show-definition)]
    ["Document"
+    :if clutch--object-act-mongodb-collection-p
     ("i" (lambda () (clutch--object-action-label 'list-indexes))
      clutch--object-act-list-indexes)
     ("e" (lambda () (clutch--object-action-label 'explain-sample))
@@ -1856,6 +1878,7 @@ passed to the fallback reader."
     ("t" (lambda () (clutch--object-action-label 'show-stats))
      clutch--object-act-show-stats)]
    ["Navigate"
+    :if clutch--object-act-jump-target-p
     ("j" (lambda () (clutch--object-action-label 'jump-target))
      clutch--object-act-jump-target)]
    ["Copy"

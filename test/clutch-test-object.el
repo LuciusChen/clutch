@@ -40,6 +40,19 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
 
 ;;;; Object — browse and actions
 
+(defun clutch-test-object--render-action-menu (entry)
+  "Return rendered object action menu text for ENTRY."
+  (when-let* ((buf (get-buffer " *transient*")))
+    (kill-buffer buf))
+  (unwind-protect
+      (with-temp-buffer
+        (let ((clutch--object-action-entry entry))
+          (transient-setup 'clutch-object-actions-menu)
+          (with-current-buffer " *transient*"
+            (buffer-string))))
+    (when-let* ((buf (get-buffer " *transient*")))
+      (kill-buffer buf))))
+
 (ert-deftest clutch-test-object-browse-errors-without-console ()
   "Object browse should error when no matching query console is open."
   (with-temp-buffer
@@ -252,14 +265,39 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
 (ert-deftest clutch-test-object-action-inapt-flags-reflect-target-type ()
   "Object action transient flags should reflect the current target type."
   (let ((clutch--object-action-entry '(:name "ORDERS" :type "TABLE")))
+    (should-not (clutch--object-act-jump-target-p))
     (should (clutch--object-act-jump-target-inapt-p))
+    (should-not (clutch--object-act-mongodb-collection-p))
     (should (clutch--object-act-mongodb-collection-inapt-p)))
   (let ((clutch--object-action-entry '(:name "ORDER_IDX" :type "INDEX")))
+    (should (clutch--object-act-jump-target-p))
     (should-not (clutch--object-act-jump-target-inapt-p))
+    (should-not (clutch--object-act-mongodb-collection-p))
     (should (clutch--object-act-mongodb-collection-inapt-p)))
   (let ((clutch--object-action-entry '(:name "users" :type "COLLECTION")))
+    (should-not (clutch--object-act-jump-target-p))
     (should (clutch--object-act-jump-target-inapt-p))
+    (should (clutch--object-act-mongodb-collection-p))
     (should-not (clutch--object-act-mongodb-collection-inapt-p))))
+
+(ert-deftest clutch-test-object-action-menu-hides-inapplicable-groups ()
+  "Object action menu should hide groups that do not apply to the target."
+  (let ((table-menu
+         (clutch-test-object--render-action-menu
+          '(:name "ORDERS" :type "TABLE")))
+        (collection-menu
+         (clutch-test-object--render-action-menu
+          '(:name "users" :type "COLLECTION")))
+        (index-menu
+         (clutch-test-object--render-action-menu
+          '(:name "idx_users" :type "INDEX" :target-table "users"))))
+    (should-not (string-match-p "Document" table-menu))
+    (should-not (string-match-p "Navigate" table-menu))
+    (should (string-match-p "Document" collection-menu))
+    (should (string-match-p "Show stats" collection-menu))
+    (should-not (string-match-p "Navigate" collection-menu))
+    (should (string-match-p "Navigate" index-menu))
+    (should-not (string-match-p "Document" index-menu))))
 
 (ert-deftest clutch-test-object-list-indexes-executes-mongodb-helper ()
   "MongoDB collection index action should execute listIndexes helper syntax."
@@ -331,7 +369,7 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
     (should (equal captured
                    '(mongo-conn
                      (:name "users" :type "COLLECTION")
-                     "{\"configured\":true}"
+                     "{\n  \"configured\": true\n}"
                      nil nil "validation")))))
 
 (ert-deftest clutch-test-object-show-stats-displays-metadata ()
@@ -361,7 +399,7 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
     (should (equal captured
                    '(mongo-conn
                      (:name "users" :type "COLLECTION")
-                     "{\"count\":3,\"storageSize\":20480}"
+                     "{\n  \"count\": 3,\n  \"storageSize\": 20480\n}"
                      nil nil "stats")))))
 
 (ert-deftest clutch-test-copy-object-fqname-prompts-for-fqname ()
@@ -527,6 +565,42 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
         (setq-local clutch--conn-sql-product nil)
         (clutch-object-show-ddl-or-source '(:name "DEMO_TASKS" :type "TABLE"))))
     (should (eq captured-product 'oracle))))
+
+(ert-deftest clutch-test-object-show-ddl-or-source-pretty-prints-mongodb-json ()
+  "MongoDB object definition buffers should display formatted JSON metadata."
+  (let (captured)
+    (with-temp-buffer
+      (setq-local clutch-connection 'mongo-conn
+                  clutch--connection-params nil
+                  clutch--conn-sql-product nil)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mongodb))
+                ((symbol-function 'clutch-db-show-create-table)
+                 (lambda (conn collection)
+                   (should (eq conn 'mongo-conn))
+                   (should (equal collection "users"))
+                   "{\"name\":\"users\",\"type\":\"collection\"}"))
+                ((symbol-function 'clutch--show-object-text-buffer)
+                 (lambda (conn entry text &optional params product title-suffix)
+                   (setq captured
+                         (list conn entry text params product title-suffix))))
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 #'ignore)
+                ((symbol-function 'clutch--remember-current-object)
+                 #'ignore))
+        (clutch-object-show-ddl-or-source
+         '(:name "users" :type "COLLECTION"))))
+    (should (equal captured
+                   '(mongo-conn
+                     (:name "users" :type "COLLECTION")
+                     "{\n  \"name\": \"users\",\n  \"type\": \"collection\"\n}"
+                     nil nil nil)))))
+
+(ert-deftest clutch-test-object-json-metadata-text-rejects-invalid-json ()
+  "JSON metadata formatting should surface invalid JSON."
+  (should-error
+   (clutch--object-json-metadata-text "{bad")
+   :type 'json-parse-error))
 
 (ert-deftest clutch-test-object-show-ddl-or-source-populates-problem-record-and-debug-trace ()
   "Definition/source failures should feed the shared problem/debug workflow."
