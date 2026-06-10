@@ -398,9 +398,9 @@ indexes into object metadata, and evaluates supported
 MongoDB Shell / MQL helper commands such as
 =db.users.find({active: true}).limit(20)=.
 Collection object actions can describe sampled fields and indexes, browse
-documents, show collection metadata, list indexes, and run a sample explain.
-They can also show MongoDB collection validation rules when a collection has a
-validator configured.
+documents, show collection metadata, list indexes, show collection storage
+statistics, and run a sample explain.  They can also show MongoDB collection
+validation rules when a collection has a validator configured.
 Field metadata samples up to =clutch-mongodb-schema-sample-size= documents and
 reports sampled BSON type summaries, not enforced collection constraints.
 It is basic document support, not a full =mongosh= JavaScript runtime.

@@ -2040,6 +2040,55 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal captured-code
                      "db.getCollectionInfos({name: \"users\"})")))))
 
+(ert-deftest clutch-db-test-mongodb-collection-stats-uses-collstats-stage ()
+  "Native MongoDB should expose collection storage statistics."
+  (let (captured)
+    (cl-letf (((symbol-function 'mongodb-aggregate)
+               (lambda (client database collection pipeline &optional options)
+                 (setq captured
+                       (list client database collection pipeline options))
+                 '((("ns" . "app.users")
+                    ("storageStats"
+                     . (("count" . 3)
+                        ("size" . 246)
+                        ("avgObjSize" . 82)
+                        ("storageSize" . 20480)
+                        ("nindexes" . 2)
+                        ("totalIndexSize" . 40960)
+                        ("totalSize" . 61440)
+                        ("indexSizes" . (("_id_" . 20480)
+                                         ("field_idx" . 20480))))))))))
+      (let ((text
+             (clutch-db-collection-stats
+              (clutch-db-test--make-mongodb-conn "app")
+              "users")))
+        (should
+         (equal
+          text
+          (concat
+           "{\"collection\":\"users\",\"namespace\":\"app.users\","
+           "\"count\":3,\"size\":246,\"avgObjSize\":82,"
+           "\"storageSize\":20480,\"nindexes\":2,"
+           "\"totalIndexSize\":40960,\"totalSize\":61440,"
+           "\"indexSizes\":{\"_id_\":20480,\"field_idx\":20480}}")))))
+    (pcase-let ((`(,client ,database ,collection ,pipeline ,options)
+                 captured))
+      (should (eq client 'mongodb-client))
+      (should (equal database "app"))
+      (should (equal collection "users"))
+      (should-not options)
+      (should (vectorp pipeline))
+      (should (= (length pipeline) 1))
+      (let* ((stage (aref pipeline 0))
+             (coll-stats (clutch-mongodb--document-value
+                          stage "$collStats"))
+             (storage-stats (clutch-mongodb--document-value
+                             coll-stats "storageStats")))
+        (should (mongodb-document-p stage))
+        (should (mongodb-document-p coll-stats))
+        (should (mongodb-document-p storage-stats))
+        (should-not (mongodb-document-elements storage-stats))))))
+
 (ert-deftest clutch-db-test-mongodb-set-current-schema-updates-database ()
   "Native MongoDB schema switching should change the logical database."
   (let* ((client (make-mongodb-conn :database "app" :closed nil))
@@ -4175,6 +4224,14 @@ Skips if `clutch-db-test-pg-password' is nil."
             (should (string-match-p
                      collection
                      (clutch-db-show-create-table conn collection)))
+            (let ((stats (clutch-db-collection-stats conn collection)))
+              (should (string-match-p (format "\"collection\":\"%s\""
+                                              collection)
+                                      stats))
+              (should (string-match-p "\"count\":2" stats))
+              (should (string-match-p "\"storageSize\":" stats))
+              (should (string-match-p "\"totalIndexSize\":" stats))
+              (should (string-match-p "\"indexSizes\"" stats)))
             (let ((validation
                    (clutch-db-collection-validation conn validation-collection)))
               (should (string-match-p "\"configured\":true" validation))

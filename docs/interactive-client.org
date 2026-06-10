@@ -503,6 +503,7 @@ fallback:
 | =i= | List indexes (MongoDB collections) |
 | =e= | Explain sample query (MongoDB collections) |
 | =v= | Show validation (MongoDB collections) |
+| =t= | Show stats (MongoDB collections) |
 | =j= | Jump to target object (only for target-capable objects such as synonyms, indexes, and triggers) |
 | =n= | Copy object name |
 | =f= | Copy fully-qualified object name |

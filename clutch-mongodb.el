@@ -1500,6 +1500,54 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
        ("validationLevel" . ,validation-level)
        ("validator" . ,validator)))))
 
+(cl-defmethod clutch-db-collection-stats ((conn clutch-mongodb-conn) collection)
+  "Return collection storage statistics for MongoDB COLLECTION on CONN."
+  (let* ((storage-stage
+          (mongodb-document
+           (list (cons "storageStats" (mongodb-document nil)))))
+         (pipeline
+          (vector
+           (mongodb-document
+            (list (cons "$collStats" storage-stage)))))
+         (docs
+          (mongodb-aggregate
+           (clutch-mongodb-conn-client conn)
+           (clutch-mongodb-conn-database conn)
+           collection
+           pipeline))
+         (stats (and (listp docs) (car docs)))
+         (storage-stats
+          (and stats
+               (clutch-mongodb--document-value stats "storageStats"))))
+    (unless (listp docs)
+      (signal 'clutch-db-error
+              (list "MongoDB collection stats returned a non-list result")))
+    (unless stats
+      (signal 'clutch-db-error
+              (list (format "MongoDB collection stats returned no data: %s"
+                            collection))))
+    (unless storage-stats
+      (signal 'clutch-db-error
+              (list (format "MongoDB collection stats missing storageStats: %s"
+                            collection))))
+    (clutch-mongodb--json-encode-text
+     `(("collection" . ,collection)
+       ("namespace" . ,(clutch-mongodb--document-value stats "ns"))
+       ("count" . ,(clutch-mongodb--document-value storage-stats "count"))
+       ("size" . ,(clutch-mongodb--document-value storage-stats "size"))
+       ("avgObjSize" . ,(clutch-mongodb--document-value
+                         storage-stats "avgObjSize"))
+       ("storageSize" . ,(clutch-mongodb--document-value
+                          storage-stats "storageSize"))
+       ("nindexes" . ,(clutch-mongodb--document-value
+                       storage-stats "nindexes"))
+       ("totalIndexSize" . ,(clutch-mongodb--document-value
+                             storage-stats "totalIndexSize"))
+       ("totalSize" . ,(clutch-mongodb--document-value
+                        storage-stats "totalSize"))
+       ("indexSizes" . ,(clutch-mongodb--document-value
+                         storage-stats "indexSizes"))))))
+
 (cl-defmethod clutch-db-list-objects ((conn clutch-mongodb-conn) category)
   "Return MongoDB object entries in CATEGORY for CONN."
   (pcase category

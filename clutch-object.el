@@ -1505,6 +1505,30 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                                          "validation")))))
 
 ;;;###autoload
+(defun clutch-object-show-stats (&optional entry)
+  "Show MongoDB storage statistics for collection ENTRY."
+  (interactive)
+  (let* ((entry (or entry
+                    (clutch--resolve-object-entry
+                     "Show stats for collection: " t nil
+                     '("COLLECTION"))))
+         (context (clutch--mongodb-object-action-context
+                   entry "Show stats"))
+         (conn (plist-get context :connection))
+         (source-buffer (plist-get context :source-buffer)))
+    (clutch--remember-current-object entry)
+    (clutch--with-object-error-capture source-buffer conn entry "show-stats"
+      (let ((text (clutch-db-collection-stats
+                   conn (plist-get entry :name))))
+        (unless text
+          (user-error "Collection stats unavailable for %s"
+                      (clutch--object-display-name entry)))
+        (clutch--show-object-text-buffer conn entry text
+                                         (plist-get context :params)
+                                         (plist-get context :product)
+                                         "stats")))))
+
+;;;###autoload
 (defun clutch-object-browse (&optional entry)
   "Insert a row-browse query for ENTRY into a query console.
 When ENTRY is nil, use the current table-like object."
@@ -1691,6 +1715,11 @@ passed to the fallback reader."
      :label "Show validation"
      :command clutch-object-show-validation
      :predicate clutch--mongodb-collection-entry-p)
+    (:id show-stats
+     :key "t"
+     :label "Show stats"
+     :command clutch-object-show-stats
+     :predicate clutch--mongodb-collection-entry-p)
     (:id jump-target
      :key "j"
      :label "Jump target"
@@ -1794,6 +1823,12 @@ passed to the fallback reader."
   (interactive)
   (clutch--run-object-action (clutch--object-action-target) 'show-validation))
 
+(transient-define-suffix clutch--object-act-show-stats ()
+  "Show storage statistics for the current MongoDB collection action target."
+  :inapt-if #'clutch--object-act-mongodb-collection-inapt-p
+  (interactive)
+  (clutch--run-object-action (clutch--object-action-target) 'show-stats))
+
 (defun clutch--object-act-copy-name ()
   "Copy the name of the current object action target."
   (interactive)
@@ -1817,7 +1852,9 @@ passed to the fallback reader."
     ("e" (lambda () (clutch--object-action-label 'explain-sample))
      clutch--object-act-explain-sample)
     ("v" (lambda () (clutch--object-action-label 'show-validation))
-     clutch--object-act-show-validation)]
+     clutch--object-act-show-validation)
+    ("t" (lambda () (clutch--object-action-label 'show-stats))
+     clutch--object-act-show-stats)]
    ["Navigate"
     ("j" (lambda () (clutch--object-action-label 'jump-target))
      clutch--object-act-jump-target)]
@@ -1903,6 +1940,7 @@ When PREDICATE is non-nil, keep only action specs matching it."
     (clutch-object-list-indexes . "List indexes")
     (clutch-object-explain-sample-query . "Explain sample query")
     (clutch-object-show-validation . "Show validation")
+    (clutch-object-show-stats . "Show stats")
     (clutch-object-jump-target . "Jump target")
     (clutch-copy-object-name . "Copy name")
     (clutch-copy-object-fqname . "Copy fqname"))
