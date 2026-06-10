@@ -1142,6 +1142,13 @@ other backend-specific keys as needed.")
   "Default: return nil when DDL is unavailable."
   nil)
 
+(cl-defgeneric clutch-db-collection-validation (conn collection)
+  "Return validation metadata text for COLLECTION on CONN.")
+
+(cl-defmethod clutch-db-collection-validation ((_conn t) _collection)
+  "Default: return nil when validation metadata is unavailable."
+  nil)
+
 (cl-defgeneric clutch-db-table-comment (conn table)
   "Return the comment string for TABLE on CONN, or nil if none.")
 

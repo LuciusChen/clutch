@@ -304,6 +304,36 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
                    '("db.getCollection(\"users\").find({}).limit(1).explain(\"executionStats\");"
                      mongo-conn nil)))))
 
+(ert-deftest clutch-test-object-show-validation-displays-metadata ()
+  "MongoDB collection validation action should display validation metadata."
+  (let (captured)
+    (with-temp-buffer
+      (setq-local clutch-connection 'mongo-conn
+                  clutch--connection-params nil
+                  clutch--conn-sql-product nil)
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mongodb))
+                ((symbol-function 'clutch-db-collection-validation)
+                 (lambda (conn collection)
+                   (should (eq conn 'mongo-conn))
+                   (should (equal collection "users"))
+                   "{\"configured\":true}"))
+                ((symbol-function 'clutch--show-object-text-buffer)
+                 (lambda (conn entry text &optional params product title-suffix)
+                   (setq captured
+                         (list conn entry text params product title-suffix))))
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 #'ignore)
+                ((symbol-function 'clutch--remember-current-object)
+                 #'ignore))
+        (clutch-object-show-validation
+         '(:name "users" :type "COLLECTION"))))
+    (should (equal captured
+                   '(mongo-conn
+                     (:name "users" :type "COLLECTION")
+                     "{\"configured\":true}"
+                     nil nil "validation")))))
+
 (ert-deftest clutch-test-copy-object-fqname-prompts-for-fqname ()
   "Copy-fqname should use an fqname-specific prompt."
   (let (prompt)
@@ -1652,14 +1682,15 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
                           (lambda (spec)
                             (not (eq (plist-get spec :id) 'jump-target)))))
                  '(describe show-definition list-indexes explain-sample
-                            copy-name copy-fqname))))
+                            show-validation copy-name copy-fqname))))
 
 (ert-deftest clutch-test-embark-target-action-specs-keep-jump-target ()
   "Target-capable Embark menus should keep jump-target."
   (should (equal (mapcar (lambda (spec) (plist-get spec :id))
                          (clutch--embark-action-specs))
                  '(describe show-definition list-indexes explain-sample
-                            jump-target copy-name copy-fqname))))
+                            show-validation jump-target copy-name
+                            copy-fqname))))
 
 (ert-deftest clutch-test-embark-command-label-uses-shared-label ()
   "Embark command labels should reuse the shared object action wording."
@@ -1670,6 +1701,9 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
   (should (equal (clutch--embark-command-label
                   'clutch-object-explain-sample-query)
                  "Explain sample query"))
+  (should (equal (clutch--embark-command-label
+                  'clutch-object-show-validation)
+                 "Show validation"))
   (should (equal (clutch--embark-command-label 'clutch-object-default-action)
                  "Default action")))
 

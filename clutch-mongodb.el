@@ -1175,9 +1175,17 @@ helper call."
   "Return VALUE encoded as JSON text for MongoDB result display."
   (json-encode (clutch-mongodb--json-encodable value)))
 
+(defun clutch-mongodb--document-elements (document)
+  "Return top-level elements from MongoDB DOCUMENT."
+  (cond
+   ((mongodb-document-p document) (mongodb-document-elements document))
+   ((clutch-mongodb--alist-p document) document)
+   (t (signal 'clutch-db-error
+              (list "MongoDB expected a metadata document")))))
+
 (defun clutch-mongodb--document-value (document key)
   "Return KEY's value from MongoDB DOCUMENT."
-  (cdr (assoc key (mongodb-document-elements document))))
+  (cdr (assoc key (clutch-mongodb--document-elements document))))
 
 (defun clutch-mongodb--index-direction (value)
   "Return a display direction for a MongoDB index key VALUE."
@@ -1452,14 +1460,45 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
   (clutch-mongodb--column-details-for-docs
    (clutch-mongodb--sample-documents conn collection)))
 
+(defun clutch-mongodb--collection-info (conn collection)
+  "Return the collection info document for COLLECTION on CONN."
+  (let ((infos (clutch-mongodb--eval
+                conn
+                (format "db.getCollectionInfos({name: %s})"
+                        (clutch--json-serialize-text
+                         collection
+                         "MongoDB collection name")))))
+    (unless (listp infos)
+      (signal 'clutch-db-error
+              (list "MongoDB collection metadata returned a non-list result")))
+    (or (car infos)
+        (signal 'clutch-db-error
+                (list (format "MongoDB collection not found: %s" collection))))))
+
 (cl-defmethod clutch-db-show-create-table ((conn clutch-mongodb-conn) collection)
   "Return collection metadata for COLLECTION on CONN as JSON."
-  (let ((info (clutch-mongodb--eval
-              conn
-              (format "db.getCollectionInfos({name: %s})"
-                      (clutch--json-serialize-text collection
-                                                   "MongoDB collection name")))))
-    (clutch-mongodb--json-encode-text info)))
+  (clutch-mongodb--json-encode-text
+   (list (clutch-mongodb--collection-info conn collection))))
+
+(cl-defmethod clutch-db-collection-validation
+  ((conn clutch-mongodb-conn) collection)
+  "Return collection validation metadata for MongoDB COLLECTION on CONN."
+  (let* ((info (clutch-mongodb--collection-info conn collection))
+         (options (clutch-mongodb--document-value info "options"))
+         (validator (and options
+                         (clutch-mongodb--document-value options "validator")))
+         (validation-action
+          (and options
+               (clutch-mongodb--document-value options "validationAction")))
+         (validation-level
+          (and options
+               (clutch-mongodb--document-value options "validationLevel"))))
+    (clutch-mongodb--json-encode-text
+     `(("collection" . ,collection)
+       ("configured" . ,(if validator t :false))
+       ("validationAction" . ,validation-action)
+       ("validationLevel" . ,validation-level)
+       ("validator" . ,validator)))))
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-mongodb-conn) category)
   "Return MongoDB object entries in CATEGORY for CONN."

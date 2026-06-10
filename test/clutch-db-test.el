@@ -2016,6 +2016,30 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       "users")
      :type 'clutch-db-error)))
 
+(ert-deftest clutch-db-test-mongodb-collection-validation-extracts-options ()
+  "Native MongoDB should expose collection validation metadata."
+  (let ((metadata '((("name" . "users")
+                     ("type" . "collection")
+                     ("options"
+                      . (("validator"
+                          . (("$jsonSchema"
+                               . (("required" . ["status"])))))
+                         ("validationAction" . "warn")
+                         ("validationLevel" . "moderate"))))))
+        captured-code)
+    (cl-letf (((symbol-function 'clutch-mongodb--eval)
+               (lambda (_conn code)
+                 (setq captured-code code)
+                 metadata)))
+      (should
+       (equal
+        (clutch-db-collection-validation
+         (clutch-db-test--make-mongodb-conn)
+         "users")
+        "{\"collection\":\"users\",\"configured\":true,\"validationAction\":\"warn\",\"validationLevel\":\"moderate\",\"validator\":{\"$jsonSchema\":{\"required\":[\"status\"]}}}"))
+      (should (equal captured-code
+                     "db.getCollectionInfos({name: \"users\"})")))))
+
 (ert-deftest clutch-db-test-mongodb-set-current-schema-updates-database ()
   "Native MongoDB schema switching should change the logical database."
   (let* ((client (make-mongodb-conn :database "app" :closed nil))
@@ -4094,7 +4118,8 @@ Skips if `clutch-db-test-pg-password' is nil."
   :tags '(:db-live :mongodb-live)
   "Native MongoDB metadata should expose databases, collections, and sampled keys."
   (clutch-db-test--with-mongodb conn
-    (let ((collection (clutch-db-test--mongodb-live-collection "schema")))
+    (let* ((collection (clutch-db-test--mongodb-live-collection "schema"))
+           (validation-collection (concat collection "_validation")))
       (unwind-protect
           (progn
             (clutch-db-query
@@ -4110,6 +4135,16 @@ Skips if `clutch-db-test-pg-password' is nil."
              (format
               "db.getCollection(%S).createIndex({field: 1}, {name: 'field_idx'})"
               collection))
+            (clutch-db-query
+             conn
+             (format
+              (concat
+               "db.createCollection(%S, "
+               "{validator: {$jsonSchema: {bsonType: 'object', "
+               "required: ['status'], "
+               "properties: {status: {bsonType: 'string'}}}}, "
+               "validationAction: 'error', validationLevel: 'strict'})")
+              validation-collection))
             (should (member (clutch-db-current-schema conn)
                             (clutch-db-list-schemas conn)))
             (should (member collection (clutch-db-list-tables conn)))
@@ -4139,11 +4174,21 @@ Skips if `clutch-db-test-pg-password' is nil."
                        (clutch-db-show-create-object conn index))))
             (should (string-match-p
                      collection
-                     (clutch-db-show-create-table conn collection))))
+                     (clutch-db-show-create-table conn collection)))
+            (let ((validation
+                   (clutch-db-collection-validation conn validation-collection)))
+              (should (string-match-p "\"configured\":true" validation))
+              (should (string-match-p "\"validationAction\":\"error\""
+                                      validation))
+              (should (string-match-p "\"validationLevel\":\"strict\""
+                                      validation))
+              (should (string-match-p "\"\\$jsonSchema\"" validation))))
         (ignore-errors
           (clutch-db-query
            conn
-           (format "db.getCollection(%S).drop()" collection)))))))
+           (format
+            "db.getCollection(%S).drop();db.getCollection(%S).drop()"
+            collection validation-collection)))))))
 
 (ert-deftest clutch-db-test-mongodb-live-set-current-schema ()
   :tags '(:db-live :mongodb-live)

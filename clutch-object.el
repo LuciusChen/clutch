@@ -960,13 +960,19 @@ when the real object schema is unavailable."
        (list name))
      ".")))
 
-(defun clutch--show-object-text-buffer (conn entry text &optional params product)
-  "Display TEXT for ENTRY using CONN's object definition mode."
+(defun clutch--show-object-text-buffer
+    (conn entry text &optional params product title-suffix)
+  "Display TEXT for ENTRY using CONN's object definition mode.
+TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
   (let* ((product (or product
                       (and params
                            (clutch--effective-sql-product params))
                       clutch-sql-product))
-         (title (clutch--object-fqname entry))
+         (title (if title-suffix
+                    (format "%s %s"
+                            (clutch--object-fqname entry)
+                            title-suffix)
+                  (clutch--object-fqname entry)))
          (buf (get-buffer-create (format "*clutch: %s*" title))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -1475,6 +1481,30 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
        conn))))
 
 ;;;###autoload
+(defun clutch-object-show-validation (&optional entry)
+  "Show MongoDB validation metadata for collection ENTRY."
+  (interactive)
+  (let* ((entry (or entry
+                    (clutch--resolve-object-entry
+                     "Show validation for collection: " t nil
+                     '("COLLECTION"))))
+         (context (clutch--mongodb-object-action-context
+                   entry "Show validation"))
+         (conn (plist-get context :connection))
+         (source-buffer (plist-get context :source-buffer)))
+    (clutch--remember-current-object entry)
+    (clutch--with-object-error-capture source-buffer conn entry "show-validation"
+      (let ((text (clutch-db-collection-validation
+                   conn (plist-get entry :name))))
+        (unless text
+          (user-error "Validation metadata unavailable for %s"
+                      (clutch--object-display-name entry)))
+        (clutch--show-object-text-buffer conn entry text
+                                         (plist-get context :params)
+                                         (plist-get context :product)
+                                         "validation")))))
+
+;;;###autoload
 (defun clutch-object-browse (&optional entry)
   "Insert a row-browse query for ENTRY into a query console.
 When ENTRY is nil, use the current table-like object."
@@ -1656,6 +1686,11 @@ passed to the fallback reader."
      :label "Explain sample query"
      :command clutch-object-explain-sample-query
      :predicate clutch--mongodb-collection-entry-p)
+    (:id show-validation
+     :key "v"
+     :label "Show validation"
+     :command clutch-object-show-validation
+     :predicate clutch--mongodb-collection-entry-p)
     (:id jump-target
      :key "j"
      :label "Jump target"
@@ -1753,6 +1788,12 @@ passed to the fallback reader."
   (interactive)
   (clutch--run-object-action (clutch--object-action-target) 'explain-sample))
 
+(transient-define-suffix clutch--object-act-show-validation ()
+  "Show validation metadata for the current MongoDB collection action target."
+  :inapt-if #'clutch--object-act-mongodb-collection-inapt-p
+  (interactive)
+  (clutch--run-object-action (clutch--object-action-target) 'show-validation))
+
 (defun clutch--object-act-copy-name ()
   "Copy the name of the current object action target."
   (interactive)
@@ -1774,7 +1815,9 @@ passed to the fallback reader."
     ("i" (lambda () (clutch--object-action-label 'list-indexes))
      clutch--object-act-list-indexes)
     ("e" (lambda () (clutch--object-action-label 'explain-sample))
-     clutch--object-act-explain-sample)]
+     clutch--object-act-explain-sample)
+    ("v" (lambda () (clutch--object-action-label 'show-validation))
+     clutch--object-act-show-validation)]
    ["Navigate"
     ("j" (lambda () (clutch--object-action-label 'jump-target))
      clutch--object-act-jump-target)]
@@ -1859,6 +1902,7 @@ When PREDICATE is non-nil, keep only action specs matching it."
     (clutch-object-show-ddl-or-source . "Show definition")
     (clutch-object-list-indexes . "List indexes")
     (clutch-object-explain-sample-query . "Explain sample query")
+    (clutch-object-show-validation . "Show validation")
     (clutch-object-jump-target . "Jump target")
     (clutch-copy-object-name . "Copy name")
     (clutch-copy-object-fqname . "Copy fqname"))
