@@ -99,7 +99,14 @@ but does not bind SQL-only transaction controls or SQL preview.  =C-c ?= opens
 the MongoDB document-console dispatch menu.
 
 Completion intentionally covers common helper, stage, operator, collection, and
-sampled field names for basic support.  Field completion and collection
+sampled field names for basic support.  It also offers cursor helper chains
+after =find(...).= and =aggregate(...).= so query-bar controls common in GUI
+MongoDB clients remain discoverable in the Emacs query buffer.  Projection stays
+as the second =find= argument; =find(...).= completion offers =sort()=,
+=skip()=, =limit()=, =maxTimeMS()=, =batchSize()=, =allowDiskUse()=,
+=comment()=, and =explain()=.  =aggregate(...).= completion offers the
+aggregate command option helpers =allowDiskUse()=, =batchSize()=,
+=maxTimeMS()=, =comment()=, and =explain()=.  Field completion and collection
 metadata sample up to =clutch-mongodb-schema-sample-size= documents, merge
 top-level keys from those documents, and report sampled BSON type summaries.
 They are not MongoDB server-enforced schemas or an exhaustive field catalog;

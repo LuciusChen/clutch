@@ -83,10 +83,11 @@
 
 (defconst clutch-mongodb--function-keywords
   '("adminCommand" "aggregate" "countDocuments" "createCollection"
-    "createIndex" "deleteMany" "deleteOne" "distinct" "drop" "dropDatabase"
-    "dropIndex" "find" "findOne" "getCollection" "getCollectionInfos"
-    "getCollectionNames" "getName" "getSiblingDB" "insertMany" "insertOne"
-    "listIndexes" "replaceOne" "runCommand" "updateMany" "updateOne")
+    "createIndex" "deleteMany" "deleteOne" "distinct" "drop"
+    "dropDatabase" "dropIndex" "estimatedDocumentCount" "find" "findOne"
+    "getCollection" "getCollectionInfos" "getCollectionNames" "getName"
+    "getSiblingDB" "insertMany" "insertOne" "listIndexes" "replaceOne"
+    "runCommand" "updateMany" "updateOne")
   "MongoDB shell function names highlighted in `clutch-mongodb-mode'.")
 
 (defconst clutch-mongodb--constructor-keywords
@@ -199,9 +200,26 @@
 (defconst clutch-mongodb--collection-method-candidates
   (clutch-mongodb--call-candidates
    '("aggregate" "countDocuments" "createIndex" "deleteMany" "deleteOne"
-     "distinct" "drop" "dropIndex" "find" "findOne" "insertMany"
-     "insertOne" "listIndexes" "replaceOne" "updateMany" "updateOne"))
+     "distinct" "drop" "dropIndex" "estimatedDocumentCount" "find"
+     "findOne" "insertMany" "insertOne" "listIndexes" "replaceOne"
+     "updateMany" "updateOne"))
   "MongoDB shell methods useful after a collection expression.")
+
+(defconst clutch-mongodb--find-chain-candidates
+  (clutch-mongodb--call-candidates
+   '("sort" "skip" "limit" "maxTimeMS" "batchSize" "allowDiskUse"
+     "comment" "explain"))
+  "MongoDB cursor helper methods useful after `find(...)'.")
+
+(defconst clutch-mongodb--aggregate-chain-candidates
+  (clutch-mongodb--call-candidates
+   '("allowDiskUse" "batchSize" "maxTimeMS" "comment" "explain"))
+  "MongoDB cursor helper methods useful after `aggregate(...)'.")
+
+(defconst clutch-mongodb--cursor-chain-methods
+  '("sort" "skip" "limit" "maxTimeMS" "batchSize" "allowDiskUse"
+    "comment")
+  "Non-terminal MongoDB cursor helper method names.")
 
 (defconst clutch-mongodb--top-level-candidates
   (append '("db")
@@ -270,6 +288,51 @@
            "\\_<db\\.getCollection\\s-*(\\s-*\"[^\"]+\"\\s-*)\\s-*\\.\\s-*\\'"
            prefix)))))
 
+(defun clutch-mongodb--method-call-before-point ()
+  "Return the MongoDB method call ending before point.
+The return value is (METHOD . METHOD-START), or nil when point is not directly
+after a helper call."
+  (skip-chars-backward " \t\n\r")
+  (when (eq (char-before) ?\))
+    (condition-case nil
+        (progn
+          (backward-list)
+          (skip-chars-backward " \t\n\r")
+          (let ((end (point)))
+            (skip-chars-backward "[:alnum:]_")
+            (when (< (point) end)
+              (cons (buffer-substring-no-properties (point) end)
+                    (point)))))
+      (scan-error nil))))
+
+(defun clutch-mongodb--cursor-chain-base-method (beg)
+  "Return the base cursor method before completion at BEG, or nil."
+  (save-excursion
+    (goto-char beg)
+    (skip-chars-backward " \t\n\r")
+    (when (eq (char-before) ?.)
+      (backward-char)
+      (let (base terminal)
+        (while (and (not base)
+                    (not terminal)
+                    (pcase-let ((`(,method . ,method-start)
+                                 (clutch-mongodb--method-call-before-point)))
+                      (cond
+                       ((member method '("find" "aggregate"))
+                        (setq base method)
+                        nil)
+                       ((string= method "explain")
+                        (setq terminal t)
+                        nil)
+                       ((member method clutch-mongodb--cursor-chain-methods)
+                        (goto-char method-start)
+                        (skip-chars-backward " \t\n\r")
+                        (when (eq (char-before) ?.)
+                          (backward-char)
+                          t))
+                       (t nil)))))
+        (and (not terminal) base)))))
+
 (defun clutch-mongodb--field-key-context-p (beg)
   "Return non-nil when BEG completes an unquoted MongoDB document key."
   (save-excursion
@@ -335,6 +398,10 @@ path expressions."
       (list :kind 'db-member))
      ((clutch-mongodb--collection-method-context-p beg)
       (list :kind 'collection-method))
+     ((if-let* ((base-method (clutch-mongodb--cursor-chain-base-method beg)))
+          (pcase base-method
+            ("find" (list :kind 'find-chain))
+            ("aggregate" (list :kind 'aggregate-chain)))))
      ((string-prefix-p "$" prefix)
       (list :kind 'operator-key))
      ((clutch-mongodb--field-key-context-p beg)
@@ -357,6 +424,10 @@ path expressions."
                 clutch-mongodb--db-method-candidates)))
       ('collection-method
        clutch-mongodb--collection-method-candidates)
+      ('find-chain
+       clutch-mongodb--find-chain-candidates)
+      ('aggregate-chain
+       clutch-mongodb--aggregate-chain-candidates)
       ('operator-key
        clutch-mongodb--operator-candidates)
       ('field-key
