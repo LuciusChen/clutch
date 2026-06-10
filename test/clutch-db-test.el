@@ -1237,6 +1237,29 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should-error (clutch-mongodb--ensure-mongodb-client-api)
                   :type 'clutch-db-error)))
 
+(ert-deftest clutch-db-test-mongodb-errors-translate-labels-to-details-plist ()
+  "Native MongoDB should translate labeled protocol errors to Clutch error shape."
+  (let ((err (should-error
+              (clutch-mongodb--with-mongodb-errors
+                (signal 'mongodb-error
+                        '("boom" :error-labels
+                          ("TransientTransactionError"))))
+              :type 'clutch-db-error)))
+    (should (equal (cadr err) "boom"))
+    (should (plistp (nth 2 err)))
+    (should (equal (plist-get (nth 2 err) :mongodb-error-labels)
+                   '("TransientTransactionError")))
+    (should (equal
+             (plist-get
+              (clutch--make-connection-error-details
+               '(:backend mongodb
+                 :host "127.0.0.1"
+                 :port 27017
+                 :database "app")
+               err)
+              :mongodb-error-labels)
+             '("TransientTransactionError")))))
+
 (ert-deftest clutch-db-test-mongodb-connect-passes-native-params ()
   "Native MongoDB should pass saved params directly to `mongodb-connect'."
   (let (captured-params)
@@ -1916,30 +1939,82 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mongodb-metadata-uses-mongodb-helpers ()
   "Native MongoDB metadata should map databases and collections into Clutch objects."
+  (let ((clutch-mongodb-schema-sample-size 2)
+        sample-codes)
+    (cl-letf (((symbol-function 'clutch-mongodb--eval)
+               (lambda (_conn code)
+                 (cond
+                  ((equal code "db.getCollectionNames()")
+                   '("users" "orders"))
+                  ((string-match-p
+                    (regexp-quote "db.getCollection(\"users\").find({}).limit(2)")
+                    code)
+                   (push code sample-codes)
+                   '((("_id" . (("$oid" . "64f")))
+                      ("name" . "Ann")
+                      ("score" . 10)
+                      ("profile" . (("age" . 30))))
+                     (("_id" . (("$oid" . "650")))
+                      ("score" . "high")
+                      ("active" . :false))))
+                  ((string-match-p "getCollectionInfos" code)
+                   '((("name" . "users")
+                      ("type" . "collection"))))
+                  (t (error "unexpected code: %s" code))))))
+      (let ((conn (clutch-db-test--make-mongodb-conn)))
+        (should (equal (clutch-db-list-schemas conn) '("app")))
+        (should (equal (clutch-db-list-tables conn) '("users" "orders")))
+        (should (equal (clutch-db-list-table-entries conn)
+                       '((:name "users" :schema "app" :type "COLLECTION")
+                         (:name "orders" :schema "app" :type "COLLECTION"))))
+        (should (equal (clutch-db-complete-tables conn "us") '("users")))
+        (should (equal (clutch-db-list-columns conn "users")
+                       '("_id" "name" "score" "profile" "active")))
+        (should (equal (clutch-db-column-details conn "users")
+                       '((:name "_id"
+                          :type "BSON<object>"
+                          :type-category json
+                          :nullable t
+                          :comment nil)
+                         (:name "name"
+                          :type "BSON<string>"
+                          :type-category text
+                          :nullable t
+                          :comment "present in 1/2 sampled documents")
+                         (:name "score"
+                          :type "BSON<number|string>"
+                          :type-category text
+                          :nullable t
+                          :comment nil)
+                         (:name "profile"
+                          :type "BSON<object>"
+                          :type-category json
+                          :nullable t
+                          :comment "present in 1/2 sampled documents")
+                         (:name "active"
+                          :type "BSON<bool>"
+                          :type-category text
+                          :nullable t
+                          :comment "present in 1/2 sampled documents"))))
+        (should (equal (length sample-codes) 2))
+        (should (string-match-p "\"users\""
+                                (clutch-db-show-create-table conn "users")))))))
+
+(ert-deftest clutch-db-test-mongodb-schema-sample-size-rejects-invalid ()
+  "Native MongoDB metadata should reject invalid schema sample sizes."
+  (let ((clutch-mongodb-schema-sample-size 0))
+    (should-error (clutch-mongodb--schema-sample-limit)
+                  :type 'clutch-db-error)))
+
+(ert-deftest clutch-db-test-mongodb-schema-sampling-rejects-non-documents ()
+  "Native MongoDB metadata should reject non-document sampling results."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
-             (lambda (_conn code)
-               (cond
-                ((equal code "db.getCollectionNames()")
-                 '("users" "orders"))
-                ((string-match-p "findOne" code)
-                 '(("_id" . (("$oid" . "64f")))
-                   ("name" . "Ann")
-                   ("profile" . (("age" . 30)))))
-                ((string-match-p "getCollectionInfos" code)
-                 '((("name" . "users")
-                    ("type" . "collection"))))
-                (t (error "unexpected code: %s" code))))))
-    (let ((conn (clutch-db-test--make-mongodb-conn)))
-      (should (equal (clutch-db-list-schemas conn) '("app")))
-      (should (equal (clutch-db-list-tables conn) '("users" "orders")))
-      (should (equal (clutch-db-list-table-entries conn)
-                     '((:name "users" :schema "app" :type "COLLECTION")
-                       (:name "orders" :schema "app" :type "COLLECTION"))))
-      (should (equal (clutch-db-complete-tables conn "us") '("users")))
-      (should (equal (clutch-db-list-columns conn "users")
-                     '("_id" "name" "profile")))
-      (should (string-match-p "\"users\""
-                              (clutch-db-show-create-table conn "users"))))))
+             (lambda (&rest _args) 42)))
+    (should-error
+     (clutch-mongodb--sample-documents
+      (clutch-db-test--make-mongodb-conn)
+      "users")
+     :type 'clutch-db-error)))
 
 (ert-deftest clutch-db-test-mongodb-set-current-schema-updates-database ()
   "Native MongoDB schema switching should change the logical database."
@@ -4027,8 +4102,9 @@ Skips if `clutch-db-test-pg-password' is nil."
              (format
               (concat
                "db.getCollection(%S).deleteMany({});"
-               "db.getCollection(%S).insertOne({_id: 'sample', field: 1})")
-              collection collection))
+               "db.getCollection(%S).insertOne({_id: 'sample-a', field: 1});"
+               "db.getCollection(%S).insertOne({_id: 'sample-b', extra: true})")
+              collection collection collection))
             (clutch-db-query
              conn
              (format
@@ -4046,7 +4122,8 @@ Skips if `clutch-db-test-pg-password' is nil."
                 entries)))
             (let ((columns (clutch-db-list-columns conn collection)))
               (should (member "_id" columns))
-              (should (member "field" columns)))
+              (should (member "field" columns))
+              (should (member "extra" columns)))
             (let* ((indexes (clutch-db-list-objects conn 'indexes))
                    (index (seq-find
                            (lambda (entry)

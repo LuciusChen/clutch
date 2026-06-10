@@ -99,9 +99,12 @@ but does not bind SQL-only transaction controls or SQL preview.  =C-c ?= opens
 the MongoDB document-console dispatch menu.
 
 Completion intentionally covers common helper, stage, operator, collection, and
-sampled field names for basic support.  It is not an exhaustive MongoDB server
-feature catalog; long-tail operators can still be typed manually when the
-backend helper parser and =mongodb.el= command layer support the query shape.
+sampled field names for basic support.  Field completion and collection
+metadata sample up to =clutch-mongodb-schema-sample-size= documents, merge
+top-level keys from those documents, and report sampled BSON type summaries.
+They are not MongoDB server-enforced schemas or an exhaustive field catalog;
+long-tail operators can still be typed manually when the backend helper parser
+and =mongodb.el= command layer support the query shape.
 
 Supported helper families include:
 
@@ -131,7 +134,7 @@ Clutch maps MongoDB concepts onto the generic database contract:
 
 - schemas are MongoDB databases
 - tables are collections
-- columns are sampled top-level document keys
+- columns are sampled top-level document keys with sampled BSON type summaries
 - indexes are collection indexes returned by =listIndexes()=
 - nested documents and arrays render as JSON-valued cells
 

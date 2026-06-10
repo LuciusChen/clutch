@@ -65,6 +65,7 @@
 (declare-function mongodb-drop-collection "mongodb" (client database collection))
 (declare-function mongodb-drop-database "mongodb" (client database))
 (declare-function mongodb-drop-index "mongodb" (client database collection index))
+(declare-function mongodb-error-labels "mongodb" (condition))
 (declare-function mongodb-explain "mongodb" (client database command &optional verbosity))
 (declare-function mongodb-find "mongodb" (client database collection filter &optional projection limit skip sort options))
 (declare-function mongodb-find-command "mongodb" (collection filter &optional projection limit skip sort options))
@@ -82,13 +83,35 @@
 
 ;;;; Configuration
 
+(defcustom clutch-mongodb-schema-sample-size 20
+  "Number of MongoDB documents to sample for collection field metadata."
+  :type 'integer
+  :group 'clutch)
+
+(defun clutch-mongodb--error-message (err)
+  "Return the primary MongoDB error message from ERR."
+  (if (stringp (cadr err))
+      (cadr err)
+    (error-message-string err)))
+
+(defun clutch-mongodb--error-details (err)
+  "Return Clutch details plist for MongoDB ERR."
+  (when-let* ((labels (mongodb-error-labels err)))
+    (list :mongodb-error-labels labels
+          :diag (list :mongodb-error-labels labels))))
+
 (defmacro clutch-mongodb--with-mongodb-errors (&rest body)
   "Run BODY and translate `mongodb-error' to `clutch-db-error'."
   (declare (indent 0) (debug t))
   `(condition-case err
        (progn ,@body)
      (mongodb-error
-      (signal 'clutch-db-error (cdr err)))))
+      (let ((message (clutch-mongodb--error-message err))
+            (details (clutch-mongodb--error-details err)))
+        (signal 'clutch-db-error
+                (if details
+                    (list message details)
+                  (list message)))))))
 
 ;;;; Connection struct
 
@@ -138,6 +161,7 @@
     mongodb-drop-collection
     mongodb-drop-database
     mongodb-drop-index
+    mongodb-error-labels
     mongodb-explain
     mongodb-find
     mongodb-find-command
@@ -1100,6 +1124,30 @@ helper call."
    ((clutch-mongodb--scalar-p value) 'text)
    (t 'json)))
 
+(defun clutch-mongodb--value-type-name (value)
+  "Return a compact sampled BSON type name for VALUE."
+  (cond
+   ((null value) "null")
+   ((or (eq value t) (eq value :false)) "bool")
+   ((numberp value) "number")
+   ((stringp value) "string")
+   ((vectorp value) "array")
+   ((mongodb-document-p value) "object")
+   ((clutch-mongodb--alist-p value) "object")
+   ((listp value) "array")
+   (t "value")))
+
+(defun clutch-mongodb--field-type-category (values)
+  "Return a Clutch type category for sampled field VALUES."
+  (cond
+   ((seq-some (lambda (value)
+                (member (clutch-mongodb--value-type-name value)
+                        '("array" "object")))
+              values)
+    'json)
+   ((and values (cl-every #'numberp values)) 'numeric)
+   (t 'text)))
+
 (defun clutch-mongodb--display-value (value)
   "Return display cell value for MongoDB VALUE."
   (cond
@@ -1189,6 +1237,56 @@ helper call."
         (cons "_id" (remove "_id" keys))
       keys)))
 
+(defun clutch-mongodb--schema-sample-limit ()
+  "Return the MongoDB schema sample size."
+  (unless (and (integerp clutch-mongodb-schema-sample-size)
+               (> clutch-mongodb-schema-sample-size 0))
+    (signal 'clutch-db-error
+            (list "MongoDB schema sample size must be a positive integer")))
+  clutch-mongodb-schema-sample-size)
+
+(defun clutch-mongodb--sample-documents (conn collection)
+  "Return sampled documents from COLLECTION on CONN."
+  (let ((value (clutch-mongodb--eval
+                conn
+                (format "db.getCollection(%s).find({}).limit(%d)"
+                        (clutch--json-serialize-text
+                         collection
+                         "MongoDB collection name")
+                        (clutch-mongodb--schema-sample-limit)))))
+    (cond
+     ((clutch-mongodb--document-list-p value) value)
+     (t (signal 'clutch-db-error
+                (list "MongoDB schema sampling returned a non-document result"))))))
+
+(defun clutch-mongodb--sample-field-stats (key docs)
+  "Return sampled metadata stats for KEY in DOCS."
+  (let ((values nil)
+        (present 0)
+        (total (length docs)))
+    (dolist (doc docs)
+      (when-let* ((pair (assoc key doc)))
+        (cl-incf present)
+        (push (cdr pair) values)))
+    (list :values (nreverse values)
+          :present present
+          :total total)))
+
+(defun clutch-mongodb--sample-field-type (values)
+  "Return sampled BSON type label for VALUES."
+  (let ((types nil))
+    (dolist (value values)
+      (let ((type (clutch-mongodb--value-type-name value)))
+        (unless (member type types)
+          (push type types))))
+    (format "BSON<%s>"
+            (string-join (nreverse types) "|"))))
+
+(defun clutch-mongodb--sample-field-comment (present total)
+  "Return a field comment for PRESENT out of TOTAL sampled documents."
+  (when (and (> total 0) (< present total))
+    (format "present in %d/%d sampled documents" present total)))
+
 (defun clutch-mongodb--columns-for-docs (keys docs)
   "Return Clutch column plists for KEYS sampled from DOCS."
   (mapcar
@@ -1199,6 +1297,21 @@ helper call."
        (list :name key
              :type-category (clutch-mongodb--column-category sample))))
    keys))
+
+(defun clutch-mongodb--column-details-for-docs (docs)
+  "Return Clutch column-detail plists sampled from MongoDB DOCS."
+  (mapcar
+   (lambda (key)
+     (let* ((stats (clutch-mongodb--sample-field-stats key docs))
+            (values (plist-get stats :values))
+            (present (plist-get stats :present))
+            (total (plist-get stats :total)))
+       (list :name key
+             :type (clutch-mongodb--sample-field-type values)
+             :type-category (clutch-mongodb--field-type-category values)
+             :nullable t
+             :comment (clutch-mongodb--sample-field-comment present total))))
+   (clutch-mongodb--ordered-keys docs)))
 
 (defun clutch-mongodb--result-from-docs (conn docs)
   "Return a Clutch result for CONN from MongoDB document list DOCS."
@@ -1331,22 +1444,13 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-mongodb-conn) collection)
   "Return sampled top-level document keys for COLLECTION on CONN."
-  (let* ((code (format "db.getCollection(%s).findOne()"
-                       (clutch--json-serialize-text collection
-                                                    "MongoDB collection name")))
-         (doc (clutch-mongodb--eval conn code)))
-    (if (clutch-mongodb--alist-p doc)
-        (clutch-mongodb--ordered-keys (list doc))
-      nil)))
+  (clutch-mongodb--ordered-keys
+   (clutch-mongodb--sample-documents conn collection)))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-mongodb-conn) collection)
   "Return sampled column details for MongoDB COLLECTION on CONN."
-  (mapcar (lambda (name)
-            (list :name name
-                  :type "BSON"
-                  :type-category 'json
-                  :nullable t))
-          (clutch-db-list-columns conn collection)))
+  (clutch-mongodb--column-details-for-docs
+   (clutch-mongodb--sample-documents conn collection)))
 
 (cl-defmethod clutch-db-show-create-table ((conn clutch-mongodb-conn) collection)
   "Return collection metadata for COLLECTION on CONN as JSON."
