@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'seq)
 (require 'subr-x)
 (require 'clutch-backend)
@@ -277,6 +278,46 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
          (if (clutch--json-false-value-p val) :false val))
       (error (clutch--format-value val))))
    (t (clutch--format-value val))))
+
+(defun clutch--json-ts-mode-available-p ()
+  "Return non-nil when `json-ts-mode' can be enabled now."
+  (and (fboundp 'json-ts-mode)
+       (or (not (fboundp 'treesit-language-available-p))
+           (treesit-language-available-p 'json))))
+
+(defun clutch--json-display-mode ()
+  "Enable the best available JSON display mode in the current buffer."
+  (cond
+   ((clutch--json-ts-mode-available-p)
+    (json-ts-mode))
+   ((fboundp 'json-mode)
+    (json-mode))
+   ((fboundp 'js-mode)
+    (js-mode))
+   (t
+    (special-mode))))
+
+(defun clutch--json-metadata-text (text)
+  "Return TEXT pretty-printed as JSON metadata."
+  (ignore (json-parse-string text))
+  (with-temp-buffer
+    (insert text)
+    (json-pretty-print-buffer)
+    (string-trim-right (buffer-string))))
+
+(defun clutch--show-json-text-buffer (buffer-name text)
+  "Show JSON TEXT in BUFFER-NAME and return the displayed buffer."
+  (let ((buf (get-buffer-create buffer-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (clutch--json-display-mode)
+        (erase-buffer)
+        (insert (clutch--json-metadata-text text))
+        (insert "\n")
+        (font-lock-ensure)
+        (setq buffer-read-only t)
+        (goto-char (point-min))))
+    (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
 (defun clutch--string-pad (str width &optional right-align)
   "Pad STR with spaces to reach display WIDTH.

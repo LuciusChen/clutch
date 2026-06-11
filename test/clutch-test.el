@@ -216,13 +216,15 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (equal seen "{\"name\":\"张三\"}"))
       (should-not serialize-called))))
 
-(ert-deftest clutch-test-json-view-mode-falls-back-when-json-ts-errors ()
-  "JSON viewers should tolerate missing tree-sitter grammars."
+(ert-deftest clutch-test-json-view-mode-uses-json-mode-without-json-ts-grammar ()
+  "JSON viewers should use `json-mode' when the tree-sitter grammar is unavailable."
   (let (selected-mode)
     (with-temp-buffer
       (insert "{\"ok\":true}")
       (cl-letf (((symbol-function 'json-ts-mode)
-                 (lambda () (error "missing JSON grammar")))
+                 (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
+                ((symbol-function 'treesit-language-available-p)
+                 (lambda (_language) nil))
                 ((symbol-function 'json-mode)
                  (lambda () (setq selected-mode 'json-mode)))
                 ((symbol-function 'js-mode)
@@ -3807,12 +3809,14 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Edit — JSON sub-editor
 
-(ert-deftest clutch-test-json-editor-mode-falls-back-when-json-ts-errors ()
-  "JSON editors should tolerate missing tree-sitter grammars."
+(ert-deftest clutch-test-json-editor-mode-uses-js-mode-without-json-ts-grammar ()
+  "JSON editors should use `js-mode' when the tree-sitter grammar is unavailable."
   (let (selected-mode)
     (with-temp-buffer
       (cl-letf (((symbol-function 'json-ts-mode)
-                 (lambda () (error "missing JSON grammar")))
+                 (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
+                ((symbol-function 'treesit-language-available-p)
+                 (lambda (_language) nil))
                 ((symbol-function 'js-mode)
                  (lambda () (setq selected-mode 'js-mode))))
         (clutch-result-insert--json-editor-mode)))
@@ -5187,6 +5191,48 @@ crashing the UI layer."
                                 :ssh-host)
                      "bastion-prod")))))
 
+(ert-deftest clutch-test-build-conn-rewrites-mongodb-through-ssh-tunnel ()
+  "MongoDB host/port connections should reuse the shared SSH transport layer."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--start-ssh-tunnel)
+               (lambda (params)
+                 (should (eq (plist-get params :backend) 'mongodb))
+                 (should (equal (plist-get params :host) "mongo.internal"))
+                 (should (= (plist-get params :port) 27017))
+                 '(:kind ssh
+                   :process fake-proc
+                   :local-port 47017
+                   :ssh-host "bastion-prod")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (should (eq backend 'mongodb))
+                 (setq captured params)
+                 'fake-mongo-conn)))
+      (should (eq (clutch--build-conn
+                   '(:backend mongodb
+                     :host "mongo.internal"
+                     :port 27017
+                     :database "app"
+                     :ssh-host "bastion-prod"))
+                  'fake-mongo-conn))
+      (should (equal (plist-get captured :host) "127.0.0.1"))
+      (should (= (plist-get captured :port) 47017))
+      (should-not (plist-member captured :ssh-host))
+      (should (equal (plist-get
+                      (gethash 'fake-mongo-conn
+                               clutch--connection-remote-params-cache)
+                      :host)
+                     "mongo.internal"))
+      (should (equal (plist-get
+                      (gethash 'fake-mongo-conn
+                               clutch--connection-transport-cache)
+                      :ssh-host)
+                     "bastion-prod")))))
+
 (ert-deftest clutch-test-build-conn-direct-first-selects-direct-or-ssh ()
   "Direct-first SSH mode should probe direct TCP before tunneling."
   (dolist (direct-open '(t nil))
@@ -5352,6 +5398,48 @@ crashing the UI layer."
                              :kind)
                   'tramp)))))
 
+(ert-deftest clutch-test-build-conn-rewrites-mongodb-through-tramp-forward ()
+  "MongoDB host/port connections should reuse the shared TRAMP transport layer."
+  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+        captured)
+    (cl-letf (((symbol-function 'clutch--resolve-password)
+               (lambda (_params) nil))
+              ((symbol-function 'clutch--start-tramp-tcp-forward)
+               (lambda (params)
+                 (should (eq (plist-get params :backend) 'mongodb))
+                 (should (equal (plist-get params :host) "mongo.internal"))
+                 (should (= (plist-get params :port) 27017))
+                 '(:kind tramp
+                   :process fake-listener
+                   :local-port 47018
+                   :tramp-default-directory "/ssh:devbox:/workspace/")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (should (eq backend 'mongodb))
+                 (setq captured params)
+                 'fake-mongo-conn)))
+      (should (eq (clutch--build-conn
+                   '(:backend mongodb
+                     :host "mongo.internal"
+                     :port 27017
+                     :database "app"
+                     :tramp-default-directory "/ssh:devbox:/workspace/"))
+                  'fake-mongo-conn))
+      (should (equal (plist-get captured :host) "127.0.0.1"))
+      (should (= (plist-get captured :port) 47018))
+      (should-not (plist-member captured :tramp-default-directory))
+      (should (equal (plist-get
+                      (gethash 'fake-mongo-conn
+                               clutch--connection-remote-params-cache)
+                      :tramp-default-directory)
+                     "/ssh:devbox:/workspace/"))
+      (should (eq (plist-get
+                   (gethash 'fake-mongo-conn
+                            clutch--connection-transport-cache)
+                   :kind)
+                  'tramp)))))
+
 (ert-deftest clutch-test-open-connection-supports-tramp-alias ()
   "The public connection API should support the short :tramp key."
   (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
@@ -5454,6 +5542,23 @@ crashing the UI layer."
        :type 'user-error)
       (should-not connect-called))))
 
+(ert-deftest clutch-test-start-ssh-tunnel-rejects-mongodb-url ()
+  "SSH tunneling should not rewrite opaque MongoDB URLs."
+  (cl-letf (((symbol-function 'executable-find)
+             (lambda (_name) "/usr/bin/ssh"))
+            ((symbol-function 'make-process)
+             (lambda (&rest _args)
+               (error "SSH process should not start for MongoDB URL"))))
+    (let ((err (should-error
+                (clutch--start-ssh-tunnel
+                 '(:backend mongodb
+                   :url "mongodb://mongo.internal:27017/app"
+                   :ssh-host "bastion-prod"))
+                :type 'user-error)))
+      (should (equal (cadr err)
+                     (concat "Structured forwarding via SSH tunnels requires "
+                             ":host/:port params, not :url"))))))
+
 (ert-deftest clutch-test-start-ssh-tunnel-starts-batch-tunnel-directly ()
   "SSH tunnel startup should rely on the real batch tunnel command."
   (let (process-file-called make-process-args)
@@ -5502,6 +5607,21 @@ crashing the UI layer."
           :tramp-default-directory "/ssh:devbox:/workspace/"))
        :type 'user-error)
       (should-not make-process-called))))
+
+(ert-deftest clutch-test-start-tramp-forward-rejects-mongodb-url ()
+  "TRAMP forwarding should not rewrite opaque MongoDB URLs."
+  (cl-letf (((symbol-function 'make-process)
+             (lambda (&rest _args)
+               (error "TRAMP process should not start for MongoDB URL"))))
+    (let ((err (should-error
+                (clutch--start-tramp-tcp-forward
+                 '(:backend mongodb
+                   :url "mongodb://mongo.internal:27017/app"
+                   :tramp-default-directory "/ssh:devbox:/workspace/"))
+                :type 'user-error)))
+      (should (equal (cadr err)
+                     (concat "Structured forwarding via TRAMP forwarding "
+                             "requires :host/:port params, not :url"))))))
 
 (ert-deftest clutch-test-start-tramp-forward-starts-direct-ssh-forward ()
   "Direct ssh TRAMP forward startup should use OpenSSH -L."
@@ -6301,7 +6421,7 @@ crashing the UI layer."
                   '(:backend mongodb :database "analytics"))
                  '(:backend mongodb :database "analytics"))))
 
-(ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongodb-surface-sql-surface ()
+(ert-deftest clutch-test-canonicalize-connection-params-normalizes-sql-interface-mongodb-surface ()
   "MongoDB SQL Interface should be a surface on the MongoDB backend."
   (should (equal (clutch--canonicalize-connection-params
                   '(:backend mongodb :surface "sql-interface" :database "analytics"))
@@ -6838,7 +6958,7 @@ crashing the UI layer."
                  "nf-md-database_cog_outline")))
 
 (ert-deftest clutch-test-backend-candidates-affixation-omits-annotation ()
-  "Backend candidates should not repeat backend names as annotations."
+  "Core backend candidates should not carry support annotations."
   (cl-letf (((symbol-function 'clutch--nerd-icons-available-p)
              (lambda () t))
             ((symbol-function 'clutch--db-backend-icon-for-key)
@@ -6885,6 +7005,9 @@ crashing the UI layer."
                (candidates (all-completions "" (nth 2 capf))))
           (should (member "find()" candidates))
           (should (member "aggregate()" candidates))
+          (should (member "find({}).limit(20)" candidates))
+          (should (member "aggregate([{ $match: {} }, { $limit: 20 }])"
+                          candidates))
           (should (member "estimatedDocumentCount()" candidates)))
         (erase-buffer)
         (insert "db.users.fi")
@@ -6896,6 +7019,29 @@ crashing the UI layer."
                      t)))
           (clutch-mongodb-complete-at-point)
           (should (equal (buffer-string) "db.users.find()")))))))
+
+(ert-deftest clutch-test-mongodb-explain-query-at-point-uses-current-helper ()
+  "MongoDB explain command should explain the current helper at point."
+  (let (captured displayed)
+    (with-temp-buffer
+      (clutch-mongodb-mode)
+      (setq-local clutch-connection 'mongo-conn)
+      (insert "db.users.find({active: true}).limit(5)")
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 #'ignore)
+                ((symbol-function 'clutch-db-explain-query)
+                 (lambda (conn query)
+                   (setq captured (list conn query))
+                   "{\"summary\":{\"winningStage\":\"IXSCAN\"}}"))
+                ((symbol-function 'clutch--show-json-text-buffer)
+                 (lambda (buffer-name text)
+                   (setq displayed (list buffer-name text)))))
+        (clutch-mongodb-explain-query-at-point)))
+    (should (equal captured
+                   '(mongo-conn "db.users.find({active: true}).limit(5)")))
+    (should (equal displayed
+                   '("*clutch mongodb: explain*"
+                     "{\"summary\":{\"winningStage\":\"IXSCAN\"}}")))))
 
 (ert-deftest clutch-test-mongodb-completion-uses-cursor-chain-candidates ()
   "MongoDB completion should offer cursor helpers after chainable queries."
@@ -6998,7 +7144,7 @@ crashing the UI layer."
                          "db.orders.aggregate([{$match: ")))))))
 
 (ert-deftest clutch-test-mongodb-mode-keymap-keeps-document-actions-only ()
-  "MongoDB query buffers should not expose SQL transaction or preview keys."
+  "MongoDB query buffers should expose document actions, not SQL transaction keys."
   (with-temp-buffer
     (clutch-mongodb-mode)
     (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-c"))
@@ -7011,9 +7157,11 @@ crashing the UI layer."
                 #'clutch-act-dwim))
     (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-l"))
                 #'clutch-switch-schema))
+    (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c C-p"))
+                #'clutch-mongodb-explain-query-at-point))
     (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c ?"))
                 #'clutch-mongodb-dispatch))
-    (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a" "C-c C-p"))
+    (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a"))
       (should-not (lookup-key clutch-mongodb-mode-map (kbd key))))))
 
 (ert-deftest clutch-test-mongodb-mode-indents-mql-pipeline ()
@@ -7048,29 +7196,47 @@ crashing the UI layer."
     (should (eq (get-text-property (match-beginning 0) 'face)
                 'font-lock-string-face))))
 
-(ert-deftest clutch-test-object-browse-query-uses-mongodb-shell-syntax ()
-  "MongoDB object browsing should insert a shell query, not SELECT SQL."
+(ert-deftest clutch-test-object-browse-query-uses-backend-specific-query ()
+  "Object browsing should use a backend-specific query before SQL formatting."
+  (cl-letf (((symbol-function 'clutch-db-object-browse-query)
+             (lambda (conn entry)
+               (should (eq conn 'document-conn))
+               (should (equal entry '(:name "users")))
+               "doc.browse(\"users\");"))
+            ((symbol-function 'clutch--object-sql-name)
+             (lambda (&rest _args)
+               (ert-fail "SQL formatter should not run when backend handles browsing"))))
+    (should (equal (clutch--object-browse-query 'document-conn '(:name "users"))
+                   "doc.browse(\"users\");"))))
+
+(ert-deftest clutch-test-object-browse-query-errors-for-document-backend-without-query ()
+  "Native document backends should not silently fall back to SQL browsing."
   (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
              (lambda (_conn) 'mongodb))
             ((symbol-function 'clutch-jdbc-conn-p)
              (lambda (_conn) nil))
+            ((symbol-function 'clutch-db-object-browse-query)
+             (lambda (&rest _args) nil))
             ((symbol-function 'clutch--object-sql-name)
              (lambda (&rest _args)
-               (error "SQL formatter should not run for MongoDB"))))
-    (should (equal (clutch--object-browse-query 'mongodb-conn '(:name "users"))
-                   "db.getCollection(\"users\").find();"))))
+               (ert-fail "SQL formatter should not run for document browsing"))))
+    (should-error
+     (clutch--object-browse-query 'document-conn '(:name "users"))
+     :type 'user-error)))
 
-(ert-deftest clutch-test-object-browse-query-uses-sql-for-mongodb-surface-sql ()
+(ert-deftest clutch-test-object-browse-query-uses-sql-for-sql-interface-mongodb ()
   "MongoDB SQL Interface object browsing should insert SELECT SQL."
-  (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
-             (lambda (_conn) 'mongodb))
-            ((symbol-function 'clutch-jdbc--mongodb-conn-p)
-             (lambda (_conn) t))
-            ((symbol-function 'clutch--object-sql-name)
-             (lambda (_conn entry)
-               (plist-get entry :name))))
-    (should (equal (clutch--object-browse-query 'mongodb-surface-sql-conn '(:name "users"))
-                   "SELECT * FROM users;"))))
+  (require 'clutch-db-jdbc)
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver mongodb))))
+    (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+               (lambda (_conn) 'mongodb))
+              ((symbol-function 'clutch-db-object-browse-query)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--object-sql-name)
+               (lambda (_conn entry)
+                 (plist-get entry :name))))
+      (should (equal (clutch--object-browse-query conn '(:name "users"))
+                     "SELECT * FROM users;")))))
 
 (ert-deftest clutch-test-connection-state-icon-uses-database-check-outline ()
   "Connected state icon should use the requested database-check-outline glyph."
@@ -7390,8 +7556,8 @@ This applies when the buffer owns the connection."
             (setq-local clutch-connection 'old-conn
                         clutch--connection-params '(:backend mysql :database "db")
                         clutch--conn-sql-product 'mysql)
-            (cl-letf (((symbol-function 'clutch-db-show-create-table)
-                       (lambda (_conn _table) "CREATE TABLE demo (id INT)"))
+            (cl-letf (((symbol-function 'clutch-db-object-definition)
+                       (lambda (_conn _entry) "CREATE TABLE demo (id INT)"))
                       ((symbol-function 'sql-mode) #'ignore)
                       ((symbol-function 'sql-set-product) #'ignore)
                       ((symbol-function 'font-lock-ensure) #'ignore)
@@ -7835,9 +8001,9 @@ This applies when the buffer owns the connection."
       (when-let* ((buf (get-buffer buffer-name)))
         (kill-buffer buf)))))
 
-(ert-deftest clutch-test-query-console-mongodb-surface-sql-uses-sql-mode ()
+(ert-deftest clutch-test-query-console-sql-interface-mongodb-uses-sql-mode ()
   "MongoDB SQL Interface consoles should use SQL editing under the MongoDB backend."
-  (let* ((name "mongodb-surface-sql-local")
+  (let* ((name "sql-interface-mongodb-local")
          (buffer-name (clutch--console-buffer-base-name name))
          (params '(:backend mongodb
                    :surface sql-interface

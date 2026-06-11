@@ -40,6 +40,7 @@
 (require 'ert)
 (require 'eieio)
 (require 'clutch-backend)
+(require 'clutch-connection)
 (require 'clutch-db-jdbc)
 (require 'clutch-mongodb)
 (require 'mongodb)
@@ -239,6 +240,21 @@ connection as live and not busy."
     'mysql '(:host "127.0.0.1" :read-timeout 5))
    :type 'user-error))
 
+(ert-deftest clutch-db-test-normalize-connect-params-dispatches-registry-function ()
+  "Connection parameter normalization should come from backend registry metadata."
+  (let ((clutch-backend--registry
+         '((alpha . (:normalize-fn clutch-db-test--alpha-normalize))
+           (beta . (:normalize-fn clutch-db-test--beta-normalize)))))
+    (cl-letf (((symbol-function 'clutch-db-test--alpha-normalize)
+               (lambda (params)
+                 (append params '(:normalized-by alpha))))
+              ((symbol-function 'clutch-db-test--beta-normalize)
+               (lambda (_params)
+                 (ert-fail "Called the wrong backend normalizer"))))
+      (should (equal (clutch-db--normalize-connect-params
+                      'alpha '(:database "app"))
+                     '(:database "app" :normalized-by alpha))))))
+
 ;;;; Unit tests — clutch-db-result struct
 
 (ert-deftest clutch-db-test-result-struct ()
@@ -372,7 +388,7 @@ connection as live and not busy."
        '(:host "db" :port 1433 :database "app" :user "sa" :password "secret"))
       (should (eq (alist-get 'auto-commit captured-params) t)))))
 
-(ert-deftest clutch-db-test-jdbc-connect-mongodb-surface-sql-adds-database-property ()
+(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-adds-database-property ()
   "MongoDB SQL Interface surface should pass :database as the required driver property."
   (let (captured-params conn)
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
@@ -418,7 +434,7 @@ connection as live and not busy."
     (should (string-match-p "native mongodb backend"
                             (error-message-string err)))))
 
-(ert-deftest clutch-db-test-jdbc-connect-mongodb-surface-sql-url-adds-database-property ()
+(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-url-adds-database-property ()
   "MongoDB SQL Interface URL connections should add the required database property."
   (let (captured-params)
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
@@ -438,7 +454,7 @@ connection as live and not busy."
                      '(("database" . "analytics"))))
       (should (eq (alist-get 'auto-commit captured-params) t)))))
 
-(ert-deftest clutch-db-test-jdbc-connect-mongodb-surface-sql-requires-database-property ()
+(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-requires-database-property ()
   "MongoDB SQL Interface surface should fail early when no query database is configured."
   (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
             ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore))
@@ -569,7 +585,7 @@ connection as live and not busy."
     (should-error (clutch-db-commit conn) :type 'user-error)
     (should-error (clutch-db-rollback conn) :type 'user-error)))
 
-(ert-deftest clutch-db-test-jdbc-connect-mongodb-surface-sql-rejects-manual-commit ()
+(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-rejects-manual-commit ()
   "MongoDB SQL Interface surface should reject explicit :manual-commit at connect time."
   (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
             ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore))
@@ -874,7 +890,7 @@ connection as live and not busy."
         (clutch-db-disconnect conn))
       (ignore-errors (delete-file db-file)))))
 
-(ert-deftest clutch-db-test-jdbc-show-create-table-uses-oracle-style-identifiers ()
+(ert-deftest clutch-db-test-jdbc-object-definition-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
                                      :params '(:driver oracle :schema "CLUTCH"))))
@@ -884,7 +900,8 @@ connection as live and not busy."
                              (:name "TYPE" :type "VARCHAR2" :nullable :json-false)
                              (:name "ACTION" :type "VARCHAR2" :nullable :json-false)
                              (:name "mixedCase" :type "VARCHAR2" :nullable :json-false))))))
-      (let ((ddl (clutch-db-show-create-table conn "APP_EVENT_DATA")))
+      (let ((ddl (clutch-db-object-definition
+                  conn '(:name "APP_EVENT_DATA" :type "TABLE"))))
         (should (string-match-p "CREATE TABLE APP_EVENT_DATA" ddl))
         (should (string-match-p "PK_MAIN CHAR" ddl))
         (should (string-match-p "\"TYPE\" VARCHAR2" ddl))
@@ -1177,7 +1194,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                                                :database "default"))))
     (should (equal (clutch-jdbc--conn-catalog conn) "default"))))
 
-(ert-deftest clutch-db-test-jdbc-mongodb-surface-sql-uses-limit-offset-pagination ()
+(ert-deftest clutch-db-test-sql-interface-mongodb-uses-limit-offset-pagination ()
   "MongoDB SQL Interface should use SQL Interface LIMIT/OFFSET pagination."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :driver 'mongodb
@@ -1187,7 +1204,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                     conn "SELECT * FROM users" 2 25)
                    "SELECT * FROM users LIMIT 25 OFFSET 50"))))
 
-(ert-deftest clutch-db-test-jdbc-mongodb-surface-sql-bson-types-map-to-clutch-categories ()
+(ert-deftest clutch-db-test-sql-interface-mongodb-bson-types-map-to-clutch-categories ()
   "MongoDB SQL Interface JDBC BSON type names should map to useful display categories."
   (should (eq (clutch-jdbc--type-category "DOCUMENT") 'json))
   (should (eq (clutch-jdbc--type-category "ARRAY") 'json))
@@ -1206,6 +1223,16 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
    :client (or client 'mongodb-client)
    :closed nil
    :busy nil))
+
+(ert-deftest clutch-db-test-mongodb-object-browse-query-uses-helper-syntax ()
+  "Native MongoDB should provide object browsing syntax from the adapter."
+  (let ((conn (clutch-db-test--make-mongodb-conn)))
+    (dolist (case '(("users" . "db.getCollection(\"users\").find({}).limit(20);")
+                    ("order-items" . "db.getCollection(\"order-items\").find({}).limit(20);")))
+      (pcase-let ((`(,collection . ,expected) case))
+        (should (equal (clutch-db-object-browse-query
+                        conn (list :name collection :type "COLLECTION"))
+                       expected))))))
 
 (ert-deftest clutch-db-test-mongodb-ensure-mongodb-api-reloads-stale-feature ()
   "Native MongoDB should retry loading mongodb.el when a stale feature lacks APIs."
@@ -1352,7 +1379,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                        '((:name "email" :position 1 :descend "ASC"))))
         (should (string-match-p
                  "\"name\":\"email_idx\""
-                 (clutch-db-show-create-object conn email-entry)))))))
+                 (clutch-db-object-definition conn email-entry)))))))
 
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   "Native MongoDB query results should flatten top-level document keys."
@@ -1362,22 +1389,26 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                '((("_id" . (("$oid" . "64f")))
                   ("name" . "Ann")
                   ("score" . 10)
-                  ("tags" . ["a" "b"]))
+                  ("tags" . ["a" "b"])
+                  ("meta" . "plain"))
                  (("_id" . (("$oid" . "650")))
                   ("name" . "Bob")
-                 ("active" . :false))))))
+                  ("meta" . (("ok" . t)))
+                  ("active" . :false))))))
     (let* ((conn (clutch-db-test--make-mongodb-conn))
            (result (clutch-db-query conn "db.users.find()")))
       (should (equal (clutch-db-result-column-names
                       (clutch-db-result-columns result))
-                     '("_id" "name" "score" "tags" "active")))
+                     '("_id" "name" "score" "tags" "meta" "active")))
       (should (equal (mapcar (lambda (column)
                                (plist-get column :type-category))
                              (clutch-db-result-columns result))
-                     '(json text numeric json text)))
+                     '(json text numeric json json text)))
       (should (equal (clutch-db-result-rows result)
-                     '(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]" nil)
-                       ("{\"$oid\":\"650\"}" "Bob" nil nil "false")))))))
+                     '(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
+                        "plain" nil)
+                       ("{\"$oid\":\"650\"}" "Bob" nil nil
+                        "{\"ok\":true}" "false")))))))
 
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
@@ -1969,7 +2000,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                          (:name "orders" :schema "app" :type "COLLECTION"))))
         (should (equal (clutch-db-complete-tables conn "us") '("users")))
         (should (equal (clutch-db-list-columns conn "users")
-                       '("_id" "name" "score" "profile" "active")))
+                       '("_id" "name" "score" "profile" "profile.age" "active")))
         (should (equal (clutch-db-column-details conn "users")
                        '((:name "_id"
                           :type "BSON<object>"
@@ -1991,6 +2022,11 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                           :type-category json
                           :nullable t
                           :comment "present in 1/2 sampled documents")
+                         (:name "profile.age"
+                          :type "BSON<number>"
+                          :type-category numeric
+                          :nullable t
+                          :comment "present in 1/2 sampled documents")
                          (:name "active"
                           :type "BSON<bool>"
                           :type-category text
@@ -1998,7 +2034,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                           :comment "present in 1/2 sampled documents"))))
         (should (equal (length sample-codes) 2))
         (should (string-match-p "\"users\""
-                                (clutch-db-show-create-table conn "users")))))))
+                                (clutch-db-object-definition
+                                 conn '(:name "users" :type "COLLECTION"))))))))
 
 (ert-deftest clutch-db-test-mongodb-schema-sample-size-rejects-invalid ()
   "Native MongoDB metadata should reject invalid schema sample sizes."
@@ -2088,6 +2125,146 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
         (should (mongodb-document-p coll-stats))
         (should (mongodb-document-p storage-stats))
         (should-not (mongodb-document-elements storage-stats))))))
+
+(ert-deftest clutch-db-test-mongodb-collection-profile-samples-nested-fields ()
+  "Native MongoDB collection profiles should include nested field stats."
+  (let ((clutch-mongodb-schema-sample-size 3)
+        (sample-docs '((("_id" . (("$oid" . "64f")))
+                        ("name" . "Ann")
+                        ("profile" . (("age" . 30)))
+                        ("items" . [(("sku" . "A") ("qty" . 2))])
+                        ("status" . "active"))
+                       (("_id" . (("$oid" . "650")))
+                        ("name" . "Bob")
+                        ("profile" . (("age" . 40)))
+                        ("items" . [(("sku" . "A") ("qty" . 1))
+                                     (("sku" . "B") ("qty" . 4))])
+                        ("status" . "active"))
+                       (("_id" . (("$oid" . "651")))
+                        ("name" . "Cal")
+                        ("status" . "blocked"))))
+        (id-index (mongodb-document
+                   `(("name" . "_id_")
+                     ("key" . ,(mongodb-document '(("_id" . 1))))))))
+    (cl-letf (((symbol-function 'clutch-mongodb--eval)
+               (lambda (_conn code)
+                 (should (string-match-p
+                          "db.getCollection(\"users\").find({}).limit(3)"
+                          code))
+                 sample-docs))
+              ((symbol-function 'mongodb-list-indexes)
+               (lambda (_client _database collection)
+                 (should (equal collection "users"))
+                 (list id-index))))
+      (let* ((text (clutch-db-collection-profile
+                    (clutch-db-test--make-mongodb-conn "app")
+                    "users"))
+             (profile (json-parse-string text :object-type 'alist
+                                         :array-type 'list))
+             (fields (cdr (assoc 'fields profile)))
+             (age (seq-find (lambda (field)
+                              (equal (cdr (assoc 'path field))
+                                     "profile.age"))
+                            fields))
+             (items (seq-find (lambda (field)
+                                (equal (cdr (assoc 'path field))
+                                       "items"))
+                              fields))
+             (item-sku (seq-find (lambda (field)
+                                   (equal (cdr (assoc 'path field))
+                                          "items.sku"))
+                                 fields))
+             (status (seq-find (lambda (field)
+                                 (equal (cdr (assoc 'path field))
+                                        "status"))
+                               fields)))
+        (should (= (cdr (assoc 'sampleSize profile)) 3))
+        (should age)
+        (should (equal (cdr (assoc 'type age)) "BSON<number>"))
+        (should (= (cdr (assoc 'present age)) 2))
+        (should items)
+        (should (equal (cdr (assoc 'type items)) "BSON<array>"))
+        (should item-sku)
+        (should (equal (cdr (assoc 'type item-sku)) "BSON<string>"))
+        (should (= (cdr (assoc 'present item-sku)) 2))
+        (should (equal (cdr (assoc 'topValues status))
+                       '(((value . "active") (count . 2))
+                         ((value . "blocked") (count . 1)))))))))
+
+(ert-deftest clutch-db-test-mongodb-index-insight-combines-definitions-and-usage ()
+  "Native MongoDB index insight should combine listIndexes and indexStats."
+  (let ((captured-pipeline nil)
+        (id-index (mongodb-document
+                   `(("name" . "_id_")
+                     ("key" . ,(mongodb-document '(("_id" . 1)))))))
+        (email-index (mongodb-document
+                      `(("name" . "email_idx")
+                        ("key" . ,(mongodb-document '(("email" . 1))))
+                        ("unique" . t)))))
+    (cl-letf (((symbol-function 'mongodb-list-indexes)
+               (lambda (_client database collection)
+                 (should (equal database "app"))
+                 (should (equal collection "users"))
+                 (list id-index email-index)))
+              ((symbol-function 'mongodb-aggregate)
+               (lambda (_client database collection pipeline &optional options)
+                 (should (equal database "app"))
+                 (should (equal collection "users"))
+                 (should-not options)
+                 (setq captured-pipeline pipeline)
+                 '((("name" . "email_idx")
+                    ("host" . "localhost:27017")
+                    ("accesses" . (("ops" . 9)
+                                   ("since" . "2026-06-11T00:00:00Z"))))))))
+      (let* ((text (clutch-db-collection-index-insight
+                    (clutch-db-test--make-mongodb-conn "app")
+                    "users"))
+             (insight (json-parse-string text :object-type 'alist
+                                         :array-type 'list))
+             (indexes (cdr (assoc 'indexes insight)))
+             (email (seq-find (lambda (index)
+                                (equal (cdr (assoc 'name index))
+                                       "email_idx"))
+                              indexes)))
+        (should (vectorp captured-pipeline))
+        (should (assoc "$indexStats"
+                       (mongodb-document-pairs (aref captured-pipeline 0))))
+        (should (eq (cdr (assoc 'unique email)) t))
+        (should (equal (cdr (assoc 'usage email))
+                       '((ops . 9)
+                         (since . "2026-06-11T00:00:00Z"))))))))
+
+(ert-deftest clutch-db-test-mongodb-explain-query-summarizes-current-helper ()
+  "Native MongoDB explain should summarize the current find helper."
+  (let (captured)
+    (cl-letf (((symbol-function 'mongodb-explain)
+               (lambda (client database command &optional verbosity)
+                 (setq captured (list client database command verbosity))
+                 '(("queryPlanner"
+                    . (("winningPlan"
+                        . (("stage" . "IXSCAN")
+                           ("indexName" . "active_1")))))
+                   ("executionStats"
+                    . (("nReturned" . 5)
+                       ("totalKeysExamined" . 5)
+                       ("totalDocsExamined" . 5)
+                       ("executionTimeMillis" . 2)))))))
+      (let* ((text (clutch-db-explain-query
+                    (clutch-db-test--make-mongodb-conn "app" 'client)
+                    "db.users.find({active: true}).limit(5)"))
+             (doc (json-parse-string text :object-type 'alist
+                                     :array-type 'list))
+             (summary (cdr (assoc 'summary doc))))
+        (pcase-let ((`(,client ,database ,command ,verbosity) captured))
+          (should (eq client 'client))
+          (should (equal database "app"))
+          (should (equal (cdr (assoc "find" command)) "users"))
+          (should (= (cdr (assoc "limit" command)) 5))
+          (should (equal verbosity "executionStats")))
+        (should (equal (cdr (assoc 'winningStage summary)) "IXSCAN"))
+        (should (equal (cdr (assoc 'indexName summary)) "active_1"))
+        (should (eq (cdr (assoc 'collectionScan summary)) :false))
+        (should (= (cdr (assoc 'totalDocsExamined summary)) 5))))))
 
 (ert-deftest clutch-db-test-mongodb-set-current-schema-updates-database ()
   "Native MongoDB schema switching should change the logical database."
@@ -2680,17 +2857,21 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
     (should (eq (plist-get mysql-features :connect-fn) 'clutch-db-mysql-connect))
+    (should (eq (plist-get mysql-features :normalize-fn)
+                'clutch-db-mysql--normalize-connect-params))
     (should (equal (plist-get mysql-features :display-name) "MySQL"))
     (should (= (plist-get mysql-features :default-port) 3306))
-    (should (eq (plist-get mysql-features :support-level) 'full))
+    (should (eq (plist-get mysql-features :support-level) 'core))
     (should (eq (plist-get mysql-features :sql-product) 'mysql))
     ;; PostgreSQL backend
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'clutch-db-pg))
     (should (eq (plist-get pg-features :connect-fn) 'clutch-db-pg-connect))
+    (should (eq (plist-get pg-features :normalize-fn)
+                'clutch-db-pg--normalize-connect-params))
     (should (equal (plist-get pg-features :display-name) "PostgreSQL"))
     (should (= (plist-get pg-features :default-port) 5432))
-    (should (eq (plist-get pg-features :support-level) 'full))
+    (should (eq (plist-get pg-features :support-level) 'core))
     (should (eq (plist-get pg-features :sql-product) 'postgres))
     ;; Generic JDBC backend
     (should jdbc-features)
@@ -2709,7 +2890,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (= (plist-get mongodb-features :default-port) 27017))
     (should (eq (plist-get mongodb-features :support-level) 'basic))
     (should (clutch-backend-manual-choice-p 'mongodb))
-    (should-not (clutch-backend-feature 'mongodb-surface-sql))))
+    (should-not (clutch-backend-feature 'sql-interface-mongodb))))
 
 (ert-deftest clutch-db-test-backend-list-loads-optional-registries-in-order ()
   "User-facing backend lists should be derived from the backend registry."
@@ -2766,7 +2947,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (should (member 'mysql choices))
     (should (member 'clickhouse choices))
     (should (member 'mongodb choices))
-    (should-not (member 'mongodb-surface-sql choices))
+    (should-not (member 'sql-interface-mongodb choices))
     (should-not (member 'jdbc choices))))
 
 (ert-deftest clutch-db-test-manual-backends-have-registry-metadata ()
@@ -3674,8 +3855,9 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
     (let ((columns (clutch-db-list-columns conn "user")))
       (should (listp columns))
       (should (member "Host" columns)))
-    ;; show-create-table
-    (let ((ddl (clutch-db-show-create-table conn "user")))
+    ;; object definition
+    (let ((ddl (clutch-db-object-definition
+                conn '(:name "user" :type "TABLE"))))
       (should (stringp ddl))
       (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))))
 
@@ -3777,14 +3959,16 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
         (ignore-errors (clutch-db-query conn drop-a))
         (ignore-errors (clutch-db-query conn drop-b))))))
 
-(ert-deftest clutch-db-test-mysql-show-create-table-empty-rows-errors-cleanly ()
-  "MySQL show-create-table should signal `clutch-db-error' on empty row sets."
+(ert-deftest clutch-db-test-mysql-object-definition-empty-rows-errors-cleanly ()
+  "MySQL table definition should signal `clutch-db-error' on empty row sets."
   (let ((conn (make-mysql-conn :host "localhost")))
     (cl-letf (((symbol-function 'mysql-query)
                (lambda (_conn _sql)
                  (make-mysql-result :rows nil))))
-      (should-error (clutch-db-show-create-table conn "missing_table")
-                    :type 'clutch-db-error))))
+      (should-error
+       (clutch-db-object-definition
+        conn '(:name "missing_table" :type "TABLE"))
+       :type 'clutch-db-error))))
 
 ;;;; Live integration tests — PostgreSQL
 
@@ -3831,7 +4015,8 @@ Skips if `clutch-db-test-pg-password' is nil."
               (should (listp columns))
               (should (member "id" columns))
               (should (member "name" columns)))
-            (let ((ddl (clutch-db-show-create-table conn table)))
+            (let ((ddl (clutch-db-object-definition
+                        conn (list :name table :type "TABLE"))))
               (should (stringp ddl))
               (should (string-match-p "CREATE TABLE" ddl))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
@@ -4220,10 +4405,11 @@ Skips if `clutch-db-test-pg-password' is nil."
                              '((:name "field" :position 1 :descend "ASC"))))
               (should (string-match-p
                        "\"name\":\"field_idx\""
-                       (clutch-db-show-create-object conn index))))
+                       (clutch-db-object-definition conn index))))
             (should (string-match-p
                      collection
-                     (clutch-db-show-create-table conn collection)))
+                     (clutch-db-object-definition
+                      conn (list :name collection :type "COLLECTION"))))
             (let ((stats (clutch-db-collection-stats conn collection)))
               (should (string-match-p (format "\"collection\":\"%s\""
                                               collection)
@@ -4401,50 +4587,50 @@ Non-nil enables the :clickhouse-live suite.")
 (defvar clutch-db-test-jdbc-clickhouse-database "default"
   "Database name for ClickHouse JDBC live tests.")
 
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-url nil
+(defvar clutch-db-test-sql-interface-mongodb-url nil
   "JDBC URL for MongoDB SQL Interface live tests.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-host nil
+(defvar clutch-db-test-sql-interface-mongodb-host nil
   "Host for MongoDB SQL Interface live tests.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-port 27017
+(defvar clutch-db-test-sql-interface-mongodb-port 27017
   "Port for MongoDB SQL Interface live tests.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-user nil
+(defvar clutch-db-test-sql-interface-mongodb-user nil
   "User for MongoDB SQL Interface live tests.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-password nil
+(defvar clutch-db-test-sql-interface-mongodb-password nil
   "Password for MongoDB SQL Interface live tests.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-database nil
+(defvar clutch-db-test-sql-interface-mongodb-database nil
   "Query database for MongoDB SQL Interface live tests.
-Non-nil, together with URL or host, enables the :mongodb-surface-sql-live suite.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-auth-database nil
+Non-nil, together with URL or host, enables the :sql-interface-mongodb-live suite.")
+(defvar clutch-db-test-sql-interface-mongodb-auth-database nil
   "Optional auth database for structured MongoDB SQL Interface live test URLs.")
-(defvar clutch-db-test-jdbc-mongodb-surface-sql-props nil
+(defvar clutch-db-test-sql-interface-mongodb-props nil
   "Additional JDBC properties for MongoDB SQL Interface live tests.")
 
-(defun clutch-db-test--mongodb-surface-sql-live-configured-p ()
+(defun clutch-db-test--sql-interface-mongodb-live-configured-p ()
   "Return non-nil when MongoDB SQL Interface live connection data is configured."
-  (and clutch-db-test-jdbc-mongodb-surface-sql-database
-       (or clutch-db-test-jdbc-mongodb-surface-sql-url
-           clutch-db-test-jdbc-mongodb-surface-sql-host)))
+  (and clutch-db-test-sql-interface-mongodb-database
+       (or clutch-db-test-sql-interface-mongodb-url
+           clutch-db-test-sql-interface-mongodb-host)))
 
-(defun clutch-db-test--mongodb-surface-sql-live-params ()
+(defun clutch-db-test--sql-interface-mongodb-live-params ()
   "Return connection params for MongoDB SQL Interface live tests."
-  (let ((params (if clutch-db-test-jdbc-mongodb-surface-sql-url
-                    (list :url clutch-db-test-jdbc-mongodb-surface-sql-url)
-                  (list :host clutch-db-test-jdbc-mongodb-surface-sql-host
-                        :port clutch-db-test-jdbc-mongodb-surface-sql-port))))
+  (let ((params (if clutch-db-test-sql-interface-mongodb-url
+                    (list :url clutch-db-test-sql-interface-mongodb-url)
+                  (list :host clutch-db-test-sql-interface-mongodb-host
+                        :port clutch-db-test-sql-interface-mongodb-port))))
     (setq params
-          (plist-put params :database clutch-db-test-jdbc-mongodb-surface-sql-database))
-    (when clutch-db-test-jdbc-mongodb-surface-sql-auth-database
+          (plist-put params :database clutch-db-test-sql-interface-mongodb-database))
+    (when clutch-db-test-sql-interface-mongodb-auth-database
       (setq params
             (plist-put params :auth-database
-                       clutch-db-test-jdbc-mongodb-surface-sql-auth-database)))
-    (when clutch-db-test-jdbc-mongodb-surface-sql-user
-      (setq params (plist-put params :user clutch-db-test-jdbc-mongodb-surface-sql-user)))
-    (when clutch-db-test-jdbc-mongodb-surface-sql-password
+                       clutch-db-test-sql-interface-mongodb-auth-database)))
+    (when clutch-db-test-sql-interface-mongodb-user
+      (setq params (plist-put params :user clutch-db-test-sql-interface-mongodb-user)))
+    (when clutch-db-test-sql-interface-mongodb-password
       (setq params
             (plist-put params :password
-                       clutch-db-test-jdbc-mongodb-surface-sql-password)))
-    (when clutch-db-test-jdbc-mongodb-surface-sql-props
-      (setq params (plist-put params :props clutch-db-test-jdbc-mongodb-surface-sql-props)))
+                       clutch-db-test-sql-interface-mongodb-password)))
+    (when clutch-db-test-sql-interface-mongodb-props
+      (setq params (plist-put params :props clutch-db-test-sql-interface-mongodb-props)))
     (setq params (plist-put params :surface 'sql-interface))
     params))
 
@@ -4503,18 +4689,18 @@ Skips if `clutch-db-test-jdbc-clickhouse-password' is nil."
            (progn ,@body)
          (clutch-db-disconnect ,var)))))
 
-(defmacro clutch-db-test--with-mongodb-surface-sql (var &rest body)
+(defmacro clutch-db-test--with-sql-interface-mongodb (var &rest body)
   "Execute BODY with VAR bound to a live MongoDB SQL Interface JDBC connection.
-Skips unless `clutch-db-test-jdbc-mongodb-surface-sql-database' and either
-`clutch-db-test-jdbc-mongodb-surface-sql-url' or
-`clutch-db-test-jdbc-mongodb-surface-sql-host' are set."
+Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
+`clutch-db-test-sql-interface-mongodb-url' or
+`clutch-db-test-sql-interface-mongodb-host' are set."
   (declare (indent 1))
-  `(if (not (clutch-db-test--mongodb-surface-sql-live-configured-p))
-       (ert-skip "Set clutch-db-test-jdbc-mongodb-surface-sql-url/host and database to enable MongoDB SQL Interface live tests")
+  `(if (not (clutch-db-test--sql-interface-mongodb-live-configured-p))
+       (ert-skip "Set clutch-db-test-sql-interface-mongodb-url/host and database to enable MongoDB SQL Interface live tests")
      (require 'clutch-db-jdbc)
      (let ((,var (clutch-db-connect
                   'mongodb
-                  (clutch-db-test--mongodb-surface-sql-live-params))))
+                  (clutch-db-test--sql-interface-mongodb-live-params))))
        (unwind-protect
            (progn ,@body)
          (clutch-db-disconnect ,var)))))
@@ -4971,20 +5157,20 @@ Skips unless `clutch-db-test-jdbc-mongodb-surface-sql-database' and either
       (should (listp entries))
       (should (> (length entries) 0)))))
 
-(ert-deftest clutch-db-test-jdbc-mongodb-surface-sql-live-connect ()
-  :tags '(:db-live :jdbc-live :mongodb-surface-sql-live)
+(ert-deftest clutch-db-test-sql-interface-mongodb-live-connect ()
+  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface JDBC connection should return a live conn."
-  (clutch-db-test--with-mongodb-surface-sql conn
+  (clutch-db-test--with-sql-interface-mongodb conn
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "MongoDB"))
     (should (eq (clutch-db-backend-key conn) 'mongodb))
     (should-not (clutch-db-manual-commit-supported-p conn))
     (should-not (clutch-db-manual-commit-p conn))))
 
-(ert-deftest clutch-db-test-jdbc-mongodb-surface-sql-live-query ()
-  :tags '(:db-live :jdbc-live :mongodb-surface-sql-live)
+(ert-deftest clutch-db-test-sql-interface-mongodb-live-query ()
+  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface should execute a read-only SQL Interface query."
-  (clutch-db-test--with-mongodb-surface-sql conn
+  (clutch-db-test--with-sql-interface-mongodb conn
     (let* ((sql "SELECT * FROM [{'n': 1}]")
            (result (clutch-db-query conn sql))
            (rows (clutch-db-result-rows result)))
@@ -4994,10 +5180,10 @@ Skips unless `clutch-db-test-jdbc-mongodb-surface-sql-database' and either
       (should (equal (clutch-db-build-paged-sql conn sql 1 1)
                      "SELECT * FROM [{'n': 1}] LIMIT 1 OFFSET 1")))))
 
-(ert-deftest clutch-db-test-jdbc-mongodb-surface-sql-live-schema ()
-  :tags '(:db-live :jdbc-live :mongodb-surface-sql-live)
+(ert-deftest clutch-db-test-sql-interface-mongodb-live-schema ()
+  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface metadata calls should return list-shaped results."
-  (clutch-db-test--with-mongodb-surface-sql conn
+  (clutch-db-test--with-sql-interface-mongodb conn
     (should (listp (clutch-db-list-table-entries conn)))
     (should (listp (clutch-db-list-schemas conn)))))
 

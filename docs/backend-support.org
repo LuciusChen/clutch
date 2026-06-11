@@ -7,11 +7,11 @@ only by whether a connection can be opened.
 
 | Level | Meaning | Examples |
 |-------+---------+----------|
-| Full SQL support | SQL-first database where clutch targets the normal query, metadata, result grid, completion, pagination, and staged mutation workflows where the backend can provide row identity and transactions. | MySQL, PostgreSQL, SQLite, Oracle, SQL Server |
-| Full SQL model, generic entry | SQL-first database that fits the core clutch model, but currently enters through generic JDBC configuration instead of a dedicated manual backend prompt. | DuckDB |
+| Core SQL support | SQL-first database where clutch targets the normal query, metadata, result grid, completion, pagination, and staged mutation workflows where the backend can provide row identity and transactions. | MySQL, PostgreSQL, SQLite, Oracle, SQL Server |
+| Core SQL model, generic entry | SQL-first database that fits the core clutch model, but currently enters through generic JDBC configuration instead of a dedicated manual backend prompt. | DuckDB |
 | Basic SQL / query-first support | JDBC-backed SQL or SQL-like database where querying and metadata are supported, while edits, transactions, row identity, or dialect behavior may be partial. | ClickHouse, Snowflake, Redshift, DB2, generic JDBC |
 | Basic document support | Non-relational backend with a read-oriented grid/metadata mapping, but not the SQL row-editing model. | MongoDB via =mongodb= |
-| Advanced SQL surface | A SQL/JDBC endpoint for a non-relational database. It is useful only when that product actually provides the SQL surface. | MongoDB SQL Interface via =(:backend mongodb :surface sql-interface)= |
+| SQL Interface surface | A SQL/JDBC endpoint for a non-relational database. It is useful only when that product actually provides the SQL surface. | MongoDB SQL Interface via =(:backend mongodb :surface sql-interface)= |
 | Unsupported / future contract | Databases that need a different UI and backend contract before clutch should claim support. | Redis, Cassandra, Elasticsearch, Couchbase |
 
 * MongoDB Boundary

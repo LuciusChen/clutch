@@ -39,6 +39,7 @@
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--format-value "clutch-ui" (value))
+(declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
 (declare-function clutch--json-value-to-string "clutch-ui" (value))
 (declare-function clutch--result-source-table-or-user-error "clutch-ui" (op))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
@@ -1172,13 +1173,13 @@ All field types use the same delay so feedback timing is consistent."
 
 (defun clutch-result-insert--json-editor-mode ()
   "Select the best available major mode for JSON field editing."
-  (unless (and (fboundp 'json-ts-mode)
-               (condition-case nil
-                   (progn (json-ts-mode) t)
-                 (error nil)))
-    (cond
-     ((fboundp 'js-mode) (js-mode))
-     (t (text-mode)))))
+  (cond
+   ((clutch--json-ts-mode-available-p)
+    (json-ts-mode))
+   ((fboundp 'js-mode)
+    (js-mode))
+   (t
+    (text-mode))))
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.

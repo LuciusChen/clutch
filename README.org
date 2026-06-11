@@ -12,7 +12,8 @@ through Emacs built-in =sqlite-*= functions, MongoDB through the external
 ClickHouse, DuckDB, and generic JDBC URLs through a
 lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
 
-Architecture and module ownership are recorded in [[file:PRD.md][PRD.md]].
+Architecture diagrams are in [[file:docs/architecture.md][docs/architecture.md]], and module ownership is
+recorded in [[file:PRD.md][PRD.md]].
 For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 #+CAPTION: Query console with result pane, value viewer, and footer status.
@@ -22,11 +23,11 @@ For Org-Babel integration, install the separate [[https://github.com/LuciusChen/
 
 | Backend | Support level | Requirements and notes |
 |---------+---------------+------------------------|
-| MySQL | Full SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
-| PostgreSQL | Full SQL support | Functional and compatible, with less daily-use coverage than MySQL |
-| SQLite | Full SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
-| Oracle / SQL Server | Full SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
-| DuckDB | Full SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |
+| MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
+| PostgreSQL | Core SQL support | Functional and compatible, with less daily-use coverage than MySQL |
+| SQLite | Core SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
+| Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
+| DuckDB | Core SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |
 | MongoDB | Basic native document support; optional SQL Interface surface | Normal connections use external =mongodb.el= native protocol support plus Clutch's MongoDB Shell / MQL helper query buffers; SQL Interface endpoints use =:surface sql-interface= and require the JDBC driver |
 | ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Useful through JDBC, with backend-specific limits around edits, transactions, and dialect behavior |
 
@@ -69,8 +70,9 @@ and inject or read a matching row identity.
 
 * Documentation
 
+- [[file:docs/architecture.md][Architecture guide]] — current module layers, backend/surface model, connection flow, query/object flow, and JDBC runtime diagrams.
 - [[file:docs/interactive-client.org][Interactive client guide]] — key bindings, result workflows, object actions, REPL, transient menus, faces, timeouts, and customization.
-- [[file:docs/backend-support.org][Backend support levels]] — Full SQL, basic support, MongoDB SQL Interface, DuckDB, and Redis-style future boundaries.
+- [[file:docs/backend-support.org][Backend support levels]] — Core SQL, basic support, MongoDB SQL Interface, DuckDB, and Redis-style future boundaries.
 - [[file:docs/native-backends.md][Native backend guide]] — MySQL, PostgreSQL, SQLite, SSH tunnels, TLS, timeout behavior, and backend-specific examples.
 - [[file:docs/jdbc-backend.org][JDBC backend guide]] — JDBC driver setup, connection examples, Oracle notes, transaction behavior, and generic JDBC URLs.
 - [[file:docs/org-babel.org][Org-Babel guide]] — =ob-clutch= setup, source block examples, header arguments, and connection caching.
@@ -302,7 +304,8 @@ non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure
 
 Add =:ssh-tunnel direct-first= when the same profile should try a direct
 connection before falling back to SSH.  SSH forwarding applies to structured
-=:host= / =:port= entries; raw JDBC =:url= profiles still need manual tunnels.
+=:host= / =:port= entries; opaque =:url= profiles, including JDBC and MongoDB
+URLs, still need manual tunnels or backend-level transport support.
 Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** TRAMP-aware Connection Origin
@@ -393,16 +396,17 @@ Common entry points:
 MongoDB is basic native document support through =mongodb.el=.  It connects to
 ordinary MongoDB deployments through =mongodb://...= URLs or structured
 =:host= / =:port= params accepted by =mongodb.el=.  It lists collections,
-expands sampled top-level document keys into result columns, maps collection
-indexes into object metadata, and evaluates supported
+samples document field paths for completion and object metadata, maps
+collection indexes into object metadata, and evaluates supported
 MongoDB Shell / MQL helper commands such as
 =db.users.find({active: true}).limit(20)=.
-Collection object actions can describe sampled fields and indexes, browse
-documents, show collection metadata, list indexes, show collection storage
-statistics, and run a sample explain.  They can also show MongoDB collection
-validation rules when a collection has a validator configured.
+Collection object actions can show a schema profile, browse documents, show
+collection metadata, show index insight, show collection storage statistics,
+and run a sample explain.  They can also show MongoDB collection validation
+rules when a collection has a validator configured.
 Field metadata samples up to =clutch-mongodb-schema-sample-size= documents and
-reports sampled BSON type summaries, not enforced collection constraints.
+reports sampled BSON type summaries, presence, examples, and top scalar values,
+not enforced collection constraints.
 It is basic document support, not a full =mongosh= JavaScript runtime.
 For connection examples, query behavior, metadata mapping, and live tests, see
 [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].

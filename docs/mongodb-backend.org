@@ -11,7 +11,7 @@ This is =Basic document support=.  It covers connection setup, helper-based
 query execution, database/collection metadata, top-level document key display,
 and read-only result grids.  It does not expose relational row editing,
 relationship metadata, SQL completion, or the generic manual-commit UI used by
-full SQL backends.
+core SQL backends.
 
 MongoDB SQL Interface is an optional JDBC surface of the same backend:
 
@@ -88,6 +88,12 @@ saved connections, prefer =:pass-entry= and let Clutch resolve it through
 Unauthenticated local MongoDB connections do not need =:user=, =:password=, or
 =:pass-entry=.
 
+SSH tunnels and TRAMP forwarding work with structured =:host= / =:port=
+MongoDB params because those transports only rewrite the TCP endpoint before
+calling =mongodb.el=.  Clutch does not rewrite opaque =mongodb://= or
+=mongodb+srv://= URLs for SSH/TRAMP; URL parsing, SRV, TLS, and effective
+database semantics remain owned by =mongodb.el=.
+
 ** Query Buffers
 
 Native MongoDB query buffers use =clutch-mongodb-mode= from
@@ -95,8 +101,10 @@ Native MongoDB query buffers use =clutch-mongodb-mode= from
 fontifies and completes a supported MongoDB Shell / MQL helper surface, then
 the backend translates those helpers into native =mongodb.el= command calls.
 It keeps the shared execute, object, schema/database, and completion shortcuts,
-but does not bind SQL-only transaction controls or SQL preview.  =C-c ?= opens
-the MongoDB document-console dispatch menu.
+but does not bind SQL-only transaction controls.  =C-c C-p= explains the
+current =find=, =findOne=, or =aggregate= helper and shows formatted JSON with a
+compact execution summary.  =C-c ?= opens the MongoDB document-console dispatch
+menu.
 
 Completion intentionally covers common helper, stage, operator, collection, and
 sampled field names for basic support.  It also offers cursor helper chains
@@ -108,10 +116,13 @@ as the second =find= argument; =find(...).= completion offers =sort()=,
 aggregate command option helpers =allowDiskUse()=, =batchSize()=,
 =maxTimeMS()=, =comment()=, and =explain()=.  Field completion and collection
 metadata sample up to =clutch-mongodb-schema-sample-size= documents, merge
-top-level keys from those documents, and report sampled BSON type summaries.
-They are not MongoDB server-enforced schemas or an exhaustive field catalog;
-long-tail operators can still be typed manually when the backend helper parser
-and =mongodb.el= command layer support the query shape.
+field paths from those documents, and report sampled BSON type summaries.
+Collection-method completion also offers lightweight templates such as
+=find({}).limit(20)=, projected =find=, common =aggregate= skeletons, and a
+=$lookup= skeleton.  These are plain completion candidates, not a separate
+query builder.  They are not MongoDB server-enforced schemas or an exhaustive
+field catalog; long-tail operators can still be typed manually when the backend
+helper parser and =mongodb.el= command layer support the query shape.
 
 Supported helper families include:
 
@@ -141,27 +152,32 @@ Clutch maps MongoDB concepts onto the generic database contract:
 
 - schemas are MongoDB databases
 - tables are collections
-- columns are sampled top-level document keys with sampled BSON type summaries
+- columns are sampled document field paths with sampled BSON type summaries
 - indexes are collection indexes returned by =listIndexes()=
 - nested documents and arrays render as JSON-valued cells
 
 Object actions use the same =C-c C-o= / Embark workflow as SQL backends.  For a
-MongoDB collection, Describe shows a formatted JSON summary with sampled fields
-and collection indexes, Show definition displays =getCollectionInfos({name:
-...})= as JSON, Browse inserts a =db.getCollection(...).find();= helper, List
-indexes executes =listIndexes()=, Show stats displays formatted JSON with
+MongoDB collection, Describe shows a formatted JSON schema profile with sampled
+field paths, presence counts, type counts, examples, top scalar values, and
+collection indexes.  Show definition displays =getCollectionInfos({name:
+...})= as JSON.  Browse inserts a =db.getCollection(...).find({}).limit(20);=
+helper.  Show index insight combines =listIndexes()= definitions with
+=$indexStats= usage data.  Show stats displays formatted JSON with
 collection-level =count=, =avgObjSize=, =storageSize=, =totalIndexSize=,
-=totalSize=, and =indexSizes= values from a =$collStats= aggregation, Explain
-sample query executes
-=find({}).limit(1).explain("executionStats")=, and Show validation displays
-collection =validator= / =validationAction= / =validationLevel= metadata from
-=getCollectionInfos(...)=.  Stats and validation are MongoDB document features;
-Clutch exposes them through the shared object action UI for workflow
-consistency, not as SQL-compatible features or query-result footer fields.
+=totalSize=, and =indexSizes= values from a =$collStats= aggregation.  Explain
+sample query uses the same backend explain path as =C-c C-p= and explains
+=find({}).limit(1)= with =executionStats=.  Show validation displays collection
+=validator= / =validationAction= / =validationLevel= metadata from
+=getCollectionInfos(...)=.  Profile, index insight, stats, explain, and
+validation are MongoDB document features; Clutch exposes them through the
+shared object action UI for workflow consistency, not as SQL-compatible
+features or query-result footer fields.
 
-MongoDB result grids are read-only.  Staged SQL =UPDATE= / =DELETE= workflows,
-SQL-style manual transaction toggles, and row identity editing remain disabled
-for the native document surface.
+MongoDB result grids are read-only.  Nested documents, arrays, and mixed
+scalar/document columns are marked as JSON-valued where the sample shows JSON
+content, so the normal Clutch value viewers can pretty-print them.  Staged SQL
+=UPDATE= / =DELETE= workflows, SQL-style manual transaction toggles, and row
+identity editing remain disabled for the native document surface.
 
 MongoDB SQL Interface is different: it is a JDBC SQL surface selected with
 =:surface sql-interface=, uses SQL query buffers, and requires an endpoint that
@@ -183,5 +199,5 @@ docker run -d --name clutch-mongodb-live -p 27017:27017 mongo:7
 #+end_src
 
 MongoDB SQL Interface JDBC live tests are separate and remain tagged
-=:mongodb-surface-sql-live= because they require an Atlas or Enterprise
+=:sql-interface-mongodb-live= because they require an Atlas or Enterprise
 Advanced SQL Interface endpoint.

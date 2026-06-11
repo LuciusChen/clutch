@@ -500,7 +500,7 @@ fallback:
 |-----+--------|
 | =d= | Describe object |
 | =s= | Show definition |
-| =i= | List indexes (MongoDB collections) |
+| =i= | Show index insight (MongoDB collections) |
 | =e= | Explain sample query (MongoDB collections) |
 | =v= | Show validation (MongoDB collections) |
 | =t= | Show stats (MongoDB collections) |

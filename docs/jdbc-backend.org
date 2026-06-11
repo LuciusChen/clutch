@@ -13,12 +13,12 @@ semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
 
 | Backend symbol | Database              | Support level | Driver auto-install | Default port |
 |----------------+-----------------------+---------------+---------------------+--------------|
-| =oracle=       | Oracle Database       | Full SQL      | Maven Central       | 1521         |
-| =sqlserver=    | Microsoft SQL Server  | Full SQL      | Maven Central       | 1433         |
+| =oracle=       | Oracle Database       | Core SQL      | Maven Central       | 1521         |
+| =sqlserver=    | Microsoft SQL Server  | Core SQL      | Maven Central       | 1433         |
 | =redshift=     | Amazon Redshift       | Basic SQL     | Maven Central       | 5439         |
 | =snowflake=    | Snowflake             | Basic SQL     | Maven Central       | —            |
 | =clickhouse=   | ClickHouse            | Basic SQL     | Maven Central       | 8123         |
-| =mongodb= + =:surface sql-interface= | MongoDB SQL Interface | Advanced SQL surface | Maven Central | 27017 |
+| =mongodb= + =:surface sql-interface= | MongoDB SQL Interface | SQL Interface surface | Maven Central | 27017 |
 | =db2=          | IBM DB2               | Basic SQL     | Manual download     | 50000        |
 
 DuckDB, TiDB, Hive, KingbaseES, and other JDBC-compatible databases
@@ -229,7 +229,7 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
 - Query pagination uses SQL Interface =LIMIT/OFFSET= syntax.
 - Clutch does not expose manual transaction controls for MongoDB JDBC
   connections.
-- Live ERT coverage is tagged =:mongodb-surface-sql-live= and requires a configured
+- Live ERT coverage is tagged =:sql-interface-mongodb-live= and requires a configured
   MongoDB SQL Interface endpoint.  A local community =mongod= container is not
   enough because this backend talks to the SQL Interface JDBC surface.  Use
   =mongodb= live coverage for ordinary local containers.
@@ -237,11 +237,11 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
 
   #+begin_src sh
   emacs -Q --batch -L . -L test -l ert -l clutch-db-test \
-    --eval '(setq clutch-db-test-jdbc-mongodb-surface-sql-url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
-                  clutch-db-test-jdbc-mongodb-surface-sql-database "analytics"
-                  clutch-db-test-jdbc-mongodb-surface-sql-user "reporter"
-                  clutch-db-test-jdbc-mongodb-surface-sql-password "secret")' \
-    --eval "(ert-run-tests-batch-and-exit '(tag :mongodb-surface-sql-live))"
+    --eval '(setq clutch-db-test-sql-interface-mongodb-url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
+                  clutch-db-test-sql-interface-mongodb-database "analytics"
+                  clutch-db-test-sql-interface-mongodb-user "reporter"
+                  clutch-db-test-sql-interface-mongodb-password "secret")' \
+    --eval "(ert-run-tests-batch-and-exit '(tag :sql-interface-mongodb-live))"
   #+end_src
 
 ** Staged Mutation Row Identity

@@ -91,6 +91,38 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
    `((:connect-timeout . ,clutch-connect-timeout-seconds)
      (:read-idle-timeout . ,clutch-read-idle-timeout-seconds))))
 
+(defun clutch-db-mysql--normalize-ssl-mode (ssl-mode)
+  "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
+  (pcase (clutch-db--normalize-symbol-option ssl-mode)
+    ('nil nil)
+    ((or 'disabled 'off) 'disabled)
+    (_
+     (signal 'clutch-db-error
+             (list (format "Unsupported MySQL :ssl-mode %S (supported: disabled)" ssl-mode))))))
+
+(defun clutch-db-mysql--normalize-connect-params (params)
+  "Return PARAMS normalized for the MySQL backend."
+  (let* ((params (copy-sequence params))
+         (tls-specified-p (plist-member params :tls))
+         (tls (plist-get params :tls))
+         (ssl-mode (clutch-db-mysql--normalize-ssl-mode
+                    (plist-get params :ssl-mode)))
+         (tls-mode (cond
+                    (ssl-mode 'disable)
+                    (tls-specified-p (if tls 'require 'disable))
+                    (t 'default))))
+    (when ssl-mode
+      (setq params (plist-put params :ssl-mode ssl-mode)))
+    (when (and ssl-mode tls-specified-p tls)
+      (signal 'clutch-db-error
+              (list "Conflicting MySQL TLS options: :tls t cannot be combined with :ssl-mode disabled")))
+    (setq params (plist-put params :clutch-tls-mode tls-mode))
+    (when (and tls-specified-p (null tls))
+      ;; Canonicalize the generic plaintext shortcut to MySQL's explicit name.
+      (setq params (plist-put params :ssl-mode 'disabled))
+      (cl-remf params :tls))
+    params))
+
 (defun clutch-db-mysql--wire-connect-args (params)
   "Return PARAMS with clutch-only keys removed for `mysql-connect'."
   (cl-loop for (key value) on params by #'cddr
@@ -386,20 +418,6 @@ ORDER BY TABLE_NAME"))
                            (mysql-escape-identifier table)))))
       (mapcar #'car (mysql-result-rows result)))))
 
-(cl-defmethod clutch-db-show-create-table ((conn mysql-conn) table)
-  "Return DDL for TABLE on MySQL CONN."
-  (clutch-db--translate-library-error mysql-error
-    (let* ((result (mysql-query
-                    conn
-                    (format "SHOW CREATE TABLE %s"
-                            (mysql-escape-identifier table))))
-           (rows (mysql-result-rows result)))
-      (unless rows
-        (signal 'clutch-db-error
-                (list (format "SHOW CREATE TABLE returned no rows for %s" table))))
-      (pcase-let ((`(,_ ,ddl) (car rows)))
-        ddl))))
-
 (cl-defmethod clutch-db-list-objects ((conn mysql-conn) category)
   "Return object entry plists for CATEGORY on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
@@ -524,32 +542,48 @@ ORDER BY ORDINAL_POSITION"
          (nth 2 row)))
       (_ nil))))
 
-(cl-defmethod clutch-db-show-create-object ((conn mysql-conn) entry)
-  "Return DDL text for MySQL non-table ENTRY on CONN."
+(cl-defmethod clutch-db-object-definition ((conn mysql-conn) entry)
+  "Return definition or source text for MySQL object ENTRY on CONN."
   (clutch-db--translate-library-error mysql-error
-    (pcase (upcase (or (plist-get entry :type) ""))
-      ("VIEW"
-       (let* ((result (mysql-query
-                       conn
-                       (format "SHOW CREATE VIEW %s"
-                               (mysql-escape-identifier (plist-get entry :name)))))
-              (row (car (mysql-result-rows result))))
-         (nth 1 row)))
-      ("INDEX"
-       (let* ((details (clutch-db-object-details conn entry))
-              (columns (mapconcat
-                        (lambda (col)
-                          (format "%s %s"
-                                  (mysql-escape-identifier (plist-get col :name))
-                                  (plist-get col :descend)))
-                        details
-                        ", ")))
-         (format "CREATE %sINDEX %s ON %s (%s);"
-                 (if (plist-get entry :unique) "UNIQUE " "")
-                 (mysql-escape-identifier (plist-get entry :name))
-                 (mysql-escape-identifier (plist-get entry :target-table))
-                 columns)))
-      (_ nil))))
+    (let ((type (upcase (or (plist-get entry :type) "")))
+          (name (plist-get entry :name)))
+      (pcase type
+        ("TABLE"
+         (let* ((result (mysql-query
+                         conn
+                         (format "SHOW CREATE TABLE %s"
+                                 (mysql-escape-identifier name))))
+                (rows (mysql-result-rows result)))
+           (unless rows
+             (signal 'clutch-db-error
+                     (list (format "SHOW CREATE TABLE returned no rows for %s"
+                                   name))))
+           (pcase-let ((`(,_ ,ddl) (car rows)))
+             ddl)))
+        ((or "PROCEDURE" "FUNCTION" "TRIGGER")
+         (clutch-db-object-source conn entry))
+        ("VIEW"
+         (let* ((result (mysql-query
+                         conn
+                         (format "SHOW CREATE VIEW %s"
+                                 (mysql-escape-identifier name))))
+                (row (car (mysql-result-rows result))))
+           (nth 1 row)))
+        ("INDEX"
+         (let* ((details (clutch-db-object-details conn entry))
+                (columns (mapconcat
+                          (lambda (col)
+                            (format "%s %s"
+                                    (mysql-escape-identifier (plist-get col :name))
+                                    (plist-get col :descend)))
+                          details
+                          ", ")))
+           (format "CREATE %sINDEX %s ON %s (%s);"
+                   (if (plist-get entry :unique) "UNIQUE " "")
+                   (mysql-escape-identifier name)
+                   (mysql-escape-identifier (plist-get entry :target-table))
+                   columns)))
+        (_ nil)))))
 
 (cl-defmethod clutch-db-table-comment ((conn mysql-conn) table)
   "Return the comment for TABLE on MySQL CONN, or nil if empty."

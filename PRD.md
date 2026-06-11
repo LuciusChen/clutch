@@ -39,6 +39,10 @@ boundaries.  UI/workflow modules depend on the `clutch-backend.el` facade, while
 backend adapters contain database-specific integration, SQL dialect, and
 metadata behavior.
 
+Current architecture diagrams are maintained in
+[`docs/architecture.md`](docs/architecture.md). This section keeps the module
+ownership summary.
+
 ```
 clutch.el
   package entry, customization, public commands, mode assembly
@@ -107,23 +111,23 @@ user queries on the same JDBC session.
 
 | Backend | Support Level | Emacs Version | Implementation | Notes |
 |---------|---------------|---------------|----------------|-------|
-| **MySQL** | Full SQL support | 29.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
-| **PostgreSQL** | Full SQL support | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
-| **SQLite** | Full SQL support | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
+| **MySQL** | Core SQL support | 29.1+ | `mysql` | External pure Elisp protocol package; supports MySQL 5.6+, 8.0+, MariaDB 10.11+ |
+| **PostgreSQL** | Core SQL support | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
+| **SQLite** | Core SQL support | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 | **MongoDB** | Basic native document support | 29.1+ | `mongodb.el` | Ordinary local `mongodb://` deployments; query buffers use supported MongoDB Shell / MQL helper syntax, not SQL or arbitrary JavaScript |
 
 ### JDBC Backends (via JVM Sidecar)
 
 | Backend | Support Level | Driver | Version | Source |
 |---------|---------------|--------|---------|--------|
-| **Oracle** | Full SQL support | `ojdbc8` | 19.21.0.0 | Maven Central (auto-download) |
+| **Oracle** | Core SQL support | `ojdbc8` | 19.21.0.0 | Maven Central (auto-download) |
 | **Oracle i18n** | Companion driver | `orai18n` | 21.13.0.0 | Maven Central (optional, for non-ASCII) |
-| **SQL Server** | Full SQL support | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
+| **SQL Server** | Core SQL support | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
 | **Snowflake** | Basic SQL / query-first support | `snowflake-jdbc` | 3.14.4 | Maven Central (auto-download) |
 | **Amazon Redshift** | Basic SQL / query-first support | `redshift-jdbc42` | 2.1.0.30 | Maven Central (auto-download) |
 | **ClickHouse** | Basic SQL / query-first support | `clickhouse-jdbc` | 0.9.8:all | Maven Central (auto-download) |
-| **DuckDB** | Full SQL model, generic JDBC entry | `duckdb_jdbc` | 1.5.3.0 | Maven Central (auto-download; connect through generic JDBC URL) |
-| **MongoDB SQL Interface surface** | Advanced basic SQL surface | `mongodb-jdbc` | 3.0.6:all | Maven Central (connect with `:backend mongodb :surface sql-interface`; requires JDBC sidecar and driver jar) |
+| **DuckDB** | Core SQL model, generic JDBC entry | `duckdb_jdbc` | 1.5.3.0 | Maven Central (auto-download; connect through generic JDBC URL) |
+| **MongoDB SQL Interface surface** | SQL Interface surface | `mongodb-jdbc` | 3.0.6:all | Maven Central (connect with `:backend mongodb :surface sql-interface`; requires JDBC sidecar and driver jar) |
 | **DB2** | Basic SQL / query-first support | `db2jcc4` | — | Manual installation from IBM |
 | **Generic JDBC** | Basic SQL / query-first support | any | — | Drop jar into `clutch-jdbc-agent-dir/drivers/` |
 

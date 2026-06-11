@@ -15,7 +15,6 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
-(require 'json)
 (require 'sql)
 (require 'subr-x)
 (require 'transient)
@@ -50,7 +49,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
-(declare-function clutch-jdbc--mongodb-conn-p "clutch-db-jdbc" (conn))
+(declare-function clutch-jdbc-conn-p "clutch-db-jdbc" (conn))
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
@@ -59,6 +58,8 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
 (declare-function clutch--icon-with-face "clutch-ui"
                   (name fallback face &rest icon-args))
+(declare-function clutch--json-display-mode "clutch-ui" ())
+(declare-function clutch--json-metadata-text "clutch-ui" (text))
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--query-buffer-p "clutch-connection" ())
@@ -73,7 +74,6 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
 (declare-function clutch--warn-completion-metadata-error-once "clutch-schema" (message-text))
 (declare-function clutch--warn-schema-cache-state "clutch-schema" (&optional conn))
-(declare-function clutch-mongodb-mode "clutch-document" ())
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
   "Return non-nil when ENTRY is permitted by ALLOWED-TYPES.
@@ -961,6 +961,14 @@ when the real object schema is unavailable."
        (list name))
      ".")))
 
+(defun clutch--use-object-action-keymap ()
+  "Install object action keys on top of the current local map."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map (current-local-map))
+    (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
+    (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
+    (use-local-map map)))
+
 (defun clutch--show-object-text-buffer
     (conn entry text &optional params product title-suffix)
   "Display TEXT for ENTRY using CONN's object definition mode.
@@ -977,16 +985,13 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
          (buf (get-buffer-create (format "*clutch: %s*" title))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
-        (if (clutch--mongodb-document-conn-p conn)
-            (progn
-              (require 'clutch-document)
-              (clutch-mongodb-mode))
+        (if (clutch--document-surface-conn-p conn)
+            (clutch--json-display-mode)
           (sql-mode)
           (sql-set-product product))
         (clutch--bind-connection-context conn params product)
         (setq-local clutch-browser-current-object entry)
-        (local-set-key (kbd "C-c C-o") #'clutch-act-dwim)
-        (local-set-key (kbd "C-c C-d") #'clutch-describe-dwim)
+        (clutch--use-object-action-keymap)
         (erase-buffer)
         (insert text)
         (insert "\n")
@@ -994,25 +999,6 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
         (setq buffer-read-only t)
         (goto-char (point-min))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
-
-(defun clutch--object-json-metadata-text (text)
-  "Return TEXT pretty-printed as JSON metadata."
-  (ignore (json-parse-string text))
-  (with-temp-buffer
-    (insert text)
-    (json-pretty-print-buffer)
-    (string-trim-right (buffer-string))))
-
-(defun clutch--object-definition-text (conn entry)
-  "Return the definition text for ENTRY on CONN."
-  (let ((type (upcase (or (plist-get entry :type) ""))))
-    (pcase type
-      ((or "PROCEDURE" "FUNCTION" "TRIGGER")
-       (clutch-db-object-source conn entry))
-      ((or "TABLE" "COLLECTION")
-       (clutch-db-show-create-table conn (plist-get entry :name)))
-      (_
-       (clutch-db-show-create-object conn entry)))))
 
 (defun clutch--object-type-string (entry)
   "Return ENTRY's object type string, defaulting to OBJECT."
@@ -1172,89 +1158,24 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
                       "")))
           indexes))
 
-(defun clutch--object-json-bool (value)
-  "Return VALUE as an Emacs JSON boolean."
-  (if value t :false))
-
-(defun clutch--object-json-field (field)
-  "Return a JSON-serializable MongoDB describe field object for FIELD."
-  (if (plist-get field :name)
-      (let ((category (plist-get field :type-category)))
-        (delq nil
-              `((name . ,(plist-get field :name))
-                ,(when (plist-get field :type)
-                   `(type . ,(plist-get field :type)))
-                ,(when category
-                   `(typeCategory . ,(format "%s" category)))
-                ,(when (plist-member field :nullable)
-                   `(nullable . ,(clutch--object-json-bool
-                                  (plist-get field :nullable))))
-                ,(when (plist-get field :comment)
-                   `(comment . ,(plist-get field :comment))))))
-    `((name . ,(format "%s" field)))))
-
-(defun clutch--object-json-index (index)
-  "Return a JSON-serializable MongoDB describe index object for INDEX."
-  (delq nil
-        `((name . ,(plist-get index :name))
-          ,(when (plist-get index :target-table)
-             `(collection . ,(plist-get index :target-table)))
-          ,(when (plist-member index :unique)
-             `(unique . ,(clutch--object-json-bool
-                          (plist-get index :unique)))))))
-
-(defun clutch--object-json-index-key (column)
-  "Return a JSON-serializable MongoDB index key object for COLUMN."
-  (delq nil
-        `((name . ,(plist-get column :name))
-          ,(when (plist-get column :position)
-             `(position . ,(plist-get column :position)))
-          ,(when (plist-get column :descend)
-             `(direction . ,(plist-get column :descend))))))
-
-(defun clutch--object-describe-json-document (conn entry)
-  "Return a JSON-serializable MongoDB describe document for ENTRY on CONN."
-  (let ((name (plist-get entry :name))
-        (type (clutch--object-type-string entry)))
-    (pcase type
-      ("COLLECTION"
-       (let* ((details (or (clutch--ensure-column-details conn name t)
-                           (clutch-db-list-columns conn name)))
-              (indexes (clutch--object-related-entries conn entry "INDEX" t)))
-         (delq nil
-               `((name . ,name)
-                 (type . ,type)
-                 ,(when (plist-get entry :schema)
-                    `(database . ,(plist-get entry :schema)))
-                 (fields . ,(vconcat (mapcar #'clutch--object-json-field
-                                              details)))
-                 (indexes . ,(vconcat (mapcar #'clutch--object-json-index
-                                               indexes)))))))
-      ("INDEX"
-       (let ((keys (clutch-db-object-details conn entry)))
-         (delq nil
-               `((name . ,name)
-                 (type . ,type)
-                 ,(when (plist-get entry :target-table)
-                    `(collection . ,(plist-get entry :target-table)))
-                 ,(when (plist-member entry :unique)
-                    `(unique . ,(clutch--object-json-bool
-                                 (plist-get entry :unique))))
-                 (keys . ,(vconcat (mapcar #'clutch--object-json-index-key
-                                            keys)))))))
-      (_
-       (delq nil
-             `((name . ,name)
-               (type . ,type)
-               ,(when (plist-get entry :schema)
-                  `(database . ,(plist-get entry :schema)))))))))
-
 (defun clutch--object-describe-json-text (conn entry)
-  "Return pretty JSON describe text for MongoDB ENTRY on CONN."
-  (clutch--object-json-metadata-text
-   (clutch--json-serialize-text
-    (clutch--object-describe-json-document conn entry)
-    "MongoDB object description")))
+  "Return pretty JSON describe text for document-backend ENTRY on CONN."
+  (let* ((type (clutch--object-type-string entry))
+         (name (plist-get entry :name))
+         (text (pcase type
+                 ("COLLECTION"
+                  (clutch-db-collection-profile conn name))
+                 (_
+                  (clutch-db-object-definition conn entry)))))
+    (clutch--json-metadata-text
+     (or text
+         (clutch--json-serialize-text
+          (delq nil
+                `((name . ,name)
+                  (type . ,type)
+                  ,(when (plist-get entry :schema)
+                     `(database . ,(plist-get entry :schema)))))
+          "document object description")))))
 
 (defun clutch--object-describe-sections (conn entry)
   "Return describe sections for ENTRY on CONN."
@@ -1309,7 +1230,7 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
 
 (defun clutch--object-describe-text (conn entry)
   "Return describe text for ENTRY on CONN."
-  (if (clutch--mongodb-document-conn-p conn)
+  (if (clutch--document-surface-conn-p conn)
       (clutch--object-describe-json-text conn entry)
     (let* ((header (format "%s (%s)"
                            (clutch--object-fqname entry)
@@ -1364,8 +1285,15 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
 
 (defun clutch--render-object-describe (conn entry &optional params product)
   "Render describe content for ENTRY using CONN."
-  (let ((inhibit-read-only t))
-    (clutch-describe-mode)
+  (let ((inhibit-read-only t)
+        (json-metadata-p (clutch--document-surface-conn-p conn)))
+    (if json-metadata-p
+        (progn
+          (clutch--json-display-mode)
+          (clutch--use-object-action-keymap)
+          (local-set-key (kbd "s") #'clutch-object-show-ddl-or-source)
+          (local-set-key (kbd "g") #'clutch-describe-refresh))
+      (clutch-describe-mode))
     (clutch--bind-connection-context conn params product)
     (setq-local clutch-browser-current-object entry
                 clutch--describe-object-entry entry
@@ -1383,7 +1311,10 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
     (erase-buffer)
     (insert (clutch--object-describe-text conn entry))
     (insert "\n")
-    (clutch--fontify-object-describe)
+    (if json-metadata-p
+        (font-lock-ensure)
+      (clutch--fontify-object-describe))
+    (setq buffer-read-only t)
     (goto-char (point-min))))
 
 (defun clutch--show-object-describe-buffer (conn entry &optional params product)
@@ -1470,11 +1401,11 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
       (user-error "%s %s does not expose a definition"
                   type name))
     (clutch--with-object-error-capture source-buffer conn entry "show-definition"
-      (let ((text (clutch--object-definition-text conn entry)))
+      (let ((text (clutch-db-object-definition conn entry)))
         (unless text
           (user-error "DDL/source unavailable for %s %s" type name))
-        (when (clutch--mongodb-document-conn-p conn)
-          (setq text (clutch--object-json-metadata-text text)))
+        (when (clutch--document-surface-conn-p conn)
+          (setq text (clutch--json-metadata-text text)))
         (clutch--remember-current-object entry)
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
@@ -1499,25 +1430,24 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
 
 (defun clutch--object-browse-query (conn entry)
   "Return a query-console browse query for ENTRY on CONN."
-  (if (clutch--mongodb-document-conn-p conn)
-      (format "db.getCollection(%s).find();"
-              (clutch--json-serialize-text
-               (plist-get entry :name)
-               "MongoDB collection name"))
-    (format "SELECT * FROM %s;"
-            (clutch--object-sql-name conn entry))))
+  (or (clutch-db-object-browse-query conn entry)
+      (if (clutch--document-surface-conn-p conn)
+          (user-error "Document backend %s does not provide object browse queries"
+                      (clutch--backend-key-from-conn conn))
+        (format "SELECT * FROM %s;"
+                (clutch--object-sql-name conn entry)))))
+
+(defun clutch--document-surface-conn-p (conn)
+  "Return non-nil when CONN uses a native document database surface."
+  (and (eq (clutch-backend-data-model (clutch--backend-key-from-conn conn))
+           'document)
+       (not (and (fboundp 'clutch-jdbc-conn-p)
+                 (clutch-jdbc-conn-p conn)))))
 
 (defun clutch--mongodb-document-conn-p (conn)
-  "Return non-nil when CONN uses MongoDB's document query surface."
+  "Return non-nil when CONN uses MongoDB's native document surface."
   (and (eq (clutch--backend-key-from-conn conn) 'mongodb)
-       (not (clutch--mongodb-surface-sql-conn-p conn))))
-
-(defun clutch--mongodb-surface-sql-conn-p (conn)
-  "Return non-nil when CONN is the MongoDB SQL Interface JDBC surface."
-  (and (fboundp 'clutch-jdbc--mongodb-conn-p)
-       (condition-case nil
-           (clutch-jdbc--mongodb-conn-p conn)
-         (error nil))))
+       (clutch--document-surface-conn-p conn)))
 
 (defun clutch--mongodb-collection-query (entry method)
   "Return a MongoDB helper query for ENTRY collection METHOD."
@@ -1543,21 +1473,29 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
           :connection conn)))
 
 ;;;###autoload
-(defun clutch-object-list-indexes (&optional entry)
-  "List MongoDB indexes for collection ENTRY."
+(defun clutch-object-show-index-insight (&optional entry)
+  "Show MongoDB index definitions and usage insight for collection ENTRY."
   (interactive)
   (let* ((entry (or entry
                     (clutch--resolve-object-entry
-                     "List indexes for collection: " t nil
+                     "Show index insight for collection: " t nil
                      '("COLLECTION"))))
-         (context (clutch--mongodb-object-action-context entry "List indexes"))
+         (context (clutch--mongodb-object-action-context
+                   entry "Show index insight"))
          (conn (plist-get context :connection))
          (source-buffer (plist-get context :source-buffer)))
     (clutch--remember-current-object entry)
-    (clutch--with-object-error-capture source-buffer conn entry "list-indexes"
-      (clutch--execute
-       (clutch--mongodb-collection-query entry "listIndexes()")
-       conn))))
+    (clutch--with-object-error-capture source-buffer conn entry "index-insight"
+      (let ((text (clutch-db-collection-index-insight
+                   conn (plist-get entry :name))))
+        (unless text
+          (user-error "Index insight unavailable for %s"
+                      (clutch--object-display-name entry)))
+        (setq text (clutch--json-metadata-text text))
+        (clutch--show-object-text-buffer conn entry text
+                                         (plist-get context :params)
+                                         (plist-get context :product)
+                                         "index insight")))))
 
 ;;;###autoload
 (defun clutch-object-explain-sample-query (&optional entry)
@@ -1569,13 +1507,17 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
          (context (clutch--mongodb-object-action-context
                    entry "Explain sample query"))
          (conn (plist-get context :connection))
-         (source-buffer (plist-get context :source-buffer)))
+         (source-buffer (plist-get context :source-buffer))
+         (query (clutch--mongodb-collection-query
+                 entry "find({}).limit(1)")))
     (clutch--remember-current-object entry)
     (clutch--with-object-error-capture source-buffer conn entry "explain-sample"
-      (clutch--execute
-       (clutch--mongodb-collection-query
-        entry "find({}).limit(1).explain(\"executionStats\")")
-       conn))))
+      (let ((text (clutch-db-explain-query conn query)))
+        (setq text (clutch--json-metadata-text text))
+        (clutch--show-object-text-buffer conn entry text
+                                         (plist-get context :params)
+                                         (plist-get context :product)
+                                         "explain")))))
 
 ;;;###autoload
 (defun clutch-object-show-validation (&optional entry)
@@ -1596,7 +1538,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
         (unless text
           (user-error "Validation metadata unavailable for %s"
                       (clutch--object-display-name entry)))
-        (setq text (clutch--object-json-metadata-text text))
+        (setq text (clutch--json-metadata-text text))
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
                                          (plist-get context :product)
@@ -1621,7 +1563,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
         (unless text
           (user-error "Collection stats unavailable for %s"
                       (clutch--object-display-name entry)))
-        (setq text (clutch--object-json-metadata-text text))
+        (setq text (clutch--json-metadata-text text))
         (clutch--show-object-text-buffer conn entry text
                                          (plist-get context :params)
                                          (plist-get context :product)
@@ -1799,10 +1741,10 @@ passed to the fallback reader."
      :label "Browse rows"
      :command clutch-object-browse
      :predicate clutch--table-like-entry-p)
-    (:id list-indexes
+    (:id index-insight
      :key "i"
-     :label "List indexes"
-     :command clutch-object-list-indexes
+     :label "Show index insight"
+     :command clutch-object-show-index-insight
      :predicate clutch--mongodb-collection-entry-p)
     (:id explain-sample
      :key "e"
@@ -1912,11 +1854,11 @@ passed to the fallback reader."
   (interactive)
   (clutch--run-object-action (clutch--object-action-target) 'jump-target))
 
-(transient-define-suffix clutch--object-act-list-indexes ()
-  "List indexes for the current MongoDB collection action target."
+(transient-define-suffix clutch--object-act-index-insight ()
+  "Show index insight for the current MongoDB collection action target."
   :inapt-if #'clutch--object-act-mongodb-collection-inapt-p
   (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'list-indexes))
+  (clutch--run-object-action (clutch--object-action-target) 'index-insight))
 
 (transient-define-suffix clutch--object-act-explain-sample ()
   "Explain a sample query for the current MongoDB collection action target."
@@ -1955,8 +1897,8 @@ passed to the fallback reader."
      clutch--object-act-show-definition)]
    ["Document"
     :if clutch--object-act-mongodb-collection-p
-    ("i" (lambda () (clutch--object-action-label 'list-indexes))
-     clutch--object-act-list-indexes)
+    ("i" (lambda () (clutch--object-action-label 'index-insight))
+     clutch--object-act-index-insight)
     ("e" (lambda () (clutch--object-action-label 'explain-sample))
      clutch--object-act-explain-sample)
     ("v" (lambda () (clutch--object-action-label 'show-validation))
@@ -2046,7 +1988,7 @@ When PREDICATE is non-nil, keep only action specs matching it."
   '((clutch-object-default-action . "Default action")
     (clutch-object-describe . "Describe object")
     (clutch-object-show-ddl-or-source . "Show definition")
-    (clutch-object-list-indexes . "List indexes")
+    (clutch-object-show-index-insight . "Show index insight")
     (clutch-object-explain-sample-query . "Explain sample query")
     (clutch-object-show-validation . "Show validation")
     (clutch-object-show-stats . "Show stats")

@@ -65,6 +65,10 @@ the named host in `~/.ssh/config` before the native backend connects by default.
 The database `:host` / `:port` remain the remote endpoint as seen from the
 bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT`
 internally.
+This transport layer only rewrites structured `:host` / `:port` connection
+params.  Opaque `:url` profiles, including JDBC URLs and MongoDB
+`mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level
+transport support.
 Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be
 directly reachable on some machines; clutch tries that route briefly and falls
 back to SSH when the TCP endpoint is not reachable or the direct database

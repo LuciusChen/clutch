@@ -668,11 +668,11 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
   (pcase backend
     ((or 'pg 'postgresql) 'pg)
     ((or 'mysql 'mariadb) 'mysql)
-    ((or 'mongodb 'mongodb) 'mongodb)
+    ('mongodb 'mongodb)
     (_ (and (memq backend (clutch-backends t)) backend))))
 
-(defun clutch--mongodb-surface-sql-params-p (params)
-  "Return non-nil when PARAMS select MongoDB SQL Interface."
+(defun clutch--sql-interface-surface-params-p (params)
+  "Return non-nil when PARAMS select the SQL Interface surface."
   (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
         '(sql sql-interface)))
 
@@ -915,7 +915,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (let ((backend (clutch--backend-key-from-params params)))
     (or (clutch--jdbc-backend-p backend)
         (and (eq backend 'mongodb)
-             (clutch--mongodb-surface-sql-params-p params)))))
+             (clutch--sql-interface-surface-params-p params)))))
 
 (defun clutch--params-nonempty-user-p (params)
   "Return non-nil when PARAMS contain a non-empty :user value."
@@ -1383,14 +1383,16 @@ transport."
      transport-name))
   (when (plist-get params :url)
     (user-error
-     "%s currently requires structured :host/:port params, not :url"
+     "Structured forwarding via %s requires :host/:port params, not :url"
      transport-name))
   (unless (plist-get params :host)
-    (user-error "%s requires :host for the remote database endpoint"
-                        transport-name))
+    (user-error
+     "Structured forwarding via %s requires :host for the remote database endpoint"
+     transport-name))
   (unless (plist-get params :port)
-    (user-error "%s requires :port for the remote database endpoint"
-                        transport-name)))
+    (user-error
+     "Structured forwarding via %s requires :port for the remote database endpoint"
+     transport-name)))
 
 (defun clutch--ssh-local-port-open-p (port)
   "Return non-nil when localhost PORT accepts TCP connections."
@@ -1842,7 +1844,7 @@ port and TRANSPORT contains the live process metadata."
   "Return CONNECT-PARAMS with short provisional timeouts for BACKEND."
   (let* ((jdbc (or (clutch--jdbc-backend-p backend)
                    (and (eq backend 'mongodb)
-                        (clutch--mongodb-surface-sql-params-p connect-params))))
+                        (clutch--sql-interface-surface-params-p connect-params))))
          (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
          (params (copy-sequence connect-params))
          (connect-timeout (plist-get params :connect-timeout))

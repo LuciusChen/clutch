@@ -71,6 +71,57 @@
      (:read-idle-timeout . ,clutch-read-idle-timeout-seconds)
      (:query-timeout . ,clutch-query-timeout-seconds))))
 
+(defun clutch-db-pg--normalize-sslmode (sslmode)
+  "Return canonical PostgreSQL SSLMODE, or signal `clutch-db-error'."
+  (pcase (clutch-db--normalize-symbol-option sslmode)
+    ('nil nil)
+    ((or 'disable 'prefer 'require 'verify-full)
+     (clutch-db--normalize-symbol-option sslmode))
+    (_
+     (signal 'clutch-db-error
+             (list (format
+                    "Unsupported PostgreSQL :sslmode %S (supported: disable, prefer, require, verify-full)"
+                    sslmode))))))
+
+(defun clutch-db-pg--normalize-connect-params (params)
+  "Return PARAMS normalized for the PostgreSQL backend."
+  (let* ((params (copy-sequence params))
+         (tls-specified-p (plist-member params :tls))
+         (tls (plist-get params :tls))
+         (sslmode (clutch-db-pg--normalize-sslmode
+                   (plist-get params :sslmode)))
+         (tls-mode (pcase sslmode
+                     ((or 'disable 'prefer) sslmode)
+                     ((or 'require 'verify-full) 'require)
+                     (_ (if tls-specified-p
+                            (if tls 'require 'disable)
+                          'default)))))
+    (pcase sslmode
+      ('disable
+       (when (and tls-specified-p tls)
+         (signal 'clutch-db-error
+                 (list "Conflicting PostgreSQL TLS options: :tls t cannot be combined with :sslmode disable"))))
+      ('prefer
+       (when tls-specified-p
+         (signal 'clutch-db-error
+                 (list "Conflicting PostgreSQL TLS options: :sslmode prefer cannot be combined with :tls"))))
+      ((or 'require 'verify-full)
+       (when (and tls-specified-p (null tls))
+         (signal 'clutch-db-error
+                 (list (format "Conflicting PostgreSQL TLS options: :tls nil cannot be combined with :sslmode %s"
+                               sslmode))))))
+    (setq params (plist-put params :clutch-tls-mode tls-mode))
+    (cond
+     (sslmode
+      (setq params (plist-put params :sslmode sslmode))
+      (when tls-specified-p
+        (cl-remf params :tls)))
+     (tls-specified-p
+      ;; Canonicalize the generic boolean shortcut to PostgreSQL's official name.
+      (setq params (plist-put params :sslmode (if tls 'require 'disable)))
+      (cl-remf params :tls)))
+    params))
+
 ;;;; OID → type-category mapping
 
 (defconst clutch-db-pg--oid-bool 16)
@@ -733,26 +784,6 @@ ORDER BY ordinal_position"
         (push (format "DEFAULT %s" default-val) parts))
       (format "    %s" (mapconcat #'identity (nreverse parts) " ")))))
 
-(cl-defmethod clutch-db-show-create-table ((conn pgcon) table)
-  "Return synthesized DDL for TABLE on PostgreSQL CONN.
-PostgreSQL has no SHOW CREATE TABLE, so we build DDL from
-information_schema."
-  (clutch-db--translate-library-error pg-error
-    (let* ((cols-result
-            (pg-exec
-             conn
-             (format "SELECT column_name, data_type, \
-character_maximum_length, column_default, is_nullable \
-FROM information_schema.columns \
-WHERE table_name = %s AND table_schema = current_schema() \
-ORDER BY ordinal_position"
-                     (pg-escape-literal table))))
-           (lines (mapcar #'clutch-db-pg--format-column-ddl
-                          (clutch-db-pg--rows cols-result))))
-      (format "CREATE TABLE %s (\n%s\n);"
-              (pg-escape-identifier table)
-              (mapconcat #'identity lines ",\n")))))
-
 (cl-defmethod clutch-db-list-objects ((conn pgcon) category)
   "Return object entry plists for CATEGORY on PostgreSQL CONN."
   (clutch-db--translate-library-error pg-error
@@ -925,43 +956,62 @@ ORDER BY position" oid)))
                 (pg-exec conn (format "SELECT pg_get_triggerdef(%s::oid, true)" oid)))))
         (_ nil)))))
 
-(cl-defmethod clutch-db-show-create-object ((conn pgcon) entry)
-  "Return DDL text for PostgreSQL non-table ENTRY on CONN."
+(cl-defmethod clutch-db-object-definition ((conn pgcon) entry)
+  "Return definition or source text for PostgreSQL object ENTRY on CONN."
   (clutch-db--translate-library-error pg-error
-    (pcase (upcase (or (plist-get entry :type) ""))
-      ("INDEX"
-       (caar (clutch-db-pg--rows
-              (pg-exec
-               conn
-               (format "SELECT pg_get_indexdef(idx.oid)
+    (let ((type (upcase (or (plist-get entry :type) "")))
+          (name (plist-get entry :name)))
+      (pcase type
+        ("TABLE"
+         (let* ((cols-result
+                 (pg-exec
+                  conn
+                  (format "SELECT column_name, data_type, \
+character_maximum_length, column_default, is_nullable \
+FROM information_schema.columns \
+WHERE table_name = %s AND table_schema = current_schema() \
+ORDER BY ordinal_position"
+                          (pg-escape-literal name))))
+                (lines (mapcar #'clutch-db-pg--format-column-ddl
+                               (clutch-db-pg--rows cols-result))))
+           (format "CREATE TABLE %s (\n%s\n);"
+                   (pg-escape-identifier name)
+                   (mapconcat #'identity lines ",\n"))))
+        ((or "PROCEDURE" "FUNCTION" "TRIGGER")
+         (clutch-db-object-source conn entry))
+        ("INDEX"
+         (caar (clutch-db-pg--rows
+                (pg-exec
+                 conn
+                 (format "SELECT pg_get_indexdef(idx.oid)
 FROM pg_class idx
 JOIN pg_namespace n ON n.oid = idx.relnamespace
 WHERE idx.relkind = 'i'
   AND idx.relname = %s
   AND n.nspname = current_schema()"
-                       (pg-escape-literal (plist-get entry :name)))))))
-      ("VIEW"
-       (caar (clutch-db-pg--rows
-              (pg-exec
-               conn
-               (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
+                         (pg-escape-literal name))))))
+        ("VIEW"
+         (caar (clutch-db-pg--rows
+                (pg-exec
+                 conn
+                 (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
        pg_get_viewdef((quote_ident(schemaname) || '.' || quote_ident(viewname))::regclass, true)
 FROM pg_views
 WHERE schemaname = current_schema()
   AND viewname = %s"
-                       (pg-escape-literal (plist-get entry :name)))))))
-      ("SEQUENCE"
-       (caar (clutch-db-pg--rows
-              (pg-exec
-               conn
-               (format "SELECT format(
+                         (pg-escape-literal name))))))
+        ("SEQUENCE"
+         (caar (clutch-db-pg--rows
+                (pg-exec
+                 conn
+                 (format "SELECT format(
   'CREATE SEQUENCE %%I.%%I INCREMENT BY %%s MINVALUE %%s MAXVALUE %%s START WITH %%s;',
   schemaname, sequencename, increment_by, min_value, max_value, start_value)
 FROM pg_sequences
 WHERE schemaname = current_schema()
   AND sequencename = %s"
-                       (pg-escape-literal (plist-get entry :name)))))))
-      (_ nil))))
+                         (pg-escape-literal name))))))
+        (_ nil)))))
 
 (cl-defmethod clutch-db-table-comment ((conn pgcon) table)
   "Return the comment for TABLE on PostgreSQL CONN, or nil if none."

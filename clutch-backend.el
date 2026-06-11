@@ -151,96 +151,18 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
                            (or context "value")
                            (error-message-string err)))))))
 
-(defun clutch-db--normalize-mysql-ssl-mode (ssl-mode)
-  "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
-  (pcase (clutch-db--normalize-symbol-option ssl-mode)
-    ('nil nil)
-    ((or 'disabled 'off) 'disabled)
-    (_
-     (signal 'clutch-db-error
-             (list (format "Unsupported MySQL :ssl-mode %S (supported: disabled)" ssl-mode))))))
-
-(defun clutch-db--normalize-pg-sslmode (sslmode)
-  "Return canonical PostgreSQL SSLMODE, or signal `clutch-db-error'."
-  (pcase (clutch-db--normalize-symbol-option sslmode)
-    ('nil nil)
-    ((or 'disable 'prefer 'require 'verify-full)
-     (clutch-db--normalize-symbol-option sslmode))
-    (_
-     (signal 'clutch-db-error
-             (list (format
-                    "Unsupported PostgreSQL :sslmode %S (supported: disable, prefer, require, verify-full)"
-                    sslmode))))))
-
-(defun clutch-db--normalize-mysql-connect-params (params)
-  "Return PARAMS normalized for the MySQL backend."
-  (let* ((params (copy-sequence params))
-         (tls-specified-p (plist-member params :tls))
-         (tls (plist-get params :tls))
-         (ssl-mode (clutch-db--normalize-mysql-ssl-mode
-                    (plist-get params :ssl-mode)))
-         (tls-mode (cond
-                    (ssl-mode 'disable)
-                    (tls-specified-p (if tls 'require 'disable))
-                    (t 'default))))
-    (when ssl-mode
-      (setq params (plist-put params :ssl-mode ssl-mode)))
-    (when (and ssl-mode tls-specified-p tls)
-      (signal 'clutch-db-error
-              (list "Conflicting MySQL TLS options: :tls t cannot be combined with :ssl-mode disabled")))
-    (setq params (plist-put params :clutch-tls-mode tls-mode))
-    (when (and tls-specified-p (null tls))
-      ;; Canonicalize the generic plaintext shortcut to MySQL's explicit name.
-      (setq params (plist-put params :ssl-mode 'disabled))
-      (cl-remf params :tls))
-    params))
-
-(defun clutch-db--normalize-pg-connect-params (params)
-  "Return PARAMS normalized for the PostgreSQL backend."
-  (let* ((params (copy-sequence params))
-         (tls-specified-p (plist-member params :tls))
-         (tls (plist-get params :tls))
-         (sslmode (clutch-db--normalize-pg-sslmode
-                   (plist-get params :sslmode)))
-         (tls-mode (pcase sslmode
-                     ((or 'disable 'prefer) sslmode)
-                     ((or 'require 'verify-full) 'require)
-                     (_ (if tls-specified-p
-                            (if tls 'require 'disable)
-                          'default)))))
-    (pcase sslmode
-      ('disable
-       (when (and tls-specified-p tls)
-         (signal 'clutch-db-error
-                 (list "Conflicting PostgreSQL TLS options: :tls t cannot be combined with :sslmode disable"))))
-      ('prefer
-       (when tls-specified-p
-         (signal 'clutch-db-error
-                 (list "Conflicting PostgreSQL TLS options: :sslmode prefer cannot be combined with :tls"))))
-      ((or 'require 'verify-full)
-       (when (and tls-specified-p (null tls))
-         (signal 'clutch-db-error
-                 (list (format "Conflicting PostgreSQL TLS options: :tls nil cannot be combined with :sslmode %s"
-                               sslmode))))))
-    (setq params (plist-put params :clutch-tls-mode tls-mode))
-    (cond
-     (sslmode
-      (setq params (plist-put params :sslmode sslmode))
-      (when tls-specified-p
-        (cl-remf params :tls)))
-     (tls-specified-p
-      ;; Canonicalize the generic boolean shortcut to PostgreSQL's official name.
-      (setq params (plist-put params :sslmode (if tls 'require 'disable)))
-      (cl-remf params :tls)))
-    params))
-
 (defun clutch-db--normalize-connect-params (backend params)
   "Return connection PARAMS normalized for BACKEND."
-  (setq params (clutch-db--reject-removed-connect-params params))
-  (pcase backend
-    ('mysql (clutch-db--normalize-mysql-connect-params params))
-    ('pg (clutch-db--normalize-pg-connect-params params))
-    (_ params)))
+  (let* ((params (clutch-db--reject-removed-connect-params params))
+         (features (and backend (clutch-backend-feature backend)))
+         (normalize-fn (plist-get features :normalize-fn)))
+    (when (and (symbolp normalize-fn)
+               (not (fboundp normalize-fn))
+               (plist-get features :require))
+      (require (plist-get features :require)))
+    (if normalize-fn
+        (funcall normalize-fn params)
+      params)))
 
 ;;;; Result struct
 
@@ -1099,9 +1021,6 @@ Return nil when the backend does not support direct column completion.")
   "Backends without direct column completion support return nil."
   nil)
 
-(cl-defgeneric clutch-db-show-create-table (conn table)
-  "Return the DDL string for TABLE on CONN.")
-
 (cl-defgeneric clutch-db-list-objects (conn category)
   "Return object entry plists for CATEGORY on CONN.
 CATEGORY is one of: indexes, sequences, procedures, functions, triggers.")
@@ -1135,11 +1054,19 @@ other backend-specific keys as needed.")
   "Default: return nil when source is unavailable."
   nil)
 
-(cl-defgeneric clutch-db-show-create-object (conn entry)
-  "Return DDL text for non-table object ENTRY on CONN.")
+(cl-defgeneric clutch-db-object-definition (conn entry)
+  "Return definition or source text for object ENTRY on CONN.")
 
-(cl-defmethod clutch-db-show-create-object ((_conn t) _entry)
-  "Default: return nil when DDL is unavailable."
+(cl-defmethod clutch-db-object-definition ((_conn t) _entry)
+  "Default: return nil when object definition is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-object-browse-query (conn entry)
+  "Return query-console text to browse object ENTRY on CONN.
+Return nil when CONN does not provide a backend-specific browse query.")
+
+(cl-defmethod clutch-db-object-browse-query ((_conn t) _entry)
+  "Default: object browsing is built by the Clutch UI."
   nil)
 
 (cl-defgeneric clutch-db-collection-validation (conn collection)
@@ -1154,6 +1081,27 @@ other backend-specific keys as needed.")
 
 (cl-defmethod clutch-db-collection-stats ((_conn t) _collection)
   "Default: return nil when collection statistics are unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-collection-profile (conn collection)
+  "Return schema/profile metadata text for COLLECTION on CONN.")
+
+(cl-defmethod clutch-db-collection-profile ((_conn t) _collection)
+  "Default: return nil when collection profile metadata is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-collection-index-insight (conn collection)
+  "Return index insight metadata text for COLLECTION on CONN.")
+
+(cl-defmethod clutch-db-collection-index-insight ((_conn t) _collection)
+  "Default: return nil when index insight metadata is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-explain-query (conn query)
+  "Return explain metadata text for QUERY on CONN.")
+
+(cl-defmethod clutch-db-explain-query ((_conn t) _query)
+  "Default: return nil when query explain is unavailable."
   nil)
 
 (cl-defgeneric clutch-db-table-comment (conn table)
@@ -1288,22 +1236,24 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 (defvar clutch-backend--registry
   '((mysql  . (:require clutch-db-mysql
 	       :connect-fn clutch-db-mysql-connect
+	       :normalize-fn clutch-db-mysql--normalize-connect-params
 	       :display-name "MySQL"
 	       :default-port 3306
-	       :support-level full
+	       :support-level core
 	       :data-model relational
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
 	       :connect-fn clutch-db-pg-connect
+	       :normalize-fn clutch-db-pg--normalize-connect-params
 	       :display-name "PostgreSQL"
 	       :default-port 5432
-	       :support-level full
+	       :support-level core
 	       :data-model relational
 	       :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
 	       :connect-fn clutch-db-sqlite-connect
 	       :display-name "SQLite"
-	       :support-level full
+	       :support-level core
 	       :data-model relational
 	       :sql-product sqlite))
     (mongodb . (:require clutch-mongodb
@@ -1318,9 +1268,9 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
                            (sql-interface . (:query-mode clutch-mode))))))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
-a plist of connection params and returning a conn), and optional UI metadata
-such as :display-name, :default-port, :support-level, :data-model,
-:query-mode, :surfaces, and :manual-choice.")
+a plist of connection params and returning a conn), and optional
+:normalize-fn plus UI metadata such as :display-name, :default-port,
+:support-level, :data-model, :query-mode, :surfaces, and :manual-choice.")
 
 (defun clutch-backend-feature (backend)
   "Return the registered feature plist for BACKEND.

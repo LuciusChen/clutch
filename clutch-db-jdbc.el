@@ -170,12 +170,12 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
                   :manual-choice nil))
     (oracle     . (:display-name "Oracle"
                   :default-port 1521
-                  :support-level full
+                  :support-level core
                   :data-model relational
                   :sql-product oracle))
     (sqlserver  . (:display-name "SQL Server"
                   :default-port 1433
-                  :support-level full
+                  :support-level core
                   :data-model relational))
     (db2        . (:display-name "DB2"
                   :default-port 50000
@@ -683,7 +683,7 @@ diagnostics when non-nil.  Return the request id."
 
 ;;;; JDBC URL builder
 
-(defun clutch-jdbc--mongodb-surface-sql-url (params)
+(defun clutch-jdbc--sql-interface-url (params)
   "Build a MongoDB SQL Interface JDBC URL from PARAMS.
 The MongoDB JDBC driver's query database is passed separately as the
 driver-specific `database' property; the optional URL path remains available
@@ -699,7 +699,7 @@ for the MongoDB default auth database."
                 (format "/%s" auth-db)
               ""))))
 
-(defun clutch-jdbc--mongodb-surface-sql-jdbc-url-p (url)
+(defun clutch-jdbc--sql-interface-jdbc-url-p (url)
   "Return non-nil when URL is a MongoDB SQL Interface JDBC URL."
   (and (stringp url)
        (or (string-prefix-p "jdbc:mongodb:" url)
@@ -712,7 +712,7 @@ Otherwise constructs a URL from :host, :port, and :database (service name)
 or :sid (Oracle SID-style connection)."
   (or (and (eq driver 'mongodb)
            (when-let* ((url (plist-get params :url)))
-             (unless (clutch-jdbc--mongodb-surface-sql-jdbc-url-p url)
+             (unless (clutch-jdbc--sql-interface-jdbc-url-p url)
                (signal 'clutch-db-error
                        (list "MongoDB SQL Interface JDBC URLs must start with jdbc:mongodb:")))
              url))
@@ -745,7 +745,7 @@ or :sid (Oracle SID-style connection)."
            (format "jdbc:clickhouse://%s:%d/%s"
                    host (or port 8123) database))
           ('mongodb
-           (clutch-jdbc--mongodb-surface-sql-url params))
+           (clutch-jdbc--sql-interface-url params))
           (_
            (error "Unknown JDBC driver %s; provide :url directly" driver))))))
 
@@ -753,7 +753,7 @@ or :sid (Oracle SID-style connection)."
   "Return string-keyed connection property KEY from PROPS, or nil."
   (cdr (assoc-string key props t)))
 
-(defun clutch-jdbc--mongodb-surface-sql-props (params)
+(defun clutch-jdbc--sql-interface-props (params)
   "Return JDBC properties for MongoDB SQL Interface PARAMS.
 The official MongoDB JDBC driver requires the driver-specific `database'
 property even when the URL includes a default auth database."
@@ -777,11 +777,11 @@ property even when the URL includes a default auth database."
 (defun clutch-jdbc--driver-props (driver params)
   "Return normalized JDBC connection properties for DRIVER and PARAMS."
   (if (clutch-jdbc--mongodb-driver-p driver params)
-      (clutch-jdbc--mongodb-surface-sql-props params)
+      (clutch-jdbc--sql-interface-props params)
     (clutch-jdbc--normalize-props (plist-get params :props))))
 
-(defun clutch-jdbc--mongodb-surface-sql-p (params)
-  "Return non-nil when PARAMS request MongoDB SQL Interface."
+(defun clutch-jdbc--sql-interface-surface-p (params)
+  "Return non-nil when PARAMS request the SQL Interface surface."
   (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
         '(sql sql-interface)))
 
@@ -789,7 +789,7 @@ property even when the URL includes a default auth database."
   "Return internal JDBC driver for user-facing DRIVER and PARAMS."
   (cond
    ((eq driver 'mongodb)
-    (if (clutch-jdbc--mongodb-surface-sql-p params)
+    (if (clutch-jdbc--sql-interface-surface-p params)
         'mongodb
       (signal 'clutch-db-error
               (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
@@ -800,8 +800,8 @@ property even when the URL includes a default auth database."
 (defun clutch-jdbc--mongodb-driver-p (driver params)
   "Return non-nil when DRIVER/PARAMS represent MongoDB SQL Interface JDBC."
   (or (and (eq driver 'mongodb)
-           (clutch-jdbc--mongodb-surface-sql-p params))
-      (clutch-jdbc--mongodb-surface-sql-jdbc-url-p
+           (clutch-jdbc--sql-interface-surface-p params))
+      (clutch-jdbc--sql-interface-jdbc-url-p
        (plist-get params :url))))
 
 (defun clutch-jdbc--manual-commit-capable-p (driver params)
@@ -1652,33 +1652,6 @@ Call CALLBACK on success or ERRBACK on failure."
         (mapcar (lambda (col) (plist-get col :name))
                 (plist-get result :columns)))))))
 
-(cl-defmethod clutch-db-show-create-table ((conn clutch-jdbc-conn) table)
-  "Return a best-effort DDL for TABLE on JDBC CONN.
-Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
-  (let ((driver (clutch-jdbc--conn-driver conn)))
-    (let* ((result (clutch-jdbc--rpc
-                    "get-columns"
-                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                      (table   . ,table)
-                      ,@(clutch-jdbc--metadata-scope-params conn))))
-           (cols   (plist-get result :columns))
-           (display-ident
-            (if (eq driver 'oracle)
-                #'clutch-jdbc--oracle-display-identifier
-              (lambda (name) (clutch-db-escape-identifier conn name)))))
-      (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
-              (funcall display-ident table)
-              (mapconcat
-               (lambda (col)
-                 (format "    %s %s%s"
-                         (funcall display-ident (plist-get col :name))
-                         (plist-get col :type)
-                         (if (clutch-jdbc--json-bool (plist-get col :nullable))
-                             ""
-                           " NOT NULL")))
-               cols
-               ",\n")))))
-
 (cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
   "Return object entry plists for CATEGORY on JDBC CONN."
   (when-let* ((spec (clutch-jdbc--object-category-spec category)))
@@ -1751,17 +1724,48 @@ Built from DatabaseMetaData column info; not a true SHOW CREATE TABLE."
                     ,@(clutch-jdbc--metadata-scope-params conn)))))
     (plist-get result :source)))
 
-(cl-defmethod clutch-db-show-create-object ((conn clutch-jdbc-conn) entry)
-  "Return DDL text for JDBC non-table ENTRY on CONN."
-  (let* ((result (clutch-jdbc--rpc
-                  "get-object-ddl"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (name    . ,(plist-get entry :name))
-                    (type    . ,(plist-get entry :type))
-                    ,@(when (plist-get entry :identity)
-                        `((identity . ,(plist-get entry :identity))))
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
-    (plist-get result :ddl)))
+(cl-defmethod clutch-db-object-definition ((conn clutch-jdbc-conn) entry)
+  "Return definition or source text for JDBC object ENTRY on CONN."
+  (let ((type (upcase (or (plist-get entry :type) "")))
+        (name (plist-get entry :name)))
+    (pcase type
+      ((or "PROCEDURE" "FUNCTION" "TRIGGER")
+       (clutch-db-object-source conn entry))
+      ((or "TABLE" "COLLECTION")
+       (let* ((driver (clutch-jdbc--conn-driver conn))
+              (result (clutch-jdbc--rpc
+                       "get-columns"
+                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                         (table   . ,name)
+                         ,@(clutch-jdbc--metadata-scope-params conn))))
+              (cols (plist-get result :columns))
+              (display-ident
+               (if (eq driver 'oracle)
+                   #'clutch-jdbc--oracle-display-identifier
+                 (lambda (identifier)
+                   (clutch-db-escape-identifier conn identifier)))))
+         (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
+                 (funcall display-ident name)
+                 (mapconcat
+                  (lambda (col)
+                    (format "    %s %s%s"
+                            (funcall display-ident (plist-get col :name))
+                            (plist-get col :type)
+                            (if (clutch-jdbc--json-bool (plist-get col :nullable))
+                                ""
+                              " NOT NULL")))
+                  cols
+                  ",\n"))))
+      (_
+       (let* ((result (clutch-jdbc--rpc
+                       "get-object-ddl"
+                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                         (name    . ,name)
+                         (type    . ,(plist-get entry :type))
+                         ,@(when (plist-get entry :identity)
+                             `((identity . ,(plist-get entry :identity))))
+                         ,@(clutch-jdbc--metadata-scope-params conn)))))
+         (plist-get result :ddl))))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-jdbc-conn) _table)
   "Return nil — table comments are not available via standard DatabaseMetaData."

@@ -22,6 +22,15 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Stabilize workflow changes before coding**: For any change that alters a primary entry point, default action, or action menu, write a short design note first.
 - **Keep experiments narrow**: Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice shows real user value.
 - **Audit the whole project for broad refactors**: For project-wide cleanup, review all `*.el` modules, tests, documentation, and relevant sibling repositories before choosing changes. Do not optimize one visible subsystem and call the architecture done.
+- **Clarify broad refactors before coding**: When architecture, scope,
+  compatibility, naming, ownership, user-visible behavior, or stopping criteria
+  are unclear, ask focused questions before implementation.  Inspect code,
+  tests, docs, and existing conventions first; do not ask the user questions
+  that local evidence can answer.  Ask at most 10 questions per round, include
+  the recommended answer and tradeoff for each question, and order questions so
+  upstream architectural decisions come before downstream implementation
+  details.  Multiple rounds are allowed, but stop asking once the remaining
+  uncertainty no longer changes the implementation plan.
 - **Flag compensating code as design debt**: When touching a subsystem, look for code that compensates in the wrong layer — `condition-case nil` swallowing internal errors, re-querying data already available from a caller, timing hacks, or silent fallbacks. These are not blockers; record them in a postmortem as design debt rather than fixing inline. Do not let debt discovery delay the current change.
 
 ## Error Handling and Testing Discipline

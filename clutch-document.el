@@ -24,6 +24,7 @@
 (require 'clutch-backend)
 (require 'clutch-query)
 (require 'clutch-schema)
+(require 'clutch-ui)
 (require 'subr-x)
 (require 'transient)
 
@@ -34,9 +35,11 @@
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
 (declare-function clutch-disconnect "clutch-connection" ())
+(declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch-execute-buffer "clutch-query" ())
 (declare-function clutch-execute-query-at-point "clutch-query" ())
 (declare-function clutch-execute-region "clutch-query" ())
+(declare-function clutch--dwim-bounds-at-point "clutch-query" ())
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-query-console "clutch-query" (target))
 (declare-function clutch-refresh-schema "clutch-schema" ())
@@ -204,6 +207,15 @@
      "findOne" "insertMany" "insertOne" "listIndexes" "replaceOne"
      "updateMany" "updateOne"))
   "MongoDB shell methods useful after a collection expression.")
+
+(defconst clutch-mongodb--collection-template-candidates
+  '("find({}).limit(20)"
+    "find({}, { FIELD: 1 }).limit(20)"
+    "find({ FIELD: VALUE }).sort({ FIELD: -1 }).limit(20)"
+    "aggregate([{ $match: {} }, { $limit: 20 }])"
+    "aggregate([{ $match: {} }, { $group: { _id: \"$FIELD\", count: { $sum: 1 } } }])"
+    "aggregate([{ $lookup: { from: \"COLLECTION\", localField: \"FIELD\", foreignField: \"_id\", as: \"joined\" } }])")
+  "MongoDB collection helper templates exposed through completion.")
 
 (defconst clutch-mongodb--find-chain-candidates
   (clutch-mongodb--call-candidates
@@ -423,7 +435,8 @@ path expressions."
         (append (clutch-mongodb--collection-candidates)
                 clutch-mongodb--db-method-candidates)))
       ('collection-method
-       clutch-mongodb--collection-method-candidates)
+       (append clutch-mongodb--collection-method-candidates
+               clutch-mongodb--collection-template-candidates))
       ('find-chain
        clutch-mongodb--find-chain-candidates)
       ('aggregate-chain
@@ -495,6 +508,21 @@ path expressions."
       (completion-at-point)
     (indent-for-tab-command)))
 
+;;;###autoload
+(defun clutch-mongodb-explain-query-at-point ()
+  "Explain the current MongoDB find, findOne, or aggregate helper."
+  (interactive)
+  (clutch--ensure-connection)
+  (pcase-let* ((`(,beg . ,end) (clutch--dwim-bounds-at-point))
+               (query (string-trim
+                       (buffer-substring-no-properties beg end))))
+    (when (string-empty-p query)
+      (user-error "No MongoDB query at point"))
+    (let ((text (clutch-db-explain-query clutch-connection query)))
+      (unless text
+        (user-error "MongoDB explain unavailable for query"))
+      (clutch--show-json-text-buffer "*clutch mongodb: explain*" text))))
+
 ;;;###autoload (autoload 'clutch-mongodb-dispatch "clutch-document" nil t)
 (transient-define-prefix clutch-mongodb-dispatch ()
   "MongoDB query-console dispatch menu."
@@ -505,6 +533,7 @@ path expressions."
     ("d" "Disconnect"    clutch-disconnect)]
    ["Execute"
     ("x" "Query at point"     clutch-execute-query-at-point)
+    ("p" "Explain query"      clutch-mongodb-explain-query-at-point)
     ("r" "Region"             clutch-execute-region)
     ("b" "Buffer"             clutch-execute-buffer)
     ("k" "Copy agent context" clutch-copy-context-for-agent)]
@@ -520,8 +549,9 @@ path expressions."
 (defun clutch-mongodb--install-query-keybindings (map)
   "Install MongoDB query-console key bindings into MAP."
   (clutch--install-query-keybindings map)
-  (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a" "C-c C-p"))
+  (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a"))
     (define-key map (kbd key) nil))
+  (define-key map (kbd "C-c C-p") #'clutch-mongodb-explain-query-at-point)
   (define-key map (kbd "C-c ?") #'clutch-mongodb-dispatch)
   map)
 

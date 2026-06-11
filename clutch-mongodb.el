@@ -1094,6 +1094,136 @@ helper call."
         (setq value (clutch-mongodb--eval-one conn statement)))
       value)))
 
+(defun clutch-mongodb--single-helper-call (query purpose)
+  "Parse QUERY as one MongoDB helper call for PURPOSE."
+  (let ((statements (clutch-mongodb--split-statements query)))
+    (unless (= (length statements) 1)
+      (signal 'clutch-db-error
+              (list (format "MongoDB %s expects exactly one helper call"
+                            purpose))))
+    (clutch-mongodb--parse-db-call (car statements))))
+
+(defun clutch-mongodb--find-document-key (value key)
+  "Return the first value for KEY found recursively in MongoDB VALUE."
+  (cond
+   ((or (mongodb-document-p value)
+        (clutch-mongodb--alist-p value))
+    (or (cdr (assoc key (clutch-mongodb--document-elements value)))
+        (cl-loop for pair in (clutch-mongodb--document-elements value)
+                 thereis (clutch-mongodb--find-document-key (cdr pair) key))))
+   ((vectorp value)
+    (cl-loop for item across value
+             thereis (clutch-mongodb--find-document-key item key)))
+   ((listp value)
+    (cl-loop for item in value
+             thereis (clutch-mongodb--find-document-key item key)))))
+
+(defun clutch-mongodb--document-has-value-p (value key expected)
+  "Return non-nil when VALUE recursively contains KEY equal to EXPECTED."
+  (cond
+   ((or (mongodb-document-p value)
+        (clutch-mongodb--alist-p value))
+    (or (equal (cdr (assoc key (clutch-mongodb--document-elements value)))
+               expected)
+        (cl-loop for pair in (clutch-mongodb--document-elements value)
+                 thereis (clutch-mongodb--document-has-value-p
+                          (cdr pair) key expected))))
+   ((vectorp value)
+    (cl-loop for item across value
+             thereis (clutch-mongodb--document-has-value-p item key expected)))
+   ((listp value)
+    (cl-loop for item in value
+             thereis (clutch-mongodb--document-has-value-p item key expected)))))
+
+(defun clutch-mongodb--explain-summary (explain)
+  "Return a compact JSON-ready summary for MongoDB EXPLAIN output."
+  (let* ((winning-plan (clutch-mongodb--find-document-key explain "winningPlan"))
+         (winning-stage (or (and winning-plan
+                                  (clutch-mongodb--find-document-key
+                                   winning-plan "stage"))
+                            (clutch-mongodb--find-document-key explain "stage")))
+         (index-name (or (and winning-plan
+                              (clutch-mongodb--find-document-key
+                               winning-plan "indexName"))
+                         (clutch-mongodb--find-document-key explain "indexName"))))
+    (delq nil
+          `(("winningStage" . ,winning-stage)
+            ,(when index-name
+               `("indexName" . ,index-name))
+            ("collectionScan" . ,(if (clutch-mongodb--document-has-value-p
+                                      explain "stage" "COLLSCAN")
+                                     t
+                                   :false))
+            ,(when-let* ((value (clutch-mongodb--find-document-key
+                                 explain "nReturned")))
+               `("nReturned" . ,value))
+            ,(when-let* ((value (clutch-mongodb--find-document-key
+                                 explain "totalKeysExamined")))
+               `("totalKeysExamined" . ,value))
+            ,(when-let* ((value (clutch-mongodb--find-document-key
+                                 explain "totalDocsExamined")))
+               `("totalDocsExamined" . ,value))
+            ,(when-let* ((value (clutch-mongodb--find-document-key
+                                 explain "executionTimeMillis")))
+               `("executionTimeMillis" . ,value))))))
+
+(defun clutch-mongodb--explain-call (conn call)
+  "Return MongoDB explain value for parsed helper CALL on CONN."
+  (let ((client (clutch-mongodb-conn-client conn)))
+    (pcase call
+      (`(:collection ,collection :method "find" :args ,args :chain ,chain
+                     :database ,database)
+       (let ((filter (clutch-mongodb--mql-doc-or-empty (nth 0 args)))
+             (projection (nth 1 args))
+             (limit (cdr (assoc "limit" chain)))
+             (skip (cdr (assoc "skip" chain)))
+             (options (clutch-mongodb--find-options-from-chain chain)))
+         (mongodb-explain
+          client database
+          (mongodb-find-command collection filter projection limit skip options)
+          (or (clutch-mongodb--explain-verbosity chain)
+              "executionStats"))))
+      (`(:collection ,_collection :method "find" :args ,_args :chain ,_chain)
+       (clutch-mongodb--explain-call
+        conn
+        (append call (list :database (clutch-mongodb-conn-database conn)))))
+      (`(:collection ,collection :method "findOne" :args ,args :chain ,chain
+                     :database ,database)
+       (let ((filter (clutch-mongodb--mql-doc-or-empty (nth 0 args)))
+             (projection (nth 1 args)))
+         (mongodb-explain
+          client database
+          (mongodb-find-command collection filter projection 1 nil nil)
+          (or (clutch-mongodb--explain-verbosity chain)
+              "executionStats"))))
+      (`(:collection ,_collection :method "findOne" :args ,_args :chain ,_chain)
+       (clutch-mongodb--explain-call
+        conn
+        (append call (list :database (clutch-mongodb-conn-database conn)))))
+      (`(:collection ,collection :method "aggregate" :args ,args :chain ,chain
+                     :database ,database)
+       (unless (and (<= 1 (length args) 2)
+                    (vectorp (car args)))
+         (signal 'clutch-db-error
+                 (list "aggregate() explain expects a pipeline array")))
+       (mongodb-explain
+        client database
+        (mongodb-aggregate-command
+         collection
+         (car args)
+         (clutch-mongodb--merge-options
+          (nth 1 args)
+          (clutch-mongodb--aggregate-options-from-chain chain)))
+        (or (clutch-mongodb--explain-verbosity chain)
+            "executionStats")))
+      (`(:collection ,_collection :method "aggregate" :args ,_args :chain ,_chain)
+       (clutch-mongodb--explain-call
+        conn
+        (append call (list :database (clutch-mongodb-conn-database conn)))))
+      (_
+       (signal 'clutch-db-error
+               (list "MongoDB explain supports find(), findOne(), and aggregate() helpers"))))))
+
 ;;;; Result conversion
 
 (defun clutch-mongodb--alist-p (value)
@@ -1187,6 +1317,41 @@ helper call."
   "Return KEY's value from MongoDB DOCUMENT."
   (cdr (assoc key (clutch-mongodb--document-elements document))))
 
+(defun clutch-mongodb--field-type-counts (values)
+  "Return sorted BSON type count objects for sampled VALUES."
+  (let ((counts (make-hash-table :test 'equal)))
+    (dolist (value values)
+      (let ((type (clutch-mongodb--value-type-name value)))
+        (puthash type (1+ (or (gethash type counts) 0)) counts)))
+    (vconcat
+     (sort
+      (cl-loop for type being the hash-keys of counts
+               using (hash-values count)
+               collect `(("type" . ,type)
+                         ("count" . ,count)))
+      (lambda (a b)
+        (let ((count-a (cdr (assoc "count" a)))
+              (count-b (cdr (assoc "count" b))))
+          (if (= count-a count-b)
+              (string< (cdr (assoc "type" a))
+                       (cdr (assoc "type" b)))
+            (> count-a count-b))))))))
+
+(defun clutch-mongodb--sample-field-type (values)
+  "Return sampled BSON type label for VALUES."
+  (let ((types nil))
+    (dolist (value values)
+      (let ((type (clutch-mongodb--value-type-name value)))
+        (unless (member type types)
+          (push type types))))
+    (format "BSON<%s>"
+            (string-join (nreverse types) "|"))))
+
+(defun clutch-mongodb--sample-field-comment (present total)
+  "Return a field comment for PRESENT out of TOTAL sampled documents."
+  (when (and (> total 0) (< present total))
+    (format "present in %d/%d sampled documents" present total)))
+
 (defun clutch-mongodb--index-direction (value)
   "Return a display direction for a MongoDB index key VALUE."
   (cond
@@ -1218,6 +1383,32 @@ helper call."
           :unique (eq (clutch-mongodb--document-value document "unique") t)
           :key key
           :definition document)))
+
+(defun clutch-mongodb--index-json (document &optional stats)
+  "Return a JSON-serializable index insight object from DOCUMENT and STATS."
+  (let* ((name (clutch-mongodb--document-value document "name"))
+         (key (clutch-mongodb--document-value document "key"))
+         (unique-pair (assoc "unique"
+                             (clutch-mongodb--document-elements document)))
+         (accesses (and stats
+                        (clutch-mongodb--document-value stats "accesses"))))
+    (delq nil
+          `(("name" . ,name)
+            ,(when key
+               `("key" . ,(clutch-mongodb--json-encodable key)))
+            ,(when unique-pair
+               `("unique" . ,(if (eq (cdr unique-pair) t)
+                                 t
+                               :false)))
+            ,(when-let* ((type (clutch-mongodb--document-value document "type")))
+               `("type" . ,type))
+            ,(when-let* ((expire (clutch-mongodb--document-value
+                                  document "expireAfterSeconds")))
+               `("expireAfterSeconds" . ,expire))
+            ,(when accesses
+               `("usage" . ,(clutch-mongodb--json-encodable accesses)))
+            ,(when stats
+               `("host" . ,(clutch-mongodb--document-value stats "host")))))))
 
 (defun clutch-mongodb--index-document (conn entry)
   "Return the MongoDB index document for object ENTRY on CONN."
@@ -1267,59 +1458,186 @@ helper call."
      (t (signal 'clutch-db-error
                 (list "MongoDB schema sampling returned a non-document result"))))))
 
-(defun clutch-mongodb--sample-field-stats (key docs)
-  "Return sampled metadata stats for KEY in DOCS."
-  (let ((values nil)
-        (present 0)
-        (total (length docs)))
-    (dolist (doc docs)
-      (when-let* ((pair (assoc key doc)))
-        (cl-incf present)
-        (push (cdr pair) values)))
-    (list :values (nreverse values)
-          :present present
-          :total total)))
+(defun clutch-mongodb--profile-stat (stats path)
+  "Return the mutable profile stat for PATH in STATS."
+  (or (gethash path stats)
+      (puthash path
+               (list :path path
+                     :present 0
+                     :values nil
+                     :types (make-hash-table :test 'equal)
+                     :top-values (make-hash-table :test 'equal)
+                     :examples nil
+                     :numeric-min nil
+                     :numeric-max nil)
+               stats)))
 
-(defun clutch-mongodb--sample-field-type (values)
-  "Return sampled BSON type label for VALUES."
-  (let ((types nil))
-    (dolist (value values)
-      (let ((type (clutch-mongodb--value-type-name value)))
-        (unless (member type types)
-          (push type types))))
-    (format "BSON<%s>"
-            (string-join (nreverse types) "|"))))
+(defun clutch-mongodb--profile-value-key (value)
+  "Return a stable hash key for sampled profile VALUE."
+  (cond
+   ((eq value :false) "false")
+   ((eq value t) "true")
+   ((null value) "null")
+   ((stringp value) (concat "s:" value))
+   ((numberp value) (format "n:%s" value))
+   (t (clutch-mongodb--json-encode-text value))))
 
-(defun clutch-mongodb--sample-field-comment (present total)
-  "Return a field comment for PRESENT out of TOTAL sampled documents."
-  (when (and (> total 0) (< present total))
-    (format "present in %d/%d sampled documents" present total)))
+(defun clutch-mongodb--profile-top-values (stat)
+  "Return top sampled scalar values for profile STAT."
+  (vconcat
+   (cl-subseq
+    (sort
+     (cl-loop with counts = (plist-get stat :top-values)
+              for _key being the hash-keys of counts
+              using (hash-values payload)
+              collect `(("value" . ,(plist-get payload :value))
+                        ("count" . ,(plist-get payload :count))))
+     (lambda (a b)
+       (> (cdr (assoc "count" a))
+         (cdr (assoc "count" b)))))
+    0
+    (min 5 (hash-table-count (plist-get stat :top-values))))))
+
+(defun clutch-mongodb--profile-record-value (stats seen path value)
+  "Record sampled VALUE for PATH in STATS, tracking document-level SEEN paths."
+  (let* ((stat (clutch-mongodb--profile-stat stats path))
+         (type (clutch-mongodb--value-type-name value))
+         (types (plist-get stat :types)))
+    (unless (gethash path seen)
+      (puthash path t seen)
+      (setq stat (plist-put stat :present
+                            (1+ (plist-get stat :present)))))
+    (push value (plist-get stat :values))
+    (puthash type (1+ (or (gethash type types) 0)) types)
+    (when (numberp value)
+      (setq stat
+            (plist-put stat :numeric-min
+                       (if (numberp (plist-get stat :numeric-min))
+                           (min (plist-get stat :numeric-min) value)
+                         value)))
+      (setq stat
+            (plist-put stat :numeric-max
+                       (if (numberp (plist-get stat :numeric-max))
+                           (max (plist-get stat :numeric-max) value)
+                         value))))
+    (when (clutch-mongodb--scalar-p value)
+      (let* ((examples (plist-get stat :examples))
+             (key (clutch-mongodb--profile-value-key value))
+             (top-values (plist-get stat :top-values))
+             (payload (or (gethash key top-values)
+                          (list :value (clutch-mongodb--json-encodable value)
+                                :count 0))))
+        (when (< (length examples) 3)
+          (setq stat (plist-put stat :examples
+                                (append examples
+                                        (list (clutch-mongodb--json-encodable
+                                               value))))))
+        (puthash key
+                 (plist-put payload :count
+                            (1+ (plist-get payload :count)))
+                 top-values)))
+    (puthash path stat stats)))
+
+(defun clutch-mongodb--extended-json-wrapper-p (value)
+  "Return non-nil when VALUE looks like an Extended JSON scalar wrapper."
+  (and (clutch-mongodb--alist-p value)
+       (= (length value) 1)
+       (stringp (caar value))
+       (string-prefix-p "$" (caar value))))
+
+(defun clutch-mongodb--profile-stats-for-docs (docs)
+  "Return sorted field profile stat plists sampled from DOCS."
+  (let ((stats (make-hash-table :test 'equal))
+        (seen-paths (make-hash-table :test 'equal))
+        paths)
+    (cl-labels
+        ((remember (path)
+           (unless (gethash path seen-paths)
+             (puthash path t seen-paths)
+             (push path paths)))
+         (walk (value path doc-seen record-current)
+           (when (and path record-current)
+             (remember path)
+             (clutch-mongodb--profile-record-value
+              stats doc-seen path value))
+           (cond
+            ((and (or (mongodb-document-p value)
+                      (clutch-mongodb--alist-p value))
+                  (not (clutch-mongodb--extended-json-wrapper-p value)))
+             (dolist (pair (clutch-mongodb--document-elements value))
+               (walk (cdr pair)
+                     (if path
+                         (format "%s.%s" path (car pair))
+                       (car pair))
+                     doc-seen
+                     t)))
+            ((or (vectorp value)
+                 (and (listp value)
+                      (not (clutch-mongodb--alist-p value))))
+             (dolist (item (if (vectorp value) (append value nil) value))
+               (when (or (mongodb-document-p item)
+                         (clutch-mongodb--alist-p item))
+                 (walk item path doc-seen nil)))))))
+      (dolist (doc docs)
+        (walk doc nil (make-hash-table :test 'equal) nil)))
+    (mapcar
+     (lambda (path)
+       (let ((stat (gethash path stats)))
+         (plist-put stat :values
+                    (nreverse (plist-get stat :values)))))
+     (nreverse paths))))
+
+(defun clutch-mongodb--profile-field-json (stat sample-size)
+  "Return JSON-ready schema profile field object for STAT and SAMPLE-SIZE."
+  (let* ((values (plist-get stat :values))
+         (present (plist-get stat :present))
+         (field `(("path" . ,(plist-get stat :path))
+                  ("type" . ,(clutch-mongodb--sample-field-type values))
+                  ("typeCategory" . ,(format "%s"
+                                             (clutch-mongodb--field-type-category
+                                              values)))
+                  ("present" . ,present)
+                  ("sampled" . ,sample-size)
+                  ("presence" . ,(if (> sample-size 0)
+                                     (/ (float present) sample-size)
+                                   0.0))
+                  ("typeCounts" . ,(clutch-mongodb--field-type-counts values)))))
+    (when-let* ((examples (plist-get stat :examples)))
+      (setq field (append field `(("examples" . ,(vconcat examples))))))
+    (when (numberp (plist-get stat :numeric-min))
+      (setq field (append field
+                          `(("min" . ,(plist-get stat :numeric-min))
+                            ("max" . ,(plist-get stat :numeric-max))))))
+    (when (> (hash-table-count (plist-get stat :top-values)) 0)
+      (setq field (append field
+                          `(("topValues" . ,(clutch-mongodb--profile-top-values
+                                             stat))))))
+    field))
 
 (defun clutch-mongodb--columns-for-docs (keys docs)
   "Return Clutch column plists for KEYS sampled from DOCS."
   (mapcar
    (lambda (key)
-     (let ((sample (cl-loop for doc in docs
-                            for value = (cdr (assoc key doc))
-                            when value return value)))
+     (let ((values (cl-loop for doc in docs
+                            for pair = (assoc key doc)
+                            when pair collect (cdr pair))))
        (list :name key
-             :type-category (clutch-mongodb--column-category sample))))
+             :type-category (clutch-mongodb--field-type-category values))))
    keys))
 
 (defun clutch-mongodb--column-details-for-docs (docs)
   "Return Clutch column-detail plists sampled from MongoDB DOCS."
   (mapcar
-   (lambda (key)
-     (let* ((stats (clutch-mongodb--sample-field-stats key docs))
-            (values (plist-get stats :values))
-            (present (plist-get stats :present))
-            (total (plist-get stats :total)))
-       (list :name key
+   (lambda (stat)
+     (let ((values (plist-get stat :values))
+           (present (plist-get stat :present))
+           (total (length docs)))
+       (list :name (plist-get stat :path)
              :type (clutch-mongodb--sample-field-type values)
              :type-category (clutch-mongodb--field-type-category values)
              :nullable t
              :comment (clutch-mongodb--sample-field-comment present total))))
-   (clutch-mongodb--ordered-keys docs)))
+   (clutch-mongodb--profile-stats-for-docs docs)))
 
 (defun clutch-mongodb--result-from-docs (conn docs)
   "Return a Clutch result for CONN from MongoDB document list DOCS."
@@ -1451,9 +1769,10 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
           (clutch-db-search-table-entries conn prefix)))
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-mongodb-conn) collection)
-  "Return sampled top-level document keys for COLLECTION on CONN."
-  (clutch-mongodb--ordered-keys
-   (clutch-mongodb--sample-documents conn collection)))
+  "Return sampled document field paths for COLLECTION on CONN."
+  (mapcar (lambda (stat) (plist-get stat :path))
+          (clutch-mongodb--profile-stats-for-docs
+           (clutch-mongodb--sample-documents conn collection))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-mongodb-conn) collection)
   "Return sampled column details for MongoDB COLLECTION on CONN."
@@ -1475,10 +1794,13 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
         (signal 'clutch-db-error
                 (list (format "MongoDB collection not found: %s" collection))))))
 
-(cl-defmethod clutch-db-show-create-table ((conn clutch-mongodb-conn) collection)
-  "Return collection metadata for COLLECTION on CONN as JSON."
-  (clutch-mongodb--json-encode-text
-   (list (clutch-mongodb--collection-info conn collection))))
+(cl-defmethod clutch-db-object-browse-query
+  ((_conn clutch-mongodb-conn) entry)
+  "Return MongoDB helper syntax to browse collection ENTRY."
+  (format "db.getCollection(%s).find({}).limit(20);"
+          (clutch--json-serialize-text
+           (plist-get entry :name)
+           "MongoDB collection name")))
 
 (cl-defmethod clutch-db-collection-validation
   ((conn clutch-mongodb-conn) collection)
@@ -1548,6 +1870,84 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
        ("indexSizes" . ,(clutch-mongodb--document-value
                          storage-stats "indexSizes"))))))
 
+(defun clutch-mongodb--collection-index-documents (conn collection)
+  "Return raw MongoDB index documents for COLLECTION on CONN."
+  (mongodb-list-indexes
+   (clutch-mongodb-conn-client conn)
+   (clutch-mongodb-conn-database conn)
+   collection))
+
+(defun clutch-mongodb--collection-index-stats (conn collection)
+  "Return raw MongoDB `$indexStats' documents for COLLECTION on CONN."
+  (let ((pipeline
+         (vector
+          (mongodb-document
+           (list (cons "$indexStats" (mongodb-document nil)))))))
+    (mongodb-aggregate
+     (clutch-mongodb-conn-client conn)
+     (clutch-mongodb-conn-database conn)
+     collection
+     pipeline)))
+
+(defun clutch-mongodb--index-stats-by-name (stats-docs)
+  "Return a hash table mapping index names to STATS-DOCS entries."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (doc stats-docs)
+      (when-let* ((name (clutch-mongodb--document-value doc "name")))
+        (puthash name doc table)))
+    table))
+
+(cl-defmethod clutch-db-collection-profile ((conn clutch-mongodb-conn) collection)
+  "Return MongoDB schema profile metadata for COLLECTION on CONN as JSON."
+  (let* ((docs (clutch-mongodb--sample-documents conn collection))
+         (sample-size (length docs))
+         (stats (clutch-mongodb--profile-stats-for-docs docs))
+         (indexes (clutch-mongodb--collection-index-documents conn collection)))
+    (clutch-mongodb--json-encode-text
+     `(("collection" . ,collection)
+       ("database" . ,(clutch-mongodb-conn-database conn))
+       ("sampleSize" . ,sample-size)
+       ("sampleLimit" . ,(clutch-mongodb--schema-sample-limit))
+       ("fields" . ,(vconcat
+                      (mapcar
+                       (lambda (stat)
+                         (clutch-mongodb--profile-field-json
+                          stat sample-size))
+                       stats)))
+       ("indexes" . ,(vconcat
+                       (mapcar #'clutch-mongodb--index-json indexes)))))))
+
+(cl-defmethod clutch-db-collection-index-insight
+  ((conn clutch-mongodb-conn) collection)
+  "Return MongoDB index insight for COLLECTION on CONN.
+The returned text is JSON metadata."
+  (let* ((index-docs (clutch-mongodb--collection-index-documents
+                      conn collection))
+         (stats-docs (clutch-mongodb--collection-index-stats
+                      conn collection))
+         (stats-by-name (clutch-mongodb--index-stats-by-name stats-docs)))
+    (clutch-mongodb--json-encode-text
+     `(("collection" . ,collection)
+       ("database" . ,(clutch-mongodb-conn-database conn))
+       ("indexes" . ,(vconcat
+                       (mapcar
+                        (lambda (document)
+                          (clutch-mongodb--index-json
+                           document
+                           (gethash
+                            (clutch-mongodb--document-value document "name")
+                            stats-by-name)))
+                        index-docs)))))))
+
+(cl-defmethod clutch-db-explain-query ((conn clutch-mongodb-conn) query)
+  "Return MongoDB explain metadata for QUERY on CONN as JSON."
+  (let* ((call (clutch-mongodb--single-helper-call query "explain"))
+         (explain (clutch-mongodb--with-mongodb-errors
+                    (clutch-mongodb--explain-call conn call))))
+    (clutch-mongodb--json-encode-text
+     `(("summary" . ,(clutch-mongodb--explain-summary explain))
+       ("explain" . ,(clutch-mongodb--json-encodable explain))))))
+
 (cl-defmethod clutch-db-list-objects ((conn clutch-mongodb-conn) category)
   "Return MongoDB object entries in CATEGORY for CONN."
   (pcase category
@@ -1556,10 +1956,8 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
               append
               (mapcar (lambda (document)
                         (clutch-mongodb--index-entry conn collection document))
-                      (mongodb-list-indexes
-                       (clutch-mongodb-conn-client conn)
-                       (clutch-mongodb-conn-database conn)
-                       collection))))
+                      (clutch-mongodb--collection-index-documents
+                       conn collection))))
     (_ nil)))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-mongodb-conn) entry)
@@ -1570,9 +1968,13 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
                  (key (clutch-mongodb--document-value document "key")))
        (clutch-mongodb--index-key-details key)))))
 
-(cl-defmethod clutch-db-show-create-object ((conn clutch-mongodb-conn) entry)
+(cl-defmethod clutch-db-object-definition ((conn clutch-mongodb-conn) entry)
   "Return MongoDB object metadata for ENTRY on CONN as JSON."
   (pcase (upcase (or (plist-get entry :type) ""))
+    ("COLLECTION"
+     (clutch-mongodb--json-encode-text
+      (list (clutch-mongodb--collection-info
+             conn (plist-get entry :name)))))
     ("INDEX"
      (when-let* ((document (clutch-mongodb--index-document conn entry)))
        (clutch-mongodb--json-encode-text document)))))

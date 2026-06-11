@@ -299,8 +299,8 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
     (should (string-match-p "Navigate" index-menu))
     (should-not (string-match-p "Document" index-menu))))
 
-(ert-deftest clutch-test-object-list-indexes-executes-mongodb-helper ()
-  "MongoDB collection index action should execute listIndexes helper syntax."
+(ert-deftest clutch-test-object-show-index-insight-displays-metadata ()
+  "MongoDB collection index action should display index insight metadata."
   (let (captured)
     (with-temp-buffer
       (setq-local clutch-connection 'mongo-conn
@@ -308,20 +308,29 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
                   clutch--conn-sql-product nil)
       (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                  (lambda (_conn) 'mongodb))
-                ((symbol-function 'clutch--execute)
-                 (lambda (sql conn &optional result-context)
-                   (setq captured (list sql conn result-context))))
+                ((symbol-function 'clutch-db-collection-index-insight)
+                 (lambda (conn collection)
+                   (should (eq conn 'mongo-conn))
+                   (should (equal collection "users"))
+                   "{\"indexes\":[{\"name\":\"_id_\"}]}"))
+                ((symbol-function 'clutch--show-object-text-buffer)
+                 (lambda (conn entry text &optional params product title-suffix)
+                   (setq captured
+                         (list conn entry text params product title-suffix))))
                 ((symbol-function 'clutch--clear-connection-problem-capture)
                  #'ignore)
                 ((symbol-function 'clutch--remember-current-object)
                  #'ignore))
-        (clutch-object-list-indexes '(:name "users" :type "COLLECTION"))))
+        (clutch-object-show-index-insight
+         '(:name "users" :type "COLLECTION"))))
     (should (equal captured
-                   '("db.getCollection(\"users\").listIndexes();"
-                     mongo-conn nil)))))
+                   '(mongo-conn
+                     (:name "users" :type "COLLECTION")
+                     "{\n  \"indexes\": [\n    {\n      \"name\": \"_id_\"\n    }\n  ]\n}"
+                     nil nil "index insight")))))
 
-(ert-deftest clutch-test-object-explain-sample-executes-mongodb-helper ()
-  "MongoDB collection explain action should execute a sample explain helper."
+(ert-deftest clutch-test-object-explain-sample-displays-metadata ()
+  "MongoDB collection explain action should display sample explain metadata."
   (let (captured)
     (with-temp-buffer
       (setq-local clutch-connection 'mongo-conn
@@ -329,9 +338,16 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
                   clutch--conn-sql-product nil)
       (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                  (lambda (_conn) 'mongodb))
-                ((symbol-function 'clutch--execute)
-                 (lambda (sql conn &optional result-context)
-                   (setq captured (list sql conn result-context))))
+                ((symbol-function 'clutch-db-explain-query)
+                 (lambda (conn query)
+                   (should (eq conn 'mongo-conn))
+                   (should (equal query
+                                  "db.getCollection(\"users\").find({}).limit(1);"))
+                   "{\"summary\":{\"collectionScan\":true}}"))
+                ((symbol-function 'clutch--show-object-text-buffer)
+                 (lambda (conn entry text &optional params product title-suffix)
+                   (setq captured
+                         (list conn entry text params product title-suffix))))
                 ((symbol-function 'clutch--clear-connection-problem-capture)
                  #'ignore)
                 ((symbol-function 'clutch--remember-current-object)
@@ -339,8 +355,10 @@ becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
         (clutch-object-explain-sample-query
          '(:name "users" :type "COLLECTION"))))
     (should (equal captured
-                   '("db.getCollection(\"users\").find({}).limit(1).explain(\"executionStats\");"
-                     mongo-conn nil)))))
+                   '(mongo-conn
+                     (:name "users" :type "COLLECTION")
+                     "{\n  \"summary\": {\n    \"collectionScan\": true\n  }\n}"
+                     nil nil "explain")))))
 
 (ert-deftest clutch-test-object-show-validation-displays-metadata ()
   "MongoDB collection validation action should display validation metadata."
@@ -552,8 +570,8 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
   "Object definition buffers should use Oracle font-lock when backend is oracle."
   (let (captured-product)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-              ((symbol-function 'clutch-db-show-create-table)
-               (lambda (_conn _table) "CREATE TABLE demo_tasks (id NUMBER)"))
+              ((symbol-function 'clutch-db-object-definition)
+               (lambda (_conn _entry) "CREATE TABLE demo_tasks (id NUMBER)"))
               ((symbol-function 'sql-mode) #'ignore)
               ((symbol-function 'sql-set-product)
                (lambda (product) (setq captured-product product)))
@@ -575,10 +593,10 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
                   clutch--conn-sql-product nil)
       (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                  (lambda (_conn) 'mongodb))
-                ((symbol-function 'clutch-db-show-create-table)
-                 (lambda (conn collection)
+                ((symbol-function 'clutch-db-object-definition)
+                 (lambda (conn entry)
                    (should (eq conn 'mongo-conn))
-                   (should (equal collection "users"))
+                   (should (equal entry '(:name "users" :type "COLLECTION")))
                    "{\"name\":\"users\",\"type\":\"collection\"}"))
                 ((symbol-function 'clutch--show-object-text-buffer)
                  (lambda (conn entry text &optional params product title-suffix)
@@ -596,10 +614,49 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
                      "{\n  \"name\": \"users\",\n  \"type\": \"collection\"\n}"
                      nil nil nil)))))
 
+(ert-deftest clutch-test-object-text-buffer-uses-json-mode-for-document-metadata ()
+  "Document metadata buffers should use JSON display mode, not query-console mode."
+  (let ((buf-name "*clutch: users json-mode-test*")
+        selected-mode)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'mongodb))
+                  ((symbol-function 'clutch-jdbc-conn-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'json-ts-mode)
+                   (lambda () (setq selected-mode 'json-ts-mode)))
+                  ((symbol-function 'treesit-language-available-p)
+                   (lambda (_language) t))
+                  ((symbol-function 'sql-mode)
+                   (lambda () (ert-fail "Document metadata should not use sql-mode")))
+                  ((symbol-function 'sql-set-product)
+                   (lambda (&rest _args)
+                     (ert-fail "Document metadata should not set a SQL product")))
+                  ((symbol-function 'clutch--bind-connection-context)
+                   #'ignore)
+                  ((symbol-function 'font-lock-ensure)
+                   #'ignore)
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) buf)))
+          (clutch--show-object-text-buffer
+           'mongo-conn
+           '(:name "users" :type "COLLECTION")
+           "{\n  \"name\": \"users\"\n}"
+           nil nil "json-mode-test")
+          (with-current-buffer buf-name
+            (should (eq selected-mode 'json-ts-mode))
+            (should buffer-read-only)
+            (should (eq (lookup-key (current-local-map) (kbd "C-c C-d"))
+                        #'clutch-describe-dwim))
+            (should (eq (lookup-key (current-local-map) (kbd "C-c C-o"))
+                        #'clutch-act-dwim))))
+      (when-let* ((buf (get-buffer buf-name)))
+        (kill-buffer buf)))))
+
 (ert-deftest clutch-test-object-json-metadata-text-rejects-invalid-json ()
   "JSON metadata formatting should surface invalid JSON."
   (should-error
-   (clutch--object-json-metadata-text "{bad")
+   (clutch--json-metadata-text "{bad")
    :type 'json-parse-error))
 
 (ert-deftest clutch-test-object-show-ddl-or-source-populates-problem-record-and-debug-trace ()
@@ -616,7 +673,7 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
         (setq-local clutch-connection 'fake-conn)
         (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                    (lambda (_conn) 'oracle))
-                  ((symbol-function 'clutch-db-show-create-table)
+                  ((symbol-function 'clutch-db-object-definition)
                    (lambda (&rest _args)
                      (signal 'clutch-db-error
                              (list "ORA-04043: object does not exist" details))))
@@ -704,34 +761,20 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
   "Native MongoDB collection describe should display formatted JSON metadata."
   (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
              (lambda (_conn) 'mongodb))
-            ((symbol-function 'clutch--ensure-column-details)
-             (lambda (_conn collection &optional strict)
+            ((symbol-function 'clutch-db-collection-profile)
+             (lambda (_conn collection)
                (should (equal collection "orders"))
-               (should strict)
-               '((:name "_id" :type "BSON<ObjectId>"
-                  :type-category json :nullable t)
-                 (:name "status" :type "BSON<string>"
-                  :type-category text :nullable t
-                  :comment "present in 2/3 sampled documents"))))
-            ((symbol-function 'clutch-db-list-columns)
-             (lambda (&rest _args)
-               (ert-fail "Column fallback should not run when details exist")))
-            ((symbol-function 'clutch--object-related-entries)
-             (lambda (_conn entry type &optional refresh)
-               (should (equal entry
-                              '(:name "orders" :type "COLLECTION"
-                                :schema "app")))
-               (should (equal type "INDEX"))
-               (should refresh)
-               '((:name "_id_" :type "INDEX" :target-table "orders"
-                  :unique t)
-                 (:name "status_idx" :type "INDEX"
-                  :target-table "orders" :unique nil)))))
+               (concat
+                "{\"collection\":\"orders\",\"database\":\"app\","
+                "\"fields\":[{\"path\":\"_id\",\"typeCategory\":\"json\"},"
+                "{\"path\":\"status\",\"comment\":\"present in 2/3 sampled documents\"}],"
+                "\"indexes\":[{\"name\":\"_id_\",\"unique\":true},"
+                "{\"name\":\"status_idx\",\"unique\":false}]}"))))
     (let ((text (clutch--object-describe-text
                  'mongo-conn
                  '(:name "orders" :type "COLLECTION" :schema "app"))))
       (should (string-prefix-p "{\n" text))
-      (should (string-match-p "\"name\": \"orders\"" text))
+      (should (string-match-p "\"collection\": \"orders\"" text))
       (should (string-match-p "\"database\": \"app\"" text))
       (should (string-match-p "\"fields\": \\[" text))
       (should (string-match-p "\"typeCategory\": \"json\"" text))
@@ -740,6 +783,45 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
       (should (string-match-p "\"unique\": true" text))
       (should (string-match-p "\"unique\": false" text))
       (should-not (string-match-p "^Fields" text)))))
+
+(ert-deftest clutch-test-object-describe-mongodb-buffer-uses-json-mode ()
+  "Native MongoDB describe buffers should use JSON display mode."
+  (let (selected-mode fontified)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                 (lambda (_conn) 'mongodb))
+                ((symbol-function 'clutch-jdbc-conn-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'json-ts-mode)
+                 (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
+                ((symbol-function 'treesit-language-available-p)
+                 (lambda (_language) nil))
+                ((symbol-function 'json-mode)
+                 (lambda () (setq selected-mode 'json-mode)))
+                ((symbol-function 'clutch--bind-connection-context)
+                 #'ignore)
+                ((symbol-function 'clutch--icon-with-face)
+                 (lambda (&rest _args) ""))
+                ((symbol-function 'clutch--object-describe-text)
+                 (lambda (_conn _entry) "{\n  \"name\": \"users\"\n}"))
+                ((symbol-function 'clutch--fontify-object-describe)
+                 (lambda () (ert-fail
+                             "MongoDB JSON describe should not use table fontification")))
+                ((symbol-function 'font-lock-ensure)
+                 (lambda () (setq fontified t))))
+        (clutch--render-object-describe
+         'mongo-conn '(:name "users" :type "COLLECTION"))
+        (should (eq selected-mode 'json-mode))
+        (should fontified)
+        (should buffer-read-only)
+        (should (eq (lookup-key (current-local-map) (kbd "s"))
+                    #'clutch-object-show-ddl-or-source))
+        (should (eq (lookup-key (current-local-map) (kbd "g"))
+                    #'clutch-describe-refresh))
+        (should (eq (lookup-key (current-local-map) (kbd "C-c C-d"))
+                    #'clutch-describe-dwim))
+        (should (eq (lookup-key (current-local-map) (kbd "C-c C-o"))
+                    #'clutch-act-dwim))))))
 
 (ert-deftest clutch-test-object-describe-populates-problem-record-in-source-buffer ()
   "Describe failures should populate a problem record in the invoking buffer."
@@ -1826,7 +1908,7 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
                          (clutch--embark-action-specs
                           (lambda (spec)
                             (not (eq (plist-get spec :id) 'jump-target)))))
-                 '(describe show-definition list-indexes explain-sample
+                 '(describe show-definition index-insight explain-sample
                             show-validation show-stats copy-name
                             copy-fqname))))
 
@@ -1834,7 +1916,7 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
   "Target-capable Embark menus should keep jump-target."
   (should (equal (mapcar (lambda (spec) (plist-get spec :id))
                          (clutch--embark-action-specs))
-                 '(describe show-definition list-indexes explain-sample
+                 '(describe show-definition index-insight explain-sample
                             show-validation show-stats jump-target copy-name
                             copy-fqname))))
 
@@ -1842,8 +1924,8 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
   "Embark command labels should reuse the shared object action wording."
   (should (equal (clutch--embark-command-label 'clutch-object-show-ddl-or-source)
                  "Show definition"))
-  (should (equal (clutch--embark-command-label 'clutch-object-list-indexes)
-                 "List indexes"))
+  (should (equal (clutch--embark-command-label 'clutch-object-show-index-insight)
+                 "Show index insight"))
   (should (equal (clutch--embark-command-label
                   'clutch-object-explain-sample-query)
                  "Explain sample query"))

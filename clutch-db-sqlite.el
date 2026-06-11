@@ -223,16 +223,20 @@ WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
                           (clutch-db-sqlite--escape-id table)))))
       (mapcar (lambda (row) (nth 1 row)) rows))))
 
-(cl-defmethod clutch-db-show-create-table ((conn clutch-db-sqlite-conn) table)
-  "Return the DDL for TABLE on SQLite CONN."
+(cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
+  "Return definition text for SQLite object ENTRY on CONN."
   (clutch-db--translate-library-error sqlite-error
-    (let* ((handle (clutch-db-sqlite-conn-handle conn))
-           (rows (sqlite-select
-                  handle
-                  (format "SELECT sql FROM sqlite_master \
+    (pcase (upcase (or (plist-get entry :type) ""))
+      ("TABLE"
+       (let* ((table (plist-get entry :name))
+              (handle (clutch-db-sqlite-conn-handle conn))
+              (rows (sqlite-select
+                     handle
+                     (format "SELECT sql FROM sqlite_master \
 WHERE type='table' AND name=%s"
-                          (clutch-db-sqlite--escape-lit table)))))
-      (or (caar rows) (format "-- No DDL found for %s" table)))))
+                             (clutch-db-sqlite--escape-lit table)))))
+         (or (caar rows) (format "-- No DDL found for %s" table))))
+      (_ nil))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table)
   "Return nil; SQLite does not support table comments."
