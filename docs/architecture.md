@@ -8,12 +8,11 @@ database, and JDBC surface refactor. Historical rationale lives in
 ## Layered Module Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
   Entry["clutch.el<br/>entry point, customization,<br/>public commands, mode assembly"]
 
   subgraph Workflow["Workflow, UI, and query-buffer modules"]
     direction TB
-    Conn["clutch-connection.el<br/>connection lifecycle, auth,<br/>SSH/TRAMP transport, transactions"]
     subgraph QueryPath["Query buffer path"]
       direction LR
       SQL["clutch-sql.el<br/>SQL context, completion,<br/>Eldoc, xref"]
@@ -21,17 +20,22 @@ flowchart LR
       RedisQuery["clutch-redis-mode<br/>Redis command buffers<br/>(defined in clutch-redis.el)"]
       Query["clutch-query.el<br/>query consoles, execution,<br/>statement boundaries"]
     end
-    Result["clutch-result.el<br/>result, record, value,<br/>sort/filter/export commands"]
-    Object["clutch-object.el<br/>object discovery, describe buffers,<br/>object actions"]
-    Edit["clutch-edit.el<br/>staged edit, insert, delete,<br/>validation and commit"]
-    Schema["clutch-schema.el<br/>schema refresh lifecycle,<br/>metadata caches"]
-    UI["clutch-ui.el<br/>grid rendering, header/footer,<br/>navigation, JSON metadata display"]
+
+    subgraph WorkflowModules["Workflow and UI modules"]
+      direction LR
+      Conn["clutch-connection.el<br/>connection lifecycle, auth,<br/>SSH/TRAMP transport, transactions"]
+      Result["clutch-result.el<br/>result, record, value,<br/>sort/filter/export commands"]
+      Object["clutch-object.el<br/>object discovery, describe buffers,<br/>object actions"]
+      Edit["clutch-edit.el<br/>staged edit, insert, delete,<br/>validation and commit"]
+      Schema["clutch-schema.el<br/>schema refresh lifecycle,<br/>metadata caches"]
+      UI["clutch-ui.el<br/>grid rendering, header/footer,<br/>navigation, JSON metadata display"]
+    end
   end
 
   Facade["clutch-backend.el<br/>generic database API,<br/>result struct, capability gates,<br/>shared SQL helpers"]
 
   subgraph Adapters["Backend adapters"]
-    direction TB
+    direction LR
     MySQL["clutch-db-mysql.el<br/>MySQL adapter"]
     PG["clutch-db-pg.el<br/>PostgreSQL adapter"]
     SQLite["clutch-db-sqlite.el<br/>SQLite adapter"]
@@ -41,7 +45,7 @@ flowchart LR
   end
 
   subgraph External["External protocol/runtime packages"]
-    direction TB
+    direction LR
     MySQLExt["mysql.el"]
     PGExt["pg-el"]
     SQLiteExt["Emacs sqlite-*"]
@@ -52,20 +56,30 @@ flowchart LR
   end
 
   style Workflow fill:#f6f8fa,stroke:#6e7781,stroke-width:2px
+  style Adapters fill:#f6f8fa,stroke:#6e7781,stroke-width:2px
+  style External fill:#f6f8fa,stroke:#6e7781,stroke-width:2px
 
   Entry --> Workflow
   Workflow --> Facade
   Facade --> Adapters
-  Adapters --> External
 
   SQL --> Query
   Document --> Query
   RedisQuery --> Query
+
+  MySQL --> MySQLExt
+  PG --> PGExt
+  SQLite --> SQLiteExt
+  Mongo --> MongoExt
+  Redis --> RedisExt
+  JDBC --> Agent
+  Agent --> Drivers
 ```
 
 This diagram shows primary runtime/workflow ownership, not every `require` form.
-Arrows between groups show layer boundaries; per-adapter runtime bindings are
-intentionally not expanded in this overview.
+Arrows between the large groups show layer boundaries. Adapter-to-runtime
+arrows are expanded only at the bottom layer, where they identify the external
+protocol package or runtime each adapter delegates to.
 The facade is the database contract boundary. Workflow modules call generic
 `clutch-db-*` operations instead of protocol packages. Backend adapters own
 database-specific connection params, metadata, object definitions, query
@@ -186,83 +200,57 @@ defaults.
 ## Query And Object Flow
 
 ```mermaid
-flowchart TB
-  subgraph Consoles["Query consoles"]
-    SQLConsole["clutch-mode<br/>SQL buffers"]
-    MongoConsole["clutch-mongodb-mode<br/>MongoDB helper/MQL buffers"]
-    RedisConsole["clutch-redis-mode<br/>Redis command buffers"]
+sequenceDiagram
+  participant Buffer as Query buffer (SQL, MongoDB, Redis)
+  participant Query as clutch-query.el
+  participant Backend as clutch-backend.el
+  participant Adapter as Backend adapter
+  participant Result as clutch-result.el + clutch-ui.el
+
+  Buffer->>Query: Execute statement, region, or buffer
+  Query->>Query: Find statement bounds and execution context
+  Query->>Backend: clutch-db-query
+  Backend->>Adapter: Dispatch by connection/backend type
+  Adapter-->>Backend: clutch-db-result
+  Backend-->>Query: Rows, columns, and result context
+  Query->>Result: Render shared result grid
+  opt Result-grid action needs backend support
+    Result->>Backend: Capability-gated refine, edit, export, or native mutation
+    Backend->>Adapter: SQL-surface or native-surface operation
+    Adapter-->>Result: Rewritten SQL, DML/export text, or native helper
   end
+```
 
-  subgraph LanguageHelpers["Language-specific buffer helpers"]
-    SQLHelpers["clutch-sql.el<br/>SQL context/completion/Eldoc/xref"]
-    DocumentHelpers["clutch-document.el<br/>current MongoDB highlighting,<br/>indentation, completion, explain command"]
-    RedisHelpers["clutch-redis.el<br/>Redis command completion,<br/>line-oriented execution"]
+```mermaid
+sequenceDiagram
+  participant ObjectBuf as Object browser / describe buffer
+  participant Object as clutch-object.el
+  participant Backend as clutch-backend.el
+  participant Adapter as Backend adapter
+  participant QueryBuf as Matching query buffer
+  participant Output as Describe/action/result buffer
+
+  ObjectBuf->>Object: Jump, describe, browse, or object action
+  Object->>Backend: Metadata, definition, browse, or action API
+  Backend->>Adapter: Dispatch by backend and object type
+  alt Describe or metadata action
+    Adapter-->>Object: DDL, source, JSON metadata, stats, validation, explain
+    Object->>Output: Render describe/action buffer
+  else Browse object
+    Adapter-->>Object: Backend-owned browse command text
+    Object->>QueryBuf: Open SQL, MongoDB, or Redis query buffer
   end
-
-  subgraph ObjectUI["Object workflow"]
-    Jump["Object lookup / jump"]
-    Describe["Describe object"]
-    Browse["Browse object"]
-    Actions["Capability-gated actions<br/>profile, index insight,<br/>stats, validation, explain"]
-  end
-
-  Facade["clutch-backend.el<br/>generic API"]
-
-  QueryWorkflow["clutch-query.el<br/>query-at-point/region/buffer,<br/>execution and marking"]
-  QueryAPI["clutch-db-query<br/>clutch-db-build-paged-sql"]
-  DefinitionAPI["clutch-db-object-definition"]
-  BrowseAPI["clutch-db-object-browse-query"]
-  MetadataAPI["schema/list/column APIs"]
-  DocumentMetadataAPI["document capability APIs<br/>profile, index insight,<br/>validation, stats, explain"]
-  KeyValueMetadataAPI["key/value metadata APIs<br/>key listing, type metadata,<br/>type-aware browse command"]
-
-  Adapter["Backend adapter<br/>SQL, JDBC, document,<br/>or key/value"]
-  ResultStruct["clutch-db-result"]
-  ResultGrid["Result grid<br/>shared table renderer"]
-  BrowseText["Backend-owned browse text<br/>SQL SELECT, document helper,<br/>or Redis read command"]
-  DescribeBuffer["Describe buffer<br/>DDL/source or JSON metadata"]
-
-  SQLHelpers --> SQLConsole
-  DocumentHelpers --> MongoConsole
-  RedisHelpers --> RedisConsole
-  SQLConsole --> QueryWorkflow
-  MongoConsole --> QueryWorkflow
-  RedisConsole --> QueryWorkflow
-  QueryWorkflow --> QueryAPI
-  QueryAPI --> Facade
-  Facade --> Adapter
-  Adapter --> ResultStruct
-  ResultStruct --> ResultGrid
-
-  Jump --> MetadataAPI
-  Describe --> DefinitionAPI
-  Browse --> BrowseAPI
-  Actions --> DocumentMetadataAPI
-  Browse --> KeyValueMetadataAPI
-  MetadataAPI --> Facade
-  DefinitionAPI --> Facade
-  BrowseAPI --> Facade
-  DocumentMetadataAPI --> Facade
-  KeyValueMetadataAPI --> Facade
-  Adapter --> DescribeBuffer
-  Adapter --> BrowseText
-  BrowseText --> SQLConsole
-  BrowseText --> MongoConsole
-  BrowseText --> RedisConsole
 ```
 
 The result grid is shared across SQL, document, and key/value query results.
-Object definition, browse text, document object actions, and key/value metadata
-are backend-owned so native non-SQL backends do not fall back to table-oriented
-SQL behavior or MongoDB special cases. The object workflow asks the backend
-whether an action is supported for the selected object, then calls the
-corresponding generic API. Redis uses the same object workflow for KEY entries,
-but its backend builds Redis read commands from key type metadata instead of
-using document collection actions. Result-buffer actions use the same
-capability boundary: SQL rewrite, SQL INSERT/UPDATE export, and staged SQL
-mutation stay on SQL surfaces, while native document results keep
-backend-neutral grid operations and ask the document adapter to build native
-mutation snippets such as MongoDB helper calls.
+Query buffers differ by language helper and statement-boundary rules, but query
+execution always converges in `clutch-query.el` before calling the generic
+backend API. Object browsing is intentionally separate: `clutch-object.el` asks
+the adapter for metadata, definitions, native actions, or browse command text.
+Browse command text is opened in the matching query-buffer mode instead of
+pretending that every backend has SQL tables. Result-buffer actions use their
+own capability gate, so SQL rewrite/edit/export stays on SQL surfaces while
+native document/key-value surfaces expose only adapter-supported operations.
 
 ## JDBC Runtime Shape
 

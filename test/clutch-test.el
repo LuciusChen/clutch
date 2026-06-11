@@ -1055,7 +1055,7 @@ ROWS defaults to a small three-row sample."
             (should (eq clutch--conn-sql-product 'mysql))
             (let ((line (clutch--header-with-disconnect-badge
                          clutch-record--header-base)))
-              (should-not (string-match-p "Disconnected" line)))))
+              (should-not (string-match-p "DISCONNECTED" line)))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-record-open-renders-current-row ()
