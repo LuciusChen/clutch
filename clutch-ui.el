@@ -1,11 +1,6 @@
 ;;; clutch-ui.el --- Result rendering and display helpers -*- lexical-binding: t; -*-
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
 
@@ -93,6 +88,10 @@ Nil means derive the offset from `clutch--page-current'.")
   "Row data from the last result.")
 (defvar-local clutch--row-identity nil
   "Row identity metadata for staging edits and deletes in the current result.")
+(defvar-local clutch--row-identity-status nil
+  "Row identity capability status for the current result buffer.")
+(defvar-local clutch--row-identity-error-message nil
+  "Row identity metadata error message for the current result buffer.")
 (defvar-local clutch--executed-sql-overlay nil
   "Overlay marking the last SQL execution status.")
 (defvar-local clutch--row-overlay nil
@@ -1015,10 +1014,23 @@ Returns a list of propertized strings (may be empty)."
   (when (and clutch--result-columns
              clutch--result-source-table)
     (unless clutch--row-identity
-      (let ((warn-icon 'font-lock-warning-face)
-            (warn-text '(:inherit font-lock-warning-face :weight normal)))
+      (let* ((warn-icon 'font-lock-warning-face)
+             (warn-text '(:inherit font-lock-warning-face :weight normal))
+             (error-message (and (eq clutch--row-identity-status 'error)
+                                 clutch--row-identity-error-message))
+             (warning (if error-message
+                          (format "row identity error: %s"
+                                  (truncate-string-to-width
+                                   (string-trim error-message)
+                                   80 nil nil "…"))
+                        "row identity missing")))
         (concat (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warn-icon)
-                (propertize "row identity missing" 'face warn-text)
+                (propertize warning
+                            'face warn-text
+                            'help-echo
+                            (and error-message
+                                 (format "Row identity metadata failed: %s"
+                                         error-message)))
                 (propertize " E/D off" 'face warn-text))))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size total-rows

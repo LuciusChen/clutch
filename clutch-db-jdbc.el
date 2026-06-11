@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -780,16 +775,11 @@ property even when the URL includes a default auth database."
       (clutch-jdbc--sql-interface-props params)
     (clutch-jdbc--normalize-props (plist-get params :props))))
 
-(defun clutch-jdbc--sql-interface-surface-p (params)
-  "Return non-nil when PARAMS request the SQL Interface surface."
-  (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
-        '(sql sql-interface)))
-
 (defun clutch-jdbc--effective-driver (driver params)
   "Return internal JDBC driver for user-facing DRIVER and PARAMS."
   (cond
    ((eq driver 'mongodb)
-    (if (clutch-jdbc--sql-interface-surface-p params)
+    (if (clutch-db-sql-interface-surface-p params)
         'mongodb
       (signal 'clutch-db-error
               (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
@@ -800,7 +790,7 @@ property even when the URL includes a default auth database."
 (defun clutch-jdbc--mongodb-driver-p (driver params)
   "Return non-nil when DRIVER/PARAMS represent MongoDB SQL Interface JDBC."
   (or (and (eq driver 'mongodb)
-           (clutch-jdbc--sql-interface-surface-p params))
+           (clutch-db-sql-interface-surface-p params))
       (clutch-jdbc--sql-interface-jdbc-url-p
        (plist-get params :url))))
 

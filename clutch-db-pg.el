@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -34,7 +29,7 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
-(require 'pg)
+(require 'eieio)
 
 (defvar pg-connect-timeout)
 (defvar pg-read-timeout)
@@ -62,6 +57,27 @@
 (declare-function pgcon-connect-plist "pg" (object))
 (declare-function pg-escape-identifier "pg" (identifier))
 (declare-function pg-escape-literal "pg" (string))
+(declare-function clutch-db-pg--bind-with-null-params "clutch-db-pg" (conn statement-name typed-arguments))
+(declare-function clutch-db-pg--column-details-row "clutch-db-pg" (row pk-cols fks))
+(declare-function clutch-db-pg--ctid-identity "clutch-db-pg" (conn table))
+(declare-function clutch-db-pg--exec-prepared-with-nulls "clutch-db-pg" (conn sql typed-arguments))
+(declare-function clutch-db-pg--format-column-ddl "clutch-db-pg" (col))
+(declare-function clutch-db-pg--format-type "clutch-db-pg" (data-type max-len num-prec num-scale))
+(declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg" (sql))
+(declare-function clutch-db-pg--typed-arguments "clutch-db-pg" (params))
+(declare-function clutch-db-pg--unique-not-null-identities "clutch-db-pg" (conn table))
+
+(defvar clutch-db-pg--methods-installed nil
+  "Non-nil when PostgreSQL generic methods were installed.")
+
+(defun clutch-db-pg--ensure-client-api ()
+  "Ensure pg.el is available and this adapter installed its methods."
+  (unless (require 'pg nil t)
+    (signal 'clutch-db-error
+            (list "PostgreSQL backend requires pg.el. Install emarsden/pg-el, ensure it is on load-path, then restart Emacs.")))
+  (unless clutch-db-pg--methods-installed
+    (signal 'clutch-db-error
+            (list "PostgreSQL backend was loaded before pg.el was available. Restart Emacs after installing pg.el."))))
 
 (defun clutch-db-pg--apply-timeout-defaults (params)
   "Return PARAMS with PostgreSQL timeout defaults filled in."
@@ -289,6 +305,10 @@
   "Return connection plist KEY for CONN."
   (plist-get (pgcon-connect-plist conn) key))
 
+(defun clutch-db-pg--set-slot-value (conn slot value)
+  "Set CONN EIEIO SLOT to VALUE."
+  (funcall (symbol-function 'eieio-oset) conn slot value))
+
 (defconst clutch-db-pg--current-schema-cache-key :clutch-current-schema
   "Connection-local cache key for the effective PostgreSQL schema.")
 
@@ -301,7 +321,7 @@
   (let ((plist (plist-put (pgcon-connect-plist conn)
                           clutch-db-pg--current-schema-cache-key
                           schema)))
-    (setf (slot-value conn 'connect-plist) plist))
+    (clutch-db-pg--set-slot-value conn 'connect-plist plist))
   schema)
 
 (defun clutch-db-pg--set-statement-timeout (conn timeout-seconds)
@@ -487,6 +507,7 @@
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
 :sslmode, :schema, :connect-timeout, :read-idle-timeout, :query-timeout.
 `:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name."
+  (clutch-db-pg--ensure-client-api)
   (setq params (clutch-db-pg--apply-timeout-defaults
                 (clutch-db--normalize-connect-params 'pg params)))
   (let ((schema (plist-get params :schema))
@@ -518,6 +539,8 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 
 ;;;; Lifecycle methods
 
+(when (require 'pg nil t)
+
 (cl-defmethod clutch-db-disconnect ((conn pgcon))
   "Disconnect PostgreSQL CONN."
   (clutch-db-pg--set-manual-commit-enabled conn nil)
@@ -528,7 +551,6 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 (cl-defmethod clutch-db-live-p ((conn pgcon))
   "Return non-nil if PostgreSQL CONN is live."
   (and conn
-       (cl-typep conn 'pgcon)
        (process-live-p (pgcon-process conn))))
 
 (cl-defmethod clutch-db-backend-key ((_conn pgcon))
@@ -545,7 +567,7 @@ No special init needed — encoding is set in startup message.")
                   (clutch-db--normalize-connect-params 'pg params)))
          (read-idle-timeout (plist-get params :read-idle-timeout)))
     (when read-idle-timeout
-      (setf (pgcon-timeout conn) read-idle-timeout))))
+      (clutch-db-pg--set-slot-value conn 'timeout read-idle-timeout))))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn pgcon))
   "PostgreSQL schema refresh should not block connect."
@@ -1228,6 +1250,8 @@ ORDER BY c.ordinal_position"
 (cl-defmethod clutch-db-display-name ((_conn pgcon))
   "Return \"PostgreSQL\" as the display name."
   "PostgreSQL")
+
+ (setq clutch-db-pg--methods-installed t))
 
 (provide 'clutch-db-pg)
 ;;; clutch-db-pg.el ends here

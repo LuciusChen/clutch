@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -655,8 +650,9 @@ CONN supplies identifier escaping for the hidden aliases."
 
 (defun clutch--prepare-row-identity-query (conn sql &optional candidate table)
   "Return a row identity preparation plist for executing SQL on CONN.
-The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
-:augmented.  If no identity candidate is available, :sql is the original SQL.
+The returned plist contains :sql, :table, :candidate, :hidden-aliases,
+:augmented, and :identity-status.  If no identity candidate is available, :sql
+is the original SQL.
 CANDIDATE and TABLE reuse row identity already established by a result buffer."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (source-token (and (not table)
@@ -664,31 +660,46 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
          (table (or table
                     (and source-token
                          (clutch-db--source-table-name conn source-token))))
-         (candidates (cond
-                      (candidate (list candidate))
-                      (table
-                       (condition-case nil
-                           (clutch-db-row-identity-candidates conn table)
-                         (clutch-db-error nil)))))
-         (candidate (car candidates))
-         (expressions (and candidate
-                           (clutch--row-identity-select-expressions
-                            conn candidate)))
-         (aliases (and expressions
-                       (clutch--row-identity-hidden-aliases
-                        (length expressions))))
-         (augment-p (and candidate expressions
-                         (clutch--row-identity-augmentable-sql-p
-                          analysis-sql table))))
-    (list :sql (if augment-p
-                   (clutch--row-identity-inject-select-list
-                    conn analysis-sql expressions aliases)
-                 sql)
-          :table table
-          :candidate candidate
-          :candidates candidates
-          :hidden-aliases (and augment-p aliases)
-          :augmented (and augment-p t))))
+         candidates
+         identity-error)
+    (cond
+     (candidate
+      (setq candidates (list candidate)))
+     (table
+      (condition-case err
+          (setq candidates (clutch-db-row-identity-candidates conn table))
+        (clutch-db-error
+         (setq identity-error err)))))
+    (let* ((candidate (car candidates))
+           (expressions (and candidate
+                             (clutch--row-identity-select-expressions
+                              conn candidate)))
+           (aliases (and expressions
+                         (clutch--row-identity-hidden-aliases
+                          (length expressions))))
+           (augment-p (and candidate expressions
+                           (clutch--row-identity-augmentable-sql-p
+                            analysis-sql table)))
+           (identity-status (cond
+                             (identity-error 'error)
+                             (candidate 'candidate)
+                             (table 'unsupported))))
+      (list :sql (if augment-p
+                     (clutch--row-identity-inject-select-list
+                      conn analysis-sql expressions aliases)
+                   sql)
+            :table table
+            :candidate candidate
+            :candidates candidates
+            :hidden-aliases (and augment-p aliases)
+            :augmented (and augment-p t)
+            :identity-status identity-status
+            :identity-error-message
+            (and identity-error
+                 (or (and (stringp (cadr identity-error))
+                          (cadr identity-error))
+                     (error-message-string identity-error)))
+            :identity-error identity-error))))
 
 (defun clutch--row-identity-column-indices (columns names)
   "Return column indices in COLUMNS for NAMES, or nil if any is absent."
@@ -1263,7 +1274,10 @@ ELAPSED, when non-nil, is the failed execution duration in seconds."
 RESULT-CONTEXT, when non-nil, is an internal plist carrying source metadata
 for SQL generated from an already verified result.
 Returns the query result."
-  (let* ((page-size clutch-result-max-rows)
+  (let* ((result-context (append result-context
+                                 (clutch-db-query-result-context
+                                  connection sql)))
+         (page-size clutch-result-max-rows)
          (fetch-size (1+ page-size))
          (row-identity-prep
           (or (plist-get result-context :row-identity-prep)
@@ -1388,7 +1402,7 @@ Prompts for confirmation on destructive operations."
           (condition-case nil
               (catch 'clutch--execution-aborted
                 (let ((clutch--source-window source-win))
-                  (if (clutch-db-sql-select-query-p sql)
+                  (if (clutch-db-result-query-p connection sql)
                       (clutch--execute-select sql connection result-context)
                     (clutch--execute-dml sql connection))))
             (quit
@@ -1709,7 +1723,7 @@ result buffer.  Stops and reports on the first error."
              (funcall signal-statement-error err spec)))))
       (pcase-let ((`(,last ,beg ,end) last-spec))
         (cond
-         ((clutch-db-sql-select-query-p last)
+         ((clutch-db-result-query-p clutch-connection last)
           (when (> done 0)
             (message "%s statement%s %s"
                      (clutch--message-count done)

@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -306,7 +301,7 @@ The return value is (METHOD . METHOD-START), or nil when point is not directly
 after a helper call."
   (skip-chars-backward " \t\n\r")
   (when (eq (char-before) ?\))
-    (condition-case nil
+    (condition-case _scan-error
         (progn
           (backward-list)
           (skip-chars-backward " \t\n\r")

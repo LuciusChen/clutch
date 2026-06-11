@@ -13,6 +13,7 @@ add_load_path() {
 }
 
 add_load_path "$repo/../mongodb.el"
+add_load_path "$repo/../redis.el"
 add_load_path "$repo/../mysql.el"
 add_load_path "$repo/../pg-el"
 add_load_path "$repo"

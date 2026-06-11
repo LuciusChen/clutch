@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -88,6 +83,9 @@
   :type 'integer
   :group 'clutch)
 
+(defconst clutch-mongodb--source-document-column "clutch__document"
+  "Hidden result column name that stores the original MongoDB document.")
+
 (defun clutch-mongodb--error-message (err)
   "Return the primary MongoDB error message from ERR."
   (if (stringp (cadr err))
@@ -128,10 +126,6 @@
 (defun clutch-mongodb--surface (params)
   "Return normalized MongoDB surface from PARAMS, or nil."
   (clutch-db--normalize-symbol-option (plist-get params :surface)))
-
-(defun clutch-mongodb--sql-interface-surface-p (params)
-  "Return non-nil when PARAMS select MongoDB SQL Interface."
-  (memq (clutch-mongodb--surface params) '(sql sql-interface)))
 
 (defun clutch-mongodb--validate-surface (params)
   "Signal if PARAMS contain an unsupported MongoDB surface."
@@ -193,9 +187,13 @@
                              (error-message-string err)))))))
   (when (clutch-mongodb--missing-mongodb-functions)
     (when-let* ((library (locate-library "mongodb")))
-      (condition-case nil
+      (condition-case err
           (load library nil 'nomessage)
-        (error nil))))
+        (error
+         (signal 'clutch-db-error
+                 (list (format "MongoDB backend found mongodb.el at %s but failed to load it: %s"
+                               library
+                               (error-message-string err))))))))
   (when-let* ((missing (clutch-mongodb--missing-mongodb-functions)))
     (signal 'clutch-db-error
             (list (format
@@ -212,7 +210,7 @@ PARAMS may contain :url, or structured :host/:port/:database fields.
 The default connection delegates to public mongodb.el APIs.  When PARAMS select
 `:surface sql-interface', delegate to the JDBC SQL Interface surface."
   (clutch-mongodb--validate-surface params)
-  (if (clutch-mongodb--sql-interface-surface-p params)
+  (if (clutch-db-sql-interface-surface-p params)
       (progn
         (require 'clutch-db-jdbc)
         (clutch-db-jdbc-connect 'mongodb params))
@@ -723,29 +721,28 @@ When both are present, return the earlier one."
      (open open)
      (t (length text)))))
 
-(defun clutch-mongodb--find-options-from-chain (chain)
-  "Return MongoDB find command options parsed from helper CHAIN."
+(defun clutch-mongodb--options-from-chain (chain methods)
+  "Return MongoDB command option pairs parsed from CHAIN for METHODS."
   (delq nil
         (mapcar
          (lambda (pair)
            (let ((method (car pair))
                  (value (cdr pair)))
-             (when (member method '("sort" "maxTimeMS" "batchSize"
-                                    "allowDiskUse" "comment"))
+             (when (member method methods)
                (cons method value))))
          chain)))
 
+(defun clutch-mongodb--find-options-from-chain (chain)
+  "Return MongoDB find command options parsed from helper CHAIN."
+  (clutch-mongodb--options-from-chain
+   chain
+   '("sort" "maxTimeMS" "batchSize" "allowDiskUse" "comment")))
+
 (defun clutch-mongodb--aggregate-options-from-chain (chain)
   "Return MongoDB aggregate command options parsed from helper CHAIN."
-  (delq nil
-        (mapcar
-         (lambda (pair)
-           (let ((method (car pair))
-                 (value (cdr pair)))
-             (when (member method '("allowDiskUse" "batchSize" "comment"
-                                    "maxTimeMS"))
-               (cons method value))))
-         chain)))
+  (clutch-mongodb--options-from-chain
+   chain
+   '("allowDiskUse" "batchSize" "comment" "maxTimeMS")))
 
 (defun clutch-mongodb--merge-option-pairs (base extra)
   "Return a MongoDB option document from BASE pairs with EXTRA overriding."
@@ -841,6 +838,43 @@ DATABASE, when non-nil, is the database targeted by the parsed helper."
   (when value
     (clutch-mongodb--mql-document-arg value helper position)))
 
+(defun clutch-mongodb--find-arguments (args chain &optional single)
+  "Return MongoDB find arguments parsed from ARGS and CHAIN.
+When SINGLE is non-nil, force a single-result limit and ignore cursor paging
+chain options."
+  (list (clutch-mongodb--mql-doc-or-empty (nth 0 args))
+        (nth 1 args)
+        (if single 1 (cdr (assoc "limit" chain)))
+        (unless single (cdr (assoc "skip" chain)))
+        (unless single (clutch-mongodb--find-options-from-chain chain))))
+
+(defun clutch-mongodb--find-command (collection args chain &optional single)
+  "Return a MongoDB find command for COLLECTION from ARGS, CHAIN, and SINGLE."
+  (pcase-let ((`(,filter ,projection ,limit ,skip ,options)
+               (clutch-mongodb--find-arguments args chain single)))
+    (mongodb-find-command collection filter projection limit skip options)))
+
+(defun clutch-mongodb--aggregate-options (args chain)
+  "Return MongoDB aggregate options parsed from ARGS and CHAIN."
+  (unless (and (<= 1 (length args) 2)
+               (vectorp (car args)))
+    (signal 'clutch-db-error
+            (list "aggregate() expects a pipeline array and optional options document")))
+  (when (and (nth 1 args)
+             (not (mongodb-document-p (nth 1 args))))
+    (signal 'clutch-db-error
+            (list "aggregate() options argument must be a document")))
+  (clutch-mongodb--merge-options
+   (nth 1 args)
+   (clutch-mongodb--aggregate-options-from-chain chain)))
+
+(defun clutch-mongodb--aggregate-command (collection args chain)
+  "Return a MongoDB aggregate command for COLLECTION from ARGS and CHAIN."
+  (mongodb-aggregate-command
+   collection
+   (car args)
+   (clutch-mongodb--aggregate-options args chain)))
+
 (defun clutch-mongodb--execute-db-method
     (conn method args &optional target-database)
   "Execute database-level METHOD with ARGS on CONN.
@@ -920,25 +954,20 @@ helper call."
                       (clutch-mongodb-conn-database conn))))
     (pcase method
       ("find"
-       (let ((filter (clutch-mongodb--mql-doc-or-empty (nth 0 args)))
-             (projection (nth 1 args))
-             (limit (cdr (assoc "limit" chain)))
-             (skip (cdr (assoc "skip" chain)))
-             (options (clutch-mongodb--find-options-from-chain chain)))
+       (pcase-let ((`(,filter ,projection ,limit ,skip ,options)
+                    (clutch-mongodb--find-arguments args chain)))
          (if (assoc "explain" chain)
              (mongodb-explain
               client database
-              (mongodb-find-command collection filter projection limit skip
-                                  options)
+              (mongodb-find-command collection filter projection limit skip options)
               (clutch-mongodb--explain-verbosity chain))
            (mongodb-find
             client database collection filter projection limit skip options))))
       ("findOne"
-       (car (mongodb-find
-             client database collection
-             (clutch-mongodb--mql-doc-or-empty (nth 0 args))
-             (nth 1 args)
-             1)))
+       (pcase-let ((`(,filter ,projection ,limit ,skip ,options)
+                    (clutch-mongodb--find-arguments args chain t)))
+         (car (mongodb-find
+               client database collection filter projection limit skip options))))
       ("countDocuments"
        (unless (<= (length args) 2)
          (signal 'clutch-db-error
@@ -969,25 +998,15 @@ helper call."
         (clutch-mongodb--mql-optional-document-arg
          (nth 2 args) method 3)))
       ("aggregate"
-       (unless (and (<= 1 (length args) 2)
-                    (vectorp (car args)))
-         (signal 'clutch-db-error
-                 (list "aggregate() expects a pipeline array and optional options document")))
-       (when (and (nth 1 args)
-                  (not (mongodb-document-p (nth 1 args))))
-         (signal 'clutch-db-error
-                 (list "aggregate() options argument must be a document")))
-       (let ((options (clutch-mongodb--merge-options
-                       (nth 1 args)
-                       (clutch-mongodb--aggregate-options-from-chain
-                        chain))))
-         (if (assoc "explain" chain)
-             (mongodb-explain
-              client database
-              (mongodb-aggregate-command collection (car args) options)
-              (clutch-mongodb--explain-verbosity chain))
-           (mongodb-aggregate
-            client database collection (car args) options))))
+       (if (assoc "explain" chain)
+           (mongodb-explain
+            client database
+            (clutch-mongodb--aggregate-command collection args chain)
+            (clutch-mongodb--explain-verbosity chain))
+         (mongodb-aggregate
+          client database collection
+          (car args)
+          (clutch-mongodb--aggregate-options args chain))))
       ("listIndexes"
        (unless (null args)
          (signal 'clutch-db-error
@@ -1103,6 +1122,11 @@ helper call."
                             purpose))))
     (clutch-mongodb--parse-db-call (car statements))))
 
+(defun clutch-mongodb--last-helper-call (query)
+  "Return the parsed last MongoDB helper call in QUERY, or nil."
+  (when-let* ((statements (clutch-mongodb--split-statements query)))
+    (clutch-mongodb--parse-db-call (car (last statements)))))
+
 (defun clutch-mongodb--find-document-key (value key)
   "Return the first value for KEY found recursively in MongoDB VALUE."
   (cond
@@ -1173,47 +1197,31 @@ helper call."
     (pcase call
       (`(:collection ,collection :method "find" :args ,args :chain ,chain
                      :database ,database)
-       (let ((filter (clutch-mongodb--mql-doc-or-empty (nth 0 args)))
-             (projection (nth 1 args))
-             (limit (cdr (assoc "limit" chain)))
-             (skip (cdr (assoc "skip" chain)))
-             (options (clutch-mongodb--find-options-from-chain chain)))
-         (mongodb-explain
-          client database
-          (mongodb-find-command collection filter projection limit skip options)
-          (or (clutch-mongodb--explain-verbosity chain)
-              "executionStats"))))
+       (mongodb-explain
+        client database
+        (clutch-mongodb--find-command collection args chain)
+        (or (clutch-mongodb--explain-verbosity chain)
+            "executionStats")))
       (`(:collection ,_collection :method "find" :args ,_args :chain ,_chain)
        (clutch-mongodb--explain-call
         conn
         (append call (list :database (clutch-mongodb-conn-database conn)))))
       (`(:collection ,collection :method "findOne" :args ,args :chain ,chain
                      :database ,database)
-       (let ((filter (clutch-mongodb--mql-doc-or-empty (nth 0 args)))
-             (projection (nth 1 args)))
-         (mongodb-explain
-          client database
-          (mongodb-find-command collection filter projection 1 nil nil)
-          (or (clutch-mongodb--explain-verbosity chain)
-              "executionStats"))))
+       (mongodb-explain
+        client database
+        (clutch-mongodb--find-command collection args chain t)
+        (or (clutch-mongodb--explain-verbosity chain)
+            "executionStats")))
       (`(:collection ,_collection :method "findOne" :args ,_args :chain ,_chain)
        (clutch-mongodb--explain-call
         conn
         (append call (list :database (clutch-mongodb-conn-database conn)))))
       (`(:collection ,collection :method "aggregate" :args ,args :chain ,chain
                      :database ,database)
-       (unless (and (<= 1 (length args) 2)
-                    (vectorp (car args)))
-         (signal 'clutch-db-error
-                 (list "aggregate() explain expects a pipeline array")))
        (mongodb-explain
         client database
-        (mongodb-aggregate-command
-         collection
-         (car args)
-         (clutch-mongodb--merge-options
-          (nth 1 args)
-          (clutch-mongodb--aggregate-options-from-chain chain)))
+        (clutch-mongodb--aggregate-command collection args chain)
         (or (clutch-mongodb--explain-verbosity chain)
             "executionStats")))
       (`(:collection ,_collection :method "aggregate" :args ,_args :chain ,_chain)
@@ -1297,6 +1305,8 @@ helper call."
               (cons (car pair)
                     (clutch-mongodb--json-encodable (cdr pair))))
             value))
+   ((vectorp value)
+    (vconcat (mapcar #'clutch-mongodb--json-encodable (append value nil))))
    ((listp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable value)))
    (t value)))
@@ -1316,6 +1326,77 @@ helper call."
 (defun clutch-mongodb--document-value (document key)
   "Return KEY's value from MongoDB DOCUMENT."
   (cdr (assoc key (clutch-mongodb--document-elements document))))
+
+(defun clutch-mongodb--document-pair (document key)
+  "Return KEY's top-level pair from MongoDB DOCUMENT, or nil."
+  (assoc key (clutch-mongodb--document-elements document)))
+
+(defun clutch-mongodb--document-id-filter (document action)
+  "Return an _id filter document for DOCUMENT during ACTION."
+  (if-let* ((pair (clutch-mongodb--document-pair document "_id")))
+      (list (cons "_id" (cdr pair)))
+    (user-error "Cannot build MongoDB %s: document has no _id" action)))
+
+(defun clutch-mongodb--document-set-fields (document fields action)
+  "Return a MongoDB $set document from DOCUMENT FIELDS for ACTION."
+  (when (member "_id" fields)
+    (user-error "Cannot build MongoDB %s: _id is not writable" action))
+  (let ((pairs
+         (cl-loop for field in fields
+                  for pair = (clutch-mongodb--document-pair document field)
+                  unless pair
+                  do (user-error
+                      "Cannot build MongoDB %s: field %s is absent in document"
+                      action field)
+                  collect (cons field (cdr pair)))))
+    (unless pairs
+      (user-error "Cannot build MongoDB %s: no fields selected" action))
+    pairs))
+
+(defun clutch-mongodb--helper-call (collection method args)
+  "Return MongoDB helper text for COLLECTION METHOD and ARGS."
+  (format "db.getCollection(%s).%s(%s);"
+          (clutch-mongodb--json-encode-text collection)
+          method
+          (mapconcat #'clutch-mongodb--json-encode-text args ", ")))
+
+(defun clutch-mongodb--document-mutation-snippet
+    (action collection documents &optional fields)
+  "Return MongoDB helper snippets for ACTION on COLLECTION and DOCUMENTS.
+FIELDS is an optional list of top-level field names for update snippets."
+  (pcase action
+    ('insert-one
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "insertOne" (list document))))
+    ('insert-many
+     (list (clutch-mongodb--helper-call
+            collection "insertMany" (list (vconcat documents)))))
+    ('replace-one
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "replaceOne"
+                       (list (clutch-mongodb--document-id-filter
+                              document "replaceOne")
+                             document))))
+    ('delete-one
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "deleteOne"
+                       (list (clutch-mongodb--document-id-filter
+                              document "deleteOne")))))
+    ('update-one-set
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "updateOne"
+                       (list (clutch-mongodb--document-id-filter
+                              document "updateOne")
+                             (list
+                              (cons "$set"
+                                    (clutch-mongodb--document-set-fields
+                                     document fields "updateOne")))))))
+    (_
+     (user-error "Unsupported MongoDB document mutation action: %s" action))))
 
 (defun clutch-mongodb--field-type-counts (values)
   "Return sorted BSON type count objects for sampled VALUES."
@@ -1642,13 +1723,20 @@ helper call."
 (defun clutch-mongodb--result-from-docs (conn docs)
   "Return a Clutch result for CONN from MongoDB document list DOCS."
   (let* ((keys (clutch-mongodb--ordered-keys docs))
-         (columns (clutch-mongodb--columns-for-docs keys docs))
+         (source-column (list :name clutch-mongodb--source-document-column
+                              :type-category 'json
+                              :hidden t
+                              :document-source t))
+         (columns (append (clutch-mongodb--columns-for-docs keys docs)
+                          (list source-column)))
          (rows (mapcar
                 (lambda (doc)
-                  (mapcar
-                   (lambda (key)
-                     (clutch-mongodb--display-value (cdr (assoc key doc))))
-                   keys))
+                  (append
+                   (mapcar
+                    (lambda (key)
+                      (clutch-mongodb--display-value (cdr (assoc key doc))))
+                    keys)
+                   (list doc)))
                 docs)))
     (make-clutch-db-result
      :connection conn
@@ -1708,6 +1796,21 @@ helper call."
        conn
        (clutch-mongodb--eval conn code))
     (setf (clutch-mongodb-conn-busy conn) nil)))
+
+(cl-defmethod clutch-db-result-query-p ((_conn clutch-mongodb-conn) _code)
+  "Return non-nil because native MongoDB helpers return result documents."
+  t)
+
+(cl-defmethod clutch-db-query-result-context ((_conn clutch-mongodb-conn) code)
+  "Return native MongoDB result context for CODE."
+  (let* ((call (clutch-mongodb--last-helper-call code))
+         (collection (plist-get call :collection)))
+    (append
+     (list :row-identity-prep (list :sql code)
+           :server-pageable nil
+           :server-rewritable nil)
+     (when collection
+       (list :source-table collection)))))
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-mongodb-conn)
                                          base-code page-num page-size
@@ -1938,6 +2041,34 @@ The returned text is JSON metadata."
                             (clutch-mongodb--document-value document "name")
                             stats-by-name)))
                         index-docs)))))))
+
+(cl-defmethod clutch-db-object-action-supported-p
+  ((_conn clutch-mongodb-conn) entry action-id)
+  "Return non-nil when ACTION-ID is a MongoDB collection action for ENTRY."
+  (and (string= (upcase (or (plist-get entry :type) "")) "COLLECTION")
+       (memq action-id
+             '(index-insight explain-sample show-validation show-stats))))
+
+(cl-defmethod clutch-db-document-mutation-supported-p
+  ((_conn clutch-mongodb-conn) action)
+  "Return non-nil when ACTION has a native MongoDB helper snippet."
+  (memq action '(insert-one insert-many replace-one delete-one update-one-set)))
+
+(cl-defmethod clutch-db-document-mutation-snippets
+  ((_conn clutch-mongodb-conn) action collection documents &optional fields)
+  "Return native MongoDB helper snippets for ACTION on COLLECTION.
+DOCUMENTS is a list of original MongoDB documents.  FIELDS is an optional list
+of top-level field names for field-scoped snippets."
+  (clutch-mongodb--document-mutation-snippet
+   action collection documents fields))
+
+(cl-defmethod clutch-db-collection-explain-sample
+  ((conn clutch-mongodb-conn) collection)
+  "Return MongoDB explain metadata for a sample query on COLLECTION using CONN."
+  (clutch-db-explain-query
+   conn
+   (format "db.getCollection(%s).find({}).limit(1);"
+           (clutch-mongodb--json-encode-text collection))))
 
 (cl-defmethod clutch-db-explain-query ((conn clutch-mongodb-conn) query)
   "Return MongoDB explain metadata for QUERY on CONN as JSON."

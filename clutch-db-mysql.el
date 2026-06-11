@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -34,30 +29,62 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'clutch-backend)
-(require 'mysql)
+
+(declare-function mysql-autocommit-p "mysql" (conn))
+(declare-function mysql-busy-p "mysql" (conn))
+(declare-function mysql-commit "mysql" (conn))
+(declare-function mysql-connect "mysql" (&rest params))
+(declare-function mysql-connection-host "mysql" (conn))
+(declare-function mysql-connection-id "mysql" (conn))
+(declare-function mysql-connection-port "mysql" (conn))
+(declare-function mysql-connection-user "mysql" (conn))
+(declare-function mysql-current-database "mysql" (conn))
+(declare-function mysql-disconnect "mysql" (conn))
+(declare-function mysql-drain-query-response "mysql" (conn read-idle-timeout))
+(declare-function mysql-escape-identifier "mysql" (identifier))
+(declare-function mysql-escape-literal "mysql" (string))
+(declare-function mysql-execute "mysql" (stmt &rest params))
+(declare-function mysql-live-p "mysql" (conn))
+(declare-function mysql-prepare "mysql" (conn sql))
+(declare-function mysql-query "mysql" (conn sql))
+(declare-function mysql-result-affected-rows "mysql" (object))
+(declare-function mysql-result-columns "mysql" (object))
+(declare-function mysql-result-connection "mysql" (object))
+(declare-function mysql-result-last-insert-id "mysql" (object))
+(declare-function mysql-result-rows "mysql" (object))
+(declare-function mysql-result-warnings "mysql" (object))
+(declare-function mysql-rollback "mysql" (conn))
+(declare-function mysql-select-database "mysql" (conn database))
+(declare-function mysql-set-autocommit "mysql" (conn autocommit))
+(declare-function mysql-stmt-close "mysql" (stmt))
+(declare-function clutch-db-mysql--drain-interrupted-response "clutch-db-mysql" (conn))
+(declare-function clutch-db-mysql--parse-help-text "clutch-db-mysql" (text))
+(declare-function clutch-db-mysql--unique-not-null-identities "clutch-db-mysql" (conn table))
+
+(defvar mysql-tls-verify-server)
 
 ;;;; Type-category mapping
 
 (defconst clutch-db-mysql--type-category-alist
-  `((,mysql-type-decimal    . numeric)
-    (,mysql-type-tiny       . numeric)
-    (,mysql-type-short      . numeric)
-    (,mysql-type-long       . numeric)
-    (,mysql-type-float      . numeric)
-    (,mysql-type-double     . numeric)
-    (,mysql-type-longlong   . numeric)
-    (,mysql-type-int24      . numeric)
-    (,mysql-type-year       . numeric)
-    (,mysql-type-newdecimal . numeric)
-    (,mysql-type-json       . json)
-    (,mysql-type-blob       . blob)
-    (,mysql-type-tiny-blob  . blob)
-    (,mysql-type-medium-blob . blob)
-    (,mysql-type-long-blob  . blob)
-    (,mysql-type-date       . date)
-    (,mysql-type-time       . time)
-    (,mysql-type-datetime   . datetime)
-    (,mysql-type-timestamp  . datetime))
+  '((0   . numeric) ; DECIMAL
+    (1   . numeric) ; TINYINT
+    (2   . numeric) ; SMALLINT
+    (3   . numeric) ; INT
+    (4   . numeric) ; FLOAT
+    (5   . numeric) ; DOUBLE
+    (8   . numeric) ; BIGINT
+    (9   . numeric) ; MEDIUMINT
+    (13  . numeric) ; YEAR
+    (246 . numeric) ; NEWDECIMAL
+    (245 . json)    ; JSON
+    (252 . blob)    ; BLOB
+    (249 . blob)    ; TINYBLOB
+    (250 . blob)    ; MEDIUMBLOB
+    (251 . blob)    ; LONGBLOB
+    (10  . date)    ; DATE
+    (11  . time)    ; TIME
+    (12  . datetime) ; DATETIME
+    (7   . datetime)) ; TIMESTAMP
   "Alist mapping MySQL type codes to type-category symbols.")
 
 (defconst clutch-db-mysql--binary-charset 63
@@ -65,8 +92,7 @@
 Blob-family types with this charset are true BLOBs; others are TEXT.")
 
 (defconst clutch-db-mysql--blob-family-types
-  (list mysql-type-blob mysql-type-tiny-blob
-        mysql-type-medium-blob mysql-type-long-blob)
+  '(252 249 250 251)
   "MySQL type codes that share BLOB/TEXT family encodings.")
 
 (defcustom clutch-db-mysql-cancel-timeout-seconds 5
@@ -83,6 +109,25 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 (defvar clutch-db-mysql--connection-params
   (make-hash-table :test 'eq :weakness 'key)
   "Wire connection parameters keyed by MySQL connection objects.")
+
+(defvar clutch-db-mysql--methods-installed nil
+  "Non-nil when MySQL generic methods were installed.")
+
+(defvar clutch-db-mysql--set-read-idle-timeout-function nil
+  "Function used to update a mysql.el connection read-idle-timeout.")
+
+(defun clutch-db-mysql--ensure-client-api ()
+  "Ensure mysql.el is available and this adapter installed its methods."
+  (unless (require 'mysql nil t)
+    (signal 'clutch-db-error
+            (list "MySQL backend requires mysql.el. Install LuciusChen/mysql.el, ensure it is on load-path, then restart Emacs.")))
+  (unless clutch-db-mysql--methods-installed
+    (signal 'clutch-db-error
+            (list "MySQL backend was loaded before mysql.el was available. Restart Emacs after installing mysql.el."))))
+
+(defun clutch-db-mysql--set-read-idle-timeout (conn value)
+  "Set MySQL CONN read idle timeout to VALUE."
+  (funcall clutch-db-mysql--set-read-idle-timeout-function conn value))
 
 (defun clutch-db-mysql--apply-timeout-defaults (params)
   "Return PARAMS with MySQL timeout defaults filled in."
@@ -167,6 +212,7 @@ Each output plist has :name and :type-category."
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
 :ssl-mode, :connect-timeout, :read-idle-timeout.
 For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
+  (clutch-db-mysql--ensure-client-api)
   (setq params (clutch-db-mysql--apply-timeout-defaults
                 (clutch-db--normalize-connect-params 'mysql params)))
   (let ((tls-mode (plist-get params :clutch-tls-mode)))
@@ -189,6 +235,8 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
         conn))))
 
 ;;;; Lifecycle methods
+
+(when (require 'mysql nil t)
 
 (cl-defmethod clutch-db-disconnect ((conn mysql-conn))
   "Disconnect MySQL CONN."
@@ -252,7 +300,7 @@ Return non-nil when the wire protocol is synchronized again."
                   (clutch-db--normalize-connect-params 'mysql params)))
          (read-idle-timeout (plist-get params :read-idle-timeout)))
     (when read-idle-timeout
-      (setf (mysql-conn-read-idle-timeout conn) read-idle-timeout))))
+      (clutch-db-mysql--set-read-idle-timeout conn read-idle-timeout))))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
   "MySQL schema refresh should not block connect."
@@ -745,6 +793,15 @@ ORDER BY ORDINAL_POSITION"
 (cl-defmethod clutch-db-display-name ((_conn mysql-conn))
   "Return \"MySQL\" as the display name."
   "MySQL")
+
+ ;; Build the setter after mysql.el is loaded; otherwise byte-compilation of
+ ;; this optional adapter can expand mysql.el's struct setter too early.
+ (setq clutch-db-mysql--set-read-idle-timeout-function
+       (eval
+        '(lambda (conn value)
+           (setf (mysql-conn-read-idle-timeout conn) value))
+        t))
+ (setq clutch-db-mysql--methods-installed t))
 
 (provide 'clutch-db-mysql)
 ;;; clutch-db-mysql.el ends here

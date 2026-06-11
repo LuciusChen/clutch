@@ -53,6 +53,38 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
        (buffer-substring-no-properties (nth 0 capf) (nth 1 capf)))
    (nth 2 capf)))
 
+(defmacro clutch-test--with-connection-data-model (spec &rest body)
+  "Run BODY with SPEC identifying a test connection's backend data model.
+SPEC is (CONN BACKEND MODEL)."
+  (declare (indent 1) (debug ((form form form) body)))
+  (pcase-let ((`(,conn ,backend ,model) spec))
+    `(let ((clutch-test--conn ,conn)
+           (clutch-test--backend ,backend)
+           (clutch-test--model ,model))
+       (cl-letf (((symbol-function 'clutch-db-backend-key)
+                  (lambda (conn)
+                    (should (eq conn clutch-test--conn))
+                    clutch-test--backend))
+                 ((symbol-function 'clutch--backend-key-from-conn)
+                  (lambda (conn)
+                    (should (eq conn clutch-test--conn))
+                    clutch-test--backend))
+                 ((symbol-function 'clutch-backend-data-model)
+                  (lambda (backend)
+                    (should (eq backend clutch-test--backend))
+                    clutch-test--model)))
+         ,@body))))
+
+(defmacro clutch-test--with-native-document-result-buffer (&rest body)
+  "Run BODY in a temporary result buffer for a native document surface."
+  (declare (indent 0) (debug (body)))
+  `(with-temp-buffer
+     (setq-local clutch-connection 'document-conn
+                 clutch--connection-params nil)
+     (clutch-test--with-connection-data-model
+         ('document-conn 'mongodb 'document)
+       ,@body)))
+
 (defmacro clutch-test--with-result-buffer (spec &rest body)
   "Run BODY with result rendering isolated to buffer NAME.
 SPEC is (NAME &optional REFRESH-FN).

@@ -7,6 +7,7 @@
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
 - `clutch-mongodb.el` over external `mongodb.el` — native MongoDB document adapter
 - `clutch-document.el` — document query-console layer for MongoDB native buffers
+- `clutch-redis.el` over external `redis.el` — native Redis key/value adapter and command buffers
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
@@ -33,16 +34,16 @@ emacs -Q --batch -L . -l ert -l test/mysql-test.el \
   --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
 ```
 
-Run clutch native adapter live tests for MySQL and PostgreSQL from the `clutch`
-checkout:
+Run clutch native adapter live tests from the `clutch` checkout:
 
 ```sh
 ./test/run-native-live-tests.sh
 ```
 
 The runner starts or reuses local Docker/OrbStack containers and executes both
-UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live`
-tests.  Default ERT runs skip those live tags unless credentials are provided.
+UI-level `:clutch-live` tests and backend-level native tests such as
+`:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT
+runs skip those live tags unless credentials are provided.
 
 MongoDB backend details live in
 [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses
@@ -53,6 +54,11 @@ repository.
 
 MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires
 the JDBC sidecar plus the MongoDB JDBC driver jar.
+
+Redis uses the external `redis.el` native RESP client.  Clutch owns the
+line-oriented Redis command buffers, key browsing, type-aware read commands,
+TTL/existence metadata, and result-grid mapping.  Redis is a basic key/value
+backend, not a document backend and not a SQL surface.
 
 Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and
 MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake,

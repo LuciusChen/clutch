@@ -1,11 +1,6 @@
 ;;; clutch-edit.el --- Staged result edit and insert workflow -*- lexical-binding: t; -*-
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
 
@@ -23,6 +18,7 @@
 (defvar clutch--filtered-rows)
 (defvar clutch--fk-info)
 (defvar clutch--last-query)
+(defvar clutch--connection-params)
 (defvar clutch--marked-rows)
 (defvar clutch--pending-deletes)
 (defvar clutch--pending-edits)
@@ -31,6 +27,8 @@
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
 (defvar clutch--result-source-table)
+(defvar clutch--row-identity-error-message)
+(defvar clutch--row-identity-status)
 (defvar clutch-insert-validation-idle-delay)
 (defvar clutch-connection)
 (defvar clutch-record--result-buffer)
@@ -62,6 +60,16 @@
 (declare-function clutch-db-sql-find-top-level-clause "clutch-backend" (sql pattern &optional start))
 (declare-function clutch-db-substitute-params "clutch-backend" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-backend" (conn table))
+
+(defun clutch-result--sql-edit-surface-p ()
+  "Return non-nil when SQL staged mutation is available in this result."
+  (clutch-db-sql-surface-p clutch-connection clutch--connection-params))
+
+(defun clutch-result--require-sql-staged-mutation (op)
+  "Signal unless SQL staged mutation OP is available for this result."
+  (unless (clutch-result--sql-edit-surface-p)
+    (user-error
+     "%s is SQL-only and is not available for non-SQL results" op)))
 
 ;;;; Cell editing (C-c ')
 
@@ -392,6 +400,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
 (defun clutch-result-edit-cell ()
   "Edit or re-edit the value at point in a dedicated buffer."
   (interactive)
+  (clutch-result--require-sql-staged-mutation "Edit / re-edit")
   (pcase-let* ((`(,ridx ,cidx ,val) (or (clutch--cell-at-point)
                                         (user-error "No cell at point"))))
     (if (>= ridx (length clutch--result-rows))
@@ -487,6 +496,11 @@ Refresh the affected row and footer in place when possible."
 (defun clutch-result--row-identity-or-user-error (table op)
   "Return row identity metadata for TABLE, or signal `user-error' for OP."
   (or clutch--row-identity
+      (when (eq clutch--row-identity-status 'error)
+        (user-error "Cannot %s: row identity metadata failed for table %s: %s"
+                    op table
+                    (or clutch--row-identity-error-message
+                        "unknown error")))
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
 
@@ -736,6 +750,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
   "Stage selected rows for deletion.
 Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
+  (clutch-result--require-sql-staged-mutation "Stage delete")
   (let* ((indices (or (clutch--selected-row-indices)
                       (user-error "No row at point")))
          (table (clutch--result-source-table-or-user-error "Stage DELETE"))
@@ -1645,6 +1660,7 @@ fields until the user expands to all columns."
 (defun clutch-result-insert-row ()
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
+  (clutch-result--require-sql-staged-mutation "Stage insert")
   (let* ((table (or clutch--result-source-table
                     (user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
@@ -1719,6 +1735,8 @@ fields until the user expands to all columns."
          (ridx (nth 1 source)))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
+    (with-current-buffer result-buf
+      (clutch-result--require-sql-staged-mutation "Clone row to insert"))
     (let* ((table (with-current-buffer result-buf
                     (or clutch--result-source-table
                         (user-error "Cannot detect source table"))))

@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-**clutch** is an interactive Emacs database client designed to provide an intuitive visual interface for browsing, querying, and mutating SQL databases directly within Emacs. It eliminates the need for external GUI tools or CLI clients by providing a rich, single-page result browser, object-centric schema workflow, and interactive REPL.
+**clutch** is an interactive Emacs database client designed to provide an intuitive visual interface for browsing, querying, and mutating databases directly within Emacs. It eliminates the need for external GUI tools or CLI clients by providing a rich, single-page result browser, object-centric schema workflow, and interactive REPL.
 
 ### Problem Statement
 
@@ -14,7 +14,7 @@ Emacs users lack a seamless, integrated database client that operates within the
 ### Solution
 
 clutch integrates directly into Emacs, offering:
-- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, built-in SQLite, and native MongoDB through the external `mongodb.el` client
+- Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, built-in SQLite, native MongoDB through the external `mongodb.el` client, and basic Redis key/value support through the external `redis.el` client
 - JDBC sidecar support for Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB SQL Interface, and generic JDBC URLs
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
@@ -67,6 +67,7 @@ backend adapters
   clutch-db-pg.el        external pg-el client
   clutch-db-sqlite.el    Emacs sqlite-* functions
   clutch-mongodb.el      MongoDB document adapter over external mongodb.el
+  clutch-redis.el        Redis key/value adapter over external redis.el
   clutch-db-jdbc.el      JVM sidecar plus JDBC drivers
 ```
 
@@ -89,10 +90,12 @@ backend adapters
 | `clutch-db-pg.el` | PostgreSQL backend adapter, OID-to-type mapping, pg-el boundary wrappers |
 | `clutch-db-sqlite.el` | SQLite backend adapter (Emacs 29.1+ `sqlite-*` functions) |
 | `clutch-mongodb.el` | MongoDB basic document backend over external `mongodb.el` |
+| `clutch-redis.el` | Redis basic key/value backend over external `redis.el` |
 | `clutch-db-jdbc.el` | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
 | External dependency: `mysql` | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | PostgreSQL client from upstream `pg-el` (separate package) |
 | External dependency: `mongodb` | Native MongoDB client from `mongodb.el` (separate package) |
+| External dependency: `redis` | Native Redis RESP client from `redis.el` (separate package) |
 | Optional package: `ob-clutch` | Org-Babel integration bridge (separate package) |
 
 For JDBC-backed databases, one logical clutch connection now maps to two JDBC
@@ -115,6 +118,7 @@ user queries on the same JDBC session.
 | **PostgreSQL** | Core SQL support | 29.1+ | `pg` | External `pg-el` package; supports PG 12+ |
 | **SQLite** | Core SQL support | 29.1+ | Emacs built-in `sqlite-*` | Synchronous queries only |
 | **MongoDB** | Basic native document support | 29.1+ | `mongodb.el` | Ordinary local `mongodb://` deployments; query buffers use supported MongoDB Shell / MQL helper syntax, not SQL or arbitrary JavaScript |
+| **Redis** | Basic key/value support | 29.1+ | `redis.el` | Ordinary Redis TCP endpoints; command buffers, key browsing, and type-aware value display |
 
 ### JDBC Backends (via JVM Sidecar)
 
@@ -132,8 +136,9 @@ user queries on the same JDBC session.
 | **Generic JDBC** | Basic SQL / query-first support | any | — | Drop jar into `clutch-jdbc-agent-dir/drivers/` |
 
 Backend support levels are defined in `docs/backend-support.org`.  Redis-style
-key/value systems are not covered by the MongoDB adapter and require a future
-non-relational backend contract before clutch should claim support.
+key/value systems are not document databases; Clutch supports Redis through the
+separate `redis` backend and intentionally keeps it at the basic key/value
+support level.
 
 ---
 
@@ -643,10 +648,10 @@ migration fallback when the identity-keyed file has not been created yet.
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `clutch-jdbc-agent-dir` | `~/.emacs.d/clutch-jdbc/` | directory | Directory for agent jar and `drivers/` |
-| `clutch-jdbc-agent-version` | `"0.2.3"` | string | Agent version to download |
+| `clutch-jdbc-agent-version` | `"0.2.4"` | string | Agent version to download |
 | `clutch-jdbc-agent-sha256` | (hash string) | string or nil | Expected SHA-256 of agent jar; nil to disable |
 | `clutch-jdbc-agent-java-executable` | `"java"` | string | Java executable path |
-| `clutch-jdbc-agent-jvm-args` | `'("-Xss512k")` | list of strings | Extra JVM arguments |
+| `clutch-jdbc-agent-jvm-args` | `'("-Xss512k" "-Dpolyglot.engine.WarnInterpreterOnly=false")` | list of strings | Extra JVM arguments |
 | `clutch-jdbc-fetch-size` | `500` | natnum | Rows per fetch batch from JDBC cursor |
 | `clutch-jdbc-oracle-manual-commit` | `t` | boolean | Oracle JDBC default: manual-commit instead of auto-commit |
 
@@ -1075,7 +1080,7 @@ runtime model are documented in `docs/jdbc-agent-protocol.md`.
 - Result buffers support per-table/per-column displayers through
   `clutch-register-column-displayer`.
 - Result buffers can pipe the current cell through a shell command with `|`.
-- Live coverage is split by backend path: native MySQL/PostgreSQL/MongoDB
+- Live coverage is split by backend path: native MySQL/PostgreSQL/MongoDB/Redis
   suites run through `test/run-native-live-tests.sh`, SQLite is covered
   in-process, and environment-driven JDBC live suites cover Oracle, SQL Server,
   ClickHouse, DuckDB, and MongoDB SQL Interface user workflows against real

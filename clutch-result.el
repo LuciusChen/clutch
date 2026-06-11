@@ -1,11 +1,6 @@
 ;;; clutch-result.el --- Result buffer workflows -*- lexical-binding: t; -*-
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
 
@@ -52,6 +47,8 @@
 (defvar clutch--result-source-table)
 (defvar clutch--result-column-details)
 (defvar clutch--row-identity)
+(defvar clutch--row-identity-error-message)
+(defvar clutch--row-identity-status)
 (defvar clutch--pre-fullscreen-config)
 (defvar clutch--source-window)
 (defvar clutch--where-filter)
@@ -143,6 +140,50 @@ Uses the full connection key so each console gets its own result buffer."
   (and (local-variable-p 'clutch--result-server-rewritable (current-buffer))
        clutch--result-server-rewritable))
 
+(defun clutch-result--native-document-p ()
+  "Return non-nil when the current result uses a native document surface."
+  (clutch-db-native-document-surface-p
+   clutch-connection clutch--connection-params))
+
+(defun clutch-result--sql-result-action-p ()
+  "Return non-nil when SQL-only result actions should be available."
+  (clutch-db-sql-surface-p clutch-connection clutch--connection-params))
+
+(defun clutch-result--document-source-collection (op)
+  "Return source collection for document OP, or signal a user error."
+  (or clutch--result-source-table
+      (user-error "Cannot %s: result has no source collection" op)))
+
+(defun clutch-result--document-source-column-index ()
+  "Return the hidden source-document column index, or nil."
+  (cl-position-if (lambda (col)
+                    (plist-get col :document-source))
+                  clutch--result-column-defs))
+
+(defun clutch-result--document-source-documents (rows op)
+  "Return original backend documents from ROWS for document OP."
+  (let ((idx (or (clutch-result--document-source-column-index)
+                 (user-error
+                  "Cannot %s: result has no source document metadata" op))))
+    (cl-loop for row in rows
+             collect (nth idx row))))
+
+(defun clutch-result--document-mutation-supported-p (action)
+  "Return non-nil when ACTION snippets are available for this result."
+  (and (clutch-result--native-document-p)
+       (clutch-db-document-mutation-supported-p clutch-connection action)))
+
+(defun clutch-result--require-document-mutation (action op)
+  "Signal unless document mutation ACTION is available for OP."
+  (unless (clutch-result--document-mutation-supported-p action)
+    (user-error "%s is not available for this result" op)))
+
+(defun clutch-result--require-sql-result-action (op)
+  "Signal unless SQL-only OP is available for this result."
+  (unless (clutch-result--sql-result-action-p)
+    (user-error "%s is SQL-only and is not available for non-SQL results"
+                op)))
+
 (defun clutch-result--query-plan (base &optional filter)
   "Return SQL execution plan for BASE with optional FILTER.
 The plan keeps the user-visible SQL and the internal row-identity SQL together
@@ -152,7 +193,11 @@ so callers cannot apply WHERE before hidden identity columns are injected."
                      (clutch--prepare-row-identity-query
                       clutch-connection base clutch--row-identity
                       clutch--result-source-table)
-                   (list :sql base :table clutch--result-source-table)))
+                   (list :sql base
+                         :table clutch--result-source-table
+                         :identity-status clutch--row-identity-status
+                         :identity-error-message
+                         clutch--row-identity-error-message)))
            (sql (if filter (clutch-db-apply-where clutch-connection base filter) base)))
       (list :sql sql
             :row-identity-prep
@@ -226,6 +271,14 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                        columns row-identity-prep))
          (row-identity (clutch--finalize-row-identity
                         row-identity-prep column-defs))
+         (prep-identity-status (plist-get row-identity-prep :identity-status))
+         (row-identity-status
+          (cond
+           (row-identity 'available)
+           ((eq prep-identity-status 'error) 'error)
+           ((or (plist-get row-identity-prep :table)
+                clutch--result-source-table)
+            'unsupported)))
          (column-names (clutch-db-result-column-names column-defs))
          (cached-pk-indices
           (and (eq (plist-get row-identity :kind) 'primary-key)
@@ -236,6 +289,10 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                 clutch--result-columns column-names
                 clutch--result-column-defs column-defs
                 clutch--row-identity row-identity
+                clutch--row-identity-status row-identity-status
+                clutch--row-identity-error-message
+                (and (eq row-identity-status 'error)
+                     (plist-get row-identity-prep :identity-error-message))
                 clutch--result-rows rows
                 clutch--page-current page-num
                 clutch--page-offset offset
@@ -398,6 +455,8 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--result-rows nil
               clutch--result-column-details nil
               clutch--row-identity nil
+              clutch--row-identity-status nil
+              clutch--row-identity-error-message nil
               clutch--cached-pk-indices nil
               clutch--sort-column nil
               clutch--sort-descending nil
@@ -1223,7 +1282,9 @@ RECT is (ROW-INDICES . COL-INDICES)."
 
 (defun clutch-result-copy (format &optional rect)
   "Unified copy entry point for result buffer.
-FORMAT is one of symbols: `tsv', `csv', `org-table', `insert', `update'.
+FORMAT is one of symbols: `tsv', `csv', `org-table', `insert', `update',
+`document-insert-one', `document-insert-many', `document-replace-one',
+`document-delete-one', or `document-update-one-set'.
 When RECT is non-nil, use it as precomputed rectangle bounds.  If region
 is active, copy rectangle bounds from region endpoints.
 Otherwise, copy the current cell."
@@ -1241,9 +1302,21 @@ Otherwise, copy the current cell."
     ('org-table
      (clutch-result--copy-rows 'org-table rect))
     ('insert
+     (clutch-result--require-sql-result-action "Copy INSERT SQL")
      (clutch-result--copy-rows 'insert rect))
     ('update
+     (clutch-result--require-sql-result-action "Copy UPDATE SQL")
      (clutch-result--copy-rows 'update rect))
+    ('document-insert-one
+     (clutch-result--copy-rows 'document-insert-one rect))
+    ('document-insert-many
+     (clutch-result--copy-rows 'document-insert-many rect))
+    ('document-replace-one
+     (clutch-result--copy-rows 'document-replace-one rect))
+    ('document-delete-one
+     (clutch-result--copy-rows 'document-delete-one rect))
+    ('document-update-one-set
+     (clutch-result--copy-rows 'document-update-one-set rect))
     (_
      (user-error "Unsupported copy format: %s" format))))
 
@@ -1288,6 +1361,31 @@ Otherwise, copy the current cell."
   (interactive)
   (clutch-result--copy-fmt 'update))
 
+(defun clutch-result-copy-document-insert-one ()
+  "Copy selected documents as native document insert-one snippets."
+  (interactive)
+  (clutch-result--copy-fmt 'document-insert-one))
+
+(defun clutch-result-copy-document-insert-many ()
+  "Copy selected documents as a native document insert-many snippet."
+  (interactive)
+  (clutch-result--copy-fmt 'document-insert-many))
+
+(defun clutch-result-copy-document-replace-one ()
+  "Copy selected documents as native document replace-one snippets."
+  (interactive)
+  (clutch-result--copy-fmt 'document-replace-one))
+
+(defun clutch-result-copy-document-delete-one ()
+  "Copy selected documents as native document delete-one snippets."
+  (interactive)
+  (clutch-result--copy-fmt 'document-delete-one))
+
+(defun clutch-result-copy-document-update-one-set ()
+  "Copy selected fields as native document update-one snippets."
+  (interactive)
+  (clutch-result--copy-fmt 'document-update-one-set))
+
 (transient-define-prefix clutch-result-copy-dispatch ()
   "Copy result buffer data.
 Enable --refine to exclude rows/columns interactively before copying
@@ -1300,8 +1398,22 @@ Enable --refine to exclude rows/columns interactively before copying
    ("t" "TSV"             clutch-result-copy-tsv)
    ("c" "CSV with header" clutch-result-copy-csv)
    ("o" "Org table"       clutch-result-copy-org-table)
-   ("i" "INSERT"          clutch-result-copy-insert)
-   ("u" "UPDATE"          clutch-result-copy-update)])
+   ("i" "INSERT SQL"      clutch-result-copy-insert
+    :if clutch-result--sql-result-action-p)
+   ("u" "UPDATE SQL"      clutch-result-copy-update
+    :if clutch-result--sql-result-action-p)]
+  ["Document helper"
+   :pad-keys t
+   ("I" "Insert one"      clutch-result-copy-document-insert-one
+    :if (lambda () (clutch-result--document-mutation-supported-p 'insert-one)))
+   ("M" "Insert many"     clutch-result-copy-document-insert-many
+    :if (lambda () (clutch-result--document-mutation-supported-p 'insert-many)))
+   ("R" "Replace one"     clutch-result-copy-document-replace-one
+    :if (lambda () (clutch-result--document-mutation-supported-p 'replace-one)))
+   ("U" "Update fields"   clutch-result-copy-document-update-one-set
+    :if (lambda () (clutch-result--document-mutation-supported-p 'update-one-set)))
+   ("D" "Delete one"      clutch-result-copy-document-delete-one
+    :if (lambda () (clutch-result--document-mutation-supported-p 'delete-one)))])
 
 
 (defun clutch--agent-context-sql-from-bounds (bounds)
@@ -2167,7 +2279,9 @@ OP is a short operation description used in user-facing error messages."
     ("insert-copy" :kind insert :destination clipboard)
     ("insert-file" :kind insert :destination file)
     ("update-copy" :kind update :destination clipboard)
-    ("update-file" :kind update :destination file))
+    ("update-file" :kind update :destination file)
+    ("document-insert-many-copy" :kind document-insert-many :destination clipboard)
+    ("document-insert-many-file" :kind document-insert-many :destination file))
   "Available result export choices and their execution targets.")
 
 (defconst clutch--result-export-kinds
@@ -2186,8 +2300,28 @@ OP is a short operation description used in user-facing error messages."
                :file-prompt "Export SQL to file: "
                :default-file "export.sql"
                :copy-message "Copied %d row%s as UPDATE SQL"
-               :file-message "Exported %d row%s as UPDATE SQL to %s")))
+               :file-message "Exported %d row%s as UPDATE SQL to %s"))
+    (document-insert-many . (:content clutch--export-document-insert-many-content
+                             :file-prompt "Export document helper to file: "
+                             :default-file "documents.txt"
+                             :copy-message "Copied %d document%s as native insert-many helper"
+                             :file-message "Exported %d document%s as native insert-many helper to %s")))
   "Result export behavior keyed by logical export kind.")
+
+(defun clutch-result--export-format-available-p (format)
+  "Return non-nil when export FORMAT is available in the current result."
+  (pcase (plist-get format :kind)
+    ('csv t)
+    ((or 'insert 'update)
+     (clutch-result--sql-result-action-p))
+    ('document-insert-many
+     (clutch-result--document-mutation-supported-p 'insert-many))))
+
+(defun clutch-result--available-export-formats ()
+  "Return export formats available for the current result buffer."
+  (cl-loop for format in clutch--result-export-formats
+           when (clutch-result--export-format-available-p (cdr format))
+           collect format))
 
 (defun clutch-result--copy-selection-indices (&optional rect)
   "Return row and column indices for result copy commands.
@@ -2217,6 +2351,23 @@ rectangle and inactive regions fall back to the current cell."
     ('update
      (clutch-result--build-update-statements-for-rows
       rows col-indices "copy UPDATE SQL"))
+    ((or 'document-insert-one 'document-insert-many
+         'document-replace-one 'document-delete-one
+         'document-update-one-set)
+     (let* ((action (pcase kind
+                      ('document-insert-one 'insert-one)
+                      ('document-insert-many 'insert-many)
+                      ('document-replace-one 'replace-one)
+                      ('document-delete-one 'delete-one)
+                      ('document-update-one-set 'update-one-set)))
+            (op (format "copy %s" kind))
+            (collection (clutch-result--document-source-collection op))
+            (documents (clutch-result--document-source-documents rows op))
+            (fields (when (eq action 'update-one-set)
+                      (clutch--column-names-for-indices col-indices))))
+       (clutch-result--require-document-mutation action op)
+       (clutch-db-document-mutation-snippets
+        clutch-connection action collection documents fields)))
     (_
      (user-error "Unsupported copy format: %s" kind))))
 
@@ -2245,7 +2396,13 @@ rectangle and inactive regions fall back to the current cell."
                   (clutch--message-keyword op)
                   (if (= (length lines) 1) "" "s")
                   (clutch--message-count (length col-indices))
-                  (if (= (length col-indices) 1) "" "s")))))))
+                  (if (= (length col-indices) 1) "" "s"))))
+      ((or 'document-insert-one 'document-insert-many
+           'document-replace-one 'document-delete-one
+           'document-update-one-set)
+       (message "Copied %s document helper snippet%s"
+                (clutch--message-count (length lines))
+                (if (= (length lines) 1) "" "s"))))))
 
 (defun clutch--csv-escape (val)
   "Return CSV-escaped string for VAL."
@@ -2295,11 +2452,12 @@ Prompts for format:
 - update-copy: all rows to clipboard as UPDATE statements
 - update-file: all rows to a .sql file as UPDATE statements."
   (interactive)
-  (let* ((choice (completing-read
+  (let* ((formats (clutch-result--available-export-formats))
+         (choice (completing-read
                   "Export format: "
-                  (mapcar #'car clutch--result-export-formats)
+                  (mapcar #'car formats)
                   nil t))
-         (format (cdr (assoc choice clutch--result-export-formats))))
+         (format (cdr (assoc choice formats))))
     (unless format
       (user-error "Unsupported export format: %s" choice))
     (clutch--export-result format)))
@@ -2377,6 +2535,20 @@ Prompts for format:
   (let* ((col-indices (clutch--visible-columns))
          (stmts (clutch-result--build-update-statements-for-rows
                  rows col-indices "export UPDATE SQL")))
+    (if stmts
+        (concat (mapconcat #'identity stmts "\n") "\n")
+      "")))
+
+(defun clutch--export-document-insert-many-content (rows)
+  "Return native document insertMany export text for ROWS."
+  (let* ((collection
+          (clutch-result--document-source-collection
+           "export document insert-many"))
+         (documents
+          (clutch-result--document-source-documents
+           rows "export document insert-many"))
+         (stmts (clutch-db-document-mutation-snippets
+                 clutch-connection 'insert-many collection documents)))
     (if stmts
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
@@ -2783,16 +2955,22 @@ Selects JSON, XML, or binary string view based on column type and content."
    ["Query"
     ("g" "Re-execute"        clutch-result-rerun)
     ("x" "Preview execution" clutch-preview-execution-sql)
-    ("#" "Count total"       clutch-result-count-total)
+    ("#" "Count total"       clutch-result-count-total
+     :if clutch-result--server-rewritable-p)
     ("A" "Aggregate"         clutch-result-aggregate)]
    ["Staged"
-    ("y" "Copy staged SQL"  clutch-result-copy-pending-sql)
-    ("Y" "Save staged SQL"  clutch-result-save-pending-sql)]
+    ("y" "Copy staged SQL"  clutch-result-copy-pending-sql
+     :if clutch-result--sql-result-action-p)
+    ("Y" "Save staged SQL"  clutch-result-save-pending-sql
+     :if clutch-result--sql-result-action-p)]
    ["Filter / Sort"
     ("/" "Filter rows"       clutch-result-filter)
-    ("W" "WHERE filter"      clutch-result-apply-filter)
-    ("s" "Sort ASC"          clutch-result-sort-by-column)
-    ("S" "Sort DESC"         clutch-result-sort-by-column-desc)]]
+    ("W" "WHERE filter"      clutch-result-apply-filter
+     :if clutch-result--server-rewritable-p)
+    ("s" "Sort ASC"          clutch-result-sort-by-column
+     :if clutch-result--server-rewritable-p)
+    ("S" "Sort DESC"         clutch-result-sort-by-column-desc
+     :if clutch-result--server-rewritable-p)]]
   [ :pad-keys t
    ["Pages"
     ("N" "Next page"         clutch-result-next-page)
@@ -2802,12 +2980,18 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("]" "Page right →│"     clutch-result-scroll-right)
     ("[" "Page left │←"      clutch-result-scroll-left)]
    ["Mutate"
-    ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
-    ("i" "Stage insert"      clutch-result-insert-row)
-    ("I" "Clone row → insert" clutch-clone-row-to-insert)
-    ("d" "Stage delete"      clutch-result-delete-rows)
-    ("C-c C-c" "Commit staged" clutch-result-commit)
-    ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point)]
+    ("C-c '" "Edit / re-edit" clutch-result-edit-cell
+     :if clutch-result--sql-result-action-p)
+    ("i" "Stage insert"      clutch-result-insert-row
+     :if clutch-result--sql-result-action-p)
+    ("I" "Clone row → insert" clutch-clone-row-to-insert
+     :if clutch-result--sql-result-action-p)
+    ("d" "Stage delete"      clutch-result-delete-rows
+     :if clutch-result--sql-result-action-p)
+    ("C-c C-c" "Commit staged" clutch-result-commit
+     :if clutch-result--sql-result-action-p)
+    ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point
+     :if clutch-result--sql-result-action-p)]
    ["Layout"
     ("=" "Widen column"      clutch-result-widen-column)
     ("-" "Narrow column"     clutch-result-narrow-column)

@@ -5,7 +5,7 @@
 ;; Assisted-by: OpenAI Codex:gpt-5.5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (mysql "0.2.2") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
@@ -397,7 +397,7 @@ background object discovery starts."
   :type 'number
   :group 'clutch)
 
-(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM" "COLLECTION")
+(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM" "COLLECTION" "KEY")
   "Object types preferred by clutch's primary object entrypoint.
 When nil, the primary entrypoint includes all schema object types."
   :type '(repeat string)

@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -118,6 +113,11 @@ actionable hints for known error patterns."
    ((stringp value)
     (intern (downcase value)))
    (t value)))
+
+(defun clutch-db-sql-interface-surface-p (params)
+  "Return non-nil when PARAMS select a SQL Interface surface."
+  (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
+        '(sql sql-interface)))
 
 (defun clutch-db--reject-removed-connect-params (params)
   "Signal for removed connection PARAMS and return PARAMS otherwise."
@@ -842,6 +842,20 @@ ERRBACK receives an error-message string when the work fails."
 (cl-defgeneric clutch-db-query (conn sql)
   "Execute SQL on CONN and return a `clutch-db-result'.")
 
+(cl-defgeneric clutch-db-result-query-p (conn sql)
+  "Return non-nil when SQL should render as a tabular result for CONN.")
+
+(cl-defmethod clutch-db-result-query-p ((_conn t) sql)
+  "Return non-nil when SQL is a normal SQL result-set query."
+  (clutch-db-sql-select-query-p sql))
+
+(cl-defgeneric clutch-db-query-result-context (conn sql)
+  "Return result-buffer context plist for SQL on CONN.")
+
+(cl-defmethod clutch-db-query-result-context ((_conn t) _sql)
+  "Default: return no additional result-buffer context."
+  nil)
+
 (cl-defgeneric clutch-db-execute-params (conn sql params)
   "Execute SQL on CONN with positional PARAMS.
 SQL uses `?' placeholders.  PARAMS is a list of Elisp values.
@@ -1047,6 +1061,14 @@ other backend-specific keys as needed.")
   "Default: return nil when no detail loader is available."
   nil)
 
+(cl-defgeneric clutch-db-object-entry-metadata (conn entry)
+  "Return object ENTRY augmented with display metadata for CONN.
+Backends may add cheap, caller-facing metadata used by object pickers.")
+
+(cl-defmethod clutch-db-object-entry-metadata ((_conn t) entry)
+  "Default: return ENTRY unchanged."
+  entry)
+
 (cl-defgeneric clutch-db-object-source (conn entry)
   "Return source text for source-bearing object ENTRY on CONN.")
 
@@ -1095,6 +1117,38 @@ Return nil when CONN does not provide a backend-specific browse query.")
 
 (cl-defmethod clutch-db-collection-index-insight ((_conn t) _collection)
   "Default: return nil when index insight metadata is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-object-action-supported-p (conn entry action-id)
+  "Return non-nil when ACTION-ID is supported for object ENTRY on CONN.")
+
+(cl-defmethod clutch-db-object-action-supported-p ((_conn t) _entry _action-id)
+  "Default: backend-specific object actions are unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-document-mutation-supported-p (conn action)
+  "Return non-nil when CONN can build document mutation ACTION snippets.")
+
+(cl-defmethod clutch-db-document-mutation-supported-p ((_conn t) _action)
+  "Default: document mutation snippets are unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-document-mutation-snippets
+    (conn action collection documents &optional fields)
+  "Return document mutation snippets for ACTION on COLLECTION using CONN.
+DOCUMENTS is a list of backend-native documents.  FIELDS is an optional list of
+field names for field-scoped actions.")
+
+(cl-defmethod clutch-db-document-mutation-snippets
+  ((_conn t) action _collection _documents &optional _fields)
+  "Default: signal that ACTION is unsupported for document mutation snippets."
+  (user-error "Document mutation %s is not available for this backend" action))
+
+(cl-defgeneric clutch-db-collection-explain-sample (conn collection)
+  "Return explain metadata text for a sample query on COLLECTION using CONN.")
+
+(cl-defmethod clutch-db-collection-explain-sample ((_conn t) _collection)
+  "Default: return nil when collection sample explain is unavailable."
   nil)
 
 (cl-defgeneric clutch-db-explain-query (conn query)
@@ -1169,6 +1223,10 @@ BACKEND-NAME is used only in generated docstrings."
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")
 
+(cl-defmethod clutch-db-primary-key-columns ((_conn t) _table)
+  "Return nil because CONN has no default primary-key metadata support."
+  nil)
+
 (cl-defgeneric clutch-db-row-identity-candidates (conn table)
   "Return row identity candidate plists for TABLE on CONN.
 Candidates are ordered from most stable to least stable.  A candidate with
@@ -1179,12 +1237,10 @@ UPDATE and DELETE.")
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn t) table)
   "Return the primary-key row identity candidate for CONN and TABLE."
-  (condition-case nil
-      (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
-        (list (list :kind 'primary-key
-                    :name "PRIMARY"
-                    :columns pk-cols)))
-    (error nil)))
+  (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
+    (list (list :kind 'primary-key
+                :name "PRIMARY"
+                :columns pk-cols))))
 
 (cl-defgeneric clutch-db-foreign-keys (conn table)
   "Return foreign key info for TABLE on CONN.
@@ -1265,7 +1321,14 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
                 :query-mode clutch-mongodb-mode
                 :query-mode-require clutch-document
                 :surfaces ((sql . (:query-mode clutch-mode))
-                           (sql-interface . (:query-mode clutch-mode))))))
+                           (sql-interface . (:query-mode clutch-mode)))))
+    (redis . (:require clutch-redis
+              :connect-fn clutch-redis-connect
+              :display-name "Redis"
+              :default-port 6379
+              :support-level basic
+              :data-model key-value
+              :query-mode clutch-redis-mode)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
 a plist of connection params and returning a conn), and optional
@@ -1307,6 +1370,22 @@ before returning the list."
   "Return registered data model for BACKEND, or nil."
   (and backend
        (plist-get (clutch-backend-feature backend) :data-model)))
+
+(defun clutch-db-native-document-surface-p (conn params)
+  "Return non-nil when CONN and PARAMS describe a native document surface."
+  (let ((backend (and conn (clutch-db-backend-key conn))))
+    (and (eq (clutch-backend-data-model backend) 'document)
+         (not (clutch-db-sql-interface-surface-p params)))))
+
+(defun clutch-db-sql-surface-p (conn params)
+  "Return non-nil when CONN and PARAMS describe a SQL execution surface."
+  (let ((backend (or (and conn (clutch-db-backend-key conn))
+                     (clutch-db--normalize-symbol-option
+                      (or (plist-get params :backend)
+                          (plist-get params :driver))))))
+    (or (eq (clutch-backend-data-model backend) 'relational)
+        (and (eq backend 'mongodb)
+             (clutch-db-sql-interface-surface-p params)))))
 
 (defun clutch-backend-manual-choice-p (backend)
   "Return non-nil when BACKEND should appear in manual connection prompts."

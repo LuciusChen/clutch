@@ -11,9 +11,12 @@ mysql_name="${CLUTCH_TEST_MYSQL_CONTAINER:-clutch-mysql-live}"
 mysql_port="${CLUTCH_TEST_MYSQL_PORT:-55306}"
 mongo_name="${CLUTCH_TEST_MONGO_CONTAINER:-clutch-mongo-live}"
 mongo_port="${CLUTCH_TEST_MONGO_PORT:-57017}"
+redis_name="${CLUTCH_TEST_REDIS_CONTAINER:-clutch-redis-live}"
+redis_port="${CLUTCH_TEST_REDIS_PORT:-56379}"
 pg_image="${CLUTCH_TEST_PG_IMAGE:-docker.io/library/postgres:16}"
 mysql_image="${CLUTCH_TEST_MYSQL_IMAGE:-docker.io/library/mysql:8.0}"
 mongo_image="${CLUTCH_TEST_MONGO_IMAGE:-docker.io/library/mongo:7}"
+redis_image="${CLUTCH_TEST_REDIS_IMAGE:-docker.io/library/redis:7-alpine}"
 
 started=()
 temp_paths=()
@@ -157,6 +160,19 @@ start_mongo() {
   started+=("$mongo_name")
 }
 
+start_redis() {
+  if container_running_p "$redis_name"; then
+    log "Reusing Redis container $redis_name"
+    return
+  fi
+  log "Starting Redis container $redis_name on 127.0.0.1:$redis_port"
+  run_container \
+    --name "$redis_name" \
+    -p "127.0.0.1:${redis_port}:6379" \
+    "$redis_image"
+  started+=("$redis_name")
+}
+
 wait_pg() {
   log "Waiting for PostgreSQL readiness"
   for _ in {1..120}; do
@@ -196,9 +212,23 @@ wait_mongo() {
   return 1
 }
 
+wait_redis() {
+  log "Waiting for Redis readiness"
+  for _ in {1..120}; do
+    if ctr exec "$redis_name" redis-cli ping >/dev/null 2>&1; then
+      log "Redis ready: $(container_summary "$redis_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "Redis container did not become ready" >&2
+  return 1
+}
+
 emacs_load_args=(
   --batch -Q
   -L "$repo/../mongodb.el"
+  -L "$repo/../redis.el"
   -L "$repo/../mysql.el"
   -L "$repo/../pg-el"
   -L "$repo"
@@ -248,18 +278,29 @@ run_db_live_mongodb() {
     --eval "(ert-run-tests-batch-and-exit '(tag :mongodb-live))"
 }
 
+run_db_live_redis() {
+  log "Running backend live tests against Redis native protocol"
+  "$emacs_bin" "${emacs_load_args[@]}" \
+    -l ert -l clutch-db-test \
+    --eval "(setq clutch-db-test-redis-live-enabled t clutch-db-test-redis-host \"127.0.0.1\" clutch-db-test-redis-port ${redis_port} clutch-db-test-redis-database 0)" \
+    --eval "(ert-run-tests-batch-and-exit '(tag :redis-live))"
+}
+
 select_container_runtime
 require_orbstack_docker
 show_container_environment
 start_pg
 start_mysql
 start_mongo
+start_redis
 wait_pg
 wait_mysql
 wait_mongo
+wait_redis
 
 run_clutch_live_pg
 run_clutch_live_mysql
 run_db_live_pg
 run_db_live_mysql
 run_db_live_mongodb
+run_db_live_redis

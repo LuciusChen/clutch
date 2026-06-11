@@ -17,7 +17,8 @@ flowchart LR
     subgraph QueryPath["Query buffer path"]
       direction LR
       SQL["clutch-sql.el<br/>SQL context, completion,<br/>Eldoc, xref"]
-      Document["clutch-document.el<br/>document query-buffer modes,<br/>MongoDB helper syntax"]
+      Document["clutch-document.el<br/>document query-buffer modes,<br/>current MongoDB helper syntax"]
+      RedisQuery["clutch-redis-mode<br/>Redis command buffers<br/>(defined in clutch-redis.el)"]
       Query["clutch-query.el<br/>query consoles, execution,<br/>statement boundaries"]
     end
     Result["clutch-result.el<br/>result, record, value,<br/>sort/filter/export commands"]
@@ -35,6 +36,7 @@ flowchart LR
     PG["clutch-db-pg.el<br/>PostgreSQL adapter"]
     SQLite["clutch-db-sqlite.el<br/>SQLite adapter"]
     Mongo["clutch-mongodb.el<br/>MongoDB document adapter"]
+    Redis["clutch-redis.el<br/>Redis key/value adapter"]
     JDBC["clutch-db-jdbc.el<br/>JDBC adapter and sidecar client"]
   end
 
@@ -44,6 +46,7 @@ flowchart LR
     PGExt["pg-el"]
     SQLiteExt["Emacs sqlite-*"]
     MongoExt["mongodb.el"]
+    RedisExt["redis.el"]
     Agent["clutch-jdbc-agent.jar"]
     Drivers["JDBC driver jars"]
   end
@@ -57,6 +60,7 @@ flowchart LR
 
   SQL --> Query
   Document --> Query
+  RedisQuery --> Query
 ```
 
 This diagram shows primary runtime/workflow ownership, not every `require` form.
@@ -70,8 +74,12 @@ execution, and type mapping.
 `clutch-query.el` is query-console workflow, not the SQL layer. SQL-specific
 analysis and completion live in `clutch-sql.el` and are installed by
 `clutch-mode`, whose major-mode definition remains in `clutch.el`. Document
-query-buffer behavior currently lives in `clutch-document.el`; it provides
-`clutch-mongodb-mode` and reuses the shared query workflow for execution.
+query-buffer behavior is selected through backend registry metadata.
+`clutch-document.el` currently provides `clutch-mongodb-mode` for MongoDB and
+reuses the shared query workflow for execution. Future document backends should
+register their own query mode instead of adding MongoDB branches to generic
+workflow modules. Redis registers `clutch-redis-mode` from its adapter because
+the mode is Redis-specific and small; protocol work still lives in `redis.el`.
 `clutch-ui.el` is a shared rendering/helper module, not a separate workflow
 entry point, so its same-layer helper edges are omitted from this overview.
 
@@ -96,8 +104,9 @@ flowchart LR
     MongoSQL["SQL Interface surface<br/>:surface sql-interface/sql<br/>clutch-mode"]
   end
 
-  subgraph Future["Unsupported / future contract"]
-    Redis["Redis-style key/value systems<br/>need a separate contract"]
+  subgraph KeyValue["Key/value data model"]
+    RedisBackend["redis backend<br/>basic key/value support"]
+    RedisNative["native command surface<br/>clutch-redis-mode"]
   end
 
   Registry --> MySQLCore
@@ -107,19 +116,27 @@ flowchart LR
   Registry --> SQLServerCore
   Registry --> GenericJDBC
   Registry --> MongoBackend
+  Registry --> RedisBackend
 
   MongoBackend --> MongoNative
   MongoBackend --> MongoSQL
   MongoNative --> MongoExt["mongodb.el native client"]
   MongoSQL --> JDBCPath["clutch-db-jdbc.el<br/>MongoDB JDBC driver"]
 
-  Registry -. no claimed support .-> Redis
+  RedisBackend --> RedisNative
+  RedisNative --> RedisExt["redis.el native RESP client"]
 ```
 
 `mongodb` is one backend. Ordinary MongoDB uses the native document surface.
 MongoDB SQL Interface is a `:surface sql-interface` path on the same backend,
 with `:surface sql` accepted as a short alias.  It is not a second public
 backend, driver, feature, or manual chooser entry.
+`redis` is a separate key/value backend with a native command surface. It is
+not a document backend and should not reuse MongoDB collection/document actions.
+SQL-only result and staged-mutation actions are gated by the registered
+relational data model or by an explicit SQL Interface surface; native document
+and key/value surfaces keep only backend-neutral grid actions unless their
+adapter exposes a dedicated capability.
 DuckDB currently has a JDBC driver source and URL/runtime helpers, but no
 registered backend symbol; use it through the generic `jdbc` path.
 
@@ -173,18 +190,20 @@ flowchart TB
   subgraph Consoles["Query consoles"]
     SQLConsole["clutch-mode<br/>SQL buffers"]
     MongoConsole["clutch-mongodb-mode<br/>MongoDB helper/MQL buffers"]
+    RedisConsole["clutch-redis-mode<br/>Redis command buffers"]
   end
 
   subgraph LanguageHelpers["Language-specific buffer helpers"]
     SQLHelpers["clutch-sql.el<br/>SQL context/completion/Eldoc/xref"]
-    DocumentHelpers["clutch-document.el<br/>MongoDB highlighting,<br/>indentation, completion, explain command"]
+    DocumentHelpers["clutch-document.el<br/>current MongoDB highlighting,<br/>indentation, completion, explain command"]
+    RedisHelpers["clutch-redis.el<br/>Redis command completion,<br/>line-oriented execution"]
   end
 
   subgraph ObjectUI["Object workflow"]
     Jump["Object lookup / jump"]
     Describe["Describe object"]
     Browse["Browse object"]
-    Actions["Backend-specific actions<br/>schema profile, index insight,<br/>stats, validation, explain"]
+    Actions["Capability-gated actions<br/>profile, index insight,<br/>stats, validation, explain"]
   end
 
   Facade["clutch-backend.el<br/>generic API"]
@@ -194,18 +213,21 @@ flowchart TB
   DefinitionAPI["clutch-db-object-definition"]
   BrowseAPI["clutch-db-object-browse-query"]
   MetadataAPI["schema/list/column APIs"]
-  DocumentMetadataAPI["document metadata APIs<br/>profile, index insight,<br/>validation, stats, explain"]
+  DocumentMetadataAPI["document capability APIs<br/>profile, index insight,<br/>validation, stats, explain"]
+  KeyValueMetadataAPI["key/value metadata APIs<br/>key listing, type metadata,<br/>type-aware browse command"]
 
-  Adapter["Backend adapter<br/>SQL, JDBC, or document"]
+  Adapter["Backend adapter<br/>SQL, JDBC, document,<br/>or key/value"]
   ResultStruct["clutch-db-result"]
   ResultGrid["Result grid<br/>shared table renderer"]
-  BrowseText["Backend-owned browse text<br/>SQL SELECT or document helper"]
+  BrowseText["Backend-owned browse text<br/>SQL SELECT, document helper,<br/>or Redis read command"]
   DescribeBuffer["Describe buffer<br/>DDL/source or JSON metadata"]
 
   SQLHelpers --> SQLConsole
   DocumentHelpers --> MongoConsole
+  RedisHelpers --> RedisConsole
   SQLConsole --> QueryWorkflow
   MongoConsole --> QueryWorkflow
+  RedisConsole --> QueryWorkflow
   QueryWorkflow --> QueryAPI
   QueryAPI --> Facade
   Facade --> Adapter
@@ -216,19 +238,31 @@ flowchart TB
   Describe --> DefinitionAPI
   Browse --> BrowseAPI
   Actions --> DocumentMetadataAPI
+  Browse --> KeyValueMetadataAPI
   MetadataAPI --> Facade
   DefinitionAPI --> Facade
   BrowseAPI --> Facade
   DocumentMetadataAPI --> Facade
+  KeyValueMetadataAPI --> Facade
   Adapter --> DescribeBuffer
   Adapter --> BrowseText
   BrowseText --> SQLConsole
   BrowseText --> MongoConsole
+  BrowseText --> RedisConsole
 ```
 
-The result grid is shared across SQL and document query results. Object
-definition and browse text are backend-owned so native document backends do not
-fall back to table-oriented SQL behavior.
+The result grid is shared across SQL, document, and key/value query results.
+Object definition, browse text, document object actions, and key/value metadata
+are backend-owned so native non-SQL backends do not fall back to table-oriented
+SQL behavior or MongoDB special cases. The object workflow asks the backend
+whether an action is supported for the selected object, then calls the
+corresponding generic API. Redis uses the same object workflow for KEY entries,
+but its backend builds Redis read commands from key type metadata instead of
+using document collection actions. Result-buffer actions use the same
+capability boundary: SQL rewrite, SQL INSERT/UPDATE export, and staged SQL
+mutation stay on SQL surfaces, while native document results keep
+backend-neutral grid operations and ask the document adapter to build native
+mutation snippets such as MongoDB helper calls.
 
 ## JDBC Runtime Shape
 

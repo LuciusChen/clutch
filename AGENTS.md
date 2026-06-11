@@ -48,8 +48,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Architecture and Implementation
 
-- **Interface / implementation separation**: `mysql`, upstream `pg`, and `mongodb` are external protocol libraries with no UI. `clutch.el` depends on `clutch-backend.el`, not protocol layers directly.
-- **External dependency boundaries stay explicit**: `mysql` and `pg` are required package dependencies. `mongodb.el` is a lazy optional protocol package loaded only when users connect to `:backend mongodb`. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
+- **Interface / implementation separation**: `mysql`, upstream `pg`, `mongodb`, and `redis` are external protocol libraries with no UI. `clutch.el` depends on `clutch-backend.el`, not protocol layers directly.
+- **External dependency boundaries stay explicit**: Protocol packages are backend-specific optional dependencies. `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are loaded only when users connect to the corresponding backend; missing protocol packages must produce clear connection-time errors. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
 - **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `mongodb--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
 - **MongoDB is one backend**: User configuration must use `:backend mongodb` for
   MongoDB.  The ordinary document surface uses native `mongodb.el`; MongoDB SQL
@@ -194,7 +194,7 @@ These rules keep the package compatible with MELPA submission requirements
   package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`,
   and `;; Author:`.
 - `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with
-  minimum versions, including the declared Emacs baseline. Lazy optional backend packages such as `mongodb.el` are documented but not listed until they are package-archive installable.
+  minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are documented but not listed.
 - Split implementation files must not carry `;; Package-Requires:` headers, but
   they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
 - Keep the MELPA checklist attribution in the main package file when AI tools
@@ -331,7 +331,8 @@ backend adapters, also run the real MySQL/PostgreSQL/MongoDB live suite:
 
 The native live runner starts or reuses local containers, preferring Podman on
 Linux and OrbStack-backed Docker on macOS. It runs both UI-level `:clutch-live`
-tests and backend-level `:pg-live` / `:mysql-live` / `:mongodb-live` tests. JDBC
+tests and backend-level `:pg-live` / `:mysql-live` / `:mongodb-live` /
+`:redis-live` tests. JDBC
 live tests remain separate because they require external credentials.
 
 ### 3. Byte-compile with zero warnings
@@ -345,8 +346,7 @@ live tests remain separate because they require external credentials.
 `clutch` is one package split across multiple implementation files, so
 `package-lint` should run on the package entry file rather than on extracted
 modules as if they were standalone packages.  For local straight checkouts,
-make sure package metadata for external deps (`transient`, `mysql`, `pg`,
-`mongodb`) is
+make sure package metadata for required external deps such as `transient` is
 available to `package.el` in the batch session before running the command.
 Do not move `Package-Requires` into split files to satisfy per-file lint; set
 `package-lint-main-file` to `clutch.el` when linting implementation files

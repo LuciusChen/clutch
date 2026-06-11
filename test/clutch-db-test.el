@@ -10,7 +10,7 @@
 ;; ERT tests for the clutch-db generic database interface.
 ;;
 ;; Unit tests run without a database server.
-;; Native live tests require MySQL, PostgreSQL, and MongoDB.  The live runner
+;; Native live tests require MySQL, PostgreSQL, MongoDB, and Redis.  The live runner
 ;; starts or reuses local containers, preferring Podman on Linux and OrbStack-backed
 ;; Docker on macOS:
 ;;   ./test/run-native-live-tests.sh
@@ -19,6 +19,7 @@
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
 ;;   docker run -d -p 127.0.0.1:57017:27017 mongo:7
+;;   docker run -d -p 127.0.0.1:56379:6379 redis:7-alpine
 ;;
 ;; Note: MySQL 8 defaults to `caching_sha2_password'.  The native mysql
 ;; client retries with TLS when the server requires a secure channel; local
@@ -43,6 +44,8 @@
 (require 'clutch-connection)
 (require 'clutch-db-jdbc)
 (require 'clutch-mongodb)
+(require 'clutch-redis)
+(require 'redis)
 (require 'mongodb)
 
 (eval-when-compile
@@ -132,6 +135,19 @@
   "Authentication database for native MongoDB live tests.")
 (defvar clutch-db-test-mongodb-props nil
   "Additional URI query properties for native MongoDB live tests.")
+
+(defvar clutch-db-test-redis-live-enabled nil
+  "Non-nil enables Redis live tests.")
+(defvar clutch-db-test-redis-host "127.0.0.1"
+  "Host for Redis live tests.")
+(defvar clutch-db-test-redis-port 6379
+  "Port for Redis live tests.")
+(defvar clutch-db-test-redis-user nil
+  "User for Redis live tests.")
+(defvar clutch-db-test-redis-password nil
+  "Password for Redis live tests.")
+(defvar clutch-db-test-redis-database 0
+  "Logical database for Redis live tests.")
 
 (defconst clutch-db-test--pg-oid-bytea 17)
 (defconst clutch-db-test--pg-oid-int8 20)
@@ -254,6 +270,134 @@ connection as live and not busy."
       (should (equal (clutch-db--normalize-connect-params
                       'alpha '(:database "app"))
                      '(:database "app" :normalized-by alpha))))))
+
+(ert-deftest clutch-db-test-sql-interface-surface-p-normalizes-aliases ()
+  "SQL Interface surface detection should accept canonical symbols and strings."
+  (should (clutch-db-sql-interface-surface-p '(:surface sql-interface)))
+  (should (clutch-db-sql-interface-surface-p '(:surface "sql-interface")))
+  (should (clutch-db-sql-interface-surface-p '(:surface sql)))
+  (should-not (clutch-db-sql-interface-surface-p nil)))
+
+(ert-deftest clutch-db-test-native-document-surface-p-uses-surface-aliases ()
+  "Native document surface detection should exclude SQL Interface aliases."
+  (cl-letf (((symbol-function 'clutch-db-backend-key)
+             (lambda (_conn) 'mongodb)))
+    (should (clutch-db-native-document-surface-p 'mongo-conn nil))
+    (should-not
+     (clutch-db-native-document-surface-p
+      'mongo-conn '(:surface "sql-interface")))))
+
+(ert-deftest clutch-db-test-redis-registry-uses-key-value-model ()
+  "Redis should be registered as a basic key/value backend."
+  (should (eq (clutch-backend-support-level 'redis) 'basic))
+  (should (eq (clutch-backend-data-model 'redis) 'key-value))
+  (should (eq (clutch-backend-query-mode 'redis) #'clutch-redis-mode))
+  (should (= (clutch-backend-default-port 'redis) 6379)))
+
+(ert-deftest clutch-db-test-redis-query-maps-hgetall-to-pair-grid ()
+  "Redis HGETALL responses should render as field/value rows."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client)))
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (client command &rest args)
+                 (should (eq client 'redis-client))
+                 (should (equal command "HGETALL"))
+                 (should (equal args '("user:1")))
+                 (mapcar (lambda (text)
+                           (encode-coding-string text 'utf-8 t))
+                         '("name" "Ada" "tier" "pro")))))
+      (let* ((result (clutch-db-query conn "HGETALL user:1"))
+             (columns (clutch-db-result-column-names
+                       (clutch-db-result-columns result))))
+        (should (equal columns '("field" "value")))
+        (should (equal (clutch-db-result-rows result)
+                       '(("name" "Ada") ("tier" "pro"))))))))
+
+(ert-deftest clutch-db-test-redis-query-maps-zrange-by-withscores ()
+  "Redis ZRANGE should render scores only when WITHSCORES is present."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client)))
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (should (equal command "ZRANGE"))
+                 (pcase args
+                   (`("leaders" "0" "-1")
+                    (mapcar (lambda (text)
+                              (encode-coding-string text 'utf-8 t))
+                            '("ada" "grace")))
+                   (`("leaders" "0" "-1" "WITHSCORES")
+                    (mapcar (lambda (text)
+                              (encode-coding-string text 'utf-8 t))
+                            '("ada" "10" "grace" "8")))
+                   (_ (ert-fail "Unexpected ZRANGE arguments"))))))
+      (let ((result (clutch-db-query conn "ZRANGE leaders 0 -1")))
+        (should (equal (clutch-db-result-column-names
+                        (clutch-db-result-columns result))
+                       '("index" "value")))
+        (should (equal (clutch-db-result-rows result)
+                       '((0 "ada") (1 "grace")))))
+      (let ((result (clutch-db-query conn
+                                     "ZRANGE leaders 0 -1 WITHSCORES")))
+        (should (equal (clutch-db-result-column-names
+                        (clutch-db-result-columns result))
+                       '("member" "score")))
+        (should (equal (clutch-db-result-rows result)
+                       '(("ada" "10") ("grace" "8"))))))))
+
+(ert-deftest clutch-db-test-redis-scan-keys-iterates-cursors ()
+  "Redis key discovery should use SCAN until cursor returns to zero."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command cursor &rest args)
+                 (push (list command cursor args) calls)
+                 (pcase cursor
+                   ("0" (list (encode-coding-string "7" 'utf-8 t)
+                              (list (encode-coding-string "alpha" 'utf-8 t))))
+                   ("7" (list (encode-coding-string "0" 'utf-8 t)
+                              (list (encode-coding-string "beta" 'utf-8 t))))
+                   (_ (ert-fail "Unexpected cursor"))))))
+      (should (equal (clutch-db-list-tables conn) '("alpha" "beta")))
+      (should (equal (nreverse calls)
+                     '(("SCAN" "0" ("COUNT" 1000))
+                       ("SCAN" "7" ("COUNT" 1000))))))))
+
+(ert-deftest clutch-db-test-redis-key-entry-metadata-includes-value-type ()
+  "Redis key metadata should include the value type for annotations."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn))))
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (pcase (cons command args)
+                   (`("SCAN" "0" "COUNT" 1000)
+                    (list (encode-coding-string "0" 'utf-8 t)
+                          (mapcar (lambda (text)
+                                    (encode-coding-string text 'utf-8 t))
+                                  '("user:1" "jobs"))))
+                   (`("TYPE" "user:1")
+                    (encode-coding-string "hash" 'utf-8 t))
+                   (`("TYPE" "jobs")
+                    (encode-coding-string "list" 'utf-8 t))
+                   (_ (ert-fail "Unexpected Redis command"))))))
+      (let ((entries (clutch-db-list-table-entries conn)))
+        (should (equal entries
+                       '((:name "user:1" :schema "0" :type "KEY")
+                         (:name "jobs" :schema "0" :type "KEY"))))
+        (should (equal (clutch-db-object-entry-metadata conn (car entries))
+                       '(:name "user:1" :schema "0" :type "KEY"
+                         :value-type "HASH")))
+        (should (equal (clutch-db-object-entry-metadata conn (cadr entries))
+                       '(:name "jobs" :schema "0" :type "KEY"
+                         :value-type "LIST")))))))
+
+(ert-deftest clutch-db-test-redis-object-browse-query-is-type-aware ()
+  "Redis key browsing should choose a read command from the key type."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client)))
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command key)
+                 (should (equal command "TYPE"))
+                 (should (equal key "user:1"))
+                 (encode-coding-string "hash" 'utf-8 t))))
+      (should (equal (clutch-db-object-browse-query
+                      conn '(:name "user:1" :type "KEY"))
+                     "HGETALL \"user:1\"")))))
 
 ;;;; Unit tests — clutch-db-result struct
 
@@ -829,6 +973,20 @@ connection as live and not busy."
                        :select-expressions ("ctid::text")
                        :where-sql "ctid = ?::tid"))))))
 
+(ert-deftest clutch-db-test-default-row-identity-has-no-metadata-support ()
+  "Default row identity should report no metadata support."
+  (should-not (clutch-db-row-identity-candidates '(:backend unsupported)
+                                                 "demo")))
+
+(ert-deftest clutch-db-test-default-row-identity-surfaces-metadata-errors ()
+  "Default row identity should not hide primary-key metadata errors."
+  (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+             (lambda (_conn _table)
+               (signal 'clutch-db-error '("metadata failed")))))
+    (should-error (clutch-db-row-identity-candidates '(:backend broken)
+                                                    "demo")
+                  :type 'clutch-db-error)))
+
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
   (skip-unless (require 'clutch-db-sqlite nil t))
@@ -1383,32 +1541,81 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   "Native MongoDB query results should flatten top-level document keys."
-  (cl-letf (((symbol-function 'clutch-mongodb--eval)
-             (lambda (_conn code)
-               (should (equal code "db.users.find()"))
-               '((("_id" . (("$oid" . "64f")))
-                  ("name" . "Ann")
-                  ("score" . 10)
-                  ("tags" . ["a" "b"])
-                  ("meta" . "plain"))
-                 (("_id" . (("$oid" . "650")))
-                  ("name" . "Bob")
-                  ("meta" . (("ok" . t)))
-                  ("active" . :false))))))
-    (let* ((conn (clutch-db-test--make-mongodb-conn))
-           (result (clutch-db-query conn "db.users.find()")))
-      (should (equal (clutch-db-result-column-names
-                      (clutch-db-result-columns result))
-                     '("_id" "name" "score" "tags" "meta" "active")))
-      (should (equal (mapcar (lambda (column)
-                               (plist-get column :type-category))
-                             (clutch-db-result-columns result))
-                     '(json text numeric json json text)))
-      (should (equal (clutch-db-result-rows result)
-                     '(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
-                        "plain" nil)
-                       ("{\"$oid\":\"650\"}" "Bob" nil nil
-                        "{\"ok\":true}" "false")))))))
+  (let ((docs '((("_id" . (("$oid" . "64f")))
+                 ("name" . "Ann")
+                 ("score" . 10)
+                 ("tags" . ["a" "b"])
+                 ("meta" . "plain"))
+                (("_id" . (("$oid" . "650")))
+                 ("name" . "Bob")
+                 ("meta" . (("ok" . t)))
+                 ("active" . :false)))))
+    (cl-letf (((symbol-function 'clutch-mongodb--eval)
+               (lambda (_conn code)
+                 (should (equal code "db.users.find()"))
+                 docs)))
+      (let* ((conn (clutch-db-test--make-mongodb-conn))
+             (result (clutch-db-query conn "db.users.find()")))
+        (should (equal (clutch-db-result-column-names
+                        (clutch-db-result-columns result))
+                       '("_id" "name" "score" "tags" "meta" "active"
+                         "clutch__document")))
+        (should (equal (mapcar (lambda (column)
+                                 (plist-get column :type-category))
+                               (clutch-db-result-columns result))
+                       '(json text numeric json json text json)))
+        (should (plist-get (car (last (clutch-db-result-columns result)))
+                           :hidden))
+        (should (plist-get (car (last (clutch-db-result-columns result)))
+                           :document-source))
+        (should (equal (clutch-db-result-rows result)
+                       '(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
+                          "plain" nil
+                          (("_id" . (("$oid" . "64f")))
+                           ("name" . "Ann")
+                           ("score" . 10)
+                           ("tags" . ["a" "b"])
+                           ("meta" . "plain")))
+                         ("{\"$oid\":\"650\"}" "Bob" nil nil
+                          "{\"ok\":true}" "false"
+                          (("_id" . (("$oid" . "650")))
+                           ("name" . "Bob")
+                           ("meta" . (("ok" . t)))
+                           ("active" . :false))))))))))
+
+(ert-deftest clutch-db-test-mongodb-result-context-records-source-collection ()
+  "Native MongoDB query context should record collection result metadata."
+  (let* ((conn (clutch-db-test--make-mongodb-conn))
+         (code "db.getCollection(\"users\").find({active: true}).limit(5)")
+         (context (clutch-db-query-result-context conn code)))
+    (should (clutch-db-result-query-p conn code))
+    (should (equal (plist-get context :source-table) "users"))
+    (should-not (plist-get context :server-pageable))
+    (should-not (plist-get context :server-rewritable))
+    (should (equal (plist-get (plist-get context :row-identity-prep) :sql)
+                   code))))
+
+(ert-deftest clutch-db-test-mongodb-document-mutation-snippets ()
+  "Native MongoDB should build document mutation helper snippets."
+  (let* ((conn (clutch-db-test--make-mongodb-conn))
+         (doc '(("_id" . 7) ("name" . "Ann") ("score" . 10))))
+    (should
+     (equal
+      (clutch-db-document-mutation-snippets conn 'insert-one "users" (list doc))
+      '("db.getCollection(\"users\").insertOne({\"_id\":7,\"name\":\"Ann\",\"score\":10});")))
+    (should
+     (equal
+      (clutch-db-document-mutation-snippets conn 'insert-many "users" (list doc))
+      '("db.getCollection(\"users\").insertMany([{\"_id\":7,\"name\":\"Ann\",\"score\":10}]);")))
+    (should
+     (equal
+      (clutch-db-document-mutation-snippets
+       conn 'update-one-set "users" (list doc) '("name"))
+      '("db.getCollection(\"users\").updateOne({\"_id\":7}, {\"$set\":{\"name\":\"Ann\"}});")))
+    (should
+     (equal
+      (clutch-db-document-mutation-snippets conn 'delete-one "users" (list doc))
+      '("db.getCollection(\"users\").deleteOne({\"_id\":7});")))))
 
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
@@ -2911,11 +3118,27 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                      '(mysql pg sqlite jdbc oracle clickhouse))))))
 
 (ert-deftest clutch-db-test-backend-registry-exposes-data-models ()
-  "Backend metadata should distinguish relational and document data models."
+  "Backend metadata should distinguish supported data models."
   (should (eq (clutch-backend-data-model 'mysql) 'relational))
   (should (eq (clutch-backend-data-model 'pg) 'relational))
   (should (eq (clutch-backend-data-model 'sqlite) 'relational))
-  (should (eq (clutch-backend-data-model 'mongodb) 'document)))
+  (should (eq (clutch-backend-data-model 'mongodb) 'document))
+  (should (eq (clutch-backend-data-model 'redis) 'key-value)))
+
+(ert-deftest clutch-db-test-sql-surface-p-follows-data-model-and-surface ()
+  "SQL surface detection should not treat every non-document backend as SQL."
+  (cl-letf (((symbol-function 'clutch-db-backend-key)
+             (lambda (conn)
+               (pcase conn
+                 ('mysql-conn 'mysql)
+                 ('mongo-conn 'mongodb)
+                 ('redis-conn 'redis)
+                 (_ nil)))))
+    (should (clutch-db-sql-surface-p 'mysql-conn nil))
+    (should-not (clutch-db-sql-surface-p 'mongo-conn nil))
+    (should (clutch-db-sql-surface-p
+             'mongo-conn '(:backend mongodb :surface sql-interface)))
+    (should-not (clutch-db-sql-surface-p 'redis-conn nil))))
 
 (ert-deftest clutch-db-test-backend-query-mode-follows-surface-metadata ()
   "Query console modes should come from backend registry surface metadata."
@@ -3023,25 +3246,26 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
    :type 'user-error))
 
 (ert-deftest clutch-db-test-native-backend-missing-package-errors-clearly ()
-  "Missing native backend packages should raise a direct user error."
-  (dolist (case '((mysql clutch-db-mysql "mysql package")
-                  (pg clutch-db-pg "pg package")))
-    (pcase-let ((`(,backend ,feature ,expected) case))
+  "Missing optional protocol packages should raise a direct backend error."
+  (dolist (case '((mysql mysql "mysql.el")
+                  (pg pg "pg.el")))
+    (pcase-let ((`(,backend ,protocol ,expected) case))
       (ert-info ((symbol-name backend))
         (let ((orig-require (symbol-function 'require)))
           (cl-letf (((symbol-function 'require)
                      (lambda (requested &optional filename noerror)
-                       (if (eq requested feature)
-                           (signal 'file-missing
-                                   (list "Cannot open load file"
-                                         "No such file or directory"
-                                         (symbol-name feature)))
+                       (if (eq requested protocol)
+                           (if noerror nil
+                             (signal 'file-missing
+                                     (list "Cannot open load file"
+                                           "No such file or directory"
+                                           (symbol-name protocol))))
                          (funcall orig-require requested filename noerror)))))
             (condition-case err
                 (progn
                   (clutch-db-connect backend '(:host "localhost"))
                   (should nil))
-              (user-error
+              (clutch-db-error
                (should (string-match-p expected (cadr err)))))))))))
 
 (ert-deftest clutch-db-test-jdbc-driver-backend-loads-jdbc-on-demand ()
@@ -3792,6 +4016,40 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
            (progn ,@body)
          (clutch-db-disconnect ,var)))))
 
+(defun clutch-db-test--redis-live-configured-p ()
+  "Return non-nil when Redis live connection data is configured."
+  (and clutch-db-test-redis-live-enabled
+       clutch-db-test-redis-host
+       clutch-db-test-redis-port))
+
+(defun clutch-db-test--redis-live-params ()
+  "Return connection params for Redis live tests."
+  (let ((params (list :host clutch-db-test-redis-host
+                      :port clutch-db-test-redis-port
+                      :database clutch-db-test-redis-database)))
+    (when clutch-db-test-redis-user
+      (setq params (plist-put params :user clutch-db-test-redis-user)))
+    (when clutch-db-test-redis-password
+      (setq params (plist-put params :password clutch-db-test-redis-password)))
+    params))
+
+(defmacro clutch-db-test--with-redis (var &rest body)
+  "Execute BODY with VAR bound to a live Redis connection."
+  (declare (indent 1))
+  `(if (not (clutch-db-test--redis-live-configured-p))
+       (ert-skip "Set clutch-db-test-redis-live-enabled and connection data to enable Redis live tests")
+     (require 'clutch-redis)
+     (let ((,var (clutch-db-connect
+                  'redis
+                  (clutch-db-test--redis-live-params))))
+       (unwind-protect
+           (progn ,@body)
+         (clutch-db-disconnect ,var)))))
+
+(defun clutch-db-test--redis-live-key (suffix)
+  "Return an isolated Redis key name using SUFFIX."
+  (clutch-db-test--live-name (format "clutch:redis:%s" suffix)))
+
 (clutch-db-test--define-live-basic-tests
  clutch-db-test-mysql
  clutch-db-test--with-mysql
@@ -4048,6 +4306,26 @@ Skips if `clutch-db-test-pg-password' is nil."
   "Return an isolated MongoDB live collection name using SUFFIX."
   (format "clutch_%s_%d" suffix (emacs-pid)))
 
+(defun clutch-db-test--visible-result-column-indexes (result)
+  "Return non-hidden column indexes for RESULT."
+  (cl-loop for column in (clutch-db-result-columns result)
+           for index from 0
+           unless (plist-get column :hidden)
+           collect index))
+
+(defun clutch-db-test--visible-result-column-names (result)
+  "Return non-hidden column names for RESULT."
+  (let ((columns (clutch-db-result-columns result)))
+    (mapcar (lambda (index) (plist-get (nth index columns) :name))
+            (clutch-db-test--visible-result-column-indexes result))))
+
+(defun clutch-db-test--visible-result-rows (result)
+  "Return non-hidden row values for RESULT."
+  (let ((indexes (clutch-db-test--visible-result-column-indexes result)))
+    (mapcar (lambda (row)
+              (mapcar (lambda (index) (nth index row)) indexes))
+            (clutch-db-result-rows result))))
+
 (ert-deftest clutch-db-test-mongodb-live-connect ()
   :tags '(:db-live :mongodb-live)
   "Native MongoDB connection should return a live conn."
@@ -4107,7 +4385,12 @@ Skips if `clutch-db-test-pg-password' is nil."
               (should (equal (mapcar (lambda (column)
                                        (plist-get column :name))
                                      (clutch-db-result-columns result))
-                             '("_id" "n" "s" "nested")))
+                             '("_id" "n" "s" "nested"
+                               "clutch__document")))
+              (should (plist-get (car (last (clutch-db-result-columns result)))
+                                 :hidden))
+              (should (plist-get (car (last (clutch-db-result-columns result)))
+                                 :document-source))
               (should (= (length rows) 2))
               (should (equal (seq-take (car rows) 3) '("a" 1 "hello")))
               (should (equal (seq-take (cadr rows) 2) '("b" 2)))
@@ -4172,13 +4455,12 @@ Skips if `clutch-db-test-pg-password' is nil."
                            ".skip(0)"
                            ".limit(1)")
                           collection))
-                   (result (clutch-db-query conn code))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal (mapcar (lambda (column)
-                                       (plist-get column :name))
-                                     (clutch-db-result-columns result))
+                   (result (clutch-db-query conn code)))
+              (should (equal (clutch-db-test--visible-result-column-names
+                              result)
                              '("_id" "n")))
-              (should (equal rows '(("b" 2)))))
+              (should (equal (clutch-db-test--visible-result-rows result)
+                             '(("b" 2)))))
             (clutch-db-query
              conn
              (format
@@ -4281,26 +4563,23 @@ Skips if `clutch-db-test-pg-password' is nil."
                            "db.getCollection(%S).find({price: 12.5}, "
                            "{_id: 1, price: 1})")
                           collection))
-                   (result (clutch-db-query conn code))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal (mapcar (lambda (column)
-                                     (plist-get column :name))
-                                     (clutch-db-result-columns result))
+                   (result (clutch-db-query conn code)))
+              (should (equal (clutch-db-test--visible-result-column-names
+                              result)
                              '("_id" "price")))
-              (should (equal rows '(("a" 12.5)))))
+              (should (equal (clutch-db-test--visible-result-rows result)
+                             '(("a" 12.5)))))
             (let* ((code (format
                           (concat
                            "db.getCollection(%S).find("
                            "{amount: Decimal128('12.3400')}, "
                            "{_id: 1, amount: 1})")
                           collection))
-                   (result (clutch-db-query conn code))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal (mapcar (lambda (column)
-                                       (plist-get column :name))
-                                     (clutch-db-result-columns result))
+                   (result (clutch-db-query conn code)))
+              (should (equal (clutch-db-test--visible-result-column-names
+                              result)
                              '("_id" "amount")))
-              (should (equal rows
+              (should (equal (clutch-db-test--visible-result-rows result)
                              '(("a" "{\"$numberDecimal\":\"12.3400\"}")))))
             (let* ((code (format
                           (concat
@@ -4308,13 +4587,11 @@ Skips if `clutch-db-test-pg-password' is nil."
                            "{createdAt: ISODate('2024-01-02T03:04:05.678Z')}, "
                            "{_id: 1, createdAt: 1})")
                           collection))
-                   (result (clutch-db-query conn code))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal (mapcar (lambda (column)
-                                       (plist-get column :name))
-                                     (clutch-db-result-columns result))
+                   (result (clutch-db-query conn code)))
+              (should (equal (clutch-db-test--visible-result-column-names
+                              result)
                              '("_id" "createdAt")))
-              (should (equal rows
+              (should (equal (clutch-db-test--visible-result-rows result)
                              '(("a" "{\"$date\":1704164645678}"))))))
             (let* ((code (format
                           (concat
@@ -4322,13 +4599,11 @@ Skips if `clutch-db-test-pg-password' is nil."
                            "{ts: Timestamp(1700000000, 7)}, "
                            "{_id: 1, ts: 1})")
                           collection))
-                   (result (clutch-db-query conn code))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal (mapcar (lambda (column)
-                                       (plist-get column :name))
-                                     (clutch-db-result-columns result))
+                   (result (clutch-db-query conn code)))
+              (should (equal (clutch-db-test--visible-result-column-names
+                              result)
                              '("_id" "ts")))
-              (should (equal rows
+              (should (equal (clutch-db-test--visible-result-rows result)
                              '(("a" "{\"$timestamp\":{\"t\":1700000000,\"i\":7}}")))))
             (let* ((code (format
                           (concat
@@ -4336,13 +4611,12 @@ Skips if `clutch-db-test-pg-password' is nil."
                            "{n32: {$type: 'int'}, n64: {$type: 'long'}}, "
                            "{_id: 1, n32: 1, n64: 1})")
                           collection))
-                   (result (clutch-db-query conn code))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal (mapcar (lambda (column)
-                                       (plist-get column :name))
-                                     (clutch-db-result-columns result))
+                   (result (clutch-db-query conn code)))
+              (should (equal (clutch-db-test--visible-result-column-names
+                              result)
                              '("_id" "n32" "n64")))
-              (should (equal rows '(("a" 7 7)))))
+              (should (equal (clutch-db-test--visible-result-rows result)
+                             '(("a" 7 7)))))
         (ignore-errors
           (clutch-db-query
            conn
@@ -4496,10 +4770,10 @@ Skips if `clutch-db-test-pg-password' is nil."
                       schema collection)))
                    (columns (mapcar (lambda (column)
                                       (plist-get column :name))
-                                    (clutch-db-result-columns result)))
-                   (rows (clutch-db-result-rows result)))
-              (should (equal columns '("_id" "n")))
-              (should (equal rows '(("ok" 1)))))
+                                    (clutch-db-result-columns result))))
+              (should (equal columns '("_id" "n" "clutch__document")))
+              (should (equal (clutch-db-test--visible-result-rows result)
+                             '(("ok" 1)))))
             (should (equal (clutch-db-current-schema conn) original)))
         (ignore-errors
           (clutch-db-query
@@ -4536,6 +4810,92 @@ Skips if `clutch-db-test-pg-password' is nil."
           (clutch-db-query
            conn
            (format "db.getCollection(%S).drop()" collection)))))))
+
+(ert-deftest clutch-db-test-redis-live-connect ()
+  :tags '(:db-live :redis-live)
+  "Redis connection should return a live key/value conn."
+  (clutch-db-test--with-redis conn
+    (should (clutch-db-live-p conn))
+    (should (eq (clutch-db-backend-key conn) 'redis))
+    (should (equal (clutch-db-display-name conn) "Redis"))
+    (should (equal (clutch-db-current-schema conn)
+                   (format "%s" clutch-db-test-redis-database)))))
+
+(ert-deftest clutch-db-test-redis-live-query ()
+  :tags '(:db-live :redis-live)
+  "Redis commands should render through Clutch result grids."
+  (clutch-db-test--with-redis conn
+    (let ((string-key (clutch-db-test--redis-live-key "string"))
+          (hash-key (clutch-db-test--redis-live-key "hash"))
+          (list-key (clutch-db-test--redis-live-key "list")))
+      (unwind-protect
+          (progn
+            (should (equal
+                     (clutch-db-result-rows
+                      (clutch-db-query conn (format "SET %S hello" string-key)))
+                     '(("OK"))))
+            (should (equal
+                     (clutch-db-result-rows
+                      (clutch-db-query conn (format "GET %S" string-key)))
+                     '(("hello"))))
+            (clutch-db-query conn (format "HSET %S name Ada tier pro" hash-key))
+            (let ((result (clutch-db-query conn (format "HGETALL %S" hash-key))))
+              (should (equal (clutch-db-result-column-names
+                              (clutch-db-result-columns result))
+                             '("field" "value")))
+              (should (member '("name" "Ada") (clutch-db-result-rows result)))
+              (should (member '("tier" "pro") (clutch-db-result-rows result))))
+            (clutch-db-query conn (format "RPUSH %S a b" list-key))
+            (should (equal
+                     (clutch-db-result-rows
+                      (clutch-db-query conn (format "LRANGE %S 0 -1" list-key)))
+                     '((0 "a") (1 "b")))))
+        (ignore-errors
+          (clutch-db-query conn (format "DEL %S %S %S"
+                                        string-key hash-key list-key)))))))
+
+(ert-deftest clutch-db-test-redis-live-schema ()
+  :tags '(:db-live :redis-live)
+  "Redis metadata should expose keys as KEY objects."
+  (clutch-db-test--with-redis conn
+    (let ((hash-key (clutch-db-test--redis-live-key "schema")))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "HSET %S field value" hash-key))
+            (should (member hash-key (clutch-db-list-tables conn)))
+            (let ((entry (seq-find
+                          (lambda (candidate)
+                            (equal (plist-get candidate :name) hash-key))
+                          (clutch-db-list-table-entries conn))))
+              (should entry)
+              (should (equal (plist-get entry :type) "KEY"))
+              (should-not (plist-get entry :value-type))
+              (should (equal
+                       (plist-get
+                        (clutch-db-object-entry-metadata conn entry)
+                        :value-type)
+                       "HASH"))
+              (should (equal (clutch-db-object-browse-query conn entry)
+                             (format "HGETALL %S" hash-key)))
+              (let ((details (clutch-db-object-details conn entry)))
+                (should (member '("Type" . "hash") details))
+                (should (member '("Exists" . "yes") details)))))
+        (ignore-errors
+          (clutch-db-query conn (format "DEL %S" hash-key)))))))
+
+(ert-deftest clutch-db-test-redis-live-error ()
+  :tags '(:db-live :redis-live)
+  "Redis command errors should signal `clutch-db-error'."
+  (clutch-db-test--with-redis conn
+    (let ((string-key (clutch-db-test--redis-live-key "error")))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "SET %S hello" string-key))
+            (should-error
+             (clutch-db-query conn (format "LRANGE %S 0 -1" string-key))
+             :type 'clutch-db-error))
+        (ignore-errors
+          (clutch-db-query conn (format "DEL %S" string-key)))))))
 
 ;;;; Live integration tests — JDBC / Oracle
 ;;

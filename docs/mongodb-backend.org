@@ -177,7 +177,13 @@ MongoDB result grids are read-only.  Nested documents, arrays, and mixed
 scalar/document columns are marked as JSON-valued where the sample shows JSON
 content, so the normal Clutch value viewers can pretty-print them.  Staged SQL
 =UPDATE= / =DELETE= workflows, SQL-style manual transaction toggles, and row
-identity editing remain disabled for the native document surface.
+identity editing remain disabled for the native document surface.  Result-level
+copy/refine, CSV/TSV/Org table export, client-side filtering, and aggregate
+remain available because they operate on the displayed grid.  When a result came
+from a collection helper and Clutch kept the source document metadata, copy and
+export actions can generate MongoDB helper snippets such as =insertOne=,
+=insertMany=, =replaceOne=, =updateOne({ _id }, { $set: ... })=, and
+=deleteOne=.
 
 MongoDB SQL Interface is different: it is a JDBC SQL surface selected with
 =:surface sql-interface=, uses SQL query buffers, and requires an endpoint that

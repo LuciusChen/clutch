@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -632,7 +627,8 @@ using the stored params.  Signals a user-error if not recoverable."
     (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
     (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF"))
     (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00"))
-    (mongodb    . ((devicon . "nf-dev-mongodb")            ""  :color "#47A248")))
+    (mongodb    . ((devicon . "nf-dev-mongodb")            ""  :color "#47A248"))
+    (redis      . ((devicon . "nf-dev-redis")              ""  :color "#DC382D")))
   "Alist mapping backend symbols to icon specs.
 Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
 ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
@@ -669,12 +665,8 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
     ((or 'pg 'postgresql) 'pg)
     ((or 'mysql 'mariadb) 'mysql)
     ('mongodb 'mongodb)
+    ('redis 'redis)
     (_ (and (memq backend (clutch-backends t)) backend))))
-
-(defun clutch--sql-interface-surface-params-p (params)
-  "Return non-nil when PARAMS select the SQL Interface surface."
-  (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
-        '(sql sql-interface)))
 
 (defun clutch--backend-key-from-params (params)
   "Return backend icon key for connection PARAMS, or nil."
@@ -915,7 +907,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (let ((backend (clutch--backend-key-from-params params)))
     (or (clutch--jdbc-backend-p backend)
         (and (eq backend 'mongodb)
-             (clutch--sql-interface-surface-params-p params)))))
+             (clutch-db-sql-interface-surface-p params)))))
 
 (defun clutch--params-nonempty-user-p (params)
   "Return non-nil when PARAMS contain a non-empty :user value."
@@ -1844,7 +1836,7 @@ port and TRANSPORT contains the live process metadata."
   "Return CONNECT-PARAMS with short provisional timeouts for BACKEND."
   (let* ((jdbc (or (clutch--jdbc-backend-p backend)
                    (and (eq backend 'mongodb)
-                        (clutch--sql-interface-surface-params-p connect-params))))
+                        (clutch-db-sql-interface-surface-p connect-params))))
          (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
          (params (copy-sequence connect-params))
          (connect-timeout (plist-get params :connect-timeout))
