@@ -1013,7 +1013,7 @@ ROWS defaults to a small three-row sample."
             (should (eq clutch--conn-sql-product 'mysql))
             (let ((line (clutch--header-with-disconnect-badge
                          clutch-record--header-base)))
-              (should-not (string-match-p "Disconnected" line)))))
+              (should-not (string-match-p "DISCONNECTED" line)))))
       (kill-buffer result-buf))))
 
 (ert-deftest clutch-test-record-open-renders-current-row ()
@@ -6648,7 +6648,7 @@ crashing the UI layer."
               ((symbol-function 'clutch--connection-state-icon) (lambda (_connected) "[disc]"))
               ((symbol-function 'clutch--header-line-indent) (lambda () "")))
       (let* ((line (clutch--build-connection-header-line))
-             (start (string-match "Disconnect" line)))
+             (start (string-match "DISCONNECTED" line)))
         (should (string-match-p "\\[db\\]" line))
         (should-not (string-match-p "Oracle" line))
         (should start)
@@ -6661,7 +6661,7 @@ crashing the UI layer."
               ((symbol-function 'clutch--connection-state-icon) (lambda (_connected) "[disc]"))
               ((symbol-function 'clutch--header-line-indent) (lambda () "")))
       (let* ((line (clutch--build-connection-header-line))
-             (start (string-match "Disconnect" line)))
+             (start (string-match "DISCONNECTED" line)))
         (should (string-match-p "Oracle" line))
         (should start)
         (should (eq (get-text-property start 'face line) 'warning))))))

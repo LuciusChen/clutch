@@ -504,7 +504,7 @@ number of space characters.  This ensures `string-width' matches
   "Return a disconnected indicator string with warning face, or nil if connected."
   (unless clutch-connection
     (concat (clutch--icon-with-face '(mdicon . "nf-md-database_off") "⨯" 'warning)
-            (propertize " Disconnected" 'face 'warning))))
+            (propertize " DISCONNECTED" 'face 'warning))))
 
 (defun clutch--header-with-disconnect-badge (base)
   "Prepend disconnected badge to BASE header string when not connected."

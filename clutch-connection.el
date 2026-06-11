@@ -780,7 +780,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                               clutch-connection clutch--connection-params))
                (disconnect   (propertize
                               (concat (clutch--connection-state-icon nil)
-                                      " Disconnect")
+                                      " DISCONNECTED")
                               'face 'warning))
                (parts        (delq nil (list (if backend
                                                  backend
