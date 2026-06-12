@@ -1634,10 +1634,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let (captured)
     (cl-letf (((symbol-function 'mongodb-find)
                (lambda (client database collection filter projection limit skip
-                             &optional options)
+                             sort &optional options)
                  (setq captured
                        (list client database collection filter projection
-                             limit skip options))
+                             limit skip sort options))
                  (list (list (cons "_id" "a")
                              (cons "name" "Ann"))))))
       (let* ((conn (clutch-db-test--make-mongodb-conn "app" 'client))
@@ -1646,7 +1646,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                      "db.users.find({active: true}, {name: 1}).limit(20)")))
         (should (equal value '((("_id" . "a") ("name" . "Ann")))))
         (pcase-let ((`(,client ,database ,collection ,filter ,projection
-                       ,limit ,skip ,options)
+                       ,limit ,skip ,sort ,options)
                      captured))
           (should (eq client 'client))
           (should (equal database "app"))
@@ -1659,6 +1659,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                          '(("name" . 1))))
           (should (= limit 20))
           (should (null skip))
+          (should (null sort))
           (should (null options)))))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-find-chain-options ()
@@ -1666,10 +1667,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let (captured)
     (cl-letf (((symbol-function 'mongodb-find)
                (lambda (client database collection filter projection limit skip
-                             &optional options)
+                             sort &optional options)
                  (setq captured
                        (list client database collection filter projection
-                             limit skip options))
+                             limit skip sort options))
                  nil)))
       (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
@@ -1682,7 +1683,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
         ".allowDiskUse(true)"
         ".skip(5).limit(10)"))
       (pcase-let ((`(,client ,database ,collection ,filter ,projection
-                     ,limit ,skip ,options)
+                     ,limit ,skip ,sort ,options)
                    captured))
         (should (eq client 'client))
         (should (equal database "app"))
@@ -1691,18 +1692,18 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
         (should (equal (mongodb-document-pairs filter)
                        '(("active" . t))))
         (should (mongodb-document-p projection))
-          (should (equal (mongodb-document-pairs projection)
-                         '(("name" . 1))))
-          (should (= limit 10))
-          (should (= skip 5))
-        (let ((sort (cdr (assoc "sort" options))))
-          (should (mongodb-document-p sort))
-          (should (equal (mongodb-document-pairs sort)
-                         '(("createdAt" . -1))))
-          (should (= (cdr (assoc "maxTimeMS" options)) 250))
-          (should (= (cdr (assoc "batchSize" options)) 50))
-          (should (equal (cdr (assoc "comment" options)) "scan-users"))
-          (should (eq (cdr (assoc "allowDiskUse" options)) t)))))))
+        (should (equal (mongodb-document-pairs projection)
+                       '(("name" . 1))))
+        (should (= limit 10))
+        (should (= skip 5))
+        (should (mongodb-document-p sort))
+        (should (equal (mongodb-document-pairs sort)
+                       '(("createdAt" . -1))))
+        (should-not (assoc "sort" options))
+        (should (= (cdr (assoc "maxTimeMS" options)) 250))
+        (should (= (cdr (assoc "batchSize" options)) 50))
+        (should (equal (cdr (assoc "comment" options)) "scan-users"))
+        (should (eq (cdr (assoc "allowDiskUse" options)) t))))))
 
 (ert-deftest clutch-db-test-mongodb-find-chain-boolean-options-validate ()
   "Native MongoDB cursor boolean helpers should reject non-boolean values."
@@ -1977,7 +1978,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let (captured-filter)
     (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
-                              _projection _limit _skip &optional _options)
+                              _projection _limit _skip _sort
+                              &optional _options)
                  (setq captured-filter filter)
                  nil)))
       (clutch-mongodb--eval
@@ -1994,7 +1996,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let (captured-filter)
     (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
-                              _projection _limit _skip &optional _options)
+                              _projection _limit _skip _sort
+                              &optional _options)
                  (setq captured-filter filter)
                  nil)))
       (clutch-mongodb--eval
@@ -2012,7 +2015,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let (captured-filter)
     (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
-                              _projection _limit _skip &optional _options)
+                              _projection _limit _skip _sort
+                              &optional _options)
                  (setq captured-filter filter)
                  nil)))
       (clutch-mongodb--eval
@@ -2042,7 +2046,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let (captured-filter)
     (cl-letf (((symbol-function 'mongodb-find)
                (lambda (_client _database _collection filter
-                              _projection _limit _skip &optional _options)
+                              _projection _limit _skip _sort
+                              &optional _options)
                  (setq captured-filter filter)
                  nil)))
       (clutch-mongodb--eval
@@ -2118,9 +2123,9 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                  '(("ok" . 1))))
               ((symbol-function 'mongodb-find)
                (lambda (client database collection filter projection limit skip
-                             &optional options)
+                             sort &optional options)
                  (push (list client database collection filter projection
-                             limit skip options)
+                             limit skip sort options)
                        finds)
                  '((("_id" . "a"))))))
       (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
@@ -2160,7 +2165,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal collection "events"))
       (should-not options))
     (pcase-let ((`(,client ,database ,collection ,filter ,_projection
-                         ,_limit ,_skip ,_options)
+                         ,_limit ,_skip ,_sort ,_options)
                  (car finds)))
       (should (eq client 'client))
       (should (equal database "analytics"))
@@ -2168,7 +2173,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (equal (mongodb-document-pairs filter)
                      '(("_id" . "a")))))
     (pcase-let ((`(,_client ,database ,collection ,filter ,_projection
-                          ,_limit ,_skip ,_options)
+                          ,_limit ,_skip ,_sort ,_options)
                  (cadr finds)))
       (should (equal database "analytics"))
       (should (equal collection "orders"))
@@ -2484,7 +2489,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
     (let (captured-database)
       (cl-letf (((symbol-function 'mongodb-find)
                  (lambda (_client database _collection _filter
-                                  _projection _limit _skip &optional _options)
+                                  _projection _limit _skip _sort
+                                  &optional _options)
                    (setq captured-database database)
                    nil)))
         (clutch-db-query conn "db.users.find()"))

@@ -736,7 +736,7 @@ When both are present, return the earlier one."
   "Return MongoDB find command options parsed from helper CHAIN."
   (clutch-mongodb--options-from-chain
    chain
-   '("sort" "maxTimeMS" "batchSize" "allowDiskUse" "comment")))
+   '("maxTimeMS" "batchSize" "allowDiskUse" "comment")))
 
 (defun clutch-mongodb--aggregate-options-from-chain (chain)
   "Return MongoDB aggregate command options parsed from helper CHAIN."
@@ -846,13 +846,14 @@ chain options."
         (nth 1 args)
         (if single 1 (cdr (assoc "limit" chain)))
         (unless single (cdr (assoc "skip" chain)))
+        (unless single (cdr (assoc "sort" chain)))
         (unless single (clutch-mongodb--find-options-from-chain chain))))
 
 (defun clutch-mongodb--find-command (collection args chain &optional single)
   "Return a MongoDB find command for COLLECTION from ARGS, CHAIN, and SINGLE."
-  (pcase-let ((`(,filter ,projection ,limit ,skip ,options)
+  (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
                (clutch-mongodb--find-arguments args chain single)))
-    (mongodb-find-command collection filter projection limit skip options)))
+    (mongodb-find-command collection filter projection limit skip sort options)))
 
 (defun clutch-mongodb--aggregate-options (args chain)
   "Return MongoDB aggregate options parsed from ARGS and CHAIN."
@@ -954,20 +955,21 @@ helper call."
                       (clutch-mongodb-conn-database conn))))
     (pcase method
       ("find"
-       (pcase-let ((`(,filter ,projection ,limit ,skip ,options)
+       (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
                     (clutch-mongodb--find-arguments args chain)))
          (if (assoc "explain" chain)
              (mongodb-explain
               client database
-              (mongodb-find-command collection filter projection limit skip options)
+              (mongodb-find-command
+               collection filter projection limit skip sort options)
               (clutch-mongodb--explain-verbosity chain))
            (mongodb-find
-            client database collection filter projection limit skip options))))
+            client database collection filter projection limit skip sort options))))
       ("findOne"
-       (pcase-let ((`(,filter ,projection ,limit ,skip ,options)
+       (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
                     (clutch-mongodb--find-arguments args chain t)))
          (car (mongodb-find
-               client database collection filter projection limit skip options))))
+               client database collection filter projection limit skip sort options))))
       ("countDocuments"
        (unless (<= (length args) 2)
          (signal 'clutch-db-error
