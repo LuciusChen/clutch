@@ -24,11 +24,11 @@ flowchart TB
     subgraph WorkflowModules["Workflow and UI modules"]
       direction LR
       Conn["clutch-connection.el<br/>connection lifecycle, auth,<br/>SSH/TRAMP transport, transactions"]
-      Result["clutch-result.el<br/>result, record, value,<br/>sort/filter/export commands"]
+      Result["clutch-result.el<br/>result lifecycle/state owner,<br/>action registry, record/value workflows"]
       Object["clutch-object.el<br/>object discovery, describe buffers,<br/>object actions"]
-      Edit["clutch-edit.el<br/>staged edit, insert, delete,<br/>validation and commit"]
+      Edit["clutch-edit.el<br/>staged mutation state,<br/>validation and commit"]
       Schema["clutch-schema.el<br/>schema refresh lifecycle,<br/>metadata caches"]
-      UI["clutch-ui.el<br/>grid rendering, header/footer,<br/>navigation, JSON metadata display"]
+      UI["clutch-ui.el<br/>grid and header rendering helpers,<br/>footer, navigation"]
     end
   end
 
@@ -94,8 +94,12 @@ reuses the shared query workflow for execution. Future document backends should
 register their own query mode instead of adding MongoDB branches to generic
 workflow modules. Redis registers `clutch-redis-mode` from its adapter because
 the mode is Redis-specific and small; protocol work still lives in `redis.el`.
-`clutch-ui.el` is a shared rendering/helper module, not a separate workflow
-entry point, so its same-layer helper edges are omitted from this overview.
+`clutch-result.el` owns result buffer lifecycle state, paging/filter/sort state,
+refine state, and the result action registry. `clutch-edit.el` owns staged
+mutation payloads. `clutch-ui.el` is a shared rendering/helper module for
+result grids and connection header-line presentation; it is not a separate
+workflow entry point or result-state owner, so its same-layer helper edges are
+omitted from this overview.
 
 ## Backend And Surface Model
 
@@ -205,7 +209,8 @@ sequenceDiagram
   participant Query as clutch-query.el
   participant Backend as clutch-backend.el
   participant Adapter as Backend adapter
-  participant Result as clutch-result.el + clutch-ui.el
+  participant Result as clutch-result.el
+  participant UI as clutch-ui.el
 
   Buffer->>Query: Execute statement, region, or buffer
   Query->>Query: Find statement bounds and execution context
@@ -213,11 +218,14 @@ sequenceDiagram
   Backend->>Adapter: Dispatch by connection/backend type
   Adapter-->>Backend: clutch-db-result
   Backend-->>Query: Rows, columns, and result context
-  Query->>Result: Render shared result grid
+  Query->>Result: Install result state
+  Result->>UI: Render shared grid, header, and footer
   opt Result-grid action needs backend support
+    Result->>Result: Resolve action through result action registry
     Result->>Backend: Capability-gated refine, edit, export, or native mutation
     Backend->>Adapter: SQL-surface or native-surface operation
     Adapter-->>Result: Rewritten SQL, DML/export text, or native helper
+    Result->>UI: Re-render affected state
   end
 ```
 
@@ -248,9 +256,10 @@ execution always converges in `clutch-query.el` before calling the generic
 backend API. Object browsing is intentionally separate: `clutch-object.el` asks
 the adapter for metadata, definitions, native actions, or browse command text.
 Browse command text is opened in the matching query-buffer mode instead of
-pretending that every backend has SQL tables. Result-buffer actions use their
-own capability gate, so SQL rewrite/edit/export stays on SQL surfaces while
-native document/key-value surfaces expose only adapter-supported operations.
+pretending that every backend has SQL tables. Result-buffer actions use a single
+action registry owned by `clutch-result.el`, so SQL rewrite/edit/export stays on
+SQL surfaces while native document/key/value surfaces expose only
+adapter-supported operations.
 
 ## JDBC Runtime Shape
 

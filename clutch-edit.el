@@ -10,19 +10,14 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-schema)
 (require 'json)
 
-(defvar-local clutch--cached-pk-indices nil
-  "Cached list of primary-key column indices for the current result buffer.")
+(defvar clutch--cached-pk-indices)
 (defvar clutch--row-identity)
 (defvar clutch--filtered-rows)
-(defvar clutch--fk-info)
 (defvar clutch--last-query)
 (defvar clutch--connection-params)
-(defvar clutch--marked-rows)
-(defvar clutch--pending-deletes)
-(defvar clutch--pending-edits)
-(defvar clutch--pending-inserts)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
@@ -34,7 +29,16 @@
 (defvar clutch-record--result-buffer)
 (defvar clutch-record--row-idx)
 
-(declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
+(defvar-local clutch--fk-info nil
+  "Foreign key info for the current result.")
+(defvar clutch--marked-rows)
+(defvar-local clutch--pending-deletes nil
+  "List of row identity vectors staged for deletion.")
+(defvar-local clutch--pending-edits nil
+  "Alist of staged edits: ((IDENTITY-VEC . COL-IDX) . NEW-VALUE).")
+(defvar-local clutch--pending-inserts nil
+  "List of field alists staged for insertion.")
+
 (declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
@@ -61,13 +65,13 @@
 (declare-function clutch-db-substitute-params "clutch-backend" (sql params render-fn))
 (declare-function clutch-db-foreign-keys "clutch-backend" (conn table))
 
-(defun clutch-result--sql-edit-surface-p ()
+(defun clutch-edit--sql-surface-p ()
   "Return non-nil when SQL staged mutation is available in this result."
   (clutch-db-sql-surface-p clutch-connection clutch--connection-params))
 
-(defun clutch-result--require-sql-staged-mutation (op)
+(defun clutch-edit--require-sql-staged-mutation (op)
   "Signal unless SQL staged mutation OP is available for this result."
-  (unless (clutch-result--sql-edit-surface-p)
+  (unless (clutch-edit--sql-surface-p)
     (user-error
      "%s is SQL-only and is not available for non-SQL results" op)))
 
@@ -400,7 +404,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
 (defun clutch-result-edit-cell ()
   "Edit or re-edit the value at point in a dedicated buffer."
   (interactive)
-  (clutch-result--require-sql-staged-mutation "Edit / re-edit")
+  (clutch-edit--require-sql-staged-mutation "Edit / re-edit")
   (pcase-let* ((`(,ridx ,cidx ,val) (or (clutch--cell-at-point)
                                         (user-error "No cell at point"))))
     (if (>= ridx (length clutch--result-rows))
@@ -512,13 +516,17 @@ column indices to their referenced table and column."
   (when-let* ((conn clutch-connection)
               (table clutch--result-source-table)
               (col-names clutch--result-columns))
-    (condition-case nil
+    (condition-case err
         (let ((fks (clutch-db-foreign-keys conn table)))
           (pcase-dolist (`(,col-name . ,ref-info) fks)
             (let ((idx (cl-position col-name col-names :test #'string=)))
               (when idx
                 (push (cons idx ref-info) clutch--fk-info)))))
-      (clutch-db-error nil))))
+      (clutch-db-error
+       (clutch--remember-recoverable-metadata-warning
+        conn "foreign-key metadata" err `(:table ,table))
+       (message "Foreign-key metadata unavailable: %s"
+                (error-message-string err))))))
 
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
@@ -750,7 +758,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
   "Stage selected rows for deletion.
 Use \\[clutch-result-commit] in the result buffer to commit."
   (interactive)
-  (clutch-result--require-sql-staged-mutation "Stage delete")
+  (clutch-edit--require-sql-staged-mutation "Stage delete")
   (let* ((indices (or (clutch--selected-row-indices)
                       (user-error "No row at point")))
          (table (clutch--result-source-table-or-user-error "Stage DELETE"))
@@ -1660,7 +1668,7 @@ fields until the user expands to all columns."
 (defun clutch-result-insert-row ()
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
-  (clutch-result--require-sql-staged-mutation "Stage insert")
+  (clutch-edit--require-sql-staged-mutation "Stage insert")
   (let* ((table (or clutch--result-source-table
                     (user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
@@ -1736,7 +1744,7 @@ fields until the user expands to all columns."
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
-      (clutch-result--require-sql-staged-mutation "Clone row to insert"))
+      (clutch-edit--require-sql-staged-mutation "Clone row to insert"))
     (let* ((table (with-current-buffer result-buf
                     (or clutch--result-source-table
                         (user-error "Cannot detect source table"))))

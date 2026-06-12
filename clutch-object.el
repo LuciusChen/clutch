@@ -1486,101 +1486,57 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
     (setq context (plist-put context :connection conn))
     (plist-put context :source-buffer (current-buffer))))
 
+(defun clutch--document-collection-action-entry (entry action-id)
+  "Return collection ENTRY for document ACTION-ID, prompting when needed."
+  (or entry
+      (clutch--resolve-object-entry
+       (plist-get (clutch--object-action-spec action-id) :prompt)
+       t nil '("COLLECTION"))))
+
+(defun clutch--run-document-collection-action (entry action-id)
+  "Run document collection ACTION-ID for ENTRY and show its metadata."
+  (let* ((entry (clutch--document-collection-action-entry entry action-id))
+         (spec (clutch--object-action-spec action-id))
+         (context (clutch--document-object-action-context entry action-id))
+         (conn (plist-get context :connection))
+         (source-buffer (plist-get context :source-buffer)))
+    (clutch--remember-current-object entry)
+    (clutch--with-object-error-capture source-buffer conn entry
+        (symbol-name action-id)
+      (let ((text (clutch-db-object-action-metadata conn entry action-id)))
+        (when-let* ((message (and (null text)
+                                  (plist-get spec :empty-message))))
+          (user-error message (clutch--object-display-name entry)))
+        (clutch--show-object-text-buffer
+         conn entry
+         (clutch--json-metadata-text text)
+         (plist-get context :params)
+         (plist-get context :product)
+         (plist-get spec :title-suffix))))))
+
 ;;;###autoload
 (defun clutch-object-show-index-insight (&optional entry)
   "Show index definitions and usage insight for collection ENTRY."
   (interactive)
-  (let* ((entry (or entry
-                    (clutch--resolve-object-entry
-                     "Show index insight for collection: " t nil
-                     '("COLLECTION"))))
-         (context (clutch--document-object-action-context
-                   entry 'index-insight))
-         (conn (plist-get context :connection))
-         (source-buffer (plist-get context :source-buffer)))
-    (clutch--remember-current-object entry)
-    (clutch--with-object-error-capture source-buffer conn entry "index-insight"
-      (let ((text (clutch-db-collection-index-insight
-                   conn (plist-get entry :name))))
-        (unless text
-          (user-error "Index insight unavailable for %s"
-                      (clutch--object-display-name entry)))
-        (setq text (clutch--json-metadata-text text))
-        (clutch--show-object-text-buffer conn entry text
-                                         (plist-get context :params)
-                                         (plist-get context :product)
-                                         "index insight")))))
+  (clutch--run-document-collection-action entry 'index-insight))
 
 ;;;###autoload
 (defun clutch-object-explain-sample-query (&optional entry)
   "Explain a sample document query for collection ENTRY."
   (interactive)
-  (let* ((entry (or entry
-                    (clutch--resolve-object-entry
-                     "Explain collection: " t nil '("COLLECTION"))))
-         (context (clutch--document-object-action-context
-                   entry 'explain-sample))
-         (conn (plist-get context :connection))
-         (source-buffer (plist-get context :source-buffer)))
-    (clutch--remember-current-object entry)
-    (clutch--with-object-error-capture source-buffer conn entry "explain-sample"
-      (let ((text (clutch-db-collection-explain-sample
-                   conn (plist-get entry :name))))
-        (setq text (clutch--json-metadata-text text))
-        (clutch--show-object-text-buffer conn entry text
-                                         (plist-get context :params)
-                                         (plist-get context :product)
-                                         "explain")))))
+  (clutch--run-document-collection-action entry 'explain-sample))
 
 ;;;###autoload
 (defun clutch-object-show-validation (&optional entry)
   "Show validation metadata for collection ENTRY."
   (interactive)
-  (let* ((entry (or entry
-                    (clutch--resolve-object-entry
-                     "Show validation for collection: " t nil
-                     '("COLLECTION"))))
-         (context (clutch--document-object-action-context
-                   entry 'show-validation))
-         (conn (plist-get context :connection))
-         (source-buffer (plist-get context :source-buffer)))
-    (clutch--remember-current-object entry)
-    (clutch--with-object-error-capture source-buffer conn entry "show-validation"
-      (let ((text (clutch-db-collection-validation
-                   conn (plist-get entry :name))))
-        (unless text
-          (user-error "Validation metadata unavailable for %s"
-                      (clutch--object-display-name entry)))
-        (setq text (clutch--json-metadata-text text))
-        (clutch--show-object-text-buffer conn entry text
-                                         (plist-get context :params)
-                                         (plist-get context :product)
-                                         "validation")))))
+  (clutch--run-document-collection-action entry 'show-validation))
 
 ;;;###autoload
 (defun clutch-object-show-stats (&optional entry)
   "Show storage statistics for collection ENTRY."
   (interactive)
-  (let* ((entry (or entry
-                    (clutch--resolve-object-entry
-                     "Show stats for collection: " t nil
-                     '("COLLECTION"))))
-         (context (clutch--document-object-action-context
-                   entry 'show-stats))
-         (conn (plist-get context :connection))
-         (source-buffer (plist-get context :source-buffer)))
-    (clutch--remember-current-object entry)
-    (clutch--with-object-error-capture source-buffer conn entry "show-stats"
-      (let ((text (clutch-db-collection-stats
-                   conn (plist-get entry :name))))
-        (unless text
-          (user-error "Collection stats unavailable for %s"
-                      (clutch--object-display-name entry)))
-        (setq text (clutch--json-metadata-text text))
-        (clutch--show-object-text-buffer conn entry text
-                                         (plist-get context :params)
-                                         (plist-get context :product)
-                                         "stats")))))
+  (clutch--run-document-collection-action entry 'show-stats))
 
 ;;;###autoload
 (defun clutch-object-browse (&optional entry)
@@ -1760,25 +1716,36 @@ passed to the fallback reader."
      :label "Show index insight"
      :command clutch-object-show-index-insight
      :predicate clutch--document-collection-entry-p
-     :backend-action t)
+     :backend-action t
+     :prompt "Show index insight for collection: "
+     :empty-message "Index insight unavailable for %s"
+     :title-suffix "index insight")
     (:id explain-sample
      :key "e"
      :label "Explain sample query"
      :command clutch-object-explain-sample-query
      :predicate clutch--document-collection-entry-p
-     :backend-action t)
+     :backend-action t
+     :prompt "Explain collection: "
+     :title-suffix "explain")
     (:id show-validation
      :key "v"
      :label "Show validation"
      :command clutch-object-show-validation
      :predicate clutch--document-collection-entry-p
-     :backend-action t)
+     :backend-action t
+     :prompt "Show validation for collection: "
+     :empty-message "Validation metadata unavailable for %s"
+     :title-suffix "validation")
     (:id show-stats
      :key "t"
      :label "Show stats"
      :command clutch-object-show-stats
      :predicate clutch--document-collection-entry-p
-     :backend-action t)
+     :backend-action t
+     :prompt "Show stats for collection: "
+     :empty-message "Collection stats unavailable for %s"
+     :title-suffix "stats")
     (:id jump-target
      :key "j"
      :label "Jump target"

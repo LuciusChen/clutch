@@ -22,7 +22,7 @@
 ;;; Commentary:
 
 ;; Connection lifecycle management, transaction state tracking, backend
-;; detection, header-line rendering, and authentication for clutch.
+;; detection, transport, and authentication for clutch.
 ;;
 ;; This module is required by `clutch.el' — do not require `clutch' here.
 
@@ -88,12 +88,8 @@
 (declare-function clutch--debug-workflow-message "clutch-query" (message))
 (declare-function clutch--render-object-describe
                   "clutch-object" (conn entry params product))
-
-;; Forward declarations — functions defined in other modules
-(declare-function clutch--icon "clutch-ui" (name &optional fallback &rest icon-args))
-(declare-function clutch--icon-with-face "clutch-ui"
-                  (name fallback face &rest icon-args))
-(declare-function clutch--nerd-icons-available-p "clutch-ui" ())
+(declare-function clutch--build-connection-header-line "clutch-ui" ())
+(declare-function clutch--completion-backend-icon-prefix "clutch-ui" (key))
 
 ;;;; Connection identity
 
@@ -390,22 +386,6 @@ interactive readers inspect shared customization such as
    (propertize "  ✕  Connection closed"
                'face '(:inherit shadow))))
 
-(defun clutch--tx-header-line-segment (conn)
-  "Return a header-line segment for CONN transaction state, or nil.
-Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
-  (when (clutch--manual-commit-supported-p conn)
-    (let* ((state-face (if (clutch-db-manual-commit-p conn)
-                           (if (clutch--tx-dirty-p conn) 'error 'warning)
-                         'success))
-           (icon (clutch--icon-with-face '(mdicon . "nf-md-database_lock")
-                                         "⛁" state-face))
-           (label (if (clutch-db-manual-commit-p conn)
-                      (if (clutch--tx-dirty-p conn) "Tx: Manual*" "Tx: Manual")
-                    "Tx: Auto")))
-      (concat (unless (string-empty-p icon)
-                (concat icon " "))
-              (propertize label 'face state-face)))))
-
 (defun clutch--record-tx-state-after-query (conn sql)
   "Update transaction dirty state for successful SQL on CONN."
   (when (clutch-db-manual-commit-p conn)
@@ -602,48 +582,7 @@ using the stored params.  Signals a user-error if not recoverable."
            (clutch-db-database conn))
       (clutch-db-current-schema conn)))
 
-(defun clutch--current-schema-header-line-segment (conn)
-  "Return a header-line segment for CONN's current schema or database, or nil."
-  (when-let* ((schema (clutch--current-namespace-name conn)))
-    (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-sitemap_outline")
-                                        "≣" 'header-line)))
-      (if (string-empty-p icon)
-          schema
-        (format "%s %s" icon schema)))))
-
-;;;; Backend detection and icons
-
-(defconst clutch--db-icon-specs
-  ;; Each entry: (BACKEND . (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS))
-  ;; :color sets the icon foreground; remaining ICON-ARGS (e.g. :height) are
-  ;; forwarded to the nerd-icons function.
-  '((mysql      . ((devicon . "nf-dev-mysql")              ""  :color "#469AD7"))
-    (pg         . ((devicon . "nf-dev-postgresql")         ""  :color "#336791"))
-    (sqlite     . ((devicon . "nf-dev-sqlite")             ""  :color "#3A7EC6"))
-    (jdbc       . ((mdicon  . "nf-md-database_cog_outline") "" :color "#59636e"))
-    (oracle     . ((mdicon  . "nf-md-alpha_o_circle")      "O" :color "#C74634"))
-    (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""  :color "#CC2927"))
-    (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
-    (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
-    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF"))
-    (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00"))
-    (mongodb    . ((devicon . "nf-dev-mongodb")            ""  :color "#47A248"))
-    (redis      . ((devicon . "nf-dev-redis")              ""  :color "#DC382D")))
-  "Alist mapping backend symbols to icon specs.
-Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
-ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
-
-(defun clutch--db-backend-icon-for-key (key)
-  "Return a colored backend icon for KEY, or nil."
-  (when-let* ((spec (alist-get key clutch--db-icon-specs)))
-    (let* ((rest      (cddr spec))
-           (color     (plist-get rest :color))
-           (icon-args (cl-loop for (k v) on rest by #'cddr
-                               unless (eq k :color) nconc (list k v)))
-           (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
-      (if (and color (not (string-empty-p icon)))
-          (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
-        icon))))
+;;;; Backend detection
 
 (defun clutch--backend-key-from-conn (conn)
   "Return backend icon key for live connection CONN, or nil."
@@ -699,15 +638,6 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
     ('basic "Basic")
     ('experimental "Experimental")
     (_ nil)))
-
-(defun clutch--completion-backend-icon-prefix (key)
-  "Return a minibuffer completion icon prefix for backend KEY."
-  (let ((icon (clutch--db-backend-icon-for-key key)))
-    (if (and icon
-             (not (string-empty-p icon))
-             (clutch--nerd-icons-available-p))
-        (concat icon " ")
-      "")))
 
 (defun clutch--completion-annotation (parts)
   "Return a `completing-read' suffix annotation from non-empty PARTS."
@@ -769,73 +699,7 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
               (list (clutch--backend-support-annotation key))))))
    candidates))
 
-(defun clutch--connection-backend-segment (&optional conn params)
-  "Return the shared backend segment for CONN or PARAMS, or nil.
-When nerd-icons is available, show only the icon; otherwise fall back
-to the display name (e.g. \"MySQL\")."
-  (let* ((icon (clutch--db-backend-icon-for-key
-                (or (and conn (clutch--backend-key-from-conn conn))
-                    (and params (clutch--backend-key-from-params params)))))
-         (name (or (and conn (clutch-db-display-name conn))
-                   (and params (clutch--backend-display-name-from-params params)))))
-    (cond
-     ((and icon (not (string-empty-p icon))
-           (clutch--nerd-icons-available-p))
-      icon)
-     (name (propertize name 'face 'bold)))))
-
-(defun clutch--connection-state-icon (connected)
-  "Return a connection state icon for CONNECTED."
-  (if connected
-      (clutch--icon '(mdicon . "nf-md-database_check_outline") "⬢")
-    (clutch--icon '(mdicon . "nf-md-database_off") "⨯")))
-
-;;;; Header-line and mode-line
-
-(defun clutch--header-line-indent ()
-  "Return leading spaces to align header-line text with the buffer text area.
-Accounts for the line-number gutter when `display-line-numbers-mode' is on."
-  (make-string (max 1 (line-number-display-width)) ?\s))
-
-(defun clutch--build-connection-header-line ()
-  "Build the header-line string for the current clutch buffer."
-  (let ((indent (clutch--header-line-indent)))
-    (if (not (clutch--connection-alive-p clutch-connection))
-        (let* ((sep          (propertize "  •  " 'face 'shadow))
-               (backend      (clutch--connection-backend-segment
-                              clutch-connection clutch--connection-params))
-               (disconnect   (propertize
-                              (concat (clutch--connection-state-icon nil)
-                                      " DISCONNECTED")
-                              'face 'warning))
-               (parts        (delq nil (list (if backend
-                                                 backend
-                                               nil)
-                                             disconnect))))
-          (concat indent
-                  (if parts
-                      (mapconcat #'identity parts sep)
-                    disconnect)))
-      (let* ((sep         (propertize "  •  " 'face 'shadow))
-             (backend-sep (propertize "  ›  " 'face 'shadow))
-             (backend     (clutch--connection-backend-segment clutch-connection))
-             (key         (concat (clutch--connection-state-icon t)
-                                  " "
-                                  (clutch--connection-display-key clutch-connection)))
-             (current-schema
-              (clutch--current-schema-header-line-segment clutch-connection))
-             (schema      (clutch--schema-status-header-line-segment clutch-connection))
-             (tx          (clutch--tx-header-line-segment clutch-connection))
-             (tail        (delq nil (list current-schema schema tx))))
-        (concat indent
-                (cond
-                 ((and backend key)
-                  (concat backend backend-sep key
-                          (when tail
-                            (concat sep (mapconcat #'identity tail sep)))))
-                 (backend backend)
-                 (key (mapconcat #'identity (cons key tail) sep))
-                 (t (mapconcat #'identity tail sep))))))))
+;;;; Spinner and mode-line
 
 (defun clutch--spinner-start ()
   "Start the spinner timer if not already running."

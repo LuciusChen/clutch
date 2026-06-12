@@ -17,25 +17,19 @@
 (defvar clutch--executing-p)
 (declare-function clutch--spinner-string "clutch-connection" ())
 
-(defvar-local clutch--aggregate-summary nil
-  "Last aggregate summary plist for result footer, or nil.
-Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
+(defvar clutch--aggregate-summary)
+(defvar clutch--base-query)
 (defvar clutch--cached-pk-indices)
-(defvar clutch--row-identity)
 (defvar clutch--cell-default-placeholder)
 (defvar clutch--cell-generated-placeholder)
 (defvar-local clutch--column-widths nil
   "Vector of display widths for each result column.")
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
-(defvar-local clutch--dml-result nil
-  "Non-nil when this result buffer shows a DML result.")
-(defvar-local clutch--filter-pattern nil
-  "Current client-side filter string, or nil.")
-(defvar-local clutch--fk-info nil
-  "Foreign key info for the current result.")
-(defvar-local clutch--filtered-rows nil
-  "Filtered subset of `clutch--result-rows', or nil when unfiltered.")
+(defvar clutch--dml-result)
+(defvar clutch--filter-pattern)
+(defvar clutch--fk-info)
+(defvar clutch--filtered-rows)
 (defvar-local clutch--header-active-col nil
   "Column index currently highlighted in the header, or nil.")
 (defvar-local clutch--footer-base-string nil
@@ -53,72 +47,41 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--last-window-width nil
   "Last known window body width for the current result buffer.")
-(defvar-local clutch--marked-rows nil
-  "List of marked row indices.")
-(defvar-local clutch--order-by nil
-  "Current ORDER BY state as (COL-NAME . DIRECTION) or nil.")
-(defvar-local clutch--page-current 0
-  "Current data page number (0-based).")
-(defvar-local clutch--page-has-more nil
-  "Non-nil when one-row lookahead found rows after the current page.")
-(defvar-local clutch--page-offset nil
-  "Zero-based SQL offset for the first row in the current result page.
-Nil means derive the offset from `clutch--page-current'.")
-(defvar-local clutch--page-total-rows nil
-  "Total row count from COUNT(*), or nil if not yet queried.")
-(defvar-local clutch--pending-deletes nil
-  "List of row identity vectors staged for deletion.")
-(defvar-local clutch--pending-edits nil
-  "Alist of staged edits: ((IDENTITY-VEC . COL-IDX) . NEW-VALUE).")
-(defvar-local clutch--pending-inserts nil
-  "List of field alists staged for insertion.")
-(defvar-local clutch--query-elapsed nil
-  "Elapsed time in seconds for the last query execution.")
-(defvar-local clutch--result-source-table nil
-  "Detected source table name for the current result buffer, or nil.")
-(defvar-local clutch--result-server-pageable nil
-  "Non-nil when server-side page navigation is safe for this result.")
-(defvar-local clutch--result-server-rewritable nil
-  "Non-nil when server-side sort/filter/count rewrites are safe.")
-(defvar-local clutch--result-column-defs nil
-  "Full column definition plists from the last result.")
-(defvar-local clutch--result-columns nil
-  "Column names from the last result.")
-(defvar-local clutch--result-rows nil
-  "Row data from the last result.")
-(defvar-local clutch--row-identity nil
-  "Row identity metadata for staging edits and deletes in the current result.")
-(defvar-local clutch--row-identity-status nil
-  "Row identity capability status for the current result buffer.")
-(defvar-local clutch--row-identity-error-message nil
-  "Row identity metadata error message for the current result buffer.")
+(defvar clutch--marked-rows)
+(defvar clutch--order-by)
+(defvar clutch--page-current)
+(defvar clutch--page-has-more)
+(defvar clutch--page-offset)
+(defvar clutch--page-total-rows)
+(defvar clutch--pending-deletes)
+(defvar clutch--pending-edits)
+(defvar clutch--pending-inserts)
+(defvar clutch--query-elapsed)
+(defvar clutch--result-source-table)
+(defvar clutch--result-server-pageable)
+(defvar clutch--result-server-rewritable)
+(defvar clutch--result-column-defs)
+(defvar clutch--result-columns)
+(defvar clutch--result-rows)
+(defvar clutch--row-identity)
+(defvar clutch--row-identity-status)
+(defvar clutch--row-identity-error-message)
 (defvar-local clutch--executed-sql-overlay nil
   "Overlay marking the last SQL execution status.")
 (defvar-local clutch--row-overlay nil
   "Overlay used to highlight the current row.")
 (defvar-local clutch--row-start-positions nil
   "Vector mapping rendered row indices to their line start positions.")
-(defvar-local clutch--sort-column nil
-  "Column name currently sorted by, or nil.")
-(defvar-local clutch--sort-descending nil
-  "Non-nil if the current sort is descending.")
-(defvar-local clutch--result-column-details nil
-  "List of column detail plists aligned with `clutch--result-columns'.
-Each element corresponds to the same-index column.  Nil when unavailable.")
-(defvar-local clutch--where-filter nil
-  "Current WHERE filter string, or nil if no filter is active.")
-(defvar-local clutch--refine-rect nil
-  "Rectangle (ROW-INDICES . COL-INDICES) being refined, or nil.")
-(defvar-local clutch--refine-excluded-rows nil
-  "Row indices (0-based) excluded during refine mode.")
-(defvar-local clutch--refine-excluded-cols nil
-  "Column indices (0-based) excluded during refine mode.")
-(defvar-local clutch--refine-overlays nil
-  "Overlays created during refine mode.")
-(defvar-local clutch--refine-callback nil
-  "Callback called with final rect when refine is confirmed.")
-(defvar-local clutch--refine-saved-mode-line nil
-  "Saved `mode-line-format' to restore after refine mode exits.")
+(defvar clutch--sort-column)
+(defvar clutch--sort-descending)
+(defvar clutch--result-column-details)
+(defvar clutch--where-filter)
+(defvar clutch--refine-rect)
+(defvar clutch--refine-excluded-rows)
+(defvar clutch--refine-excluded-cols)
+(defvar clutch--refine-overlays)
+(defvar clutch--refine-callback)
+(defvar clutch--refine-saved-mode-line)
 (defvar clutch-column-padding)
 (defvar clutch-column-width-max)
 (defvar clutch-connection)
@@ -126,10 +89,19 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (defvar clutch-result-max-rows)
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
+(declare-function clutch--backend-display-name-from-params
+                  "clutch-connection" (params))
+(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
+(declare-function clutch--backend-key-from-params "clutch-connection" (params))
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
+(declare-function clutch--connection-alive-p "clutch-connection" (conn))
+(declare-function clutch--connection-display-key "clutch-connection" (conn))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
-(declare-function clutch--tx-header-line-segment "clutch-connection" (conn))
+(declare-function clutch--current-namespace-name "clutch-connection" (conn))
+(declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
+(declare-function clutch--schema-status-header-line-segment "clutch-schema" (conn))
+(declare-function clutch--tx-dirty-p "clutch-connection" (conn))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 
 (defcustom clutch-column-displayers nil
@@ -508,6 +480,138 @@ installed, the family is unsupported, or the icon is unknown."
   "Return icon NAME/FALLBACK with FACE appended to its text properties.
 Pass ICON-ARGS through to `clutch--icon'."
   (clutch--append-face (apply #'clutch--icon name fallback icon-args) face))
+
+(defconst clutch--db-icon-specs
+  ;; Each entry: (BACKEND . (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS))
+  ;; :color sets the icon foreground; remaining ICON-ARGS (e.g. :height) are
+  ;; forwarded to the nerd-icons function.
+  '((mysql      . ((devicon . "nf-dev-mysql")              ""  :color "#469AD7"))
+    (pg         . ((devicon . "nf-dev-postgresql")         ""  :color "#336791"))
+    (sqlite     . ((devicon . "nf-dev-sqlite")             ""  :color "#3A7EC6"))
+    (jdbc       . ((mdicon  . "nf-md-database_cog_outline") "" :color "#59636e"))
+    (oracle     . ((mdicon  . "nf-md-alpha_o_circle")      "O" :color "#C74634"))
+    (sqlserver  . ((devicon . "nf-dev-microsoftsqlserver") ""  :color "#CC2927"))
+    (snowflake  . ((mdicon  . "nf-md-snowflake")           "❄" :color "#29B5E8"))
+    (db2        . ((mdicon  . "nf-md-database")            ""  :color "#1F70C1"))
+    (redshift   . ((mdicon  . "nf-md-database")            ""  :color "#8C4FFF"))
+    (clickhouse . ((faicon  . "nf-fa-barcode")             ""  :color "#FFCC00"))
+    (mongodb    . ((devicon . "nf-dev-mongodb")            ""  :color "#47A248"))
+    (redis      . ((devicon . "nf-dev-redis")              ""  :color "#DC382D")))
+  "Alist mapping backend symbols to icon specs.
+Each value is (ICON-SPEC FALLBACK :color COLOR &rest ICON-ARGS).
+ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
+
+(defun clutch--db-backend-icon-for-key (key)
+  "Return a colored backend icon for KEY, or nil."
+  (when-let* ((spec (alist-get key clutch--db-icon-specs)))
+    (let* ((rest      (cddr spec))
+           (color     (plist-get rest :color))
+           (icon-args (cl-loop for (k v) on rest by #'cddr
+                               unless (eq k :color) nconc (list k v)))
+           (icon      (apply #'clutch--icon (car spec) (cadr spec) icon-args)))
+      (if (and color (not (string-empty-p icon)))
+          (propertize icon 'face `(:foreground ,color :inherit ,(get-text-property 0 'face icon)))
+        icon))))
+
+(defun clutch--completion-backend-icon-prefix (key)
+  "Return a minibuffer completion icon prefix for backend KEY."
+  (let ((icon (clutch--db-backend-icon-for-key key)))
+    (if (and icon
+             (not (string-empty-p icon))
+             (clutch--nerd-icons-available-p))
+        (concat icon " ")
+      "")))
+
+(defun clutch--connection-backend-segment (&optional conn params)
+  "Return the shared backend segment for CONN or PARAMS, or nil.
+When nerd-icons is available, show only the icon; otherwise fall back
+to the display name (e.g. \"MySQL\")."
+  (let* ((icon (clutch--db-backend-icon-for-key
+                (or (and conn (clutch--backend-key-from-conn conn))
+                    (and params (clutch--backend-key-from-params params)))))
+         (name (or (and conn (clutch-db-display-name conn))
+                   (and params (clutch--backend-display-name-from-params params)))))
+    (cond
+     ((and icon (not (string-empty-p icon))
+           (clutch--nerd-icons-available-p))
+      icon)
+     (name (propertize name 'face 'bold)))))
+
+(defun clutch--connection-state-icon (connected)
+  "Return a connection state icon for CONNECTED."
+  (if connected
+      (clutch--icon '(mdicon . "nf-md-database_check_outline") "⬢")
+    (clutch--icon '(mdicon . "nf-md-database_off") "⨯")))
+
+(defun clutch--tx-header-line-segment (conn)
+  "Return a header-line segment for CONN transaction state, or nil.
+Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
+  (when (clutch--manual-commit-supported-p conn)
+    (let* ((state-face (if (clutch-db-manual-commit-p conn)
+                           (if (clutch--tx-dirty-p conn) 'error 'warning)
+                         'success))
+           (icon (clutch--icon-with-face '(mdicon . "nf-md-database_lock")
+                                         "⛁" state-face))
+           (label (if (clutch-db-manual-commit-p conn)
+                      (if (clutch--tx-dirty-p conn) "Tx: Manual*" "Tx: Manual")
+                    "Tx: Auto")))
+      (concat (unless (string-empty-p icon)
+                (concat icon " "))
+              (propertize label 'face state-face)))))
+
+(defun clutch--current-schema-header-line-segment (conn)
+  "Return a header-line segment for CONN's current schema or database, or nil."
+  (when-let* ((schema (clutch--current-namespace-name conn)))
+    (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-sitemap_outline")
+                                        "≣" 'header-line)))
+      (if (string-empty-p icon)
+          schema
+        (format "%s %s" icon schema)))))
+
+(defun clutch--header-line-indent ()
+  "Return leading spaces to align header-line text with the buffer text area.
+Accounts for the line-number gutter when `display-line-numbers-mode' is on."
+  (make-string (max 1 (line-number-display-width)) ?\s))
+
+(defun clutch--build-connection-header-line ()
+  "Build the header-line string for the current clutch buffer."
+  (let ((indent (clutch--header-line-indent)))
+    (if (not (clutch--connection-alive-p clutch-connection))
+        (let* ((sep          (propertize "  •  " 'face 'shadow))
+               (backend      (clutch--connection-backend-segment
+                              clutch-connection clutch--connection-params))
+               (disconnect   (propertize
+                              (concat (clutch--connection-state-icon nil)
+                                      " DISCONNECTED")
+                              'face 'warning))
+               (parts        (delq nil (list (if backend
+                                                 backend
+                                               nil)
+                                             disconnect))))
+          (concat indent
+                  (if parts
+                      (mapconcat #'identity parts sep)
+                    disconnect)))
+      (let* ((sep         (propertize "  •  " 'face 'shadow))
+             (backend-sep (propertize "  ›  " 'face 'shadow))
+             (backend     (clutch--connection-backend-segment clutch-connection))
+             (key         (concat (clutch--connection-state-icon t)
+                                  " "
+                                  (clutch--connection-display-key clutch-connection)))
+             (current-schema
+              (clutch--current-schema-header-line-segment clutch-connection))
+             (schema      (clutch--schema-status-header-line-segment clutch-connection))
+             (tx          (clutch--tx-header-line-segment clutch-connection))
+             (tail        (delq nil (list current-schema schema tx))))
+        (concat indent
+                (cond
+                 ((and backend key)
+                  (concat backend backend-sep key
+                          (when tail
+                            (concat sep (mapconcat #'identity tail sep)))))
+                 (backend backend)
+                 (key (mapconcat #'identity (cons key tail) sep))
+                 (t (mapconcat #'identity tail sep))))))))
 
 (defun clutch--fixed-width-icon (spec fallback &optional face)
   "Return icon with `string-width' matching actual display width.

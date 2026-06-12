@@ -1907,8 +1907,7 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
            (plist-get entry :name)
            "MongoDB collection name")))
 
-(cl-defmethod clutch-db-collection-validation
-  ((conn clutch-mongodb-conn) collection)
+(defun clutch-mongodb--collection-validation (conn collection)
   "Return collection validation metadata for MongoDB COLLECTION on CONN."
   (let* ((info (clutch-mongodb--collection-info conn collection))
          (options (clutch-mongodb--document-value info "options"))
@@ -1924,10 +1923,10 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
      `(("collection" . ,collection)
        ("configured" . ,(if validator t :false))
        ("validationAction" . ,validation-action)
-       ("validationLevel" . ,validation-level)
-       ("validator" . ,validator)))))
+	   ("validationLevel" . ,validation-level)
+	   ("validator" . ,validator)))))
 
-(cl-defmethod clutch-db-collection-stats ((conn clutch-mongodb-conn) collection)
+(defun clutch-mongodb--collection-stats (conn collection)
   "Return collection storage statistics for MongoDB COLLECTION on CONN."
   (let* ((storage-stage
           (mongodb-document
@@ -2022,8 +2021,7 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
        ("indexes" . ,(vconcat
                        (mapcar #'clutch-mongodb--index-json indexes)))))))
 
-(cl-defmethod clutch-db-collection-index-insight
-  ((conn clutch-mongodb-conn) collection)
+(defun clutch-mongodb--collection-index-insight (conn collection)
   "Return MongoDB index insight for COLLECTION on CONN.
 The returned text is JSON metadata."
   (let* ((index-docs (clutch-mongodb--collection-index-documents
@@ -2051,6 +2049,21 @@ The returned text is JSON metadata."
        (memq action-id
              '(index-insight explain-sample show-validation show-stats))))
 
+(cl-defmethod clutch-db-object-action-metadata
+  ((conn clutch-mongodb-conn) entry action-id)
+  "Return MongoDB metadata text for collection ACTION-ID on ENTRY using CONN."
+  (when (clutch-db-object-action-supported-p conn entry action-id)
+    (let ((collection (plist-get entry :name)))
+      (pcase action-id
+        ('index-insight
+         (clutch-mongodb--collection-index-insight conn collection))
+        ('explain-sample
+         (clutch-mongodb--collection-explain-sample conn collection))
+        ('show-validation
+         (clutch-mongodb--collection-validation conn collection))
+        ('show-stats
+         (clutch-mongodb--collection-stats conn collection))))))
+
 (cl-defmethod clutch-db-document-mutation-supported-p
   ((_conn clutch-mongodb-conn) action)
   "Return non-nil when ACTION has a native MongoDB helper snippet."
@@ -2064,8 +2077,7 @@ of top-level field names for field-scoped snippets."
   (clutch-mongodb--document-mutation-snippet
    action collection documents fields))
 
-(cl-defmethod clutch-db-collection-explain-sample
-  ((conn clutch-mongodb-conn) collection)
+(defun clutch-mongodb--collection-explain-sample (conn collection)
   "Return MongoDB explain metadata for a sample query on COLLECTION using CONN."
   (clutch-db-explain-query
    conn

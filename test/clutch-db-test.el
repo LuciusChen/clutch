@@ -2282,9 +2282,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                  metadata)))
       (should
        (equal
-        (clutch-db-collection-validation
+        (clutch-db-object-action-metadata
          (clutch-db-test--make-mongodb-conn)
-         "users")
+         '(:name "users" :type "COLLECTION")
+         'show-validation)
         "{\"collection\":\"users\",\"configured\":true,\"validationAction\":\"warn\",\"validationLevel\":\"moderate\",\"validator\":{\"$jsonSchema\":{\"required\":[\"status\"]}}}"))
       (should (equal captured-code
                      "db.getCollectionInfos({name: \"users\"})")))))
@@ -2308,9 +2309,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                         ("indexSizes" . (("_id_" . 20480)
                                          ("field_idx" . 20480))))))))))
       (let ((text
-             (clutch-db-collection-stats
+             (clutch-db-object-action-metadata
               (clutch-db-test--make-mongodb-conn "app")
-              "users")))
+              '(:name "users" :type "COLLECTION")
+              'show-stats)))
         (should
          (equal
           text
@@ -2428,9 +2430,10 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                     ("host" . "localhost:27017")
                     ("accesses" . (("ops" . 9)
                                    ("since" . "2026-06-11T00:00:00Z"))))))))
-      (let* ((text (clutch-db-collection-index-insight
+      (let* ((text (clutch-db-object-action-metadata
                     (clutch-db-test--make-mongodb-conn "app")
-                    "users"))
+                    '(:name "users" :type "COLLECTION")
+                    'index-insight))
              (insight (json-parse-string text :object-type 'alist
                                          :array-type 'list))
              (indexes (cdr (assoc 'indexes insight)))
@@ -4690,7 +4693,10 @@ Skips if `clutch-db-test-pg-password' is nil."
                      collection
                      (clutch-db-object-definition
                       conn (list :name collection :type "COLLECTION"))))
-            (let ((stats (clutch-db-collection-stats conn collection)))
+            (let ((stats (clutch-db-object-action-metadata
+                          conn
+                          (list :name collection :type "COLLECTION")
+                          'show-stats)))
               (should (string-match-p (format "\"collection\":\"%s\""
                                               collection)
                                       stats))
@@ -4699,7 +4705,10 @@ Skips if `clutch-db-test-pg-password' is nil."
               (should (string-match-p "\"totalIndexSize\":" stats))
               (should (string-match-p "\"indexSizes\"" stats)))
             (let ((validation
-                   (clutch-db-collection-validation conn validation-collection)))
+                   (clutch-db-object-action-metadata
+                    conn
+                    (list :name validation-collection :type "COLLECTION")
+                    'show-validation)))
               (should (string-match-p "\"configured\":true" validation))
               (should (string-match-p "\"validationAction\":\"error\""
                                       validation))

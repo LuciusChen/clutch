@@ -60,11 +60,11 @@ controls backend-specific object action availability."
       (kill-buffer buf))))
 
 (defun clutch-test-object--capture-collection-action
-    (command action-id provider payload &optional conn backend)
+    (command action-id payload &optional conn backend)
   "Run collection COMMAND and return captured object text display arguments.
-ACTION-ID controls capability support.  PROVIDER is the backend generic
-COMMAND should call, and PAYLOAD is the raw metadata text it returns.  CONN and
-BACKEND default to a MongoDB-flavored native document connection."
+ACTION-ID controls capability support.  PAYLOAD is the raw metadata text the
+backend action returns.  CONN and BACKEND default to a MongoDB-flavored native
+document connection."
   (let ((conn (or conn 'mongo-conn))
         (backend (or backend 'mongodb))
         captured)
@@ -78,10 +78,11 @@ BACKEND default to a MongoDB-flavored native document connection."
                      (should (eq actual-conn conn))
                      (should (equal (plist-get entry :name) "users"))
                      (eq candidate action-id)))
-                  ((symbol-function provider)
-                   (lambda (actual-conn collection)
+                  ((symbol-function 'clutch-db-object-action-metadata)
+                   (lambda (actual-conn entry candidate)
                      (should (eq actual-conn conn))
-                     (should (equal collection "users"))
+                     (should (equal (plist-get entry :name) "users"))
+                     (should (eq candidate action-id))
                      payload))
                   ((symbol-function 'clutch--show-object-text-buffer)
                    (lambda (actual-conn entry text
@@ -363,7 +364,6 @@ BACKEND default to a MongoDB-flavored native document connection."
     (clutch-test-object--capture-collection-action
      #'clutch-object-show-index-insight
      'index-insight
-     'clutch-db-collection-index-insight
      "{\"indexes\":[{\"name\":\"_id_\"}]}")
     '(mongo-conn
       (:name "users" :type "COLLECTION")
@@ -377,7 +377,6 @@ BACKEND default to a MongoDB-flavored native document connection."
     (clutch-test-object--capture-collection-action
      #'clutch-object-explain-sample-query
      'explain-sample
-     'clutch-db-collection-explain-sample
      "{\"summary\":{\"collectionScan\":true}}")
     '(mongo-conn
       (:name "users" :type "COLLECTION")
@@ -391,7 +390,6 @@ BACKEND default to a MongoDB-flavored native document connection."
     (clutch-test-object--capture-collection-action
      #'clutch-object-show-validation
      'show-validation
-     'clutch-db-collection-validation
      "{\"configured\":true}")
     '(mongo-conn
       (:name "users" :type "COLLECTION")
@@ -405,7 +403,6 @@ BACKEND default to a MongoDB-flavored native document connection."
     (clutch-test-object--capture-collection-action
      #'clutch-object-show-stats
      'show-stats
-     'clutch-db-collection-stats
      "{\"count\":3,\"storageSize\":20480}"
      'document-conn
      'couchdb)

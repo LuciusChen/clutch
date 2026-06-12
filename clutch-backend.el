@@ -1091,20 +1091,6 @@ Return nil when CONN does not provide a backend-specific browse query.")
   "Default: object browsing is built by the Clutch UI."
   nil)
 
-(cl-defgeneric clutch-db-collection-validation (conn collection)
-  "Return validation metadata text for COLLECTION on CONN.")
-
-(cl-defmethod clutch-db-collection-validation ((_conn t) _collection)
-  "Default: return nil when validation metadata is unavailable."
-  nil)
-
-(cl-defgeneric clutch-db-collection-stats (conn collection)
-  "Return collection storage statistics text for COLLECTION on CONN.")
-
-(cl-defmethod clutch-db-collection-stats ((_conn t) _collection)
-  "Default: return nil when collection statistics are unavailable."
-  nil)
-
 (cl-defgeneric clutch-db-collection-profile (conn collection)
   "Return schema/profile metadata text for COLLECTION on CONN.")
 
@@ -1112,18 +1098,18 @@ Return nil when CONN does not provide a backend-specific browse query.")
   "Default: return nil when collection profile metadata is unavailable."
   nil)
 
-(cl-defgeneric clutch-db-collection-index-insight (conn collection)
-  "Return index insight metadata text for COLLECTION on CONN.")
-
-(cl-defmethod clutch-db-collection-index-insight ((_conn t) _collection)
-  "Default: return nil when index insight metadata is unavailable."
-  nil)
-
 (cl-defgeneric clutch-db-object-action-supported-p (conn entry action-id)
   "Return non-nil when ACTION-ID is supported for object ENTRY on CONN.")
 
 (cl-defmethod clutch-db-object-action-supported-p ((_conn t) _entry _action-id)
   "Default: backend-specific object actions are unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-object-action-metadata (conn entry action-id)
+  "Return metadata text for backend ACTION-ID on object ENTRY using CONN.")
+
+(cl-defmethod clutch-db-object-action-metadata ((_conn t) _entry _action-id)
+  "Default: return nil when backend-specific action metadata is unavailable."
   nil)
 
 (cl-defgeneric clutch-db-document-mutation-supported-p (conn action)
@@ -1143,13 +1129,6 @@ field names for field-scoped actions.")
   ((_conn t) action _collection _documents &optional _fields)
   "Default: signal that ACTION is unsupported for document mutation snippets."
   (user-error "Document mutation %s is not available for this backend" action))
-
-(cl-defgeneric clutch-db-collection-explain-sample (conn collection)
-  "Return explain metadata text for a sample query on COLLECTION using CONN.")
-
-(cl-defmethod clutch-db-collection-explain-sample ((_conn t) _collection)
-  "Default: return nil when collection sample explain is unavailable."
-  nil)
 
 (cl-defgeneric clutch-db-explain-query (conn query)
   "Return explain metadata text for QUERY on CONN.")
