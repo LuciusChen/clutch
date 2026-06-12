@@ -280,6 +280,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 
 (ert-deftest clutch-test-value-placeholder-detects-xml-and-blob ()
   "Grid placeholders should compactly mark XML and BLOB values."
+  (should-not (clutch--value-placeholder "{\"a\":1}" '(:type-category json)))
   (should (equal (clutch--value-placeholder "<root/>" '(:type-category text))
                  "<XML>"))
   (should (equal (clutch--value-placeholder (unibyte-string #x00 #x01)
@@ -411,6 +412,24 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
          (widths (clutch--compute-column-widths col-names rows columns)))
     ;; Should be capped at max width
     (should (<= (aref widths 0) clutch-column-width-max))))
+
+(ert-deftest clutch-test-compute-column-widths-shows-short-json ()
+  "JSON columns should size to short compact values instead of placeholders."
+  (let* ((clutch-column-width-max 30)
+         (col-names '("j"))
+         (rows '(("{\"a\":1}")))
+         (columns '((:name "j" :type-category json)))
+         (widths (clutch--compute-column-widths col-names rows columns)))
+    (should (= (aref widths 0) (string-width "{\"a\":1}")))))
+
+(ert-deftest clutch-test-compute-column-widths-keeps-blob-compact ()
+  "BLOB columns should still use compact default width."
+  (let* ((clutch-column-width-max 30)
+         (col-names '("payload"))
+         (rows '(("this blob text is intentionally long")))
+         (columns '((:name "payload" :type-category blob)))
+         (widths (clutch--compute-column-widths col-names rows columns)))
+    (should (= (aref widths 0) 10))))
 
 (ert-deftest clutch-test-visible-columns-renders-all-result-columns ()
   "The result buffer should render every result column into one table."
@@ -1595,8 +1614,16 @@ ROWS defaults to a small three-row sample."
             (when (eq case 'error-result)
               (should (string-match-p "failed: boom" logged)))))))))
 
+(ert-deftest clutch-test-cell-display-content-truncates-text-with-ellipsis ()
+  "Default cell text should use ellipsis when truncated."
+  (with-temp-buffer
+    (should (equal
+             (clutch--cell-display-content
+              "abcdef" 4 '(:name "status" :type-category text) nil)
+             "abc…"))))
+
 (ert-deftest clutch-test-cell-display-content-truncates-custom-displayer-output ()
-  "Custom column displayer output should still be truncated to column width."
+  "Custom column displayer output should be truncated with ellipsis."
   (let ((clutch-column-displayers nil))
     (clutch-register-column-displayer
      "orders" "status"
@@ -1607,7 +1634,27 @@ ROWS defaults to a small three-row sample."
       (should (equal
                (clutch--cell-display-content
                 "queued" 4 '(:name "status" :type-category text) nil)
-               "abcd")))))
+               "abc…")))))
+
+(ert-deftest clutch-test-cell-display-content-highlights-short-json ()
+  "Short JSON cells should render full compact JSON with token faces."
+  (let ((s (clutch--cell-display-content
+            "{\"a\":1,\"b\":\"x\"}" 20 '(:name "payload" :type-category json) nil)))
+    (should (equal (substring-no-properties s) "{\"a\":1,\"b\":\"x\"}"))
+    (should (eq (get-text-property 0 'face s) 'shadow))
+    (should (eq (get-text-property 1 'face s) (clutch--json-key-face)))
+    (should-not (eq (get-text-property 1 'face s) 'clutch-field-name-face))
+    (should (eq (get-text-property 5 'face s) 'font-lock-constant-face))
+    (should (eq (get-text-property 12 'face s) 'font-lock-string-face))))
+
+(ert-deftest clutch-test-cell-display-content-truncates-long-json-unhighlighted ()
+  "Long JSON cells should show a raw prefix with ellipsis, not a placeholder."
+  (let ((s (clutch--cell-display-content
+            "{\"status\":\"paid\",\"total\":128.5}"
+            18 '(:name "payload" :type-category json) nil)))
+    (should (string-suffix-p "…" s))
+    (should-not (string-match-p "<JSON>" s))
+    (should-not (get-text-property 0 'face s))))
 
 (ert-deftest clutch-test-render-cell-custom-displayer-keeps-full-value-raw ()
   "Custom cell display should keep `clutch-full-value' on the raw value."

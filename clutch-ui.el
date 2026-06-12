@@ -326,6 +326,82 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   "Return non-nil when string VAL appears to contain JSON text."
   (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
 
+(defun clutch--json-cell-value-p (val col-def)
+  "Return non-nil when VAL/COL-DEF should use JSON cell rendering."
+  (or (eq (plist-get col-def :type-category) 'json)
+      (clutch--json-like-string-p val)))
+
+(defun clutch--json-string-end (text start)
+  "Return end index of JSON string in TEXT that starts at START."
+  (let ((pos (1+ start))
+        (len (length text))
+        (escaped nil))
+    (while (and (< pos len)
+                (or escaped (/= (aref text pos) ?\")))
+      (setq escaped (and (not escaped) (= (aref text pos) ?\\)))
+      (cl-incf pos))
+    (min len (1+ pos))))
+
+(defun clutch--json-token-boundary-p (text pos)
+  "Return non-nil when POS is a token boundary in TEXT."
+  (or (>= pos (length text))
+      (memq (aref text pos) '(?\s ?\t ?\n ?\r ?} ?\] ?, ?:))))
+
+(defun clutch--json-key-face ()
+  "Return the face used for JSON object keys in result cells."
+  (if (facep 'font-lock-property-name-face)
+      'font-lock-property-name-face
+    'font-lock-variable-name-face))
+
+(defun clutch--json-display-highlight (text)
+  "Return TEXT with lightweight JSON token faces for result cells."
+  (let ((display (copy-sequence text))
+        (pos 0)
+        (len (length text))
+        (case-fold-search nil))
+    (while (< pos len)
+      (let ((ch (aref text pos)))
+        (cond
+         ((= ch ?\")
+          (let* ((end (clutch--json-string-end text pos))
+                 (after end))
+            (while (and (< after len)
+                        (memq (aref text after) '(?\s ?\t ?\n ?\r)))
+              (cl-incf after))
+            (put-text-property
+             pos end 'face
+             (if (and (< after len) (= (aref text after) ?:))
+                 (clutch--json-key-face)
+               'font-lock-string-face)
+             display)
+            (setq pos end)))
+         ((memq ch '(?{ ?} ?\[ ?\] ?: ?,))
+          (put-text-property pos (1+ pos) 'face 'shadow display)
+          (cl-incf pos))
+         ((and (string-match
+                "-?\\(?:0\\|[1-9][0-9]*\\)\\(?:\\.[0-9]+\\)?\\(?:[eE][+-]?[0-9]+\\)?"
+                text pos)
+               (= (match-beginning 0) pos))
+          (put-text-property
+           pos (match-end 0) 'face 'font-lock-constant-face display)
+          (setq pos (match-end 0)))
+         ((and (string-match "\\(?:true\\|false\\|null\\)" text pos)
+               (= (match-beginning 0) pos)
+               (clutch--json-token-boundary-p text (match-end 0)))
+          (put-text-property
+           pos (match-end 0) 'face 'font-lock-keyword-face display)
+          (setq pos (match-end 0)))
+         (t
+          (cl-incf pos)))))
+    display))
+
+(defun clutch--truncate-display-string (text width)
+  "Return TEXT truncated to WIDTH with a compact ellipsis when possible."
+  (if (<= (string-width text) width)
+      text
+    (truncate-string-to-width text width nil nil
+                              (and (>= width 1) "…"))))
+
 (defun clutch--xml-like-string-p (val)
   "Return non-nil when string VAL appears to contain XML text.
 Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
@@ -346,8 +422,6 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
   "Return compact placeholder text for VAL/COL-DEF in result grid."
   (let ((cat (plist-get col-def :type-category)))
     (cond
-     ((or (eq cat 'json) (clutch--json-like-string-p val))
-      "<JSON>")
      ((clutch--xml-like-string-p val)
       "<XML>")
      ((eq cat 'blob)
@@ -374,7 +448,7 @@ Returns a vector of integers."
          (widths (make-vector ncols 0))
          (sample (seq-take rows 50)))
     (dotimes (i ncols)
-      (if (and (clutch--long-field-type-p (nth i column-defs))
+      (if (and (eq (plist-get (nth i column-defs) :type-category) 'blob)
                (<= max-w clutch-column-width-max))
           (aset widths i 10)
         (let ((header-w (string-width (nth i col-names)))
@@ -799,6 +873,9 @@ column-local commands still work from padded whitespace."
 COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
   (let* ((display-val (if edited (cdr edited) val))
          (custom (clutch--cell-custom-display display-val col-def))
+         (json-cell (and (not custom)
+                         (not edited)
+                         (clutch--json-cell-value-p display-val col-def)))
          (special-placeholder (and (not custom)
                                    (not edited)
                                    (clutch--cell-placeholder-value display-val)))
@@ -811,10 +888,14 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
                            (not special-placeholder)
                            (> (string-width s) w)
                            (clutch--value-placeholder display-val col-def)))
-         (formatted (or custom placeholder s)))
-    (if (> (string-width formatted) w)
-        (truncate-string-to-width formatted w)
-      formatted)))
+         (formatted (or custom placeholder s))
+         (truncated (> (string-width formatted) w)))
+    (cond
+     ((and json-cell (not truncated))
+      (clutch--json-display-highlight formatted))
+     (truncated
+      (clutch--truncate-display-string formatted w))
+     (t formatted))))
 
 (defun clutch--pending-insert-placeholders ()
   "Return placeholder sentinels aligned with `clutch--result-columns'."
