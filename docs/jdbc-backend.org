@@ -23,9 +23,9 @@ semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
 
 DuckDB, TiDB, Hive, KingbaseES, and other JDBC-compatible databases
 can be used through the generic =jdbc= backend by passing
-=:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
-directory.  Use =:display-name= if you want the UI to show a friendly backend
-label instead of plain =JDBC=.
+=:url "jdbc:xxx://..."= and =:driver-class "..."= directly, then placing
+the driver jar in the drivers directory.  Use =:display-name= if you want the
+UI to show a friendly backend label instead of plain =JDBC=.
 
 MongoDB SQL Interface uses MongoDB's official SQL Interface JDBC driver through
 the same =mongodb= backend with =:surface sql-interface=.  Use it only for SQL
@@ -157,9 +157,11 @@ artifact from Maven Central rather than a nonexistent plain
                       :display-name "DuckDB"))
 
         ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
-        ;; Use :backend jdbc with a full JDBC URL when no native backend exists.
+        ;; Use :backend jdbc with a full JDBC URL and driver class when no
+        ;; native backend exists.
         ("kingbase" . (:backend jdbc
                         :url "jdbc:kingbase8://db.corp.com:54321/test"
+                        :driver-class "com.kingbase8.Driver"
                         :display-name "KingbaseES"
                         :user "system" :pass-entry "kingbase"
                         :rpc-timeout 15))))

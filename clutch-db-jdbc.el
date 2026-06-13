@@ -53,13 +53,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.4"
+(defcustom clutch-jdbc-agent-version "0.2.5"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "4eeff237d9a20dd5328f7586b25d8cf7d5f4fc2a361be85667e08c299f665be4"
+  "93752197c241261477e9dc9b4a476c51c7ee9a40ac4fc893cc72e0ef43fceab5"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -122,29 +122,39 @@ A stuck disconnect should not block the user or kill the agent.")
 
 (defconst clutch-jdbc--driver-sources
   '((sqlserver . (:maven "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"
-                  :filename "mssql-jdbc.jar"))
+                  :filename "mssql-jdbc.jar"
+                  :class "com.microsoft.sqlserver.jdbc.SQLServerDriver"))
     (snowflake . (:maven "net.snowflake:snowflake-jdbc:3.14.4"
-                  :filename "snowflake-jdbc.jar"))
+                  :filename "snowflake-jdbc.jar"
+                  :class "net.snowflake.client.jdbc.SnowflakeDriver"))
     ;; ojdbc8 (19c driver) is the safest default across Oracle 11g/12c/19c.
     (oracle    . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
-                  :filename "ojdbc8.jar"))
+                  :filename "ojdbc8.jar"
+                  :class "oracle.jdbc.OracleDriver"))
     (oracle-8  . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
-                  :filename "ojdbc8.jar"))
+                  :filename "ojdbc8.jar"
+                  :class "oracle.jdbc.OracleDriver"))
     ;; ojdbc11 remains available for users who explicitly want the newer line.
     (oracle-11 . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
-                  :filename "ojdbc11.jar"))
+                  :filename "ojdbc11.jar"
+                  :class "oracle.jdbc.OracleDriver"))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
                     :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
-                  :filename "db2jcc4.jar"))
+                  :filename "db2jcc4.jar"
+                  :class "com.ibm.db2.jcc.DB2Driver"))
     (redshift  . (:maven "com.amazon.redshift:redshift-jdbc42:2.1.0.30"
-                  :filename "redshift-jdbc42.jar"))
+                  :filename "redshift-jdbc42.jar"
+                  :class "com.amazon.redshift.jdbc.Driver"))
     (clickhouse . (:maven "com.clickhouse:clickhouse-jdbc:0.9.8:all"
-                   :filename "clickhouse-jdbc.jar"))
+                   :filename "clickhouse-jdbc.jar"
+                   :class "com.clickhouse.jdbc.ClickHouseDriver"))
     (duckdb     . (:maven "org.duckdb:duckdb_jdbc:1.5.3.0"
-                  :filename "duckdb_jdbc.jar"))
+                  :filename "duckdb_jdbc.jar"
+                  :class "org.duckdb.DuckDBDriver"))
     (mongodb    . (:maven "org.mongodb:mongodb-jdbc:3.0.6:all"
-                  :filename "mongodb-jdbc.jar"))
+                  :filename "mongodb-jdbc.jar"
+                  :class "com.mongodb.jdbc.MongoDriver"))
     (slf4j-api  . (:maven "org.slf4j:slf4j-api:2.0.16"
                    :filename "slf4j-api.jar"))
     (slf4j-nop  . (:maven "org.slf4j:slf4j-nop:2.0.16"
@@ -775,6 +785,22 @@ property even when the URL includes a default auth database."
       (clutch-jdbc--sql-interface-props params)
     (clutch-jdbc--normalize-props (plist-get params :props))))
 
+(defun clutch-jdbc--driver-class (driver params)
+  "Return the concrete JDBC driver class for DRIVER and PARAMS."
+  (let ((explicit (plist-get params :driver-class)))
+    (cond
+     ((and (stringp explicit)
+           (not (string-empty-p explicit)))
+      explicit)
+     ((and explicit
+           (not (stringp explicit)))
+      (signal 'clutch-db-error
+              (list ":driver-class must be a non-empty string")))
+     ((plist-get (alist-get driver clutch-jdbc--driver-sources) :class))
+     (t
+      (signal 'clutch-db-error
+              (list (format "JDBC backend %S requires :driver-class" driver)))))))
+
 (defun clutch-jdbc--effective-driver (driver params)
   "Return internal JDBC driver for user-facing DRIVER and PARAMS."
   (cond
@@ -876,12 +902,14 @@ Returns a `clutch-jdbc-conn'."
          (user     (plist-get normalized-params :user))
          (password (plist-get normalized-params :password))
          (props    (clutch-jdbc--driver-props driver normalized-params))
+         (driver-class (clutch-jdbc--driver-class driver normalized-params))
          (connect-timeout (plist-get normalized-params :connect-timeout))
          (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
          (rpc-timeout (plist-get normalized-params :rpc-timeout))
          (result   (clutch-jdbc--rpc
                     "connect"
                     `((url      . ,url)
+                      (driver-class . ,driver-class)
                       (user     . ,user)
                       (password . ,password)
                       (auto-commit . ,(if manual-commit-p

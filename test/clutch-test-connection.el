@@ -2385,6 +2385,8 @@ crashing the UI layer."
          :connect-timeout 1
          :rpc-timeout 2))
       (should (= captured-timeout 2))
+      (should (equal (alist-get 'driver-class captured-params)
+                     "oracle.jdbc.OracleDriver"))
       (should (= (alist-get 'connect-timeout-seconds captured-params) 1)))))
 
 ;;;; Connection — reconnect and disconnect

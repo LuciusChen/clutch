@@ -512,6 +512,8 @@ connection as live and not busy."
                      :rpc-timeout 41))))
         (should (equal captured-op "connect"))
         (should (= captured-timeout 41))
+        (should (equal (alist-get 'driver-class captured-params)
+                       "oracle.jdbc.OracleDriver"))
         (should (eq (alist-get 'auto-commit captured-params) clutch-jdbc--json-false))
         (should (= (alist-get 'connect-timeout-seconds captured-params) 7))
         (should (= (alist-get 'network-timeout-seconds captured-params) 23))
@@ -530,6 +532,8 @@ connection as live and not busy."
       (clutch-db-jdbc-connect
        'sqlserver
        '(:host "db" :port 1433 :database "app" :user "sa" :password "secret"))
+      (should (equal (alist-get 'driver-class captured-params)
+                     "com.microsoft.sqlserver.jdbc.SQLServerDriver"))
       (should (eq (alist-get 'auto-commit captured-params) t)))))
 
 (ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-adds-database-property ()
@@ -554,6 +558,8 @@ connection as live and not busy."
                :props (("loglevel" . "SEVERE")))))
       (should (equal (alist-get 'url captured-params)
                      "jdbc:mongodb://cluster0.a.query.mongodb.net:27017/admin"))
+      (should (equal (alist-get 'driver-class captured-params)
+                     "com.mongodb.jdbc.MongoDriver"))
       (should (equal (alist-get 'props captured-params)
                      '(("database" . "analytics")
                        ("loglevel" . "SEVERE"))))
@@ -596,6 +602,8 @@ connection as live and not busy."
          :password "secret"))
       (should (equal (alist-get 'props captured-params)
                      '(("database" . "analytics"))))
+      (should (equal (alist-get 'driver-class captured-params)
+                     "com.mongodb.jdbc.MongoDriver"))
       (should (eq (alist-get 'auto-commit captured-params) t)))))
 
 (ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-requires-database-property ()
@@ -625,6 +633,8 @@ connection as live and not busy."
       (clutch-db-jdbc-connect
        'oracle
        '(:host "db" :port 1521 :database "svc" :user "scott" :password "tiger"))
+      (should (equal (alist-get 'driver-class captured-params)
+                     "oracle.jdbc.OracleDriver"))
       (should (eq (alist-get 'auto-commit captured-params) t)))))
 
 (ert-deftest clutch-db-test-jdbc-connect-defaults-connect-timeout-separately-from-rpc ()
@@ -646,6 +656,8 @@ connection as live and not busy."
              'oracle
              '(:host "db" :port 1521 :database "svc" :user "scott" :password "tiger")))
       (should (= captured-timeout 41))
+      (should (equal (alist-get 'driver-class captured-params)
+                     "oracle.jdbc.OracleDriver"))
       (should (= (alist-get 'connect-timeout-seconds captured-params) 10))
       (should (= (alist-get 'network-timeout-seconds captured-params) 30))
       (should (= (plist-get (clutch-jdbc-conn-params conn) :connect-timeout) 10))
@@ -2852,6 +2864,39 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
          :props (:role "reporting" :schema "HR"))))
     (should (equal (alist-get 'props captured-params)
                    '(("role" . "reporting") ("schema" . "HR"))))))
+
+(ert-deftest clutch-db-test-jdbc-connect-generic-requires-driver-class ()
+  "Generic JDBC connections must explicitly name the JDBC driver class."
+  (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+            ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+            ((symbol-function 'clutch-jdbc--rpc)
+             (lambda (&rest _args)
+               (error "connect RPC should not run without :driver-class"))))
+    (let ((err (should-error
+                (clutch-db-jdbc-connect
+                 'jdbc
+                 '(:url "jdbc:kingbase8://127.0.0.1:54321/test"
+                   :user "system"))
+                :type 'clutch-db-error)))
+      (should (string-match-p ":driver-class"
+                              (error-message-string err))))))
+
+(ert-deftest clutch-db-test-jdbc-connect-generic-sends-driver-class ()
+  "Generic JDBC connections should pass :driver-class through to the agent."
+  (let (captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout-seconds)
+                 (setq captured-params params)
+                 '(:conn-id 12))))
+      (clutch-db-jdbc-connect
+       'jdbc
+       '(:url "jdbc:kingbase8://127.0.0.1:54321/test"
+         :driver-class "com.kingbase8.Driver"
+         :user "system")))
+    (should (equal (alist-get 'driver-class captured-params)
+                   "com.kingbase8.Driver"))))
 
 ;;;; Unit tests — row normalization
 

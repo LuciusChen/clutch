@@ -51,7 +51,7 @@ begins.
 Requests:
 
 ```json
-{"id":1,"op":"connect","params":{"url":"jdbc:oracle:thin:@//db:1521/FREEPDB1","user":"system","password":"secret"}}
+{"id":1,"op":"connect","params":{"url":"jdbc:oracle:thin:@//db:1521/FREEPDB1","driver-class":"oracle.jdbc.OracleDriver","user":"system","password":"secret"}}
 ```
 
 Success responses:
@@ -77,6 +77,8 @@ Rules:
 - `id` is client-generated and matched exactly in the response
 - `op` is a string RPC name
 - `params` is an object whose fields depend on the operation
+- `connect` requests must include `params.driver-class`, the concrete
+  `java.sql.Driver` implementation class to use for that connection
 - `params.debug=true` opts into an additional redacted `debug` payload on
   failures; normal requests should leave it unset
 - `ok=true` carries a `result` object
@@ -134,6 +136,7 @@ than a separate protocol version.
 `connect` accepts:
 
 - `url`
+- `driver-class`
 - `user`
 - `password`
 - `props`

@@ -82,6 +82,9 @@ This section summarizes the current feature branch relative to `origin/main`.
   object buffers.
 - Kept native document and key/value surfaces out of SQL-only staged mutation,
   manual transaction, row-identity edit, and SQL rewrite workflows.
+- Made JDBC connections send an explicit driver class to the sidecar. This
+  prevents unrelated registered JDBC drivers from claiming the same URL prefix;
+  generic `:backend jdbc` connections now require `:driver-class`.
 
 ### Documentation
 
