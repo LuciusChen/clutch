@@ -271,13 +271,6 @@ connection as live and not busy."
                       'alpha '(:database "app"))
                      '(:database "app" :normalized-by alpha))))))
 
-(ert-deftest clutch-db-test-sql-interface-surface-p-normalizes-aliases ()
-  "SQL Interface surface detection should accept canonical symbols and strings."
-  (should (clutch-db-sql-interface-surface-p '(:surface sql-interface)))
-  (should (clutch-db-sql-interface-surface-p '(:surface "sql-interface")))
-  (should (clutch-db-sql-interface-surface-p '(:surface sql)))
-  (should-not (clutch-db-sql-interface-surface-p nil)))
-
 (ert-deftest clutch-db-test-native-document-surface-p-uses-surface-aliases ()
   "Native document surface detection should exclude SQL Interface aliases."
   (cl-letf (((symbol-function 'clutch-db-backend-key)
@@ -536,8 +529,8 @@ connection as live and not busy."
                      "com.microsoft.sqlserver.jdbc.SQLServerDriver"))
       (should (eq (alist-get 'auto-commit captured-params) t)))))
 
-(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-adds-database-property ()
-  "MongoDB SQL Interface surface should pass :database as the required driver property."
+(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-contract ()
+  "MongoDB SQL Interface JDBC should be a surface on the MongoDB backend."
   (let (captured-params conn)
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
               ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
@@ -570,29 +563,8 @@ connection as live and not busy."
       (should (eq (plist-get (clutch-jdbc-conn-params conn) :surface)
                   'sql-interface))
       (should (eq (clutch-db-backend-key conn) 'mongodb))
-      (should (equal (clutch-db-display-name conn) "MongoDB")))))
-
-(ert-deftest clutch-db-test-jdbc-connect-mongodb-rejects-ordinary-surface ()
-  "Ordinary MongoDB should use the native backend, not JDBC."
-  (let ((err (should-error
-              (clutch-db-jdbc-connect
-               'mongodb
-               '(:host "127.0.0.1"
-                 :port 27017
-                 :database "app"))
-              :type 'clutch-db-error)))
-    (should (string-match-p "native mongodb backend"
-                            (error-message-string err)))))
-
-(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-url-adds-database-property ()
-  "MongoDB SQL Interface URL connections should add the required database property."
-  (let (captured-params)
-    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
-              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
-              ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op params &optional _timeout-seconds)
-                 (setq captured-params params)
-                 '(:conn-id 11))))
+      (should (equal (clutch-db-display-name conn) "MongoDB"))
+      (setq captured-params nil)
       (clutch-db-jdbc-connect
        'mongodb
        '(:url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
@@ -604,21 +576,25 @@ connection as live and not busy."
                      '(("database" . "analytics"))))
       (should (equal (alist-get 'driver-class captured-params)
                      "com.mongodb.jdbc.MongoDriver"))
-      (should (eq (alist-get 'auto-commit captured-params) t)))))
-
-(ert-deftest clutch-db-test-jdbc-connect-sql-interface-mongodb-requires-database-property ()
-  "MongoDB SQL Interface surface should fail early when no query database is configured."
-  (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
-            ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore))
-    (let ((err (should-error
-                (clutch-db-jdbc-connect
-                 'mongodb
-                 '(:host "cluster0.a.query.mongodb.net"
-                   :surface sql-interface
-                   :user "reporter"))
-                :type 'clutch-db-error)))
-      (should (string-match-p "require :database"
-                              (error-message-string err))))))
+      (should (eq (alist-get 'auto-commit captured-params) t))
+      (let ((err (should-error
+                  (clutch-db-jdbc-connect
+                   'mongodb
+                   '(:host "127.0.0.1"
+                     :port 27017
+                     :database "app"))
+                  :type 'clutch-db-error)))
+        (should (string-match-p "native mongodb backend"
+                                (error-message-string err))))
+      (let ((err (should-error
+                  (clutch-db-jdbc-connect
+                   'mongodb
+                   '(:host "cluster0.a.query.mongodb.net"
+                     :surface sql-interface
+                     :user "reporter"))
+                  :type 'clutch-db-error)))
+        (should (string-match-p "require :database"
+                                (error-message-string err)))))))
 
 (ert-deftest clutch-db-test-jdbc-connect-oracle-global-autocommit-override ()
   "Oracle connect should honor the global manual-commit default override."
@@ -1404,13 +1380,15 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                         conn (list :name collection :type "COLLECTION"))
                        expected))))))
 
-(ert-deftest clutch-db-test-mongodb-ensure-mongodb-api-reloads-stale-feature ()
-  "Native MongoDB should retry loading mongodb.el when a stale feature lacks APIs."
+(ert-deftest clutch-db-test-mongodb-ensure-mongodb-api-does-not-reload-stale-feature ()
+  "Native MongoDB should report stale public APIs instead of reloading libraries."
   (let (loaded)
-    (cl-letf (((symbol-function 'fboundp)
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (feature &optional _subfeature)
+                 (eq feature 'mongodb)))
+              ((symbol-function 'fboundp)
                (lambda (symbol)
-                 (or (not (eq symbol 'mongodb-connect))
-                     loaded)))
+                 (not (eq symbol 'mongodb-connect))))
               ((symbol-function 'locate-library)
                (lambda (library)
                  (and (equal library "mongodb") "/tmp/mongodb.el")))
@@ -1418,21 +1396,13 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                (lambda (file &rest _args)
                  (setq loaded file)
                  t)))
-      (clutch-mongodb--ensure-mongodb-client-api)
-      (should (equal loaded "/tmp/mongodb.el")))))
-
-(ert-deftest clutch-db-test-mongodb-ensure-mongodb-api-errors-for-old-mongodb ()
-  "Native MongoDB should report a clear dependency error for old mongodb.el APIs."
-  (cl-letf (((symbol-function 'fboundp)
-             (lambda (symbol)
-               (not (eq symbol 'mongodb-connect))))
-            ((symbol-function 'locate-library)
-             (lambda (library)
-               (and (equal library "mongodb") "/tmp/old-mongodb.el")))
-            ((symbol-function 'load)
-             (lambda (&rest _args) t)))
-    (should-error (clutch-mongodb--ensure-mongodb-client-api)
-                  :type 'clutch-db-error)))
+      (let ((err (should-error (clutch-mongodb--ensure-mongodb-client-api)
+                               :type 'clutch-db-error)))
+        (should (string-match-p "requires current mongodb.el public API"
+                                (error-message-string err)))
+        (should (string-match-p "mongodb-connect"
+                                (error-message-string err))))
+      (should-not loaded))))
 
 (ert-deftest clutch-db-test-mongodb-errors-translate-labels-to-details-plist ()
   "Native MongoDB should translate labeled protocol errors to Clutch error shape."
@@ -1979,8 +1949,8 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should-not multi)
       (should-not options))))
 
-(ert-deftest clutch-db-test-mongodb-mql-parses-isodate-constructor ()
-  "Native MongoDB MQL parsing should turn ISODate() into BSON datetimes."
+(ert-deftest clutch-db-test-mongodb-mql-parses-bson-constructors ()
+  "Native MongoDB MQL parsing should preserve supported BSON constructors."
   (should (= (clutch-mongodb--mql-iso-date-millis
               "2024-01-02T03:04:05.678Z")
              1704164645678))
@@ -1996,54 +1966,29 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                  nil)))
       (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
-       "db.events.find({createdAt: ISODate('2024-01-02T03:04:05.678Z')})"))
-    (should (mongodb-document-p captured-filter))
-    (let ((value (cdr (assoc "createdAt"
-                             (mongodb-document-pairs captured-filter)))))
-      (should (mongodb-datetime-p value))
-      (should (= (mongodb-datetime-millis value) 1704164645678)))))
-
-(ert-deftest clutch-db-test-mongodb-mql-parses-timestamp-constructor ()
-  "Native MongoDB MQL parsing should turn Timestamp() into BSON timestamps."
-  (let (captured-filter)
-    (cl-letf (((symbol-function 'mongodb-find)
-               (lambda (_client _database _collection filter
-                              _projection _limit _skip _sort
-                              &optional _options)
-                 (setq captured-filter filter)
-                 nil)))
-      (clutch-mongodb--eval
-       (clutch-db-test--make-mongodb-conn "app" 'client)
-       "db.events.find({ts: Timestamp(1700000000, 7)})"))
-    (should (mongodb-document-p captured-filter))
-    (let ((value (cdr (assoc "ts"
-                             (mongodb-document-pairs captured-filter)))))
-      (should (mongodb-timestamp-p value))
-      (should (= (mongodb-timestamp-seconds value) 1700000000))
-      (should (= (mongodb-timestamp-increment value) 7)))))
-
-(ert-deftest clutch-db-test-mongodb-mql-parses-explicit-integer-constructors ()
-  "Native MongoDB MQL parsing should preserve explicit int32/int64 constructors."
-  (let (captured-filter)
-    (cl-letf (((symbol-function 'mongodb-find)
-               (lambda (_client _database _collection filter
-                              _projection _limit _skip _sort
-                              &optional _options)
-                 (setq captured-filter filter)
-                 nil)))
-      (clutch-mongodb--eval
-       (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.events.find({"
+        "createdAt: ISODate('2024-01-02T03:04:05.678Z'), "
+        "ts: Timestamp(1700000000, 7), "
         "a: Int32('7'), b: NumberInt(8), "
-        "c: Long(7), d: NumberLong('9223372036854775807')"
+        "c: Long(7), d: NumberLong('9223372036854775807'), "
+        "price: Decimal128('12.3400'), tax: NumberDecimal('1.23')"
         "})")))
     (should (mongodb-document-p captured-filter))
     (let* ((pairs (mongodb-document-pairs captured-filter))
+           (created-at (cdr (assoc "createdAt" pairs)))
+           (timestamp (cdr (assoc "ts" pairs)))
            (a (cdr (assoc "a" pairs)))
            (b (cdr (assoc "b" pairs)))
            (c (cdr (assoc "c" pairs)))
-           (d (cdr (assoc "d" pairs))))
+           (d (cdr (assoc "d" pairs)))
+           (price (cdr (assoc "price" pairs)))
+           (tax (cdr (assoc "tax" pairs))))
+      (should (mongodb-datetime-p created-at))
+      (should (= (mongodb-datetime-millis created-at) 1704164645678))
+      (should (mongodb-timestamp-p timestamp))
+      (should (= (mongodb-timestamp-seconds timestamp) 1700000000))
+      (should (= (mongodb-timestamp-increment timestamp) 7))
       (should (mongodb-int32-p a))
       (should (= (mongodb-int32-value a) 7))
       (should (mongodb-int32-p b))
@@ -2051,24 +1996,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should (mongodb-int64-p c))
       (should (= (mongodb-int64-value c) 7))
       (should (mongodb-int64-p d))
-      (should (= (mongodb-int64-value d) 9223372036854775807)))))
-
-(ert-deftest clutch-db-test-mongodb-mql-parses-decimal128-constructor ()
-  "Native MongoDB MQL parsing should preserve Decimal128 constructors."
-  (let (captured-filter)
-    (cl-letf (((symbol-function 'mongodb-find)
-               (lambda (_client _database _collection filter
-                              _projection _limit _skip _sort
-                              &optional _options)
-                 (setq captured-filter filter)
-                 nil)))
-      (clutch-mongodb--eval
-       (clutch-db-test--make-mongodb-conn "app" 'client)
-       "db.metrics.find({price: Decimal128('12.3400'), tax: NumberDecimal('1.23')})"))
-    (should (mongodb-document-p captured-filter))
-    (let* ((pairs (mongodb-document-pairs captured-filter))
-           (price (cdr (assoc "price" pairs)))
-           (tax (cdr (assoc "tax" pairs))))
+      (should (= (mongodb-int64-value d) 9223372036854775807))
       (should (mongodb-decimal128-p price))
       (should (equal (mongodb-decimal128-value price) "12.3400"))
       (should (mongodb-decimal128-p tax))
@@ -3181,18 +3109,31 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-sql-surface-p-follows-data-model-and-surface ()
   "SQL surface detection should not treat every non-document backend as SQL."
-  (cl-letf (((symbol-function 'clutch-db-backend-key)
-             (lambda (conn)
-               (pcase conn
-                 ('mysql-conn 'mysql)
-                 ('mongo-conn 'mongodb)
-                 ('redis-conn 'redis)
-                 (_ nil)))))
-    (should (clutch-db-sql-surface-p 'mysql-conn nil))
-    (should-not (clutch-db-sql-surface-p 'mongo-conn nil))
-    (should (clutch-db-sql-surface-p
-             'mongo-conn '(:backend mongodb :surface sql-interface)))
-    (should-not (clutch-db-sql-surface-p 'redis-conn nil))))
+  (let ((clutch-backend--registry
+         (append clutch-backend--registry
+                 '((docdb . (:display-name "DocDB"
+                              :data-model document
+                              :surfaces
+                              ((query-service . (:execution-model sql
+                                                 :transport jdbc)))))))))
+    (cl-letf (((symbol-function 'clutch-db-backend-key)
+               (lambda (conn)
+                 (pcase conn
+                   ('mysql-conn 'mysql)
+                   ('mongo-conn 'mongodb)
+                   ('doc-conn 'docdb)
+                   ('redis-conn 'redis)
+                   (_ nil)))))
+      (should (clutch-db-sql-surface-p 'mysql-conn nil))
+      (should-not (clutch-db-sql-surface-p 'mongo-conn nil))
+      (should (clutch-db-sql-surface-p
+               'mongo-conn '(:backend mongodb :surface sql-interface)))
+      (should (clutch-db-sql-surface-p
+               'doc-conn '(:backend docdb :surface query-service)))
+      (should (clutch-backend-jdbc-transport-p
+               'docdb '(:surface query-service)))
+      (should-not (clutch-db-sql-surface-p 'doc-conn nil))
+      (should-not (clutch-db-sql-surface-p 'redis-conn nil)))))
 
 (ert-deftest clutch-db-test-backend-query-mode-follows-surface-metadata ()
   "Query console modes should come from backend registry surface metadata."
@@ -6153,8 +6094,8 @@ It does so without touching the agent process."
       (should-not (gethash conn clutch-jdbc--error-details-by-conn))
       (should-not (gethash 7 clutch-jdbc--connections-by-id)))))
 
-(ert-deftest clutch-db-test-jdbc-agent-filter-drops-invalid-json-lines ()
-  "Malformed agent output should be ignored instead of enqueuing nil."
+(ert-deftest clutch-db-test-jdbc-agent-filter-surfaces-invalid-json-lines ()
+  "Malformed agent output should surface as a protocol error."
   (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
         (clutch-jdbc--response-queue nil))
     (unwind-protect
@@ -6163,8 +6104,13 @@ It does so without touching the agent process."
                    (lambda (_parsed) nil)))
           (clutch-jdbc--agent-filter 'fake-proc
                                      "{\"id\":1,\"ok\":true}\nnot-json\n")
-          (should (equal clutch-jdbc--response-queue
-                         '((:id 1 :ok t)))))
+          (should (equal (car clutch-jdbc--response-queue)
+                         '(:id 1 :ok t)))
+          (should (plist-get (cadr clutch-jdbc--response-queue)
+                             :protocol-error))
+          (should-error (clutch-jdbc--recv-response 2 10.0)
+                        :type 'clutch-db-error)
+          (should-not clutch-jdbc--response-queue))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 

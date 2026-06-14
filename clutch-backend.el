@@ -114,10 +114,26 @@ actionable hints for known error patterns."
     (intern (downcase value)))
    (t value)))
 
-(defun clutch-db-sql-interface-surface-p (params)
-  "Return non-nil when PARAMS select a SQL Interface surface."
-  (memq (clutch-db--normalize-symbol-option (plist-get params :surface))
-        '(sql sql-interface)))
+(defvar clutch-backend--registry)
+
+(defun clutch-backend-normalize (backend)
+  "Return the canonical backend symbol for BACKEND.
+Known aliases are read from `clutch-backend--registry'.  Unknown symbols are
+returned unchanged so the normal backend lookup can report the final error."
+  (let ((sym (clutch-db--normalize-symbol-option backend)))
+    (or (and sym
+             (cl-loop for (key . features) in clutch-backend--registry
+                      when (or (eq sym key)
+                               (memq sym (plist-get features :aliases)))
+                      return key))
+        (and sym
+             (progn
+               (require 'clutch-db-jdbc nil t)
+               (cl-loop for (key . features) in clutch-backend--registry
+                        when (or (eq sym key)
+                                 (memq sym (plist-get features :aliases)))
+                        return key)))
+        sym)))
 
 (defun clutch-db--reject-removed-connect-params (params)
   "Signal for removed connection PARAMS and return PARAMS otherwise."
@@ -1270,6 +1286,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 
 (defvar clutch-backend--registry
   '((mysql  . (:require clutch-db-mysql
+	       :aliases (mariadb)
 	       :connect-fn clutch-db-mysql-connect
 	       :normalize-fn clutch-db-mysql--normalize-connect-params
 	       :display-name "MySQL"
@@ -1278,6 +1295,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :data-model relational
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
+	       :aliases (postgres postgresql)
 	       :connect-fn clutch-db-pg-connect
 	       :normalize-fn clutch-db-pg--normalize-connect-params
 	       :display-name "PostgreSQL"
@@ -1292,6 +1310,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :data-model relational
 	       :sql-product sqlite))
     (mongodb . (:require clutch-mongodb
+                :aliases (mongo)
                 :connect-fn clutch-mongodb-connect
                 :display-name "MongoDB"
                 :default-port 27017
@@ -1299,8 +1318,12 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
                 :data-model document
                 :query-mode clutch-mongodb-mode
                 :query-mode-require clutch-document
-                :surfaces ((sql . (:query-mode clutch-mode))
-                           (sql-interface . (:query-mode clutch-mode)))))
+                :surfaces ((sql . (:query-mode clutch-mode
+                                    :execution-model sql
+                                    :transport jdbc))
+                           (sql-interface . (:query-mode clutch-mode
+                                              :execution-model sql
+                                              :transport jdbc)))))
     (redis . (:require clutch-redis
               :connect-fn clutch-redis-connect
               :display-name "Redis"
@@ -1310,9 +1333,11 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
               :query-mode clutch-redis-mode)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
-a plist of connection params and returning a conn), and optional
+a plist of connection params and returning a conn), and optional :aliases,
 :normalize-fn plus UI metadata such as :display-name, :default-port,
-:support-level, :data-model, :query-mode, :surfaces, and :manual-choice.")
+:support-level, :data-model, :query-mode, :surfaces, and :manual-choice.
+Surface entries may set :execution-model and :transport for non-default
+execution paths.")
 
 (defun clutch-backend-feature (backend)
   "Return the registered feature plist for BACKEND.
@@ -1348,13 +1373,40 @@ before returning the list."
 (defun clutch-backend-data-model (backend)
   "Return registered data model for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-backend-feature backend) :data-model)))
+       (plist-get (clutch-backend-feature
+                   (clutch-backend-normalize backend))
+                  :data-model)))
+
+(defun clutch-backend-surface-feature (backend surface)
+  "Return registered feature plist for BACKEND SURFACE, or nil."
+  (let* ((backend (clutch-backend-normalize backend))
+         (surface (clutch-db--normalize-symbol-option surface))
+         (features (and backend (clutch-backend-feature backend))))
+    (and surface
+         (alist-get surface (plist-get features :surfaces)))))
+
+(defun clutch-backend-sql-execution-p (backend params)
+  "Return non-nil when BACKEND with PARAMS executes SQL."
+  (let* ((backend (clutch-backend-normalize backend))
+         (surface-features
+          (clutch-backend-surface-feature backend (plist-get params :surface))))
+    (or (eq (clutch-backend-data-model backend) 'relational)
+        (eq (plist-get surface-features :execution-model) 'sql))))
+
+(defun clutch-backend-jdbc-transport-p (backend params)
+  "Return non-nil when BACKEND with PARAMS connects through JDBC."
+  (let* ((backend (clutch-backend-normalize backend))
+         (features (and backend (clutch-backend-feature backend)))
+         (surface-features
+          (clutch-backend-surface-feature backend (plist-get params :surface))))
+    (or (eq (plist-get features :require) 'clutch-db-jdbc)
+        (eq (plist-get surface-features :transport) 'jdbc))))
 
 (defun clutch-db-native-document-surface-p (conn params)
   "Return non-nil when CONN and PARAMS describe a native document surface."
   (let ((backend (and conn (clutch-db-backend-key conn))))
     (and (eq (clutch-backend-data-model backend) 'document)
-         (not (clutch-db-sql-interface-surface-p params)))))
+         (not (clutch-backend-sql-execution-p backend params)))))
 
 (defun clutch-db-sql-surface-p (conn params)
   "Return non-nil when CONN and PARAMS describe a SQL execution surface."
@@ -1362,9 +1414,7 @@ before returning the list."
                      (clutch-db--normalize-symbol-option
                       (or (plist-get params :backend)
                           (plist-get params :driver))))))
-    (or (eq (clutch-backend-data-model backend) 'relational)
-        (and (eq backend 'mongodb)
-             (clutch-db-sql-interface-surface-p params)))))
+    (clutch-backend-sql-execution-p backend params)))
 
 (defun clutch-backend-manual-choice-p (backend)
   "Return non-nil when BACKEND should appear in manual connection prompts."

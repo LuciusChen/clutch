@@ -253,6 +253,12 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
   "Sentinel used to represent JSON false distinctly from nil.")
 
+(defun clutch-jdbc--protocol-error-response (message)
+  "Return a synthetic response for JDBC protocol error MESSAGE."
+  (list :protocol-error t
+        :ok clutch-jdbc--json-false
+        :error message))
+
 (defconst clutch-jdbc--object-category-specs
   '((indexes . (:op "get-indexes" :key :indexes))
     (sequences . (:op "get-sequences" :key :sequences))
@@ -369,12 +375,15 @@ Return non-nil when RESPONSE was consumed asynchronously."
             (delete-region (point-min) (point))
             (goto-char (point-min))
             (unless (string-empty-p line)
-              (let ((parsed (condition-case nil
+              (let ((parsed (condition-case err
                                 (json-parse-string line :object-type 'plist
                                                    :array-type 'list
                                                    :null-object nil
                                                    :false-object clutch-jdbc--json-false)
-                              (error nil))))
+                              (error
+                               (clutch-jdbc--protocol-error-response
+                                (format "clutch-jdbc-agent emitted invalid JSON: %s"
+                                        (error-message-string err)))))))
                 (when parsed
                   (let ((id (plist-get parsed :id)))
                     (cond
@@ -498,6 +507,9 @@ Defaults to 8 lines.  Return nil when stderr is empty."
       (let ((parsed (pop clutch-jdbc--response-queue)))
         (cond
          ((and parsed
+               (plist-get parsed :protocol-error))
+          (setq response parsed))
+         ((and parsed
                (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
           (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
          ((and parsed (eql (plist-get parsed :id) id))
@@ -534,6 +546,16 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
                clutch-jdbc--agent-process
                (not (process-live-p clutch-jdbc--agent-process)))
       (setq failure-message (clutch-jdbc--agent-exit-error-message)))
+    (when (and response (plist-get response :protocol-error))
+      (when (and clutch-jdbc--agent-process
+                 (process-live-p clutch-jdbc--agent-process))
+        (delete-process clutch-jdbc--agent-process))
+      (clutch-jdbc--clear-async-callbacks)
+      (clutch-jdbc--clear-request-state)
+      (setq clutch-jdbc--agent-process nil
+            clutch-jdbc--response-queue nil)
+      (signal 'clutch-db-error
+              (list (plist-get response :error))))
     (unless response
       ;; The agent is likely blocked on a dead JDBC call.  Kill the process so
       ;; it does not remain wedged — subsequent requests would otherwise pile up
@@ -805,7 +827,7 @@ property even when the URL includes a default auth database."
   "Return internal JDBC driver for user-facing DRIVER and PARAMS."
   (cond
    ((eq driver 'mongodb)
-    (if (clutch-db-sql-interface-surface-p params)
+    (if (clutch-backend-jdbc-transport-p 'mongodb params)
         'mongodb
       (signal 'clutch-db-error
               (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
@@ -816,7 +838,7 @@ property even when the URL includes a default auth database."
 (defun clutch-jdbc--mongodb-driver-p (driver params)
   "Return non-nil when DRIVER/PARAMS represent MongoDB SQL Interface JDBC."
   (or (and (eq driver 'mongodb)
-           (clutch-db-sql-interface-surface-p params))
+           (clutch-backend-jdbc-transport-p 'mongodb params))
       (clutch-jdbc--sql-interface-jdbc-url-p
        (plist-get params :url))))
 

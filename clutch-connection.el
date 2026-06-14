@@ -600,12 +600,9 @@ using the stored params.  Signals a user-error if not recoverable."
 
 (defun clutch--normalize-backend-key (backend)
   "Return the registered backend key for BACKEND, including public aliases."
-  (pcase backend
-    ((or 'pg 'postgresql) 'pg)
-    ((or 'mysql 'mariadb) 'mysql)
-    ('mongodb 'mongodb)
-    ('redis 'redis)
-    (_ (and (memq backend (clutch-backends t)) backend))))
+  (let ((normalized (clutch-backend-normalize backend)))
+    (and (clutch-backend-feature normalized)
+         normalized)))
 
 (defun clutch--backend-key-from-params (params)
   "Return backend icon key for connection PARAMS, or nil."
@@ -769,9 +766,7 @@ using the stored params.  Signals a user-error if not recoverable."
 (defun clutch--jdbc-connection-params-p (params)
   "Return non-nil when PARAMS will execute through the JDBC backend."
   (let ((backend (clutch--backend-key-from-params params)))
-    (or (clutch--jdbc-backend-p backend)
-        (and (eq backend 'mongodb)
-             (clutch-db-sql-interface-surface-p params)))))
+    (clutch-backend-jdbc-transport-p backend params)))
 
 (defun clutch--params-nonempty-user-p (params)
   "Return non-nil when PARAMS contain a non-empty :user value."
@@ -888,15 +883,16 @@ cannot be read."
 (defun clutch--canonicalize-backend-aliases (params)
   "Return PARAMS with public backend aliases normalized."
   (let ((out (copy-sequence params)))
-    (when (eq (plist-get out :backend) 'mongodb)
-      (setq out (plist-put out :backend 'mongodb)))
-    (when (and (eq (plist-get out :backend) 'mongodb)
-               (plist-member out :driver))
-      (user-error
-       "MongoDB connections do not accept :driver; use :surface sql-interface for SQL Interface"))
+    (when-let* ((backend (plist-get out :backend)))
+      (setq out (plist-put out :backend (clutch-backend-normalize backend))))
     (when-let* ((surface (plist-get out :surface)))
       (setq out (plist-put out :surface
                            (clutch-db--normalize-symbol-option surface))))
+    (when (and (plist-member out :driver)
+               (eq (clutch-backend-data-model (plist-get out :backend))
+                   'document))
+      (user-error
+       "Document database connections do not accept :driver; use :surface sql-interface for SQL Interface"))
     out))
 
 (defun clutch--canonicalize-connection-params (params)
@@ -1698,9 +1694,7 @@ port and TRANSPORT contains the live process metadata."
 
 (defun clutch--direct-first-connect-params (backend connect-params)
   "Return CONNECT-PARAMS with short provisional timeouts for BACKEND."
-  (let* ((jdbc (or (clutch--jdbc-backend-p backend)
-                   (and (eq backend 'mongodb)
-                        (clutch-db-sql-interface-surface-p connect-params))))
+  (let* ((jdbc (clutch-backend-jdbc-transport-p backend connect-params))
          (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
          (params (copy-sequence connect-params))
          (connect-timeout (plist-get params :connect-timeout))
@@ -1867,6 +1861,13 @@ Leaves PARAMS unchanged when :password or :pass-entry is already set."
   "Return saved connection params for NAME, or nil when missing."
   (when-let* ((params (cdr (assoc name clutch-connection-alist))))
     (clutch--inject-entry-name params name)))
+
+(defun clutch-saved-connection-params (name)
+  "Return saved connection params for NAME, or nil when NAME is unknown.
+The returned plist includes Clutch's saved-connection defaults, such as using
+NAME as `:pass-entry' when no explicit password source is configured."
+  (when-let* ((params (clutch--saved-connection-params name)))
+    (copy-sequence params)))
 
 (defun clutch--normalize-sqlite-database-file (file)
   "Return canonical SQLite database FILE for connection identity."

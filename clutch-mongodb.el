@@ -129,11 +129,10 @@
 
 (defun clutch-mongodb--validate-surface (params)
   "Signal if PARAMS contain an unsupported MongoDB surface."
-  (pcase (clutch-mongodb--surface params)
-    ((or 'nil 'sql 'sql-interface) nil)
-    (surface
-     (signal 'clutch-db-error
-             (list (format "Unsupported MongoDB :surface %S" surface))))))
+  (when-let* ((surface (clutch-mongodb--surface params)))
+    (unless (clutch-backend-surface-feature 'mongodb surface)
+      (signal 'clutch-db-error
+              (list (format "Unsupported MongoDB :surface %S" surface))))))
 
 (defconst clutch-mongodb--required-mongodb-functions
   '(mongodb-aggregate
@@ -185,15 +184,6 @@
        (signal 'clutch-db-error
                (list (format "MongoDB backend requires mongodb.el: %s"
                              (error-message-string err)))))))
-  (when (clutch-mongodb--missing-mongodb-functions)
-    (when-let* ((library (locate-library "mongodb")))
-      (condition-case err
-          (load library nil 'nomessage)
-        (error
-         (signal 'clutch-db-error
-                 (list (format "MongoDB backend found mongodb.el at %s but failed to load it: %s"
-                               library
-                               (error-message-string err))))))))
   (when-let* ((missing (clutch-mongodb--missing-mongodb-functions)))
     (signal 'clutch-db-error
             (list (format
@@ -210,7 +200,7 @@ PARAMS may contain :url, or structured :host/:port/:database fields.
 The default connection delegates to public mongodb.el APIs.  When PARAMS select
 `:surface sql-interface', delegate to the JDBC SQL Interface surface."
   (clutch-mongodb--validate-surface params)
-  (if (clutch-db-sql-interface-surface-p params)
+  (if (clutch-backend-jdbc-transport-p 'mongodb params)
       (progn
         (require 'clutch-db-jdbc)
         (clutch-db-jdbc-connect 'mongodb params))
