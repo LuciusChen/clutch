@@ -73,6 +73,8 @@ Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
 Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
 Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-view*=,
 which follows point until you press =f= to freeze it or =q= to close it.
+Tip: short JSON/XML cells render inline with lightweight token faces; long
+values show a raw prefix with an ellipsis and can be opened with =v=.
 Tip: the result-buffer status line uses compact staged-change tokens:
 =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
 When a query result is not updateable because no row identity was detected,
@@ -95,6 +97,25 @@ result transient as the exact staged SQL batch.
 Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result
 queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong
 real table name.
+
+** Edit Buffer Keys
+
+Single-cell edit buffers use the same staged-mutation vocabulary as result
+buffers: =C-c C-c= stages the edited value, and the result buffer's
+=C-c C-c= commits all pending row changes.
+
+| Key               | Action                                         |
+|-------------------+------------------------------------------------|
+| =M-TAB= / =C-M-i= | Complete enum / bool-like values              |
+| =C-c '=           | Edit current JSON field in a dedicated buffer  |
+| =C-c .=           | Set current date/time field to "now"           |
+| =C-c C-n=         | Set database =NULL=                            |
+| =C-c C-c=         | Stage edited value                             |
+| =C-c C-k=         | Cancel                                         |
+
+Database =NULL= displays as =<null>= in result cells and edit buffers.  In an
+edit buffer, =C-c C-n= sets an explicit =NULL= state; an empty buffer remains an
+empty string, and typing =NULL= stages the literal text =NULL=.
 
 #+CAPTION: Result browser with staged markers, sort state, and query timing.
 [[file:screenshots/result-browser-basic.png]]
@@ -261,7 +282,9 @@ Typical flow:
                                M-TAB completes enum / bool-like values when available
                                non-JSON edit buffers still use C-c ' for the JSON sub-editor fallback
                                C-c . sets temporal columns to now
+                               C-c C-n sets database NULL
 5. Edit the value, C-c C-c to stage (C-c C-k to cancel)
+                               empty text is an empty string; C-c C-n is database NULL
                                enum / bool / numeric / temporal fields validate locally as you edit
                                JSON validation follows the same model but waits for a short idle pause
                                validation shows a compact inline token instead of a long full-line message

@@ -402,6 +402,8 @@ Common entry points:
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
+- =C-c '= edits the current result cell; in that edit buffer, =C-c C-n=
+  stages database =NULL=
 - =M-x clutch-copy-context-for-agent= copies SQL, table metadata, and the latest
   matching visible result sample as Markdown for an external agent; the same
   command is available as =k= in the main and result transients.  Table metadata

@@ -83,6 +83,8 @@ Nil means derive the offset from `clutch--page-current'.")
 (defvar-local clutch--result-column-details nil
   "Column detail plists aligned with `clutch--result-columns'.
 Each element corresponds to the same-index column.  Nil when unavailable.")
+(defvar-local clutch--active-edit-cell nil
+  "Cons cell (ROW-IDX . COL-IDX) currently open in a cell edit buffer.")
 (defvar-local clutch--row-identity nil
   "Row identity metadata for staging edits and deletes in the current result.")
 (defvar-local clutch--row-identity-status nil
@@ -1913,26 +1915,35 @@ reformat the current buffer."
       (erase-buffer)
       (insert decoded))))
 
+(defun clutch--xml-declaration-prefix-p (text)
+  "Return non-nil when TEXT begins with an XML declaration."
+  (string-match-p "\\`[[:space:]\n\r\t]*<\\?xml\\_>" text))
+
 (defun clutch--setup-xml-view-buffer (val &optional quiet)
   "Pretty-print XML VAL in the current buffer and enable XML mode.
 When QUIET is non-nil, suppress informational fallback messages."
-  (if (executable-find "xmllint")
-      (let ((raw (buffer-string))
-            (err-file (make-temp-file "clutch-xmllint-")))
-        (unwind-protect
-            (unless (eq 0 (call-process-region
-                           (point-min) (point-max)
-                           "xmllint" t (list t err-file) nil "--format" "-"))
-              (erase-buffer)
-              (insert raw)
-              (unless quiet
-                (message "xmllint: %s"
-                         (string-trim (with-temp-buffer
-                                        (insert-file-contents err-file)
-                                        (buffer-string))))))
-          (delete-file err-file)))
-    (unless quiet
-      (message "xmllint not found — showing raw XML without formatting")))
+  (let ((raw (buffer-string)))
+    (if (executable-find "xmllint")
+        (let ((err-file (make-temp-file "clutch-xmllint-")))
+          (unwind-protect
+              (unless (eq 0 (call-process-region
+                             (point-min) (point-max)
+                             "xmllint" t (list t err-file) nil "--format" "-"))
+                (erase-buffer)
+                (insert raw)
+                (unless quiet
+                  (message "xmllint: %s"
+                           (string-trim (with-temp-buffer
+                                          (insert-file-contents err-file)
+                                          (buffer-string))))))
+            (delete-file err-file)))
+      (unless quiet
+        (message "xmllint not found — showing raw XML without formatting")))
+    (when (and (not (clutch--xml-declaration-prefix-p raw))
+               (clutch--xml-declaration-prefix-p (buffer-string)))
+      (goto-char (point-min))
+      (when (looking-at "[[:space:]\n\r\t]*<\\?xml[^>]*\\?>[[:space:]\n\r\t]*")
+        (replace-match ""))))
   ;; Readability matters more than preserving numeric character references in
   ;; the transient viewer buffer; keep the raw XML value unchanged elsewhere.
   (clutch--decode-xml-char-refs-in-buffer)

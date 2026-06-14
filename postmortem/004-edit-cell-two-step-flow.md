@@ -1,5 +1,8 @@
 # 004 — Edit-Cell Two-Step Flow (Do Not Auto-Commit)
 
+Note: the header wording details below were superseded by
+`116-explicit-null-edit-state.md`.  The two-step staging invariant still stands.
+
 ## Background
 
 Cell editing has always been two-step: `C-c '` opens an edit buffer,

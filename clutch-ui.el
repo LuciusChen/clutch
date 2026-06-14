@@ -18,6 +18,7 @@
 (declare-function clutch--spinner-string "clutch-connection" ())
 
 (defvar clutch--aggregate-summary)
+(defvar clutch--active-edit-cell)
 (defvar clutch--base-query)
 (defvar clutch--cached-pk-indices)
 (defvar clutch--cell-default-placeholder)
@@ -87,6 +88,9 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
 (defvar clutch-connection)
 (defvar clutch-describe--header-base)
 (defvar clutch-result-max-rows)
+
+(defconst clutch--null-cell-display-text "<null>"
+  "Display text for database NULL values in result cells.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-display-name-from-params
@@ -395,6 +399,46 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
           (cl-incf pos)))))
     display))
 
+(defconst clutch--xml-cell-highlight-max-chars 2000
+  "Maximum XML cell length eligible for inline result-cell highlighting.")
+
+(defun clutch--xml-display-highlight (text)
+  "Return TEXT with lightweight XML token faces for result cells."
+  (let ((display (copy-sequence text))
+        (pos 0)
+        (tag-re "<\\(?:!--[^>]*--\\|!\\[CDATA\\[[^>]*\\]\\]\\|/?\\([[:alpha:]_][[:alnum:]_.:-]*\\)\\([^<>]*\\)\\|\\?xml[^>]*\\?\\)>")
+        (attr-re "\\([[:alpha:]_][[:alnum:]_.:-]*\\)\\s-*=\\s-*\\(\"[^\"]*\"\\|'[^']*'\\)")
+        (case-fold-search nil))
+    (while (string-match tag-re text pos)
+      (let* ((beg (match-beginning 0))
+             (end (match-end 0))
+             (token (match-string 0 text))
+             (tag-beg (match-beginning 1))
+             (tag-end (match-end 1)))
+        (cond
+         ((string-prefix-p "<!--" token)
+          (put-text-property beg end 'face 'font-lock-comment-face display))
+         ((string-prefix-p "<![CDATA[" token)
+          (put-text-property beg end 'face 'font-lock-string-face display))
+         (tag-beg
+          (put-text-property beg (min end (1+ beg)) 'face 'shadow display)
+          (put-text-property (max beg (1- end)) end 'face 'shadow display)
+          (when (and (< (1+ beg) end) (= (aref text (1+ beg)) ?/))
+            (put-text-property (1+ beg) (+ beg 2) 'face 'shadow display))
+          (put-text-property tag-beg tag-end 'face 'font-lock-function-name-face display)
+          (let ((scan tag-end))
+            (while (and (string-match attr-re text scan)
+                        (< (match-beginning 0) end))
+              (put-text-property (match-beginning 1) (match-end 1)
+                                 'face (clutch--json-key-face) display)
+              (put-text-property (match-beginning 2) (match-end 2)
+                                 'face 'font-lock-string-face display)
+              (put-text-property (1- (match-beginning 2)) (match-beginning 2)
+                                 'face 'shadow display)
+              (setq scan (match-end 0))))))
+        (setq pos end)))
+    display))
+
 (defun clutch--truncate-display-string (text width)
   "Return TEXT truncated to WIDTH with a compact ellipsis when possible."
   (if (<= (string-width text) width)
@@ -422,9 +466,8 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
   "Return compact placeholder text for VAL/COL-DEF in result grid."
   (let ((cat (plist-get col-def :type-category)))
     (cond
-     ((clutch--xml-like-string-p val)
-      "<XML>")
-     ((eq cat 'blob)
+     ((and (eq cat 'blob)
+           (not (clutch--xml-like-string-p val)))
       "<BLOB>")
      (t nil))))
 
@@ -860,9 +903,12 @@ column-local commands still work from padded whitespace."
     (concat (mapconcat #'identity (nreverse parts) "")
             (propertize "│" 'face 'clutch-border-face))))
 
-(defun clutch--cell-face (val edited cidx)
-  "Return the display face for a cell with VAL at CIDX, EDITED if modified."
+(defun clutch--cell-face (val edited cidx active-edit)
+  "Return the display face for a cell with VAL at CIDX.
+EDITED is the staged edit entry when modified.  ACTIVE-EDIT is non-nil
+when the cell is open in a cell edit buffer."
   (cond (edited 'clutch-modified-face)
+        (active-edit 'clutch-modified-face)
         ((clutch--cell-placeholder-value val) 'clutch-null-face)
         ((null val) 'clutch-null-face)
         ((assq cidx clutch--fk-info) 'clutch-fk-face)
@@ -876,13 +922,18 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
          (json-cell (and (not custom)
                          (not edited)
                          (clutch--json-cell-value-p display-val col-def)))
+         (xml-cell (and (not custom)
+                        (not edited)
+                        (clutch--xml-like-string-p display-val)))
          (special-placeholder (and (not custom)
                                    (not edited)
                                    (clutch--cell-placeholder-value display-val)))
          (s (and (not custom)
-                 (or special-placeholder
-                     (replace-regexp-in-string "\n" "↵"
-                                               (clutch--format-value display-val)))))
+                 (cond
+                  (special-placeholder)
+                  ((null display-val) clutch--null-cell-display-text)
+                  (t (replace-regexp-in-string "\n" "↵"
+                                               (clutch--format-value display-val))))))
          (placeholder (and (not custom)
                            (not edited)
                            (not special-placeholder)
@@ -893,6 +944,10 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
     (cond
      ((and json-cell (not truncated))
       (clutch--json-display-highlight formatted))
+     ((and xml-cell
+           (not truncated)
+           (<= (length formatted) clutch--xml-cell-highlight-max-chars))
+      (clutch--xml-display-highlight formatted))
      (truncated
       (clutch--truncate-display-string formatted w))
      (t formatted))))
@@ -933,6 +988,7 @@ rendering large result pages."
           :marked marked-table
           :deletes delete-table
           :insert-placeholders (clutch--pending-insert-placeholders)
+          :active-edit-cell clutch--active-edit-cell
           :row-identity row-identity)))
 
 (defun clutch--render-edit-entry (row _ridx cidx render-state)
@@ -960,10 +1016,12 @@ including the leading border and padding."
   (let* ((val     (nth cidx row))
          (col-def (nth cidx clutch--result-column-defs))
          (edited  (clutch--render-edit-entry row ridx cidx render-state))
+         (active-edit (equal (plist-get render-state :active-edit-cell)
+                             (cons ridx cidx)))
          (w       (aref widths cidx))
          (content (clutch--cell-display-content val w col-def edited))
          (padded  (clutch--string-pad content w (clutch--numeric-type-p col-def)))
-         (face    (clutch--cell-face val edited cidx))
+         (face    (clutch--cell-face val edited cidx active-edit))
          (pad-str (make-string clutch-column-padding ?\s))
          (body nil))
     (when (and (eq face 'clutch-fk-face)
