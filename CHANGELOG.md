@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased - `feature/mongodb-document-backend`
+## 0.2.0 - Unreleased
 
-This section summarizes the current feature branch relative to `origin/main`.
+This section summarizes the planned 0.2.0 release relative to `origin/main`.
+
+### Breaking Changes
+
+- Native MySQL and PostgreSQL protocol packages are no longer installed through
+  `clutch` package dependencies. Install `mysql.el` for `:backend mysql` and
+  `pg.el` / `pg-el` for `:backend pg` in environments that do not already have
+  those packages.
+- Internal backend facade consumers must require `clutch-backend.el` instead of
+  `clutch-db.el`. Custom backend adapters also need to follow the current
+  backend contract, including `clutch-db-object-definition` rather than the old
+  show-create-specific hooks.
+- Generic JDBC URL configurations now require an explicit `:driver-class`.
+  Built-in JDBC backend aliases such as Oracle, SQL Server, DB2, Snowflake,
+  Redshift, and ClickHouse still provide their own driver classes.
 
 ### Added
 
@@ -56,6 +70,8 @@ This section summarizes the current feature branch relative to `origin/main`.
   helpers; `clutch-edit.el` owns staged mutation state.
 - Updated result-cell truncation so incomplete cell display uses a compact
   single-character ellipsis (`…`) instead of silently cutting text.
+- Updated header-line shortcut hints so shortcut keys and their descriptions
+  use distinct faces, matching the visual separation used by Transient.
 - Updated JSON result-cell display to match a DataGrip-like rule:
   short JSON is shown inline with lightweight token highlighting, while long
   JSON shows a compact prefix ending in `…` and remains unhighlighted.

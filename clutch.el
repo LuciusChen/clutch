@@ -79,6 +79,16 @@
   "Face for header text that is not a database field name."
   :group 'clutch)
 
+(defface clutch-key-hint-key-face
+  '((t :inherit transient-key))
+  "Face for shortcut keys shown in Clutch header-line hints."
+  :group 'clutch)
+
+(defface clutch-key-hint-description-face
+  '((t :inherit header-line))
+  "Face for shortcut descriptions shown in Clutch header-line hints."
+  :group 'clutch)
+
 (defface clutch-insert-field-tag-face
   '((t :inherit shadow))
   "Face for metadata tags in the insert buffer."

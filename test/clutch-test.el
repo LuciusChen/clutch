@@ -1242,6 +1242,15 @@ ROWS defaults to a small three-row sample."
 
 ;;;; Rendering — header-line and footer
 
+(ert-deftest clutch-test-header-key-hint-uses-distinct-faces ()
+  "Header shortcut hints should style keys separately from descriptions."
+  (let ((hint (clutch--key-hint "C-c C-c" "stage")))
+    (should (equal (substring-no-properties hint) "C-c C-c: stage"))
+    (should (eq (get-text-property 0 'face hint)
+                'clutch-key-hint-key-face))
+    (should (eq (get-text-property (length "C-c C-c: ") 'face hint)
+                'clutch-key-hint-description-face))))
+
 (ert-deftest clutch-test-header-line-with-hscroll-matches-body-offset ()
   "Header-line hscroll should track body hscroll exactly."
   (with-temp-buffer

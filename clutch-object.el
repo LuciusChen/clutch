@@ -48,6 +48,7 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
+(declare-function clutch--clear-table-metadata-caches "clutch-schema" (conn table))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
@@ -55,6 +56,7 @@ Each value is a plist with at least :entries and :fetched-at.")
                   (name fallback face &rest icon-args))
 (declare-function clutch--json-display-mode "clutch-ui" ())
 (declare-function clutch--json-metadata-text "clutch-ui" (text))
+(declare-function clutch--key-hints "clutch-ui" (hints))
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--query-buffer-p "clutch-connection" ())
@@ -1283,6 +1285,12 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
          sections))
        "\n\n"))))
 
+(defun clutch--refresh-object-describe-metadata (conn entry)
+  "Invalidate CONN metadata that should be live for describing ENTRY."
+  (when (member (clutch--object-type-string entry) '("TABLE" "VIEW" "COLLECTION"))
+    (when-let* ((name (plist-get entry :name)))
+      (clutch--clear-table-metadata-caches conn name))))
+
 (defun clutch--fontify-object-describe ()
   "Apply lightweight highlighting to the current describe buffer."
   (let ((inhibit-read-only t))
@@ -1327,11 +1335,16 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
                 clutch--describe-object-entry entry
                 clutch-describe--header-base
                 (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-table")
-                                                    "▦" 'header-line)))
+                                                    "▦" 'header-line))
+                      (hints (concat "["
+                                     (clutch--key-hints
+                                      '(("s" "show definition")
+                                        ("C-c C-o" "object actions")
+                                        ("g" "refresh")))
+                                     "]")))
                   (if (string-empty-p icon)
-                      " [s: show definition  C-c C-o: object actions  g: refresh]"
-                    (format " %s  [s: show definition  C-c C-o: object actions  g: refresh]"
-                            icon)))
+                      (concat " " hints)
+                    (format " %s  %s" icon hints)))
                 header-line-format
                 '(:eval (clutch--header-with-disconnect-badge
                          clutch-describe--header-base))
@@ -1390,6 +1403,8 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
   (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
   (clutch--with-object-error-capture
       (current-buffer) clutch-connection clutch--describe-object-entry "describe"
+    (clutch--refresh-object-describe-metadata clutch-connection
+                                             clutch--describe-object-entry)
     (clutch--render-object-describe clutch-connection
                                     clutch--describe-object-entry
                                     clutch--connection-params
@@ -1453,6 +1468,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
                    (user-error "No active connection"))))
     (clutch--remember-current-object entry)
     (clutch--with-object-error-capture source-buffer conn entry "describe"
+      (clutch--refresh-object-describe-metadata conn entry)
       (clutch--show-object-describe-buffer conn entry
                                            (plist-get context :params)
                                            (plist-get context :product)))))

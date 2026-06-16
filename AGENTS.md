@@ -151,6 +151,10 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 ## Documentation and Release Records
 
 - Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
+- Every release-relevant change must update `CHANGELOG.md` in the same change. This includes user-visible bug fixes, backend/protocol support, configuration or dependency changes, public API changes, and behavior that affects documented usage. Pure test refactors, comment-only edits, mechanical formatting, and internal cleanup with no release-note value do not need a changelog entry; when skipping the changelog for a non-trivial commit, state why in the final summary or commit rationale.
+- Changelog release sections are version-based. Use `## VERSION - Unreleased` while a release is still in development, and replace `Unreleased` with the release date only when cutting the release or tag. Do not date unreleased feature branches.
+- While `clutch` is still pre-1.0, bump patch for bug-fix-only releases and bump minor for new backends, substantial user-visible features, configuration/API breaks, or backend contract breaks. Breaking changes before 1.0 are recorded under the next minor version.
+- Feature-branch changelog sections that summarize changes relative to `origin/main` must include a `Breaking Changes` section before `Added`. List real upgrade/configuration/API breaks there, and write `None` explicitly when the target version has no breaking changes.
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
 - Optimize documentation for the rendered reader, not source-width aesthetics. Do not rewrap unchanged Markdown/Org prose or lists just to fit a column; rendered documents already wrap naturally.
 - When documentation feels hard to read, improve the information structure: use a table, shorter bullets, a clearer heading, or a focused rewrite. Avoid changes whose only effect is different source line breaks.

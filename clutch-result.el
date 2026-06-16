@@ -139,6 +139,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--format-value "clutch-ui" (val))
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
+(declare-function clutch--key-hints "clutch-ui" (hints))
 (declare-function clutch--message-count "clutch-ui" (value))
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--message-keyword "clutch-ui" (value))
@@ -2134,7 +2135,9 @@ blob type with non-text value → binary string; otherwise plain text."
            (if frozen "FROZEN" "FOLLOW")
            label
            (format "R%d/%d C%d" (1+ ridx) row-count (1+ cidx))
-           "f freeze  g refresh  q quit")
+           (clutch--key-hints '(("f" "freeze")
+                                ("g" "refresh")
+                                ("q" "quit"))))
      (clutch--status-separator))))
 
 (defun clutch--live-view-detach-source (source-buf &optional viewer-buf)

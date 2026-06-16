@@ -206,6 +206,27 @@ Return DEFAULT when CONN has no cache entry or TABLE is absent."
   (when-let* ((cache (gethash (clutch--connection-key conn) cache-table)))
     (remhash table cache)))
 
+(defun clutch--clear-table-metadata-caches (conn table)
+  "Clear table-scoped metadata caches for TABLE on CONN."
+  (let ((key (clutch--connection-key conn)))
+    (when-let* ((schema (gethash key clutch--schema-cache)))
+      (unless (eq (gethash table schema 'missing) 'missing)
+        (puthash table nil schema)))
+    (dolist (cache-symbol '(clutch--columns-status-cache
+                            clutch--column-details-cache
+                            clutch--column-details-status-cache
+                            clutch--table-comment-cache
+                            clutch--table-comment-status-cache))
+      (when-let* ((cache (gethash key (symbol-value cache-symbol))))
+        (remhash table cache)))
+    (when-let* ((queue (gethash key clutch--column-details-queue-cache)))
+      (puthash key
+               (cl-remove table queue :test #'equal)
+               clutch--column-details-queue-cache))
+    (when-let* ((active (gethash key clutch--column-details-active-cache)))
+      (when (equal (car active) table)
+        (remhash key clutch--column-details-active-cache)))))
+
 (defun clutch--begin-metadata-ticket ()
   "Issue a new table metadata freshness ticket."
   (cl-incf clutch--metadata-ticket-counter))

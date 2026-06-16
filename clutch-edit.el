@@ -45,6 +45,7 @@
 (declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
 (declare-function clutch--json-value-to-string "clutch-ui" (value))
+(declare-function clutch--key-hints "clutch-ui" (hints))
 (declare-function clutch--result-source-table-or-user-error "clutch-ui" (op))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
 (declare-function clutch--string-pad "clutch-ui" (s width &optional pad-left numeric))
@@ -278,17 +279,19 @@ placeholder is displayed.  The placeholder is not part of the buffer text."
          (tag-text (and tags (format "[%s]" (string-join tags " "))))
          (affordances nil))
     (when (clutch-result-edit--field-candidates)
-      (push "M-TAB: complete" affordances))
+      (push '("M-TAB" "complete") affordances))
     (when (clutch-result-edit--temporal-p)
-      (push "C-c .: now" affordances))
+      (push '("C-c ." "now") affordances))
     (when (clutch-result-edit--json-p)
-      (push "C-c ': JSON" affordances))
+      (push '("C-c '" "JSON") affordances))
     (concat " "
-            (string-join
-             (append (when tag-text (list tag-text))
-                     (nreverse affordances)
-                     '("C-c C-c: stage" "C-c C-k: cancel" "C-c C-n: set NULL"))
-             "  "))))
+            (when tag-text
+              (concat tag-text "  "))
+            (clutch--key-hints
+             (append (nreverse affordances)
+                     '(("C-c C-c" "stage")
+                       ("C-c C-k" "cancel")
+                       ("C-c C-n" "set NULL")))))))
 
 (defun clutch-result-edit--refresh-header-line ()
   "Refresh the edit-buffer header line, including any validation token."
@@ -1300,9 +1303,11 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
         (define-key map (kbd "C-c C-k") cancel-fn)
         (use-local-map map))
       (setq-local header-line-format
-                  (format " JSON field %s%sC-c C-c: save  C-c C-k: cancel"
-                          field-name
-                          (clutch--status-separator))))
+                  (concat
+                   (format " JSON field %s" field-name)
+                   (clutch--status-separator)
+                   (clutch--key-hints '(("C-c C-c" "save")
+                                        ("C-c C-k" "cancel"))))))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--current-field-or-error ()
@@ -1470,8 +1475,16 @@ TIME defaults to `current-time'."
            clutch-result-insert--table
            (if clutch-result-insert--show-all-fields "all columns" "sparse"))
    (clutch--status-separator)
-   (format "TAB/S-TAB: field  M-TAB: complete  C-c .: now  C-c C-a: %s  C-c C-y: import TSV/CSV  C-c C-c: stage  C-c C-k: cancel"
-           (if clutch-result-insert--show-all-fields "sparse fields" "all fields"))))
+   (clutch--key-hints
+    `(("TAB/S-TAB" "field")
+      ("M-TAB" "complete")
+      ("C-c ." "now")
+      ("C-c C-a" ,(if clutch-result-insert--show-all-fields
+                      "sparse fields"
+                    "all fields"))
+      ("C-c C-y" "import TSV/CSV")
+      ("C-c C-c" "stage")
+      ("C-c C-k" "cancel")))))
 
 (defun clutch-result-insert--refresh-header-line ()
   "Refresh the insert form header line."
