@@ -7,7 +7,8 @@
 ;;; Code:
 
 (eval-and-compile
-  (require 'clutch-test-common))
+  (require 'clutch-test-common)
+  (require 'clutch-test-backends))
 
 (defvar mysql-tls-verify-server)
 (defvar clutch-test-backend)
@@ -41,15 +42,9 @@
       (setq params (plist-put params :props clutch-test-props)))
     params))
 
-(defun clutch-test--duckdb-live-p ()
-  "Return non-nil when live tests target DuckDB through generic JDBC."
-  (and (eq clutch-test-backend 'jdbc)
-       (stringp clutch-test-url)
-       (string-match-p "\\`jdbc:duckdb:" clutch-test-url)))
-
 (defun clutch-test--clickhouse-live-p ()
   "Return non-nil when live tests target ClickHouse."
-  (eq clutch-test-backend 'clickhouse))
+  (clutch-test-live-backend-capability-p :clickhouse-engine))
 
 (defun clutch-test--live-name-member-p (name names)
   "Return non-nil when NAME appears in NAMES, ignoring metadata case."
@@ -57,13 +52,11 @@
 
 (defun clutch-test--updateable-live-backend-p ()
   "Return non-nil when generic live workflow SQL is valid for the backend."
-  (or (memq clutch-test-backend '(mysql pg sqlserver oracle))
-      (clutch-test--duckdb-live-p)))
+  (clutch-test-live-backend-capability-p :updateable-workflow))
 
 (defun clutch-test--result-live-backend-p ()
   "Return non-nil when result workflow SQL is valid for the backend."
-  (or (clutch-test--updateable-live-backend-p)
-      (clutch-test--clickhouse-live-p)))
+  (clutch-test-live-backend-capability-p :result-workflow))
 
 (defun clutch-test--live-column-type (kind)
   "Return a live-test SQL column type for KIND."
@@ -162,8 +155,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 (ert-deftest clutch-test-live-object-describe-uses-real-table-and-index-metadata ()
   :tags '(:clutch-live)
   "Object describe should render real table/index metadata from the backend."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "Object describe live test currently covers MySQL/PostgreSQL"))
+  (unless (clutch-test-live-backend-capability-p :object-describe)
+    (ert-skip (clutch-test-capability-skip-message :object-describe)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_obj_desc_%d" (emacs-pid)))
            (index (format "idx_clutch_obj_desc_%d" (emacs-pid)))
@@ -236,7 +229,11 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 	                      (string-match-p "ROWNUM" paged-upper)
 	                      (string-match-p "FETCH" paged-upper))))
 	        (should (= (length rows) 2)))
-	      (let* ((sort-column (if (eq clutch-test-backend 'oracle) "ID" "id"))
+	      (let* ((sort-column
+                      (if (clutch-test-live-backend-capability-p
+                           :uppercase-identifiers)
+                          "ID"
+                        "id"))
 	             (paged (clutch-db-build-paged-sql
 	                     conn base-sql 0 2 (cons sort-column "DESC")))
 	             (rows (clutch-db-result-rows
@@ -252,7 +249,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   :tags '(:clutch-live)
   "Result buffer workflows should run real backend queries end-to-end."
   (unless (clutch-test--result-live-backend-p)
-    (ert-skip "Result workflow live test covers MySQL/PostgreSQL/SQL Server/Oracle/ClickHouse/DuckDB"))
+    (ert-skip (clutch-test-capability-skip-message :result-workflow)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_result_flow_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -331,8 +328,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 (ert-deftest clutch-test-live-mysql-limited-join-duplicate-columns-executes-flat ()
   :tags '(:clutch-live)
   "MySQL limited JOIN results with duplicate column names should not be wrapped."
-  (unless (eq clutch-test-backend 'mysql)
-    (ert-skip "Duplicate-column derived table restriction is MySQL-specific"))
+  (unless (clutch-test-live-backend-capability-p :duplicate-column-join)
+    (ert-skip (clutch-test-capability-skip-message :duplicate-column-join)))
   (clutch-test--with-conn conn
     (let* ((table-a (format "clutch_dup_a_%d" (emacs-pid)))
            (table-b (format "clutch_dup_b_%d" (emacs-pid)))
@@ -379,8 +376,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 (ert-deftest clutch-test-live-pg-ctid-edit-via-execute-select-persists ()
   :tags '(:clutch-live)
   "PostgreSQL no-key edit should work through SELECT row identity injection."
-  (unless (eq clutch-test-backend 'pg)
-    (ert-skip "CTID row identity is PostgreSQL-specific"))
+  (unless (clutch-test-live-backend-capability-p :ctid-row-identity)
+    (ert-skip (clutch-test-capability-skip-message :ctid-row-identity)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_ctid_edit_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -416,8 +413,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 (ert-deftest clutch-test-live-pg-ctid-aggregate-select-skips-row-identity-injection ()
   :tags '(:clutch-live)
   "PostgreSQL no-key aggregate SELECT should not receive CTID injection."
-  (unless (eq clutch-test-backend 'pg)
-    (ert-skip "CTID row identity is PostgreSQL-specific"))
+  (unless (clutch-test-live-backend-capability-p :ctid-row-identity)
+    (ert-skip (clutch-test-capability-skip-message :ctid-row-identity)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_ctid_count_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -443,7 +440,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   :tags '(:clutch-live)
   "Aggregate SELECT execution should not inject row identity into live SQL."
   (unless (clutch-test--result-live-backend-p)
-    (ert-skip "Aggregate row identity live test covers MySQL/PostgreSQL/SQL Server/Oracle/ClickHouse/DuckDB"))
+    (ert-skip (clutch-test-capability-skip-message :result-workflow)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_issue12_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -472,7 +469,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   :tags '(:clutch-live)
   "Edit through a real SELECT result and commit the persisted row change."
   (unless (clutch-test--updateable-live-backend-p)
-    (ert-skip "Edit live test covers MySQL/PostgreSQL/SQL Server/Oracle/DuckDB"))
+    (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_edit_commit_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -520,7 +517,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   :tags '(:clutch-live)
   "Insert and delete staging should persist through real backend commits."
   (unless (clutch-test--updateable-live-backend-p)
-    (ert-skip "Insert/delete live test covers MySQL/PostgreSQL/SQL Server/Oracle/DuckDB"))
+    (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_insert_delete_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))

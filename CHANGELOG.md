@@ -77,6 +77,9 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
   JSON shows a compact prefix ending in `…` and remains unhighlighted.
 - Kept BLOB cells compact with `<BLOB>` placeholders to avoid displaying raw
   binary content in the shared result grid.
+- Reworked live workflow test backend selection around a shared capability
+  table so SQL-native and JDBC workflow coverage no longer depends on scattered
+  hard-coded backend lists.
 - Reworked MongoDB query-console completion around common helpers, collection
   names, sampled field names, aggregation stages/operators, and supported
   cursor helper chains.

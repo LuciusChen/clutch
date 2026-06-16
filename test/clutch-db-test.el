@@ -3902,11 +3902,41 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 ;;;; Live integration tests — MySQL
 
+(defun clutch-db-test--mysql-live-configured-p ()
+  "Return non-nil when MySQL live connection data is configured."
+  clutch-db-test-mysql-password)
+
+(defun clutch-db-test--mysql-live-params ()
+  "Return connection params for MySQL live tests."
+  (list :host clutch-db-test-mysql-host
+        :port clutch-db-test-mysql-port
+        :user clutch-db-test-mysql-user
+        :password clutch-db-test-mysql-password
+        :database clutch-db-test-mysql-database))
+
+(defun clutch-db-test--pg-live-configured-p ()
+  "Return non-nil when PostgreSQL live connection data is configured."
+  clutch-db-test-pg-password)
+
+(defun clutch-db-test--pg-live-params ()
+  "Return connection params for PostgreSQL live tests."
+  (list :host clutch-db-test-pg-host
+        :port clutch-db-test-pg-port
+        :user clutch-db-test-pg-user
+        :password clutch-db-test-pg-password
+        :database clutch-db-test-pg-database))
+
+(defun clutch-db-test--require-cross-sql-live-backends ()
+  "Skip unless the current cross-backend live tests have both SQL backends."
+  (unless (and (clutch-db-test--mysql-live-configured-p)
+               (clutch-db-test--pg-live-configured-p))
+    (ert-skip "Set both MySQL and PostgreSQL live credentials for cross-backend tests")))
+
 (defmacro clutch-db-test--with-mysql (var &rest body)
   "Execute BODY with VAR bound to a MySQL connection.
 Skips if `clutch-db-test-mysql-password' is nil."
   (declare (indent 1))
-  `(if (null clutch-db-test-mysql-password)
+  `(if (not (clutch-db-test--mysql-live-configured-p))
        (ert-skip "Set clutch-db-test-mysql-password to enable MySQL live tests")
      ;; Local MySQL 8 containers usually present self-signed certs.  The native
      ;; client auto-upgrades to TLS for `caching_sha2_password', so disable
@@ -3915,11 +3945,7 @@ Skips if `clutch-db-test-mysql-password' is nil."
      (clutch-db-test--with-local-mysql-tls
        (let ((,var (clutch-db-connect
                     'mysql
-                    (list :host clutch-db-test-mysql-host
-                          :port clutch-db-test-mysql-port
-                          :user clutch-db-test-mysql-user
-                          :password clutch-db-test-mysql-password
-                          :database clutch-db-test-mysql-database))))
+                    (clutch-db-test--mysql-live-params))))
          (unwind-protect
              (progn ,@body)
            (clutch-db-disconnect ,var))))))
@@ -4229,15 +4255,11 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
   "Execute BODY with VAR bound to a PostgreSQL connection.
 Skips if `clutch-db-test-pg-password' is nil."
   (declare (indent 1))
-  `(if (null clutch-db-test-pg-password)
+  `(if (not (clutch-db-test--pg-live-configured-p))
        (ert-skip "Set clutch-db-test-pg-password to enable PostgreSQL live tests")
      (let ((,var (clutch-db-connect
                   'pg
-                  (list :host clutch-db-test-pg-host
-                        :port clutch-db-test-pg-port
-                        :user clutch-db-test-pg-user
-                        :password clutch-db-test-pg-password
-                        :database clutch-db-test-pg-database))))
+                  (clutch-db-test--pg-live-params))))
        (unwind-protect
            (progn ,@body)
          (clutch-db-disconnect ,var)))))
@@ -5623,67 +5645,42 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
 (ert-deftest clutch-db-test-cross-type-categories ()
   :tags '(:db-live :mysql-live :pg-live)
   "Test that both backends use consistent type categories."
-  (when (and (null clutch-db-test-mysql-password)
-             (null clutch-db-test-pg-password))
-    (ert-skip "Need both MySQL and PostgreSQL for cross-backend tests"))
+  (clutch-db-test--require-cross-sql-live-backends)
   ;; Test numeric
   (clutch-db-test--with-local-mysql-tls
-    (let ((mysql-conn (when clutch-db-test-mysql-password
-                        (clutch-db-connect
-                         'mysql
-                         (list :host clutch-db-test-mysql-host
-                               :port clutch-db-test-mysql-port
-                               :user clutch-db-test-mysql-user
-                               :password clutch-db-test-mysql-password
-                               :database clutch-db-test-mysql-database))))
-          (pg-conn (when clutch-db-test-pg-password
-                     (clutch-db-connect
-                      'pg
-                      (list :host clutch-db-test-pg-host
-                            :port clutch-db-test-pg-port
-                            :user clutch-db-test-pg-user
-                            :password clutch-db-test-pg-password
-                            :database clutch-db-test-pg-database)))))
+    (let ((mysql-conn (clutch-db-connect
+                       'mysql
+                       (clutch-db-test--mysql-live-params)))
+          (pg-conn (clutch-db-connect
+                    'pg
+                    (clutch-db-test--pg-live-params))))
       (unwind-protect
           (progn
             ;; Both should return numeric type-category for integers
-            (when mysql-conn
-              (let* ((result (clutch-db-query mysql-conn "SELECT 42 AS n"))
-                     (cols (clutch-db-result-columns result)))
-                (should (eq (plist-get (car cols) :type-category) 'numeric))))
-            (when pg-conn
-              (let* ((result (clutch-db-query pg-conn "SELECT 42 AS n"))
-                     (cols (clutch-db-result-columns result)))
-                (should (eq (plist-get (car cols) :type-category) 'numeric)))))
+            (let* ((result (clutch-db-query mysql-conn "SELECT 42 AS n"))
+                   (cols (clutch-db-result-columns result)))
+              (should (eq (plist-get (car cols) :type-category) 'numeric)))
+            (let* ((result (clutch-db-query pg-conn "SELECT 42 AS n"))
+                   (cols (clutch-db-result-columns result)))
+              (should (eq (plist-get (car cols) :type-category) 'numeric))))
         (when mysql-conn (clutch-db-disconnect mysql-conn))
         (when pg-conn (clutch-db-disconnect pg-conn))))))
 
 (ert-deftest clutch-db-test-cross-null-handling ()
   :tags '(:db-live :mysql-live :pg-live)
   "Test that both backends handle NULL values consistently."
-  (when (and (null clutch-db-test-mysql-password)
-             (null clutch-db-test-pg-password))
-    (ert-skip "Need both MySQL and PostgreSQL for cross-backend tests"))
+  (clutch-db-test--require-cross-sql-live-backends)
   (clutch-db-test--with-local-mysql-tls
     (dolist (backend-spec (list (cons 'mysql
-                                      (list :host clutch-db-test-mysql-host
-                                            :port clutch-db-test-mysql-port
-                                            :user clutch-db-test-mysql-user
-                                            :password clutch-db-test-mysql-password
-                                            :database clutch-db-test-mysql-database))
+                                      (clutch-db-test--mysql-live-params))
                                 (cons 'pg
-                                      (list :host clutch-db-test-pg-host
-                                            :port clutch-db-test-pg-port
-                                            :user clutch-db-test-pg-user
-                                            :password clutch-db-test-pg-password
-                                            :database clutch-db-test-pg-database))))
-      (when (plist-get (cdr backend-spec) :password)
-        (let ((conn (clutch-db-connect (car backend-spec) (cdr backend-spec))))
-          (unwind-protect
-              (let* ((result (clutch-db-query conn "SELECT NULL AS n"))
-                     (row (car (clutch-db-result-rows result))))
-                (should (null (car row))))
-            (clutch-db-disconnect conn)))))))
+                                      (clutch-db-test--pg-live-params))))
+      (let ((conn (clutch-db-connect (car backend-spec) (cdr backend-spec))))
+        (unwind-protect
+            (let* ((result (clutch-db-query conn "SELECT NULL AS n"))
+                   (row (car (clutch-db-result-rows result))))
+              (should (null (car row))))
+          (clutch-db-disconnect conn))))))
 
 ;;;; Unit tests — clutch-db-live-p (JDBC identity check)
 

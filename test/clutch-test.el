@@ -10,14 +10,16 @@
 ;; ERT tests for the clutch user interface layer.
 ;;
 ;; Unit tests run without a database server.
-;; Native live tests require MySQL and PostgreSQL.  The live runner starts or
-;; reuses local containers, preferring Podman on Linux and OrbStack-backed
-;; Docker on macOS:
+;; Native live tests cover MySQL, PostgreSQL, MongoDB, and Redis.  The live
+;; runner starts or reuses local containers, preferring Podman on Linux and
+;; OrbStack-backed Docker on macOS:
 ;;   ./test/run-native-live-tests.sh
 ;;
 ;; Manual live setup:
 ;;   docker run -d -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8
 ;;   docker run -d -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
+;;   docker run -d -p 127.0.0.1:57017:27017 mongo:7
+;;   docker run -d -p 127.0.0.1:56379:6379 redis:7-alpine
 ;;
 ;; Run unit tests from the repository root:
 ;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
@@ -28,7 +30,8 @@
 ;;; Code:
 
 (eval-and-compile
-  (require 'clutch-test-common))
+  (require 'clutch-test-common)
+  (require 'clutch-test-backends))
 
 ;;;; Test configuration
 
@@ -82,6 +85,29 @@
 (require 'clutch-test-debug)
 (require 'clutch-test-live)
 (require 'clutch-document)
+
+;;;; Test backend matrix
+
+(ert-deftest clutch-test-backend-matrix-selects-live-workflow-capabilities ()
+  "Live backend matrix should replace hard-coded workflow backend lists."
+  (let ((clutch-test-backend 'jdbc)
+        (clutch-test-url "jdbc:duckdb:/tmp/clutch-test.duckdb"))
+    (should (eq (clutch-test-live-backend-id) 'duckdb))
+    (should (clutch-test-live-backend-capability-p :result-workflow))
+    (should (clutch-test-live-backend-capability-p :updateable-workflow)))
+  (let ((clutch-test-backend 'clickhouse)
+        (clutch-test-url nil))
+    (should (eq (clutch-test-live-backend-id) 'clickhouse))
+    (should (clutch-test-live-backend-capability-p :result-workflow))
+    (should-not
+     (clutch-test-live-backend-capability-p :updateable-workflow)))
+  (should (clutch-test-live-backend-capability-p :object-describe 'mysql))
+  (should (clutch-test-live-backend-capability-p :ctid-row-identity 'pg))
+  (should-not (clutch-test-live-backend-capability-p :result-workflow
+                                                     'mongodb))
+  (should (string-match-p
+           "MySQL/PostgreSQL"
+           (clutch-test-capability-skip-message :object-describe))))
 
 ;;;; Rendering — value formatting
 

@@ -238,52 +238,72 @@ emacs_load_args=(
   --eval "(setq load-prefer-newer t)"
 )
 
-run_clutch_live_pg() {
-  log "Running UI live tests against PostgreSQL"
+run_ert_live() {
+  local label="$1"
+  local test_file="$2"
+  local setup_form="$3"
+  local selector="$4"
+  log "$label"
   "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-test \
-    --eval "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :clutch-live))"
+    -l ert -l "$test_file" \
+    --eval "$setup_form" \
+    --eval "(ert-run-tests-batch-and-exit ${selector})"
 }
 
 run_clutch_live_mysql() {
-  log "Running UI live tests against MySQL"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-test \
-    --eval "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :clutch-live))"
+  run_ert_live \
+    "Running UI live tests against MySQL" \
+    clutch-test \
+    "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\")" \
+    "'(tag :clutch-live)"
 }
 
-run_db_live_pg() {
-  log "Running backend live tests against PostgreSQL"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-db-test \
-    --eval "(setq clutch-db-test-pg-host \"127.0.0.1\" clutch-db-test-pg-port ${pg_port} clutch-db-test-pg-user \"postgres\" clutch-db-test-pg-password \"test\" clutch-db-test-pg-database \"postgres\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :pg-live))"
+run_clutch_live_pg() {
+  run_ert_live \
+    "Running UI live tests against PostgreSQL" \
+    clutch-test \
+    "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\")" \
+    "'(tag :clutch-live)"
 }
 
 run_db_live_mysql() {
-  log "Running backend live tests against MySQL"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-db-test \
-    --eval "(setq clutch-db-test-mysql-host \"127.0.0.1\" clutch-db-test-mysql-port ${mysql_port} clutch-db-test-mysql-user \"root\" clutch-db-test-mysql-password \"test\" clutch-db-test-mysql-database \"mysql\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
+  run_ert_live \
+    "Running backend live tests against MySQL" \
+    clutch-db-test \
+    "(setq clutch-db-test-mysql-host \"127.0.0.1\" clutch-db-test-mysql-port ${mysql_port} clutch-db-test-mysql-user \"root\" clutch-db-test-mysql-password \"test\" clutch-db-test-mysql-database \"mysql\")" \
+    "'(and (tag :mysql-live) (not (tag :pg-live)))"
+}
+
+run_db_live_pg() {
+  run_ert_live \
+    "Running backend live tests against PostgreSQL" \
+    clutch-db-test \
+    "(setq clutch-db-test-pg-host \"127.0.0.1\" clutch-db-test-pg-port ${pg_port} clutch-db-test-pg-user \"postgres\" clutch-db-test-pg-password \"test\" clutch-db-test-pg-database \"postgres\")" \
+    "'(and (tag :pg-live) (not (tag :mysql-live)))"
+}
+
+run_db_live_cross_sql() {
+  run_ert_live \
+    "Running cross-backend live tests against MySQL and PostgreSQL" \
+    clutch-db-test \
+    "(setq clutch-db-test-mysql-host \"127.0.0.1\" clutch-db-test-mysql-port ${mysql_port} clutch-db-test-mysql-user \"root\" clutch-db-test-mysql-password \"test\" clutch-db-test-mysql-database \"mysql\" clutch-db-test-pg-host \"127.0.0.1\" clutch-db-test-pg-port ${pg_port} clutch-db-test-pg-user \"postgres\" clutch-db-test-pg-password \"test\" clutch-db-test-pg-database \"postgres\")" \
+    "'(and (tag :mysql-live) (tag :pg-live))"
 }
 
 run_db_live_mongodb() {
-  log "Running backend live tests against MongoDB native protocol"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-db-test \
-    --eval "(setq clutch-db-test-mongodb-live-enabled t clutch-db-test-mongodb-url \"mongodb://127.0.0.1:${mongo_port}/clutch_test\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :mongodb-live))"
+  run_ert_live \
+    "Running backend live tests against MongoDB native protocol" \
+    clutch-db-test \
+    "(setq clutch-db-test-mongodb-live-enabled t clutch-db-test-mongodb-url \"mongodb://127.0.0.1:${mongo_port}/clutch_test\")" \
+    "'(tag :mongodb-live)"
 }
 
 run_db_live_redis() {
-  log "Running backend live tests against Redis native protocol"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-db-test \
-    --eval "(setq clutch-db-test-redis-live-enabled t clutch-db-test-redis-host \"127.0.0.1\" clutch-db-test-redis-port ${redis_port} clutch-db-test-redis-database 0)" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :redis-live))"
+  run_ert_live \
+    "Running backend live tests against Redis native protocol" \
+    clutch-db-test \
+    "(setq clutch-db-test-redis-live-enabled t clutch-db-test-redis-host \"127.0.0.1\" clutch-db-test-redis-port ${redis_port} clutch-db-test-redis-database 0)" \
+    "'(tag :redis-live)"
 }
 
 select_container_runtime
@@ -302,5 +322,6 @@ run_clutch_live_pg
 run_clutch_live_mysql
 run_db_live_pg
 run_db_live_mysql
+run_db_live_cross_sql
 run_db_live_mongodb
 run_db_live_redis
