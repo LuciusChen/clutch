@@ -1111,10 +1111,10 @@ WHERE c.oid = %s::regclass"
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn pgcon) table)
   "Return row identity candidates for TABLE on PostgreSQL CONN."
-  (append (cl-call-next-method)
-          (clutch-db-pg--unique-not-null-identities conn table)
-          (when-let* ((ctid (clutch-db-pg--ctid-identity conn table)))
-            (list ctid))))
+  (or (cl-call-next-method)
+      (clutch-db-pg--unique-not-null-identities conn table)
+      (when-let* ((ctid (clutch-db-pg--ctid-identity conn table)))
+        (list ctid))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn pgcon) table)
   "Return foreign key info for TABLE on PostgreSQL CONN."

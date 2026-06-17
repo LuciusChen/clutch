@@ -308,10 +308,10 @@ WHERE type='table' AND name=%s"
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table)
   "Return row identity candidates for TABLE on SQLite CONN."
-  (append (cl-call-next-method)
-          (clutch-db-sqlite--unique-not-null-identities conn table)
-          (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table)))
-            (list rowid))))
+  (or (cl-call-next-method)
+      (clutch-db-sqlite--unique-not-null-identities conn table)
+      (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table)))
+        (list rowid))))
 
 (defun clutch-db-sqlite--fk-alist (handle table)
   "Return FK alist for TABLE from HANDLE.

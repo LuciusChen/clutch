@@ -208,6 +208,9 @@ AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   "Connections currently reserved by foreground Clutch commands.
 Values are nesting counts.")
 
+(defvar clutch-schema-refresh-idle-delay-seconds 0.5
+  "Forward declaration; defined as `defcustom' in clutch.el.")
+
 (defun clutch-db--foreground-busy-p (conn)
   "Return non-nil when CONN is reserved by foreground Clutch work."
   (and conn (gethash conn clutch-db--foreground-connections)))
@@ -800,13 +803,17 @@ backend should preserve the current dirty state.")
   "Most backends can synchronously load column metadata during completion."
   t)
 
-(cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback)
+(cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback
+                                                   idle-delay)
   "Start an asynchronous schema refresh for CONN.
 CALLBACK receives the table name list on success.  ERRBACK receives
 an error message string on failure.  Return non-nil when async refresh
-was started, nil when unsupported.")
+was started, nil when unsupported.
+IDLE-DELAY, when non-nil, delays low-priority idle refresh work by at least
+that many seconds before it may run.")
 
-(cl-defmethod clutch-db-refresh-schema-async ((_conn t) _callback &optional _errback)
+(cl-defmethod clutch-db-refresh-schema-async ((_conn t) _callback
+                                              &optional _errback _idle-delay)
   "Backends without asynchronous schema refresh support return nil."
   nil)
 
@@ -833,10 +840,13 @@ started, nil when unsupported.")
   nil)
 
 (defun clutch-db--schedule-idle-metadata-call (conn callback errback fn
+                                                    &optional initial-delay
                                                     &rest args)
   "Schedule metadata FN for CONN on the main thread once Emacs is idle.
 CALLBACK receives the result of calling FN with CONN and ARGS.
-ERRBACK receives an error-message string when the work fails."
+ERRBACK receives an error-message string when the work fails.
+INITIAL-DELAY, when positive, is the minimum wall-clock delay before the first
+idle attempt."
   (cl-labels
       ((run ()
          (if (clutch-db-live-p conn)
@@ -851,7 +861,11 @@ ERRBACK receives an error-message string when the work fails."
                     (funcall errback (error-message-string err))))))
            (when errback
              (funcall errback "Connection closed")))))
-    (run-with-idle-timer 0 nil #'run)))
+    (if (and initial-delay (> initial-delay 0))
+        (run-at-time initial-delay nil
+                     (lambda ()
+                       (run-with-idle-timer 0 nil #'run)))
+      (run-with-idle-timer 0 nil #'run))))
 
 ;; Query
 
@@ -1181,39 +1195,40 @@ nil when unsupported.")
 BACKEND-NAME is used only in generated docstrings."
   `(progn
      (cl-defmethod clutch-db-refresh-schema-async ((conn ,type) callback
-                                                   &optional errback)
+                                                   &optional errback
+                                                   idle-delay)
        ,(format "Refresh %s schema names on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-tables))
+        conn callback errback #'clutch-db-list-tables idle-delay))
 
      (cl-defmethod clutch-db-list-columns-async ((conn ,type) table callback
                                                  &optional errback)
        ,(format "Fetch %s column names on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-columns table))
+        conn callback errback #'clutch-db-list-columns nil table))
 
      (cl-defmethod clutch-db-column-details-async ((conn ,type) table callback
                                                    &optional errback)
        ,(format "Fetch %s column details on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-column-details table))
+        conn callback errback #'clutch-db-column-details nil table))
 
      (cl-defmethod clutch-db-table-comment-async ((conn ,type) table callback
                                                   &optional errback)
        ,(format "Fetch %s table comments on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-table-comment table))
+        conn callback errback #'clutch-db-table-comment nil table))
 
      (cl-defmethod clutch-db-list-objects-async ((conn ,type) category callback
                                                  &optional errback)
        ,(format "Fetch %s object entries on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-objects category))))
+        conn callback errback #'clutch-db-list-objects nil category))))
 
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")

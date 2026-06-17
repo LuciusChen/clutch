@@ -69,6 +69,7 @@
 (defvar clutch-connection)
 (defvar clutch-debug-mode nil)
 (defvar clutch-schema-cache-install-batch-size)
+(defvar clutch-schema-refresh-idle-delay-seconds)
 (defvar clutch--oracle-i18n-warning-shown nil
   "Non-nil after showing the Oracle orai18n completion warning once.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)
@@ -489,9 +490,10 @@ When KEY is non-nil, clear that cache namespace instead of CONN's current key."
   (clutch--metadata-debug-event
    conn "schema-refresh" "error" backend message))
 
-(defun clutch--refresh-schema-cache-async (conn)
+(defun clutch--refresh-schema-cache-async (conn &optional idle-delay)
   "Refresh schema cache for CONN asynchronously when supported.
-Return non-nil when an asynchronous refresh was started."
+Return non-nil when an asynchronous refresh was started.
+IDLE-DELAY, when non-nil, is passed to idle metadata backends."
   (let ((ticket (clutch--begin-schema-refresh-ticket conn))
         (backend (clutch--metadata-debug-backend conn)))
     (clutch--set-schema-status conn 'refreshing)
@@ -513,7 +515,8 @@ Return non-nil when an asynchronous refresh was started."
                   (clutch--remember-schema-refresh-error conn message backend)
                 (clutch--metadata-debug-event
                  conn "schema-refresh" "stale-drop" backend
-                 "Ignored stale schema refresh error"))))))
+                 "Ignored stale schema refresh error")))
+            idle-delay)))
       (when started
         (clutch--metadata-debug-event
          conn "schema-refresh" "submit" backend
@@ -542,7 +545,8 @@ Only loads table names (fast).  Column info is loaded lazily."
   "Kick off the appropriate schema refresh strategy for CONN."
   (if (clutch-db-eager-schema-refresh-p conn)
       (clutch--refresh-schema-cache conn)
-    (unless (clutch--refresh-schema-cache-async conn)
+    (unless (clutch--refresh-schema-cache-async
+             conn clutch-schema-refresh-idle-delay-seconds)
       (clutch--refresh-schema-cache conn))))
 
 (defun clutch--refresh-current-schema (&optional quiet force-sync)

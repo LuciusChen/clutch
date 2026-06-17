@@ -975,6 +975,109 @@ connection as live and not busy."
                                                     "demo")
                   :type 'clutch-db-error)))
 
+(defun clutch-db-test--assert-row-identity-skips-lower-priority
+    (conn table pk-columns unique-fn locator-fn locator-value)
+  "Assert CONN row identity stops after PK-COLUMNS for TABLE.
+UNIQUE-FN and LOCATOR-FN are lower-priority candidate builders that should not
+be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
+  (let (unique-called locator-called)
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (context actual-table)
+                 (should (eq context conn))
+                 (should (equal actual-table table))
+                 pk-columns))
+              ((symbol-function unique-fn)
+               (lambda (&rest _args)
+                 (setq unique-called t)
+                 '((:kind unique-key :name "uq_code" :columns ("code")))))
+              ((symbol-function locator-fn)
+               (lambda (&rest _args)
+                 (setq locator-called t)
+                 locator-value)))
+      (should (equal (clutch-db-row-identity-candidates conn table)
+                     `((:kind primary-key
+                        :name "PRIMARY"
+                        :columns ,pk-columns))))
+      (should-not unique-called)
+      (should-not locator-called))))
+
+(ert-deftest clutch-db-test-mysql-row-identity-skips-unique-scan-when-primary-key-exists ()
+  "MySQL row identity should not scan unique indexes after finding a primary key."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :host "localhost" :database "test"))
+        unique-scan-called)
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (context table)
+                 (should (eq context conn))
+                 (should (equal table "demo"))
+                 '("id")))
+              ((symbol-function 'clutch-db-mysql--unique-not-null-identities)
+               (lambda (_context _table)
+                 (setq unique-scan-called t)
+                 '((:kind unique-key :name "uq_code" :columns ("code"))))))
+      (should (equal (clutch-db-row-identity-candidates conn "demo")
+                     '((:kind primary-key :name "PRIMARY" :columns ("id")))))
+      (should-not unique-scan-called))))
+
+(ert-deftest clutch-db-test-mysql-row-identity-uses-unique-scan-without-primary-key ()
+  "MySQL row identity should still use unique indexes when no primary key exists."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :host "localhost" :database "test")))
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (_context _table) nil))
+              ((symbol-function 'clutch-db-mysql--unique-not-null-identities)
+               (lambda (context table)
+                 (should (eq context conn))
+                 (should (equal table "demo"))
+                 '((:kind unique-key :name "uq_code" :columns ("code"))))))
+      (should (equal (clutch-db-row-identity-candidates conn "demo")
+                     '((:kind unique-key :name "uq_code" :columns ("code"))))))))
+
+(ert-deftest clutch-db-test-mysql-unique-identities-use-show-keys ()
+  "MySQL unique row identity lookup should use scoped SHOW KEYS metadata."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :host "localhost" :database "test"))
+        observed-sql)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (context sql)
+                 (should (eq context conn))
+                 (setq observed-sql sql)
+                 (make-mysql-result
+                  :rows '(("demo" 0 "uq_pair" 2 "b" nil nil nil nil "" nil)
+                          ("demo" 0 "uq_pair" 1 "a" nil nil nil nil "" nil)
+                          ("demo" 0 "uq_nullable" 1 "maybe" nil nil nil nil "YES" nil))))))
+      (should (equal (clutch-db-mysql--unique-not-null-identities conn "demo")
+                     '((:kind unique-key :name "uq_pair" :columns ("a" "b")))))
+      (should (string-prefix-p "SHOW KEYS FROM `demo`" observed-sql))
+      (should-not (string-match-p "INFORMATION_SCHEMA" observed-sql)))))
+
+(ert-deftest clutch-db-test-row-identity-skips-lower-priority-when-primary-key-exists ()
+  "SQL row identity should not scan lower-priority candidates after PK."
+  (require 'clutch-db-pg)
+  (require 'clutch-db-sqlite)
+  (require 'clutch-db-jdbc)
+  (dolist (case `((,(clutch-db-test--make-pgcon :database "test")
+                   "demo" ("id")
+                   clutch-db-pg--unique-not-null-identities
+                   clutch-db-pg--ctid-identity
+                   (:kind row-locator :name "ctid"))
+                  (,(make-clutch-db-sqlite-conn :database "test.db")
+                   "demo" ("id")
+                   clutch-db-sqlite--unique-not-null-identities
+                   clutch-db-sqlite--rowid-identity
+                   (:kind row-locator :name "rowid"))
+                  (,(make-clutch-jdbc-conn :conn-id 4
+                                           :params '(:driver oracle))
+                   "DEMO" ("ID")
+                   clutch-jdbc--unique-not-null-identities
+                   clutch-jdbc--rowid-identity
+                   (:kind row-locator :name "ROWID"))))
+    (pcase-let ((`(,conn ,table ,pk-columns ,unique-fn ,locator-fn
+                   ,locator-value)
+                 case))
+      (clutch-db-test--assert-row-identity-skips-lower-priority
+       conn table pk-columns unique-fn locator-fn locator-value))))
+
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
   (skip-unless (require 'clutch-db-sqlite nil t))
@@ -1188,6 +1291,42 @@ connection as live and not busy."
             (should (equal scheduled '(0 nil)))
             (should (equal callback-result expected))))))))
 
+(ert-deftest clutch-db-test-native-schema-refresh-accepts-idle-delay ()
+  "Native schema refresh should honor the caller's idle delay."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "mysql"))
+        callback-result
+        wall-timer
+        idle-timer)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (secs repeat fn &rest args)
+                 (setq wall-timer (list secs repeat))
+                 (apply fn args)
+                 'fake-wall-timer))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (secs repeat fn &rest args)
+                 (setq idle-timer (list secs repeat))
+                 (apply fn args)
+                 'fake-idle-timer))
+              ((symbol-function 'clutch-db-busy-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-list-tables)
+               (lambda (context)
+                 (should (eq context conn))
+                 '("users" "orders"))))
+      (should (eq (clutch-db-refresh-schema-async
+                   conn
+                   (lambda (value) (setq callback-result value))
+                   nil
+                   0.75)
+                  'fake-wall-timer))
+      (should (equal wall-timer '(0.75 nil)))
+      (should (equal idle-timer '(0 nil)))
+      (should (equal callback-result '("users" "orders"))))))
+
 (ert-deftest clutch-db-test-idle-metadata-call-reschedules-while-busy ()
   "Idle metadata calls should not run on a busy connection.
 They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil."
@@ -1218,6 +1357,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                      (setq callback-result columns))
                    nil
                    #'clutch-db-list-columns
+                   nil
                    "users")
                   'fake-timer))
       (should (= scheduled 2))
@@ -1252,6 +1392,7 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                      (setq callback-result columns))
                    nil
                    #'clutch-db-list-columns
+                   nil
                    "users")
                   'fake-timer))
       (should (= (length timers) 1))

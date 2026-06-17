@@ -1582,7 +1582,7 @@ not issue an additional empty-prefix `search-tables' scan here."
   (clutch-db-list-table-entries conn))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
-                                              &optional errback)
+                                              &optional errback _idle-delay)
   "Refresh JDBC table names for CONN asynchronously.
 Call CALLBACK on success or ERRBACK on failure."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
@@ -1869,10 +1869,10 @@ Call CALLBACK on success or ERRBACK on failure."
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table)
   "Return row identity candidates for TABLE on JDBC CONN."
-  (append (cl-call-next-method)
-          (clutch-jdbc--unique-not-null-identities conn table)
-          (when-let* ((rowid (clutch-jdbc--rowid-identity conn)))
-            (list rowid))))
+  (or (cl-call-next-method)
+      (clutch-jdbc--unique-not-null-identities conn table)
+      (when-let* ((rowid (clutch-jdbc--rowid-identity conn)))
+        (list rowid))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table)
   "Return foreign key info for TABLE on JDBC CONN."

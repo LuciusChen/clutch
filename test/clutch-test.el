@@ -1946,7 +1946,7 @@ ROWS defaults to a small three-row sample."
                (lambda (_conn) t))
               ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
               ((symbol-function 'clutch-db-refresh-schema-async)
-               (lambda (_conn callback &optional _errback)
+               (lambda (_conn callback &optional _errback _idle-delay)
                  (funcall callback '("users" "orders"))
                  t)))
       (should (clutch--refresh-schema-cache-async 'fake-conn))
@@ -1971,7 +1971,7 @@ ROWS defaults to a small three-row sample."
                (lambda (_conn) t))
               ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
               ((symbol-function 'clutch-db-refresh-schema-async)
-               (lambda (_conn callback &optional _errback)
+               (lambda (_conn callback &optional _errback _idle-delay)
                  (if first-callback
                      (setq second-callback callback)
                    (setq first-callback callback))
@@ -2010,7 +2010,7 @@ ROWS defaults to a small three-row sample."
                   ((symbol-function 'clutch--invalidate-object-warmup) #'ignore)
                   ((symbol-function 'clutch--schedule-object-warmup) #'ignore)
                   ((symbol-function 'clutch-db-refresh-schema-async)
-                   (lambda (_conn callback &optional _errback)
+                   (lambda (_conn callback &optional _errback _idle-delay)
                      (if first-callback
                          (setq second-callback callback)
                        (setq first-callback callback))
@@ -2167,11 +2167,15 @@ ROWS defaults to a small three-row sample."
 
 (ert-deftest clutch-test-prime-schema-cache-falls-back-to-sync-when-async-unavailable ()
   "Schema priming should fall back to sync refresh when async is unavailable."
-  (let (sync-called async-called)
+  (let ((clutch-schema-refresh-idle-delay-seconds 0.75)
+        sync-called
+        async-called
+        seen-delay)
     (cl-letf (((symbol-function 'clutch-db-eager-schema-refresh-p)
                (lambda (_conn) nil))
               ((symbol-function 'clutch--refresh-schema-cache-async)
-               (lambda (_conn)
+               (lambda (_conn &optional idle-delay)
+                 (setq seen-delay idle-delay)
                  (setq async-called t)
                  nil))
               ((symbol-function 'clutch--refresh-schema-cache)
@@ -2180,6 +2184,7 @@ ROWS defaults to a small three-row sample."
                  t)))
       (clutch--prime-schema-cache 'fake-conn)
       (should async-called)
+      (should (= seen-delay 0.75))
       (should sync-called))))
 
 (ert-deftest clutch-test-refresh-current-schema-falls-back-to-sync-when-background-refresh-is-unavailable ()

@@ -88,6 +88,12 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 
 ### Fixed
 
+- Reduced SQL first-query latency by stopping row-identity metadata lookup after
+  the first usable candidate across MySQL, PostgreSQL, SQLite, and JDBC; MySQL
+  unique-index fallback now uses scoped `SHOW KEYS` metadata.
+- Delayed automatic schema cache refresh after connecting before it enters the
+  idle queue, so native metadata refresh cannot immediately occupy the
+  foreground connection before the first query.
 - Preserved clear boundary errors for unsupported MongoDB helper syntax instead
   of passing unsupported shell-only constructs to an external process.
 - Improved MongoDB metadata buffers so JSON object definitions, collection
