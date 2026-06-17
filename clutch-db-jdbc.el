@@ -1832,40 +1832,36 @@ Call CALLBACK on success or ERRBACK on failure."
 
 (defun clutch-jdbc--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
-  (condition-case _err
-      (let* ((details (clutch-db-column-details conn table))
-             (not-null (make-hash-table :test 'equal))
-             (indexes (clutch-db-list-objects conn 'indexes)))
-        (dolist (detail details)
-          (puthash (plist-get detail :name)
-                   (not (plist-get detail :nullable))
-                   not-null))
-        (cl-loop for index in indexes
-                 when (and (plist-get index :unique)
-                           (string= (or (plist-get index :target-table)
-                                        table)
-                                    table))
-                 for cols = (mapcar
-                             #'clutch-jdbc--index-column-name
-                             (clutch-db-object-details conn index))
-                 when (and cols
-                           (cl-every (lambda (col)
-                                       (gethash col not-null))
-                                     cols))
-                 collect (list :kind 'unique-key
-                               :name (plist-get index :name)
-                               :columns cols)))
-    (clutch-db-error nil)))
+  (let* ((details (clutch-db-column-details conn table))
+         (not-null (make-hash-table :test 'equal))
+         (indexes (clutch-db-list-objects conn 'indexes)))
+    (dolist (detail details)
+      (puthash (plist-get detail :name)
+               (not (plist-get detail :nullable))
+               not-null))
+    (cl-loop for index in indexes
+             when (and (plist-get index :unique)
+                       (string= (or (plist-get index :target-table)
+                                    table)
+                                table))
+             for cols = (mapcar
+                         #'clutch-jdbc--index-column-name
+                         (clutch-db-object-details conn index))
+             when (and cols
+                       (cl-every (lambda (col)
+                                   (gethash col not-null))
+                                 cols))
+             collect (list :kind 'unique-key
+                           :name (plist-get index :name)
+                           :columns cols))))
 
 (defun clutch-jdbc--rowid-identity (conn)
   "Return a JDBC row locator candidate for CONN, or nil."
-  (condition-case _err
-      (when (eq (clutch-jdbc--conn-driver conn) 'oracle)
-        (list :kind 'row-locator
-              :name "ROWID"
-              :select-expressions '("ROWID")
-              :where-sql "ROWID = ?"))
-    (error nil)))
+  (when (eq (clutch-jdbc--conn-driver conn) 'oracle)
+    (list :kind 'row-locator
+          :name "ROWID"
+          :select-expressions '("ROWID")
+          :where-sql "ROWID = ?")))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table)
   "Return row identity candidates for TABLE on JDBC CONN."

@@ -208,6 +208,31 @@ connection as live and not busy."
               (lambda (_conn) t)))
      ,@body))
 
+(defmacro clutch-db-test--with-temp-dir (var prefix &rest body)
+  "Bind VAR to a temporary directory named with PREFIX while running BODY."
+  (declare (indent 2))
+  `(let ((,var (make-temp-file ,prefix t)))
+     (unwind-protect
+         (progn ,@body)
+       (delete-directory ,var t))))
+
+(defmacro clutch-db-test--with-jdbc-temp-dir (var prefix &rest body)
+  "Bind VAR and `clutch-jdbc-agent-dir' to a temporary directory."
+  (declare (indent 2))
+  `(clutch-db-test--with-temp-dir ,var ,prefix
+     (let ((clutch-jdbc-agent-dir ,var))
+       ,@body)))
+
+(defmacro clutch-db-test--with-temp-sqlite (conn-var prefix &rest body)
+  "Bind CONN-VAR to a temporary SQLite database named with PREFIX."
+  (declare (indent 2))
+  `(let* ((db-file (make-temp-file ,prefix nil ".db"))
+          (,conn-var (clutch-db-sqlite-connect (list :database db-file))))
+     (unwind-protect
+         (progn ,@body)
+       (clutch-db-disconnect ,conn-var)
+       (ignore-errors (delete-file db-file)))))
+
 ;;;; Unit tests — connection parameter normalization
 
 (ert-deftest clutch-db-test-normalize-mysql-connect-params-canonicalizes-disabled ()
@@ -975,6 +1000,35 @@ connection as live and not busy."
                                                     "demo")
                   :type 'clutch-db-error)))
 
+(ert-deftest clutch-db-test-row-identity-adapters-surface-metadata-errors ()
+  "Backend row identity metadata lookup failures should not become nil."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (require 'clutch-db-sqlite)
+  (require 'clutch-db-jdbc)
+  (let ((mysql-conn (make-mysql-conn :host "localhost" :database "test"))
+        (pg-conn (clutch-db-test--make-pgcon :database "test"))
+        (sqlite-conn (make-clutch-db-sqlite-conn :database "test.db"
+                                                 :handle 'sqlite-handle))
+        (jdbc-conn (make-clutch-jdbc-conn :conn-id 4
+                                          :params '(:driver oracle))))
+    (dolist (case `((mysql-query mysql-error ,mysql-conn)
+                    (pg-exec pg-error ,pg-conn)
+                    (sqlite-select sqlite-error ,sqlite-conn)))
+      (pcase-let ((`(,fn ,err ,conn) case))
+        (cl-letf (((symbol-function fn)
+                   (lambda (&rest _)
+                     (signal err '("metadata failed")))))
+          (should-error (clutch-db-row-identity-candidates conn "demo")
+                        :type 'clutch-db-error))))
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-db-column-details)
+               (lambda (_conn _table)
+                 (signal 'clutch-db-error '("jdbc metadata failed")))))
+      (should-error (clutch-db-row-identity-candidates jdbc-conn "DEMO")
+                    :type 'clutch-db-error))))
+
 (defun clutch-db-test--assert-row-identity-skips-lower-priority
     (conn table pk-columns unique-fn locator-fn locator-value)
   "Assert CONN row identity stops after PK-COLUMNS for TABLE.
@@ -1083,20 +1137,13 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   (skip-unless (require 'clutch-db-sqlite nil t))
   (skip-unless (and (fboundp 'sqlite-available-p)
                     (sqlite-available-p)))
-  (let* ((db-file (make-temp-file "clutch-sqlite-rowid-" nil ".db"))
-         (conn (clutch-db-sqlite-connect (list :database db-file))))
-    (unwind-protect
-        (progn
-          (clutch-db-query conn "CREATE TABLE demo (name TEXT)")
-          (let ((candidate (car (clutch-db-row-identity-candidates
-                                 conn "demo"))))
-            (should (equal (plist-get candidate :kind) 'row-locator))
-            (should (equal (plist-get candidate :name) "rowid"))
-            (should (equal (plist-get candidate :select-expressions)
-                           '("rowid")))
-            (should (equal (plist-get candidate :where-sql) "rowid = ?"))))
-      (clutch-db-disconnect conn)
-      (ignore-errors (delete-file db-file)))))
+  (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-rowid-"
+    (clutch-db-query conn "CREATE TABLE demo (name TEXT)")
+    (let ((candidate (car (clutch-db-row-identity-candidates conn "demo"))))
+      (should (equal (plist-get candidate :kind) 'row-locator))
+      (should (equal (plist-get candidate :name) "rowid"))
+      (should (equal (plist-get candidate :select-expressions) '("rowid")))
+      (should (equal (plist-get candidate :where-sql) "rowid = ?")))))
 
 (ert-deftest clutch-db-test-sqlite-memory-does-not-create-file ()
   "SQLite :memory: profiles should open an in-memory database."
@@ -1120,24 +1167,16 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   (skip-unless (require 'clutch-db-sqlite nil t))
   (skip-unless (and (fboundp 'sqlite-available-p)
                     (sqlite-available-p)))
-  (let* ((db-file (make-temp-file "clutch-sqlite-returning-" nil ".db"))
-         conn)
-    (unwind-protect
-        (progn
-          (setq conn (clutch-db-sqlite-connect (list :database db-file)))
-          (clutch-db-query conn
-                           "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
-          (let ((result (clutch-db-query
-                         conn
-                         "INSERT INTO demo (name) VALUES ('a') RETURNING id, name")))
-            (should (equal (mapcar (lambda (col) (plist-get col :name))
-                                   (clutch-db-result-columns result))
-                           '("id" "name")))
-            (should (equal (clutch-db-result-rows result) '((1 "a"))))
-            (should-not (clutch-db-result-affected-rows result))))
-      (when conn
-        (clutch-db-disconnect conn))
-      (ignore-errors (delete-file db-file)))))
+  (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-returning-"
+    (clutch-db-query conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
+    (let ((result (clutch-db-query
+                   conn
+                   "INSERT INTO demo (name) VALUES ('a') RETURNING id, name")))
+      (should (equal (mapcar (lambda (col) (plist-get col :name))
+                             (clutch-db-result-columns result))
+                     '("id" "name")))
+      (should (equal (clutch-db-result-rows result) '((1 "a"))))
+      (should-not (clutch-db-result-affected-rows result)))))
 
 (ert-deftest clutch-db-test-jdbc-object-definition-table-uses-oracle-style-identifiers ()
   "Oracle synthesized JDBC DDL should quote only identifiers that need it."
@@ -2716,191 +2755,136 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
-         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
-         (clutch-jdbc-agent-dir tmpdir)
-         (clutch-jdbc-agent-version "0.1.2")
-         (clutch-jdbc-agent-sha256 "deadbeef"))
-    (unwind-protect
-        (progn
-          (with-temp-file jar
-            (insert "not a release jar"))
-          (should-error (clutch-jdbc--validate-agent-jar jar) :type 'user-error))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-agent-"
+    (let ((jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+          (clutch-jdbc-agent-version "0.1.2")
+          (clutch-jdbc-agent-sha256 "deadbeef"))
+      (with-temp-file jar
+        (insert "not a release jar"))
+      (should-error (clutch-jdbc--validate-agent-jar jar) :type 'user-error))))
 
 (ert-deftest clutch-db-test-jdbc-ensure-agent-cleans-stale-jars ()
   "Ensuring the agent should keep only the current versioned jar."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         (clutch-jdbc-agent-version "0.1.2")
-         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
-         (stale-a (expand-file-name "clutch-jdbc-agent-0.1.0.jar" tmpdir))
-         (stale-b (expand-file-name "clutch-jdbc-agent-0.1.1.jar" tmpdir))
-         (clutch-jdbc-agent-sha256 nil))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "drivers" tmpdir) t)
-          (with-temp-file jar
-            (insert "current"))
-          (with-temp-file stale-a
-            (insert "old-a"))
-          (with-temp-file stale-b
-            (insert "old-b"))
-          (clutch-jdbc-ensure-agent)
-          (should (file-exists-p jar))
-          (should-not (file-exists-p stale-a))
-          (should-not (file-exists-p stale-b)))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-agent-"
+    (let* ((clutch-jdbc-agent-version "0.1.2")
+           (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+           (stale-a (expand-file-name "clutch-jdbc-agent-0.1.0.jar" tmpdir))
+           (stale-b (expand-file-name "clutch-jdbc-agent-0.1.1.jar" tmpdir))
+           (clutch-jdbc-agent-sha256 nil))
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file jar
+        (insert "current"))
+      (with-temp-file stale-a
+        (insert "old-a"))
+      (with-temp-file stale-b
+        (insert "old-b"))
+      (clutch-jdbc-ensure-agent)
+      (should (file-exists-p jar))
+      (should-not (file-exists-p stale-a))
+      (should-not (file-exists-p stale-b)))))
 
 (ert-deftest clutch-db-test-jdbc-ensure-agent-allows-custom-jar-when-checksum-disabled ()
   "Checksum verification can be disabled for a local custom jar."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         (clutch-jdbc-agent-version "0.1.2")
-         (clutch-jdbc-agent-sha256 nil)
-         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir)))
-    (unwind-protect
-        (progn
-          (with-temp-file jar
-            (insert "custom build"))
-          (should (clutch-jdbc--agent-jar-valid-p jar))
-          (should (progn (clutch-jdbc--validate-agent-jar jar) t)))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-agent-"
+    (let ((clutch-jdbc-agent-version "0.1.2")
+          (clutch-jdbc-agent-sha256 nil)
+          (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir)))
+      (with-temp-file jar
+        (insert "custom build"))
+      (should (clutch-jdbc--agent-jar-valid-p jar))
+      (should (progn (clutch-jdbc--validate-agent-jar jar) t)))))
 
 (ert-deftest clutch-db-test-jdbc-setup-prerequisites-requires-agent-command ()
   "Missing JDBC agent should instruct the user to run the explicit install command."
-  (let ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
-        (clutch-jdbc-agent-version "0.1.2")
-        (clutch-jdbc-agent-dir nil))
-    (setq clutch-jdbc-agent-dir tmpdir)
-    (unwind-protect
-        (let ((err (should-error (clutch-jdbc--setup-prerequisites 'oracle)
-                                 :type 'user-error)))
-          (should (string-match-p
-                   "Run M-x clutch-jdbc-ensure-agent"
-                   (cadr err))))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-agent-"
+    (let ((clutch-jdbc-agent-version "0.1.2"))
+      (let ((err (should-error (clutch-jdbc--setup-prerequisites 'oracle)
+                               :type 'user-error)))
+        (should (string-match-p
+                 "Run M-x clutch-jdbc-ensure-agent"
+                 (cadr err)))))))
 
 (ert-deftest clutch-db-test-jdbc-setup-prerequisites-points-to-install-driver ()
   "Missing Maven drivers should point users at `clutch-jdbc-install-driver'."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
-         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
-         (clutch-jdbc-agent-dir tmpdir)
-         (clutch-jdbc-agent-version "0.1.2"))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "drivers" tmpdir) t)
-          (with-temp-file jar (insert "placeholder"))
-          (cl-letf (((symbol-function 'clutch-jdbc--agent-jar-valid-p)
-                     (lambda (_jar) t)))
-            (let ((err (should-error
-                        (clutch-jdbc--setup-prerequisites 'sqlserver)
-                        :type 'user-error)))
-              (should (string-match-p
-                       "Run M-x clutch-jdbc-install-driver RET sqlserver"
-                       (cadr err))))))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-agent-"
+    (let ((jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+          (clutch-jdbc-agent-version "0.1.2"))
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file jar (insert "placeholder"))
+      (cl-letf (((symbol-function 'clutch-jdbc--agent-jar-valid-p)
+                 (lambda (_jar) t)))
+        (let ((err (should-error
+                    (clutch-jdbc--setup-prerequisites 'sqlserver)
+                    :type 'user-error)))
+          (should (string-match-p
+                   "Run M-x clutch-jdbc-install-driver RET sqlserver"
+                   (cadr err))))))))
 
 (ert-deftest clutch-db-test-jdbc-setup-prerequisites-reports-manual-driver-url ()
   "Missing manual JDBC drivers should report the download URL and destination."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-agent-" t))
-         (jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
-         (clutch-jdbc-agent-dir tmpdir)
-         (clutch-jdbc-agent-version "0.1.2")
-         (dest (expand-file-name "db2jcc4.jar" (expand-file-name "drivers" tmpdir))))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "drivers" tmpdir) t)
-          (with-temp-file jar (insert "placeholder"))
-          (cl-letf (((symbol-function 'clutch-jdbc--agent-jar-valid-p)
-                     (lambda (_jar) t)))
-            (let ((err (should-error (clutch-jdbc--setup-prerequisites 'db2)
-                                     :type 'user-error)))
-              (should (string-match-p "requires manual download" (cadr err)))
-              (should (string-match-p "ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
-                                      (cadr err)))
-              (should (string-match-p (regexp-quote dest) (cadr err))))))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-agent-"
+    (let* ((jar (expand-file-name "clutch-jdbc-agent-0.1.2.jar" tmpdir))
+           (clutch-jdbc-agent-version "0.1.2")
+           (dest (expand-file-name "db2jcc4.jar" (expand-file-name "drivers" tmpdir))))
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file jar (insert "placeholder"))
+      (cl-letf (((symbol-function 'clutch-jdbc--agent-jar-valid-p)
+                 (lambda (_jar) t)))
+        (let ((err (should-error (clutch-jdbc--setup-prerequisites 'db2)
+                                 :type 'user-error)))
+          (should (string-match-p "requires manual download" (cadr err)))
+          (should (string-match-p "ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
+                                  (cadr err)))
+          (should (string-match-p (regexp-quote dest) (cadr err))))))))
 
 (ert-deftest clutch-db-test-jdbc-install-driver-installs-oracle-i18n-companion ()
   "Installing Oracle JDBC should also install the orai18n companion jar."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         downloaded)
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (_coords dest)
-                     (push (file-name-nondirectory dest) downloaded)
-                     (with-temp-file dest (insert "jar")))))
-          (clutch-jdbc-install-driver 'oracle)
-          (should (member "ojdbc8.jar" downloaded))
-          (should (member "orai18n.jar" downloaded)))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+    (let (downloaded)
+      (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                 (lambda (_coords dest)
+                   (push (file-name-nondirectory dest) downloaded)
+                   (with-temp-file dest (insert "jar")))))
+        (clutch-jdbc-install-driver 'oracle)
+        (should (member "ojdbc8.jar" downloaded))
+        (should (member "orai18n.jar" downloaded))))))
 
 (ert-deftest clutch-db-test-jdbc-install-driver-removes-conflicting-oracle-jar ()
   "Installing an Oracle driver should remove the conflicting Oracle jar."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir))
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (_coords dest)
-                     (with-temp-file dest (insert "jar")))))
-          (make-directory (expand-file-name "drivers" tmpdir) t)
-          (with-temp-file (expand-file-name "drivers/ojdbc11.jar" tmpdir)
-            (insert "jar"))
-          (clutch-jdbc-install-driver 'oracle)
-          (should (file-exists-p (expand-file-name "drivers/ojdbc8.jar" tmpdir)))
-          (should-not (file-exists-p (expand-file-name "drivers/ojdbc11.jar" tmpdir))))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+    (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+               (lambda (_coords dest)
+                 (with-temp-file dest (insert "jar")))))
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file (expand-file-name "drivers/ojdbc11.jar" tmpdir)
+        (insert "jar"))
+      (clutch-jdbc-install-driver 'oracle)
+      (should (file-exists-p (expand-file-name "drivers/ojdbc8.jar" tmpdir)))
+      (should-not (file-exists-p (expand-file-name "drivers/ojdbc11.jar" tmpdir))))))
 
-(ert-deftest clutch-db-test-jdbc-install-driver-uses-sqlserver-jre11-artifact ()
-  "Installing SQL Server JDBC should use the classifier-based Maven artifact."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         requested-coords)
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (coords dest)
-                     (setq requested-coords coords)
-                     (with-temp-file dest (insert "jar")))))
-          (clutch-jdbc-install-driver 'sqlserver)
-          (should (equal requested-coords
-                         "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"))
-          (should (file-exists-p (expand-file-name "drivers/mssql-jdbc.jar" tmpdir))))
-      (delete-directory tmpdir t))))
-
-(ert-deftest clutch-db-test-jdbc-install-driver-uses-duckdb-artifact ()
-  "Installing DuckDB JDBC should use the Maven Central driver artifact."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         requested-coords)
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (coords dest)
-                     (setq requested-coords coords)
-                     (with-temp-file dest (insert "jar")))))
-          (clutch-jdbc-install-driver 'duckdb)
-          (should (equal requested-coords
-                         "org.duckdb:duckdb_jdbc:1.5.3.0"))
-          (should (file-exists-p (expand-file-name "drivers/duckdb_jdbc.jar" tmpdir))))
-      (delete-directory tmpdir t))))
-
-(ert-deftest clutch-db-test-jdbc-install-driver-mongodb-installs-sql-interface-artifact ()
-  "Installing MongoDB JDBC should install the SQL Interface driver artifact."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         requested-coords)
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (coords dest)
-                     (setq requested-coords coords)
-                     (make-directory (file-name-directory dest) t)
-                     (with-temp-file dest (insert "jar")))))
-          (clutch-jdbc-install-driver 'mongodb)
-          (should (equal requested-coords
-                         "org.mongodb:mongodb-jdbc:3.0.6:all"))
-          (should (file-exists-p (expand-file-name "drivers/mongodb-jdbc.jar" tmpdir))))
-      (delete-directory tmpdir t))))
+(ert-deftest clutch-db-test-jdbc-install-driver-uses-maven-artifacts ()
+  "Maven-backed JDBC drivers should request and install expected artifacts."
+  (dolist (case '((sqlserver "drivers/mssql-jdbc.jar"
+                    "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11" equal)
+                  (duckdb "drivers/duckdb_jdbc.jar"
+                   "org.duckdb:duckdb_jdbc:1.5.3.0" equal)
+                  (mongodb "drivers/mongodb-jdbc.jar"
+                   "org.mongodb:mongodb-jdbc:3.0.6:all" equal)
+                  (redshift "drivers/redshift-jdbc42.jar"
+                   "com.amazon.redshift:redshift-jdbc42:" prefix)))
+    (pcase-let ((`(,driver ,jar-path ,expected-coords ,match) case))
+      (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+        (let (requested-coords)
+          (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                     (lambda (coords dest)
+                       (setq requested-coords coords)
+                       (make-directory (file-name-directory dest) t)
+                       (with-temp-file dest (insert "jar")))))
+            (clutch-jdbc-install-driver driver)
+            (pcase match
+              ('equal (should (equal requested-coords expected-coords)))
+              ('prefix (should (string-prefix-p expected-coords requested-coords))))
+            (should (file-exists-p (expand-file-name jar-path tmpdir)))))))))
 
 ;;;; Unit tests — props normalization
 
@@ -3010,21 +2994,6 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
   (let ((conn (make-clutch-jdbc-conn :params '(:driver redshift))))
     (should (equal (clutch-db-display-name conn) "Redshift"))))
 
-(ert-deftest clutch-db-test-jdbc-install-driver-installs-redshift ()
-  "Installing Redshift JDBC should download the redshift-jdbc42 Maven artifact."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         requested-coords)
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (coords dest)
-                     (setq requested-coords coords)
-                     (with-temp-file dest (insert "jar")))))
-          (clutch-jdbc-install-driver 'redshift)
-          (should (string-prefix-p "com.amazon.redshift:redshift-jdbc42:" requested-coords))
-          (should (file-exists-p (expand-file-name "drivers/redshift-jdbc42.jar" tmpdir))))
-      (delete-directory tmpdir t))))
-
 ;;;; Unit tests — ClickHouse driver support
 
 (ert-deftest clutch-db-test-jdbc-build-url-clickhouse ()
@@ -3046,20 +3015,17 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
 
 (ert-deftest clutch-db-test-jdbc-install-driver-installs-clickhouse ()
   "Installing ClickHouse JDBC should download the all-classifier artifact and companions."
-  (let* ((tmpdir (make-temp-file "clutch-jdbc-driver-" t))
-         (clutch-jdbc-agent-dir tmpdir)
-         all-coords)
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
-                   (lambda (coords dest)
-                     (push coords all-coords)
-                     (with-temp-file dest (insert "jar")))))
-          (clutch-jdbc-install-driver 'clickhouse)
-          (should (cl-some (lambda (c) (string-match-p ":all\\'" c)) all-coords))
-          (should (file-exists-p (expand-file-name "drivers/clickhouse-jdbc.jar" tmpdir)))
-          (should (file-exists-p (expand-file-name "drivers/slf4j-api.jar" tmpdir)))
-          (should (file-exists-p (expand-file-name "drivers/slf4j-nop.jar" tmpdir))))
-      (delete-directory tmpdir t))))
+  (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+    (let (all-coords)
+      (cl-letf (((symbol-function 'clutch-jdbc--download-maven-driver)
+                 (lambda (coords dest)
+                   (push coords all-coords)
+                   (with-temp-file dest (insert "jar")))))
+        (clutch-jdbc-install-driver 'clickhouse)
+        (should (cl-some (lambda (c) (string-match-p ":all\\'" c)) all-coords))
+        (should (file-exists-p (expand-file-name "drivers/clickhouse-jdbc.jar" tmpdir)))
+        (should (file-exists-p (expand-file-name "drivers/slf4j-api.jar" tmpdir)))
+        (should (file-exists-p (expand-file-name "drivers/slf4j-nop.jar" tmpdir)))))))
 
 (ert-deftest clutch-db-test-jdbc-download-maven-classifier ()
   "Maven downloader should handle 4-segment coords (with classifier)."

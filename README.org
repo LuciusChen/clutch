@@ -411,56 +411,22 @@ Common entry points:
 
 ** MongoDB Backend
 
-MongoDB is basic native document support through =mongodb.el=.  It connects to
-ordinary MongoDB deployments through =mongodb://...= URLs or structured
-=:host= / =:port= params accepted by =mongodb.el=.  It lists collections,
-samples document field paths for completion and object metadata, maps
-collection indexes into object metadata, and evaluates supported
-MongoDB Shell / MQL helper commands such as
-=db.users.find({active: true}).limit(20)=.
-Collection object actions can show a schema profile, browse documents, show
-collection metadata, show index insight, show collection storage statistics,
-and run a sample explain.  They can also show MongoDB collection validation
-rules when a collection has a validator configured.
-MongoDB result buffers use the shared Clutch result grid for value viewing,
-client-side filtering, aggregate/refine, and CSV/TSV/Org table copy/export.
-SQL-only result actions such as staged SQL edit/insert/delete, SQL
-=WHERE=/=ORDER BY= rewrites, and INSERT/UPDATE SQL copy are hidden for native
-MongoDB results.  Collection results that preserve source document metadata can
-copy MongoDB helper snippets such as =insertOne=, =insertMany=, =replaceOne=,
-=updateOne({ _id }, { $set: ... })=, and =deleteOne=.
-Field metadata samples up to =clutch-mongodb-schema-sample-size= documents and
-reports sampled BSON type summaries, presence, examples, and top scalar values,
-not enforced collection constraints.
-It is basic document support, not a full =mongosh= JavaScript runtime.
-For connection examples, query behavior, metadata mapping, and live tests, see
-[[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
-
-MongoDB SQL Interface is a specialized surface of the same =mongodb= backend.
-Use =:surface sql-interface= only when you have a SQL Interface JDBC endpoint;
-that surface requires the JDBC sidecar and MongoDB JDBC driver jar.
+MongoDB is basic native document support through =mongodb.el=: ordinary MongoDB
+deployments, supported MongoDB Shell / MQL helper commands, and shared
+object/result workflows.  It is not a full =mongosh= JavaScript runtime.
+MongoDB SQL Interface stays on the same =mongodb= backend as
+=:surface sql-interface= and requires the JDBC sidecar plus MongoDB JDBC driver
+jar.  See [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
 
 ** Redis Backend
 
 Redis is basic key/value support through =redis.el=.  It connects to ordinary
-Redis TCP endpoints through structured =:host= / =:port= params and optional
-=:password= / =:user= / =:database= fields.
-
-Redis query buffers use =clutch-redis-mode=.  Commands are line-oriented:
-=C-c C-c= executes the current command line, while region execution remains
-available for explicit selections.  Redis commands are not semicolon-delimited;
-a =;= is treated as command text, not as a statement separator.  Redis results
-use the shared Clutch result grid, with type-aware mappings for common commands
-such as =GET=, =HGETALL=, =LRANGE=, =SMEMBERS=, =ZRANGE ... WITHSCORES=, and
-=SCAN=.
-
-Object browsing lists Redis keys as =KEY= entries.  Browsing a key chooses a
-read command based on its Redis type, and describe buffers show metadata such as
-type, TTL, and existence.
-
-Redis support is intentionally basic.  Clutch does not provide SQL row editing,
-joins, row identity, transaction workflow, pub/sub loops, cluster management, or
-stream consumer workflows for Redis.
+Redis TCP endpoints, uses line-oriented =clutch-redis-mode= command buffers,
+and maps key browsing/type-aware reads into the shared Clutch grid.  Redis
+support is intentionally basic: no SQL row editing, joins, row identity,
+transaction workflow, pub/sub loops, cluster management, or stream consumer
+workflows.  See [[file:docs/backend-support.org][docs/backend-support.org]] and
+[[file:docs/native-backends.md][docs/native-backends.md]] for support boundaries.
 
 ** JDBC Backend
 

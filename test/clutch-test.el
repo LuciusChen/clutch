@@ -2677,6 +2677,65 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (with-current-buffer result-buf
       (clutch-result-edit-cell))))
 
+(defmacro clutch-test--with-edit-cell-result-buffer (spec &rest body)
+  "Bind a result buffer according to SPEC while running BODY.
+SPEC has the form (VAR COLUMNS COLUMN-DEFS ROWS . LOCALS), matching
+`clutch-test--make-edit-cell-result-buffer'."
+  (declare (indent 1))
+  (let ((var (nth 0 spec))
+        (columns (nth 1 spec))
+        (column-defs (nth 2 spec))
+        (rows (nth 3 spec))
+        (locals (nthcdr 4 spec)))
+    `(let ((,var (clutch-test--make-edit-cell-result-buffer
+                  ,columns ,column-defs ,rows ,@locals)))
+       (unwind-protect
+           (progn ,@body)
+         (kill-buffer ,var)))))
+
+(defmacro clutch-test--with-open-edit-cell (edit-var result-spec cell table details
+                                                     &rest body)
+  "Open EDIT-VAR from RESULT-SPEC for CELL on TABLE with DETAILS, then run BODY."
+  (declare (indent 5))
+  (let ((result-var (car result-spec)))
+    `(clutch-test--with-edit-cell-result-buffer ,result-spec
+       (let ((,edit-var (clutch-test--open-edit-cell
+                         ,result-var ,cell ,table ,details)))
+         ,@body))))
+
+(defmacro clutch-test--with-result-edit-buffer (var initial-text &rest body)
+  "Bind VAR to an edit buffer seeded with INITIAL-TEXT while running BODY."
+  (declare (indent 2))
+  `(let ((,var (generate-new-buffer "*clutch-edit-test*")))
+     (unwind-protect
+         (with-current-buffer ,var
+           (insert ,initial-text)
+           (clutch--result-edit-mode 1)
+           ,@body)
+       (kill-buffer ,var))))
+
+(defmacro clutch-test--with-insert-result-buffer (spec &rest body)
+  "Bind an insert result buffer according to SPEC while running BODY.
+SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
+  (declare (indent 1))
+  (let ((var (nth 0 spec))
+        (columns (nth 1 spec))
+        (column-defs (nth 2 spec))
+        (locals (nthcdr 3 spec)))
+    `(let ((,var (generate-new-buffer "*clutch-insert-result*")))
+       (unwind-protect
+           (progn
+             (with-current-buffer ,var
+               (setq-local clutch-connection 'fake-conn
+                           clutch--result-columns ,columns
+                           clutch--result-column-defs ,column-defs)
+               (let ((locals (list ,@locals)))
+                 (while locals
+                   (set (make-local-variable (pop locals))
+                        (pop locals)))))
+             ,@body)
+         (kill-buffer ,var)))))
+
 (ert-deftest clutch-test-edit-pending-insert-reopens-prefilled-insert-buffer ()
   "Editing a ghost insert row should reopen the staged insert with its values."
   (let ((result-buf (generate-new-buffer "*clutch-result*")))
@@ -2702,204 +2761,169 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-edit-cell-shows-metadata-and-completion-hints ()
   "Edit buffer should expose enum metadata and completion affordances."
-  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
-                     '("severity")
-                     '((:name "severity" :type-category text))
-                     '(("low"))
-                     'clutch--row-identity
-                     (clutch-test--primary-row-identity
-                      "shipping_incidents" '("severity") '(0)))))
-    (unwind-protect
-        (let ((buf (clutch-test--open-edit-cell
-                    result-buf
-                    '(0 0 "low")
-                    "shipping_incidents"
-                    (list (list :name "severity"
-                                :type "enum('low','medium','high')")))))
-          (with-current-buffer buf
-            (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
-            (should (string-match-p "M-TAB: complete" (format "%s" header-line-format)))
-            (should (string-match-p "C-c C-n: set NULL" (format "%s" header-line-format)))
-            (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
-            (pcase-let ((`(,beg ,end ,candidates . ,_)
-                         (clutch-result-edit-completion-at-point)))
-              (should (= beg (point-min)))
-              (should (= end (point-max)))
-              (should (equal candidates '("low" "medium" "high"))))))
-      (kill-buffer result-buf))))
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("severity")
+       '((:name "severity" :type-category text))
+       '(("low"))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "shipping_incidents" '("severity") '(0)))
+      '(0 0 "low")
+      "shipping_incidents"
+      (list (list :name "severity" :type "enum('low','medium','high')"))
+    (with-current-buffer buf
+      (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
+      (should (string-match-p "M-TAB: complete" (format "%s" header-line-format)))
+      (should (string-match-p "C-c C-n: set NULL" (format "%s" header-line-format)))
+      (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
+      (pcase-let ((`(,beg ,end ,candidates . ,_)
+                   (clutch-result-edit-completion-at-point)))
+        (should (= beg (point-min)))
+        (should (= end (point-max)))
+        (should (equal candidates '("low" "medium" "high")))))))
 
 (ert-deftest clutch-test-edit-cell-opens-null-state-placeholder ()
   "Editing a NULL cell should show a placeholder while keeping buffer text empty."
-  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
-                     '("id" "note")
-                     '((:name "id" :type-category numeric)
-                       (:name "note" :type-category text))
-                     '((1 nil))
-                     'clutch--row-identity
-                     (clutch-test--primary-row-identity
-                      "shipping_incidents" '("id") '(0)))))
-    (unwind-protect
-        (let ((buf (clutch-test--open-edit-cell
-                    result-buf
-                    '(0 1 nil)
-                    "shipping_incidents"
-                    (list (list :name "note" :type "text")))))
-          (with-current-buffer buf
-            (should clutch-result-edit--null-p)
-            (should (equal (buffer-string) ""))
-            (should (overlayp clutch-result-edit--null-placeholder-overlay))
-            (should (equal
-                     (substring-no-properties
-                      (overlay-get clutch-result-edit--null-placeholder-overlay
-                                   'after-string))
-                     "<null>"))
-            (insert "hello")
-            (should-not clutch-result-edit--null-p)
-            (should-not (overlayp clutch-result-edit--null-placeholder-overlay))
-            (should (equal (buffer-string) "hello"))))
-      (kill-buffer result-buf))))
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("id" "note")
+       '((:name "id" :type-category numeric)
+         (:name "note" :type-category text))
+       '((1 nil))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "shipping_incidents" '("id") '(0)))
+      '(0 1 nil)
+      "shipping_incidents"
+      (list (list :name "note" :type "text"))
+    (with-current-buffer buf
+      (should clutch-result-edit--null-p)
+      (should (equal (buffer-string) ""))
+      (should (overlayp clutch-result-edit--null-placeholder-overlay))
+      (should (equal
+               (substring-no-properties
+                (overlay-get clutch-result-edit--null-placeholder-overlay
+                             'after-string))
+               "<null>"))
+      (insert "hello")
+      (should-not clutch-result-edit--null-p)
+      (should-not (overlayp clutch-result-edit--null-placeholder-overlay))
+      (should (equal (buffer-string) "hello")))))
 
 (ert-deftest clutch-test-edit-cell-errors-clearly-without-row-identity ()
   "Edit entry should fail early when the result is not updateable."
-  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
-                     '("id" "name")
-                     '((:name "id" :type-category numeric)
-                       (:name "name" :type-category text))
-                     '((1 "alice"))
-                     'clutch--result-source-table "users"
-                     'clutch--last-query "SELECT * FROM users")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch--cell-at-point)
-                   (lambda () '(0 1 "alice"))))
-          (with-current-buffer result-buf
-            (let ((err (should-error (clutch-result-edit-cell)
-                                     :type 'user-error)))
-              (should (string-match-p
-                       "Cannot edit cell: no primary, unique, or row locator identity available for table users"
-                       (error-message-string err))))
-            (should-not (get-buffer "*clutch-edit: [0].name*"))))
-      (kill-buffer result-buf))))
+  (clutch-test--with-edit-cell-result-buffer
+      (result-buf
+       '("id" "name")
+       '((:name "id" :type-category numeric)
+         (:name "name" :type-category text))
+       '((1 "alice"))
+       'clutch--result-source-table "users"
+       'clutch--last-query "SELECT * FROM users")
+    (cl-letf (((symbol-function 'clutch--cell-at-point)
+               (lambda () '(0 1 "alice"))))
+      (with-current-buffer result-buf
+        (let ((err (should-error (clutch-result-edit-cell) :type 'user-error)))
+          (should (string-match-p
+                   "Cannot edit cell: no primary, unique, or row locator identity available for table users"
+                   (error-message-string err))))
+        (should-not (get-buffer "*clutch-edit: [0].name*"))))))
 
 (ert-deftest clutch-test-edit-cell-errors-with-row-identity-metadata-error ()
   "Edit entry should report row identity metadata errors."
-  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
-                     '("id" "name")
-                     '((:name "id" :type-category numeric)
-                       (:name "name" :type-category text))
-                     '((1 "alice"))
-                     'clutch--result-source-table "users"
-                     'clutch--row-identity-status 'error
-                     'clutch--row-identity-error-message "metadata failed"
-                     'clutch--last-query "SELECT * FROM users")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch--cell-at-point)
-                   (lambda () '(0 1 "alice"))))
-          (with-current-buffer result-buf
-            (let ((err (should-error (clutch-result-edit-cell)
-                                     :type 'user-error)))
-              (should (string-match-p
-                       "Cannot edit cell: row identity metadata failed for table users: metadata failed"
-                       (error-message-string err))))
-            (should-not (get-buffer "*clutch-edit: [0].name*"))))
-      (kill-buffer result-buf))))
+  (clutch-test--with-edit-cell-result-buffer
+      (result-buf
+       '("id" "name")
+       '((:name "id" :type-category numeric)
+         (:name "name" :type-category text))
+       '((1 "alice"))
+       'clutch--result-source-table "users"
+       'clutch--row-identity-status 'error
+       'clutch--row-identity-error-message "metadata failed"
+       'clutch--last-query "SELECT * FROM users")
+    (cl-letf (((symbol-function 'clutch--cell-at-point)
+               (lambda () '(0 1 "alice"))))
+      (with-current-buffer result-buf
+        (let ((err (should-error (clutch-result-edit-cell) :type 'user-error)))
+          (should (string-match-p
+                   "Cannot edit cell: row identity metadata failed for table users: metadata failed"
+                   (error-message-string err))))
+        (should-not (get-buffer "*clutch-edit: [0].name*"))))))
 
 (ert-deftest clutch-test-edit-cell-shows-temporal-now-hint ()
   "Temporal edit buffers should advertise the shared now shortcut."
-  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
-                     '("opened_at")
-                     '((:name "opened_at" :type-category datetime))
-                     '(("2026-03-10 10:00:00"))
-                     'clutch--row-identity
-                     (clutch-test--primary-row-identity
-                      "shipping_incidents" '("opened_at") '(0)))))
-    (unwind-protect
-        (let ((buf (clutch-test--open-edit-cell
-                    result-buf
-                    '(0 0 "2026-03-10 10:00:00")
-                    "shipping_incidents"
-                    (list (list :name "opened_at" :type "datetime")))))
-          (with-current-buffer buf
-            (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format)))
-            (should (string-match-p (regexp-quote "C-c .: now")
-                                    (format "%s" header-line-format)))))
-      (kill-buffer result-buf))))
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("opened_at")
+       '((:name "opened_at" :type-category datetime))
+       '(("2026-03-10 10:00:00"))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "shipping_incidents" '("opened_at") '(0)))
+      '(0 0 "2026-03-10 10:00:00")
+      "shipping_incidents"
+      (list (list :name "opened_at" :type "datetime"))
+    (with-current-buffer buf
+      (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format)))
+      (should (string-match-p (regexp-quote "C-c .: now")
+                              (format "%s" header-line-format))))))
 
 (ert-deftest clutch-test-edit-cell-opens-json-sub-editor-directly ()
   "JSON cells should jump straight into the JSON sub-editor."
-  (let ((result-buf (clutch-test--make-edit-cell-result-buffer
-                     '("payload")
-                     '((:name "payload" :type-category json))
-                     '(("{\"a\":1}"))
-                     'clutch--row-identity
-                     (clutch-test--primary-row-identity
-                      "shipping_incidents" '("payload") '(0)))))
-    (unwind-protect
-        (let ((buf (clutch-test--open-edit-cell
-                    result-buf
-                    '(0 0 "{\"a\":1}")
-                    "shipping_incidents"
-                    (list (list :name "payload" :type "json")))))
-          (should (string-match-p "\\*clutch-edit-json: payload\\*" (buffer-name buf)))
-          (with-current-buffer buf
-            (should (equal clutch-result-edit-json--field-name "payload"))
-            (should (string-match-p "JSON field payload"
-                                    (format "%s" header-line-format)))
-            (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                           "{\n  \"a\": 1\n}"))))
-      (kill-buffer result-buf))))
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("payload")
+       '((:name "payload" :type-category json))
+       '(("{\"a\":1}"))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "shipping_incidents" '("payload") '(0)))
+      '(0 0 "{\"a\":1}")
+      "shipping_incidents"
+      (list (list :name "payload" :type "json"))
+    (should (string-match-p "\\*clutch-edit-json: payload\\*" (buffer-name buf)))
+    (with-current-buffer buf
+      (should (equal clutch-result-edit-json--field-name "payload"))
+      (should (string-match-p "JSON field payload" (format "%s" header-line-format)))
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     "{\n  \"a\": 1\n}")))))
 
 (ert-deftest clutch-test-edit-cell-json-object-opens-sub-editor-with-json-text ()
   "Parsed JSON objects should reach the JSON sub-editor as JSON text."
   (skip-unless (fboundp 'json-serialize))
-  (let* ((payload (make-hash-table :test 'equal))
-         (result-buf (clutch-test--make-edit-cell-result-buffer
-                      '("payload")
-                      '((:name "payload" :type-category json))
-                      (list (list payload))
-                      'clutch--row-identity
-                      (clutch-test--primary-row-identity
-                       "shipping_incidents" '("payload") '(0)))))
+  (let ((payload (make-hash-table :test 'equal)))
     (puthash "test" t payload)
     (puthash "data" (vector 1 2) payload)
-    (unwind-protect
-        (let ((buf (clutch-test--open-edit-cell
-                    result-buf
-                    (list 0 0 payload)
-                    "shipping_incidents"
-                    (list (list :name "payload" :type "json")))))
-          (with-current-buffer buf
-            (should-not (string-match-p "#s(hash-table"
-                                        (buffer-substring-no-properties
-                                         (point-min) (point-max))))
-            (should (string-match-p "\"test\": true"
-                                    (buffer-substring-no-properties
-                                     (point-min) (point-max))))
-            (should (string-match-p "\"data\": \\["
-                                    (buffer-substring-no-properties
-                                     (point-min) (point-max))))))
-      (kill-buffer result-buf))))
+    (clutch-test--with-open-edit-cell buf
+        (result-buf
+         '("payload")
+         '((:name "payload" :type-category json))
+         (list (list payload))
+         'clutch--row-identity
+         (clutch-test--primary-row-identity "shipping_incidents" '("payload") '(0)))
+        (list 0 0 payload)
+        "shipping_incidents"
+        (list (list :name "payload" :type "json"))
+      (with-current-buffer buf
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should-not (string-match-p "#s(hash-table" text))
+          (should (string-match-p "\"test\": true" text))
+          (should (string-match-p "\"data\": \\[" text)))))))
 
 (ert-deftest clutch-test-edit-cell-json-string-opens-sub-editor-with-json-text ()
   "Parsed JSON string scalars should stay valid JSON in the sub-editor."
   (skip-unless (fboundp 'json-serialize))
-  (let* ((payload "hello")
-         (result-buf (clutch-test--make-edit-cell-result-buffer
-                      '("payload")
-                      '((:name "payload" :type-category json))
-                      (list (list payload))
-                      'clutch--row-identity
-                      (clutch-test--primary-row-identity
-                       "shipping_incidents" '("payload") '(0)))))
-    (unwind-protect
-        (let ((buf (clutch-test--open-edit-cell
-                    result-buf
-                    (list 0 0 payload)
-                    "shipping_incidents"
-                    (list (list :name "payload" :type "json")))))
-          (with-current-buffer buf
-            (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                           "\"hello\""))))
-      (kill-buffer result-buf))))
+  (let ((payload "hello"))
+    (clutch-test--with-open-edit-cell buf
+        (result-buf
+         '("payload")
+         '((:name "payload" :type-category json))
+         (list (list payload))
+         'clutch--row-identity
+         (clutch-test--primary-row-identity "shipping_incidents" '("payload") '(0)))
+        (list 0 0 payload)
+        "shipping_incidents"
+        (list (list :name "payload" :type "json"))
+      (with-current-buffer buf
+        (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                       "\"hello\""))))))
 
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
   "The edit-buffer current-time helper should replace the current value with now."
@@ -3880,109 +3904,77 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-edit-finish-validates-numeric-before-stage ()
   "Edit staging should reject invalid numeric values and keep the edit buffer open."
-  (let ((edit-buf (generate-new-buffer "*clutch-edit-test*"))
-        staged-value
-        quit-called
-        err)
-    (unwind-protect
-        (with-current-buffer edit-buf
-          (insert "xx")
-          (clutch--result-edit-mode 1)
-          (setq-local clutch-result-edit--column-name "impact_score"
-                      clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
-                      clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
-                      clutch-result--edit-callback (lambda (value) (setq staged-value value)))
-          (cl-letf (((symbol-function 'quit-window)
-                     (lambda (&rest _args) (setq quit-called t))))
-            (setq err
-                  (should-error (clutch-result-edit-finish) :type 'user-error))
-            (should (string-match-p "Field impact_score expects a numeric value"
-                                    (error-message-string err)))
-            (should-not quit-called)
-            (should-not staged-value)
-            (should (buffer-live-p edit-buf))))
-      (kill-buffer edit-buf))))
+  (let (staged-value quit-called err)
+    (clutch-test--with-result-edit-buffer edit-buf "xx"
+      (setq-local clutch-result-edit--column-name "impact_score"
+                  clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
+                  clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
+                  clutch-result--edit-callback (lambda (value) (setq staged-value value)))
+      (cl-letf (((symbol-function 'quit-window)
+                 (lambda (&rest _args) (setq quit-called t))))
+        (setq err (should-error (clutch-result-edit-finish) :type 'user-error))
+        (should (string-match-p "Field impact_score expects a numeric value"
+                                (error-message-string err)))
+        (should-not quit-called)
+        (should-not staged-value)
+        (should (buffer-live-p edit-buf))))))
 
 (ert-deftest clutch-test-edit-finish-validates-enum-before-stage ()
   "Edit staging should reject invalid enum values locally."
-  (let ((edit-buf (generate-new-buffer "*clutch-edit-test*"))
-        staged-value
-        err)
-    (unwind-protect
-        (with-current-buffer edit-buf
-          (insert "urgent")
-          (clutch--result-edit-mode 1)
-          (setq-local clutch-result-edit--column-name "severity"
-                      clutch-result-edit--column-def '(:name "severity" :type-category text)
-                      clutch-result-edit--column-detail
-                      '(:name "severity" :type "enum('low','medium','high')")
-                      clutch-result--edit-callback (lambda (value) (setq staged-value value)))
-          (setq err
-                (should-error (clutch-result-edit-finish) :type 'user-error))
-          (should (string-match-p "Field severity must be one of: low, medium, high"
-                                  (error-message-string err)))
-          (should-not staged-value))
-      (kill-buffer edit-buf))))
+  (let (staged-value err)
+    (clutch-test--with-result-edit-buffer _edit-buf "urgent"
+      (setq-local clutch-result-edit--column-name "severity"
+                  clutch-result-edit--column-def '(:name "severity" :type-category text)
+                  clutch-result-edit--column-detail
+                  '(:name "severity" :type "enum('low','medium','high')")
+                  clutch-result--edit-callback (lambda (value) (setq staged-value value)))
+      (setq err (should-error (clutch-result-edit-finish) :type 'user-error))
+      (should (string-match-p "Field severity must be one of: low, medium, high"
+                              (error-message-string err)))
+      (should-not staged-value))))
 
 (ert-deftest clutch-test-edit-finish-validates-json-before-stage ()
   "Inline JSON edits should validate before staging."
-  (let ((edit-buf (generate-new-buffer "*clutch-edit-test*"))
-        staged-value
-        err)
-    (unwind-protect
-        (with-current-buffer edit-buf
-          (insert "{oops}")
-          (clutch--result-edit-mode 1)
-          (setq-local clutch-result-edit--column-name "payload"
-                      clutch-result-edit--column-def '(:name "payload" :type-category json)
-                      clutch-result-edit--column-detail '(:name "payload" :type "json")
-                      clutch-result--edit-callback (lambda (value) (setq staged-value value)))
-          (setq err
-                (should-error (clutch-result-edit-finish) :type 'user-error))
-          (should (string-match-p "Field payload expects valid JSON"
-                                  (error-message-string err)))
-          (should-not staged-value))
-      (kill-buffer edit-buf))))
+  (let (staged-value err)
+    (clutch-test--with-result-edit-buffer _edit-buf "{oops}"
+      (setq-local clutch-result-edit--column-name "payload"
+                  clutch-result-edit--column-def '(:name "payload" :type-category json)
+                  clutch-result-edit--column-detail '(:name "payload" :type "json")
+                  clutch-result--edit-callback (lambda (value) (setq staged-value value)))
+      (setq err (should-error (clutch-result-edit-finish) :type 'user-error))
+      (should (string-match-p "Field payload expects valid JSON"
+                              (error-message-string err)))
+      (should-not staged-value))))
 
 (ert-deftest clutch-test-edit-set-null-stages-nil ()
   "The explicit NULL command should stage a nil value."
-  (let ((edit-buf (generate-new-buffer "*clutch-edit-test*"))
-        (staged-value :not-called)
+  (let ((staged-value :not-called)
         quit-called)
-    (unwind-protect
-        (with-current-buffer edit-buf
-          (insert "12.5")
-          (clutch--result-edit-mode 1)
-          (setq-local clutch-result-edit--column-name "impact_score"
-                      clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
-                      clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
-                      clutch-result--edit-callback
-                      (lambda (value) (setq staged-value (list value))))
-          (cl-letf (((symbol-function 'quit-window)
-                     (lambda (&rest _args) (setq quit-called t))))
-            (clutch-result-edit-set-null)
-            (clutch-result-edit-finish)
-            (should quit-called)
-            (should (equal staged-value '(nil)))))
-      (kill-buffer edit-buf))))
+    (clutch-test--with-result-edit-buffer _edit-buf "12.5"
+      (setq-local clutch-result-edit--column-name "impact_score"
+                  clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
+                  clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
+                  clutch-result--edit-callback
+                  (lambda (value) (setq staged-value (list value))))
+      (cl-letf (((symbol-function 'quit-window)
+                 (lambda (&rest _args) (setq quit-called t))))
+        (clutch-result-edit-set-null)
+        (clutch-result-edit-finish)
+        (should quit-called)
+        (should (equal staged-value '(nil)))))))
 
 (ert-deftest clutch-test-edit-finish-preserves-literal-null-string ()
   "Typing NULL should stage literal text, not database NULL."
-  (let ((edit-buf (generate-new-buffer "*clutch-edit-test*"))
-        staged-value)
-    (unwind-protect
-        (with-current-buffer edit-buf
-          (insert "NULL")
-          (clutch--result-edit-mode 1)
-          (setq-local clutch-result-edit--column-name "note"
-                      clutch-result-edit--column-def '(:name "note" :type-category text)
-                      clutch-result-edit--column-detail '(:name "note" :type "text")
-                      clutch-result--edit-callback (lambda (value) (setq staged-value value)))
-          (cl-letf (((symbol-function 'quit-window)
-                     (lambda (&rest _args))))
-            (clutch-result-edit-finish)
-            (should (equal staged-value "NULL"))))
-      (kill-buffer edit-buf))))
+  (let (staged-value)
+    (clutch-test--with-result-edit-buffer _edit-buf "NULL"
+      (setq-local clutch-result-edit--column-name "note"
+                  clutch-result-edit--column-def '(:name "note" :type-category text)
+                  clutch-result-edit--column-detail '(:name "note" :type "text")
+                  clutch-result--edit-callback (lambda (value) (setq staged-value value)))
+      (cl-letf (((symbol-function 'quit-window)
+                 (lambda (&rest _args))))
+        (clutch-result-edit-finish)
+        (should (equal staged-value "NULL"))))))
 
 (ert-deftest clutch-test-edit-finish-errors-when-result-buffer-is-dead ()
   "Finishing an edit should fail cleanly when the parent result buffer is gone."
@@ -4023,94 +4015,49 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (when (buffer-live-p edit-buf)
         (kill-buffer edit-buf)))))
 
-(ert-deftest clutch-test-insert-commit-validates-enum-bool-and-json-before-stage ()
-  "Insert staging should reject invalid enum/bool/json values locally."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
-    (unwind-protect
-        (let (fields-after)
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("severity" "is_ship_blocked" "postmortem")
-                        clutch--result-column-defs '((:name "severity" :type-category text)
-                                                     (:name "is_ship_blocked" :type-category numeric)
-                                                     (:name "postmortem" :type-category json))
-                        clutch--pending-inserts nil))
-          (with-temp-buffer
-            (insert "severity: nope\nis_ship_blocked: 7\npostmortem: not-json\n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
-            (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "severity" :type "enum('low','medium')")
-                               (list :name "is_ship_blocked" :type "tinyint(1)")
-                               (list :name "postmortem" :type "json")))))
-              (should-error (clutch-result-insert-commit) :type 'user-error)))
-          (setq fields-after
-                (with-current-buffer result-buf clutch--pending-inserts))
-          (should (buffer-live-p result-buf))
-          (should-not fields-after))
-      (kill-buffer result-buf))))
-
-(ert-deftest clutch-test-insert-commit-validates-temporal-before-stage ()
-  "Insert staging should reject invalid date/time/datetime values locally."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
-    (unwind-protect
-        (let (fields-after err-msg)
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("opened_at" "due_on" "starts_at")
-                        clutch--result-column-defs '((:name "opened_at" :type-category datetime)
-                                                     (:name "due_on" :type-category date)
-                                                     (:name "starts_at" :type-category time))
-                        clutch--pending-inserts nil))
-          (with-temp-buffer
-            (insert "opened_at: ss\ndue_on: 2026-02-30\nstarts_at: 25:61\n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
-            (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "opened_at" :type "datetime")
-                               (list :name "due_on" :type "date")
-                               (list :name "starts_at" :type "time")))))
-              (setq err-msg
-                    (should-error (clutch-result-insert-commit)
-                                  :type 'user-error))
-              (should (string-match-p "Field opened_at expects YYYY-MM-DD HH:MM\\[:SS\\]"
-                                      (error-message-string err-msg)))))
-          (setq fields-after
-                (with-current-buffer result-buf clutch--pending-inserts))
-          (should-not fields-after))
-      (kill-buffer result-buf))))
-
-(ert-deftest clutch-test-insert-commit-validates-numeric-before-stage ()
-  "Insert staging should reject invalid numeric values locally."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
-    (unwind-protect
-        (let (fields-after err-msg)
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("impact_score")
-                        clutch--result-column-defs '((:name "impact_score" :type-category numeric))
-                        clutch--pending-inserts nil))
-          (with-temp-buffer
-            (insert "impact_score: xx\n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
-            (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "impact_score" :type "decimal(5,1)")))))
-              (setq err-msg
-                    (should-error (clutch-result-insert-commit)
-                                  :type 'user-error))
-              (should (string-match-p "Field impact_score expects a numeric value"
-                                      (error-message-string err-msg)))))
-          (setq fields-after
-                (with-current-buffer result-buf clutch--pending-inserts))
-          (should-not fields-after))
-      (kill-buffer result-buf))))
+(ert-deftest clutch-test-insert-commit-validates-fields-before-stage ()
+  "Insert staging should reject invalid enum, bool, JSON, temporal, and numeric values."
+  (dolist (case
+           `((("severity" "is_ship_blocked" "postmortem")
+              ((:name "severity" :type-category text)
+               (:name "is_ship_blocked" :type-category numeric)
+               (:name "postmortem" :type-category json))
+              "severity: nope\nis_ship_blocked: 7\npostmortem: not-json\n"
+              ((:name "severity" :type "enum('low','medium')")
+               (:name "is_ship_blocked" :type "tinyint(1)")
+               (:name "postmortem" :type "json"))
+              nil)
+             (("opened_at" "due_on" "starts_at")
+              ((:name "opened_at" :type-category datetime)
+               (:name "due_on" :type-category date)
+               (:name "starts_at" :type-category time))
+              "opened_at: ss\ndue_on: 2026-02-30\nstarts_at: 25:61\n"
+              ((:name "opened_at" :type "datetime")
+               (:name "due_on" :type "date")
+               (:name "starts_at" :type "time"))
+              "Field opened_at expects YYYY-MM-DD HH:MM\\[:SS\\]")
+             (("impact_score")
+              ((:name "impact_score" :type-category numeric))
+              "impact_score: xx\n"
+              ((:name "impact_score" :type "decimal(5,1)"))
+              "Field impact_score expects a numeric value")))
+    (pcase-let ((`(,columns ,column-defs ,input ,details ,expected-message) case))
+      (clutch-test--with-insert-result-buffer
+          (result-buf columns column-defs 'clutch--pending-inserts nil)
+        (with-temp-buffer
+          (insert input)
+          (clutch-result-insert-mode 1)
+          (setq-local clutch-result-insert--result-buffer result-buf
+                      clutch-result-insert--table "shipping_incidents")
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table) details)))
+            (let ((err (should-error (clutch-result-insert-commit)
+                                     :type 'user-error)))
+              (when expected-message
+                (should (string-match-p expected-message
+                                        (error-message-string err)))))))
+        (should (buffer-live-p result-buf))
+        (should-not (with-current-buffer result-buf clutch--pending-inserts))))))
 
 ;;;; Edit — JSON sub-editor
 

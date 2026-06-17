@@ -99,9 +99,9 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 - Improved MongoDB metadata buffers so JSON object definitions, collection
   profiles, stats, validation, and explain output are rendered as formatted JSON
   instead of table-style describe output.
-- Fixed metadata error visibility around row identity / foreign-key metadata so
-  backend metadata failures are surfaced instead of being indistinguishable
-  from absent metadata.
+- Fixed row-identity metadata error visibility so MySQL, PostgreSQL, SQLite,
+  and JDBC adapter lookup failures are surfaced instead of being
+  indistinguishable from absent metadata.
 - Improved object action availability and presentation so MongoDB-only actions
   are enabled only for MongoDB collection entries and do not leak into SQL
   object buffers.

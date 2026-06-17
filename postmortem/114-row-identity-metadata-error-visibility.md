@@ -47,3 +47,11 @@ failure:
 
 This keeps transient metadata failures visible without blocking read-only query
 results.
+
+## Adapter Follow-up
+
+A later audit found adapter helpers could still turn row-identity metadata
+lookup failures into nil before query preparation saw them.  MySQL,
+PostgreSQL, SQLite, and JDBC candidate lookups now translate backend/protocol
+errors to `clutch-db-error`; optional describe/comment/FK swallow sites remain
+separate design debt.

@@ -650,56 +650,54 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
 
 (cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table)
   "Return primary key column names for TABLE on MySQL CONN."
-  (condition-case _err
-      (let* ((result (mysql-query
-                      conn
-                      (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
-                              (mysql-escape-identifier table))))
-             (rows (mysql-result-rows result)))
-        (mapcar (lambda (row)
-                  (pcase-let ((`(,_ ,_ ,_ ,_ ,name) row))
-                    (if (stringp name) name (format "%s" name))))
-                rows))
-    (mysql-error nil)))
+  (clutch-db--translate-library-error mysql-error
+    (let* ((result (mysql-query
+                    conn
+                    (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
+                            (mysql-escape-identifier table))))
+           (rows (mysql-result-rows result)))
+      (mapcar (lambda (row)
+                (pcase-let ((`(,_ ,_ ,_ ,_ ,name) row))
+                  (if (stringp name) name (format "%s" name))))
+              rows))))
 
 (defun clutch-db-mysql--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
-  (condition-case _err
-      (let ((result
-             (mysql-query
-              conn
-              (format "SHOW KEYS FROM %s WHERE Non_unique = 0 AND Key_name <> 'PRIMARY'"
-                      (mysql-escape-identifier table))))
-            (indexes (make-hash-table :test 'equal))
-            (invalid (make-hash-table :test 'equal))
-            order)
-        (dolist (row (mysql-result-rows result))
-          (pcase-let ((`(,_table ,_non-unique ,name ,seq ,column
-                         ,_collation ,_cardinality ,_sub-part ,_packed
-                         ,nullable . ,_)
-                       row))
-            (when (and (stringp name) (not (gethash name indexes)))
-              (push name order))
-            (if (and (stringp name)
-                     (stringp column)
-                     (or (null nullable)
-                         (string-empty-p (format "%s" nullable))))
-                (puthash name
-                         (cons (cons (or seq 0) column)
-                               (gethash name indexes))
-                         indexes)
-              (puthash name t invalid))))
-        (cl-loop for name in (sort (nreverse order) #'string-collate-lessp)
-                 unless (gethash name invalid)
-                 collect (list
-                          :kind 'unique-key
-                          :name name
-                          :columns (mapcar
-                                    #'cdr
-                                    (sort (gethash name indexes)
-                                          (lambda (a b)
-                                            (< (car a) (car b))))))))
-    (mysql-error nil)))
+  (clutch-db--translate-library-error mysql-error
+    (let ((result
+           (mysql-query
+            conn
+            (format "SHOW KEYS FROM %s WHERE Non_unique = 0 AND Key_name <> 'PRIMARY'"
+                    (mysql-escape-identifier table))))
+          (indexes (make-hash-table :test 'equal))
+          (invalid (make-hash-table :test 'equal))
+          order)
+      (dolist (row (mysql-result-rows result))
+        (pcase-let ((`(,_table ,_non-unique ,name ,seq ,column
+                       ,_collation ,_cardinality ,_sub-part ,_packed
+                       ,nullable . ,_)
+                     row))
+          (when (and (stringp name) (not (gethash name indexes)))
+            (push name order))
+          (if (and (stringp name)
+                   (stringp column)
+                   (or (null nullable)
+                       (string-empty-p (format "%s" nullable))))
+              (puthash name
+                       (cons (cons (or seq 0) column)
+                             (gethash name indexes))
+                       indexes)
+            (puthash name t invalid))))
+      (cl-loop for name in (sort (nreverse order) #'string-collate-lessp)
+               unless (gethash name invalid)
+               collect (list
+                        :kind 'unique-key
+                        :name name
+                        :columns (mapcar
+                                  #'cdr
+                                  (sort (gethash name indexes)
+                                        (lambda (a b)
+                                          (< (car a) (car b))))))))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn mysql-conn) table)
   "Return row identity candidates for TABLE on MySQL CONN."

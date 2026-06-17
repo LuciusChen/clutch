@@ -1053,22 +1053,21 @@ WHERE c.relname = %s AND n.nspname = current_schema()"
 
 (cl-defmethod clutch-db-primary-key-columns ((conn pgcon) table)
   "Return primary key column names for TABLE on PostgreSQL CONN."
-  (condition-case _err
-      (let ((result (pg-exec
-                     conn
-                     (format "SELECT a.attname
+  (clutch-db--translate-library-error pg-error
+    (let ((result (pg-exec
+                   conn
+                   (format "SELECT a.attname
 FROM pg_index i
 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
 WHERE i.indrelid = %s::regclass AND i.indisprimary
 ORDER BY array_position(i.indkey, a.attnum)"
-                             (pg-escape-literal table)))))
-        (mapcar #'car (clutch-db-pg--rows result)))
-    (pg-error nil)))
+                           (pg-escape-literal table)))))
+      (mapcar #'car (clutch-db-pg--rows result)))))
 
 (defun clutch-db-pg--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
-  (condition-case _err
-      (let* ((sql (format "SELECT idx.relname,
+  (clutch-db--translate-library-error pg-error
+    (let* ((sql (format "SELECT idx.relname,
        string_agg(a.attname, E'\\x1f' ORDER BY keys.ord) AS columns
 FROM pg_index i
 JOIN pg_class idx ON idx.oid = i.indexrelid
@@ -1082,32 +1081,30 @@ WHERE i.indrelid = %s::regclass
 GROUP BY idx.relname
 HAVING bool_and(a.attnotnull)
 ORDER BY idx.relname"
-                          (pg-escape-literal table)))
-             (result (pg-exec conn sql)))
-        (mapcar (lambda (row)
-                  (pcase-let ((`(,name ,columns) row))
-                    (list :kind 'unique-key
-                          :name name
-                          :columns (split-string columns "\x1f" t))))
-                (clutch-db-pg--rows result)))
-    (pg-error nil)))
+                        (pg-escape-literal table)))
+           (result (pg-exec conn sql)))
+      (mapcar (lambda (row)
+                (pcase-let ((`(,name ,columns) row))
+                  (list :kind 'unique-key
+                        :name name
+                        :columns (split-string columns "\x1f" t))))
+              (clutch-db-pg--rows result)))))
 
 (defun clutch-db-pg--ctid-identity (conn table)
   "Return a CTID row locator candidate for TABLE on CONN, or nil."
-  (condition-case _err
-      (let* ((sql (format "SELECT c.relkind::text
+  (clutch-db--translate-library-error pg-error
+    (let* ((sql (format "SELECT c.relkind::text
 FROM pg_class c
 WHERE c.oid = %s::regclass"
-                          (pg-escape-literal table)))
-             (result (pg-exec conn sql))
-             (relkind (car (car (clutch-db-pg--rows result)))))
-        (when (or (equal relkind "r")
-                  (equal relkind ?r))
-          (list :kind 'row-locator
-                :name "ctid"
-                :select-expressions '("ctid::text")
-                :where-sql "ctid = ?::tid")))
-    (pg-error nil)))
+                        (pg-escape-literal table)))
+           (result (pg-exec conn sql))
+           (relkind (car (car (clutch-db-pg--rows result)))))
+      (when (or (equal relkind "r")
+                (equal relkind ?r))
+        (list :kind 'row-locator
+              :name "ctid"
+              :select-expressions '("ctid::text")
+              :where-sql "ctid = ?::tid")))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn pgcon) table)
   "Return row identity candidates for TABLE on PostgreSQL CONN."
