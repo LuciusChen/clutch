@@ -307,6 +307,7 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 (ert-deftest clutch-test-value-placeholder-keeps-xml-text-and-detects-blob ()
   "Grid placeholders should keep XML readable and compactly mark BLOB values."
   (should-not (clutch--value-placeholder "{\"a\":1}" '(:type-category json)))
+  (should-not (clutch--value-placeholder "{\"a\":1}" '(:type-category blob)))
   (should-not (clutch--value-placeholder "<root/>" '(:type-category text)))
   (should-not (clutch--value-placeholder "<root/>" '(:type-category blob)))
   (should (equal (clutch--value-placeholder (unibyte-string #x00 #x01)
@@ -486,6 +487,15 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
          (columns '((:name "payload" :type-category blob)))
          (widths (clutch--compute-column-widths col-names rows columns)))
     (should (= (aref widths 0) 10))))
+
+(ert-deftest clutch-test-compute-column-widths-shows-structured-blob-text ()
+  "Structured text in BLOB columns should size like displayable text."
+  (let* ((clutch-column-width-max 30)
+         (col-names '("payload"))
+         (rows '(("{\"a\":1,\"b\":2}")))
+         (columns '((:name "payload" :type-category blob)))
+         (widths (clutch--compute-column-widths col-names rows columns)))
+    (should (= (aref widths 0) (string-width "{\"a\":1,\"b\":2}")))))
 
 (ert-deftest clutch-test-visible-columns-renders-all-result-columns ()
   "The result buffer should render every result column into one table."
@@ -1739,6 +1749,16 @@ ROWS defaults to a small three-row sample."
             18 '(:name "payload" :type-category json) nil)))
     (should (string-suffix-p "…" s))
     (should-not (string-match-p "<JSON>" s))
+    (should-not (get-text-property 0 'face s))))
+
+(ert-deftest clutch-test-cell-display-content-truncates-json-blob-as-text ()
+  "JSON text in BLOB cells should show a JSON prefix, not a BLOB placeholder."
+  (let ((s (clutch--cell-display-content
+            "{\"status\":\"paid\",\"total\":128.5}"
+            18 '(:name "payload" :type-category blob) nil)))
+    (should (string-prefix-p "{\"status\"" s))
+    (should (string-suffix-p "…" s))
+    (should-not (string-match-p "<BLOB>" s))
     (should-not (get-text-property 0 'face s))))
 
 (ert-deftest clutch-test-cell-display-content-highlights-short-xml ()

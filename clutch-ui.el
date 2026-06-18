@@ -462,12 +462,18 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
                  (string-match-p "\\`<[^>]+/>\\s-*\\'" body)
                (string-match-p (format "</%s\\s-*>" (regexp-quote tag)) body)))))))
 
+(defun clutch--blob-text-display-value-p (val)
+  "Return non-nil when blob VAL should be displayed as structured text."
+  (and (stringp val)
+       (or (clutch--json-like-string-p val)
+           (clutch--xml-like-string-p val))))
+
 (defun clutch--value-placeholder (val col-def)
   "Return compact placeholder text for VAL/COL-DEF in result grid."
   (let ((cat (plist-get col-def :type-category)))
     (cond
      ((and (eq cat 'blob)
-           (not (clutch--xml-like-string-p val)))
+           (not (clutch--blob-text-display-value-p val)))
       "<BLOB>")
      (t nil))))
 
@@ -492,7 +498,10 @@ Returns a vector of integers."
          (sample (seq-take rows 50)))
     (dotimes (i ncols)
       (if (and (eq (plist-get (nth i column-defs) :type-category) 'blob)
-               (<= max-w clutch-column-width-max))
+               (<= max-w clutch-column-width-max)
+               (not (seq-some (lambda (row)
+                                (clutch--blob-text-display-value-p (nth i row)))
+                              sample)))
           (aset widths i 10)
         (let ((header-w (string-width (nth i col-names)))
               (data-w 0))

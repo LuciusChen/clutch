@@ -103,6 +103,8 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 - Updated the bundled JDBC agent pin to 0.2.6. JDBC metadata requests no longer
   block foreground execution, and small UTF-8/GB18030 JSON/XML BLOB values can
   render through the normal text/JSON/XML cell display path.
+- Fixed result-grid rendering for JDBC JSON text stored in BLOB columns, so the
+  cell shows a compact JSON prefix with `…` instead of falling back to `<BLOB>`.
 - Preserved clear boundary errors for unsupported MongoDB helper syntax instead
   of passing unsupported shell-only constructs to an external process.
 - Improved MongoDB metadata buffers so JSON object definitions, collection
