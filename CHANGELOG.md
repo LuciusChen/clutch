@@ -75,8 +75,8 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 - Updated JSON result-cell display to match a DataGrip-like rule:
   short JSON is shown inline with lightweight token highlighting, while long
   JSON shows a compact prefix ending in `…` and remains unhighlighted.
-- Kept BLOB cells compact with `<BLOB>` placeholders to avoid displaying raw
-  binary content in the shared result grid.
+- Kept binary BLOB cells compact with `<BLOB>` placeholders, while allowing
+  small JDBC JSON/XML text BLOBs to use the normal compact text display path.
 - Reworked live workflow test backend selection around a shared capability
   table so SQL-native and JDBC workflow coverage no longer depends on scattered
   hard-coded backend lists.
@@ -98,6 +98,11 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
   cancelling and draining the timed-out server query; when recovery fails, close
   the connection instead of letting later UI metadata requests reuse an
   unsynchronized protocol stream.
+- Deferred automatic JDBC schema refresh until the configured idle window, so
+  Oracle/JDBC metadata preheat does not start immediately after connecting.
+- Updated the bundled JDBC agent pin to 0.2.6. JDBC metadata requests no longer
+  block foreground execution, and small UTF-8/GB18030 JSON/XML BLOB values can
+  render through the normal text/JSON/XML cell display path.
 - Preserved clear boundary errors for unsupported MongoDB helper syntax instead
   of passing unsupported shell-only constructs to an external process.
 - Improved MongoDB metadata buffers so JSON object definitions, collection

@@ -1219,7 +1219,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                      :params `(:driver oracle :user "scott"
                                                :rpc-timeout ,clutch-jdbc-rpc-timeout-seconds)))
         callback-result)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-jdbc--rpc-async)
                (lambda (_op _params callback &optional errback _timeout-seconds _conn)
                  (should-not errback)
                  (funcall callback '(:cursor-id nil
@@ -1258,12 +1259,38 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                      :params '(:driver oracle :user "scott"
                                                :rpc-timeout 7)))
         captured-timeout)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-jdbc--rpc-async)
                (lambda (_op _params _callback &optional _errback timeout-seconds _conn)
                  (setq captured-timeout timeout-seconds)
                  42)))
       (should (clutch-db-refresh-schema-async conn #'ignore))
       (should (= captured-timeout 7)))))
+
+(ert-deftest clutch-db-test-jdbc-refresh-schema-async-respects-idle-delay ()
+  "Automatic JDBC schema refresh should wait for idle before sending RPC."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :process 'fake-proc
+                                     :params '(:driver oracle :user "scott"
+                                               :rpc-timeout 7)))
+        sent
+        timer-fn
+        timer-delay)
+    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (secs _repeat fn &rest _args)
+                 (setq timer-delay secs
+                       timer-fn fn)
+                 'fake-idle-timer))
+              ((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (&rest _args)
+                 (setq sent t)
+                 42)))
+      (should (clutch-db-refresh-schema-async conn #'ignore nil 0.75))
+      (should (equal timer-delay 0.75))
+      (should-not sent)
+      (funcall timer-fn)
+      (should sent))))
 
 (ert-deftest clutch-db-test-native-async-schedules-idle-call ()
   "Native metadata async methods should share the idle scheduling policy."

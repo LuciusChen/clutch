@@ -53,13 +53,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.5"
+(defcustom clutch-jdbc-agent-version "0.2.6"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "93752197c241261477e9dc9b4a476c51c7ee9a40ac4fc893cc72e0ef43fceab5"
+  "75c75ab8d43d918a62ee869a7647c00068862974a235d0bc82069616d5d0add2"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1077,6 +1077,13 @@ Emacs RPC timeout."
   (ignore conn)
   (clutch-jdbc--entry-type= entry "TABLE"))
 
+(defun clutch-jdbc--table-entry-names (conn entries)
+  "Return table names from ENTRIES visible as table-like objects for CONN."
+  (mapcar (lambda (entry) (plist-get entry :name))
+          (seq-filter (lambda (entry)
+                        (clutch-jdbc--table-like-entry-p conn entry))
+                      entries)))
+
 (defun clutch-jdbc--clickhouse-simple-identifier-p (name)
   "Return non-nil when NAME is a bare ClickHouse identifier."
   (and (stringp name)
@@ -1513,8 +1520,7 @@ For Oracle, defaults the schema filter to the connected username to avoid
 returning tables from SYS/SYSTEM and other visible schemas.  ClickHouse uses
 system.tables because its JDBC metadata does not reliably enumerate the
 current database."
-  (mapcar (lambda (entry) (plist-get entry :name))
-          (clutch-db-list-table-entries conn)))
+  (clutch-jdbc--table-entry-names conn (clutch-db-list-table-entries conn)))
 
 (defun clutch-jdbc--clickhouse-table-entries (conn)
   "Return ClickHouse table entries for CONN from system.tables."
@@ -1582,25 +1588,32 @@ not issue an additional empty-prefix `search-tables' scan here."
   (clutch-db-list-table-entries conn))
 
 (cl-defmethod clutch-db-refresh-schema-async ((conn clutch-jdbc-conn) callback
-                                              &optional errback _idle-delay)
+                                              &optional errback idle-delay)
   "Refresh JDBC table names for CONN asynchronously.
-Call CALLBACK on success or ERRBACK on failure."
-  (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
-    (clutch-jdbc--rpc-async
-     "get-tables"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       ,@(clutch-jdbc--metadata-scope-params conn))
-     (lambda (result)
-       (when callback
-         (funcall callback
-                  (mapcar (lambda (entry) (plist-get entry :name))
-                          (seq-filter (lambda (entry)
-                                        (clutch-jdbc--table-like-entry-p
-                                         conn entry))
-                                      (clutch-jdbc--collect-table-entries conn result))))))
-     errback
-     rpc-timeout
-     conn)
+Call CALLBACK on success or ERRBACK on failure.  When IDLE-DELAY is
+positive, wait for that many seconds of Emacs idle time before starting
+the metadata request."
+  (cl-labels
+      ((start ()
+         (if (clutch-db-live-p conn)
+             (clutch-jdbc--rpc-async
+              "get-tables"
+              `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                ,@(clutch-jdbc--metadata-scope-params conn))
+              (lambda (result)
+                (when callback
+                  (funcall callback
+                           (clutch-jdbc--table-entry-names
+                            conn (clutch-jdbc--collect-table-entries
+                                  conn result)))))
+              errback
+              (clutch-jdbc--conn-rpc-timeout conn)
+              conn)
+           (when errback
+             (funcall errback "Connection closed")))))
+    (if (and idle-delay (> idle-delay 0))
+        (run-with-idle-timer idle-delay nil #'start)
+      (start))
     t))
 
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
