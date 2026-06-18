@@ -845,8 +845,7 @@ started, nil when unsupported.")
   "Schedule metadata FN for CONN on the main thread once Emacs is idle.
 CALLBACK receives the result of calling FN with CONN and ARGS.
 ERRBACK receives an error-message string when the work fails.
-INITIAL-DELAY, when positive, is the minimum wall-clock delay before the first
-idle attempt."
+INITIAL-DELAY, when positive, is the idle delay before the first attempt."
   (cl-labels
       ((run ()
          (if (clutch-db-live-p conn)
@@ -861,11 +860,7 @@ idle attempt."
                     (funcall errback (error-message-string err))))))
            (when errback
              (funcall errback "Connection closed")))))
-    (if (and initial-delay (> initial-delay 0))
-        (run-at-time initial-delay nil
-                     (lambda ()
-                       (run-with-idle-timer 0 nil #'run)))
-      (run-with-idle-timer 0 nil #'run))))
+    (run-with-idle-timer (or initial-delay 0) nil #'run)))
 
 ;; Query
 

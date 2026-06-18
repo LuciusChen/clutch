@@ -408,12 +408,10 @@ background object discovery starts."
   :group 'clutch)
 
 (defcustom clutch-schema-refresh-idle-delay-seconds 0.5
-  "Minimum delay before automatic schema cache refresh after connect.
-After this wall-clock delay, Clutch waits for Emacs to become idle before
-running background schema refresh.  A small non-zero delay keeps the first
-query responsive for native backends whose schema refresh runs on the
-foreground connection.  Manual schema refresh commands still start
-immediately."
+  "Idle delay before automatic schema cache refresh after connect.
+A small non-zero delay keeps the first query responsive for native backends
+whose schema refresh runs on the foreground connection.  Manual schema
+refresh commands still start immediately."
   :type 'number
   :group 'clutch)
 

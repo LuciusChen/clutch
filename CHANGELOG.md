@@ -91,9 +91,13 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 - Reduced SQL first-query latency by stopping row-identity metadata lookup after
   the first usable candidate across MySQL, PostgreSQL, SQLite, and JDBC; MySQL
   unique-index fallback now uses scoped `SHOW KEYS` metadata.
-- Delayed automatic schema cache refresh after connecting before it enters the
-  idle queue, so native metadata refresh cannot immediately occupy the
-  foreground connection before the first query.
+- Delayed automatic schema cache refresh after connecting until Emacs has been
+  idle for the configured delay, so native metadata refresh is less likely to
+  occupy the foreground connection before the first query.
+- Recover native MySQL connections after a client-side query read timeout by
+  cancelling and draining the timed-out server query; when recovery fails, close
+  the connection instead of letting later UI metadata requests reuse an
+  unsynchronized protocol stream.
 - Preserved clear boundary errors for unsupported MongoDB helper syntax instead
   of passing unsupported shell-only constructs to an external process.
 - Improved MongoDB metadata buffers so JSON object definitions, collection

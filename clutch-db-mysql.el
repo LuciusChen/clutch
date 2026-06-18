@@ -116,6 +116,22 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 (defvar clutch-db-mysql--set-read-idle-timeout-function nil
   "Function used to update a mysql.el connection read-idle-timeout.")
 
+(defun clutch-db-mysql--timeout-error-message (err recovered)
+  "Return a user-facing timeout message for ERR.
+RECOVERED is non-nil when the MySQL wire connection was resynchronized."
+  (concat (error-message-string err)
+          (if recovered
+              "; interrupted running query and restored MySQL connection"
+            "; disconnected MySQL connection because timeout recovery failed")))
+
+(defun clutch-db-mysql--handle-query-timeout (conn err)
+  "Recover or close CONN after MySQL query timeout ERR, then signal error."
+  (let ((recovered (clutch-db-interrupt-query conn)))
+    (unless recovered
+      (ignore-errors (mysql-disconnect conn)))
+    (signal 'clutch-db-error
+            (list (clutch-db-mysql--timeout-error-message err recovered)))))
+
 (defun clutch-db-mysql--ensure-client-api ()
   "Ensure mysql.el is available and this adapter installed its methods."
   (unless (require 'mysql nil t)
@@ -337,8 +353,13 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
 
 (cl-defmethod clutch-db-query ((conn mysql-conn) sql)
   "Execute SQL on MySQL CONN, returning a `clutch-db-result'."
-  (clutch-db--translate-library-error mysql-error
-    (clutch-db-mysql--wrap-result (mysql-query conn sql))))
+  (condition-case err
+      (clutch-db-mysql--wrap-result (mysql-query conn sql))
+    (mysql-timeout
+     (clutch-db-mysql--handle-query-timeout conn err))
+    (mysql-error
+     (signal 'clutch-db-error
+             (list (error-message-string err))))))
 
 (defun clutch-db-mysql--parse-help-text (text)
   "Parse a MySQL HELP description TEXT into a (:sig SIG :desc DESC) plist.

@@ -1267,6 +1267,8 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
   "Record ERR for SQL on CONNECTION and abort execution from SOURCE-BUFFER.
 ELAPSED, when non-nil, is the failed execution duration in seconds."
   (clutch--show-execution-error source-buffer connection sql err elapsed)
+  (unless (clutch--connection-alive-p connection)
+    (clutch--abandon-query-connection connection))
   (throw 'clutch--execution-aborted nil))
 
 (defun clutch--execute-select (sql connection &optional result-context)

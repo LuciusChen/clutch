@@ -1336,14 +1336,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
                                :user "root" :database "mysql"))
         callback-result
-        wall-timer
         idle-timer)
-    (cl-letf (((symbol-function 'run-at-time)
-               (lambda (secs repeat fn &rest args)
-                 (setq wall-timer (list secs repeat))
-                 (apply fn args)
-                 'fake-wall-timer))
-              ((symbol-function 'run-with-idle-timer)
+    (cl-letf (((symbol-function 'run-with-idle-timer)
                (lambda (secs repeat fn &rest args)
                  (setq idle-timer (list secs repeat))
                  (apply fn args)
@@ -1361,9 +1355,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                    (lambda (value) (setq callback-result value))
                    nil
                    0.75)
-                  'fake-wall-timer))
-      (should (equal wall-timer '(0.75 nil)))
-      (should (equal idle-timer '(0 nil)))
+                  'fake-idle-timer))
+      (should (equal idle-timer '(0.75 nil)))
       (should (equal callback-result '("users" "orders"))))))
 
 (ert-deftest clutch-db-test-idle-metadata-call-reschedules-while-busy ()
@@ -3973,6 +3966,65 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
       (should disconnected)
       (should (= (mysql-conn-read-idle-timeout conn) 30)))))
 
+(ert-deftest clutch-db-test-mysql-query-timeout-interrupts-and-keeps-connection ()
+  "MySQL query timeout should cancel the server query when recovery succeeds."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "test"))
+        interrupted
+        disconnected
+        message)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql)
+                 (signal 'mysql-timeout
+                         '("Timed out waiting for 4 bytes"))))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq interrupted t)
+                 t))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (_conn)
+                 (setq disconnected t))))
+      (condition-case err
+          (clutch-db-query conn "SELECT SLEEP(60)")
+        (clutch-db-error
+         (setq message (error-message-string err))))
+      (should interrupted)
+      (should-not disconnected)
+      (should (string-match-p "restored MySQL connection" message)))))
+
+(ert-deftest clutch-db-test-mysql-query-timeout-disconnects-when-recovery-fails ()
+  "MySQL query timeout should close the connection when cancel recovery fails."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "test"))
+        interrupted
+        disconnected
+        message)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql)
+                 (signal 'mysql-timeout
+                         '("Timed out waiting for 4 bytes"))))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq interrupted t)
+                 nil))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq disconnected t))))
+      (condition-case err
+          (clutch-db-query conn "SELECT SLEEP(60)")
+        (clutch-db-error
+         (setq message (error-message-string err))))
+      (should interrupted)
+      (should disconnected)
+      (should (string-match-p "timeout recovery failed" message)))))
+
 (ert-deftest clutch-db-test-pg-interrupt-query-returns-t-after-cancel ()
   "PostgreSQL interrupt should report success when cancel completes."
   (require 'clutch-db-pg)
@@ -4228,6 +4280,25 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
               (quit nil)
               (error nil)))
           (ignore-errors (clutch-db-interrupt-query conn)))))))
+
+(ert-deftest clutch-db-test-mysql-live-timeout-recovers-connection ()
+  :tags '(:db-live :mysql-live)
+  "MySQL read timeout should resynchronize the session before reuse."
+  (clutch-db-test--with-mysql conn
+    (let ((clutch-db-mysql-cancel-timeout-seconds 2)
+          (old-timeout (mysql-conn-read-idle-timeout conn))
+          message)
+      (unwind-protect
+          (progn
+            (clutch-db-mysql--set-read-idle-timeout conn 0.2)
+            (condition-case err
+                (clutch-db-query conn "SELECT SLEEP(5)")
+              (clutch-db-error
+               (setq message (error-message-string err))))
+            (should (string-match-p "restored MySQL connection" message))
+            (let ((result (clutch-db-query conn "SELECT 1 AS n")))
+              (should (= (caar (clutch-db-result-rows result)) 1))))
+        (clutch-db-mysql--set-read-idle-timeout conn old-timeout)))))
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   :tags '(:db-live :mysql-live)
