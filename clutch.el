@@ -342,7 +342,7 @@ window; an existing result window is reused at its current height."
   :type 'natnum
   :group 'clutch)
 
-(defcustom clutch-column-width-step 5
+(defcustom clutch-column-width-step 2
   "Step size for widening/narrowing columns with +/-."
   :type 'natnum
   :group 'clutch)

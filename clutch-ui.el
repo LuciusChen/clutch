@@ -25,6 +25,8 @@
 (defvar clutch--cell-generated-placeholder)
 (defvar-local clutch--column-widths nil
   "Vector of display widths for each result column.")
+(defvar-local clutch--column-width-refresh-timer nil
+  "Idle timer used to coalesce repeated column-width redraws.")
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
 (defvar clutch--dml-result)
@@ -91,6 +93,9 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
 
 (defconst clutch--null-cell-display-text "<null>"
   "Display text for database NULL values in result cells.")
+
+(defconst clutch--column-width-refresh-delay 0.08
+  "Seconds before applying a throttled column-width redraw.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-display-name-from-params
@@ -446,13 +451,9 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
     (truncate-string-to-width text width nil nil
                               (and (>= width 1) "…"))))
 
-(defun clutch--display-piece-for-char (char)
-  "Return the single-line display piece for CHAR."
-  (if (= char ?\n) "↵" (char-to-string char)))
-
-(defun clutch--cell-display-prefix (text width)
-  "Return (DISPLAY . TRUNCATED) for TEXT shown within WIDTH.
-Newlines are rendered as `↵'.  Long strings are scanned only until
+(defun clutch--cell-visible-prefix (text width)
+  "Return (DISPLAY . TRUNCATED) for TEXT rendered in cell WIDTH.
+Newlines are shown as `↵'.  Long strings are scanned only until
 the visible prefix is known."
   (let ((limit (max 0 width))
         (used 0)
@@ -461,7 +462,8 @@ the visible prefix is known."
         parts
         truncated)
     (while (and (< pos len) (not truncated))
-      (let* ((piece (clutch--display-piece-for-char (aref text pos)))
+      (let* ((char (aref text pos))
+             (piece (if (= char ?\n) "↵" (char-to-string char)))
              (piece-width (string-width piece)))
         (if (> (+ used piece-width) limit)
             (setq truncated t)
@@ -469,27 +471,14 @@ the visible prefix is known."
           (setq used (+ used piece-width)
                 pos (1+ pos)))))
     (if (and (not truncated) (= pos len))
-        (cons (mapconcat #'identity (nreverse parts) "") nil)
-      (let* ((shown (mapconcat #'identity (nreverse parts) ""))
-             (prefix (if (>= width 1)
-                         (truncate-string-to-width shown (1- width) nil nil "")
-                       "")))
-        (cons (if (>= width 1) (concat prefix "…") "")
-              t)))))
-
-(defun clutch--display-width-capped (text cap)
-  "Return display width of TEXT, stopping once CAP is reached.
-Newlines count as the visible `↵' marker used in result cells."
-  (let ((limit (max 0 cap))
-        (width 0)
-        (pos 0)
-        (len (length text)))
-    (while (and (< pos len) (< width limit))
-      (setq width (+ width
-                     (string-width
-                      (clutch--display-piece-for-char (aref text pos))))
-            pos (1+ pos)))
-    (min width limit)))
+        (cons (string-join (nreverse parts) "") nil)
+      (cons (if (>= width 1)
+                (concat (truncate-string-to-width
+                         (string-join (nreverse parts) "")
+                         (1- width) nil nil "")
+                        "…")
+              "")
+            t))))
 
 (defun clutch--xml-like-string-p (val)
   "Return non-nil when string VAL appears to contain XML text.
@@ -552,9 +541,7 @@ Returns a vector of integers."
               (data-w 0))
           (dolist (row sample)
             (let ((formatted (clutch--format-value (nth i row))))
-              (setq data-w
-                    (max data-w
-                         (clutch--display-width-capped formatted max-w)))))
+              (setq data-w (max data-w (string-width formatted)))))
           (aset widths i (max 5 (min max-w (max header-w data-w)))))))
     widths))
 
@@ -985,12 +972,15 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
                                    (not edited)
                                    (clutch--cell-placeholder-value display-val)))
          (display (and (not custom)
-                       (clutch--cell-display-prefix
-                        (cond
-                         (special-placeholder)
-                         ((null display-val) clutch--null-cell-display-text)
-                         (t (clutch--format-value display-val)))
-                        w)))
+                       (cond
+                        (special-placeholder
+                         (cons special-placeholder nil))
+                        ((null display-val)
+                         (cons clutch--null-cell-display-text nil))
+                        (t
+                         (clutch--cell-visible-prefix
+                          (clutch--format-value display-val)
+                          w)))))
          (s (car-safe display))
          (value-truncated (cdr-safe display))
          (placeholder (and value-truncated
@@ -1776,7 +1766,9 @@ Rebuilds `header-line-format' with the active column highlighted.
 Skips work for scroll commands that do not move point."
   (when (and clutch--column-widths
              (not (memq this-command
-                        '(scroll-down-line scroll-up-line
+                        '(clutch-result-widen-column
+                          clutch-result-narrow-column
+                          scroll-down-line scroll-up-line
                           scroll-down scroll-up
                           scroll-down-command scroll-up-command
                           mwheel-scroll))))
@@ -2011,6 +2003,9 @@ Falls back to the same row (any column), then point-min."
   "Re-render the current result table after column-width recalculation.
 Preserve cursor position (row + column) and the top visible row."
   (when clutch--column-widths
+    (when (timerp clutch--column-width-refresh-timer)
+      (cancel-timer clutch--column-width-refresh-timer)
+      (setq clutch--column-width-refresh-timer nil))
     (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                           (clutch--row-idx-at-line)))
            (save-cidx (get-text-property (point) 'clutch-col-idx))
@@ -2037,6 +2032,24 @@ Preserve cursor position (row + column) and the top visible row."
                                       (< save-top-ridx (length clutch--row-start-positions))
                                       (aref clutch--row-start-positions save-top-ridx))))
               (set-window-start win top-pos))))))))
+
+(defun clutch--run-column-width-refresh (buffer)
+  "Apply a pending coalesced column-width redraw in BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq clutch--column-width-refresh-timer nil)
+      (when (derived-mode-p 'clutch-result-mode)
+        (clutch--refresh-display)))))
+
+(defun clutch--schedule-column-width-refresh ()
+  "Schedule a throttled redraw for column-width changes."
+  (unless (timerp clutch--column-width-refresh-timer)
+    (let ((buffer (current-buffer)))
+      (setq clutch--column-width-refresh-timer
+            (run-at-time clutch--column-width-refresh-delay
+                         nil
+                         #'clutch--run-column-width-refresh
+                         buffer)))))
 
 (defun clutch--window-size-change (frame)
   "Handle window resizing for clutch display buffers in FRAME."
@@ -2066,6 +2079,9 @@ IGNORE-BUFFER is excluded from liveness checks."
 
 (defun clutch--result-buffer-cleanup ()
   "Cleanup hook state when a result buffer is being removed."
+  (when (timerp clutch--column-width-refresh-timer)
+    (cancel-timer clutch--column-width-refresh-timer)
+    (setq clutch--column-width-refresh-timer nil))
   (clutch--disable-window-size-hook-if-unused (current-buffer)))
 
 (provide 'clutch-ui)

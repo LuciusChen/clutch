@@ -146,6 +146,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--message-literal "clutch-ui" (value))
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
+(declare-function clutch--schedule-column-width-refresh "clutch-ui" ())
 (declare-function clutch--remember-query-error
                   "clutch-query"
                   (buffer connection op sql err &optional context diag))
@@ -2811,7 +2812,7 @@ after paging."
       (progn
         (cl-incf (aref clutch--column-widths cidx)
                  clutch-column-width-step)
-        (clutch--refresh-display))
+        (clutch--schedule-column-width-refresh))
     (user-error "No column at point")))
 
 ;;;###autoload
@@ -2822,7 +2823,7 @@ after paging."
       (let ((new-w (max 5 (- (aref clutch--column-widths cidx)
                               clutch-column-width-step))))
         (aset clutch--column-widths cidx new-w)
-        (clutch--refresh-display))
+        (clutch--schedule-column-width-refresh))
     (user-error "No column at point")))
 
 ;;;; Fullscreen toggle

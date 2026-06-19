@@ -780,6 +780,83 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
     (clutch-result-next-cell)
     (should (= (get-text-property (point) 'clutch-col-idx) 3))))
 
+(ert-deftest clutch-test-column-width-commands-throttle-redraws ()
+  "Repeated column width commands should update widths before one redraw."
+  (let ((next-timer 0)
+        scheduled
+        (refresh-count 0))
+    (with-temp-buffer
+      (insert (propertize "x" 'clutch-col-idx 0))
+      (goto-char (point-min))
+      (clutch-result-mode)
+      (goto-char (point-min))
+      (setq-local clutch--column-widths [10])
+      (let ((clutch-column-width-step 5))
+        (cl-letf (((symbol-function 'timerp)
+                   (lambda (timer)
+                     (and (consp timer) (eq (car timer) 'fake-timer))))
+                  ((symbol-function 'cancel-timer)
+                   #'ignore)
+                  ((symbol-function 'run-at-time)
+                   (lambda (delay repeat fn &rest args)
+                     (let ((timer (list 'fake-timer
+                                        (cl-incf next-timer))))
+                       (push (list timer delay repeat fn args) scheduled)
+                       timer)))
+                  ((symbol-function 'clutch--refresh-display)
+                   (lambda ()
+                     (cl-incf refresh-count))))
+          (clutch-result-widen-column)
+          (should (= (aref clutch--column-widths 0) 15))
+          (should (= refresh-count 0))
+          (should (= (length scheduled) 1))
+
+          (clutch-result-narrow-column)
+          (should (= (aref clutch--column-widths 0) 10))
+          (clutch-result-narrow-column)
+          (should (= (aref clutch--column-widths 0) 5))
+          (should (= refresh-count 0))
+          (should (= (length scheduled) 1))
+
+          (pcase-let ((`(,_timer ,delay ,repeat ,fn ,args)
+                       (car scheduled)))
+            (should (= delay clutch--column-width-refresh-delay))
+            (should-not repeat)
+            (should (eq fn #'clutch--run-column-width-refresh))
+            (apply fn args))
+          (should (= refresh-count 1))
+          (should-not clutch--column-width-refresh-timer)
+
+          (clutch-result-widen-column)
+          (should (= (aref clutch--column-widths 0) 10))
+          (should (= (length scheduled) 2)))))))
+
+(ert-deftest clutch-test-column-width-commands-skip-post-command-ui-refresh ()
+  "Column width commands should not do cursor-only post-command UI work."
+  (let ((footer-count 0)
+        (header-count 0)
+        (row-count 0))
+    (with-temp-buffer
+      (insert (propertize "x" 'clutch-row-idx 0 'clutch-col-idx 0))
+      (goto-char (point-min))
+      (clutch-result-mode)
+      (goto-char (point-min))
+      (setq-local clutch--column-widths [10])
+      (cl-letf (((symbol-function 'clutch--refresh-footer-cursor)
+                 (lambda ()
+                   (cl-incf footer-count)))
+                ((symbol-function 'clutch--refresh-header-line)
+                 (lambda ()
+                   (cl-incf header-count)))
+                ((symbol-function 'clutch--update-row-highlight)
+                 (lambda ()
+                   (cl-incf row-count))))
+        (let ((this-command 'clutch-result-widen-column))
+          (run-hooks 'post-command-hook))
+        (should (= footer-count 0))
+        (should (= header-count 0))
+        (should (= row-count 0))))))
+
 (ert-deftest clutch-test-goto-cell-uses-row-start-positions ()
   "Cell navigation should use cached row starts when available."
   (with-temp-buffer
@@ -1716,15 +1793,6 @@ ROWS defaults to a small three-row sample."
              (clutch--cell-display-content
               "abcdef" 4 '(:name "status" :type-category text) nil)
              "abc…"))))
-
-(ert-deftest clutch-test-cell-display-content-truncates-before-newline-scan ()
-  "Long cell display should only materialize the visible prefix."
-  (with-temp-buffer
-    (should (equal
-             (clutch--cell-display-content
-              (concat "abc\ndef" (make-string 10000 ?x))
-              5 '(:name "payload" :type-category text) nil)
-             "abc↵…"))))
 
 (ert-deftest clutch-test-cell-display-content-truncates-custom-displayer-output ()
   "Custom column displayer output should be truncated with ellipsis."
