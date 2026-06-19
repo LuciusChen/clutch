@@ -446,6 +446,51 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
     (truncate-string-to-width text width nil nil
                               (and (>= width 1) "…"))))
 
+(defun clutch--display-piece-for-char (char)
+  "Return the single-line display piece for CHAR."
+  (if (= char ?\n) "↵" (char-to-string char)))
+
+(defun clutch--cell-display-prefix (text width)
+  "Return (DISPLAY . TRUNCATED) for TEXT shown within WIDTH.
+Newlines are rendered as `↵'.  Long strings are scanned only until
+the visible prefix is known."
+  (let ((limit (max 0 width))
+        (used 0)
+        (pos 0)
+        (len (length text))
+        parts
+        truncated)
+    (while (and (< pos len) (not truncated))
+      (let* ((piece (clutch--display-piece-for-char (aref text pos)))
+             (piece-width (string-width piece)))
+        (if (> (+ used piece-width) limit)
+            (setq truncated t)
+          (push piece parts)
+          (setq used (+ used piece-width)
+                pos (1+ pos)))))
+    (if (and (not truncated) (= pos len))
+        (cons (mapconcat #'identity (nreverse parts) "") nil)
+      (let* ((shown (mapconcat #'identity (nreverse parts) ""))
+             (prefix (if (>= width 1)
+                         (truncate-string-to-width shown (1- width) nil nil "")
+                       "")))
+        (cons (if (>= width 1) (concat prefix "…") "")
+              t)))))
+
+(defun clutch--display-width-capped (text cap)
+  "Return display width of TEXT, stopping once CAP is reached.
+Newlines count as the visible `↵' marker used in result cells."
+  (let ((limit (max 0 cap))
+        (width 0)
+        (pos 0)
+        (len (length text)))
+    (while (and (< pos len) (< width limit))
+      (setq width (+ width
+                     (string-width
+                      (clutch--display-piece-for-char (aref text pos))))
+            pos (1+ pos)))
+    (min width limit)))
+
 (defun clutch--xml-like-string-p (val)
   "Return non-nil when string VAL appears to contain XML text.
 Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
@@ -507,7 +552,9 @@ Returns a vector of integers."
               (data-w 0))
           (dolist (row sample)
             (let ((formatted (clutch--format-value (nth i row))))
-              (setq data-w (max data-w (string-width formatted)))))
+              (setq data-w
+                    (max data-w
+                         (clutch--display-width-capped formatted max-w)))))
           (aset widths i (max 5 (min max-w (max header-w data-w)))))))
     widths))
 
@@ -937,19 +984,24 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
          (special-placeholder (and (not custom)
                                    (not edited)
                                    (clutch--cell-placeholder-value display-val)))
-         (s (and (not custom)
-                 (cond
-                  (special-placeholder)
-                  ((null display-val) clutch--null-cell-display-text)
-                  (t (replace-regexp-in-string "\n" "↵"
-                                               (clutch--format-value display-val))))))
-         (placeholder (and (not custom)
+         (display (and (not custom)
+                       (clutch--cell-display-prefix
+                        (cond
+                         (special-placeholder)
+                         ((null display-val) clutch--null-cell-display-text)
+                         (t (clutch--format-value display-val)))
+                        w)))
+         (s (car-safe display))
+         (value-truncated (cdr-safe display))
+         (placeholder (and value-truncated
+                           (not custom)
                            (not edited)
                            (not special-placeholder)
-                           (> (string-width s) w)
                            (clutch--value-placeholder display-val col-def)))
          (formatted (or custom placeholder s))
-         (truncated (> (string-width formatted) w)))
+         (truncated (if (or custom placeholder)
+                        (> (string-width formatted) w)
+                      value-truncated)))
     (cond
      ((and json-cell (not truncated))
       (clutch--json-display-highlight formatted))
@@ -958,7 +1010,9 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
            (<= (length formatted) clutch--xml-cell-highlight-max-chars))
       (clutch--xml-display-highlight formatted))
      (truncated
-      (clutch--truncate-display-string formatted w))
+      (if (and (not custom) (not placeholder))
+          formatted
+        (clutch--truncate-display-string formatted w)))
      (t formatted))))
 
 (defun clutch--pending-insert-placeholders ()

@@ -1717,6 +1717,15 @@ ROWS defaults to a small three-row sample."
               "abcdef" 4 '(:name "status" :type-category text) nil)
              "abc…"))))
 
+(ert-deftest clutch-test-cell-display-content-truncates-before-newline-scan ()
+  "Long cell display should only materialize the visible prefix."
+  (with-temp-buffer
+    (should (equal
+             (clutch--cell-display-content
+              (concat "abc\ndef" (make-string 10000 ?x))
+              5 '(:name "payload" :type-category text) nil)
+             "abc↵…"))))
+
 (ert-deftest clutch-test-cell-display-content-truncates-custom-displayer-output ()
   "Custom column displayer output should be truncated with ellipsis."
   (let ((clutch-column-displayers nil))

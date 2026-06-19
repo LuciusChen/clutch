@@ -105,6 +105,9 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
   render through the normal text/JSON/XML cell display path.
 - Fixed result-grid rendering for JDBC JSON text stored in BLOB columns, so the
   cell shows a compact JSON prefix with `…` instead of falling back to `<BLOB>`.
+- Reduced result-grid redraw cost when widening columns that contain long text,
+  JSON, XML, or structured BLOB text by truncating from a bounded visible prefix
+  instead of scanning the full cell value on every redraw.
 - Preserved clear boundary errors for unsupported MongoDB helper syntax instead
   of passing unsupported shell-only constructs to an external process.
 - Improved MongoDB metadata buffers so JSON object definitions, collection
