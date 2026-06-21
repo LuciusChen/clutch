@@ -1211,10 +1211,11 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (should (equal loaded "orders"))
           (should (member "id" candidates))
           (should (member "order_id" candidates))
-          (should (member "users" candidates)))))))
+          (should-not (member "users" candidates))
+          (should-not (member "orders" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-keeps-statement-scope-candidates-tight ()
-  "Statement-scoped column completion should not leak unrelated schema tables."
+  "Statement-scoped column completion should not leak table names."
   (with-temp-buffer
     (insert "select us from users join posts on users.id = posts.user_id")
     (goto-char (point-min))
@@ -1238,10 +1239,35 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
         (let* ((capf (clutch-completion-at-point))
                (candidates (clutch-test--completion-candidates capf "")))
           (should capf)
-          (should (member "users" candidates))
-          (should (member "posts" candidates))
           (should (member "user_id" candidates))
+          (should-not (member "users" candidates))
+          (should-not (member "posts" candidates))
           (should-not (member "logs" candidates)))))))
+
+(ert-deftest clutch-test-completion-at-point-where-prefix-keeps-table-names-out ()
+  "WHERE expression completion should offer columns without table names."
+  (with-temp-buffer
+    (insert "select * from users u join orders o on u.id = o.user_id where us")
+    (goto-char (point-max))
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "users" '("id" "user_id" "username") schema)
+      (puthash "orders" '("id" "user_id" "status") schema)
+      (puthash "user_audit" '("id") schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda () schema))
+                ((symbol-function 'clutch-db-busy-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t)))
+        (let* ((capf (clutch-completion-at-point))
+               (candidates (clutch-test--completion-candidates capf "")))
+          (should capf)
+          (should (member "user_id" candidates))
+          (should (member "username" candidates))
+          (should-not (member "users" candidates))
+          (should-not (member "orders" candidates))
+          (should-not (member "user_audit" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-sync-loads-columns-for-small-statement-scope ()
   "Native statement-scoped completion should sync-load columns on cache miss."
@@ -1271,7 +1297,7 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (should capf)
           (should (equal loaded "users"))
           (should (member "id" candidates))
-          (should (member "users" candidates)))))))
+          (should-not (member "users" candidates)))))))
 
 (ert-deftest clutch-test-completion-at-point-uses-qualified-table-for-cached-column-loading ()
   "Qualified completion should only use cached columns for the referenced table."
@@ -1586,8 +1612,9 @@ Double-quoted multi-word identifiers are a pre-existing regex limitation."
           (let* ((capf (clutch-completion-at-point))
                  (candidates (clutch-test--completion-candidates capf "")))
             (should capf)
-            (should (member "app_config" candidates))
             (should (member "config_id" candidates))
+            (should (member "config_name" candidates))
+            (should-not (member "app_config" candidates))
             (should-not (member "APP_CONFIG" candidates))))))))
 
 (ert-deftest clutch-test-completion-at-point-swallows-oracle-i18n-completion-errors ()
