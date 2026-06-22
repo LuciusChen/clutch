@@ -4073,6 +4073,34 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
         (clutch-result-edit-finish)
         (should (equal staged-value "NULL"))))))
 
+(ert-deftest clutch-test-edit-finish-restores-result-cell-position ()
+  "Finishing a cell edit should return point to the edited result cell."
+  (save-window-excursion
+    (let ((result-buf (generate-new-buffer "*clutch-result-test*"))
+          edit-buf)
+      (unwind-protect
+          (progn
+            (switch-to-buffer result-buf)
+            (clutch-test--setup-rendered-result)
+            (setq-local clutch-connection nil
+                        clutch--connection-params '(:backend mysql)
+                        clutch--result-source-table "users")
+            (clutch--goto-cell 1 1)
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (&rest _) nil)))
+              (clutch-result-edit-cell))
+            (setq edit-buf (current-buffer))
+            (erase-buffer)
+            (insert "beta")
+            (clutch-result-edit-finish)
+            (should (eq (current-buffer) result-buf))
+            (should (= (get-text-property (point) 'clutch-row-idx) 1))
+            (should (= (get-text-property (point) 'clutch-col-idx) 1)))
+        (when (buffer-live-p result-buf)
+          (kill-buffer result-buf))
+        (when (buffer-live-p edit-buf)
+          (kill-buffer edit-buf))))))
+
 (ert-deftest clutch-test-edit-finish-errors-when-result-buffer-is-dead ()
   "Finishing an edit should fail cleanly when the parent result buffer is gone."
   (let ((result-buf (generate-new-buffer "*clutch-result-test*"))

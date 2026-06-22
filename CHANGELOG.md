@@ -111,6 +111,8 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
   step so manual column resizing feels smoother.
 - Kept SQL expression completion scoped to columns, so `WHERE` and similar
   clauses no longer include statement table names as identifier candidates.
+- Kept point on the edited result cell after staging or cancelling a cell edit,
+  instead of returning to the start of the result table.
 - Preserved clear boundary errors for unsupported MongoDB helper syntax instead
   of passing unsupported shell-only constructs to an external process.
 - Improved MongoDB metadata buffers so JSON object definitions, collection

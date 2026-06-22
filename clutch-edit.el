@@ -59,6 +59,7 @@
 (declare-function clutch--message-path "clutch-ui" (value))
 (declare-function clutch--status-separator "clutch-ui" ())
 (declare-function clutch--cell-at-point "clutch-ui" ())
+(declare-function clutch--goto-cell "clutch-ui" (ridx cidx))
 (declare-function clutch--row-idx-at-line "clutch-ui" ())
 (declare-function clutch--selected-row-indices "clutch-ui" ())
 (declare-function clutch-db-escape-identifier "clutch-backend" (conn name))
@@ -272,6 +273,16 @@ placeholder is displayed.  The placeholder is not part of the buffer text."
           (setq-local clutch--active-edit-cell nil)
           (clutch-result-edit--refresh-target-row (car cell))))))
   (setq-local clutch-result-edit--target-cell nil))
+
+(defun clutch-result-edit--restore-result-position (result-buf cell)
+  "Restore point in RESULT-BUF to CELL when the result buffer is visible."
+  (when (and (buffer-live-p result-buf) cell)
+    (pcase-let ((`(,ridx . ,cidx) cell))
+      (if-let* ((win (get-buffer-window result-buf t)))
+          (with-selected-window win
+            (clutch--goto-cell ridx cidx))
+        (with-current-buffer result-buf
+          (clutch--goto-cell ridx cidx))))))
 
 (defun clutch-result-edit--header-line (_ridx _col-name)
   "Build the edit-buffer header line."
@@ -526,7 +537,9 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   (interactive)
   (let* ((raw-value (string-trim-right (buffer-string)))
          (new-value (if clutch-result-edit--null-p nil raw-value))
-         (cb clutch-result--edit-callback))
+         (cb clutch-result--edit-callback)
+         (result-buf clutch-result--edit-result-buffer)
+         (target-cell clutch-result-edit--target-cell))
     (clutch-result-edit--cancel-validation-timer)
     (clutch-result--validate-field-value
      clutch-result-edit--column-name
@@ -534,18 +547,22 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
      clutch-result-edit--column-def
      clutch-result-edit--column-detail)
     (setq-local clutch-result-edit--error-message nil)
+    (when cb
+      (funcall cb new-value))
     (clutch-result-edit--clear-active-target)
     (quit-window 'kill)
-    (when cb
-      (funcall cb new-value))))
+    (clutch-result-edit--restore-result-position result-buf target-cell)))
 
 ;;;###autoload
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
   (interactive)
-  (clutch-result-edit--cancel-validation-timer)
-  (clutch-result-edit--clear-active-target)
-  (quit-window 'kill))
+  (let ((result-buf clutch-result--edit-result-buffer)
+        (target-cell clutch-result-edit--target-cell))
+    (clutch-result-edit--cancel-validation-timer)
+    (clutch-result-edit--clear-active-target)
+    (quit-window 'kill)
+    (clutch-result-edit--restore-result-position result-buf target-cell)))
 
 (defun clutch-result--apply-edit (ridx cidx new-value)
   "Record edit for row RIDX, column CIDX with NEW-VALUE.
