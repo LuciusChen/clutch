@@ -6441,7 +6441,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
 (ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
   "Public CSV and TSV copy commands should copy through the real entry point."
   (dolist (case '((clutch-result-copy-csv "name\nalice")
-                  (clutch-result-copy-org-table "| name |\n|---|\n| alice |")
+                  (clutch-result-copy-org-table "| name  |\n|-------|\n| alice |")
                   (clutch-result-copy-tsv "alice")))
     (pcase-let ((`(,command ,expected-text) case))
       (ert-info ((symbol-name command))
@@ -6494,8 +6494,19 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                 ((symbol-function 'clutch-result--region-rectangle-indices)
                  (lambda () '((0 1) 0 1))))
         (clutch-result-copy 'org-table)
-        (should (equal (current-kill 0)
-                       "| name | note |\n|---+---|\n| alice | a\\vertb |\n| bob | x\\ny |"))))))
+        (let ((result (current-kill 0)))
+          ;; Verify content is preserved and alignment is applied.
+          (should (string-match-p "a\\\\vert" result))
+          (should (string-match-p "x\\\\n" result))
+          (let ((lines (split-string result "\n")))
+            (should (= (length lines) 4))
+            ;; All lines must have equal length (aligned column separators).
+            (should (apply #'= (mapcar #'length lines)))
+            (should (equal result
+                           (concat "| name  | note    |\n"
+                                   "|-------+---------|\n"
+                                   "| alice | a\\vertb |\n"
+                                   "| bob   | x\\ny    |")))))))))
 
 (ert-deftest clutch-test-copy-csv-via-unified-entry-uses-region-rectangle ()
   "Unified CSV copy should use rectangle row/column bounds when region is active."

@@ -512,7 +512,7 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-first-page` / `clutch-result-last-page` | Jump to the first page / last row window |
 | `clutch-result-next-cell` / `clutch-result-prev-cell` | Move across cells |
 | `clutch-result-down-cell` / `clutch-result-up-cell` | Move down/up within the current column |
-| `clutch-result-copy-tsv` / `clutch-result-copy-csv` / `clutch-result-copy-org-table` | Copy the current cell/selection as TSV / CSV / Org table |
+| `clutch-result-copy-tsv` / `clutch-result-copy-csv` / `clutch-result-copy-org-table` | Copy the current cell/selection as TSV / CSV / aligned Org table |
 | `clutch-result-copy-insert` / `clutch-result-copy-update` | Copy rows as INSERT / UPDATE statements |
 | `clutch-result-copy-dispatch` | Open the copy transient |
 | `clutch-result-export` | Export all rows as CSV / INSERT / UPDATE (copy or file) |

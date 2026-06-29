@@ -165,6 +165,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
                   (conn table col-names &optional load))
 (declare-function clutch--status-separator "clutch-ui" ())
 (declare-function clutch-preview-execution-sql "clutch-query" ())
+(declare-function org-table-align "org-table")
 
 ;;;; Result buffer lifecycle
 
@@ -2812,8 +2813,21 @@ rectangle and inactive regions fall back to the current cell."
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat #'clutch--csv-escape vals ",")))))
 
+(defun clutch--org-table-align-lines (lines)
+  "Return LINES aligned the way `org-table-align' renders an Org table.
+If Org is unavailable, return LINES unchanged rather than signaling."
+  (if (not (require 'org-table nil t))
+      lines
+    (with-temp-buffer
+      (delay-mode-hooks (org-mode))
+      (insert (mapconcat #'identity lines "\n"))
+      (goto-char (point-min))
+      (org-table-align)
+      (split-string (buffer-substring-no-properties (point-min) (point-max))
+                    "\n" t))))
+
 (defun clutch--org-table-lines-for-rows (rows col-indices)
-  "Return Org table lines for ROWS using COL-INDICES."
+  "Return aligned Org table lines for ROWS using COL-INDICES."
   (cl-labels
       ((cell (val)
          (let ((s (clutch--format-value val)))
@@ -2827,12 +2841,13 @@ rectangle and inactive regions fall back to the current cell."
                     (mapconcat #'identity
                                (make-list (length col-indices) "---")
                                "+"))))
-      (cons (table-row col-names)
-            (cons separator
-	                  (cl-loop for row in rows
-	                           for vals = (mapcar (lambda (i) (nth i row))
-	                                              col-indices)
-	                           collect (table-row vals)))))))
+      (clutch--org-table-align-lines
+       (cons (table-row col-names)
+             (cons separator
+                   (cl-loop for row in rows
+                            for vals = (mapcar (lambda (i) (nth i row))
+                                               col-indices)
+                            collect (table-row vals))))))))
 
 ;;;; Export commands
 
