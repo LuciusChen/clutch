@@ -198,8 +198,9 @@ The copy transient (=c=) shows =Refine selection (No|Yes)= on =-r=.  With an
 active region, enabling refinement before choosing a format lets you interactively
 exclude rows or columns before the copy is performed.  The mode-line at the
 bottom of the result buffer is replaced with a color-coded hint for the
-duration of the session.  The refine entry remains visible but inapt when no
-region is active.
+duration of the session.  The refine switch can be toggled before a region is
+active; choosing a copy format with refinement still requires a region and
+reports that clearly.
 
 The region can be set with =C-x SPC= (rectangle mark), a normal mark
 (=C-SPC=), or mouse selection — all three are accepted.  Regardless of

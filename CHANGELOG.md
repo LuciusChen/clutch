@@ -97,8 +97,8 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 
 ### Fixed
 
-- Fixed copy transient state labels so toggling `-r` immediately refreshes the
-  highlighted `No|Yes` choice.
+- Fixed copy transient state labels so toggling `-r` follows the live switch
+  value and immediately refreshes the highlighted `No|Yes` choice.
 - Fixed result header sort icons so their graphical width stays aligned
   with the monospace result grid.
 - Prevented result column navigation and stale header clicks from silently

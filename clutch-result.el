@@ -1475,16 +1475,14 @@ Otherwise, copy the current cell."
     (_
      (user-error "Unsupported copy format: %s" format))))
 
-(defun clutch-result--copy-refine-description ()
-  "Return the transient description for copy refinement."
-  (concat
-   "Refine selection "
-   (clutch--transient-state-display
-    (if (transient-arg-value
-         "--refine" (transient-args 'clutch-result-copy-dispatch))
-        'yes
-      'no)
-    '((no . "No") (yes . "Yes")))))
+(defclass clutch--transient-yes-no-switch (transient-switch) ()
+  "Transient switch that displays its state as a highlighted No/Yes pair.")
+
+(cl-defmethod transient-format-value ((obj clutch--transient-yes-no-switch))
+  "Format OBJ's current switch value as a No/Yes state pair."
+  (clutch--transient-state-display
+   (if (oref obj value) 'yes 'no)
+   '((no . "No") (yes . "Yes"))))
 
 (defun clutch-result--copy-fmt (fmt)
   "Copy in FMT, entering refine mode first if --refine switch is set."
@@ -1559,9 +1557,9 @@ Enable --refine to exclude rows/columns interactively before copying
   :refresh-suffixes t
   ["Options"
    :pad-keys t
-   ("-r" clutch-result--copy-refine-description "--refine"
-    :format " %k %d"
-    :inapt-if-not use-region-p)]
+   ("-r" "Refine selection" "--refine"
+    :class clutch--transient-yes-no-switch
+    :format " %k %d %v")]
   ["Copy as"
    :pad-keys t
    ("t" "TSV"             clutch-result-copy-tsv)

@@ -5728,22 +5728,34 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                              'face description)
                             'transient-value))))))))))
 
-(ert-deftest clutch-test-copy-refine-transient-description-shows-state ()
-  "Copy refinement should display its current transient argument value."
-  (dolist (case '((nil "Refine selection (No|Yes)" "No")
-                  (("--refine") "Refine selection (No|Yes)" "Yes")))
-    (pcase-let ((`(,args ,expected ,active) case))
-      (cl-letf (((symbol-function 'transient-args) (lambda (_prefix) args)))
-        (let ((description (clutch-result--copy-refine-description)))
-          (should (equal (substring-no-properties description) expected))
-              (should (eq (get-text-property (string-match active description)
-                                            'face description)
-                      'transient-value)))))))
-
 (ert-deftest clutch-test-copy-dispatch-refreshes-dynamic-infix-labels ()
   "Copy transient should refresh descriptions after toggling options."
   (should (slot-value (get 'clutch-result-copy-dispatch 'transient--prefix)
                       'refresh-suffixes)))
+
+(ert-deftest clutch-test-copy-refine-infix-display-follows-switch-value ()
+  "Copy refinement should display the active switch object value."
+  (let* ((suffixes (transient-suffixes 'clutch-result-copy-dispatch))
+         (refine
+          (cl-find-if (lambda (obj)
+                        (and (slot-boundp obj 'key)
+                             (equal (oref obj key) "-r")))
+                      suffixes)))
+    (should refine)
+    (should (equal (substring-no-properties
+                    (transient-format-description refine))
+                   "Refine selection"))
+    (let ((value (transient-format-value refine)))
+      (should (equal (substring-no-properties value) "(No|Yes)"))
+      (should (eq (get-text-property (string-match "No" value)
+                                     'face value)
+                  'transient-value)))
+    (oset refine value "--refine")
+    (let ((value (transient-format-value refine)))
+      (should (equal (substring-no-properties value) "(No|Yes)"))
+      (should (eq (get-text-property (string-match "Yes" value)
+                                     'face value)
+                  'transient-value)))))
 
 (ert-deftest clutch-test-staged-transient-heading-shows-pending-count ()
   "Staged transient heading should summarize pending mutation count."
