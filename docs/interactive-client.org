@@ -48,9 +48,8 @@ keys such as =M-TAB= inherited from Emacs.
 | =-=            | Narrow current column                         |
 | =W=            | WHERE filter (press again to clear)           |
 | =/=            | Client-side fuzzy filter (empty to clear)     |
-| =s=            | Sort by column (toggles ASC/DESC on repeat)   |
-| =S=            | Sort descending                               |
-| =C=            | Jump to column                                |
+| =s=            | Cycle current-column sort: unsorted / ASC / DESC |
+| =C=            | Jump to visible column                        |
 | =?=            | Show column type info at point                |
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit / re-edit at point                       |
@@ -60,7 +59,7 @@ keys such as =M-TAB= inherited from Emacs.
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-k=     | Discard pending change at point               |
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
-| =c=            | Open copy transient menu (choose TSV / CSV / Org table / INSERT / UPDATE; toggle =-r= to refine) |
+| =c=            | Open copy transient menu (choose TSV / CSV / Org table / INSERT / UPDATE; =-r= controls refinement) |
 | =k=            | Copy SQL, table metadata, and bounded result sample for an external agent |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =V=            | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
@@ -92,6 +91,14 @@ Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
 header visible; busy state temporarily replaces the elapsed-time segment in the
 footer with a spinner instead of replacing the table header with the query-console
 connection header.
+
+Tip: Press =s= to cycle server-side SQL sort state for the result column at
+point.  Use =C= to jump to a different visible column first, or click its
+header to cycle that column.  The cycle is unsorted, ascending, descending, then
+unsorted again.  Header icons appear after column names and use the
+original-size nerd-icons Font Awesome sort glyphs; when nerd-icons is
+unavailable, the sort marker is omitted.
+
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
 Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result
@@ -187,11 +194,12 @@ remains result buffer -> insert buffer.
 
 ** Visual Refine Mode (=c -r= / =C-u A=)
 
-The copy transient (=c=) offers a =-r= switch for *refine mode*.  With an
-active region, enabling =-r= before choosing a format lets you interactively
+The copy transient (=c=) shows =Refine selection (No|Yes)= on =-r=.  With an
+active region, enabling refinement before choosing a format lets you interactively
 exclude rows or columns before the copy is performed.  The mode-line at the
 bottom of the result buffer is replaced with a color-coded hint for the
-duration of the session.
+duration of the session.  The refine entry remains visible but inapt when no
+region is active.
 
 The region can be set with =C-x SPC= (rectangle mark), a normal mark
 (=C-SPC=), or mouse selection — all three are accepted.  Regardless of
@@ -229,6 +237,10 @@ Typical flow:
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |
 
+The Record transient labels =RET= from the field at point: =Follow FK=,
+=Expand=, =Collapse=, or =Show value=.  It is inapt when point is not on a
+field.
+
 * Describe View (clutch-describe-mode) Key Bindings
 
 | Key         | Action                        |
@@ -256,7 +268,8 @@ Typical flow:
               e.g., select "amount" then type: > 100     → WHERE amount > 100
               → Appends WHERE clause, re-queries from page 1
 8. /          Client-side filter: type a pattern to narrow visible rows instantly
-9. s          Sort by current column (SQL ORDER BY), re-queries from page 1
+9. s          Cycle current-column sort: unsorted → ASC → DESC → unsorted
+              Use C to jump to another visible column first; clicking a header uses the same cycle
               → mode-line adds current ORDER BY state
 10. A         Aggregate selected cells/current cell
               → mode-line adds aggregate status (sum/avg/min/max + [rows/cells/skipped])
@@ -555,12 +568,22 @@ Requires the =transient= package (built-in since Emacs 28.1).
 
 Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, and =Refresh schema=.
 
+Finite state is displayed as parenthesized choices, with the active choice
+highlighted.  For example, the connection menu shows
+=Auto-commit (manual|auto)=, and the result menu shows current filter, sort,
+copy-refinement, and layout states.
+
 The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=,
 =Commit=, =Rollback=, =Auto-commit=, and =REPL=.  =Prepare SSH= opens an
 interactive OpenSSH setup session for host-key confirmation or key passphrase
 entry before retrying the normal non-interactive connect path.
 
-In the result buffer, the *Edit* group in the transient menu provides the unified staged-commit workflow: =i= stages an insert, =d= stages a deletion, =C-c C-k= discards a pending change at point, and =C-c C-c= commits all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
+In the result buffer, the *Staged* heading includes the current pending count.
+Its copy/save actions and the mutation group's commit/discard actions are inapt
+when no changes are staged.  The unified staged-commit workflow uses =i= to
+stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending
+change at point, and =C-c C-c= to commit all pending changes
+(INSERT → UPDATE → DELETE) in a single confirmation.
 
 The result and record transients also expose an *Inspect* group: =v= opens the
 static cell viewer, while =V= opens the live viewer that follows point.  Once

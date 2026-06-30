@@ -48,6 +48,10 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Cached filter/aggregate segment string for the footer.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
+(defvar-local clutch--header-sort-function nil
+  "Function called by header sort clicks.
+The function is called with the column index and the column name captured when
+the header cell was rendered.")
 (defvar-local clutch--last-window-width nil
   "Last known window body width for the current result buffer.")
 (defvar clutch--marked-rows)
@@ -75,6 +79,8 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Overlay used to highlight the current row.")
 (defvar-local clutch--row-start-positions nil
   "Vector mapping rendered row indices to their line start positions.")
+(defvar-local clutch--last-cell-position nil
+  "Last resolved data cell as (ROW-IDX . COL-IDX).")
 (defvar clutch--sort-column)
 (defvar clutch--sort-descending)
 (defvar clutch--result-column-details)
@@ -322,6 +328,21 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   (if (< seconds 1.0)
       (format "%dms" (round (* seconds 1000)))
     (format "%.3fs" seconds)))
+
+(defun clutch--transient-state-display (state choices)
+  "Return a transient state display for STATE from CHOICES.
+CHOICES is an alist of (VALUE . LABEL) entries in display order."
+  (concat
+   (propertize "(" 'face 'transient-delimiter)
+   (mapconcat
+    (lambda (choice)
+      (propertize (cdr choice)
+                  'face (if (eq state (car choice))
+                            'transient-value
+                          'transient-inactive-value)))
+    choices
+    (propertize "|" 'face 'transient-delimiter))
+   (propertize ")" 'face 'transient-delimiter)))
 
 (defun clutch--numeric-type-p (col-def)
   "Return non-nil if COL-DEF is a numeric column type."
@@ -774,30 +795,44 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                  (t (mapconcat #'identity tail sep))))))))
 
 (defun clutch--fixed-width-icon (spec fallback &optional face)
-  "Return icon with `string-width' matching actual display width.
+  "Return icon with graphical width snapped to text-cell width.
 SPEC is (FAMILY . ICON-NAME) for `clutch--icon'.
-FALLBACK is the Unicode char when nerd-icons is unavailable.
+FALLBACK is the string used when nerd-icons is unavailable, or nil.
 Optional FACE is applied to the result.
 
-When `string-pixel-width' is available, measures the icon glyph
-pixel width and wraps it in a display property over the correct
-number of space characters.  This ensures `string-width' matches
-  the real rendered width, preventing column misalignment."
-  (let* ((raw (clutch--icon spec fallback))
-         (raw (if (string-empty-p raw) fallback raw))
+When `string-pixel-width' is available, measure the icon glyph and display it
+over a placeholder whose `string-width' is an integral number of text cells.
+If the glyph is narrower than those cells, a second placeholder character
+displays the remaining pixel padding so following text stays aligned with
+monospace table cells."
+  (let* ((raw (or (clutch--icon spec fallback) ""))
+         (raw (if (string-empty-p raw) (or fallback "") raw))
          (raw (clutch--append-face raw face)))
-    (if (and (fboundp 'string-pixel-width)
-             (fboundp 'default-font-width)
-             (display-graphic-p))
+    (if (or (string-empty-p raw)
+            (not (and (fboundp 'string-pixel-width)
+                      (fboundp 'default-font-width)
+                      (display-graphic-p))))
+        raw
         (let* ((pw (string-pixel-width raw))
                (fw (default-font-width))
+               (raw-width (max 1 (string-width raw)))
                (cells (if (> fw 0)
-                          (max 1 (round (/ (float pw) fw)))
-                        (string-width raw))))
-          (if (= cells (string-width raw))
+                          (max raw-width
+                               (ceiling (/ (float pw) fw)))
+                        raw-width))
+               (target-px (* cells fw))
+               (pad-px (and (> fw 0) (- target-px pw))))
+          (if (and (= cells raw-width) (not (and pad-px (> pad-px 0))))
               raw
-            (propertize (make-string cells ?\s) 'display raw)))
-      raw)))
+            (let ((placeholder (make-string cells ?\s)))
+              (put-text-property 0 1 'display raw placeholder)
+              (when (> cells 1)
+                (put-text-property 1 cells 'display "" placeholder)
+                (when (and pad-px (> pad-px 0))
+                  (put-text-property 1 2 'display
+                                     (list 'space :width (list pad-px))
+                                     placeholder)))
+              placeholder))))))
 
 (defun clutch--footer-icon (spec fallback face)
   "Return footer icon SPEC/FALLBACK with explicit FACE."
@@ -882,21 +917,54 @@ MESSAGE, when non-nil, is used as hover text for failed SQL."
   "Mark the last failed SQL region BEG..END with MESSAGE."
   (clutch--mark-sql-status-region beg end 'failed message))
 
-(defun clutch--header-label (name)
+(defun clutch--header-sort-icon (name include-unsorted)
+  "Return the sort icon for column NAME.
+When INCLUDE-UNSORTED is non-nil, return the neutral sort icon for unsorted
+columns; otherwise return nil for unsorted columns."
+  (let* ((state (cond
+                 ((and clutch--sort-column
+                       (string= name clutch--sort-column))
+                  (if clutch--sort-descending 'desc 'asc))
+                 (include-unsorted 'none)))
+         (icon-spec (pcase state
+                      ('desc '(faicon . "nf-fa-sort_desc"))
+                      ('asc '(faicon . "nf-fa-sort_asc"))
+                      ('none '(faicon . "nf-fa-sort"))))
+         (icon (and state
+                    (clutch--fixed-width-icon icon-spec nil))))
+    (when (and icon (not (string-empty-p icon)))
+      (propertize icon 'clutch-header-icon t))))
+
+(defun clutch--header-label (name &optional include-unsorted-sort)
   "Build the display label for column NAME.
-Prepends the sort indicator when the column is active."
-  (let* ((sort (when (and clutch--sort-column
-                          (string= name clutch--sort-column))
-                 (let ((s (clutch--fixed-width-icon
-                           (if clutch--sort-descending
-                               '(codicon . "nf-cod-arrow_down")
-                             '(codicon . "nf-cod-arrow_up"))
-                           (if clutch--sort-descending "▼" "▲"))))
-                   (when s
-                     (propertize s 'clutch-header-icon t))))))
+Appends the sort indicator when the column is active.
+When INCLUDE-UNSORTED-SORT is non-nil, append the neutral sort
+indicator for unsorted columns too."
+  (let* ((sort (clutch--header-sort-icon name include-unsorted-sort)))
     (if sort
-        (concat sort " " name)
+        (concat name " " sort)
       name)))
+
+(defun clutch--header-sort-keymap (cidx name)
+  "Return a header-line keymap that cycles sorting for column CIDX named NAME."
+  (let ((map (make-sparse-keymap))
+        (col-idx cidx)
+        (col-name name))
+    (let ((command (lambda (event)
+                     (interactive "e")
+                     (let* ((start (and event (event-start event)))
+                            (win (and start (posn-window start)))
+                            (buf (if (windowp win)
+                                     (window-buffer win)
+                                   (current-buffer))))
+                       (with-current-buffer buf
+                         (unless clutch--header-sort-function
+                           (user-error "Header sorting is not available"))
+                         (funcall clutch--header-sort-function
+                                  col-idx col-name))))))
+      (define-key map [header-line mouse-1] command)
+      (define-key map [mouse-1] command))
+    map))
 
 (defun clutch--render-separator (visible-cols widths &optional position)
   "Render a separator line for VISIBLE-COLS with WIDTHS.
@@ -1438,7 +1506,7 @@ Columns with sort indicators get wider to fit the label."
   (let ((widths (copy-sequence clutch--column-widths)))
     (dotimes (cidx (length widths))
       (let* ((name (nth cidx clutch--result-columns))
-             (label (clutch--header-label name))
+             (label (clutch--header-label name t))
              (label-w (string-width label)))
         (when (> label-w (aref widths cidx))
           (aset widths cidx label-w))))
@@ -1569,7 +1637,7 @@ WIDTHS is the effective width vector.
 ACTIVE-CIDX is the highlighted column index, if any."
   (let* ((name (nth cidx clutch--result-columns))
          (w (aref widths cidx))
-         (label (clutch--header-label name))
+         (label (clutch--header-label name t))
          (truncated (if (> (string-width label) w)
                         (truncate-string-to-width label w)
                       label))
@@ -1580,6 +1648,7 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (active-p (eql cidx active-cidx))
          (base-face 'clutch-field-name-face)
          (pad-str (make-string clutch-column-padding ?\s))
+         (sort-map (clutch--header-sort-keymap cidx name))
          (body nil))
     ;; Append base/underline style without overwriting icon-specific face.
     (add-face-text-property 0 (length label) base-face 'append label)
@@ -1600,7 +1669,11 @@ ACTIVE-CIDX is the highlighted column index, if any."
                        (propertize trail 'face base-face)
                        pad-str))
     (add-text-properties 0 (length body)
-                         `(clutch-header-col ,cidx)
+                         `(clutch-header-col ,cidx
+                           local-map ,sort-map
+                           keymap ,sort-map
+                           mouse-face mode-line-highlight
+                           help-echo ,(format "mouse-1: cycle sort by %s" name))
                          body)
     (concat (propertize "│" 'face 'clutch-border-face)
             body)))
@@ -1739,6 +1812,8 @@ RENDER-STATE contains render lookup tables for staged UI state."
   "Update mode-line with current cursor position in the result grid."
   (let ((cidx (clutch--col-idx-at-point))
         (ridx (get-text-property (point) 'clutch-row-idx)))
+    (when (and ridx cidx)
+      (setq clutch--last-cell-position (cons ridx cidx)))
     (setq mode-line-position
           (when ridx (clutch--position-indicator-parts ridx cidx)))))
 
@@ -1814,9 +1889,10 @@ Priority: region rows, then current row."
 
 (defun clutch--cell-at (pos)
   "Return (ROW-IDX COL-IDX FULL-VALUE) at buffer position POS, or nil."
-  (when-let* ((ridx (get-text-property pos 'clutch-row-idx)))
+  (when-let* ((ridx (get-text-property pos 'clutch-row-idx))
+              (cidx (get-text-property pos 'clutch-col-idx)))
     (list ridx
-          (get-text-property pos 'clutch-col-idx)
+          cidx
           (get-text-property pos 'clutch-full-value))))
 
 (defun clutch--cell-at-or-near (pos)
@@ -1842,7 +1918,9 @@ right on the current line to find the nearest cell."
 Preserves point position (row + column) across the render."
   (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                         (clutch--row-idx-at-line)))
-         (save-cidx (get-text-property (point) 'clutch-col-idx))
+         (save-cidx (or (get-text-property (point) 'clutch-col-idx)
+                        (and (equal save-ridx (car-safe clutch--last-cell-position))
+                             (cdr-safe clutch--last-cell-position))))
          (inhibit-read-only t)
          (visible-cols (clutch--visible-columns))
          (widths (clutch--effective-widths))
@@ -1989,6 +2067,8 @@ Falls back to the same row (any column), then point-min."
         (if-let* ((m (text-property-search-forward 'clutch-row-idx ridx #'eq)))
             (goto-char (prop-match-beginning m))
           (goto-char (point-min)))))
+    (when-let* ((cell (clutch--cell-at (point))))
+      (setq clutch--last-cell-position (cons (nth 0 cell) (nth 1 cell))))
     (clutch--ensure-point-visible-horizontally)))
 
 (defun clutch--row-number-digits ()
@@ -2008,7 +2088,9 @@ Preserve cursor position (row + column) and the top visible row."
       (setq clutch--column-width-refresh-timer nil))
     (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                           (clutch--row-idx-at-line)))
-           (save-cidx (get-text-property (point) 'clutch-col-idx))
+           (save-cidx (or (get-text-property (point) 'clutch-col-idx)
+                          (and (equal save-ridx (car-safe clutch--last-cell-position))
+                               (cdr-safe clutch--last-cell-position))))
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
            (save-top-ridx

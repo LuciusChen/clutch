@@ -271,9 +271,9 @@ query is still running.
 | `M-<` / `M->` | `clutch-result-first-page` / `clutch-result-last-page` | First page / last row window |
 | `]` / `[` | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Page right / left (snap to column border) |
 | `=` / `-` | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust column width |
-| `C` | `clutch-result-goto-column` | Jump to a column by name |
+| `C` | `clutch-result-goto-column` | Jump to a visible column by name |
 | `?` | `clutch-result-column-info` | Show column type info at point |
-| `s` / `S` | `clutch-result-sort-by-column` / `clutch-result-sort-by-column-desc` | Sort by current column |
+| `s` | `clutch-result-sort-by-column` | Cycle current-column sort: unsorted / ASC / DESC; use `C` to jump columns first |
 | `W` | `clutch-result-apply-filter` | Apply SQL WHERE filter (column completion with auto-equal) |
 | `/` | `clutch-result-filter` | Client-side fuzzy filter |
 | `C-c '` | `clutch-result-edit-cell` | Edit / re-edit current cell |
@@ -295,10 +295,20 @@ query is still running.
 | `C-c ?` | `clutch-result-dispatch` | Result-buffer transient menu |
 
 **Pending SQL workflow**:
-- Result transient includes a dedicated *Pending* group:
+- Result transient includes a dedicated *Staged* group whose heading shows the
+  current pending mutation count:
   - `y` → `clutch-result-copy-pending-sql`
   - `Y` → `clutch-result-save-pending-sql`
+- Staged copy/save/commit/discard entries are inapt when there are no pending
+  mutations.
 - This exports the exact staged SQL batch that `C-c C-c` would execute, rather than re-exporting the full result set.
+
+**Transient state presentation**:
+- Finite operational states use parenthesized choices with the active value
+  highlighted, including auto-commit, sort, copy refinement, and result layout.
+- Client and SQL filters show their compact current values.
+- Record `RET` resolves to `Follow FK`, `Expand`, `Collapse`, or `Show value`
+  from the field at point, and the transient uses the same resolution path.
 
 **External agent context**:
 - `clutch-copy-context-for-agent` copies Markdown for tools such as ChatGPT, Claude, or
@@ -486,13 +496,12 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-aggregate` | Aggregate numeric values over the current cell/selection |
 | `clutch-result-filter` | Apply a client-side fuzzy filter |
 | `clutch-result-apply-filter` | Apply an SQL-backed WHERE filter |
-| `clutch-result-sort-by-column` | Apply ascending SQL ORDER BY for the current column |
-| `clutch-result-sort-by-column-desc` | Apply descending SQL ORDER BY for the current column |
+| `clutch-result-sort-by-column` | Cycle SQL ORDER BY for the result column at point through unsorted, ascending, and descending |
 | `clutch-result-column-info` | Show column type/default/nullability info at point |
 | `clutch-result-view-value` | Open the value viewer for the current cell |
 | `clutch-result-live-view-value` | Open the live value viewer for the current cell |
 | `clutch-result-shell-command-on-cell` | Pipe the current cell through a shell command |
-| `clutch-result-goto-column` | Jump to a result column by name |
+| `clutch-result-goto-column` | Jump to a visible result column by name |
 | `clutch-result-scroll-right` / `clutch-result-scroll-left` | Horizontal result paging aligned to column borders |
 | `clutch-result-widen-column` / `clutch-result-narrow-column` | Adjust current column width |
 | `clutch-result-fullscreen-toggle` | Toggle fullscreen display of the current result |

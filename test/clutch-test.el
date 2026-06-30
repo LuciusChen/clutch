@@ -198,6 +198,18 @@
   (should-not (clutch--long-field-type-p '(:name "id" :type-category numeric)))
   (should-not (clutch--long-field-type-p '(:name "name" :type-category text))))
 
+(ert-deftest clutch-test-transient-state-display-highlights-active-choice ()
+  "Finite transient state displays should highlight exactly one active choice."
+  (let ((display (clutch--transient-state-display
+                  'manual '((manual . "manual") (auto . "auto")))))
+    (should (equal (substring-no-properties display) "(manual|auto)"))
+    (should (eq (get-text-property (string-match "manual" display)
+                                  'face display)
+                'transient-value))
+    (should (eq (get-text-property (string-match "auto" display)
+                                  'face display)
+                'transient-inactive-value))))
+
 (ert-deftest clutch-test-json-value-to-string-hash-table ()
   "JSON viewer should accept parsed JSON objects."
   (let ((obj (make-hash-table :test 'equal)))
@@ -514,25 +526,33 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
     (should (equal (clutch--visible-columns) '(1 2)))))
 
 (ert-deftest clutch-test-visible-column-names-skip-hidden-columns ()
-  "User-facing column choices should not include hidden row identity aliases."
+  "Visible column names should not include hidden row identity aliases."
   (with-temp-buffer
     (setq-local clutch--result-columns '("clutch__rid_0" "id" "name")
                 clutch--result-column-defs
                 '((:name "clutch__rid_0" :hidden t)
                   (:name "id")
                   (:name "name")))
-    (insert (propertize "name" 'clutch-col-idx 2))
-    (goto-char (point-min))
-    (let (candidates default)
+    (should (equal (clutch--visible-column-names) '("id" "name")))))
+
+(ert-deftest clutch-test-goto-column-skips-hidden-columns ()
+  "Column completion should expose visible names and retain source indices."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("clutch__rid_0" "id" "name")
+                clutch--result-column-defs
+                '((:name "clutch__rid_0" :hidden t)
+                  (:name "id")
+                  (:name "name")))
+    (let (candidates target-index)
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt collection &optional _predicate _require-match
-                                   _initial-input _hist def _inherit-input-method)
-                   (setq candidates collection
-                         default def)
-                   def)))
-        (should (equal (clutch-result--read-column) "name"))
-        (should (equal candidates '("id" "name")))
-        (should (equal default "name"))))))
+                 (lambda (_prompt collection &rest _)
+                   (setq candidates collection)
+                   "name"))
+                ((symbol-function 'clutch-result--goto-col-idx)
+                 (lambda (index) (setq target-index index))))
+        (clutch-result-goto-column))
+      (should (equal candidates '("id" "name")))
+      (should (= target-index 2)))))
 
 (ert-deftest clutch-test-row-identity-prep-injects-hidden-primary-key ()
   "Simple table SELECTs should receive hidden identity expressions."
@@ -950,6 +970,19 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
         (when (buffer-live-p buf)
           (kill-buffer buf))))))
 
+(ert-deftest clutch-test-refresh-display-preserves-last-cell-column ()
+  "Refreshing from row chrome should restore the last resolved cell column."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (clutch--goto-cell 1 2)
+    (let ((row-start (aref clutch--row-start-positions 1)))
+      (goto-char row-start)
+      (should (= (clutch--row-idx-at-line) 1))
+      (should-not (get-text-property (point) 'clutch-col-idx))
+      (clutch--refresh-display)
+      (should (= (get-text-property (point) 'clutch-row-idx) 1))
+      (should (= (get-text-property (point) 'clutch-col-idx) 2)))))
+
 (defun clutch-test--setup-rendered-result (&optional rows)
   "Populate the current buffer with a rendered three-column result table.
 ROWS defaults to a small three-row sample."
@@ -1345,6 +1378,82 @@ ROWS defaults to a small three-row sample."
                   clutch-record--expanded-fields nil)
       (should-error (clutch-record--render) :type 'user-error))))
 
+(ert-deftest clutch-test-record-transient-description-follows-point-action ()
+  "Record transient should name the action that RET performs at point."
+  (let ((result-buf (generate-new-buffer " *clutch-record-action*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-column-defs
+                        '((:name "payload" :type-category json))
+                        clutch--fk-info nil))
+          (with-temp-buffer
+            (insert (propertize "payload"
+                                'clutch-col-idx 0
+                                'clutch-row-idx 0
+                                'clutch-full-value (make-string 100 ?x)))
+            (goto-char (point-min))
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--expanded-fields nil)
+            (should (equal (clutch-record--field-action-description) "Expand"))
+            (setq-local clutch-record--expanded-fields '(0))
+            (should (equal (clutch-record--field-action-description) "Collapse"))
+            (setq-local clutch-record--expanded-fields nil)
+            (put-text-property (point-min) (point-max)
+                               'clutch-full-value "{\"id\":1}")
+            (should (equal (clutch-record--field-action-description) "Show value"))
+            (with-current-buffer result-buf
+              (setq-local clutch--fk-info '((0 . (:ref-table "users")))))
+            (should (equal (clutch-record--field-action-description) "Follow FK"))
+            (with-current-buffer result-buf
+              (setq-local clutch--fk-info nil
+                          clutch--result-column-defs
+                          '((:name "payload" :type-category text))))
+            (should (equal (clutch-record--field-action-description) "Show value"))
+            (goto-char (point-max))
+            (should (equal (clutch-record--field-action-description)
+                           "Field action unavailable"))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-record-toggle-expand-uses-shared-action-context ()
+  "Record RET should execute expand, collapse, and foreign-key actions."
+  (let ((result-buf (generate-new-buffer " *clutch-record-command*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-column-defs
+                        '((:name "payload" :type-category json))
+                        clutch--fk-info nil))
+          (with-temp-buffer
+            (insert (propertize "payload"
+                                'clutch-col-idx 0
+                                'clutch-row-idx 0
+                                'clutch-full-value (make-string 100 ?x)))
+            (goto-char (point-min))
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--expanded-fields nil)
+            (let (followed
+                  (render-count 0))
+              (cl-letf (((symbol-function 'clutch-record--render)
+                         (lambda () (cl-incf render-count)))
+                        ((symbol-function 'clutch-record--follow-fk)
+                         (lambda (fk value source)
+                           (setq followed (list fk value source)))))
+                (clutch-record-toggle-expand)
+                (should (equal clutch-record--expanded-fields '(0)))
+                (clutch-record-toggle-expand)
+                (should-not clutch-record--expanded-fields)
+                (should (= render-count 2))
+                (with-current-buffer result-buf
+                  (setq-local clutch--fk-info
+                              '((0 . (:ref-table "users"
+                                      :ref-column "id")))))
+                (clutch-record-toggle-expand)
+                (should (equal followed
+                               (list '(:ref-table "users" :ref-column "id")
+                                     (make-string 100 ?x) result-buf)))))))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-render-separator ()
   "Test table separator line rendering."
   (let ((visible-cols '(0 1 2))
@@ -1398,15 +1507,20 @@ ROWS defaults to a small three-row sample."
 (ert-deftest clutch-test-refresh-header-line-updates-without-changing-body ()
   "Header refresh should update header state without touching buffer text."
   (with-temp-buffer
-    (clutch-test--setup-rendered-result)
-    (let ((body (buffer-string))
-          (before (substring-no-properties clutch--header-line-string)))
-      (setq-local clutch--sort-column "name"
-                  clutch--sort-descending t)
-      (clutch--refresh-header-line)
-      (should (equal body (buffer-string)))
-      (should-not (equal before
-                         (substring-no-properties clutch--header-line-string))))))
+    (cl-letf (((symbol-function 'clutch--fixed-width-icon)
+               (lambda (spec _fallback &optional _face)
+                 (pcase (cdr spec)
+                   ("nf-fa-sort_desc" "D")
+                   (_ "N")))))
+      (clutch-test--setup-rendered-result)
+      (let ((body (buffer-string))
+            (before (substring-no-properties clutch--header-line-string)))
+        (setq-local clutch--sort-column "name"
+                    clutch--sort-descending t)
+        (clutch--refresh-header-line)
+        (should (equal body (buffer-string)))
+        (should-not (equal before
+                           (substring-no-properties clutch--header-line-string)))))))
 
 (ert-deftest clutch-test-footer-filter-parts-omits-sql-preview ()
   "Footer filter parts should no longer include last SQL preview text."
@@ -1483,6 +1597,149 @@ ROWS defaults to a small three-row sample."
       (should (equal face
                      '((:family "Symbols Nerd Font Mono")
                        font-lock-keyword-face))))))
+
+(ert-deftest clutch-test-fixed-width-icon-pads-partial-cell-graphic-glyph ()
+  "Graphical icons should reserve enough full text cells for their pixels."
+  (cl-letf (((symbol-function 'clutch--icon)
+             (lambda (_spec &optional _fallback)
+               (propertize "I" 'face 'icon-face)))
+            ((symbol-function 'display-graphic-p)
+             (lambda (&optional _display) t))
+            ((symbol-function 'default-font-width)
+             (lambda () 10))
+            ((symbol-function 'string-pixel-width)
+             (lambda (_string &optional _buffer) 17)))
+    (let* ((icon (clutch--fixed-width-icon '(faicon . "nf-fa-sort")
+                                           nil))
+           (glyph (get-text-property 0 'display icon))
+           (padding (get-text-property 1 'display icon)))
+      (should (= (length icon) 2))
+      (should (= (string-width icon) 2))
+      (should (stringp glyph))
+      (should (equal (substring-no-properties glyph) "I"))
+      (should (equal padding '(space :width (3)))))))
+
+(ert-deftest clutch-test-fixed-width-icon-keeps-single-cell-graphic-glyph ()
+  "Icons that already fill their logical cell should not gain padding."
+  (cl-letf (((symbol-function 'clutch--icon)
+             (lambda (_spec &optional _fallback)
+               (propertize "I" 'face 'icon-face)))
+            ((symbol-function 'display-graphic-p)
+             (lambda (&optional _display) t))
+            ((symbol-function 'default-font-width)
+             (lambda () 10))
+            ((symbol-function 'string-pixel-width)
+             (lambda (_string &optional _buffer) 10)))
+    (let ((icon (clutch--fixed-width-icon '(faicon . "nf-fa-sort")
+                                          nil)))
+      (should (= (string-width icon) 1))
+      (should (equal (substring-no-properties icon) "I"))
+      (should-not (get-text-property 0 'display icon)))))
+
+(ert-deftest clutch-test-header-label-uses-fa-sort-icons-without-fallbacks ()
+  "Header labels should use original-size Font Awesome sort icons without fallbacks."
+  (with-temp-buffer
+    (let (specs fallbacks faces)
+      (cl-letf (((symbol-function 'clutch--fixed-width-icon)
+                 (lambda (spec fallback &optional face)
+                   (push spec specs)
+                   (push fallback fallbacks)
+                   (push face faces)
+                   "S")))
+        (should (equal (substring-no-properties (clutch--header-label "id"))
+                       "id"))
+        (should (equal (substring-no-properties
+                        (clutch--header-label "id" t))
+                       "id S"))
+        (should (equal (car specs) '(faicon . "nf-fa-sort")))
+        (should-not (car fallbacks))
+        (should-not (car faces))
+        (setq-local clutch--sort-column "id"
+                    clutch--sort-descending nil
+                    specs nil
+                    fallbacks nil
+                    faces nil)
+        (should (equal (substring-no-properties (clutch--header-label "id"))
+                       "id S"))
+        (should (equal (car specs) '(faicon . "nf-fa-sort_asc")))
+        (should-not (car fallbacks))
+        (should-not (car faces))
+        (setq-local clutch--sort-descending t
+                    specs nil
+                    fallbacks nil
+                    faces nil)
+        (should (equal (substring-no-properties (clutch--header-label "id"))
+                       "id S"))
+        (should (equal (car specs) '(faicon . "nf-fa-sort_desc")))
+        (should-not (car fallbacks))
+        (should-not (car faces))))))
+
+(ert-deftest clutch-test-header-label-omits-sort-marker-without-nerd-icons ()
+  "Header labels should not substitute text when sort icons are unavailable."
+  (with-temp-buffer
+    (setq-local clutch--sort-column "id"
+                clutch--sort-descending t)
+    (cl-letf (((symbol-function 'clutch--icon)
+               (lambda (_spec fallback &optional _face)
+                 (should-not fallback)
+                 nil)))
+      (should (equal (clutch--header-label "id" t) "id")))))
+
+(ert-deftest clutch-test-header-cell-installs-sort-click-map ()
+  "Result header cells should expose a mouse keymap for sort cycling."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id"))
+    (cl-letf (((symbol-function 'clutch--fixed-width-icon)
+               (lambda (_spec fallback &optional _face) fallback)))
+      (let* ((cell (clutch--header-cell 0 (vector 6)))
+             (pos (text-property-any 0 (length cell)
+                                     'clutch-header-col 0 cell))
+             (local-map (get-text-property pos 'local-map cell))
+             (keymap (get-text-property pos 'keymap cell)))
+        (should pos)
+        (should (keymapp local-map))
+        (should (eq keymap local-map))
+        (should (lookup-key local-map [header-line mouse-1]))
+        (should (lookup-key local-map [mouse-1]))
+        (should (eq (get-text-property pos 'mouse-face cell)
+                    'mode-line-highlight))
+        (should (string-match-p "cycle sort"
+                                (get-text-property pos 'help-echo cell)))))))
+
+(ert-deftest clutch-test-header-sort-keymap-dispatches-in-event-window-buffer ()
+  "The installed header command should sort in the clicked result buffer."
+  (let ((source (generate-new-buffer " *clutch-source*"))
+        (result (generate-new-buffer " *clutch-result*"))
+        (win (selected-window))
+        command
+        called-buffer
+        called-args)
+    (unwind-protect
+        (progn
+          (with-current-buffer result
+            (setq-local clutch--result-columns '("id" "name"))
+            (setq-local clutch--header-sort-function
+                        (lambda (cidx expected-name)
+                          (setq called-buffer (current-buffer)
+                                called-args (list cidx expected-name))))
+            (cl-letf (((symbol-function 'clutch--fixed-width-icon)
+                       (lambda (_spec fallback &optional _face) fallback)))
+              (let* ((cell (clutch--header-cell 1 (vector 6 8)))
+                     (pos (text-property-any 0 (length cell)
+                                             'clutch-header-col 1 cell))
+                     (map (get-text-property pos 'local-map cell)))
+                (setq command
+                      (lookup-key map [header-line mouse-1])))))
+          (with-current-buffer source
+            (cl-letf (((symbol-function 'event-start)
+                       (lambda (_event) (list win)))
+                      ((symbol-function 'window-buffer)
+                       (lambda (_win) result)))
+              (funcall-interactively command 'fake-event))))
+      (kill-buffer source)
+      (kill-buffer result))
+    (should (eq called-buffer result))
+    (should (equal called-args '(1 "name")))))
 
 (ert-deftest clutch-test-footer-cursor-part-shows-column-position ()
   "Footer cursor segment should include the current column index and total."
@@ -5372,39 +5629,270 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
 (ert-deftest clutch-test-sort-by-column-toggles-direction ()
   "Sorting the same column twice should toggle ascending/descending."
   (with-temp-buffer
-    (setq-local clutch--sort-column "name"
+    (insert "name")
+    (add-text-properties (point-min) (point-max) '(clutch-col-idx 1))
+    (goto-char (point-min))
+    (setq-local clutch--result-columns '("id" "name" "age")
+                clutch--result-column-defs '((:name "id")
+                                             (:name "name")
+                                             (:name "age"))
+                clutch--result-server-rewritable t
+                clutch--sort-column "name"
                 clutch--sort-descending nil)
     (let (sort-args)
-      (cl-letf (((symbol-function 'clutch-result--read-column)
-                 (lambda () "name"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "unexpected sort column prompt")))
                 ((symbol-function 'clutch-result--sort)
                  (lambda (col desc) (setq sort-args (list col desc)))))
         (clutch-result-sort-by-column)
         (should (equal sort-args '("name" t)))))))
 
+(ert-deftest clutch-test-sort-by-column-clears-after-descending ()
+  "Sorting the same DESC column again should clear SQL ORDER BY."
+  (with-temp-buffer
+    (insert "name")
+    (add-text-properties (point-min) (point-max) '(clutch-col-idx 1))
+    (goto-char (point-min))
+    (setq-local clutch--result-columns '("id" "name" "age")
+                clutch--result-column-defs '((:name "id")
+                                             (:name "name")
+                                             (:name "age"))
+                clutch--result-server-rewritable t
+                clutch--sort-column "name"
+                clutch--sort-descending t
+                clutch--order-by '("name" . "DESC")
+                clutch--page-current 4)
+    (let (pages sort-args)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "unexpected sort column prompt")))
+                ((symbol-function 'clutch-result--sort)
+                 (lambda (col desc) (setq sort-args (list col desc))))
+                ((symbol-function 'clutch-result--execute-page)
+                 (lambda (page &rest _)
+                   (push page pages))))
+        (clutch-result-sort-by-column)
+        (should-not clutch--sort-column)
+        (should-not clutch--sort-descending)
+        (should-not clutch--order-by)
+        (should (= clutch--page-current 0))
+        (should (equal pages '(0)))
+        (should-not sort-args)))))
+
 (ert-deftest clutch-test-sort-by-column-new-column-defaults-ascending ()
   "Sorting a different column should default to ascending."
   (with-temp-buffer
-    (setq-local clutch--sort-column "name"
+    (insert "age")
+    (add-text-properties (point-min) (point-max) '(clutch-col-idx 2))
+    (goto-char (point-min))
+    (setq-local clutch--result-columns '("id" "name" "age")
+                clutch--result-column-defs '((:name "id")
+                                             (:name "name")
+                                             (:name "age"))
+                clutch--result-server-rewritable t
+                clutch--sort-column "name"
                 clutch--sort-descending t)
     (let (sort-args)
-      (cl-letf (((symbol-function 'clutch-result--read-column)
-                 (lambda () "age"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "unexpected sort column prompt")))
                 ((symbol-function 'clutch-result--sort)
                  (lambda (col desc) (setq sort-args (list col desc)))))
         (clutch-result-sort-by-column)
         (should (equal sort-args '("age" nil)))))))
 
-(ert-deftest clutch-test-sort-by-column-desc-always-descending ()
-  "Sort descending command should always pass descending=t."
+(ert-deftest clutch-test-sort-by-column-errors-without-column-at-point ()
+  "Keyboard sorting should require point to be on a result column."
   (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "name")
+                clutch--result-column-defs '((:name "id") (:name "name")))
+    (let ((err (should-error (clutch-result-sort-by-column)
+                             :type 'user-error)))
+      (should (string-match-p "No column at point"
+                              (error-message-string err))))))
+
+(ert-deftest clutch-test-auto-commit-transient-description-shows-state ()
+  "Auto-commit transient label should show manual and automatic states."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-connection)
+    (cl-letf (((symbol-function 'clutch--dispatch-transaction-controls-inapt-p)
+               (lambda () nil)))
+      (dolist (case '((t manual) (nil auto)))
+        (pcase-let ((`(,manual-p ,active) case))
+          (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
+                     (lambda (_connection) manual-p)))
+            (let ((description (clutch--dispatch-auto-commit-description)))
+              (should (equal (substring-no-properties description)
+                             "Auto-commit (manual|auto)"))
+              (let ((case-fold-search nil))
+                (should (eq (get-text-property
+                             (string-match (symbol-name active) description)
+                             'face description)
+                            'transient-value))))))))))
+
+(ert-deftest clutch-test-copy-refine-transient-description-shows-state ()
+  "Copy refinement should display its current transient argument value."
+  (dolist (case '((nil "Refine selection (No|Yes)" "No")
+                  (("--refine") "Refine selection (No|Yes)" "Yes")))
+    (pcase-let ((`(,args ,expected ,active) case))
+      (cl-letf (((symbol-function 'transient-args) (lambda (_prefix) args)))
+        (let ((description (clutch-result--copy-refine-description)))
+          (should (equal (substring-no-properties description) expected))
+              (should (eq (get-text-property (string-match active description)
+                                            'face description)
+                      'transient-value)))))))
+
+(ert-deftest clutch-test-copy-dispatch-refreshes-dynamic-infix-labels ()
+  "Copy transient should refresh descriptions after toggling options."
+  (should (slot-value (get 'clutch-result-copy-dispatch 'transient--prefix)
+                      'refresh-suffixes)))
+
+(ert-deftest clutch-test-staged-transient-heading-shows-pending-count ()
+  "Staged transient heading should summarize pending mutation count."
+  (with-temp-buffer
+    (setq-local clutch--pending-edits '(edit-a edit-b)
+                clutch--pending-deletes '(delete-a)
+                clutch--pending-inserts '(insert-a insert-b insert-c))
+    (let ((heading (clutch-result--staged-transient-heading)))
+      (should (equal (substring-no-properties heading) "Staged (6 pending)"))
+      (should (eq (get-text-property (string-match "6 pending" heading)
+                                    'face heading)
+                  'warning)))
+    (setq-local clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil)
+    (should (equal (clutch-result--staged-transient-heading) "Staged"))))
+
+(ert-deftest clutch-test-filter-transient-descriptions-show-current-values ()
+  "Result filter labels should expose inactive and active values."
+  (with-temp-buffer
+    (should (equal (substring-no-properties
+                    (clutch-result--client-filter-transient-description))
+                   "Client filter (none|active)"))
+    (setq-local clutch--filter-pattern "alice"
+                clutch--where-filter "age > 18")
+    (should (equal (substring-no-properties
+                    (clutch-result--client-filter-transient-description))
+                   "Client filter (none|active) [alice]"))
+    (should (equal (substring-no-properties
+                    (clutch-result--where-filter-transient-description))
+                   "WHERE filter (none|active) [age > 18]"))))
+
+(ert-deftest clutch-test-fullscreen-transient-description-shows-layout-state ()
+  "Result layout label should expose window and fullscreen states."
+  (with-temp-buffer
+    (setq-local clutch--pre-fullscreen-config nil)
+    (should (equal (substring-no-properties
+                    (clutch-result--fullscreen-transient-description))
+                   "Layout (window|fullscreen)"))
+    (setq-local clutch--pre-fullscreen-config 'saved-configuration)
+    (let ((description (clutch-result--fullscreen-transient-description)))
+      (should (equal (substring-no-properties description)
+                     "Layout (window|fullscreen)"))
+      (should (eq (get-text-property (string-match "fullscreen" description)
+                                    'face description)
+                  'transient-value)))))
+
+(ert-deftest clutch-test-sort-transient-description-shows-three-state ()
+  "Result sort transient description should show one three-state control."
+  (with-temp-buffer
+    (insert "created_at")
+    (add-text-properties (point-min) (point-max) '(clutch-col-idx 0))
+    (goto-char (point-min))
+    (setq-local clutch--result-columns '("created_at")
+                clutch--result-column-defs '((:name "created_at")))
+    (let ((desc (clutch-result--sort-transient-description)))
+      (should (string-match-p "Sort current" desc))
+      (should (string-match-p "(none|asc|desc)" desc))
+      (should (string-match-p "\\[created_at\\]" desc))
+      (should (eq (get-text-property (string-match "none" desc) 'face desc)
+                  'transient-value)))
+    (setq-local clutch--sort-column "created_at"
+                clutch--sort-descending t)
+    (let ((desc (clutch-result--sort-transient-description)))
+      (should (eq (get-text-property (string-match "desc" desc) 'face desc)
+                  'transient-value)))
+    (remove-text-properties (point-min) (point-max) '(clutch-col-idx nil))
+    (should (equal (substring-no-properties
+                    (clutch-result--sort-transient-description))
+                   "Sort current (no column)"))))
+
+(ert-deftest clutch-test-sort-transient-description-targets-point-column ()
+  "Result sort transient description should describe the current-column target."
+  (with-temp-buffer
+    (insert "age")
+    (add-text-properties (point-min) (point-max) '(clutch-col-idx 2))
+    (goto-char (point-min))
+    (setq-local clutch--result-columns '("id" "name" "age")
+                clutch--result-column-defs '((:name "id")
+                                             (:name "name")
+                                             (:name "age"))
+                clutch--sort-column "name"
+                clutch--sort-descending t)
+    (let ((desc (substring-no-properties
+                 (clutch-result--sort-transient-description))))
+      (should (string-match-p "Sort current" desc))
+      (should (string-match-p "\\[age\\]" desc))
+      (should (string-match-p "(none|asc|desc)" desc)))))
+
+(ert-deftest clutch-test-sort-by-header-column-uses-captured-visible-name ()
+  "Header sorting should tolerate a stale index when the captured name is valid."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable t
+                clutch--result-server-pageable t
+                clutch--result-columns '("id" "name"))
+    (let (pages)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
+                 (lambda (page &rest _)
+                   (push page pages))))
+        (clutch-result--sort-by-column-index 99 "name")
+        (should (equal clutch--sort-column "name"))
+        (should (equal clutch--order-by '("name" . "ASC")))
+        (should (equal pages '(0)))))))
+
+(ert-deftest clutch-test-sort-by-header-column-rejects-stale-name ()
+  "Header sorting should not fall back to another column at the same index."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "age")
+                clutch--result-column-defs '((:name "id") (:name "age")))
     (let (sort-args)
-      (cl-letf (((symbol-function 'clutch-result--read-column)
-                 (lambda () "created_at"))
-                ((symbol-function 'clutch-result--sort)
-                 (lambda (col desc) (setq sort-args (list col desc)))))
-        (clutch-result-sort-by-column-desc)
-        (should (equal sort-args '("created_at" t)))))))
+      (cl-letf (((symbol-function 'clutch-result--sort)
+                 (lambda (name descending)
+                   (setq sort-args (list name descending)))))
+        (let ((err (should-error
+                    (clutch-result--sort-by-column-index 1 "name")
+                    :type 'user-error)))
+          (should (string-match-p "Column not found"
+                                  (error-message-string err)))))
+      (should-not sort-args))))
+
+(ert-deftest clutch-test-sort-by-header-column-cycles-state ()
+  "Click-style header sorting should cycle ASC, DESC, then unsorted."
+  (with-temp-buffer
+    (setq-local clutch--result-server-rewritable t
+                clutch--result-server-pageable t
+                clutch--result-columns '("id" "name")
+                clutch--page-current 3)
+    (let (pages)
+      (cl-letf (((symbol-function 'clutch-result--execute-page)
+                 (lambda (page &rest _)
+                   (push page pages))))
+        (clutch-result--sort-by-column-index 1)
+        (should (equal clutch--sort-column "name"))
+        (should-not clutch--sort-descending)
+        (should (equal clutch--order-by '("name" . "ASC")))
+        (should (= clutch--page-current 0))
+        (clutch-result--sort-by-column-index 1)
+        (should (equal clutch--sort-column "name"))
+        (should clutch--sort-descending)
+        (should (equal clutch--order-by '("name" . "DESC")))
+        (clutch-result--sort-by-column-index 1)
+        (should-not clutch--sort-column)
+        (should-not clutch--sort-descending)
+        (should-not clutch--order-by)
+        (clutch-result--sort-by-column-index 0)
+        (should (equal clutch--sort-column "id"))
+        (should-not clutch--sort-descending)
+        (should (equal clutch--order-by '("id" . "ASC")))
+        (should (equal (nreverse pages) '(0 0 0 0)))))))
 
 (ert-deftest clutch-test-sort-rejects-hidden-row-identity-column ()
   "Server-side sort should only accept visible user columns."

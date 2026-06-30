@@ -816,17 +816,19 @@ Accumulates input until a semicolon is found, then executes."
   (interactive)
   (call-interactively #'clutch-rollback))
 
+(defun clutch--dispatch-auto-commit-description ()
+  "Return the transient description for the current auto-commit state."
+  (if (clutch--dispatch-transaction-controls-inapt-p)
+      (concat "Auto-commit "
+              (propertize "(unavailable)" 'face 'transient-inactive-value))
+    (concat "Auto-commit "
+            (clutch--transient-state-display
+             (if (clutch-db-manual-commit-p clutch-connection) 'manual 'auto)
+             '((manual . "manual") (auto . "auto"))))))
+
 (transient-define-suffix clutch--dispatch-toggle-auto-commit ()
   "Transient suffix for `clutch-toggle-auto-commit' with a dynamic label."
-  :description (lambda ()
-                 (cond
-                  ((clutch--dispatch-transaction-controls-inapt-p)
-                   "Auto-commit unavailable")
-                  ((and clutch-connection
-                        (clutch-db-manual-commit-p clutch-connection))
-                   "Enable auto-commit")
-                  (t
-                   "Disable auto-commit")))
+  :description #'clutch--dispatch-auto-commit-description
   :inapt-if (lambda ()
                (or (clutch--dispatch-transaction-controls-inapt-p)
                    (and clutch-connection

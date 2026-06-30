@@ -47,12 +47,13 @@ See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-
 
 ** Interactive UI
 
-- Result browser: single-page table view, fixed header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
+- Result browser: single-page table view, fixed clickable header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
 - Execution flow: run a region or statement, keep focus in the SQL buffer, refresh results below, and mark the last executed statement in the gutter
 - SQL editing workflow: record view, foreign-key navigation, staged insert/edit/delete, SQL preview, and guarded commit
 - Filtering and export: server-side =WHERE= filters, client-side fuzzy filters, =ORDER BY= sorting, horizontal paging, CSV/TSV/Org table copy/export, SQL INSERT/UPDATE copy/export for SQL results, and native document helper copy/export for MongoDB results
 - SQL intelligence: scoped table/column completion, Eldoc, object lookup, MySQL =HELP= lookup, and cache-first metadata loading that avoids blocking point motion
 - Connection feedback: per-connection consoles, persisted console contents, auto-reconnect, explicit schema-refresh states, transaction status, and a dedicated debug buffer
+- Stateful transient feedback: active auto-commit, filters, sort, copy refinement, result layout, staged mutation count, and Record field action are shown directly in their menus
 - Inspection and extension: JSON/XML/BLOB value viewers, live cell viewer, per-column display overrides, and context export for external assistants
 - REPL mode built on =comint-mode=
 
@@ -399,8 +400,12 @@ Common entry points:
 - =M-.= jumps SQL aliases to their statement definition; object lookup uses
   =C-c C-d= / =C-c C-j=
 - =C-c ?= opens the transient menu
+- Stateful transient entries highlight their current choice; unavailable actions
+  stay visible but inapt when their surrounding context is still useful
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
+- Pressing =s= cycles SQL =ORDER BY= for the result column at point; use =C= to
+  jump to another visible column first, or click a result header to cycle it
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
 - =C-c '= edits the current result cell; in that edit buffer, =C-c C-n=
   stages database =NULL=

@@ -72,6 +72,15 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
   single-character ellipsis (`…`) instead of silently cutting text.
 - Updated header-line shortcut hints so shortcut keys and their descriptions
   use distinct faces, matching the visual separation used by Transient.
+- Made result column sorting a single three-state cycle. Pressing `s` on the
+  current column or clicking a result column header now cycles unsorted,
+  ascending, descending, then unsorted again; use `C` to jump to another visible
+  column first. Headers show original-size neutral, ascending, and descending
+  icons after column names.
+- Made transient menus expose current operational state using highlighted
+  choices. Auto-commit, copy refinement, filters, sorting, result layout, staged
+  mutation counts, and Record field actions now update their labels from the
+  active buffer context; unavailable stateful actions remain visible but inapt.
 - Updated JSON result-cell display to match a DataGrip-like rule:
   short JSON is shown inline with lightweight token highlighting, while long
   JSON shows a compact prefix ending in `…` and remains unhighlighted.
@@ -88,6 +97,12 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 
 ### Fixed
 
+- Fixed copy transient state labels so toggling `-r` immediately refreshes the
+  highlighted `No|Yes` choice.
+- Fixed result header sort icons so their graphical width stays aligned
+  with the monospace result grid.
+- Prevented result column navigation and stale header clicks from silently
+  targeting hidden or different columns during sorting.
 - Reduced SQL first-query latency by stopping row-identity metadata lookup after
   the first usable candidate across MySQL, PostgreSQL, SQLite, and JDBC; MySQL
   unique-index fallback now uses scoped `SHOW KEYS` metadata.
