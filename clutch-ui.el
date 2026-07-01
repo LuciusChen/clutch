@@ -362,7 +362,7 @@ CHOICES is an alist of (VALUE . LABEL) entries in display order."
       (clutch--json-like-string-p val)))
 
 (defun clutch--json-string-end (text start)
-  "Return end index of JSON string in TEXT that starts at START."
+  "Return end index of JSON string in TEXT beginning at START."
   (let ((pos (1+ start))
         (len (length text))
         (escaped nil))
@@ -2120,7 +2120,7 @@ Preserve cursor position (row + column) and the top visible row."
         (clutch--refresh-display)))))
 
 (defun clutch--schedule-column-width-refresh ()
-  "Schedule a throttled redraw for column-width changes."
+  "Schedule a throttled redraw for modified column widths."
   (unless (timerp clutch--column-width-refresh-timer)
     (let ((buffer (current-buffer)))
       (setq clutch--column-width-refresh-timer

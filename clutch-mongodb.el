@@ -1135,7 +1135,7 @@ helper call."
              thereis (clutch-mongodb--find-document-key item key)))))
 
 (defun clutch-mongodb--document-has-value-p (value key expected)
-  "Return non-nil when VALUE recursively contains KEY equal to EXPECTED."
+  "Return non-nil if VALUE has recursive KEY equal to EXPECTED."
   (cond
    ((or (mongodb-document-p value)
         (clutch-mongodb--alist-p value))
@@ -1612,7 +1612,7 @@ FIELDS is an optional list of top-level field names for update snippets."
     (puthash path stat stats)))
 
 (defun clutch-mongodb--extended-json-wrapper-p (value)
-  "Return non-nil when VALUE looks like an Extended JSON scalar wrapper."
+  "Return non-nil if VALUE is an Extended JSON scalar wrapper."
   (and (clutch-mongodb--alist-p value)
        (= (length value) 1)
        (stringp (caar value))

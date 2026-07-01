@@ -1393,7 +1393,7 @@ before returning the list."
          (alist-get surface (plist-get features :surfaces)))))
 
 (defun clutch-backend-sql-execution-p (backend params)
-  "Return non-nil when BACKEND with PARAMS executes SQL."
+  "Return non-nil if BACKEND with PARAMS is configured for SQL execution."
   (let* ((backend (clutch-backend-normalize backend))
          (surface-features
           (clutch-backend-surface-feature backend (plist-get params :surface))))
@@ -1424,7 +1424,7 @@ before returning the list."
     (clutch-backend-sql-execution-p backend params)))
 
 (defun clutch-backend-manual-choice-p (backend)
-  "Return non-nil when BACKEND should appear in manual connection prompts."
+  "Return non-nil if manual connection UI should include BACKEND."
   (when-let* ((features (clutch-backend-feature backend)))
     (if (plist-member features :manual-choice)
         (plist-get features :manual-choice)

@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.2.0 - Unreleased
+## 0.2.0 - 2026-07-01
 
-This section summarizes the planned 0.2.0 release relative to `origin/main`.
+This section summarizes the 0.2.0 release.
 
 ### Breaking Changes
 
@@ -49,6 +49,12 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
 - Added architecture documentation with diagrams for module layering, backend
   surfaces, connection flow, query/result flow, object flow, and lazy optional
   dependency loading.
+
+### Fixed
+
+- Fixed copy transient loading with the Transient version bundled in Emacs 29.
+  The copy refine toggle no longer depends on newer `:refresh-suffixes`
+  support.
 
 ### Changed
 

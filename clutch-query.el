@@ -96,7 +96,17 @@ Used to update the mode-line with a spinner during execution.")
                   (connection sql result elapsed row-identity-prep
                               server-pageable result-context source-buffer))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
+(declare-function clutch-connect "clutch-connection" ())
+(declare-function clutch-commit "clutch-connection" ())
+(declare-function clutch-rollback "clutch-connection" ())
+(declare-function clutch-toggle-auto-commit "clutch-connection" ())
+(declare-function clutch-act-dwim "clutch-object" (&optional entry))
+(declare-function clutch-jump "clutch-object" (&optional entry))
+(declare-function clutch-describe-dwim "clutch-object" (&optional entry))
+(declare-function clutch-refresh-schema "clutch-schema" ())
+(declare-function clutch-dispatch "clutch" ())
 (declare-function clutch-mode "clutch" ())
+(declare-function clutch-switch-schema "clutch" ())
 
 ;; Forward declarations — functions from clutch-ui / clutch-edit
 (declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
@@ -217,7 +227,7 @@ MODE-LINE-NAME is the base name shown while the buffer is idle."
       #'clutch-mode))
 
 (defun clutch--ensure-query-console-major-mode (params)
-  "Ensure the current buffer uses the query console mode for PARAMS."
+  "Set the current buffer to the query console mode for PARAMS."
   (let ((mode (clutch--query-console-major-mode params)))
     (unless (eq major-mode mode)
       (funcall mode))))

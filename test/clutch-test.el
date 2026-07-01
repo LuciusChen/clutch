@@ -2,7 +2,6 @@
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
@@ -5754,11 +5753,6 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                              'face description)
                             'transient-value))))))))))
 
-(ert-deftest clutch-test-copy-dispatch-refreshes-dynamic-infix-labels ()
-  "Copy transient should refresh descriptions after toggling options."
-  (should (slot-value (get 'clutch-result-copy-dispatch 'transient--prefix)
-                      'refresh-suffixes)))
-
 (ert-deftest clutch-test-copy-refine-infix-display-follows-switch-value ()
   "Copy refinement should display the active switch object value."
   (let* ((suffixes (transient-suffixes 'clutch-result-copy-dispatch))
@@ -5776,7 +5770,11 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
       (should (eq (get-text-property (string-match "No" value)
                                      'face value)
                   'transient-value)))
-    (oset refine value "--refine")
+    (let ((transient--prefix (get 'clutch-result-copy-dispatch
+                                  'transient--prefix))
+          (transient--suffixes suffixes))
+      (cl-letf (((symbol-function 'transient--show) #'ignore))
+        (transient-infix-set refine (transient-infix-read refine))))
     (let ((value (transient-format-value refine)))
       (should (equal (substring-no-properties value) "(No|Yes)"))
       (should (eq (get-text-property (string-match "Yes" value)

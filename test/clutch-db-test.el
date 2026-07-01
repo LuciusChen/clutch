@@ -2,7 +2,6 @@
 
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
 ;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:

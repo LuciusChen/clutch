@@ -1560,7 +1560,6 @@ Otherwise, copy the current cell."
   "Copy result buffer data.
 Enable --refine to exclude rows/columns interactively before copying
 \(requires an active region set with \\<global-map>\\[set-mark-command] or mouse)."
-  :refresh-suffixes t
   ["Options"
    :pad-keys t
    ("-r" "Refine selection" "--refine"

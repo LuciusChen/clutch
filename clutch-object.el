@@ -1843,7 +1843,7 @@ passed to the fallback reader."
          (clutch--object-supports-jump-target-p entry))))
 
 (defun clutch--object-act-backend-action-p (action-id)
-  "Return non-nil when ACTION-ID applies to the current action target."
+  "Return non-nil if ACTION-ID is available for current action target."
   (let ((entry clutch--object-action-entry)
         (conn (clutch--object-action-current-connection)))
     (and entry
@@ -1855,7 +1855,7 @@ passed to the fallback reader."
   (not (clutch--object-act-backend-action-p action-id)))
 
 (defun clutch--object-act-document-actions-p ()
-  "Return non-nil when any document action applies to the action target."
+  "Return non-nil if any document action is available for action target."
   (let ((entry clutch--object-action-entry)
         (conn (clutch--object-action-current-connection)))
     (and entry
