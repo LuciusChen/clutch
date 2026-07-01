@@ -1636,8 +1636,8 @@ ROWS defaults to a small three-row sample."
       (should (equal (substring-no-properties icon) "I"))
       (should-not (get-text-property 0 'display icon)))))
 
-(ert-deftest clutch-test-header-label-uses-fa-sort-icons-without-fallbacks ()
-  "Header labels should use original-size Font Awesome sort icons without fallbacks."
+(ert-deftest clutch-test-header-label-uses-sort-icons-without-fallbacks ()
+  "Header labels should use original-size Nerd Font sort icons without fallbacks."
   (with-temp-buffer
     (let (specs fallbacks faces)
       (cl-letf (((symbol-function 'clutch--fixed-width-icon)
@@ -1651,7 +1651,7 @@ ROWS defaults to a small three-row sample."
         (should (equal (substring-no-properties
                         (clutch--header-label "id" t))
                        "id S"))
-        (should (equal (car specs) '(faicon . "nf-fa-sort")))
+        (should (equal (car specs) '(mdicon . "nf-md-sort")))
         (should-not (car fallbacks))
         (should-not (car faces))
         (setq-local clutch--sort-column "id"
@@ -1661,7 +1661,7 @@ ROWS defaults to a small three-row sample."
                     faces nil)
         (should (equal (substring-no-properties (clutch--header-label "id"))
                        "id S"))
-        (should (equal (car specs) '(faicon . "nf-fa-sort_asc")))
+        (should (equal (car specs) '(octicon . "nf-oct-sort_asc")))
         (should-not (car fallbacks))
         (should-not (car faces))
         (setq-local clutch--sort-descending t
@@ -1670,7 +1670,7 @@ ROWS defaults to a small three-row sample."
                     faces nil)
         (should (equal (substring-no-properties (clutch--header-label "id"))
                        "id S"))
-        (should (equal (car specs) '(faicon . "nf-fa-sort_desc")))
+        (should (equal (car specs) '(octicon . "nf-oct-sort_desc")))
         (should-not (car fallbacks))
         (should-not (car faces))))))
 

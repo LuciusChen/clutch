@@ -101,6 +101,8 @@ This section summarizes the planned 0.2.0 release relative to `origin/main`.
   value and immediately refreshes the highlighted `No|Yes` choice.
 - Fixed result header sort icons so their graphical width stays aligned
   with the monospace result grid.
+- Refined result header sort indicators and column-name underlining so spacing
+  after the name stays visually clean.
 - Prevented result column navigation and stale header clicks from silently
   targeting hidden or different columns during sorting.
 - Reduced SQL first-query latency by stopping row-identity metadata lookup after

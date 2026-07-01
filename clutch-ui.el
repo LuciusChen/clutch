@@ -927,9 +927,9 @@ columns; otherwise return nil for unsorted columns."
                   (if clutch--sort-descending 'desc 'asc))
                  (include-unsorted 'none)))
          (icon-spec (pcase state
-                      ('desc '(faicon . "nf-fa-sort_desc"))
-                      ('asc '(faicon . "nf-fa-sort_asc"))
-                      ('none '(faicon . "nf-fa-sort"))))
+                      ('desc '(octicon . "nf-oct-sort_desc"))
+                      ('asc '(octicon . "nf-oct-sort_asc"))
+                      ('none '(mdicon . "nf-md-sort"))))
          (icon (and state
                     (clutch--fixed-width-icon icon-spec nil))))
     (when (and icon (not (string-empty-p icon)))
@@ -942,8 +942,8 @@ When INCLUDE-UNSORTED-SORT is non-nil, append the neutral sort
 indicator for unsorted columns too."
   (let* ((sort (clutch--header-sort-icon name include-unsorted-sort)))
     (if sort
-        (concat name " " sort)
-      name)))
+        (concat (propertize name 'clutch-header-name t) " " sort)
+      (propertize name 'clutch-header-name t))))
 
 (defun clutch--header-sort-keymap (cidx name)
   "Return a header-line keymap that cycles sorting for column CIDX named NAME."
@@ -1650,19 +1650,15 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (pad-str (make-string clutch-column-padding ?\s))
          (sort-map (clutch--header-sort-keymap cidx name))
          (body nil))
-    ;; Append base/underline style without overwriting icon-specific face.
+    ;; Append base style without overwriting icon-specific face.
     (add-face-text-property 0 (length label) base-face 'append label)
     (when active-p
       (add-face-text-property 0 (length label) 'clutch-header-active-face
                               'append label))
-    (add-face-text-property 0 (length label) '(:underline t) 'append label)
-    ;; Keep sort/pin icons un-underlined for cleaner visual hierarchy.
+    ;; Only underline the column name, not the spacer or trailing sort icon.
     (dotimes (i (length label))
-      (when (get-text-property i 'clutch-header-icon label)
-        (let ((icon-face (or (get-text-property i 'face label) base-face)))
-          (put-text-property i (1+ i) 'face
-                             (list '(:underline nil) icon-face)
-                             label))))
+      (when (get-text-property i 'clutch-header-name label)
+        (add-face-text-property i (1+ i) '(:underline t) 'append label)))
     (setq body (concat pad-str
                        (propertize lead 'face base-face)
                        label
