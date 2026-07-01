@@ -7,11 +7,14 @@
 
 An Emacs database client with an interactive data browsing UI.
 Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite
-through Emacs built-in =sqlite-*= functions, plus Oracle, SQL Server, DB2,
-Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through a
+through Emacs built-in =sqlite-*= functions, MongoDB through the external
+=mongodb.el= native client, Redis through the external =redis.el= native
+client, plus Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB,
+and generic JDBC URLs through a
 lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
 
-Architecture and module ownership are recorded in [[file:PRD.md][PRD.md]].
+Architecture diagrams are in [[file:docs/architecture.md][docs/architecture.md]], and module ownership is
+recorded in [[file:PRD.md][PRD.md]].
 For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 #+CAPTION: Query console with result pane, value viewer, and footer status.
@@ -19,12 +22,18 @@ For Org-Babel integration, install the separate [[https://github.com/LuciusChen/
 
 ** Backend Support
 
-| Backend | Status | Requirements and notes |
-|---------+--------+------------------------|
-| MySQL | Primary backend; tested daily | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
-| PostgreSQL | Supported | Functional and compatible, with less daily-use coverage than MySQL |
-| SQLite | Supported | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
-| JDBC | Optional sidecar | Requires Java 17+ and =clutch-jdbc-agent.jar=; install with =M-x clutch-jdbc-ensure-agent= |
+| Backend | Support level | Requirements and notes |
+|---------+---------------+------------------------|
+| MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
+| PostgreSQL | Core SQL support | Functional and compatible, with less daily-use coverage than MySQL |
+| SQLite | Core SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
+| Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
+| DuckDB | Core SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |
+| MongoDB | Basic native document support; optional SQL Interface surface | Normal connections use external =mongodb.el= native protocol support plus Clutch's MongoDB Shell / MQL helper query buffers; SQL Interface endpoints use =:surface sql-interface= and require the JDBC driver |
+| Redis | Basic key/value support | Normal connections use external =redis.el= native RESP support plus Clutch's line-oriented Redis command buffers, key browsing, and type-aware value display |
+| ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Useful through JDBC, with backend-specific limits around edits, transactions, and dialect behavior |
+
+See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-level policy and non-relational boundary.
 
 * Features
 
@@ -38,12 +47,13 @@ For Org-Babel integration, install the separate [[https://github.com/LuciusChen/
 
 ** Interactive UI
 
-- Result browser: single-page table view, fixed header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
+- Result browser: single-page table view, fixed clickable header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
 - Execution flow: run a region or statement, keep focus in the SQL buffer, refresh results below, and mark the last executed statement in the gutter
-- Editing workflow: record view, foreign-key navigation, staged insert/edit/delete, SQL preview, and guarded commit
-- Filtering and export: server-side =WHERE= filters, client-side fuzzy filters, =ORDER BY= sorting, horizontal paging, and CSV/TSV/Org table/INSERT/UPDATE copy/export
+- SQL editing workflow: record view, foreign-key navigation, staged insert/edit/delete, SQL preview, and guarded commit
+- Filtering and export: server-side =WHERE= filters, client-side fuzzy filters, =ORDER BY= sorting, horizontal paging, CSV/TSV/Org table copy/export, SQL INSERT/UPDATE copy/export for SQL results, and native document helper copy/export for MongoDB results
 - SQL intelligence: scoped table/column completion, Eldoc, object lookup, MySQL =HELP= lookup, and cache-first metadata loading that avoids blocking point motion
 - Connection feedback: per-connection consoles, persisted console contents, auto-reconnect, explicit schema-refresh states, transaction status, and a dedicated debug buffer
+- Stateful transient feedback: active auto-commit, filters, sort, copy refinement, result layout, staged mutation count, and Record field action are shown directly in their menus
 - Inspection and extension: JSON/XML/BLOB value viewers, live cell viewer, per-column display overrides, and context export for external assistants
 - REPL mode built on =comint-mode=
 
@@ -63,7 +73,9 @@ and inject or read a matching row identity.
 
 * Documentation
 
+- [[file:docs/architecture.md][Architecture guide]] — current module layers, backend/surface model, connection flow, query/object flow, and JDBC runtime diagrams.
 - [[file:docs/interactive-client.org][Interactive client guide]] — key bindings, result workflows, object actions, REPL, transient menus, faces, timeouts, and customization.
+- [[file:docs/backend-support.org][Backend support levels]] — Core SQL, basic support, MongoDB SQL Interface, DuckDB, and Redis.
 - [[file:docs/native-backends.md][Native backend guide]] — MySQL, PostgreSQL, SQLite, SSH tunnels, TLS, timeout behavior, and backend-specific examples.
 - [[file:docs/jdbc-backend.org][JDBC backend guide]] — JDBC driver setup, connection examples, Oracle notes, transaction behavior, and generic JDBC URLs.
 - [[file:docs/org-babel.org][Org-Babel guide]] — =ob-clutch= setup, source block examples, header arguments, and connection caching.
@@ -98,14 +110,27 @@ Install =clutch= from MELPA or another package archive:
 (package-install 'clutch)
 #+end_src
 
-Package-manager installs also install the core native backend protocol
-packages:
+Protocol packages are optional and backend-specific.  =clutch= does not install
+every database protocol package up front, because many users only use one
+backend.  Install the protocol package for each backend you configure:
 
-- [[https://github.com/LuciusChen/mysql.el][mysql]] for =:backend mysql=
-- [[https://github.com/emarsden/pg-el][pg]] for =:backend pg=
+| Backend | Extra Emacs package |
+|---------+---------------------|
+| =:backend mysql= | [[https://github.com/LuciusChen/mysql.el][mysql.el]] |
+| =:backend pg= | [[https://github.com/emarsden/pg-el][pg.el / pg-el]] |
+| =:backend mongodb= | [[https://github.com/LuciusChen/mongodb.el][mongodb.el]] |
+| =:backend redis= | [[https://github.com/LuciusChen/redis.el][redis.el]] |
+| =:backend sqlite= | none; Emacs 29.1+ built-in SQLite support |
+| =:backend jdbc= / Oracle / SQL Server / ClickHouse / DB2 / DuckDB | none; uses the bundled JDBC adapter |
 
-SQLite support is built in on Emacs 29.1+, and JDBC support ships inside
-=clutch= itself (the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=).
+If a configured backend's protocol package is missing, =clutch= reports the
+missing package when connecting.  Install that package with your package manager,
+ensure it is on =load-path=, then retry the connection; restarting Emacs is the
+safest way to clear stale autoload or native-compile state after installation.
+
+JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+
+and =clutch-jdbc-agent.jar=.  Individual JDBC databases may also need driver
+jars.
 For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 For source checkouts, add =clutch= and any native protocol backend checkout you
@@ -115,6 +140,8 @@ use to =load-path= explicitly:
 (add-to-list 'load-path "/path/to/clutch")
 (add-to-list 'load-path "/path/to/mysql.el") ; only for :backend mysql
 (add-to-list 'load-path "/path/to/pg-el")    ; only for :backend pg
+(add-to-list 'load-path "/path/to/mongodb.el") ; only for :backend mongodb
+(add-to-list 'load-path "/path/to/redis.el") ; only for :backend redis
 (require 'clutch)
 #+end_src
 
@@ -124,12 +151,14 @@ This release separates protocol and Org-Babel packages from the main
 =clutch= package.  If you are upgrading from an older checkout that bundled
 everything in one repository, this is a breaking packaging change:
 
-- [[https://github.com/LuciusChen/mysql.el][mysql.el]] is no longer bundled in this repository.  Package-manager installs
-  of =clutch= install the =mysql= package as a dependency; source checkouts must
-  add =mysql.el= to =load-path= for =:backend mysql=.
-- [[https://github.com/emarsden/pg-el][pg.el]] is no longer bundled in this repository.  Package-manager installs of
-  =clutch= install the =pg= package as a dependency; source checkouts must add
-  =pg-el= to =load-path= for =:backend pg=.
+- [[https://github.com/LuciusChen/mysql.el][mysql.el]] is no longer bundled in this repository.  Install it separately for
+  =:backend mysql=.
+- [[https://github.com/emarsden/pg-el][pg.el]] is no longer bundled in this repository.  Install it separately for
+  =:backend pg=.
+- [[https://github.com/LuciusChen/mongodb.el][mongodb.el]] is no longer bundled in this repository.  Install it separately for
+  =:backend mongodb=.
+- [[https://github.com/LuciusChen/redis.el][redis.el]] is a lazy optional protocol package.  Install it separately for
+  =:backend redis=.
 - [[https://github.com/LuciusChen/ob-clutch][ob-clutch.el]] is no longer bundled; install =ob-clutch= separately for
   Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
@@ -168,12 +197,15 @@ everything in one repository, this is a breaking packaging change:
                           :host "127.0.0.1" :port 55433
                           :user "app" :database "appdb"
                           :tramp "/ssh:devbox:/workspace/"))
+        ("dev-redis"  . (:backend redis
+                          :host "127.0.0.1" :port 6379
+                          :database 0))
         ("dev-sqlite" . (:backend sqlite
                           :database "/path/to/my.db"))))
 #+end_src
 
-- Every entry must specify =:backend= (=mysql=, =pg=, =sqlite=, or a JDBC driver
-  symbol such as =oracle=).
+- Every entry must specify =:backend= (=mysql=, =pg=, =sqlite=, =mongodb=,
+  =redis=, or a JDBC driver symbol such as =oracle=).
 - SQLite is local and file-based: only =:database= is required; use =":memory:"=
   for a transient database.  Do not combine SQLite with =:ssh-host=,
   =:ssh-tunnel=, or =:tramp=.
@@ -289,7 +321,8 @@ non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure
 
 Add =:ssh-tunnel direct-first= when the same profile should try a direct
 connection before falling back to SSH.  SSH forwarding applies to structured
-=:host= / =:port= entries; raw JDBC =:url= profiles still need manual tunnels.
+=:host= / =:port= entries; opaque =:url= profiles, including JDBC and MongoDB
+URLs, still need manual tunnels or backend-level transport support.
 Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** TRAMP-aware Connection Origin
@@ -367,17 +400,46 @@ Common entry points:
 - =M-.= jumps SQL aliases to their statement definition; object lookup uses
   =C-c C-d= / =C-c C-j=
 - =C-c ?= opens the transient menu
+- Stateful transient entries highlight their current choice; unavailable actions
+  stay visible but inapt when their surrounding context is still useful
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
+- Pressing =s= cycles SQL =ORDER BY= for the result column at point; use =C= to
+  jump to another visible column first, or click a result header to cycle it
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
+- =C-c '= edits the current result cell; in that edit buffer, =C-c C-n=
+  stages database =NULL=
 - =M-x clutch-copy-context-for-agent= copies SQL, table metadata, and the latest
   matching visible result sample as Markdown for an external agent; the same
   command is available as =k= in the main and result transients.  Table metadata
   reuses the existing object describe path.
 
+** MongoDB Backend
+
+MongoDB is basic native document support through =mongodb.el=: ordinary MongoDB
+deployments, supported MongoDB Shell / MQL helper commands, and shared
+object/result workflows.  It is not a full =mongosh= JavaScript runtime.
+MongoDB SQL Interface stays on the same =mongodb= backend as
+=:surface sql-interface= and requires the JDBC sidecar plus MongoDB JDBC driver
+jar.  See [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
+
+** Redis Backend
+
+Redis is basic key/value support through =redis.el=.  It connects to ordinary
+Redis TCP endpoints, uses line-oriented =clutch-redis-mode= command buffers,
+and maps key browsing/type-aware reads into the shared Clutch grid.  Redis
+support is intentionally basic: no SQL row editing, joins, row identity,
+transaction workflow, pub/sub loops, cluster management, or stream consumer
+workflows.  See [[file:docs/backend-support.org][docs/backend-support.org]] and
+[[file:docs/native-backends.md][docs/native-backends.md]] for support boundaries.
+
 ** JDBC Backend
 
-JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through the [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] sidecar.  For setup, driver installation, connection examples, Oracle notes, and transaction behavior, see [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
+JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse,
+MongoDB SQL Interface, DuckDB, and generic JDBC URLs through the
+[[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] sidecar.  For setup, driver installation, connection
+examples, backend-specific notes, and transaction behavior, see
+[[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
 
 For the sidecar wire protocol and agent internals, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]].
 
@@ -415,9 +477,12 @@ bridge live in separate repositories and carry their own focused test suites.
 ./test/run-ci.sh native-live
 #+end_src
 
-The native live runner starts or reuses local containers and covers MySQL and
-PostgreSQL UI/backend workflows against real databases.  JDBC live suites remain
-environment-driven and are skipped by default.  Contributor release gates are
+The native live runner starts or reuses local containers and covers MySQL,
+PostgreSQL, and ordinary MongoDB native protocol connections against real
+databases.  Other JDBC live suites remain environment-driven and are skipped by
+default.  MongoDB SQL Interface JDBC live tests require a SQL Interface
+endpoint; ordinary MongoDB work uses the default =mongodb= document surface.
+Contributor release gates are
 listed in =AGENTS.md= §Pre-Commit Checklist.
 
 * Roadmap

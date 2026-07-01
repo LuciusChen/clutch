@@ -5,7 +5,7 @@
 ;; Assisted-by: OpenAI Codex:gpt-5.5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (mysql "0.2.2") (pg "0.40") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
 ;; This file is part of clutch.
@@ -39,7 +39,7 @@
 
 ;;; Code:
 
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-query)
 (require 'sql)
@@ -77,6 +77,16 @@
 (defface clutch-header-face
   '((t :weight bold))
   "Face for header text that is not a database field name."
+  :group 'clutch)
+
+(defface clutch-key-hint-key-face
+  '((t :inherit transient-key))
+  "Face for shortcut keys shown in Clutch header-line hints."
+  :group 'clutch)
+
+(defface clutch-key-hint-description-face
+  '((t :inherit header-line))
+  "Face for shortcut descriptions shown in Clutch header-line hints."
   :group 'clutch)
 
 (defface clutch-insert-field-tag-face
@@ -224,8 +234,15 @@ Each entry has the form:
            [:query-timeout N] [:rpc-timeout N]))
 NAME is a string used for `completing-read'.
 :backend is required and names the backend symbol (\\='mysql, \\='pg,
-\\='sqlite, or a JDBC backend such as \\='oracle).
+\\='sqlite, \\='mongodb, or a JDBC backend such as \\='oracle or
+\\='sqlserver).
+:surface selects a non-default surface for backends that expose more than one
+query language.  For MongoDB, omit it for the normal document/MongoDB Shell
+surface, or use \\='sql-interface for MongoDB SQL Interface JDBC endpoints.
 :sql-product overrides `clutch-sql-product' for this connection.
+:auth-database / :auth-source set the MongoDB authentication database for
+native MongoDB URLs and the default auth database in structured
+MongoDB SQL Interface JDBC URLs.
 :tls is a convenience shortcut for backend TLS defaults.  For MySQL,
 an explicit `:tls nil' forces plaintext and suppresses the automatic
 MySQL 8 TLS retry path; for PostgreSQL, `:tls t' maps to `:sslmode require'
@@ -260,6 +277,8 @@ Password resolution order:
                                     (:user string)
                                     (:password string)
                                     (:database string)
+                                    (:auth-database string)
+                                    (:auth-source string)
                                     (:backend symbol)
                                     (:sql-product symbol)
                                     (:pass-entry string)
@@ -323,7 +342,7 @@ window; an existing result window is reused at its current height."
   :type 'natnum
   :group 'clutch)
 
-(defcustom clutch-column-width-step 5
+(defcustom clutch-column-width-step 2
   "Step size for widening/narrowing columns with +/-."
   :type 'natnum
   :group 'clutch)
@@ -388,7 +407,15 @@ background object discovery starts."
   :type 'number
   :group 'clutch)
 
-(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM")
+(defcustom clutch-schema-refresh-idle-delay-seconds 0.5
+  "Idle delay before automatic schema cache refresh after connect.
+A small non-zero delay keeps the first query responsive for native backends
+whose schema refresh runs on the foreground connection.  Manual schema
+refresh commands still start immediately."
+  :type 'number
+  :group 'clutch)
+
+(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM" "COLLECTION" "KEY")
   "Object types preferred by clutch's primary object entrypoint.
 When nil, the primary entrypoint includes all schema object types."
   :type '(repeat string)
@@ -443,10 +470,6 @@ cleaned up in the pasted region only."
 
 (defvar clutch-debug-mode nil
   "Non-nil when Clutch debug capture is enabled.")
-
-(defvar-local clutch--executing-p nil
-  "Non-nil while a query is executing in this buffer.
-Used to update the mode-line with a spinner during execution.")
 
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.
@@ -605,25 +628,12 @@ automatically when it drops.")
                    (user-error "%s"
                                (clutch--debug-workflow-message summary))))))))))))
 
-;;;; clutch-mode (SQL editing major mode)
+;;;; Query editing major modes
 
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
-    (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
-    (define-key map (kbd "C-c C-r") #'clutch-execute-region)
-    (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
-    (define-key map (kbd "C-c C-e") #'clutch-connect)
-    (define-key map (kbd "C-c C-m") #'clutch-commit)
-    (define-key map (kbd "C-c C-u") #'clutch-rollback)
-    (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
-    (define-key map (kbd "C-c C-j") #'clutch-jump)
-    (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
-    (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
-    (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
-    (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
-    (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
-    (define-key map (kbd "C-c ?") #'clutch-dispatch)
+    (clutch--install-query-keybindings map)
     (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
     (define-key map (kbd "C-c <tab>") #'clutch-complete-at-point)
     (define-key map (kbd "TAB") #'clutch-complete-qualified-or-indent)
@@ -648,15 +658,11 @@ Key bindings:
   \\[clutch-complete-at-point]	Complete SQL identifier at point
   \\[clutch-complete-qualified-or-indent]	Complete qualified column or indent
   \\[clutch-preview-execution-sql]	Preview execution"
-  (set-buffer-file-coding-system 'utf-8-unix nil t)
-  (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
-  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t)
-  (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
+  (clutch--query-mode-common-setup)
   (clutch--install-completion-capfs)
   (add-hook 'eldoc-documentation-functions
             #'clutch--eldoc-function nil t)
-  (add-hook 'xref-backend-functions #'clutch--xref-backend nil t)
-  (clutch--update-mode-line))
+  (add-hook 'xref-backend-functions #'clutch--xref-backend nil t))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.mysql\\'" . clutch-mode))
@@ -810,17 +816,19 @@ Accumulates input until a semicolon is found, then executes."
   (interactive)
   (call-interactively #'clutch-rollback))
 
+(defun clutch--dispatch-auto-commit-description ()
+  "Return the transient description for the current auto-commit state."
+  (if (clutch--dispatch-transaction-controls-inapt-p)
+      (concat "Auto-commit "
+              (propertize "(unavailable)" 'face 'transient-inactive-value))
+    (concat "Auto-commit "
+            (clutch--transient-state-display
+             (if (clutch-db-manual-commit-p clutch-connection) 'manual 'auto)
+             '((manual . "manual") (auto . "auto"))))))
+
 (transient-define-suffix clutch--dispatch-toggle-auto-commit ()
   "Transient suffix for `clutch-toggle-auto-commit' with a dynamic label."
-  :description (lambda ()
-                 (cond
-                  ((clutch--dispatch-transaction-controls-inapt-p)
-                   "Auto-commit unavailable")
-                  ((and clutch-connection
-                        (clutch-db-manual-commit-p clutch-connection))
-                   "Enable auto-commit")
-                  (t
-                   "Disable auto-commit")))
+  :description #'clutch--dispatch-auto-commit-description
   :inapt-if (lambda ()
                (or (clutch--dispatch-transaction-controls-inapt-p)
                    (and clutch-connection

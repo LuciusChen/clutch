@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -37,7 +32,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 
 (declare-function sqlite-available-p "sqlite" ())
 (declare-function sqlite-open        "sqlite" (file))
@@ -201,6 +196,11 @@ when non-nil."
       (sqlite-select handle pragma-sql)
     (sqlite-error nil)))
 
+(defun clutch-db-sqlite--pragma-strict (handle pragma-sql)
+  "Run PRAGMA-SQL on HANDLE and surface SQLite errors."
+  (clutch-db--translate-library-error sqlite-error
+    (sqlite-select handle pragma-sql)))
+
 ;;;; Schema methods
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-db-sqlite-conn))
@@ -223,16 +223,20 @@ WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
                           (clutch-db-sqlite--escape-id table)))))
       (mapcar (lambda (row) (nth 1 row)) rows))))
 
-(cl-defmethod clutch-db-show-create-table ((conn clutch-db-sqlite-conn) table)
-  "Return the DDL for TABLE on SQLite CONN."
+(cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
+  "Return definition text for SQLite object ENTRY on CONN."
   (clutch-db--translate-library-error sqlite-error
-    (let* ((handle (clutch-db-sqlite-conn-handle conn))
-           (rows (sqlite-select
-                  handle
-                  (format "SELECT sql FROM sqlite_master \
+    (pcase (upcase (or (plist-get entry :type) ""))
+      ("TABLE"
+       (let* ((table (plist-get entry :name))
+              (handle (clutch-db-sqlite-conn-handle conn))
+              (rows (sqlite-select
+                     handle
+                     (format "SELECT sql FROM sqlite_master \
 WHERE type='table' AND name=%s"
-                          (clutch-db-sqlite--escape-lit table)))))
-      (or (caar rows) (format "-- No DDL found for %s" table)))))
+                             (clutch-db-sqlite--escape-lit table)))))
+         (or (caar rows) (format "-- No DDL found for %s" table))))
+      (_ nil))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table)
   "Return nil; SQLite does not support table comments."
@@ -243,7 +247,7 @@ WHERE type='table' AND name=%s"
   ;; table_info row: (cid name type notnull dflt_value pk)
   ;; pk is 1-based position in composite PK; 0 means not in PK.
   (let* ((handle (clutch-db-sqlite-conn-handle conn))
-         (rows   (clutch-db-sqlite--pragma
+         (rows   (clutch-db-sqlite--pragma-strict
                   handle
                   (format "PRAGMA table_info(%s)"
                           (clutch-db-sqlite--escape-id table)))))
@@ -253,66 +257,63 @@ WHERE type='table' AND name=%s"
 
 (defun clutch-db-sqlite--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
-  (condition-case _err
-      (let* ((handle (clutch-db-sqlite-conn-handle conn))
-             (table-info (clutch-db-sqlite--pragma
+  (let* ((handle (clutch-db-sqlite-conn-handle conn))
+         (table-info (clutch-db-sqlite--pragma-strict
+                      handle
+                      (format "PRAGMA table_info(%s)"
+                              (clutch-db-sqlite--escape-id table))))
+         (not-null (make-hash-table :test 'equal))
+         (indexes (clutch-db-sqlite--pragma-strict
+                   handle
+                   (format "PRAGMA index_list(%s)"
+                           (clutch-db-sqlite--escape-id table)))))
+    (dolist (row table-info)
+      ;; table_info row: (cid name type notnull dflt_value pk)
+      (puthash (nth 1 row) (> (nth 3 row) 0) not-null))
+    (cl-loop for row in indexes
+             ;; index_list row: (seq name unique origin partial)
+             for name = (nth 1 row)
+             for unique = (nth 2 row)
+             for partial = (nth 4 row)
+             when (and (= (or unique 0) 1)
+                       (not (= (or partial 0) 1)))
+             for cols = (mapcar
+                         (lambda (info-row) (nth 2 info-row))
+                         (clutch-db-sqlite--pragma-strict
                           handle
-                          (format "PRAGMA table_info(%s)"
-                                  (clutch-db-sqlite--escape-id table))))
-             (not-null (make-hash-table :test 'equal))
-             (indexes (clutch-db-sqlite--pragma
-                       handle
-                       (format "PRAGMA index_list(%s)"
-                               (clutch-db-sqlite--escape-id table)))))
-        (dolist (row table-info)
-          ;; table_info row: (cid name type notnull dflt_value pk)
-          (puthash (nth 1 row) (> (nth 3 row) 0) not-null))
-        (cl-loop for row in indexes
-                 ;; index_list row: (seq name unique origin partial)
-                 for name = (nth 1 row)
-                 for unique = (nth 2 row)
-                 for partial = (nth 4 row)
-                 when (and (= (or unique 0) 1)
-                           (not (= (or partial 0) 1)))
-                 for cols = (mapcar
-                             (lambda (info-row) (nth 2 info-row))
-                             (clutch-db-sqlite--pragma
-                              handle
-                              (format "PRAGMA index_info(%s)"
-                                      (clutch-db-sqlite--escape-id name))))
-                 when (and cols
-                           (cl-every (lambda (col)
-                                       (gethash col not-null))
-                                     cols))
-                 collect (list :kind 'unique-key
-                               :name name
-                               :columns cols)))
-    (sqlite-error nil)))
+                          (format "PRAGMA index_info(%s)"
+                                  (clutch-db-sqlite--escape-id name))))
+             when (and cols
+                       (cl-every (lambda (col)
+                                   (gethash col not-null))
+                                 cols))
+             collect (list :kind 'unique-key
+                           :name name
+                           :columns cols))))
 
 (defun clutch-db-sqlite--rowid-identity (conn table)
   "Return a rowid row locator candidate for TABLE on CONN, or nil."
-  (condition-case _err
-      (let* ((handle (clutch-db-sqlite-conn-handle conn))
-             (rows (sqlite-select
-                    handle
-                    (format "SELECT sql FROM sqlite_master WHERE type='table' AND name=%s"
-                            (clutch-db-sqlite--escape-lit table))))
-             (ddl (caar rows)))
-        (when (and ddl
-                   (not (string-match-p "\\bWITHOUT\\s-+ROWID\\b"
-                                        (upcase ddl))))
-          (list :kind 'row-locator
-                :name "rowid"
-                :select-expressions '("rowid")
-                :where-sql "rowid = ?")))
-    (sqlite-error nil)))
+  (clutch-db--translate-library-error sqlite-error
+    (let* ((handle (clutch-db-sqlite-conn-handle conn))
+           (rows (sqlite-select
+                  handle
+                  (format "SELECT sql FROM sqlite_master WHERE type='table' AND name=%s"
+                          (clutch-db-sqlite--escape-lit table))))
+           (ddl (caar rows)))
+      (when (and ddl
+                 (not (string-match-p "\\bWITHOUT\\s-+ROWID\\b"
+                                      (upcase ddl))))
+        (list :kind 'row-locator
+              :name "rowid"
+              :select-expressions '("rowid")
+              :where-sql "rowid = ?")))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table)
   "Return row identity candidates for TABLE on SQLite CONN."
-  (append (cl-call-next-method)
-          (clutch-db-sqlite--unique-not-null-identities conn table)
-          (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table)))
-            (list rowid))))
+  (or (cl-call-next-method)
+      (clutch-db-sqlite--unique-not-null-identities conn table)
+      (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table)))
+        (list rowid))))
 
 (defun clutch-db-sqlite--fk-alist (handle table)
   "Return FK alist for TABLE from HANDLE.

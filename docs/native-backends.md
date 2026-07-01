@@ -1,14 +1,18 @@
 # Native Backends
 
-`clutch` ships three non-JDBC backends that do not require a sidecar process:
+`clutch` uses non-JDBC backends that do not require the JDBC sidecar:
 
 - [`mysql`](https://github.com/LuciusChen/mysql.el) — external pure Emacs Lisp MySQL wire protocol client
 - [`pg`](https://github.com/emarsden/pg-el) — external PostgreSQL client from [`pg-el`](https://github.com/emarsden/pg-el)
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
+- `clutch-mongodb.el` over external `mongodb.el` — native MongoDB document adapter
+- `clutch-document.el` — document query-console layer for MongoDB native buffers
+- `clutch-redis.el` over external `redis.el` — native Redis key/value adapter and command buffers
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and
 usage notes for the native backends.  The JDBC sidecar has its own document in
-[`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).
+[`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are
+defined in [`docs/backend-support.org`](./backend-support.org).
 
 ## Live Testing
 
@@ -17,8 +21,8 @@ or Docker-compatible runtime works.  The examples below use Docker only as a
 portable way to start test servers.
 
 ```sh
-docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 3306:3306 mysql:8.0
-docker run --name clutch-pg-16 -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
+docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8.0
+docker run --name clutch-pg-16 -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
 ```
 
 Run the standalone MySQL protocol live suite from the
@@ -30,16 +34,31 @@ emacs -Q --batch -L . -l ert -l test/mysql-test.el \
   --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
 ```
 
-Run clutch native adapter live tests for MySQL and PostgreSQL from the `clutch`
-checkout:
+Run clutch native adapter live tests from the `clutch` checkout:
 
 ```sh
 ./test/run-native-live-tests.sh
 ```
 
 The runner starts or reuses local Docker/OrbStack containers and executes both
-UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live`
-tests.  Default ERT runs skip those live tags unless credentials are provided.
+UI-level `:clutch-live` tests and backend-level native tests such as
+`:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT
+runs skip those live tags unless credentials are provided.
+
+MongoDB backend details live in
+[`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses
+the external `mongodb.el` native client by default; Clutch owns the adapter,
+query-buffer helper parsing, result-grid mapping, and SQL Interface surface
+selection. Protocol capability details are documented in the `mongodb.el`
+repository.
+
+MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires
+the JDBC sidecar plus the MongoDB JDBC driver jar.
+
+Redis uses the external `redis.el` native RESP client.  Clutch owns the
+line-oriented Redis command buffers, key browsing, type-aware read commands,
+TTL/existence metadata, and result-grid mapping.  Redis is a basic key/value
+backend, not a document backend and not a SQL surface.
 
 Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and
 MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake,
@@ -52,6 +71,10 @@ the named host in `~/.ssh/config` before the native backend connects by default.
 The database `:host` / `:port` remain the remote endpoint as seen from the
 bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT`
 internally.
+This transport layer only rewrites structured `:host` / `:port` connection
+params.  Opaque `:url` profiles, including JDBC URLs and MongoDB
+`mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level
+transport support.
 Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be
 directly reachable on some machines; clutch tries that route briefly and falls
 back to SSH when the TCP endpoint is not reachable or the direct database
@@ -272,25 +295,28 @@ Relevant variables:
 ### Timeouts
 
 - MySQL supports `:connect-timeout` and `:read-idle-timeout`
+- On native MySQL query read-idle timeout, Clutch tries to cancel and drain the
+  server query; if the protocol stream cannot be resynchronized, the connection
+  is closed and the next query reconnects
 - PostgreSQL supports `:connect-timeout`, `:read-idle-timeout`, and `:query-timeout`
 - SQLite does not use the network timeout parameters
 
 ### Completion and Schema Refresh
 
 - Native backends integrate directly with clutch schema refresh and completion
-- MySQL and PostgreSQL now defer the initial schema snapshot until Emacs is
+- MySQL and PostgreSQL defer the initial schema snapshot until Emacs has been
   idle after connect/reconnect; SQLite keeps its synchronous in-process path
 - Schema/database switch prompts remain synchronous, but the post-switch schema
   snapshot refresh runs as deferred idle work
 - Completion and Eldoc remain statement-scoped where possible, but native
-  MySQL/PostgreSQL hot paths are now cache-first and schedule idle-time
-  metadata preheat on cache miss instead of blocking point motion or CAPF
+  MySQL/PostgreSQL hot paths are cache-first and schedule idle-time metadata
+  preheat on cache miss instead of blocking point motion or CAPF
 - Result buffers render first and then opportunistically enrich cached column
   details in the background; explicit detail commands still load synchronously
 - Object warmup keeps non-table categories off the first-open path and fills
   them lazily during idle time
-- Native MySQL/PostgreSQL deferred metadata now stays on the Emacs main thread
-  via idle callbacks rather than using worker threads
+- Native MySQL/PostgreSQL deferred metadata stays on the Emacs main thread via
+  idle callbacks rather than using worker threads
 - Native MySQL and PostgreSQL both support clutch transaction toggling (`C-c C-a`
   / `C-c C-m` / `C-c C-u`), while SQLite still has no native runtime
   auto-commit toggle

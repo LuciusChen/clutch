@@ -1,11 +1,6 @@
 ;;; clutch-schema.el --- Schema refresh and metadata caches -*- lexical-binding: t; -*-
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
 
@@ -14,7 +9,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'subr-x)
 
 (defvar clutch--schema-cache (make-hash-table :test 'equal)
@@ -74,6 +69,7 @@
 (defvar clutch-connection)
 (defvar clutch-debug-mode nil)
 (defvar clutch-schema-cache-install-batch-size)
+(defvar clutch-schema-refresh-idle-delay-seconds)
 (defvar clutch--oracle-i18n-warning-shown nil
   "Non-nil after showing the Oracle orai18n completion warning once.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)
@@ -210,6 +206,27 @@ Return DEFAULT when CONN has no cache entry or TABLE is absent."
   "Clear TABLE metadata status for CONN from CACHE-TABLE."
   (when-let* ((cache (gethash (clutch--connection-key conn) cache-table)))
     (remhash table cache)))
+
+(defun clutch--clear-table-metadata-caches (conn table)
+  "Clear table-scoped metadata caches for TABLE on CONN."
+  (let ((key (clutch--connection-key conn)))
+    (when-let* ((schema (gethash key clutch--schema-cache)))
+      (unless (eq (gethash table schema 'missing) 'missing)
+        (puthash table nil schema)))
+    (dolist (cache-symbol '(clutch--columns-status-cache
+                            clutch--column-details-cache
+                            clutch--column-details-status-cache
+                            clutch--table-comment-cache
+                            clutch--table-comment-status-cache))
+      (when-let* ((cache (gethash key (symbol-value cache-symbol))))
+        (remhash table cache)))
+    (when-let* ((queue (gethash key clutch--column-details-queue-cache)))
+      (puthash key
+               (cl-remove table queue :test #'equal)
+               clutch--column-details-queue-cache))
+    (when-let* ((active (gethash key clutch--column-details-active-cache)))
+      (when (equal (car active) table)
+        (remhash key clutch--column-details-active-cache)))))
 
 (defun clutch--begin-metadata-ticket ()
   "Issue a new table metadata freshness ticket."
@@ -473,9 +490,10 @@ When KEY is non-nil, clear that cache namespace instead of CONN's current key."
   (clutch--metadata-debug-event
    conn "schema-refresh" "error" backend message))
 
-(defun clutch--refresh-schema-cache-async (conn)
+(defun clutch--refresh-schema-cache-async (conn &optional idle-delay)
   "Refresh schema cache for CONN asynchronously when supported.
-Return non-nil when an asynchronous refresh was started."
+Return non-nil when an asynchronous refresh was started.
+IDLE-DELAY, when non-nil, is passed to idle metadata backends."
   (let ((ticket (clutch--begin-schema-refresh-ticket conn))
         (backend (clutch--metadata-debug-backend conn)))
     (clutch--set-schema-status conn 'refreshing)
@@ -497,7 +515,8 @@ Return non-nil when an asynchronous refresh was started."
                   (clutch--remember-schema-refresh-error conn message backend)
                 (clutch--metadata-debug-event
                  conn "schema-refresh" "stale-drop" backend
-                 "Ignored stale schema refresh error"))))))
+                 "Ignored stale schema refresh error")))
+            idle-delay)))
       (when started
         (clutch--metadata-debug-event
          conn "schema-refresh" "submit" backend
@@ -526,7 +545,8 @@ Only loads table names (fast).  Column info is loaded lazily."
   "Kick off the appropriate schema refresh strategy for CONN."
   (if (clutch-db-eager-schema-refresh-p conn)
       (clutch--refresh-schema-cache conn)
-    (unless (clutch--refresh-schema-cache-async conn)
+    (unless (clutch--refresh-schema-cache-async
+             conn clutch-schema-refresh-idle-delay-seconds)
       (clutch--refresh-schema-cache conn))))
 
 (defun clutch--refresh-current-schema (&optional quiet force-sync)

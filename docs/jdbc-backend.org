@@ -11,20 +11,33 @@ semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
 
 ** Supported Databases
 
-| Backend symbol | Database            | Driver auto-install | Default port |
-|----------------+---------------------+---------------------+--------------|
-| =oracle=       | Oracle Database     | Maven Central       | 1521         |
-| =sqlserver=    | Microsoft SQL Server| Maven Central       | 1433         |
-| =redshift=     | Amazon Redshift     | Maven Central       | 5439         |
-| =snowflake=    | Snowflake           | Maven Central       | —            |
-| =clickhouse=   | ClickHouse          | Maven Central       | 8123         |
-| =db2=          | IBM DB2             | Manual download     | 50000        |
+| Backend symbol | Database              | Support level | Driver auto-install | Default port |
+|----------------+-----------------------+---------------+---------------------+--------------|
+| =oracle=       | Oracle Database       | Core SQL      | Maven Central       | 1521         |
+| =sqlserver=    | Microsoft SQL Server  | Core SQL      | Maven Central       | 1433         |
+| =redshift=     | Amazon Redshift       | Basic SQL     | Maven Central       | 5439         |
+| =snowflake=    | Snowflake             | Basic SQL     | Maven Central       | —            |
+| =clickhouse=   | ClickHouse            | Basic SQL     | Maven Central       | 8123         |
+| =mongodb= + =:surface sql-interface= | MongoDB SQL Interface | SQL Interface surface | Maven Central | 27017 |
+| =db2=          | IBM DB2               | Basic SQL     | Manual download     | 50000        |
 
 DuckDB, TiDB, Hive, KingbaseES, and other JDBC-compatible databases
 can be used through the generic =jdbc= backend by passing
-=:url "jdbc:xxx://..."= directly and placing the driver jar in the drivers
-directory.  Use =:display-name= if you want the UI to show a friendly backend
-label instead of plain =JDBC=.
+=:url "jdbc:xxx://..."= and =:driver-class "..."= directly, then placing
+the driver jar in the drivers directory.  Use =:display-name= if you want the
+UI to show a friendly backend label instead of plain =JDBC=.
+
+MongoDB SQL Interface uses MongoDB's official SQL Interface JDBC driver through
+the same =mongodb= backend with =:surface sql-interface=.  Use it only for SQL
+Interface endpoints that accept =jdbc:mongodb://...= URLs.  Ordinary MongoDB
+document connections use the default native document surface and do not require
+JDBC.  See [[file:mongodb-backend.org][docs/mongodb-backend.org]] for that path.
+See MongoDB's
+[[https://www.mongodb.com/docs/sql-interface/install-driver/][SQL Interface driver setup]]
+and [[https://www.mongodb.com/docs/sql-interface/language-reference/][SQL Interface language reference]]
+for the upstream contract.
+
+Support levels are defined in [[file:backend-support.org][docs/backend-support.org]].
 
 ** Setup
 
@@ -39,7 +52,7 @@ If you prefer to pre-install everything up front:
 ;; Download clutch-jdbc-agent.jar:
 (clutch-jdbc-ensure-agent)
 
-;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift, ClickHouse, DuckDB):
+;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB):
 (clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
 (clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
@@ -47,6 +60,7 @@ If you prefer to pre-install everything up front:
 (clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar plus SLF4J jars from Maven Central
 (clutch-jdbc-install-driver 'duckdb)      ; duckdb_jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'mongodb)     ; MongoDB SQL Interface JDBC driver
 ;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
 #+end_src
 
@@ -127,15 +141,27 @@ artifact from Maven Central rather than a nonexistent plain
                           :database "default"
                           :user "default" :password ""))
 
+        ;; MongoDB SQL Interface.  :database becomes the required JDBC driver
+        ;; property; :auth-database/:auth-source, when present, becomes the
+        ;; optional MongoDB URL path used for authentication.
+        ("atlas-sql" . (:backend mongodb
+                         :surface sql-interface
+                         :host "cluster0.a.query.mongodb.net"
+                         :database "analytics"
+                         :auth-database "admin"
+                         :user "reporter" :pass-entry "atlas-sql"))
+
         ;; DuckDB (local embedded database through generic JDBC URL)
         ("duckdb" . (:backend jdbc
                       :url "jdbc:duckdb:/path/to/analytics.duckdb"
                       :display-name "DuckDB"))
 
         ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
-        ;; Use :backend jdbc with a full JDBC URL when no native backend exists.
+        ;; Use :backend jdbc with a full JDBC URL and driver class when no
+        ;; native backend exists.
         ("kingbase" . (:backend jdbc
                         :url "jdbc:kingbase8://db.corp.com:54321/test"
+                        :driver-class "com.kingbase8.Driver"
                         :display-name "KingbaseES"
                         :user "system" :pass-entry "kingbase"
                         :rpc-timeout 15))))
@@ -187,6 +213,38 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
   active Oracle JDBC jar (=ojdbc8.jar= or =ojdbc11.jar=).
 - Oracle =DATE= columns include a time component; the agent always uses =getTimestamp()=
   to avoid silent data loss.
+
+** MongoDB SQL Interface Notes
+
+- =(:backend mongodb :surface sql-interface ...)= targets MongoDB SQL
+  Interface through the official JDBC driver.  Ordinary =mongod= / Atlas
+  MongoDB support uses the same =mongodb= backend's default native document
+  surface and does not require a JDBC jar.
+- The official driver requires a =database= JDBC property.  Clutch fills that
+  from the connection plist's =:database= value automatically.
+- Use =:url= for advanced connection strings copied from Atlas.  Keep
+  =:database= set as the query database unless you already pass
+  =("database" . "...")= in =:props=.
+- =:auth-database= and =:auth-source= are accepted aliases for the optional
+  MongoDB URL path/default auth database when using structured
+  =:host= / =:port= connection plists.
+- Query pagination uses SQL Interface =LIMIT/OFFSET= syntax.
+- Clutch does not expose manual transaction controls for MongoDB JDBC
+  connections.
+- Live ERT coverage is tagged =:sql-interface-mongodb-live= and requires a configured
+  MongoDB SQL Interface endpoint.  A local community =mongod= container is not
+  enough because this backend talks to the SQL Interface JDBC surface.  Use
+  =mongodb= live coverage for ordinary local containers.
+  Example:
+
+  #+begin_src sh
+  emacs -Q --batch -L . -L test -l ert -l clutch-db-test \
+    --eval '(setq clutch-db-test-sql-interface-mongodb-url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
+                  clutch-db-test-sql-interface-mongodb-database "analytics"
+                  clutch-db-test-sql-interface-mongodb-user "reporter"
+                  clutch-db-test-sql-interface-mongodb-password "secret")' \
+    --eval "(ert-run-tests-batch-and-exit '(tag :sql-interface-mongodb-live))"
+  #+end_src
 
 ** Staged Mutation Row Identity
 

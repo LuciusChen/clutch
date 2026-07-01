@@ -6,13 +6,20 @@ emacs_bin="${EMACS:-emacs}"
 os_name="$(uname -s)"
 
 pg_name="${CLUTCH_TEST_PG_CONTAINER:-clutch-pg-live}"
-pg_port="${CLUTCH_TEST_PG_PORT:-5432}"
+pg_port="${CLUTCH_TEST_PG_PORT:-55432}"
 mysql_name="${CLUTCH_TEST_MYSQL_CONTAINER:-clutch-mysql-live}"
-mysql_port="${CLUTCH_TEST_MYSQL_PORT:-3306}"
+mysql_port="${CLUTCH_TEST_MYSQL_PORT:-55306}"
+mongo_name="${CLUTCH_TEST_MONGO_CONTAINER:-clutch-mongo-live}"
+mongo_port="${CLUTCH_TEST_MONGO_PORT:-57017}"
+redis_name="${CLUTCH_TEST_REDIS_CONTAINER:-clutch-redis-live}"
+redis_port="${CLUTCH_TEST_REDIS_PORT:-56379}"
 pg_image="${CLUTCH_TEST_PG_IMAGE:-docker.io/library/postgres:16}"
 mysql_image="${CLUTCH_TEST_MYSQL_IMAGE:-docker.io/library/mysql:8.0}"
+mongo_image="${CLUTCH_TEST_MONGO_IMAGE:-docker.io/library/mongo:7}"
+redis_image="${CLUTCH_TEST_REDIS_IMAGE:-docker.io/library/redis:7-alpine}"
 
 started=()
+temp_paths=()
 container_runtime=""
 
 log() {
@@ -71,6 +78,11 @@ cleanup() {
       ctr rm -f "$name" >/dev/null 2>&1 || true
     done
   fi
+  if ((${#temp_paths[@]})); then
+    for path in "${temp_paths[@]}"; do
+      rm -rf "$path" >/dev/null 2>&1 || true
+    done
+  fi
 }
 trap cleanup EXIT
 
@@ -113,9 +125,11 @@ start_pg() {
   log "Starting PostgreSQL container $pg_name on 127.0.0.1:$pg_port"
   run_container \
     --name "$pg_name" \
+    -e POSTGRES_INITDB_ARGS=--auth-host=md5 \
     -e POSTGRES_PASSWORD=test \
     -p "127.0.0.1:${pg_port}:5432" \
-    "$pg_image"
+    "$pg_image" \
+    -c password_encryption=md5
   started+=("$pg_name")
 }
 
@@ -131,6 +145,32 @@ start_mysql() {
     -p "127.0.0.1:${mysql_port}:3306" \
     "$mysql_image"
   started+=("$mysql_name")
+}
+
+start_mongo() {
+  if container_running_p "$mongo_name"; then
+    log "Reusing MongoDB container $mongo_name"
+    return
+  fi
+  log "Starting MongoDB container $mongo_name on 127.0.0.1:$mongo_port"
+  run_container \
+    --name "$mongo_name" \
+    -p "127.0.0.1:${mongo_port}:27017" \
+    "$mongo_image"
+  started+=("$mongo_name")
+}
+
+start_redis() {
+  if container_running_p "$redis_name"; then
+    log "Reusing Redis container $redis_name"
+    return
+  fi
+  log "Starting Redis container $redis_name on 127.0.0.1:$redis_port"
+  run_container \
+    --name "$redis_name" \
+    -p "127.0.0.1:${redis_port}:6379" \
+    "$redis_image"
+  started+=("$redis_name")
 }
 
 wait_pg() {
@@ -159,8 +199,38 @@ wait_mysql() {
   return 1
 }
 
+wait_mongo() {
+  log "Waiting for MongoDB readiness"
+  for _ in {1..120}; do
+    if ctr exec "$mongo_name" mongosh --quiet --eval "db.adminCommand({ ping: 1 }).ok" >/dev/null 2>&1; then
+      log "MongoDB ready: $(container_summary "$mongo_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "MongoDB container did not become ready" >&2
+  return 1
+}
+
+wait_redis() {
+  log "Waiting for Redis readiness"
+  for _ in {1..120}; do
+    if ctr exec "$redis_name" redis-cli ping >/dev/null 2>&1; then
+      log "Redis ready: $(container_summary "$redis_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "Redis container did not become ready" >&2
+  return 1
+}
+
 emacs_load_args=(
   --batch -Q
+  -L "$repo/../mongodb.el"
+  -L "$repo/../redis.el"
+  -L "$repo/../mysql.el"
+  -L "$repo/../pg-el"
   -L "$repo"
   -L "$repo/test"
   -L "$HOME/.emacs.d/straight/repos/mysql.el"
@@ -168,36 +238,72 @@ emacs_load_args=(
   --eval "(setq load-prefer-newer t)"
 )
 
-run_clutch_live_pg() {
-  log "Running UI live tests against PostgreSQL"
+run_ert_live() {
+  local label="$1"
+  local test_file="$2"
+  local setup_form="$3"
+  local selector="$4"
+  log "$label"
   "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-test \
-    --eval "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :clutch-live))"
+    -l ert -l "$test_file" \
+    --eval "$setup_form" \
+    --eval "(ert-run-tests-batch-and-exit ${selector})"
 }
 
 run_clutch_live_mysql() {
-  log "Running UI live tests against MySQL"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-test \
-    --eval "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :clutch-live))"
+  run_ert_live \
+    "Running UI live tests against MySQL" \
+    clutch-test \
+    "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\")" \
+    "'(tag :clutch-live)"
 }
 
-run_db_live_pg() {
-  log "Running backend live tests against PostgreSQL"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-db-test \
-    --eval "(setq clutch-db-test-pg-host \"127.0.0.1\" clutch-db-test-pg-port ${pg_port} clutch-db-test-pg-user \"postgres\" clutch-db-test-pg-password \"test\" clutch-db-test-pg-database \"postgres\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :pg-live))"
+run_clutch_live_pg() {
+  run_ert_live \
+    "Running UI live tests against PostgreSQL" \
+    clutch-test \
+    "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\")" \
+    "'(tag :clutch-live)"
 }
 
 run_db_live_mysql() {
-  log "Running backend live tests against MySQL"
-  "$emacs_bin" "${emacs_load_args[@]}" \
-    -l ert -l clutch-db-test \
-    --eval "(setq clutch-db-test-mysql-host \"127.0.0.1\" clutch-db-test-mysql-port ${mysql_port} clutch-db-test-mysql-user \"root\" clutch-db-test-mysql-password \"test\" clutch-db-test-mysql-database \"mysql\")" \
-    --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
+  run_ert_live \
+    "Running backend live tests against MySQL" \
+    clutch-db-test \
+    "(setq clutch-db-test-mysql-host \"127.0.0.1\" clutch-db-test-mysql-port ${mysql_port} clutch-db-test-mysql-user \"root\" clutch-db-test-mysql-password \"test\" clutch-db-test-mysql-database \"mysql\")" \
+    "'(and (tag :mysql-live) (not (tag :pg-live)))"
+}
+
+run_db_live_pg() {
+  run_ert_live \
+    "Running backend live tests against PostgreSQL" \
+    clutch-db-test \
+    "(setq clutch-db-test-pg-host \"127.0.0.1\" clutch-db-test-pg-port ${pg_port} clutch-db-test-pg-user \"postgres\" clutch-db-test-pg-password \"test\" clutch-db-test-pg-database \"postgres\")" \
+    "'(and (tag :pg-live) (not (tag :mysql-live)))"
+}
+
+run_db_live_cross_sql() {
+  run_ert_live \
+    "Running cross-backend live tests against MySQL and PostgreSQL" \
+    clutch-db-test \
+    "(setq clutch-db-test-mysql-host \"127.0.0.1\" clutch-db-test-mysql-port ${mysql_port} clutch-db-test-mysql-user \"root\" clutch-db-test-mysql-password \"test\" clutch-db-test-mysql-database \"mysql\" clutch-db-test-pg-host \"127.0.0.1\" clutch-db-test-pg-port ${pg_port} clutch-db-test-pg-user \"postgres\" clutch-db-test-pg-password \"test\" clutch-db-test-pg-database \"postgres\")" \
+    "'(and (tag :mysql-live) (tag :pg-live))"
+}
+
+run_db_live_mongodb() {
+  run_ert_live \
+    "Running backend live tests against MongoDB native protocol" \
+    clutch-db-test \
+    "(setq clutch-db-test-mongodb-live-enabled t clutch-db-test-mongodb-url \"mongodb://127.0.0.1:${mongo_port}/clutch_test\")" \
+    "'(tag :mongodb-live)"
+}
+
+run_db_live_redis() {
+  run_ert_live \
+    "Running backend live tests against Redis native protocol" \
+    clutch-db-test \
+    "(setq clutch-db-test-redis-live-enabled t clutch-db-test-redis-host \"127.0.0.1\" clutch-db-test-redis-port ${redis_port} clutch-db-test-redis-database 0)" \
+    "'(tag :redis-live)"
 }
 
 select_container_runtime
@@ -205,10 +311,17 @@ require_orbstack_docker
 show_container_environment
 start_pg
 start_mysql
+start_mongo
+start_redis
 wait_pg
 wait_mysql
+wait_mongo
+wait_redis
 
 run_clutch_live_pg
 run_clutch_live_mysql
 run_db_live_pg
 run_db_live_mysql
+run_db_live_cross_sql
+run_db_live_mongodb
+run_db_live_redis

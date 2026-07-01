@@ -1,13 +1,8 @@
-;;; clutch-db.el --- Database backend protocol facade -*- lexical-binding: t; -*-
+;;; clutch-backend.el --- Database backend protocol facade -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -119,6 +114,27 @@ actionable hints for known error patterns."
     (intern (downcase value)))
    (t value)))
 
+(defvar clutch-backend--registry)
+
+(defun clutch-backend-normalize (backend)
+  "Return the canonical backend symbol for BACKEND.
+Known aliases are read from `clutch-backend--registry'.  Unknown symbols are
+returned unchanged so the normal backend lookup can report the final error."
+  (let ((sym (clutch-db--normalize-symbol-option backend)))
+    (or (and sym
+             (cl-loop for (key . features) in clutch-backend--registry
+                      when (or (eq sym key)
+                               (memq sym (plist-get features :aliases)))
+                      return key))
+        (and sym
+             (progn
+               (require 'clutch-db-jdbc nil t)
+               (cl-loop for (key . features) in clutch-backend--registry
+                        when (or (eq sym key)
+                                 (memq sym (plist-get features :aliases)))
+                        return key)))
+        sym)))
+
 (defun clutch-db--reject-removed-connect-params (params)
   "Signal for removed connection PARAMS and return PARAMS otherwise."
   (when (plist-member params :read-timeout)
@@ -151,96 +167,18 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
                            (or context "value")
                            (error-message-string err)))))))
 
-(defun clutch-db--normalize-mysql-ssl-mode (ssl-mode)
-  "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
-  (pcase (clutch-db--normalize-symbol-option ssl-mode)
-    ('nil nil)
-    ((or 'disabled 'off) 'disabled)
-    (_
-     (signal 'clutch-db-error
-             (list (format "Unsupported MySQL :ssl-mode %S (supported: disabled)" ssl-mode))))))
-
-(defun clutch-db--normalize-pg-sslmode (sslmode)
-  "Return canonical PostgreSQL SSLMODE, or signal `clutch-db-error'."
-  (pcase (clutch-db--normalize-symbol-option sslmode)
-    ('nil nil)
-    ((or 'disable 'prefer 'require 'verify-full)
-     (clutch-db--normalize-symbol-option sslmode))
-    (_
-     (signal 'clutch-db-error
-             (list (format
-                    "Unsupported PostgreSQL :sslmode %S (supported: disable, prefer, require, verify-full)"
-                    sslmode))))))
-
-(defun clutch-db--normalize-mysql-connect-params (params)
-  "Return PARAMS normalized for the MySQL backend."
-  (let* ((params (copy-sequence params))
-         (tls-specified-p (plist-member params :tls))
-         (tls (plist-get params :tls))
-         (ssl-mode (clutch-db--normalize-mysql-ssl-mode
-                    (plist-get params :ssl-mode)))
-         (tls-mode (cond
-                    (ssl-mode 'disable)
-                    (tls-specified-p (if tls 'require 'disable))
-                    (t 'default))))
-    (when ssl-mode
-      (setq params (plist-put params :ssl-mode ssl-mode)))
-    (when (and ssl-mode tls-specified-p tls)
-      (signal 'clutch-db-error
-              (list "Conflicting MySQL TLS options: :tls t cannot be combined with :ssl-mode disabled")))
-    (setq params (plist-put params :clutch-tls-mode tls-mode))
-    (when (and tls-specified-p (null tls))
-      ;; Canonicalize the generic plaintext shortcut to MySQL's explicit name.
-      (setq params (plist-put params :ssl-mode 'disabled))
-      (cl-remf params :tls))
-    params))
-
-(defun clutch-db--normalize-pg-connect-params (params)
-  "Return PARAMS normalized for the PostgreSQL backend."
-  (let* ((params (copy-sequence params))
-         (tls-specified-p (plist-member params :tls))
-         (tls (plist-get params :tls))
-         (sslmode (clutch-db--normalize-pg-sslmode
-                   (plist-get params :sslmode)))
-         (tls-mode (pcase sslmode
-                     ((or 'disable 'prefer) sslmode)
-                     ((or 'require 'verify-full) 'require)
-                     (_ (if tls-specified-p
-                            (if tls 'require 'disable)
-                          'default)))))
-    (pcase sslmode
-      ('disable
-       (when (and tls-specified-p tls)
-         (signal 'clutch-db-error
-                 (list "Conflicting PostgreSQL TLS options: :tls t cannot be combined with :sslmode disable"))))
-      ('prefer
-       (when tls-specified-p
-         (signal 'clutch-db-error
-                 (list "Conflicting PostgreSQL TLS options: :sslmode prefer cannot be combined with :tls"))))
-      ((or 'require 'verify-full)
-       (when (and tls-specified-p (null tls))
-         (signal 'clutch-db-error
-                 (list (format "Conflicting PostgreSQL TLS options: :tls nil cannot be combined with :sslmode %s"
-                               sslmode))))))
-    (setq params (plist-put params :clutch-tls-mode tls-mode))
-    (cond
-     (sslmode
-      (setq params (plist-put params :sslmode sslmode))
-      (when tls-specified-p
-        (cl-remf params :tls)))
-     (tls-specified-p
-      ;; Canonicalize the generic boolean shortcut to PostgreSQL's official name.
-      (setq params (plist-put params :sslmode (if tls 'require 'disable)))
-      (cl-remf params :tls)))
-    params))
-
 (defun clutch-db--normalize-connect-params (backend params)
   "Return connection PARAMS normalized for BACKEND."
-  (setq params (clutch-db--reject-removed-connect-params params))
-  (pcase backend
-    ('mysql (clutch-db--normalize-mysql-connect-params params))
-    ('pg (clutch-db--normalize-pg-connect-params params))
-    (_ params)))
+  (let* ((params (clutch-db--reject-removed-connect-params params))
+         (features (and backend (clutch-backend-feature backend)))
+         (normalize-fn (plist-get features :normalize-fn)))
+    (when (and (symbolp normalize-fn)
+               (not (fboundp normalize-fn))
+               (plist-get features :require))
+      (require (plist-get features :require)))
+    (if normalize-fn
+        (funcall normalize-fn params)
+      params)))
 
 ;;;; Result struct
 
@@ -269,6 +207,9 @@ AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
 (defvar clutch-db--foreground-connections (make-hash-table :test 'eq)
   "Connections currently reserved by foreground Clutch commands.
 Values are nesting counts.")
+
+(defvar clutch-schema-refresh-idle-delay-seconds 0.5
+  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defun clutch-db--foreground-busy-p (conn)
   "Return non-nil when CONN is reserved by foreground Clutch work."
@@ -862,13 +803,17 @@ backend should preserve the current dirty state.")
   "Most backends can synchronously load column metadata during completion."
   t)
 
-(cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback)
+(cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback
+                                                   idle-delay)
   "Start an asynchronous schema refresh for CONN.
 CALLBACK receives the table name list on success.  ERRBACK receives
 an error message string on failure.  Return non-nil when async refresh
-was started, nil when unsupported.")
+was started, nil when unsupported.
+IDLE-DELAY, when non-nil, delays low-priority idle refresh work by at least
+that many seconds before it may run.")
 
-(cl-defmethod clutch-db-refresh-schema-async ((_conn t) _callback &optional _errback)
+(cl-defmethod clutch-db-refresh-schema-async ((_conn t) _callback
+                                              &optional _errback _idle-delay)
   "Backends without asynchronous schema refresh support return nil."
   nil)
 
@@ -895,10 +840,12 @@ started, nil when unsupported.")
   nil)
 
 (defun clutch-db--schedule-idle-metadata-call (conn callback errback fn
+                                                    &optional initial-delay
                                                     &rest args)
   "Schedule metadata FN for CONN on the main thread once Emacs is idle.
 CALLBACK receives the result of calling FN with CONN and ARGS.
-ERRBACK receives an error-message string when the work fails."
+ERRBACK receives an error-message string when the work fails.
+INITIAL-DELAY, when positive, is the idle delay before the first attempt."
   (cl-labels
       ((run ()
          (if (clutch-db-live-p conn)
@@ -913,12 +860,26 @@ ERRBACK receives an error-message string when the work fails."
                     (funcall errback (error-message-string err))))))
            (when errback
              (funcall errback "Connection closed")))))
-    (run-with-idle-timer 0 nil #'run)))
+    (run-with-idle-timer (or initial-delay 0) nil #'run)))
 
 ;; Query
 
 (cl-defgeneric clutch-db-query (conn sql)
   "Execute SQL on CONN and return a `clutch-db-result'.")
+
+(cl-defgeneric clutch-db-result-query-p (conn sql)
+  "Return non-nil when SQL should render as a tabular result for CONN.")
+
+(cl-defmethod clutch-db-result-query-p ((_conn t) sql)
+  "Return non-nil when SQL is a normal SQL result-set query."
+  (clutch-db-sql-select-query-p sql))
+
+(cl-defgeneric clutch-db-query-result-context (conn sql)
+  "Return result-buffer context plist for SQL on CONN.")
+
+(cl-defmethod clutch-db-query-result-context ((_conn t) _sql)
+  "Default: return no additional result-buffer context."
+  nil)
 
 (cl-defgeneric clutch-db-execute-params (conn sql params)
   "Execute SQL on CONN with positional PARAMS.
@@ -1099,9 +1060,6 @@ Return nil when the backend does not support direct column completion.")
   "Backends without direct column completion support return nil."
   nil)
 
-(cl-defgeneric clutch-db-show-create-table (conn table)
-  "Return the DDL string for TABLE on CONN.")
-
 (cl-defgeneric clutch-db-list-objects (conn category)
   "Return object entry plists for CATEGORY on CONN.
 CATEGORY is one of: indexes, sequences, procedures, functions, triggers.")
@@ -1128,6 +1086,14 @@ other backend-specific keys as needed.")
   "Default: return nil when no detail loader is available."
   nil)
 
+(cl-defgeneric clutch-db-object-entry-metadata (conn entry)
+  "Return object ENTRY augmented with display metadata for CONN.
+Backends may add cheap, caller-facing metadata used by object pickers.")
+
+(cl-defmethod clutch-db-object-entry-metadata ((_conn t) entry)
+  "Default: return ENTRY unchanged."
+  entry)
+
 (cl-defgeneric clutch-db-object-source (conn entry)
   "Return source text for source-bearing object ENTRY on CONN.")
 
@@ -1135,11 +1101,65 @@ other backend-specific keys as needed.")
   "Default: return nil when source is unavailable."
   nil)
 
-(cl-defgeneric clutch-db-show-create-object (conn entry)
-  "Return DDL text for non-table object ENTRY on CONN.")
+(cl-defgeneric clutch-db-object-definition (conn entry)
+  "Return definition or source text for object ENTRY on CONN.")
 
-(cl-defmethod clutch-db-show-create-object ((_conn t) _entry)
-  "Default: return nil when DDL is unavailable."
+(cl-defmethod clutch-db-object-definition ((_conn t) _entry)
+  "Default: return nil when object definition is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-object-browse-query (conn entry)
+  "Return query-console text to browse object ENTRY on CONN.
+Return nil when CONN does not provide a backend-specific browse query.")
+
+(cl-defmethod clutch-db-object-browse-query ((_conn t) _entry)
+  "Default: object browsing is built by the Clutch UI."
+  nil)
+
+(cl-defgeneric clutch-db-collection-profile (conn collection)
+  "Return schema/profile metadata text for COLLECTION on CONN.")
+
+(cl-defmethod clutch-db-collection-profile ((_conn t) _collection)
+  "Default: return nil when collection profile metadata is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-object-action-supported-p (conn entry action-id)
+  "Return non-nil when ACTION-ID is supported for object ENTRY on CONN.")
+
+(cl-defmethod clutch-db-object-action-supported-p ((_conn t) _entry _action-id)
+  "Default: backend-specific object actions are unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-object-action-metadata (conn entry action-id)
+  "Return metadata text for backend ACTION-ID on object ENTRY using CONN.")
+
+(cl-defmethod clutch-db-object-action-metadata ((_conn t) _entry _action-id)
+  "Default: return nil when backend-specific action metadata is unavailable."
+  nil)
+
+(cl-defgeneric clutch-db-document-mutation-supported-p (conn action)
+  "Return non-nil when CONN can build document mutation ACTION snippets.")
+
+(cl-defmethod clutch-db-document-mutation-supported-p ((_conn t) _action)
+  "Default: document mutation snippets are unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-document-mutation-snippets
+    (conn action collection documents &optional fields)
+  "Return document mutation snippets for ACTION on COLLECTION using CONN.
+DOCUMENTS is a list of backend-native documents.  FIELDS is an optional list of
+field names for field-scoped actions.")
+
+(cl-defmethod clutch-db-document-mutation-snippets
+  ((_conn t) action _collection _documents &optional _fields)
+  "Default: signal that ACTION is unsupported for document mutation snippets."
+  (user-error "Document mutation %s is not available for this backend" action))
+
+(cl-defgeneric clutch-db-explain-query (conn query)
+  "Return explain metadata text for QUERY on CONN.")
+
+(cl-defmethod clutch-db-explain-query ((_conn t) _query)
+  "Default: return nil when query explain is unavailable."
   nil)
 
 (cl-defgeneric clutch-db-table-comment (conn table)
@@ -1170,42 +1190,47 @@ nil when unsupported.")
 BACKEND-NAME is used only in generated docstrings."
   `(progn
      (cl-defmethod clutch-db-refresh-schema-async ((conn ,type) callback
-                                                   &optional errback)
+                                                   &optional errback
+                                                   idle-delay)
        ,(format "Refresh %s schema names on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-tables))
+        conn callback errback #'clutch-db-list-tables idle-delay))
 
      (cl-defmethod clutch-db-list-columns-async ((conn ,type) table callback
                                                  &optional errback)
        ,(format "Fetch %s column names on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-columns table))
+        conn callback errback #'clutch-db-list-columns nil table))
 
      (cl-defmethod clutch-db-column-details-async ((conn ,type) table callback
                                                    &optional errback)
        ,(format "Fetch %s column details on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-column-details table))
+        conn callback errback #'clutch-db-column-details nil table))
 
      (cl-defmethod clutch-db-table-comment-async ((conn ,type) table callback
                                                   &optional errback)
        ,(format "Fetch %s table comments on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-table-comment table))
+        conn callback errback #'clutch-db-table-comment nil table))
 
      (cl-defmethod clutch-db-list-objects-async ((conn ,type) category callback
                                                  &optional errback)
        ,(format "Fetch %s object entries on the main thread when idle."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-objects category))))
+        conn callback errback #'clutch-db-list-objects nil category))))
 
 (cl-defgeneric clutch-db-primary-key-columns (conn table)
   "Return a list of primary key column name strings for TABLE on CONN.")
+
+(cl-defmethod clutch-db-primary-key-columns ((_conn t) _table)
+  "Return nil because CONN has no default primary-key metadata support."
+  nil)
 
 (cl-defgeneric clutch-db-row-identity-candidates (conn table)
   "Return row identity candidate plists for TABLE on CONN.
@@ -1217,12 +1242,10 @@ UPDATE and DELETE.")
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn t) table)
   "Return the primary-key row identity candidate for CONN and TABLE."
-  (condition-case nil
-      (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
-        (list (list :kind 'primary-key
-                    :name "PRIMARY"
-                    :columns pk-cols)))
-    (error nil)))
+  (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
+    (list (list :kind 'primary-key
+                :name "PRIMARY"
+                :columns pk-cols))))
 
 (cl-defgeneric clutch-db-foreign-keys (conn table)
   "Return foreign key info for TABLE on CONN.
@@ -1271,55 +1294,168 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 
 ;;;; Connect dispatcher
 
-(defvar clutch-db--backend-features
+(defvar clutch-backend--registry
   '((mysql  . (:require clutch-db-mysql
+	       :aliases (mariadb)
 	       :connect-fn clutch-db-mysql-connect
+	       :normalize-fn clutch-db-mysql--normalize-connect-params
 	       :display-name "MySQL"
 	       :default-port 3306
+	       :support-level core
+	       :data-model relational
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
+	       :aliases (postgres postgresql)
 	       :connect-fn clutch-db-pg-connect
+	       :normalize-fn clutch-db-pg--normalize-connect-params
 	       :display-name "PostgreSQL"
 	       :default-port 5432
+	       :support-level core
+	       :data-model relational
 	       :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
 	       :connect-fn clutch-db-sqlite-connect
 	       :display-name "SQLite"
-	       :sql-product sqlite)))
+	       :support-level core
+	       :data-model relational
+	       :sql-product sqlite))
+    (mongodb . (:require clutch-mongodb
+                :aliases (mongo)
+                :connect-fn clutch-mongodb-connect
+                :display-name "MongoDB"
+                :default-port 27017
+                :support-level basic
+                :data-model document
+                :query-mode clutch-mongodb-mode
+                :query-mode-require clutch-document
+                :surfaces ((sql-interface . (:query-mode clutch-mode
+                                              :execution-model sql
+                                              :transport jdbc)))))
+    (redis . (:require clutch-redis
+              :connect-fn clutch-redis-connect
+              :display-name "Redis"
+              :default-port 6379
+              :support-level basic
+              :data-model key-value
+              :query-mode clutch-redis-mode)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
-a plist of connection params and returning a conn), and optional UI metadata
-such as :display-name and :default-port.")
+a plist of connection params and returning a conn), and optional :aliases,
+:normalize-fn plus UI metadata such as :display-name, :default-port,
+:support-level, :data-model, :query-mode, :surfaces, and :manual-choice.
+Surface entries may set :execution-model and :transport for non-default
+execution paths.")
 
-(defun clutch-db-backend-feature (backend)
-  "Return the registered feature plist for BACKEND, loading JDBC if needed."
-  (or (alist-get backend clutch-db--backend-features)
+(defun clutch-backend-feature (backend)
+  "Return the registered feature plist for BACKEND.
+Load optional registries if needed."
+  (or (alist-get backend clutch-backend--registry)
       (progn
         (require 'clutch-db-jdbc nil t)
-        (alist-get backend clutch-db--backend-features))))
+        (alist-get backend clutch-backend--registry))))
 
-(defun clutch-db-backends (&optional load-optional)
+(defun clutch-backends (&optional load-optional)
   "Return registered backend symbols in user-facing order.
 When LOAD-OPTIONAL is non-nil, load optional backend registries such as JDBC
 before returning the list."
   (when load-optional
     (require 'clutch-db-jdbc nil t))
-  (mapcar #'car clutch-db--backend-features))
+  (mapcar #'car clutch-backend--registry))
 
-(defun clutch-db-backend-display-name (backend)
+(defun clutch-backend-display-name (backend)
   "Return registered display name for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :display-name)))
+       (plist-get (clutch-backend-feature backend) :display-name)))
 
-(defun clutch-db-backend-default-port (backend)
+(defun clutch-backend-default-port (backend)
   "Return registered default TCP port for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :default-port)))
+       (plist-get (clutch-backend-feature backend) :default-port)))
 
-(defun clutch-db-backend-sql-product (backend)
+(defun clutch-backend-support-level (backend)
+  "Return registered support level for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-backend-feature backend) :support-level)))
+
+(defun clutch-backend-data-model (backend)
+  "Return registered data model for BACKEND, or nil."
+  (and backend
+       (plist-get (clutch-backend-feature
+                   (clutch-backend-normalize backend))
+                  :data-model)))
+
+(defun clutch-backend-surface-feature (backend surface)
+  "Return registered feature plist for BACKEND SURFACE, or nil."
+  (let* ((backend (clutch-backend-normalize backend))
+         (surface (clutch-db--normalize-symbol-option surface))
+         (features (and backend (clutch-backend-feature backend))))
+    (and surface
+         (alist-get surface (plist-get features :surfaces)))))
+
+(defun clutch-backend-sql-execution-p (backend params)
+  "Return non-nil when BACKEND with PARAMS executes SQL."
+  (let* ((backend (clutch-backend-normalize backend))
+         (surface-features
+          (clutch-backend-surface-feature backend (plist-get params :surface))))
+    (or (eq (clutch-backend-data-model backend) 'relational)
+        (eq (plist-get surface-features :execution-model) 'sql))))
+
+(defun clutch-backend-jdbc-transport-p (backend params)
+  "Return non-nil when BACKEND with PARAMS connects through JDBC."
+  (let* ((backend (clutch-backend-normalize backend))
+         (features (and backend (clutch-backend-feature backend)))
+         (surface-features
+          (clutch-backend-surface-feature backend (plist-get params :surface))))
+    (or (eq (plist-get features :require) 'clutch-db-jdbc)
+        (eq (plist-get surface-features :transport) 'jdbc))))
+
+(defun clutch-db-native-document-surface-p (conn params)
+  "Return non-nil when CONN and PARAMS describe a native document surface."
+  (let ((backend (and conn (clutch-db-backend-key conn))))
+    (and (eq (clutch-backend-data-model backend) 'document)
+         (not (clutch-backend-sql-execution-p backend params)))))
+
+(defun clutch-db-sql-surface-p (conn params)
+  "Return non-nil when CONN and PARAMS describe a SQL execution surface."
+  (let ((backend (or (and conn (clutch-db-backend-key conn))
+                     (clutch-db--normalize-symbol-option
+                      (or (plist-get params :backend)
+                          (plist-get params :driver))))))
+    (clutch-backend-sql-execution-p backend params)))
+
+(defun clutch-backend-manual-choice-p (backend)
+  "Return non-nil when BACKEND should appear in manual connection prompts."
+  (when-let* ((features (clutch-backend-feature backend)))
+    (if (plist-member features :manual-choice)
+        (plist-get features :manual-choice)
+      t)))
+
+(defun clutch-backend-sql-product (backend)
   "Return registered `sql-product' symbol for BACKEND, or nil."
   (and backend
-       (plist-get (clutch-db-backend-feature backend) :sql-product)))
+       (plist-get (clutch-backend-feature backend) :sql-product)))
+
+(defun clutch-backend-query-mode (backend &optional params)
+  "Return query-console major mode for BACKEND and PARAMS, or nil.
+Backends may register a default :query-mode and optional surface-specific
+entries in :surfaces.  Each surface entry is an alist element whose car is a
+surface symbol and whose cdr may contain :query-mode and
+:query-mode-require."
+  (when-let* ((features (and backend (clutch-backend-feature backend))))
+    (let* ((surface (clutch-db--normalize-symbol-option
+                     (plist-get params :surface)))
+           (surface-features
+            (and surface (alist-get surface (plist-get features :surfaces))))
+           (require-feature
+            (if surface-features
+                (plist-get surface-features :query-mode-require)
+              (plist-get features :query-mode-require)))
+           (query-mode
+            (or (plist-get surface-features :query-mode)
+                (plist-get features :query-mode))))
+      (when require-feature
+        (require require-feature))
+      query-mode)))
 
 (defun clutch-db-connect (backend params)
   "Connect to a database using BACKEND with PARAMS.
@@ -1328,7 +1464,7 @@ PARAMS is a plist of connection parameters (:host, :port, :user,
 :password, :database, etc.).
 Returns a backend-specific connection object."
   (if-let* ((feature-plist
-             (clutch-db-backend-feature backend))
+             (clutch-backend-feature backend))
             (connect-fn
              (progn
                (condition-case err
@@ -1376,5 +1512,5 @@ time (with :hours only) plists returned by the protocol layers."
                 (if negative "-" "")
                 hours minutes seconds))))))
 
-(provide 'clutch-db)
-;;; clutch-db.el ends here
+(provide 'clutch-backend)
+;;; clutch-backend.el ends here

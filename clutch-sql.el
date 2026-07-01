@@ -1,11 +1,6 @@
 ;;; clutch-sql.el --- SQL context, completion, eldoc, and xref -*- lexical-binding: t; -*-
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;;; Commentary:
 
@@ -18,7 +13,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'xref)
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-schema)
 
@@ -1054,12 +1049,12 @@ when SYNC-COLUMNS-P is nil."
          (lambda ()
            (clutch-db-complete-columns conn table prefix))))))
 
-(defun clutch--completion-column-candidates (conn schema tables qualified-table
-                                                  prefix sync-columns-p)
+(defun clutch--completion-column-candidates (conn schema tables prefix
+                                                  sync-columns-p)
   "Return column completion candidates for TABLES on CONN.
-SCHEMA supplies cached columns.  QUALIFIED-TABLE, PREFIX, and SYNC-COLUMNS-P
-control narrowing and backend loading."
-  (let ((all (unless qualified-table (copy-sequence tables))))
+SCHEMA supplies cached columns.  PREFIX and SYNC-COLUMNS-P control backend
+loading."
+  (let (all)
     (dolist (tbl tables)
       (when-let* ((cols (clutch--completion-column-values
                          conn schema tbl prefix sync-columns-p)))
@@ -1296,7 +1291,7 @@ when completion triggers during an in-flight query)."
               (prefer-keyword-p nil)
               (context-tables
                (clutch--completion-column-candidates
-                conn schema context-tables qualified-table prefix sync-columns-p))
+                conn schema context-tables prefix sync-columns-p))
               (qualified-empty-prefix-p nil)
               (t
                (clutch--sql-identifier-completion-candidates

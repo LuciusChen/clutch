@@ -3,11 +3,6 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.1.0
-;; Keywords: data, tools
-;; URL: https://github.com/LuciusChen/clutch
 
 ;; This file is part of clutch.
 
@@ -33,13 +28,12 @@
 
 ;;; Code:
 
-(require 'clutch-db)
+(require 'clutch-backend)
 (require 'clutch-connection)
 (require 'cl-lib)
 
 ;; Forward declarations — variables defined in clutch.el
 (defvar clutch-connection)
-(defvar clutch--executing-p)
 (defvar clutch--conn-sql-product)
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
@@ -56,6 +50,12 @@
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch-console-yank-cleanup t)
+(defvar clutch--query-buffer-local-p)
+(defvar clutch--query-mode-line-name)
+
+(defvar-local clutch--executing-p nil
+  "Non-nil while a query is executing in this buffer.
+Used to update the mode-line with a spinner during execution.")
 
 ;; Forward declarations — functions from sibling modules
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
@@ -74,12 +74,14 @@
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--spinner-start "clutch-connection" ())
 (declare-function clutch--update-mode-line "clutch-connection" ())
+(declare-function clutch--disconnect-on-kill "clutch-connection" ())
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--saved-connection-params "clutch-connection" (name))
 (declare-function clutch--read-manual-connection-params "clutch-connection" (&optional sqlite-file))
 (declare-function clutch--read-saved-connection-choice "clutch-connection" (prompt names))
 (declare-function clutch--read-sqlite-file-params "clutch-connection" ())
 (declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
+(declare-function clutch--backend-key-from-params "clutch-connection" (params))
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--connection-candidates-affixation "clutch-connection" (candidates))
 (declare-function clutch--prepare-connection-origin-params
@@ -110,8 +112,8 @@
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
-(declare-function clutch-db-interrupt-query "clutch-db" (conn))
-(declare-function clutch-db-clear-error-details "clutch-db" (conn))
+(declare-function clutch-db-interrupt-query "clutch-backend" (conn))
+(declare-function clutch-db-clear-error-details "clutch-backend" (conn))
 
 ;;;; Query console
 
@@ -125,6 +127,35 @@ When nil, console persistence falls back to `clutch--console-name'.")
 
 (defvar-local clutch--console-ad-hoc-params nil
   "Connection params for a query console not backed by a saved profile.")
+
+(defun clutch--install-query-keybindings (map)
+  "Install common query-console key bindings into MAP."
+  (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
+  (define-key map (kbd "C-c C-r") #'clutch-execute-region)
+  (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
+  (define-key map (kbd "C-c C-e") #'clutch-connect)
+  (define-key map (kbd "C-c C-m") #'clutch-commit)
+  (define-key map (kbd "C-c C-u") #'clutch-rollback)
+  (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
+  (define-key map (kbd "C-c C-j") #'clutch-jump)
+  (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
+  (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
+  (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
+  (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
+  (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
+  (define-key map (kbd "C-c ?") #'clutch-dispatch)
+  map)
+
+(defun clutch--query-mode-common-setup (&optional mode-line-name)
+  "Install common local state for clutch query editing modes.
+MODE-LINE-NAME is the base name shown while the buffer is idle."
+  (setq-local clutch--query-buffer-local-p t)
+  (setq-local clutch--query-mode-line-name (or mode-line-name "clutch"))
+  (set-buffer-file-coding-system 'utf-8-unix nil t)
+  (add-hook 'kill-emacs-hook #'clutch--save-all-consoles)
+  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t)
+  (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
+  (clutch--update-mode-line))
 
 (defun clutch--console-buffer-base-name (name)
   "Return canonical buffer name for console NAME."
@@ -163,7 +194,7 @@ When nil, console persistence falls back to `clutch--console-name'.")
             (lambda (buf)
               (and (buffer-live-p buf)
                    (with-current-buffer buf
-                     (and (derived-mode-p 'clutch-mode)
+                     (and (clutch--query-buffer-p)
                           (clutch--console-buffer-storage-match-p
                            storage-name)))))
             (buffer-list)))
@@ -171,12 +202,25 @@ When nil, console persistence falls back to `clutch--console-name'.")
        (lambda (buf)
          (and (buffer-live-p buf)
               (with-current-buffer buf
-                (and (derived-mode-p 'clutch-mode)
+                (and (clutch--query-buffer-p)
                      (equal clutch--console-name name)
                      (or (not storage-name)
                          (and (not clutch--console-storage-name)
                               (not clutch--connection-params)))))))
        (buffer-list))))
+
+(defun clutch--query-console-major-mode (params)
+  "Return the major mode function for query console PARAMS."
+  (or (clutch-backend-query-mode
+       (clutch--backend-key-from-params params)
+       params)
+      #'clutch-mode))
+
+(defun clutch--ensure-query-console-major-mode (params)
+  "Ensure the current buffer uses the query console mode for PARAMS."
+  (let ((mode (clutch--query-console-major-mode params)))
+    (unless (eq major-mode mode)
+      (funcall mode))))
 
 (defun clutch--update-console-buffer-name ()
   "Rename the current console buffer to reflect schema status."
@@ -349,6 +393,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
               (buffer-local-value 'clutch-connection existing)))
         (progn
           (with-current-buffer existing
+            (clutch--ensure-query-console-major-mode params)
             (let ((existing-params (or clutch--connection-params params)))
               (setq-local clutch--console-name name)
               (setq-local clutch--console-storage-name storage-name)
@@ -372,8 +417,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
              (is-new (zerop (buffer-size buf))))
         (select-window (or (clutch--console-window-for buf) (selected-window)))
         (switch-to-buffer buf)
-        (unless (derived-mode-p 'clutch-mode)
-          (clutch-mode))
+        (clutch--ensure-query-console-major-mode params)
         (setq-local clutch--console-name name)
         (setq-local clutch--console-storage-name storage-name)
         (setq-local clutch--console-ad-hoc-params ad-hoc-params)
@@ -606,8 +650,9 @@ CONN supplies identifier escaping for the hidden aliases."
 
 (defun clutch--prepare-row-identity-query (conn sql &optional candidate table)
   "Return a row identity preparation plist for executing SQL on CONN.
-The returned plist contains :sql, :table, :candidate, :hidden-aliases, and
-:augmented.  If no identity candidate is available, :sql is the original SQL.
+The returned plist contains :sql, :table, :candidate, :hidden-aliases,
+:augmented, and :identity-status.  If no identity candidate is available, :sql
+is the original SQL.
 CANDIDATE and TABLE reuse row identity already established by a result buffer."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (source-token (and (not table)
@@ -615,31 +660,46 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
          (table (or table
                     (and source-token
                          (clutch-db--source-table-name conn source-token))))
-         (candidates (cond
-                      (candidate (list candidate))
-                      (table
-                       (condition-case nil
-                           (clutch-db-row-identity-candidates conn table)
-                         (clutch-db-error nil)))))
-         (candidate (car candidates))
-         (expressions (and candidate
-                           (clutch--row-identity-select-expressions
-                            conn candidate)))
-         (aliases (and expressions
-                       (clutch--row-identity-hidden-aliases
-                        (length expressions))))
-         (augment-p (and candidate expressions
-                         (clutch--row-identity-augmentable-sql-p
-                          analysis-sql table))))
-    (list :sql (if augment-p
-                   (clutch--row-identity-inject-select-list
-                    conn analysis-sql expressions aliases)
-                 sql)
-          :table table
-          :candidate candidate
-          :candidates candidates
-          :hidden-aliases (and augment-p aliases)
-          :augmented (and augment-p t))))
+         candidates
+         identity-error)
+    (cond
+     (candidate
+      (setq candidates (list candidate)))
+     (table
+      (condition-case err
+          (setq candidates (clutch-db-row-identity-candidates conn table))
+        (clutch-db-error
+         (setq identity-error err)))))
+    (let* ((candidate (car candidates))
+           (expressions (and candidate
+                             (clutch--row-identity-select-expressions
+                              conn candidate)))
+           (aliases (and expressions
+                         (clutch--row-identity-hidden-aliases
+                          (length expressions))))
+           (augment-p (and candidate expressions
+                           (clutch--row-identity-augmentable-sql-p
+                            analysis-sql table)))
+           (identity-status (cond
+                             (identity-error 'error)
+                             (candidate 'candidate)
+                             (table 'unsupported))))
+      (list :sql (if augment-p
+                     (clutch--row-identity-inject-select-list
+                      conn analysis-sql expressions aliases)
+                   sql)
+            :table table
+            :candidate candidate
+            :candidates candidates
+            :hidden-aliases (and augment-p aliases)
+            :augmented (and augment-p t)
+            :identity-status identity-status
+            :identity-error-message
+            (and identity-error
+                 (or (and (stringp (cadr identity-error))
+                          (cadr identity-error))
+                     (error-message-string identity-error)))
+            :identity-error identity-error))))
 
 (defun clutch--row-identity-column-indices (columns names)
   "Return column indices in COLUMNS for NAMES, or nil if any is absent."
@@ -1207,6 +1267,8 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
   "Record ERR for SQL on CONNECTION and abort execution from SOURCE-BUFFER.
 ELAPSED, when non-nil, is the failed execution duration in seconds."
   (clutch--show-execution-error source-buffer connection sql err elapsed)
+  (unless (clutch--connection-alive-p connection)
+    (clutch--abandon-query-connection connection))
   (throw 'clutch--execution-aborted nil))
 
 (defun clutch--execute-select (sql connection &optional result-context)
@@ -1214,7 +1276,10 @@ ELAPSED, when non-nil, is the failed execution duration in seconds."
 RESULT-CONTEXT, when non-nil, is an internal plist carrying source metadata
 for SQL generated from an already verified result.
 Returns the query result."
-  (let* ((page-size clutch-result-max-rows)
+  (let* ((result-context (append result-context
+                                 (clutch-db-query-result-context
+                                  connection sql)))
+         (page-size clutch-result-max-rows)
          (fetch-size (1+ page-size))
          (row-identity-prep
           (or (plist-get result-context :row-identity-prep)
@@ -1339,7 +1404,7 @@ Prompts for confirmation on destructive operations."
           (condition-case nil
               (catch 'clutch--execution-aborted
                 (let ((clutch--source-window source-win))
-                  (if (clutch-db-sql-select-query-p sql)
+                  (if (clutch-db-result-query-p connection sql)
                       (clutch--execute-select sql connection result-context)
                     (clutch--execute-dml sql connection))))
             (quit
@@ -1660,7 +1725,7 @@ result buffer.  Stops and reports on the first error."
              (funcall signal-statement-error err spec)))))
       (pcase-let ((`(,last ,beg ,end) last-spec))
         (cond
-         ((clutch-db-sql-select-query-p last)
+         ((clutch-db-result-query-p clutch-connection last)
           (when (> done 0)
             (message "%s statement%s %s"
                      (clutch--message-count done)
