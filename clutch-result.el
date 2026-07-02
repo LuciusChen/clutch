@@ -401,7 +401,9 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                 clutch--query-elapsed elapsed
                 clutch--filter-pattern nil
                 clutch--filtered-rows nil
-                clutch--column-widths column-widths)
+                clutch--column-widths column-widths
+                clutch--column-pixel-widths nil
+                clutch--column-pixel-metric nil)
     (clutch-result--clear-staged-state)
     column-names))
 
@@ -458,21 +460,24 @@ are produced by the query execution layer."
                     (clutch-db-result-rows result) page-size)
                  (cons (clutch-db-result-rows result) nil)))
          (rows (car page))
-         (has-more (cdr page)))
+         (has-more (cdr page))
+         col-names)
     (with-current-buffer buf
       (clutch-result-mode)
       (clutch--bind-connection-context connection params product)
-      (let ((col-names (clutch-result--init-state
-                        connection sql raw-columns rows elapsed
-                        row-identity-prep 0 has-more
-                        server-pageable server-rewritable source-table)))
-        (clutch--load-fk-info)
-        (when col-names
-          (clutch--refresh-display))))
+      (setq col-names
+            (clutch-result--init-state
+             connection sql raw-columns rows elapsed
+             row-identity-prep 0 has-more
+             server-pageable server-rewritable source-table))
+      (clutch--load-fk-info))
     (when (buffer-live-p source-buffer)
       (with-current-buffer source-buffer
         (setq-local clutch--last-result-buffer buf)))
     (clutch-result--show-buffer buf)
+    (when col-names
+      (with-current-buffer buf
+        (clutch--refresh-display)))
     buf))
 
 (defun clutch-result--execute-page (page-num &optional page-offset)
@@ -549,6 +554,8 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--result-server-pageable nil
               clutch--result-server-rewritable nil
               clutch--column-widths nil
+              clutch--column-pixel-widths nil
+              clutch--column-pixel-metric nil
               clutch--result-columns nil
               clutch--result-column-defs nil
               clutch--result-rows nil

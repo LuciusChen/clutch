@@ -25,6 +25,10 @@
 (defvar clutch--cell-generated-placeholder)
 (defvar-local clutch--column-widths nil
   "Vector of display widths for each result column.")
+(defvar-local clutch--column-pixel-widths nil
+  "Graphical pixel widths for the current result columns, or nil.")
+(defvar-local clutch--column-pixel-metric nil
+  "Font metric signature used for `clutch--column-pixel-widths'.")
 (defvar-local clutch--column-width-refresh-timer nil
   "Idle timer used to coalesce repeated column-width redraws.")
 (defvar clutch--conn-sql-product)
@@ -322,6 +326,65 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   (let* ((extra (max 0 (- width content-width)))
          (left (/ extra 2)))
     (cons left (- extra left))))
+
+(defun clutch--pixel-padding-string (cells pixels)
+  "Return CELLS padding characters displayed as PIXELS pixels.
+Keeping the original logical width preserves the existing hscroll and
+point-navigation model while tightening graphical alignment."
+  (cond
+   ((> cells 0)
+    (let ((padding (make-string cells ?\s)))
+      (put-text-property 0 1 'display
+                         (if (> pixels 0)
+                             `(space :width (,pixels))
+                           "")
+                         padding)
+      (when (> cells 1)
+        (put-text-property 1 cells 'display "" padding))
+      padding))
+   ((> pixels 0)
+    ;; A zero-width carrier adds pixels without changing logical columns.
+    (propertize (string #x200b) 'display `(space :width (,pixels))))
+   (t "")))
+
+(defun clutch--pad-display-string (string width pixel-width &optional right-align)
+  "Pad STRING to WIDTH text cells for result display.
+On graphical displays, pad to PIXEL-WIDTH actual pixels.  RIGHT-ALIGN pads
+before STRING."
+  (if pixel-width
+      (let* ((cells (max 0 (- width (string-width string))))
+             (padding (max 0 (- pixel-width
+                                (string-pixel-width string))))
+             (pad-string (clutch--pixel-padding-string cells padding)))
+        (if right-align
+            (concat pad-string string)
+          (concat string pad-string)))
+    (clutch--string-pad string width right-align)))
+
+(defun clutch--center-display-string (string width pixel-width)
+  "Center STRING within WIDTH text cells and optional PIXEL-WIDTH."
+  (if pixel-width
+      (let* ((pads (clutch--center-padding-widths (string-width string) width))
+             (extra (max 0 (- pixel-width
+                              (string-pixel-width string))))
+             (left (/ extra 2))
+             (right (- extra left)))
+        (concat (clutch--pixel-padding-string (car pads) left)
+                string
+                (clutch--pixel-padding-string (cdr pads) right)))
+    (let* ((pads (clutch--center-padding-widths (string-width string) width))
+           (lead (make-string (car pads) ?\s))
+           (trail (make-string (cdr pads) ?\s)))
+      (concat lead string trail))))
+
+(defun clutch--pixel-metric-signature ()
+  "Return the current graphical font metric signature, or nil."
+  (when (and (fboundp 'default-font-width)
+             (fboundp 'string-pixel-width)
+             (display-graphic-p))
+    (list (default-font-width)
+          (copy-tree face-remapping-alist)
+          (string-pixel-width "m中"))))
 
 (defun clutch--format-elapsed (seconds)
   "Format SECONDS as a human-readable duration."
@@ -945,6 +1008,25 @@ indicator for unsorted columns too."
         (concat (propertize name 'clutch-header-name t) " " sort)
       (propertize name 'clutch-header-name t))))
 
+(defun clutch--header-cell-label (cidx width &optional active-cidx)
+  "Return the styled header label for CIDX within logical WIDTH.
+ACTIVE-CIDX identifies the highlighted column, if any."
+  (let* ((name (nth cidx clutch--result-columns))
+         (label (clutch--header-label name t))
+         (label (if (> (string-width label) width)
+                    (truncate-string-to-width label width)
+                  (copy-sequence label))))
+    (add-face-text-property 0 (length label) 'clutch-field-name-face
+                            'append label)
+    (when (eql cidx active-cidx)
+      (add-face-text-property 0 (length label) 'clutch-header-active-face
+                              'append label))
+    ;; Only underline the column name, not its spacer or sort icon.
+    (dotimes (i (length label))
+      (when (get-text-property i 'clutch-header-name label)
+        (add-face-text-property i (1+ i) '(:underline t) 'append label)))
+    label))
+
 (defun clutch--header-sort-keymap (cidx name)
   "Return a header-line keymap that cycles sorting for column CIDX named NAME."
   (let ((map (make-sparse-keymap))
@@ -995,10 +1077,7 @@ column-local commands still work from padded whitespace."
              (truncated (if (> (string-width label) w)
                             (truncate-string-to-width label w)
                           label))
-             (pads (clutch--center-padding-widths (string-width truncated) w))
-             (lead (make-string (car pads) ?\s))
-             (trail (make-string (cdr pads) ?\s))
-             (cell (concat lead truncated trail))
+             (cell (clutch--center-display-string truncated w nil))
              (face 'clutch-field-name-face)
              (pad-str (make-string padding ?\s))
              (body nil))
@@ -1130,6 +1209,74 @@ rendering large result pages."
          (gethash (clutch-db-row-identity-values row row-identity)
                   edit-rows))))
 
+(defun clutch--pending-insert-render-rows (render-state)
+  "Return staged insert rows expanded with placeholders from RENDER-STATE."
+  (let ((placeholders (plist-get render-state :insert-placeholders)))
+    (mapcar
+     (lambda (fields)
+       (cl-mapcar (lambda (column placeholder)
+                    (if-let* ((entry (assoc column fields)))
+                        (cdr entry)
+                      placeholder))
+                  clutch--result-columns placeholders))
+     clutch--pending-inserts)))
+
+(defun clutch--prepare-pixel-layout (widths rows render-state
+                                            &optional base-pixel-widths first-ridx)
+  "Add graphical column measurements for WIDTHS and ROWS to RENDER-STATE.
+The resulting pixel widths are shared by result headers and body cells.
+Rendered cell content is cached so custom display functions run once.
+When BASE-PIXEL-WIDTHS is non-nil, only grow those existing targets from ROWS,
+whose first row index is FIRST-RIDX."
+  (if (display-graphic-p)
+      (let* ((cell-width (default-font-width))
+             (pixel-widths (if base-pixel-widths
+                               (copy-sequence base-pixel-widths)
+                             (make-vector (length widths) 0)))
+             (contents (make-hash-table :test 'equal))
+             (visible-cols (clutch--visible-columns))
+             (all-rows (if base-pixel-widths
+                           rows
+                         (append rows
+                                 (clutch--pending-insert-render-rows
+                                  render-state)))))
+        (unless base-pixel-widths
+          (dotimes (cidx (length widths))
+            (aset pixel-widths cidx (* cell-width (aref widths cidx)))))
+        (dolist (cidx visible-cols)
+          (let* ((width (aref widths cidx))
+                 (label (clutch--header-cell-label cidx width)))
+            (aset pixel-widths cidx
+                  (max (aref pixel-widths cidx)
+                       (string-pixel-width label)))))
+        (cl-loop for row in all-rows
+                 for ridx from (or first-ridx 0)
+                 do
+                 (dolist (cidx visible-cols)
+                   (let* ((val (nth cidx row))
+                          (col-def (nth cidx clutch--result-column-defs))
+                          (edited (clutch--render-edit-entry
+                                   row ridx cidx render-state))
+                          (active-edit
+                           (equal (plist-get render-state :active-edit-cell)
+                                  (cons ridx cidx)))
+                          (content (clutch--cell-display-content
+                                    val (aref widths cidx) col-def edited))
+                          (measured (copy-sequence content))
+                          (face (clutch--cell-face
+                                 val edited cidx active-edit)))
+                     (when face
+                       (add-face-text-property 0 (length measured) face
+                                               'append measured))
+                     (puthash (cons ridx cidx) content contents)
+                     (aset pixel-widths cidx
+                           (max (aref pixel-widths cidx)
+                                (string-pixel-width measured))))))
+        (setq render-state
+              (plist-put render-state :cell-contents contents))
+        (plist-put render-state :pixel-widths pixel-widths))
+    render-state))
+
 (defun clutch--render-cell (row ridx cidx widths render-state)
   "Render cell at column CIDX of ROW at row index RIDX.
 WIDTHS is the width vector.  Returns a propertized string
@@ -1140,8 +1287,14 @@ including the leading border and padding."
          (active-edit (equal (plist-get render-state :active-edit-cell)
                              (cons ridx cidx)))
          (w       (aref widths cidx))
-         (content (clutch--cell-display-content val w col-def edited))
-         (padded  (clutch--string-pad content w (clutch--numeric-type-p col-def)))
+         (content-table (plist-get render-state :cell-contents))
+         (content (or (and content-table
+                           (gethash (cons ridx cidx) content-table))
+                      (clutch--cell-display-content val w col-def edited)))
+         (pixel-widths (plist-get render-state :pixel-widths))
+         (padded  (clutch--pad-display-string
+                   content w (and pixel-widths (aref pixel-widths cidx))
+                   (clutch--numeric-type-p col-def)))
          (face    (clutch--cell-face val edited cidx active-edit))
          (pad-str (make-string clutch-column-padding ?\s))
          (body nil))
@@ -1637,33 +1790,15 @@ WIDTHS is the effective width vector.
 ACTIVE-CIDX is the highlighted column index, if any."
   (let* ((name (nth cidx clutch--result-columns))
          (w (aref widths cidx))
-         (label (clutch--header-label name t))
-         (truncated (if (> (string-width label) w)
-                        (truncate-string-to-width label w)
-                      label))
-         (pads (clutch--center-padding-widths (string-width truncated) w))
-         (lead (make-string (car pads) ?\s))
-         (trail (make-string (cdr pads) ?\s))
-         (label (copy-sequence truncated))
-         (active-p (eql cidx active-cidx))
-         (base-face 'clutch-field-name-face)
+         (pixel-width (and (vectorp clutch--column-pixel-widths)
+                           (< cidx (length clutch--column-pixel-widths))
+                           (aref clutch--column-pixel-widths cidx)))
+         (label (clutch--header-cell-label cidx w active-cidx))
+         (label (clutch--center-display-string label w pixel-width))
          (pad-str (make-string clutch-column-padding ?\s))
          (sort-map (clutch--header-sort-keymap cidx name))
          (body nil))
-    ;; Append base style without overwriting icon-specific face.
-    (add-face-text-property 0 (length label) base-face 'append label)
-    (when active-p
-      (add-face-text-property 0 (length label) 'clutch-header-active-face
-                              'append label))
-    ;; Only underline the column name, not the spacer or trailing sort icon.
-    (dotimes (i (length label))
-      (when (get-text-property i 'clutch-header-name label)
-        (add-face-text-property i (1+ i) '(:underline t) 'append label)))
-    (setq body (concat pad-str
-                       (propertize lead 'face base-face)
-                       label
-                       (propertize trail 'face base-face)
-                       pad-str))
+    (setq body (concat pad-str label pad-str))
     (add-text-properties 0 (length body)
                          `(clutch-header-col ,cidx
                            local-map ,sort-map
@@ -1691,19 +1826,75 @@ ACTIVE-CIDX highlights that column when non-nil."
             " " (make-string nw ?\s) pad-str
             data-header)))
 
+(defun clutch--pixel-crop-left (string pixels)
+  "Return STRING with PIXELS cropped from the left.
+Display spaces can be cropped partially; ordinary glyphs are removed only at
+character boundaries."
+  (catch 'done
+    (let ((pos 0)
+          (len (length string))
+          (remaining pixels))
+      (while (and (< pos len) (> remaining 0))
+        (let* ((next (1+ pos))
+               (part (substring string pos next))
+               (part-pixels (string-pixel-width part)))
+          (cond
+           ((<= part-pixels 0)
+            (setq pos next))
+           ((<= part-pixels remaining)
+            (setq remaining (- remaining part-pixels)
+                  pos next))
+           (t
+            (let* ((rest (substring string pos))
+                   (display (get-text-property pos 'display string))
+                   (width (and (consp display)
+                               (eq (car display) 'space)
+                               (plist-get (cdr display) :width)))
+                   (space-width (cond
+                                 ((consp width) (car width))
+                                 ((numberp width) width))))
+              (if space-width
+                  (progn
+                    (put-text-property
+                     0 1 'display
+                     `(space :width (,(max 0 (- space-width remaining))))
+                     rest)
+                    (throw 'done rest))
+                (throw 'done (substring string next))))))))
+      (substring string pos))))
+
 (defun clutch--header-line-with-hscroll ()
   "Return the header string shifted to match `window-hscroll'.
 The header-line should track body hscroll exactly."
   (when clutch--header-line-string
     (let* ((hs (window-hscroll))
            (str clutch--header-line-string)
-           (len (length str)))
-      (if (>= hs len)
+           (width (string-width str)))
+      (if (>= hs width)
           ""
-        (substring str hs)))))
+        (if (and (> hs 0)
+                 clutch--column-pixel-widths
+                 (fboundp 'default-font-width)
+                 (fboundp 'string-pixel-width)
+                 (display-graphic-p))
+            (clutch--pixel-crop-left str (* hs (default-font-width)))
+          (truncate-string-to-width str width hs))))))
+
+(defun clutch--schedule-pixel-metric-refresh ()
+  "Schedule a redraw if graphical font metrics changed since render."
+  (when (and clutch--column-pixel-widths
+             clutch--column-pixel-metric
+             (not (timerp clutch--column-width-refresh-timer)))
+    (let ((metric (clutch--pixel-metric-signature)))
+      (when (and metric
+                 (not (equal metric clutch--column-pixel-metric)))
+        (setq clutch--column-width-refresh-timer
+              (run-at-time 0 nil #'clutch--run-column-width-refresh
+                           (current-buffer)))))))
 
 (defun clutch--header-line-display ()
   "Return the display-ready header-line string for result buffers."
+  (clutch--schedule-pixel-metric-refresh)
   (concat (propertize " " 'display '(space :align-to 0))
           (or (clutch--header-line-with-hscroll) "")))
 
@@ -1724,18 +1915,11 @@ NROWS is the count of real rows (used to compute ghost row indices).
 ROW-POSITIONS stores line starts keyed by rendered row index.
 RENDER-STATE contains render lookup tables for staged UI state."
   (let ((bface 'clutch-border-face)
-        (pad-str (make-string clutch-column-padding ?\s))
-        (insert-placeholders (plist-get render-state :insert-placeholders)))
-    (cl-loop for fields in clutch--pending-inserts
+        (pad-str (make-string clutch-column-padding ?\s)))
+    (cl-loop for row in (clutch--pending-insert-render-rows render-state)
              for iidx from 0
              for ridx = (+ nrows iidx)
              do (aset row-positions ridx (point))
-             for row = (cl-mapcar (lambda (col placeholder)
-                                    (if-let* ((entry (assoc col fields)))
-                                        (cdr entry)
-                                      placeholder))
-                                  clutch--result-columns
-                                  insert-placeholders)
              for data-row = (propertize
                              (clutch--render-row row ridx visible-cols widths render-state)
                              'face 'clutch-pending-insert-face)
@@ -1921,11 +2105,16 @@ Preserves point position (row + column) across the render."
          (visible-cols (clutch--visible-columns))
          (widths (clutch--effective-widths))
          (rows (or clutch--filtered-rows clutch--result-rows))
-         (render-state (clutch--build-render-state))
+         (render-state (clutch--prepare-pixel-layout
+                        widths rows (clutch--build-render-state)))
          (nw (clutch--row-number-digits))
          (row-positions (make-vector (+ (length rows)
                                         (length clutch--pending-inserts))
                                      nil)))
+    (setq clutch--column-pixel-widths
+          (plist-get render-state :pixel-widths)
+          clutch--column-pixel-metric
+          (clutch--pixel-metric-signature))
     (erase-buffer)
     (setq clutch--row-start-positions row-positions)
     (clutch--refresh-footer-line)
@@ -1982,16 +2171,23 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
                             (goto-char line-pos)
                             (forward-line 1)
                             (point))))
-             (render-state (clutch--build-render-state))
-             (line (clutch--render-row-line ridx render-state))
+             (widths (clutch--effective-widths))
+             (render-state (clutch--prepare-pixel-layout
+                            widths (list (nth ridx rows))
+                            (clutch--build-render-state)
+                            clutch--column-pixel-widths ridx))
+             (pixel-widths (plist-get render-state :pixel-widths))
              (inhibit-read-only t))
-        (save-excursion
-          (goto-char line-pos)
-          (delete-region line-pos end-pos)
-          (insert line))
-        (clutch--reindex-row-starts-from ridx)
-        (when save-ridx
-          (clutch--goto-cell save-ridx save-cidx))))))
+        (if (not (equal pixel-widths clutch--column-pixel-widths))
+            (clutch--refresh-display)
+          (let ((line (clutch--render-row-line ridx render-state)))
+            (save-excursion
+              (goto-char line-pos)
+              (delete-region line-pos end-pos)
+              (insert line))
+            (clutch--reindex-row-starts-from ridx)
+            (when save-ridx
+              (clutch--goto-cell save-ridx save-cidx))))))))
 
 (defun clutch--col-idx-at-point ()
   "Return the column index at point, from data cells."
@@ -2100,7 +2296,11 @@ Preserve cursor position (row + column) and the top visible row."
       (when clutch--row-overlay
         (delete-overlay clutch--row-overlay)
         (setq clutch--row-overlay nil))
-      (clutch--render-result)
+      (if (and (window-live-p win)
+               (eq (window-buffer win) (current-buffer)))
+          (with-selected-window win
+            (clutch--render-result))
+        (clutch--render-result))
       (when save-ridx
         (clutch--goto-cell save-ridx save-cidx)
         (when (and win (integerp save-top-ridx))

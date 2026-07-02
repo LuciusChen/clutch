@@ -434,6 +434,18 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
 
 ;;;; Rendering — padding
 
+(defun clutch-test--fake-pixel-width (string &optional _buffer)
+  "Return deterministic mixed-width pixels for STRING."
+  (cl-loop for i below (length string)
+           for display = (get-text-property i 'display string)
+           sum (cond
+                ((equal display "") 0)
+                ((and (consp display) (eq (car display) 'space))
+                 (let ((width (plist-get (cdr display) :width)))
+                   (if (consp width) (car width) width)))
+                ((memq (aref string i) '(?中 ?文)) 30)
+                (t 10))))
+
 (ert-deftest clutch-test-string-pad ()
   "Test string padding."
   ;; Left-align (default)
@@ -442,6 +454,42 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
   (should (equal (clutch--string-pad "hi" 5 t) "   hi"))
   ;; String longer than width — no padding
   (should (equal (clutch--string-pad "hello" 3) "hello")))
+
+(ert-deftest clutch-test-result-grid-aligns-mixed-width-font-fallbacks ()
+  "Result headers and rows should share measured graphical column widths."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (setq-local clutch--result-columns '("name")
+                clutch--result-column-defs '(nil)
+                clutch--result-rows '(("中文"))
+                clutch--filtered-rows nil
+                clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
+                clutch--marked-rows nil
+                clutch--sort-column nil
+                clutch--sort-descending nil
+                clutch--page-current 0
+                clutch--page-total-rows 1
+                clutch--column-widths [4])
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _display) t))
+              ((symbol-function 'default-font-width)
+               (lambda () 10))
+              ((symbol-function 'string-pixel-width)
+               #'clutch-test--fake-pixel-width)
+              ((symbol-function 'clutch--header-label)
+               (lambda (name &optional _include-unsorted-sort)
+                 (propertize name 'clutch-header-name t)))
+              ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+      (clutch--render-result)
+      (should (= (clutch-test--fake-pixel-width clutch--header-line-string)
+                 (clutch-test--fake-pixel-width
+                  (string-trim-right (buffer-string)))))
+      (should (= (string-width clutch--header-line-string)
+                 (string-width (string-trim-right (buffer-string)))))
+      (should (equal clutch--column-widths [4]))
+      (should (equal clutch--column-pixel-widths [60])))))
 
 ;;;; Rendering — column layout and widths
 
@@ -982,6 +1030,50 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (= (get-text-property (point) 'clutch-row-idx) 1))
       (should (= (get-text-property (point) 'clutch-col-idx) 2)))))
 
+(ert-deftest clutch-test-refresh-display-measures-displayed-result-window ()
+  "Refresh should render with the result window's font metrics."
+  (let* ((source-win (selected-window))
+         (result-win (split-window-right))
+         (buf (get-buffer-create " *clutch-window-metric-test*")))
+    (unwind-protect
+        (progn
+          (set-window-buffer result-win buf)
+          (select-window source-win)
+          (with-current-buffer buf
+            (erase-buffer)
+            (clutch-result-mode)
+            (setq-local clutch--result-columns '("name")
+                        clutch--result-column-defs '(nil)
+                        clutch--result-rows '(("aa"))
+                        clutch--filtered-rows nil
+                        clutch--pending-edits nil
+                        clutch--pending-deletes nil
+                        clutch--pending-inserts nil
+                        clutch--marked-rows nil
+                        clutch--sort-column nil
+                        clutch--sort-descending nil
+                        clutch--page-current 0
+                        clutch--page-total-rows 1
+                        clutch--column-widths [4])
+            (cl-letf (((symbol-function 'display-graphic-p)
+                       (lambda (&optional _display) t))
+                      ((symbol-function 'default-font-width)
+                       (lambda ()
+                         (if (eq (selected-window) result-win) 20 10)))
+                      ((symbol-function 'string-pixel-width)
+                       (lambda (string &optional _buffer)
+                         (* (string-width string) (default-font-width))))
+                      ((symbol-function 'clutch--header-label)
+                       (lambda (name &optional _include-unsorted-sort)
+                         name))
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+              (clutch--refresh-display)
+              (should (equal clutch--column-pixel-widths [80])))))
+      (when (window-live-p result-win)
+        (delete-window result-win))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (defun clutch-test--setup-rendered-result (&optional rows)
   "Populate the current buffer with a rendered three-column result table.
 ROWS defaults to a small three-row sample."
@@ -1059,6 +1151,43 @@ ROWS defaults to a small three-row sample."
                    (setq refreshed t))))
         (clutch--replace-row-at-index 0)
         (should refreshed)))))
+
+(ert-deftest clutch-test-replace-row-at-index-refreshes-when-pixel-target-grows ()
+  "Row replacement should redraw fully when graphical column pixels grow."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (setq-local clutch--result-columns '("name")
+                clutch--result-column-defs '(nil)
+                clutch--result-rows '(("aa"))
+                clutch--filtered-rows nil
+                clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
+                clutch--marked-rows nil
+                clutch--sort-column nil
+                clutch--sort-descending nil
+                clutch--page-current 0
+                clutch--page-total-rows 1
+                clutch--column-widths [4])
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _display) t))
+              ((symbol-function 'default-font-width)
+               (lambda () 10))
+              ((symbol-function 'string-pixel-width)
+               #'clutch-test--fake-pixel-width)
+              ((symbol-function 'clutch--header-label)
+               (lambda (name &optional _include-unsorted-sort)
+                 name))
+              ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+      (clutch--render-result)
+      (should (equal clutch--column-pixel-widths [40]))
+      (setq-local clutch--result-rows '(("中文")))
+      (let (refreshed)
+        (cl-letf (((symbol-function 'clutch--refresh-display)
+                   (lambda ()
+                     (setq refreshed t))))
+          (clutch--replace-row-at-index 0)
+          (should refreshed))))))
 
 (ert-deftest clutch-test-reindex-row-starts-from-tracks-buffer-positions ()
   "Row-start reindexing should match actual buffer positions after replacement."
@@ -1167,6 +1296,46 @@ ROWS defaults to a small three-row sample."
         (should (equal clutch--row-identity-status 'error))
         (should (equal clutch--row-identity-error-message
                        "metadata failed"))))))
+
+(ert-deftest clutch-test-display-select-renders-in-result-window ()
+  "Initial SELECT display should use the result window's font metrics."
+  (let* ((source-win (selected-window))
+         (result-win (split-window-right))
+         (result-name "*clutch-window-display-result*")
+         (result (make-clutch-db-result
+                  :columns '((:name "name" :type-category text))
+                  :rows '(("aa")))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-result--buffer-name)
+                   (lambda () result-name))
+                  ((symbol-function 'clutch-result--show-buffer)
+                   (lambda (buf)
+                     (set-window-buffer result-win buf)
+                     (select-window result-win)))
+                  ((symbol-function 'clutch--load-fk-info) #'ignore)
+                  ((symbol-function 'display-graphic-p)
+                   (lambda (&optional _display) t))
+                  ((symbol-function 'default-font-width)
+                   (lambda ()
+                     (if (eq (selected-window) result-win) 20 10)))
+                  ((symbol-function 'string-pixel-width)
+                   (lambda (string &optional _buffer)
+                     (* (string-width string) (default-font-width))))
+                  ((symbol-function 'clutch--header-label)
+                   (lambda (name &optional _include-unsorted-sort)
+                     name))
+                  ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+          (with-temp-buffer
+            (select-window source-win)
+            (clutch-result--display-select
+             'fake-conn "SELECT name FROM users" result 0 nil t nil
+             (current-buffer)))
+          (with-current-buffer result-name
+            (should (equal clutch--column-pixel-widths [100]))))
+      (when (window-live-p result-win)
+        (delete-window result-win))
+      (when-let* ((buf (get-buffer result-name)))
+        (kill-buffer buf)))))
 
 (ert-deftest clutch-test-init-result-state-clears-stale-result-flags ()
   "Result initialization should not keep stale source or DML metadata."
@@ -1505,6 +1674,27 @@ ROWS defaults to a small three-row sample."
     (cl-letf (((symbol-function 'window-hscroll) (lambda (&optional _window) 3)))
       (should (equal (clutch--header-line-with-hscroll) "3456789")))))
 
+(ert-deftest clutch-test-header-line-with-hscroll-crops-display-space-by-pixels ()
+  "Header-line hscroll should preserve display-space remainder."
+  (with-temp-buffer
+    (let ((header (copy-sequence " x")))
+      (put-text-property 0 1 'display '(space :width (30)) header)
+      (setq-local clutch--header-line-string header
+                  clutch--column-pixel-widths [30])
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _display) t))
+                ((symbol-function 'default-font-width)
+                 (lambda () 10))
+                ((symbol-function 'window-hscroll)
+                 (lambda (&optional _window) 1))
+                ((symbol-function 'string-pixel-width)
+                 #'clutch-test--fake-pixel-width))
+        (let ((cropped (clutch--header-line-with-hscroll)))
+          (should (equal (substring-no-properties cropped) " x"))
+          (should (equal (get-text-property 0 'display cropped)
+                         '(space :width (20))))
+          (should (= (clutch-test--fake-pixel-width cropped) 30)))))))
+
 (ert-deftest clutch-test-header-line-display-prefixes-align-to-zero ()
   "Header-line display should remain aligned to the window's left edge."
   (with-temp-buffer
@@ -1514,6 +1704,47 @@ ROWS defaults to a small three-row sample."
         (should (equal (substring rendered 1) "abc"))
         (should (equal (get-text-property 0 'display rendered)
                        '(space :align-to 0)))))))
+
+(ert-deftest clutch-test-header-line-display-refreshes-stale-pixel-metrics ()
+  "Header-line redisplay should schedule refresh after font metrics change."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (setq-local clutch--result-columns '("name")
+                clutch--result-column-defs '(nil)
+                clutch--result-rows '(("中文"))
+                clutch--filtered-rows nil
+                clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
+                clutch--marked-rows nil
+                clutch--sort-column nil
+                clutch--sort-descending nil
+                clutch--page-current 0
+                clutch--page-total-rows 1
+                clutch--column-widths [4])
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _display) t))
+              ((symbol-function 'default-font-width)
+               (lambda () 10))
+              ((symbol-function 'string-pixel-width)
+               #'clutch-test--fake-pixel-width)
+              ((symbol-function 'clutch--header-label)
+               (lambda (name &optional _include-unsorted-sort)
+                 name))
+              ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+      (clutch--render-result)
+      (setq-local face-remapping-alist '((default (:height 2.0))))
+      (let (scheduled)
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (&rest args)
+                     (setq scheduled args)
+                     (timer-create)))
+                  ((symbol-function 'window-hscroll)
+                   (lambda (&optional _window) 0)))
+          (clutch--header-line-display)
+          (should scheduled)
+          (should (eq (nth 2 scheduled) #'clutch--run-column-width-refresh))
+          (should (eq (nth 3 scheduled) (current-buffer))))))))
 
 (ert-deftest clutch-test-refresh-footer-line-updates-without-changing-body ()
   "Footer refresh should update mode-line state without touching buffer text."

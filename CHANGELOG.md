@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1 - 2026-07-02
+
+### Fixed
+
+- Aligned graphical result headers and body cells using measured pixel widths,
+  including mixed ASCII/CJK font fallback configurations whose glyph widths do
+  not follow a 1:2 ratio. Logical column sizing, terminal rendering, navigation,
+  and existing column-width controls are unchanged. Result rendering now also
+  uses the displayed result window's font metrics, keeps header-line horizontal
+  scrolling aligned with pixel padding, and refreshes stale pixel layout after
+  buffer-local face metric changes.
+
 ## 0.2.0 - 2026-07-01
 
 This section summarizes the 0.2.0 release.
