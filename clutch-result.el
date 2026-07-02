@@ -374,17 +374,27 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
             'unsupported)))
          (column-names (clutch-db-result-column-names column-defs))
          (existing-widths clutch--column-widths)
+         (offset (or page-offset (* page-num clutch-result-max-rows)))
+         (existing-offset (or clutch--page-offset
+                              (* clutch--page-current clutch-result-max-rows)))
+         (same-columns (and (vectorp existing-widths)
+                            (equal column-names clutch--result-columns)
+                            (= (length existing-widths)
+                               (length column-names))))
+         (same-render-shape
+          (and same-columns
+               (equal column-defs clutch--result-column-defs)))
+         (same-cache-page
+          (and same-render-shape
+               (= offset existing-offset)))
          (column-widths
-          (if (and (vectorp existing-widths)
-                   (equal column-names clutch--result-columns)
-                   (= (length existing-widths) (length column-names)))
+          (if same-columns
               existing-widths
             (clutch--compute-column-widths column-names rows column-defs)))
          (cached-pk-indices
           (and (eq (plist-get row-identity :kind) 'primary-key)
                (or (plist-get row-identity :source-indices)
-                   (plist-get row-identity :indices))))
-         (offset (or page-offset (* page-num clutch-result-max-rows))))
+                   (plist-get row-identity :indices)))))
     (setq-local clutch--dml-result nil
                 clutch--result-columns column-names
                 clutch--result-column-defs column-defs
@@ -403,7 +413,16 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                 clutch--filtered-rows nil
                 clutch--column-widths column-widths
                 clutch--column-pixel-widths nil
-                clutch--column-pixel-metric nil)
+                clutch--column-pixel-metric nil
+                clutch--column-pixel-logical-widths nil
+                clutch--cell-render-cache
+                (and same-cache-page clutch--cell-render-cache)
+                clutch--cell-render-cache-signature
+                (and same-cache-page clutch--cell-render-cache-signature)
+                clutch--char-pixel-width-cache
+                (and same-render-shape clutch--char-pixel-width-cache)
+                clutch--char-pixel-width-cache-signature
+                (and same-render-shape clutch--char-pixel-width-cache-signature))
     (clutch-result--clear-staged-state)
     column-names))
 
@@ -556,6 +575,11 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--column-widths nil
               clutch--column-pixel-widths nil
               clutch--column-pixel-metric nil
+              clutch--column-pixel-logical-widths nil
+              clutch--cell-render-cache nil
+              clutch--cell-render-cache-signature nil
+              clutch--char-pixel-width-cache nil
+              clutch--char-pixel-width-cache-signature nil
               clutch--result-columns nil
               clutch--result-column-defs nil
               clutch--result-rows nil

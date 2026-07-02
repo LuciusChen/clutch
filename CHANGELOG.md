@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 - 2026-07-02
+
+### Fixed
+
+- Reduced graphical result-grid redraw work by caching plain cell pixel widths
+  per character, avoiding display-space properties for ordinary padding,
+  reusing rendered cells across redraws and same-shape page refreshes, skipping
+  body scans when sorting the same rows, rendering rows in a single pass, and
+  measuring only changed columns after manual column-width adjustments. Result
+  buffers now also skip pixel layout entirely when the frame's font metrics
+  already match Emacs logical cell widths.
+- Fixed result rendering on Emacs builds where `string-pixel-width` accepts only
+  one argument.
+
 ## 0.2.1 - 2026-07-02
 
 ### Fixed
