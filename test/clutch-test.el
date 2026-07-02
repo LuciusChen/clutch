@@ -5606,6 +5606,39 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
   (should (eq (lookup-key clutch-result-mode-map "k")
               #'clutch-copy-context-for-agent)))
 
+(ert-deftest clutch-test-result-mouse-click-below-table-preserves-point ()
+  "Clicking below the rendered table should not move the current cell."
+  (should (eq (lookup-key clutch-result-mode-map [mouse-1])
+              #'clutch-result-mouse-set-point))
+  (should (eq (lookup-key clutch-result-mode-map [down-mouse-1])
+              #'clutch-result-mouse-set-point))
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (clutch-result-mode)
+      (let ((inhibit-read-only t))
+        (insert "row\n"))
+      (goto-char 2)
+      (let ((event-position (point-max))
+            delegated)
+        (cl-letf (((symbol-function 'event-start) (lambda (_event) 'fake-posn))
+                  ((symbol-function 'posn-window)
+                   (lambda (_posn) (selected-window)))
+                  ((symbol-function 'posn-point)
+                   (lambda (_posn) event-position))
+                  ((symbol-function 'mouse-drag-region)
+                   (lambda (_event) (setq delegated 'drag)))
+                  ((symbol-function 'mouse-set-point)
+                   (lambda (_event) (setq delegated 'set-point))))
+          (clutch-result-mouse-set-point 'mouse-1)
+          (should (= (point) 2))
+          (should-not delegated)
+          (setq event-position 1)
+          (clutch-result-mouse-set-point 'down-mouse-1)
+          (should (eq delegated 'drag))
+          (clutch-result-mouse-set-point 'mouse-1)
+          (should (eq delegated 'set-point)))))))
+
 (ert-deftest clutch-test-copy-context-for-agent-at-end-of-semicolon-statement ()
   "Agent context copy should use the previous statement after a trailing semicolon."
   (with-temp-buffer

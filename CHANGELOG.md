@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 - Unreleased
+
+### Fixed
+
+- Kept the current result cell selected when clicking the empty window area
+  below the rendered table, while preserving normal cell clicks and mouse drag
+  selection.
+
 ## 0.2.2 - 2026-07-02
 
 ### Fixed

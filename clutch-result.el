@@ -817,9 +817,31 @@ If the result has columns, shows a table; otherwise shows DML summary."
 
 ;;;; clutch-result-mode
 
+(defun clutch-result-mouse-set-point (event)
+  "Handle mouse EVENT without moving point below the rendered result."
+  (interactive "e")
+  (let* ((position (event-start event))
+         (window (posn-window position))
+         (buffer-position (posn-point position))
+         (below-result-p
+          (and (window-live-p window)
+               (integer-or-marker-p buffer-position)
+               (with-current-buffer (window-buffer window)
+                 (and (= buffer-position (point-max))
+                      (save-excursion
+                        (goto-char buffer-position)
+                        (bolp)))))))
+    (cond
+     (below-result-p (select-window window))
+     ((memq 'down (event-modifiers event))
+      (mouse-drag-region event))
+     (t (mouse-set-point event)))))
+
 (defvar clutch-result-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
+    (define-key map [mouse-1] #'clutch-result-mouse-set-point)
+    (define-key map [down-mouse-1] #'clutch-result-mouse-set-point)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
     (define-key map (kbd "C-c C-c") #'clutch-result-commit)
     (define-key map "g" #'clutch-result-rerun)
