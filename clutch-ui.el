@@ -404,15 +404,16 @@ before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil."
   (when (and (fboundp 'default-font-width)
              (fboundp 'string-pixel-width)
              (display-graphic-p))
-    (let ((cell-width (default-font-width)))
-      (unless (cl-every
-               (lambda (sample)
-                 (= (string-pixel-width sample)
-                    (* cell-width (string-width sample))))
-               '("m" "i" "W" "中" "m中"))
+    (let* ((cell-width (default-font-width))
+           (samples '("m" "i" "W" "中" "あ" "한" "m中あ한"))
+           (pixel-widths (mapcar #'string-pixel-width samples)))
+      (unless (cl-loop for sample in samples
+                       for pixels in pixel-widths
+                       always (= pixels (* cell-width
+                                           (string-width sample))))
         (list cell-width
               (copy-tree face-remapping-alist)
-              (string-pixel-width "m中"))))))
+              pixel-widths)))))
 
 (defun clutch--string-has-properties-p (string)
   "Return non-nil when STRING has any text properties."

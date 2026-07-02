@@ -523,6 +523,23 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should-not clutch--column-pixel-metric)
       (should-not clutch--column-pixel-logical-widths))))
 
+(ert-deftest clutch-test-pixel-metric-detects-japanese-and-korean-fallbacks ()
+  "Pixel layout should detect nonstandard Japanese and Korean fallback widths."
+  (dolist (case '((?あ . 25) (?한 . 27)))
+    (pcase-let ((`(,target . ,target-pixels) case))
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _display) t))
+                ((symbol-function 'default-font-width) (lambda () 10))
+                ((symbol-function 'string-pixel-width)
+                 (lambda (string)
+                   (cl-loop for char across string
+                            sum (if (= char target)
+                                    target-pixels
+                                  (* 10 (char-width char)))))))
+        (let ((signature (clutch--pixel-metric-signature)))
+          (should signature)
+          (should (memq target-pixels (nth 2 signature))))))))
+
 (ert-deftest clutch-test-result-grid-measures-cell-pixels-once-per-render ()
   "Graphical result rendering should not remeasure each cell during padding."
   (let ((calls 0))
@@ -594,6 +611,8 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
                      (cl-incf calls)
                      (+ (* 10 (string-width string))
                         (if (string-search "中" string) 10 0))))
+                  ((symbol-function 'clutch--pixel-metric-signature)
+                   (lambda () '(test-metric)))
                   ((symbol-function 'clutch--cell-display-content)
                    (lambda (&rest args)
                      (cl-incf content-calls)
@@ -5621,22 +5640,23 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
       (goto-char 2)
       (let ((event-position (point-max))
             delegated)
-        (cl-letf (((symbol-function 'event-start) (lambda (_event) 'fake-posn))
-                  ((symbol-function 'posn-window)
-                   (lambda (_posn) (selected-window)))
-                  ((symbol-function 'posn-point)
-                   (lambda (_posn) event-position))
-                  ((symbol-function 'mouse-drag-region)
+        (cl-letf (((symbol-function 'mouse-drag-region)
                    (lambda (_event) (setq delegated 'drag)))
                   ((symbol-function 'mouse-set-point)
                    (lambda (_event) (setq delegated 'set-point))))
-          (clutch-result-mouse-set-point 'mouse-1)
+          (clutch-result-mouse-set-point
+           (list 'mouse-1
+                 (list (selected-window) event-position '(0 . 0) 0)))
           (should (= (point) 2))
           (should-not delegated)
           (setq event-position 1)
-          (clutch-result-mouse-set-point 'down-mouse-1)
+          (clutch-result-mouse-set-point
+           (list 'down-mouse-1
+                 (list (selected-window) event-position '(0 . 0) 0)))
           (should (eq delegated 'drag))
-          (clutch-result-mouse-set-point 'mouse-1)
+          (clutch-result-mouse-set-point
+           (list 'mouse-1
+                 (list (selected-window) event-position '(0 . 0) 0)))
           (should (eq delegated 'set-point)))))))
 
 (ert-deftest clutch-test-copy-context-for-agent-at-end-of-semicolon-statement ()

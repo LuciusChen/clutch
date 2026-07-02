@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Extended graphical font-metric detection to Japanese and Korean fallback
+  glyphs so mixed CJK result grids enable pixel alignment when those scripts
+  do not match Emacs logical cell widths.
 - Kept the current result cell selected when clicking the empty window area
   below the rendered table, while preserving normal cell clicks and mouse drag
   selection.
