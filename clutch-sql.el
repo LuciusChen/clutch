@@ -89,10 +89,60 @@
              (eq (plist-get clutch--tables-in-buffer-cache :schema) schema)
              (= (plist-get clutch--tables-in-buffer-cache :tick) tick))
         (plist-get clutch--tables-in-buffer-cache :tables)
-      (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+      (let ((seen (make-hash-table :test 'equal))
+            text
             tables)
+        (cl-labels
+            ((identifier-start-p (ch)
+               (and ch
+                    (or (memq (char-syntax ch) '(?w ?_))
+                        (memq ch '(?_ ?$ ?#)))))
+             (identifier-char-p (ch)
+               (and ch
+                    (or (identifier-start-p ch)
+                        (= ch ?.))))
+             (record-token (token)
+               (unless (string-empty-p token)
+                 (puthash token t seen)
+                 (puthash (downcase token) t seen)
+                 (when (string-match "\\.\\([^.]+\\)\\'" token)
+                   (puthash (match-string 1 token) t seen)
+                   (puthash (downcase (match-string 1 token)) t seen)))))
+          (save-excursion
+            (goto-char (point-min))
+            (while (not (eobp))
+              (cond
+               ((memq (char-after) '(?\" ?`))
+                (let ((quote (char-after))
+                      (beg (1+ (point))))
+                  (forward-char)
+                  (while (and (not (eobp))
+                              (/= (char-after) quote))
+                    (forward-char))
+                  (record-token (buffer-substring-no-properties beg (point)))
+                  (unless (eobp)
+                    (forward-char))))
+               ((identifier-start-p (char-after))
+                (let ((beg (point)))
+                  (while (identifier-char-p (char-after))
+                    (forward-char))
+                  (record-token (buffer-substring-no-properties
+                                 beg (point)))))
+               (t
+                (forward-char))))))
         (maphash (lambda (tbl _cols)
-                   (when (string-match-p (regexp-quote tbl) text)
+                   (when (and
+                          (stringp tbl)
+                          (if (string-match-p
+                               "\\`[[:alnum:]_$#]+\\(?:\\.[[:alnum:]_$#]+\\)*\\'"
+                               tbl)
+                              (gethash (downcase tbl) seen)
+                           (let ((case-fold-search t))
+                             (unless text
+                               (setq text
+                                     (buffer-substring-no-properties
+                                      (point-min) (point-max))))
+                             (string-match-p (regexp-quote tbl) text))))
                      (push tbl tables)))
                  schema)
         (setq tables (nreverse tables))
@@ -234,33 +284,33 @@ String literals and comments are ignored via masking."
                               word-start "on"
                               (+ (any " \t\n\r"))
                               (group (+ (any alnum "_$#.`\""))))))
-                 masked pos))
-      (when (< (match-beginning 0) end)
-        (let* ((dml-match (match-string 1 text))
-               (table-end (or (match-end 2)
-                              (match-end 3)
-                              (match-end 4)))
-               (table-token (and table-end
-                                 (or (match-string 2 text)
-                                     (match-string 3 text)
-                                     (match-string 4 text))))
-               (table (clutch--normalize-statement-table-token table-token))
-               (alias-consumed-end table-end))
-          (setq pos table-end)
-          (when (and dml-match
-                     (string-match
-                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
-                      masked table-end)
-                     (= (match-beginning 0) table-end)
-                     (< (match-beginning 0) end))
-            (let ((alias-consumed-match-end (match-end 0)))
-              (when-let* ((alias-token (match-string 1 text))
-                          (alias (clutch--normalize-statement-table-token alias-token))
-                          ((not (member (upcase alias) clutch--sql-keywords))))
-                (setq alias-consumed-end alias-consumed-match-end)
-                (push (cons alias table) aliases))))
-          (setq pos alias-consumed-end)
-          (when table (push table tables)))))
+                 masked pos)
+                (< (match-beginning 0) end))
+      (let* ((dml-match (match-string 1 text))
+             (table-end (or (match-end 2)
+                            (match-end 3)
+                            (match-end 4)))
+             (table-token (and table-end
+                               (or (match-string 2 text)
+                                   (match-string 3 text)
+                                   (match-string 4 text))))
+             (table (clutch--normalize-statement-table-token table-token))
+             (alias-consumed-end table-end))
+        (setq pos table-end)
+        (when (and dml-match
+                   (string-match
+                    "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                    masked table-end)
+                   (= (match-beginning 0) table-end)
+                   (< (match-beginning 0) end))
+          (let ((alias-consumed-match-end (match-end 0)))
+            (when-let* ((alias-token (match-string 1 text))
+                        (alias (clutch--normalize-statement-table-token alias-token))
+                        ((not (member (upcase alias) clutch--sql-keywords))))
+              (setq alias-consumed-end alias-consumed-match-end)
+              (push (cons alias table) aliases))))
+        (setq pos alias-consumed-end)
+        (when table (push table tables))))
     (cons (nreverse tables) (nreverse aliases))))
 
 (defun clutch--table-aliases-in-current-statement (schema)

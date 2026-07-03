@@ -4,12 +4,22 @@
 
 ### Fixed
 
+- Prevented Query Console Eldoc from looping indefinitely when resolving table
+  aliases in a non-final UNION branch.
+- Allowed sorting UNION, grouped, derived, and other non-rewritable query
+  results by falling back to a stable client-side sort of the current page.
+- Reduced result-grid render work for wide pages by precomputing visible column
+  metadata, avoiding repeated row-identity extraction while rendering staged
+  state, and fast-pathing ordinary non-JSON/XML cell text.
 - Extended graphical font-metric detection to Japanese and Korean fallback
   glyphs so mixed CJK result grids enable pixel alignment when those scripts
   do not match Emacs logical cell widths.
 - Kept the current result cell selected when clicking the empty window area
   below the rendered table, while preserving normal cell clicks and mouse drag
   selection.
+- Reduced large-schema completion and object discovery spikes by scanning query
+  buffers once for referenced table identifiers and grouping object-cache
+  entries without repeated list appends.
 
 ## 0.2.2 - 2026-07-02
 

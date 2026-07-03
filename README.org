@@ -404,8 +404,10 @@ Common entry points:
   stay visible but inapt when their surrounding context is still useful
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
-- Pressing =s= cycles SQL =ORDER BY= for the result column at point; use =C= to
-  jump to another visible column first, or click a result header to cycle it
+- Pressing =s= cycles sorting for the result column at point; simple table
+  results use server-side =ORDER BY=, while UNION, grouped, derived, and other
+  non-rewritable results sort the current page locally.  Use =C= to jump to
+  another visible column first, or click a result header to cycle it
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
 - =C-c '= edits the current result cell; in that edit buffer, =C-c C-n=
   stages database =NULL=

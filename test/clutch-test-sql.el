@@ -336,6 +336,27 @@ SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
       (should (equal (clutch--tables-in-buffer schema) '("users" "posts")))
       (should-not (eq clutch--tables-in-buffer-cache first-cache)))))
 
+(ert-deftest clutch-test-tables-in-buffer-scans-identifiers-once ()
+  "Whole-buffer table fallback should match SQL identifiers without substring leaks."
+  (with-temp-buffer
+    (insert "SELECT * FROM app.Users JOIN `order_items` oi ON oi.user_id = Users.id")
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "users" t schema)
+      (puthash "order_items" t schema)
+      (puthash "app.Users" t schema)
+      (puthash "items" t schema)
+      (should (equal (sort (clutch--tables-in-buffer schema) #'string<)
+                     '("app.Users" "order_items" "users"))))))
+
+(ert-deftest clutch-test-tables-in-buffer-keeps-quoted-unusual-table-fallback ()
+  "Whole-buffer table fallback should still find non-identifier table names."
+  (with-temp-buffer
+    (insert "SELECT * FROM `order-items`")
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "order-items" t schema)
+      (puthash "items" t schema)
+      (should (equal (clutch--tables-in-buffer schema) '("order-items"))))))
+
 (ert-deftest clutch-test-tables-in-query-caches-within-statement ()
   "Statement table lookup should reuse cached results until statement or text changes."
   (with-temp-buffer
@@ -464,6 +485,20 @@ ORDER BY id")
            (result (clutch--extract-tables-and-aliases sql 0 (length sql))))
       (should (equal (car result) '("section9_cases_wide")))
       (should-not (cdr result)))))
+
+(ert-deftest clutch-test-extract-tables-and-aliases-stops-at-range-end ()
+  "Table extraction should not scan repeatedly past END."
+  (let* ((sql "SELECT u.id FROM users u UNION ALL SELECT p.id FROM posts p")
+         (end (string-match "UNION" sql))
+         (real-string-match (symbol-function 'string-match))
+         (calls 0))
+    (cl-letf (((symbol-function 'string-match)
+               (lambda (&rest args)
+                 (when (> (cl-incf calls) 10)
+                   (ert-fail "table extraction repeated an out-of-range match"))
+                 (apply real-string-match args))))
+      (should (equal (clutch--extract-tables-and-aliases sql 0 end)
+                     '(("users") ("u" . "users")))))))
 
 (ert-deftest clutch-test-statement-table-identifiers-handle-multiline-from-clause ()
   "Statement table scanning should survive multiline FROM clauses."

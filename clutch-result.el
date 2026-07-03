@@ -58,6 +58,10 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "List of marked row indices.")
 (defvar-local clutch--order-by nil
   "Current ORDER BY state as (COL-NAME . DIRECTION) or nil.")
+(defvar-local clutch--local-sort-original-rows nil
+  "Current page rows in database-returned order during a local sort.")
+(defvar-local clutch--local-sort-column-index nil
+  "Actual result column index used by the active local sort.")
 (defvar-local clutch--page-current 0
   "Current data page number (0-based).")
 (defvar-local clutch--page-has-more nil
@@ -545,6 +549,12 @@ PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination."
         (clutch-result--install-page-state
          (clutch-db-result-columns result) rows elapsed
          page-num row-identity-prep offset has-more)
+        (when (and clutch--sort-column (null clutch--order-by))
+          (setq clutch--local-sort-original-rows
+                (copy-sequence clutch--result-rows))
+          (clutch-result--sort-local-page
+           clutch--sort-column clutch--sort-descending
+           clutch--local-sort-column-index))
         (clutch--refresh-display)
         (message "Rows %s loaded (%s, %s row%s)"
                  (clutch--message-count
@@ -591,6 +601,8 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--sort-column nil
               clutch--sort-descending nil
               clutch--order-by nil
+              clutch--local-sort-original-rows nil
+              clutch--local-sort-column-index nil
               clutch--page-current 0
               clutch--page-offset nil
               clutch--page-has-more nil
@@ -922,7 +934,7 @@ Edit:
   \\[clutch-result-edit-cell]	Edit / re-edit at point
   \\[clutch-result-commit]	Commit staged changes
   \\[clutch-result-apply-filter]	Apply WHERE filter
-  \\[clutch-result-sort-by-column]	Cycle current column sort (SQL ORDER BY)
+  \\[clutch-result-sort-by-column]	Cycle current column sort
   \\[clutch-result-widen-column]	Widen column
   \\[clutch-result-narrow-column]	Narrow column
   \\[clutch-result-rerun]	Re-execute the query"
@@ -1031,30 +1043,101 @@ Triggers a COUNT(*) query if total rows are not yet known."
 
 ;;;; Sort
 
-(defun clutch-result--sort (col-name descending)
-  "Sort result rows by COL-NAME using SQL ORDER BY.
-If DESCENDING, sort in descending order.
-Re-executes from the first page."
+(defun clutch-result--client-filter-rows (rows input)
+  "Return ROWS whose visible values contain INPUT."
+  (let ((pattern (downcase input))
+        (col-indices (clutch--visible-columns)))
+    (cl-loop for row in rows
+             when (cl-some
+                   (lambda (cidx)
+                     (when (< cidx (length row))
+                       (when-let* ((val (elt row cidx)))
+                         (string-match-p
+                          (regexp-quote pattern)
+                          (downcase (clutch--format-value val))))))
+                   col-indices)
+             collect row)))
+
+(defun clutch-result--sort-local-page (col-name descending &optional col-index)
+  "Sort the current page locally by COL-NAME.
+When DESCENDING is non-nil, sort in descending order.  COL-INDEX identifies
+the selected column when result labels are not unique."
+  (let ((cidx (or col-index
+                  (cl-position col-name clutch--result-columns :test #'string=))))
+    (unless (and cidx
+                 (equal (nth cidx clutch--result-columns) col-name)
+                 (memq cidx (clutch--visible-columns)))
+      (user-error "Column %s not found" col-name))
+    (let ((entries
+           (cl-loop for row in clutch--local-sort-original-rows
+                    for value = (and (< cidx (length row)) (elt row cidx))
+                    collect (cond
+                             ((null value) (vector 0 nil row))
+                             ((numberp value) (vector 1 value row))
+                             (t (vector 2 (clutch--format-value value) row))))))
+      (cl-labels
+          ((entry-less-p
+            (left right)
+            (let ((left-rank (aref left 0))
+                  (right-rank (aref right 0)))
+              (cond
+               ((< left-rank right-rank) t)
+               ((> left-rank right-rank) nil)
+               ((zerop left-rank) nil)
+               ((= left-rank 1) (< (aref left 1) (aref right 1)))
+               (t (string-collate-lessp
+                   (aref left 1) (aref right 1)))))))
+        (setq entries
+              (cl-stable-sort
+               entries
+               (if descending
+                   (lambda (left right) (entry-less-p right left))
+                 #'entry-less-p))))
+      (setq clutch--result-rows
+            (mapcar (lambda (entry) (aref entry 2)) entries))))
+  (when clutch--filter-pattern
+    (setq clutch--filtered-rows
+          (clutch-result--client-filter-rows
+           clutch--result-rows clutch--filter-pattern)))
+  (setq clutch--marked-rows nil))
+
+(defun clutch-result--sort (col-name descending &optional col-index)
+  "Sort result rows by COL-NAME.
+When DESCENDING is non-nil, sort in descending order.  Safely rewritable
+results use SQL ORDER BY; other results sort the currently loaded page.
+COL-INDEX disambiguates duplicate result labels for local sorting."
   (unless clutch--result-columns
     (user-error "No result data"))
-  (unless (clutch-result--server-rewritable-p)
-    (user-error "Server-side sort is not available for this query result"))
   (let* ((col-names (clutch--visible-column-names))
          (idx (cl-position col-name col-names :test #'string=)))
     (unless idx
       (user-error "Column %s not found" col-name))
     (let ((direction (if descending "DESC" "ASC")))
-      (setq clutch--sort-column col-name)
-      (setq clutch--sort-descending descending)
-      (setq clutch--order-by (cons col-name direction))
-      (setq clutch--page-current 0)
-      (clutch-result--execute-page 0)
-      (message "Sorted by %s %s"
-               (clutch--message-ident col-name)
-               (clutch--message-keyword direction)))))
+      (setq clutch--sort-column col-name
+            clutch--sort-descending descending)
+      (if (clutch-result--server-rewritable-p)
+          (progn
+            (setq clutch--order-by (cons col-name direction)
+                  clutch--local-sort-original-rows nil
+                  clutch--local-sort-column-index nil
+                  clutch--page-current 0)
+            (clutch-result--execute-page 0)
+            (message "Sorted by %s %s"
+                     (clutch--message-ident col-name)
+                     (clutch--message-keyword direction)))
+        (unless clutch--local-sort-original-rows
+          (setq clutch--local-sort-original-rows
+                (copy-sequence clutch--result-rows)))
+        (setq clutch--order-by nil
+              clutch--local-sort-column-index col-index)
+        (clutch-result--sort-local-page col-name descending col-index)
+        (clutch--refresh-display)
+        (message "Sorted current page by %s %s"
+                 (clutch--message-ident col-name)
+                 (clutch--message-keyword direction))))))
 
 (defun clutch-result--sort-by-column-index (col-idx &optional expected-name)
-  "Cycle SQL sort state for result column COL-IDX.
+  "Cycle sort state for result column COL-IDX.
 EXPECTED-NAME, when non-nil, is the column name captured when the header was
 rendered.
 The cycle is unsorted, ascending, descending, then unsorted again."
@@ -1068,24 +1151,48 @@ The cycle is unsorted, ascending, descending, then unsorted again."
          (col-name (if expected-name
                        (and (member expected-name visible-names)
                             expected-name)
-                     indexed-name)))
+                     indexed-name))
+         (resolved-idx
+          (if (and indexed-name
+                   (or (null expected-name)
+                       (string= indexed-name expected-name)))
+              col-idx
+            (cl-position col-name clutch--result-columns :test #'string=)))
+         (server-sort-p (clutch-result--server-rewritable-p)))
     (unless (and col-name (member col-name visible-names))
       (user-error "Column not found"))
     (cond
      ((not (and clutch--sort-column
-                (string= col-name clutch--sort-column)))
-      (clutch-result--sort col-name nil))
+                (string= col-name clutch--sort-column)
+                (or server-sort-p
+                    (null clutch--local-sort-column-index)
+                    (and (integerp resolved-idx)
+                         (= resolved-idx clutch--local-sort-column-index)))))
+      (clutch-result--sort col-name nil (and (not server-sort-p) resolved-idx)))
      ((not clutch--sort-descending)
-      (clutch-result--sort col-name t))
+      (clutch-result--sort col-name t (and (not server-sort-p) resolved-idx)))
      (t
-      (unless (clutch-result--server-rewritable-p)
-        (user-error "Server-side sort is not available for this query result"))
-      (setq clutch--sort-column nil
-            clutch--sort-descending nil
-            clutch--order-by nil
-            clutch--page-current 0)
-      (clutch-result--execute-page 0)
-      (message "Sort cleared")))))
+      (let ((original-rows clutch--local-sort-original-rows))
+        (setq clutch--sort-column nil
+              clutch--sort-descending nil
+              clutch--order-by nil
+              clutch--local-sort-original-rows nil
+              clutch--local-sort-column-index nil)
+        (if server-sort-p
+            (progn
+              (setq clutch--page-current 0)
+              (clutch-result--execute-page 0)
+              (message "Sort cleared"))
+          (unless original-rows
+            (error "Local sort snapshot is missing"))
+          (setq clutch--result-rows (copy-sequence original-rows)
+                clutch--marked-rows nil)
+          (when clutch--filter-pattern
+            (setq clutch--filtered-rows
+                  (clutch-result--client-filter-rows
+                   clutch--result-rows clutch--filter-pattern)))
+          (clutch--refresh-display)
+          (message "Current-page sort cleared")))))))
 
 (defun clutch-result--column-name-at-point ()
   "Return the visible result column name at point, or nil."
@@ -1099,23 +1206,32 @@ The cycle is unsorted, ascending, descending, then unsorted again."
 
 ;;;###autoload
 (defun clutch-result-sort-by-column ()
-  "Cycle SQL sort state for the result column at point."
+  "Cycle sort state for the result column at point."
   (interactive)
   (let ((cidx (or (get-text-property (point) 'clutch-col-idx)
                   (user-error "No column at point"))))
     (clutch-result--sort-by-column-index cidx)))
 
 (defun clutch-result--sort-transient-description ()
-  "Return the transient description for cycling SQL sort."
-  (let ((point-col (clutch-result--column-name-at-point)))
+  "Return the transient description for cycling result sort."
+  (let ((point-col (clutch-result--column-name-at-point))
+        (point-idx (get-text-property (point) 'clutch-col-idx)))
     (if point-col
-        (let ((state (cond
-                      ((not (and clutch--sort-column
-                                 (string= point-col clutch--sort-column)))
-                       'none)
-                      (clutch--sort-descending 'desc)
-                      (t 'asc))))
-          (concat "Sort current "
+        (let* ((server-sort-p (clutch-result--server-rewritable-p))
+               (same-column-p
+                (and clutch--sort-column
+                     (string= point-col clutch--sort-column)
+                     (or server-sort-p
+                         (null clutch--local-sort-column-index)
+                         (and (integerp point-idx)
+                              (= point-idx clutch--local-sort-column-index)))))
+               (state (cond
+                       ((not same-column-p) 'none)
+                       (clutch--sort-descending 'desc)
+                       (t 'asc))))
+          (concat (if (clutch-result--server-rewritable-p)
+                      "Sort current "
+                    "Sort page ")
                   (clutch--transient-state-display
                    state '((none . "none") (asc . "asc") (desc . "desc")))
                   (propertize (format " [%s]" point-col)
@@ -1229,18 +1345,8 @@ empty string at the condition prompt to clear the filter."
 
 (defun clutch-result--apply-filter (input)
   "Apply INPUT as a client-side substring filter and re-render."
-  (let* ((pattern  (downcase input))
-         (col-indices (clutch--visible-columns))
-         (matching (cl-loop for row in clutch--result-rows
-                            when (cl-some
-                                  (lambda (val)
-                                    (and val
-                                         (string-match-p
-                                          (regexp-quote pattern)
-                                          (downcase (clutch--format-value val)))))
-                                  (mapcar (lambda (i) (nth i row))
-                                          col-indices))
-                            collect row)))
+  (let ((matching (clutch-result--client-filter-rows
+                   clutch--result-rows input)))
     (setq clutch--filter-pattern input
           clutch--filtered-rows matching
           clutch--marked-rows nil)
@@ -3281,7 +3387,6 @@ Selects JSON, XML, or binary string view based on column type and content."
      clutch-result-apply-filter
      :if clutch-result--server-rewritable-p)
     ("s" clutch-result--sort-transient-description clutch-result-sort-by-column
-     :if clutch-result--server-rewritable-p
      :inapt-if-not clutch-result--column-name-at-point)]]
   [ :pad-keys t
    ["Pages"

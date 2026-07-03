@@ -1017,6 +1017,20 @@ so `clutch--object-sql-name' produces \"public\".\"orders_large\"."
 
 ;;;; Object — jump, resolve, and warmup
 
+(ert-deftest clutch-test-object-type-cache-preserves-entry-order ()
+  "Object type cache construction should group entries without reordering them."
+  (let* ((entries '((:name "orders" :type "TABLE")
+                    (:name "users" :type "TABLE")
+                    (:name "order_idx" :type "INDEX")
+                    (:name "audit" :type "TABLE")))
+         (by-type (clutch--make-object-type-cache entries)))
+    (should (equal (mapcar (lambda (entry) (plist-get entry :name))
+                           (gethash "TABLE" by-type))
+                   '("orders" "users" "audit")))
+    (should (equal (mapcar (lambda (entry) (plist-get entry :name))
+                           (gethash "INDEX" by-type))
+                   '("order_idx")))))
+
 (ert-deftest clutch-test-object-read-annotates-mixed-object-types ()
   "Object reader should expose warmed non-table metadata in the flat picker."
   (let ((clutch--object-cache (make-hash-table :test 'equal))

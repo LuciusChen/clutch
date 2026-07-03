@@ -250,6 +250,8 @@ query is still running.
 | `clutch--sort-column` | Current sort column name |
 | `clutch--sort-descending` | Sort direction flag |
 | `clutch--order-by` | `(COL . "ASC"\|"DESC")` |
+| `clutch--local-sort-original-rows` | Current page in database-returned order while local sort is active |
+| `clutch--local-sort-column-index` | Result column index for local sorting when labels are duplicated |
 | `clutch--where-filter` | Active SQL WHERE clause |
 | `clutch--filter-pattern` | Client-side row filter regex |
 | `clutch--filtered-rows` | Filtered row subset or nil |
@@ -496,7 +498,7 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-aggregate` | Aggregate numeric values over the current cell/selection |
 | `clutch-result-filter` | Apply a client-side fuzzy filter |
 | `clutch-result-apply-filter` | Apply an SQL-backed WHERE filter |
-| `clutch-result-sort-by-column` | Cycle SQL ORDER BY for the result column at point through unsorted, ascending, and descending |
+| `clutch-result-sort-by-column` | Cycle the result column at point through unsorted, ascending, and descending; uses SQL ORDER BY when safe and otherwise sorts the current page locally |
 | `clutch-result-column-info` | Show column type/default/nullability info at point |
 | `clutch-result-view-value` | Open the value viewer for the current cell |
 | `clutch-result-live-view-value` | Open the live value viewer for the current cell |
@@ -809,8 +811,9 @@ User types SQL in clutch-mode
   metadata.
 - Queries that already contain top-level `LIMIT` / `OFFSET`, derived-table unsafe
   duplicate result labels, aggregates, unions, distincts, or window functions
-  stay displayable, but server-side sort/filter/count commands are disabled
-  instead of wrapping the query in a potentially invalid derived table.
+  stay displayable without wrapping the query in a potentially invalid derived
+  table. Server-side filter/count commands remain disabled; sorting falls back
+  to a stable client-side sort of the currently loaded page.
 
 ### Horizontal Overflow
 

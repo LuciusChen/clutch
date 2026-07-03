@@ -94,12 +94,14 @@ connection header.
 Sort and paging refreshes also keep manually adjusted column widths when the
 result columns are unchanged.
 
-Tip: Press =s= to cycle server-side SQL sort state for the result column at
-point.  Use =C= to jump to a different visible column first, or click its
-header to cycle that column.  The cycle is unsorted, ascending, descending, then
-unsorted again.  Header icons appear after column names and use the
-original-size nerd-icons sort glyphs; when nerd-icons is unavailable, the sort
-marker is omitted.
+Tip: Press =s= to cycle sort state for the result column at point.  Simple table
+results use server-side SQL =ORDER BY=.  UNION, grouped, derived, and other
+results that Clutch cannot safely rewrite use a client-side sort of the current
+page; the footer marks this scope as =page=.  Use =C= to jump to a different
+visible column first, or click its header to cycle that column.  The cycle is
+unsorted, ascending, descending, then unsorted again.  Header icons appear after
+column names and use the original-size nerd-icons sort glyphs; when nerd-icons
+is unavailable, the sort marker is omitted.
 
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
@@ -273,7 +275,7 @@ field.
 8. /          Client-side filter: type a pattern to narrow visible rows instantly
 9. s          Cycle current-column sort: unsorted → ASC → DESC → unsorted
               Use C to jump to another visible column first; clicking a header uses the same cycle
-              → mode-line adds current ORDER BY state
+              → mode-line shows ORDER BY state, or "page" for local query-result sorting
 10. A         Aggregate selected cells/current cell
               → mode-line adds aggregate status (sum/avg/min/max + [rows/cells/skipped])
 11. W         Enter empty string → clears filter, restores original query
