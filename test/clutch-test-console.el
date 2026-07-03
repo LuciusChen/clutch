@@ -205,6 +205,42 @@
 
 ;;;; REPL
 
+(defun clutch-test-console--face-at-match (regexp text)
+  "Return the face at the first match for REGEXP in TEXT."
+  (should (string-match regexp text))
+  (get-text-property (match-beginning 0) 'face text))
+
+(defun clutch-test-console--buffer-face-at-match (regexp)
+  "Return the display face at the first buffer match for REGEXP."
+  (save-excursion
+    (goto-char (point-min))
+    (should (search-forward-regexp regexp nil t))
+    (or (get-text-property (match-beginning 0) 'face)
+        (get-text-property (match-beginning 0) 'font-lock-face))))
+
+(ert-deftest clutch-test-repl-output-keeps-faces-after-font-lock ()
+  "REPL output should remain styled after comint font-lock runs."
+  (with-temp-buffer
+    (let ((proc (start-process "clutch-test-repl" (current-buffer) "cat")))
+      (unwind-protect
+          (progn
+            (set-process-query-on-exit-flag proc nil)
+            (clutch-repl-mode)
+            (clutch-repl--output
+             (concat (clutch-repl--prompt)
+                     (clutch--message-count 1)
+                     " row shown in "
+                     (clutch--message-ident "result buffer")))
+            (font-lock-ensure)
+            (should (eq (clutch-test-console--buffer-face-at-match "db>")
+                        'minibuffer-prompt))
+            (should (eq (clutch-test-console--buffer-face-at-match "1")
+                        'font-lock-constant-face))
+            (should (eq (clutch-test-console--buffer-face-at-match
+                         "result buffer")
+                        'clutch-field-name-face)))
+        (delete-process proc)))))
+
 (ert-deftest clutch-test-repl-input-sender-accumulates-until-semicolon ()
   "REPL input sender should accumulate partial SQL and show continuation prompt."
   (with-temp-buffer
@@ -216,7 +252,9 @@
                  (lambda (_sql) (error "Should not execute"))))
         (clutch-repl--input-sender nil "SELECT 1")
         (should (equal clutch-repl--pending-input "SELECT 1"))
-        (should (equal (car output) "    -> "))))))
+        (should (equal (substring-no-properties (car output)) "    -> "))
+        (should (eq (clutch-test-console--face-at-match "    -> " (car output))
+                    'minibuffer-prompt))))))
 
 (ert-deftest clutch-test-repl-input-sender-executes-on-semicolon ()
   "REPL input sender should execute when statement ends with semicolon."
@@ -242,7 +280,11 @@
                  (lambda (text) (setq captured text))))
         (clutch-repl--execute-and-print "SELECT 1")
         (should (string-match-p "Not connected" captured))
-        (should (string-match-p "db> $" captured))))))
+        (should (string-match-p "db> $" captured))
+        (should (eq (clutch-test-console--face-at-match "ERROR" captured)
+                    'error))
+        (should (eq (clutch-test-console--face-at-match "db>" captured)
+                    'minibuffer-prompt))))))
 
 (ert-deftest clutch-test-repl-execute-and-print-ensures-connection ()
   "REPL should use the shared reconnect path before querying."
@@ -258,35 +300,62 @@
                 ((symbol-function 'clutch-db-query)
                  (lambda (conn _sql)
                    (setq captured-conn conn)
-                   (make-clutch-db-result :rows '((1)))))
+                   (make-clutch-db-result :affected-rows 3)))
                 ((symbol-function 'clutch-repl--output)
                  (lambda (text) (setq output text))))
         (clutch-repl--execute-and-print "UPDATE t SET x = 1;")
         (should ensured)
         (should (eq captured-conn 'new-conn))
-        (should (string-match-p "Affected rows" output))))))
+        (should (string-match-p "Affected rows" output))
+        (should (eq (clutch-test-console--face-at-match "Affected rows" output)
+                    'font-lock-keyword-face))
+        (should (eq (clutch-test-console--face-at-match "3" output)
+                    'font-lock-constant-face))
+        (should (eq (clutch-test-console--face-at-match "db>" output)
+                    'minibuffer-prompt))))))
 
 (ert-deftest clutch-test-repl-execute-and-print-select-result ()
-  "REPL should print table summary for SELECT results."
+  "REPL should show SELECT rows in a result buffer and print a summary."
   (with-temp-buffer
     (let ((clutch-connection 'fake-conn)
+          (repl-buffer (current-buffer))
+          (result-buffer-name " *clutch-test-result*")
+          displayed
           output)
-      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (_conn _sql)
-                   (make-clutch-db-result
-                    :columns '((:name "id"))
-                    :rows '((1)))))
-                ((symbol-function 'clutch-db-result-column-names)
-                 (lambda (_columns) '("id")))
-                ((symbol-function 'clutch--render-static-table)
-                 (lambda (_col-names _rows _columns) "| id |\n| 1 |"))
-                ((symbol-function 'clutch-repl--output)
-                 (lambda (text) (setq output text))))
-        (clutch-repl--execute-and-print "SELECT 1;")
-        (should (string-match-p "| id |" output))
-        (should (string-match-p "1 row" output))
-        (should (string-match-p "db> $" output))))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) t))
+                    ((symbol-function 'clutch-db-query)
+                     (lambda (_conn _sql)
+                       (make-clutch-db-result
+                        :columns '((:name "id"))
+                        :rows '((1)))))
+                    ((symbol-function 'clutch--render-static-table)
+                     (lambda (&rest _)
+                       (ert-fail "REPL SELECT should use result buffers")))
+                    ((symbol-function 'clutch-result--display)
+                     (lambda (result sql elapsed)
+                       (setq displayed (list result sql elapsed))
+                       (set-buffer (get-buffer-create result-buffer-name))
+                       'result-buffer))
+                    ((symbol-function 'clutch-repl--output)
+                     (lambda (text)
+                       (should (eq (current-buffer) repl-buffer))
+                       (setq output text))))
+            (clutch-repl--execute-and-print "SELECT 1;")
+            (should displayed)
+            (should (equal (nth 1 displayed) "SELECT 1;"))
+            (should (string-match-p "1 row" output))
+            (should (string-match-p "result buffer" output))
+            (should (string-match-p "db> $" output))
+            (should (eq (clutch-test-console--face-at-match "1" output)
+                        'font-lock-constant-face))
+            (should (eq (clutch-test-console--face-at-match "result buffer" output)
+                        'clutch-field-name-face))
+            (should (eq (clutch-test-console--face-at-match "db>" output)
+                        'minibuffer-prompt)))
+        (when-let* ((buf (get-buffer result-buffer-name)))
+          (kill-buffer buf))))))
 
 
 (provide 'clutch-test-console)

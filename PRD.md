@@ -410,12 +410,13 @@ Each field is displayed with:
 **Derived from**: `comint-mode`
 **Buffer name pattern**: `*clutch REPL*`
 
-Line-by-line SQL evaluation with history and inline results.
+Line-by-line SQL evaluation with history. Tabular `SELECT` results open in the
+standard result buffer, while DML summaries and errors remain inline.
 
 **Features**:
 - SQL history via comint ring
 - Completion from cached schema (tables, columns)
-- Result display inline or in companion result buffer
+- Tabular result display in the companion result buffer
 
 **Keybindings**:
 

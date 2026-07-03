@@ -355,6 +355,7 @@ fallback until the sidecar grows a dedicated prepared-execute op.
 M-x clutch-repl          ;; Open REPL buffer (*clutch REPL*)
 C-c C-e                     ;; Connect to database
 db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
+                             ;; SELECT results open in the result buffer
                              ;; Multi-line input supported (continuation prompt     ->)
 #+end_src
 

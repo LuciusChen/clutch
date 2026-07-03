@@ -17,6 +17,9 @@
 - Kept the current result cell selected when clicking the empty window area
   below the rendered table, while preserving normal cell clicks and mouse drag
   selection.
+- Opened REPL `SELECT` results in the standard result buffer instead of
+  expanding wide tables inline in the REPL history, and styled REPL prompts,
+  errors, and execution summaries for clearer command history.
 - Reduced large-schema completion and object discovery spikes by scanning query
   buffers once for referenced table identifiers and grouping object-cache
   entries without repeated list appends.

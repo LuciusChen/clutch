@@ -713,6 +713,12 @@ Key bindings:
   (add-hook 'xref-backend-functions #'clutch--xref-backend nil t)
   (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t))
 
+(defun clutch-repl--prompt (&optional continuation)
+  "Return the REPL prompt string.
+When CONTINUATION is non-nil, return the continuation prompt."
+  (propertize (if continuation "    -> " "db> ")
+              'face 'minibuffer-prompt))
+
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
 Accumulates input until a semicolon is found, then executes."
@@ -726,61 +732,118 @@ Accumulates input until a semicolon is found, then executes."
           (clutch-repl--execute-and-print (string-trim combined)))
       ;; Incomplete — accumulate and show continuation prompt
       (setq clutch-repl--pending-input combined)
-      (clutch-repl--output "    -> "))))
+      (clutch-repl--output (clutch-repl--prompt t)))))
+
+(defun clutch-repl--font-lock-output (text)
+  "Return TEXT with display faces preserved in a font-locked REPL buffer."
+  (let ((copy (copy-sequence text))
+        (pos 0)
+        next face)
+    (while (< pos (length copy))
+      (setq next (or (next-single-property-change pos 'face copy)
+                     (length copy))
+            face (get-text-property pos 'face copy))
+      (when face
+        (add-text-properties pos next `(font-lock-face ,face) copy))
+      (setq pos next))
+    copy))
 
 (defun clutch-repl--output (text)
   "Insert TEXT into the REPL buffer at the process mark."
   (let ((inhibit-read-only t)
         (proc (get-buffer-process (current-buffer))))
     (goto-char (process-mark proc))
-    (insert text)
+    (insert (clutch-repl--font-lock-output text))
     (set-marker (process-mark proc) (point))))
 
 (defun clutch-repl--format-dml-result (result elapsed)
   "Format a DML RESULT with ELAPSED time as a string for the REPL."
-  (let ((msg (format "\nAffected rows: %s"
-                     (or (clutch-db-result-affected-rows result) 0))))
+  (let ((msg (concat "\n"
+                     (clutch--message-keyword "Affected rows")
+                     ": "
+                     (clutch--message-count
+                      (or (clutch-db-result-affected-rows result) 0)))))
     (when-let* ((id (clutch-db-result-last-insert-id result))
                 ((> id 0)))
-      (setq msg (concat msg (format ", Last insert ID: %s" id))))
+      (setq msg (concat msg
+                        ", "
+                        (clutch--message-keyword "Last insert ID")
+                        ": "
+                        (clutch--message-count id))))
     (when-let* ((w (clutch-db-result-warnings result))
                 ((> w 0)))
-      (setq msg (concat msg (format ", Warnings: %s" w))))
-    (format "%s (%.3fs)\n\ndb> " msg elapsed)))
+      (setq msg (concat msg
+                        ", "
+                        (clutch--message-keyword "Warnings")
+                        ": "
+                        (clutch--message-count w))))
+    (concat msg
+            " ("
+            (clutch--message-literal (format "%.3fs" elapsed))
+            ")\n\n"
+            (clutch-repl--prompt))))
+
+(defun clutch-repl--format-error (message)
+  "Format MESSAGE as a REPL error."
+  (concat "\n"
+          (propertize "ERROR" 'face 'error)
+          ": "
+          (propertize message 'face 'clutch-error-summary-face)
+          "\n\n"
+          (clutch-repl--prompt)))
 
 (defun clutch-repl--execute-and-print (sql)
-  "Execute SQL and print results inline in the REPL."
-  (clutch--forget-problem-record (current-buffer) clutch-connection)
-  (condition-case err
-      (progn
-        (clutch--ensure-connection)
-        (setq clutch--last-query sql)
-        (let* ((start (float-time))
-               (result (clutch--run-db-query clutch-connection sql))
-               (elapsed (- (float-time) start))
-               (columns (clutch-db-result-columns result))
-               (rows (clutch-db-result-rows result)))
-          (if columns
-              (let* ((col-names (clutch-db-result-column-names columns))
-                     (table-str (clutch--render-static-table
-                                 col-names rows columns)))
-                (clutch-repl--output
-                 (format "\n%s\n%d row%s in %.3fs\n\ndb> "
-                         table-str (length rows)
-                         (if (= (length rows) 1) "" "s")
-                         elapsed)))
-            (clutch-repl--output (clutch-repl--format-dml-result result elapsed)))))
-    (quit
-     (condition-case nil
-         (clutch--handle-query-quit clutch-connection)
-       (clutch-query-interrupted
-        (clutch-repl--output "\nERROR: Query interrupted\n\ndb> "))))
-    (error
-     (clutch--remember-buffer-query-error-details
-      (current-buffer) clutch-connection sql err)
-     (clutch-repl--output
-      (format "\nERROR: %s\n\ndb> "
-              (clutch--humanize-db-error (error-message-string err)))))))
+  "Execute SQL from the REPL and display the result."
+  (let ((repl-buffer (current-buffer))
+        (repl-window (selected-window)))
+    (cl-labels ((output (text)
+                  (when (buffer-live-p repl-buffer)
+                    (with-current-buffer repl-buffer
+                      (clutch-repl--output text)))))
+      (clutch--forget-problem-record repl-buffer clutch-connection)
+      (condition-case err
+          (progn
+            (clutch--ensure-connection)
+            (setq clutch--last-query sql)
+            (let* ((start (float-time))
+                   (result (clutch--run-db-query clutch-connection sql))
+                   (elapsed (- (float-time) start))
+                   (columns (clutch-db-result-columns result))
+                   (rows (clutch-db-result-rows result)))
+              (if columns
+                  (progn
+                    (unless (clutch-db-result-connection result)
+                      (setf (clutch-db-result-connection result)
+                            clutch-connection))
+                    (unwind-protect
+                        (clutch-result--display result sql elapsed)
+                      (when (window-live-p repl-window)
+                        (select-window repl-window)))
+                    (output
+                     (let ((row-count (length rows)))
+                       (concat "\n"
+                               (clutch--message-count row-count)
+                               " "
+                               (if (= row-count 1) "row" "rows")
+                               " shown in "
+                               (clutch--message-ident "result buffer")
+                               " in "
+                               (clutch--message-literal
+                                (format "%.3fs" elapsed))
+                               "\n\n"
+                               (clutch-repl--prompt)))))
+                (output (clutch-repl--format-dml-result result elapsed)))))
+        (quit
+         (condition-case nil
+             (clutch--handle-query-quit clutch-connection)
+           (clutch-query-interrupted
+            (output (clutch-repl--format-error "Query interrupted")))))
+        (error
+         (clutch--remember-buffer-query-error-details
+          repl-buffer clutch-connection sql err)
+         (output
+          (clutch-repl--format-error
+           (clutch--humanize-db-error (error-message-string err)))))))))
 
 ;;;###autoload
 (defun clutch-repl ()
@@ -794,7 +857,7 @@ Accumulates input until a semicolon is found, then executes."
         (let ((proc (start-process "clutch-repl" buf "cat")))
           (set-process-query-on-exit-flag proc nil)
           (clutch-repl-mode)
-          (clutch-repl--output "db> "))))
+          (clutch-repl--output (clutch-repl--prompt)))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
 ;;;; Transient dispatch menus
