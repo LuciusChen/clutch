@@ -138,7 +138,15 @@ SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
                   ("semicolon in comment"
                    "SELECT 1 -- foo;\nFROM t;"
                    "SELECT"
-                   "SELECT 1 -- foo;\nFROM t")))
+                   "SELECT 1 -- foo;\nFROM t")
+                  ("semicolon in backtick identifier"
+                   "SELECT `a;b` FROM t;\nSELECT 2"
+                   "FROM"
+                   "SELECT `a;b` FROM t")
+                  ("semicolon in bracket identifier"
+                   "SELECT [a;b] FROM t;\nSELECT 2"
+                   "FROM"
+                   "SELECT [a;b] FROM t")))
     (pcase-let ((`(,label ,sql ,point-token ,expected) case))
       (ert-info ((format "case: %s" label))
         (with-temp-buffer

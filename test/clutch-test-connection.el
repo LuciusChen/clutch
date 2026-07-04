@@ -1159,6 +1159,14 @@ crashing the UI layer."
                        :port 5432
                        :max 1))))))
 
+(ert-deftest clutch-test-resolve-password-skips-auth-source-without-target ()
+  "Password lookup should not search all auth-source entries without a target."
+  (cl-letf (((symbol-function 'auth-source-search)
+             (lambda (&rest _args)
+               (ert-fail "auth-source should not be queried without host/user/port"))))
+    (should-not (clutch--resolve-password
+                 '(:backend sqlite :database "/tmp/app.db")))))
+
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
   (let ((err (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
@@ -2932,7 +2940,8 @@ This applies when the buffer owns the connection."
                            :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL")
                    :expected (:backend oracle
                               :url "jdbc:oracle:thin:@//db.example.com:1521/ORCL"
-                              :pass-entry "alpha"))))
+                              :pass-entry "alpha"
+                              :password "secret"))))
     (let* ((saved (plist-get case :saved))
            (expected (plist-get case :expected)))
       (let ((clutch-connection-alist `(("alpha" . ,saved)))
@@ -2997,13 +3006,41 @@ This applies when the buffer owns the connection."
                 ((symbol-function 'message) #'ignore))
         (clutch-connect)
         (should (equal built
-                       '(:backend mysql :database "app_a"
-                         :pass-entry "alpha")))
+                       (clutch--materialize-connection-params
+                        '(:backend mysql :database "app_a"
+                          :pass-entry "alpha"))))
         (should (equal activated
                        (clutch--materialize-connection-params
                         '(:backend mysql :database "app_a"
                           :pass-entry "alpha"))))
         ))))
+
+(ert-deftest clutch-test-connect-resolves-password-once ()
+  "Interactive connect should not query the password source twice."
+  (with-temp-buffer
+    (let ((clutch-connection-alist
+           '(("alpha" . (:backend mysql :database "app_a"))))
+          (resolve-count 0)
+          captured-params)
+      (setq-local clutch--console-name "alpha")
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (eq conn 'new-conn)))
+                ((symbol-function 'clutch--resolve-password)
+                 (lambda (_params)
+                   (cl-incf resolve-count)
+                   "secret"))
+                ((symbol-function 'clutch-db-connect)
+                 (lambda (_backend params)
+                   (setq captured-params params)
+                   'new-conn))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "test-conn"))
+                ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                ((symbol-function 'clutch--update-mode-line) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch-connect)
+        (should (= resolve-count 1))
+        (should (equal (plist-get captured-params :password) "secret"))))))
 
 (ert-deftest clutch-test-connect-in-query-console-errors-when-saved-connection-missing ()
   "Query console reconnect should error when its saved connection no longer exists."

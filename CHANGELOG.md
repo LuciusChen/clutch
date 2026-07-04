@@ -20,6 +20,11 @@
 - Opened REPL `SELECT` results in the standard result buffer instead of
   expanding wide tables inline in the REPL history, and styled REPL prompts,
   errors, and execution summaries for clearer command history.
+- Kept semicolons inside quoted SQL identifiers from splitting query-console
+  statements, including MySQL backtick and SQL Server bracket identifiers.
+- Avoided broad auth-source password lookups when connection params have no
+  host/user/port target, and avoided resolving saved connection passwords twice
+  during interactive connect.
 - Reduced large-schema completion and object discovery spikes by scanning query
   buffers once for referenced table identifiers and grouping object-cache
   entries without repeated list appends.

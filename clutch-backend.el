@@ -358,9 +358,15 @@ Semicolons inside strings, line comments, and block comments do not count."
         (cond
          (in-string
           (when (= ch in-string)
-            (setq in-string nil)))
+            (if (and (memq in-string '(?\' ?\" ?`))
+                     (< (1+ i) len)
+                     (= (aref sql (1+ i)) in-string))
+                (cl-incf i)
+              (setq in-string nil))))
          ((= ch ?')  (setq in-string ?'))
          ((= ch ?\") (setq in-string ?\"))
+         ((= ch ?`)  (setq in-string ?`))
+         ((= ch ?\[) (setq in-string ?\]))
          ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
           (while (and (< i len) (/= (aref sql i) ?\n))
             (cl-incf i)))

@@ -878,7 +878,10 @@ cannot be read."
      ((and (stringp pw) (not (string-empty-p pw))) pw)
      (t
       (or (and entry (clutch--resolve-pass-entry-password entry))
-          (clutch--resolve-auth-source-password params))))))
+          (when (or (plist-get params :host)
+                    (plist-get params :user)
+                    (plist-get params :port))
+            (clutch--resolve-auth-source-password params)))))))
 
 (defun clutch--canonicalize-backend-aliases (params)
   "Return PARAMS with public backend aliases normalized."
@@ -1752,7 +1755,11 @@ same credentials as the successful foreground connection."
   (setq params (clutch--canonicalize-connection-params params))
   (let* ((backend (or (plist-get params :backend)
                       (user-error "Connection params require :backend")))
-         (password (clutch--resolve-password params)))
+         (raw-password (plist-get params :password))
+         (password (if (and (stringp raw-password)
+                            (not (string-empty-p raw-password)))
+                       raw-password
+                     (clutch--resolve-password params))))
     (when (and (clutch--jdbc-connection-params-p params)
                (plist-get params :pass-entry)
                (clutch--params-nonempty-user-p params)
@@ -1981,11 +1988,11 @@ params; see `clutch-connection-alist' for details."
                      source-default-directory))
            (effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product effective-params))
-           (conn    (clutch--build-conn params)))
+           (conn    (clutch--build-conn effective-params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))
       (unless (clutch--connection-alive-p conn)
-        (setq conn (clutch--build-conn params)))
+        (setq conn (clutch--build-conn effective-params)))
       (clutch--clear-reconnect-metadata-caches old-conn conn nil)
       (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
