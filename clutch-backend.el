@@ -257,21 +257,27 @@ Values are nesting counts.")
    (replace-regexp-in-string
     ";\\s-*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
 
-(defun clutch-db-sql-skip-literal-or-comment (sql pos)
+(defun clutch-db-sql-skip-literal-or-comment (sql pos &optional identifiers)
   "If POS in SQL is at a string literal or comment, return position past it.
 Handles single-quoted strings (with '' escape), -- line comments, and
-/* block comments */.  Double-quoted identifiers and backticks are NOT
-treated as literals.  Returns nil when POS is at normal code."
+/* block comments */.  When IDENTIFIERS is non-nil, also skip double-quoted,
+backtick-quoted, and bracket-quoted identifiers, including doubled closing
+delimiter escapes.  Returns nil when POS is at normal code."
   (let ((len (length sql))
         (ch (and (< pos (length sql)) (aref sql pos))))
-    (pcase ch
-      (?\' ;; Single-quoted string: scan for unescaped closing quote.
-       (cl-loop for i from (1+ pos) below len
-                when (= (aref sql i) ?\')
-                do (if (and (< (1+ i) len) (= (aref sql (1+ i)) ?\'))
-                       (cl-incf i)          ; '' escape, skip pair
-                     (cl-return (1+ i)))    ; past closing quote
-                finally return len))
+    (if-let* ((delimiter
+               (cond
+                ((eq ch ?\') ?\')
+                ((and identifiers (memq ch '(?\" ?`))) ch)
+                ((and identifiers (eq ch ?\[)) ?\]))))
+        (cl-loop for i from (1+ pos) below len
+                 when (= (aref sql i) delimiter)
+                 do (if (and (< (1+ i) len)
+                             (= (aref sql (1+ i)) delimiter))
+                        (cl-incf i)
+                      (cl-return (1+ i)))
+                 finally return len)
+      (pcase ch
       (?-  ;; Possible -- line comment.
        (if (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
            (or (cl-loop for i from (+ pos 2) below len
@@ -285,7 +291,7 @@ treated as literals.  Returns nil when POS is at normal code."
                                          (= (aref sql (1+ i)) ?/))
                                return (+ i 2))))
              (or end len))
-         nil)))))
+         nil))))))
 
 (defun clutch-db-sql-mask-literal-or-comment (sql)
   "Return a string the same length as SQL with literals/comments blanked.
@@ -324,7 +330,7 @@ CHAR is applied.  When FN returns non-nil, stop and return that value."
         (depth 0)
         result)
     (while (and (< pos end) (not result))
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
           (setq pos (min skip end))
         (let ((ch (aref sql pos)))
           (setq result (funcall fn pos ch depth))
@@ -349,37 +355,13 @@ CHAR is applied.  When FN returns non-nil, stop and return that value."
 (defun clutch-db-sql-statement-breaks (sql)
   "Return zero-based offsets of top-level semicolons in SQL.
 Semicolons inside strings, line comments, and block comments do not count."
-  (let ((breaks nil)
-        (in-string nil)
-        (i 0)
-        (len (length sql)))
-    (while (< i len)
-      (let ((ch (aref sql i)))
-        (cond
-         (in-string
-          (when (= ch in-string)
-            (if (and (memq in-string '(?\' ?\" ?`))
-                     (< (1+ i) len)
-                     (= (aref sql (1+ i)) in-string))
-                (cl-incf i)
-              (setq in-string nil))))
-         ((= ch ?')  (setq in-string ?'))
-         ((= ch ?\") (setq in-string ?\"))
-         ((= ch ?`)  (setq in-string ?`))
-         ((= ch ?\[) (setq in-string ?\]))
-         ((and (= ch ?-) (< (1+ i) len) (= (aref sql (1+ i)) ?-))
-          (while (and (< i len) (/= (aref sql i) ?\n))
-            (cl-incf i)))
-         ((and (= ch ?/) (< (1+ i) len) (= (aref sql (1+ i)) ?*))
-          (cl-incf i 2)
-          (while (and (< (1+ i) len)
-                      (not (and (= (aref sql i) ?*)
-                                (= (aref sql (1+ i)) ?/))))
-            (cl-incf i))
-          (cl-incf i))
-         ((= ch ?\;)
-          (push i breaks))))
-      (cl-incf i))
+  (let (breaks)
+    (clutch-db-sql-scan-code
+     sql 0 nil
+     (lambda (pos ch depth)
+       (when (and (zerop depth) (= ch ?\;))
+         (push pos breaks))
+       nil))
     (nreverse breaks)))
 
 (defun clutch-db-sql-statement-effective-offset (text offset)
@@ -646,8 +628,10 @@ relations return nil."
 
 (defun clutch-db-sql-select-query-p (sql)
   "Return non-nil for SQL that yields a result set."
-  (clutch-db-sql-starts-with-keyword-p
-   sql '("SELECT" "WITH" "DESCRIBE" "DESC" "SHOW" "EXPLAIN")))
+  (or (clutch-db-sql-starts-with-keyword-p
+       sql '("SELECT" "DESCRIBE" "DESC" "SHOW" "EXPLAIN"))
+      (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
+           (equal (clutch-db-sql-main-op-keyword sql) "SELECT"))))
 
 (defun clutch-db-sql-strip-top-level-order-by (sql)
   "Strip a top-level ORDER BY tail from SQL.
@@ -970,7 +954,7 @@ RENDER-FN is called once per parameter and must return the replacement string."
         (remaining params)
         parts)
     (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
           (progn
             (push (substring sql pos skip) parts)
             (setq pos skip))

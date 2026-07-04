@@ -20,11 +20,44 @@
 - Opened REPL `SELECT` results in the standard result buffer instead of
   expanding wide tables inline in the REPL history, and styled REPL prompts,
   errors, and execution summaries for clearer command history.
-- Kept semicolons inside quoted SQL identifiers from splitting query-console
-  statements, including MySQL backtick and SQL Server bracket identifiers.
+- Recreated the REPL's dummy comint process before sending input or printing
+  output so `RET` keeps working after the process disappears.
+- Kept semicolons and parameter markers inside quoted SQL identifiers from being
+  parsed as statement boundaries or placeholders, including doubled delimiter
+  escapes in MySQL backticks and SQL Server brackets.
+- Routed CTE-prefixed `UPDATE`, `DELETE`, and `INSERT` statements through the
+  DML path instead of treating every `WITH` statement as a pageable query.
+- Reported delimiter-only query buffers as empty input instead of dispatching an
+  invalid internal query.
 - Avoided broad auth-source password lookups when connection params have no
   host/user/port target, and avoided resolving saved connection passwords twice
   during interactive connect.
+- Kept query consoles with the same display name but different connection
+  identities in separate buffers instead of overwriting the existing console.
+- Kept malformed JSON-looking text values in the plain value viewer instead of
+  routing them to the JSON viewer.
+- Rejected stale edit buffers when the target row or original cell value changes
+  before the edit is finished, avoiding staged updates against replaced results.
+- Kept record view, region TSV copy, aggregate, edit/re-edit, and clone-to-insert
+  actions aligned with the currently visible filtered rows, including filters
+  that match no rows.
+- Rendered SQL NULL values in record view with the same `<null>` placeholder
+  used by result cells.
+- Allowed `C-c '` to edit fields from record view and refreshed the record view
+  after staging the field edit.
+- Avoided staging unchanged cell edits whose editable text still matches the
+  original value, including numeric cells.
+- Allowed `C-c C-k` in record view to discard the staged change at the current
+  field.
+- Removed the redundant `Field : Value` heading from record view.
+- Cleared SQL WHERE-filter state when a new query replaces the result, avoiding
+  stale filters in rerun, sort, and footer state.
+- Escaped CSV column names and carriage returns using the same rules as result
+  values so exported records remain structurally valid.
+- Required native MongoDB `deleteOne` and `deleteMany` helpers to receive an
+  explicit filter document instead of treating missing filters as `{}`.
+- Rejected native MongoDB `insertOne` and `insertMany` helper calls whose
+  payloads are not document values.
 - Reduced large-schema completion and object discovery spikes by scanning query
   buffers once for referenced table identifiers and grouping object-cache
   entries without repeated list appends.

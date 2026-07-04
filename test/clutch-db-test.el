@@ -83,6 +83,7 @@
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 (declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
+(declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg" (sql))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
 (declare-function clutch--jdbc-backend-p "clutch-connection" (backend))
@@ -272,6 +273,13 @@ connection as live and not busy."
    (clutch-db--normalize-connect-params
     'pg '(:host "127.0.0.1" :sslmode verify-ca))
    :type 'clutch-db-error))
+
+(ert-deftest clutch-db-test-pg-param-rewrite-skips-quoted-identifiers ()
+  "PostgreSQL parameter rewriting should ignore quoted identifier text."
+  (require 'clutch-db-pg)
+  (should (equal (clutch-db-pg--rewrite-param-sql
+                  "SELECT \"?\", ?")
+                 "SELECT \"?\", $1")))
 
 (ert-deftest clutch-db-test-normalize-connect-params-rejects-removed-read-timeout ()
   "Removed connection timeout aliases should fail before reaching adapters."
@@ -2147,6 +2155,27 @@ They should reschedule and only execute FN after `clutch-db-busy-p' becomes nil.
                        ("name" . "Bob"))))
       (should-not multi)
       (should-not options))))
+
+(ert-deftest clutch-db-test-mongodb-delete-helpers-require-filter-document ()
+  "Native MongoDB delete helpers should require an explicit filter document."
+  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
+    (dolist (query '("db.users.deleteOne()"
+                     "db.users.deleteMany()"
+                     "db.users.deleteOne('name')"
+                     "db.users.deleteMany(1)"))
+      (ert-info ((format "query: %s" query))
+        (should-error (clutch-mongodb--eval conn query)
+                      :type 'clutch-db-error)))))
+
+(ert-deftest clutch-db-test-mongodb-insert-helpers-require-documents ()
+  "Native MongoDB insert helpers should reject non-document payloads."
+  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
+    (dolist (query '("db.users.insertOne('name')"
+                     "db.users.insertMany({name: 'Ann'})"
+                     "db.users.insertMany([1])"))
+      (ert-info ((format "query: %s" query))
+        (should-error (clutch-mongodb--eval conn query)
+                      :type 'clutch-db-error)))))
 
 (ert-deftest clutch-db-test-mongodb-mql-parses-bson-constructors ()
   "Native MongoDB MQL parsing should preserve supported BSON constructors."

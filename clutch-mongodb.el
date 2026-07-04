@@ -828,6 +828,13 @@ DATABASE, when non-nil, is the database targeted by the parsed helper."
   (when value
     (clutch-mongodb--mql-document-arg value helper position)))
 
+(defun clutch-mongodb--delete-filter-arg (args method)
+  "Return the required delete filter document from ARGS for METHOD."
+  (unless (= (length args) 1)
+    (signal 'clutch-db-error
+            (list (format "%s() expects one filter document" method))))
+  (clutch-mongodb--mql-document-arg (car args) method 1))
+
 (defun clutch-mongodb--find-arguments (args chain &optional single)
   "Return MongoDB find arguments parsed from ARGS and CHAIN.
 When SINGLE is non-nil, force a single-result limit and ignore cursor paging
@@ -1022,22 +1029,29 @@ helper call."
        (unless (= (length args) 1)
          (signal 'clutch-db-error
                  (list "insertOne() expects one document")))
-       (mongodb-insert client database collection (car args)))
+       (mongodb-insert
+        client database collection
+        (clutch-mongodb--mql-document-arg (car args) method 1)))
       ("insertMany"
        (unless (= (length args) 1)
          (signal 'clutch-db-error
                  (list "insertMany() expects one document array")))
-       (mongodb-insert client database collection (car args)))
+       (let ((documents (car args)))
+         (unless (and (vectorp documents)
+                      (cl-every #'mongodb-document-p (append documents nil)))
+           (signal 'clutch-db-error
+                   (list "insertMany() expects one document array")))
+         (mongodb-insert client database collection documents)))
       ("deleteMany"
        (mongodb-delete
         client database collection
-        (clutch-mongodb--mql-doc-or-empty (car args))
-        0))
+        (clutch-mongodb--delete-filter-arg args method)
+        t))
       ("deleteOne"
        (mongodb-delete
         client database collection
-        (clutch-mongodb--mql-doc-or-empty (car args))
-        1))
+        (clutch-mongodb--delete-filter-arg args method)
+        nil))
       ("updateOne"
        (unless (<= 2 (length args) 3)
          (signal 'clutch-db-error

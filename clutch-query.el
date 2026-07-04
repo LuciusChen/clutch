@@ -423,7 +423,8 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
                          (clutch--build-conn params))
                      (clutch--build-conn params)))
              (buf (or existing
-                      (get-buffer-create (clutch--console-buffer-base-name name))))
+                      (generate-new-buffer
+                       (clutch--console-buffer-base-name name))))
              (is-new (zerop (buffer-size buf))))
         (select-window (or (clutch--console-window-for buf) (selected-window)))
         (switch-to-buffer buf)
@@ -574,7 +575,7 @@ window rather than replacing the current window."
             (catch 'aggregate
               (while (< pos len)
                 (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
-                                 select-list pos)))
+                                 select-list pos t)))
                     (setq pos skip)
                   (let ((char (aref select-list pos)))
                     (cond
@@ -1787,7 +1788,7 @@ Semicolon-delimited multi-statement ranges run sequentially."
   (let* ((raw-sql (buffer-substring-no-properties beg end))
          (sql (string-trim raw-sql))
          (stmts (clutch--split-statement-specs raw-sql beg)))
-    (when (string-empty-p sql)
+    (when (or (string-empty-p sql) (null stmts))
       (user-error "No SQL in %s" scope))
     (if (cdr stmts)
         (clutch--execute-statements stmts)

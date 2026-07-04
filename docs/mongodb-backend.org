@@ -137,6 +137,11 @@ Supported helper families include:
 - database helpers: =db.getName()=, =db.getSiblingDB(...)=, and
   =db.aggregate(...)=
 
+Write helpers validate their documented argument shape before calling
+=mongodb.el=.  =insertOne= accepts one document, =insertMany= accepts one
+document array, and =deleteOne= / =deleteMany= require one explicit filter
+document.
+
 BSON constructors such as =ObjectId()=, =ISODate()=, =Timestamp()=,
 =Int32()=, =Long()=, =NumberInt()=, =NumberLong()=, =Decimal128()=, and
 =NumberDecimal()= encode as native BSON wrapper values before being sent to

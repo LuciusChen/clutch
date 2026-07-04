@@ -398,7 +398,14 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (should (equal (plist-get clutch--row-identity :name) "ctid"))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t)))
-                  (clutch-result--apply-edit 0 0 "after")
+                  (let ((row (car clutch--result-rows)))
+                    (clutch-result--apply-edit
+                     0 0 "after"
+                     (list
+                      :identity (clutch-db-row-identity-values
+                                 row clutch--row-identity)
+                      :original (car row)
+                      :original-state (cons nil (car row)))))
                   (should clutch--pending-edits)
                   (clutch-result-commit)
                   (should-not clutch--pending-edits)
@@ -497,7 +504,14 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                                '("id")))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t)))
-                  (clutch-result--apply-edit 0 1 "after")
+                  (let ((row (car clutch--result-rows)))
+                    (clutch-result--apply-edit
+                     0 1 "after"
+                     (list
+                      :identity (clutch-db-row-identity-values
+                                 row clutch--row-identity)
+                      :original (nth 1 row)
+                      :original-state (cons nil (nth 1 row)))))
                   (should clutch--pending-edits)
                   (clutch-result-commit)
                   (should-not clutch--pending-edits)

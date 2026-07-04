@@ -534,7 +534,7 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
         (index 1)
         parts)
     (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
           (progn
             (push (substring sql pos skip) parts)
             (setq pos skip))

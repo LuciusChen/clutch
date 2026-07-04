@@ -241,6 +241,34 @@
                         'clutch-field-name-face)))
         (delete-process proc)))))
 
+(ert-deftest clutch-test-repl-output-recreates-missing-process ()
+  "REPL output should recover when the dummy comint process is missing."
+  (with-temp-buffer
+    (unwind-protect
+        (progn
+          (clutch-repl-mode)
+          (clutch-repl--output (clutch-repl--prompt))
+          (should (process-live-p (get-buffer-process (current-buffer))))
+          (should (equal (substring-no-properties (buffer-string)) "db> ")))
+      (when-let* ((proc (get-buffer-process (current-buffer))))
+        (delete-process proc)))))
+
+(ert-deftest clutch-test-repl-send-input-recreates-missing-process ()
+  "RET in a REPL buffer should not fail when comint has no process."
+  (with-temp-buffer
+    (unwind-protect
+        (let (sent)
+          (clutch-repl-mode)
+          (insert (clutch-repl--prompt) "SELECT 1;")
+          (goto-char (point-max))
+          (cl-letf (((symbol-function 'clutch-repl--execute-and-print)
+                     (lambda (sql) (setq sent sql))))
+            (clutch-repl-send-input))
+          (should (process-live-p (get-buffer-process (current-buffer))))
+          (should (equal sent "SELECT 1;")))
+      (when-let* ((proc (get-buffer-process (current-buffer))))
+        (delete-process proc)))))
+
 (ert-deftest clutch-test-repl-input-sender-accumulates-until-semicolon ()
   "REPL input sender should accumulate partial SQL and show continuation prompt."
   (with-temp-buffer

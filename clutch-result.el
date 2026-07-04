@@ -18,6 +18,7 @@
 (require 'clutch-sql)
 (require 'clutch-ui)
 (require 'clutch-edit)
+(require 'json)
 (require 'subr-x)
 (require 'transient)
 
@@ -610,6 +611,7 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--query-elapsed nil
               clutch--filter-pattern nil
               clutch--filtered-rows nil
+              clutch--where-filter nil
               clutch--aggregate-summary nil
               clutch--last-cell-position nil
               clutch--header-active-col nil
@@ -778,16 +780,13 @@ If the result has columns, shows a table; otherwise shows DML summary."
 
 (defun clutch-result--rows-for-display-indices (indices)
   "Return visible result rows at display INDICES."
-  (let ((rows (or clutch--filtered-rows clutch--result-rows)))
+  (let ((rows (clutch--result-display-rows)))
     (mapcar (lambda (ridx) (nth ridx rows)) indices)))
 
-;;;###autoload
-(defun clutch-result-discard-pending-at-point ()
-  "Discard the staged change at point."
-  (interactive)
-  (let ((ridx (or (clutch--row-idx-at-line)
-                  (user-error "No row at point")))
-        (nrows (length clutch--result-rows)))
+(defun clutch-result--discard-pending-at (ridx cidx)
+  "Discard the staged change for RIDX and CIDX in the current result buffer."
+  (let* ((display-rows (clutch--result-display-rows))
+         (nrows (length display-rows)))
     (cond
      ((>= ridx nrows)
       (let ((iidx (- ridx nrows)))
@@ -797,9 +796,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
         (message "Staged insert discarded")))
      (t
       (let* ((row-identity clutch--row-identity)
-             (display-rows (or clutch--filtered-rows clutch--result-rows))
              (row (nth ridx display-rows))
-             (cidx (clutch--col-idx-at-point))
              (identity-vec (when row-identity
                              (clutch-db-row-identity-values
                               row row-identity)))
@@ -826,6 +823,28 @@ If the result has columns, shows a table; otherwise shows DML summary."
           (message "Staged deletion discarded"))
          (t
           (user-error "No staged change at point"))))))))
+
+;;;###autoload
+(defun clutch-result-discard-pending-at-point ()
+  "Discard the staged change at point."
+  (interactive)
+  (if (derived-mode-p 'clutch-record-mode)
+      (pcase-let* ((`(,ridx ,cidx ,_) (or (clutch--cell-at-point)
+                                         (user-error "No field at point")))
+                   (result-buf (or (and (buffer-live-p clutch-record--result-buffer)
+                                        clutch-record--result-buffer)
+                                   (user-error "Result buffer no longer exists"))))
+        (with-current-buffer result-buf
+          (clutch-result--discard-pending-at ridx cidx))
+        (clutch-record--render)
+        (goto-char (point-min))
+        (when-let* ((match (text-property-search-forward
+                            'clutch-col-idx cidx #'eq)))
+          (goto-char (prop-match-beginning match))))
+    (let ((ridx (or (clutch--row-idx-at-line)
+                    (user-error "No row at point")))
+          (cidx (clutch--col-idx-at-point)))
+      (clutch-result--discard-pending-at ridx cidx))))
 
 ;;;; clutch-result-mode
 
@@ -1863,7 +1882,7 @@ Enable --refine to exclude rows/columns interactively before copying
                (and (derived-mode-p 'clutch-result-mode)
                     clutch--result-columns)))
     (with-current-buffer result-buffer
-      (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+      (let* ((rows (clutch--result-display-rows))
              (col-indices (clutch--visible-columns))
              (columns (clutch--column-names-for-indices col-indices))
              (max-rows (max 0 clutch-agent-context-max-result-rows))
@@ -1961,11 +1980,12 @@ latest matching result buffer; it does not execute the SQL being copied."
 
 (defun clutch-result--cells-for-indices (row-indices col-indices)
   "Return cell triples for ROW-INDICES and COL-INDICES."
-  (cl-loop for ridx in row-indices
-           append
-           (let ((row (nth ridx clutch--result-rows)))
-             (cl-loop for cidx in col-indices
-                      collect (list ridx cidx (nth cidx row))))))
+  (let ((rows (clutch--result-display-rows)))
+    (cl-loop for ridx in row-indices
+             append
+             (let ((row (nth ridx rows)))
+               (cl-loop for cidx in col-indices
+                        collect (list ridx cidx (nth cidx row)))))))
 
 (defun clutch-result--region-cells ()
   "Return cells in active region as a rectangle of (ROW-IDX COL-IDX VALUE)."
@@ -2054,13 +2074,14 @@ Without region: use current cell."
 (defun clutch-result--compute-aggregate (row-indices col-indices)
   "Compute aggregate stats for ROW-INDICES across COL-INDICES."
   (let* ((rows (length row-indices))
+         (display-rows (clutch--result-display-rows))
          (cells (* rows (length col-indices)))
          (count 0)
         (sum 0.0)
         min-val
         max-val)
     (dolist (ridx row-indices)
-      (let ((row (nth ridx clutch--result-rows)))
+      (let ((row (nth ridx display-rows)))
         (dolist (cidx col-indices)
           (let ((num (clutch-result--parse-number (nth cidx row))))
             (when num
@@ -2290,13 +2311,20 @@ When QUIET is non-nil, suppress informational fallback messages."
          (format "\n\n... truncated, showing first %d bytes" max-bytes)
        ""))))
 
+(defun clutch--json-view-string-p (val)
+  "Return non-nil when VAL is string content suitable for the JSON viewer."
+  (and (clutch--json-like-string-p val)
+       (condition-case _err
+           (progn (ignore (json-parse-string val)) t)
+         (json-parse-error nil))))
+
 (defun clutch--view-spec (val col-def &optional quiet)
   "Return rendering spec for VAL with column metadata COL-DEF.
 When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
      ((or (eq cat 'json)
-          (and (stringp val) (string-match-p "\\`\\s-*[{\\[]" val)))
+          (clutch--json-view-string-p val))
       (list :kind "JSON"
             :content (if (stringp val) val
                        (clutch--json-value-to-string val))
@@ -2356,7 +2384,7 @@ blob type with non-text value → binary string; otherwise plain text."
             :cell-id (list 'result (buffer-chars-modified-tick) ridx cidx)
             :ridx ridx
             :cidx cidx
-            :row-count (length (or clutch--filtered-rows clutch--result-rows))
+            :row-count (length (clutch--result-display-rows))
             :table clutch--result-source-table
             :column (nth cidx clutch--result-columns)
             :col-def (nth cidx clutch--result-column-defs)
@@ -2372,7 +2400,7 @@ blob type with non-text value → binary string; otherwise plain text."
             :ridx ridx
             :cidx cidx
             :row-count (with-current-buffer result-buf
-                         (length clutch--result-rows))
+                         (length (clutch--result-display-rows)))
             :table (with-current-buffer result-buf clutch--result-source-table)
             :column (with-current-buffer result-buf
                       (nth cidx clutch--result-columns))
@@ -2772,14 +2800,14 @@ rectangle and inactive regions fall back to the current cell."
 (defun clutch--csv-escape (val)
   "Return CSV-escaped string for VAL."
   (let ((s (clutch--format-value val)))
-    (if (string-match-p "[,\"\n]" s)
+    (if (string-match-p "[,\"\r\n]" s)
         (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
       s)))
 
 (defun clutch--csv-lines-for-rows (rows col-indices)
   "Return CSV lines for ROWS using COL-INDICES."
   (let ((col-names (clutch--column-names-for-indices col-indices)))
-    (cons (mapconcat #'identity col-names ",")
+    (cons (mapconcat #'clutch--csv-escape col-names ",")
           (cl-loop for row in rows
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
                    collect (mapconcat #'clutch--csv-escape vals ",")))))
@@ -3125,6 +3153,8 @@ previous window layout."
     (define-key map "p" #'clutch-record-prev-row)
     (define-key map "v" #'clutch-record-view-value)
     (define-key map "V" #'clutch-record-live-view-value)
+    (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
+    (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
     (define-key map "I" #'clutch-clone-row-to-insert)
     (define-key map "q" #'quit-window)
     (define-key map "g" #'clutch-record-refresh)
@@ -3139,6 +3169,8 @@ previous window layout."
   \\[clutch-record-toggle-expand]	Expand/collapse field or follow FK
   \\[clutch-record-next-row]	Next row
   \\[clutch-record-prev-row]	Previous row
+  \\[clutch-result-edit-cell]	Edit / re-edit field
+  \\[clutch-result-discard-pending-at-point]	Discard staged field or row change
   \\[clutch-record-view-value]	View current field once
   \\[clutch-record-live-view-value]	Open live viewer that follows point
   \\[clutch-record-refresh]	Refresh"
@@ -3176,22 +3208,29 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
          (fk (cdr (assq cidx fk-info)))
-         (formatted (clutch--format-value display-val))
+         (formatted (if (null display-val)
+                        clutch--null-cell-display-text
+                      (clutch--format-value display-val)))
          (display (if (and long-p (not expanded-p) (> (length formatted) 80))
                       (concat (substring formatted 0 80) "…")
                     formatted))
          (face (cond (edited 'clutch-modified-face)
                      ((null val) 'clutch-null-face)
                      (fk 'clutch-fk-face)
-                     (t nil))))
-    (insert (propertize (clutch--string-pad name max-name-w)
-                        'face 'clutch-field-name-face)
-            (propertize " : " 'face 'clutch-border-face)
-            (propertize display
-                        'clutch-row-idx ridx
-                        'clutch-col-idx cidx
-                        'clutch-full-value (if edited (cdr edited) val)
-                        'face face)
+                     (t nil)))
+         (cell-props (list 'clutch-row-idx ridx
+                           'clutch-col-idx cidx
+                           'clutch-full-value display-val)))
+    (insert (apply #'propertize
+                   (clutch--string-pad name max-name-w)
+                   (append (list 'face 'clutch-field-name-face)
+                           cell-props))
+            (apply #'propertize " : "
+                   (append (list 'face 'clutch-border-face)
+                           cell-props))
+            (apply #'propertize display
+                   (append (when face (list 'face face))
+                           cell-props))
             "\n")))
 
 (defun clutch-record--render ()
@@ -3202,7 +3241,8 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (ridx clutch-record--row-idx)
          (col-names (buffer-local-value 'clutch--result-columns result-buf))
          (col-defs (buffer-local-value 'clutch--result-column-defs result-buf))
-         (rows (buffer-local-value 'clutch--result-rows result-buf))
+         (rows (with-current-buffer result-buf
+                 (clutch--result-display-rows)))
          (row-identity (buffer-local-value 'clutch--row-identity result-buf))
          (fk-info (buffer-local-value 'clutch--fk-info result-buf))
          (edits (buffer-local-value 'clutch--pending-edits result-buf))
@@ -3283,6 +3323,13 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
         ('show-value "Show value"))
     "Field action unavailable"))
 
+(defun clutch-record--pending-changes-p ()
+  "Return non-nil if the parent result buffer has staged edits."
+  (when-let* ((result-buf clutch-record--result-buffer)
+              ((buffer-live-p result-buf)))
+    (with-current-buffer result-buf
+      (clutch-result--pending-changes-p))))
+
 ;;;###autoload
 (defun clutch-record-toggle-expand ()
   "Run the expand, collapse, foreign-key, or display action at point."
@@ -3311,7 +3358,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
   "Show the next row in the Record buffer."
   (interactive)
   (let ((total (with-current-buffer clutch-record--result-buffer
-                 (length clutch--result-rows))))
+                 (length (clutch--result-display-rows)))))
     (if (>= (1+ clutch-record--row-idx) total)
         (user-error "Already at last row")
       (cl-incf clutch-record--row-idx)
@@ -3432,8 +3479,12 @@ Selects JSON, XML, or binary string view based on column type and content."
    ["Inspect"
     ("v" "View value" clutch-record-view-value)
     ("V" "Live view (follow point)" clutch-record-live-view-value)]
+   ["Mutate"
+    ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
+    ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point
+     :inapt-if-not clutch-record--pending-changes-p)
+    ("I" "Clone row → insert" clutch-clone-row-to-insert)]
    ["Other"
-    ("I" "Clone row → insert" clutch-clone-row-to-insert)
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])
 

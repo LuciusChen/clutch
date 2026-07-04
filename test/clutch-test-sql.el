@@ -104,6 +104,12 @@ SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
   (should (clutch-db-sql-select-query-p "select id from users"))
   (should (clutch-db-sql-select-query-p "  SELECT * FROM t"))
   (should (clutch-db-sql-select-query-p "WITH cte AS (SELECT 1) SELECT * FROM cte"))
+  (should-not
+   (clutch-db-sql-select-query-p
+    "WITH cte AS (SELECT 1) UPDATE users SET active = 1"))
+  (should-not
+   (clutch-db-sql-select-query-p
+    "WITH deleted AS (DELETE FROM users RETURNING id) DELETE FROM audit"))
   ;; With leading comments — previously broke SELECT detection
   (should (clutch-db-sql-select-query-p "-- get users\nSELECT * FROM users"))
   (should (clutch-db-sql-select-query-p "/* all */\nSELECT * FROM users"))
@@ -146,7 +152,19 @@ SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
                   ("semicolon in bracket identifier"
                    "SELECT [a;b] FROM t;\nSELECT 2"
                    "FROM"
-                   "SELECT [a;b] FROM t")))
+                   "SELECT [a;b] FROM t")
+                  ("semicolon after escaped double quote"
+                   "SELECT \"a\"\";b\" FROM t;\nSELECT 2"
+                   "FROM"
+                   "SELECT \"a\"\";b\" FROM t")
+                  ("semicolon after escaped backtick"
+                   "SELECT `a``;b` FROM t;\nSELECT 2"
+                   "FROM"
+                   "SELECT `a``;b` FROM t")
+                  ("semicolon after escaped bracket"
+                   "SELECT [a]];b] FROM t;\nSELECT 2"
+                   "FROM"
+                   "SELECT [a]];b] FROM t")))
     (pcase-let ((`(,label ,sql ,point-token ,expected) case))
       (ert-info ((format "case: %s" label))
         (with-temp-buffer
@@ -267,6 +285,13 @@ SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
                        '("INSERT INTO demo VALUES (1)"
                          "INSERT INTO demo VALUES (2)")))
         (should-not single-call)))))
+
+(ert-deftest clutch-test-execute-buffer-rejects-empty-statements ()
+  "A buffer containing only delimiters should report that it has no SQL."
+  (with-temp-buffer
+    (insert " ; \n ;; ")
+    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore))
+      (should-error (clutch-execute-buffer) :type 'user-error))))
 
 (ert-deftest clutch-test-execute-region-marks-each-successful-statement ()
   "Region execution should move the fringe marker statement by statement."
@@ -636,6 +661,16 @@ They should become a bare table name."
 (ert-deftest clutch-test-skip-literal-or-comment-ignores-backtick ()
   "Backtick identifiers are NOT literals — should return nil."
   (should-not (clutch-db-sql-skip-literal-or-comment "`user_table`" 0)))
+
+(ert-deftest clutch-test-substitute-params-skips-quoted-identifiers ()
+  "Parameter substitution should only consume executable placeholders."
+  (should
+   (equal
+    (clutch-db-substitute-params
+     "SELECT \"?\", `?`, [?], ?"
+     '(42)
+     #'number-to-string)
+    "SELECT \"?\", `?`, [?], 42")))
 
 (ert-deftest clutch-test-mask-literal-or-comment ()
   "Mask string literals and comments but preserve identifiers."

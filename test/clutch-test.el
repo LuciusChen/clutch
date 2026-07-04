@@ -289,6 +289,17 @@ This avoids `json-serialize' escaping non-ASCII characters (e.g. CJK) as \\uXXXX
       (should (equal content "hello"))
       (should (equal buffer-name "*clutch-value*")))))
 
+(ert-deftest clutch-test-dispatch-view-invalid-json-like-text-not-json ()
+  "Invalid JSON-looking text should remain a plain value."
+  (let (buffer-name content)
+    (cl-letf (((symbol-function 'clutch--view-in-buffer)
+               (lambda (text name _setup)
+                 (setq content text
+                       buffer-name name))))
+      (clutch--dispatch-view "{not json" '(:type-category text))
+      (should (equal content "{not json"))
+      (should (equal buffer-name "*clutch-value*")))))
+
 (ert-deftest clutch-test-dispatch-view-xml-content-overrides-blob ()
   "XML-like content should use XML viewer even when column type is blob."
   (let (buffer-name)
@@ -1676,6 +1687,179 @@ ROWS defaults to a small three-row sample."
               (should-not (string-match-p "before" rendered)))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-record-render-displays-null-placeholder ()
+  "Record view should render database NULL like result cells."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-columns '("id" "note")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "note" :type-category text))
+                        clutch--result-rows '((1 nil))
+                        clutch--row-identity nil
+                        clutch--pending-edits nil
+                        clutch--fk-info nil))
+          (with-temp-buffer
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--expanded-fields nil)
+            (clutch-record--render)
+            (let ((rendered (buffer-string))
+                  (case-fold-search nil))
+              (should (string-match-p (regexp-quote clutch--null-cell-display-text)
+                                      rendered))
+              (should-not (string-match-p "\\`Field\\s-*:" rendered))
+              (should-not (string-match-p " : NULL\\b" rendered))
+              (should (text-property-any (point-min) (point-max)
+                                         'face 'clutch-null-face)))))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-record-field-line-edits-through-result-buffer ()
+  "Record fields should edit through their parent result buffer."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (record-buf (generate-new-buffer "*clutch-record*"))
+        edit-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection nil
+                        clutch--connection-params '(:backend mysql)
+                        clutch--result-source-table "users"
+                        clutch--result-columns '("id" "name")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "name" :type-category text))
+                        clutch--result-rows '((1 "alice"))
+                        clutch--row-identity (clutch-test--primary-row-identity
+                                              "users" '("id") '(0))
+                        clutch--pending-edits nil
+                        clutch--fk-info nil))
+          (with-current-buffer record-buf
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--expanded-fields nil)
+            (clutch-record--render)
+            (goto-char (point-min))
+            (search-forward "name")
+            (goto-char (match-beginning 0))
+            (should (equal (clutch--cell-at-point) '(0 1 "alice"))))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table &optional _strict)
+                       (list (list :name "name" :type "text"))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq edit-buf buf)
+                       buf)))
+            (with-current-buffer record-buf
+              (should (eq (clutch-result-edit-cell) edit-buf))))
+          (with-current-buffer edit-buf
+            (should (eq clutch-result--edit-result-buffer result-buf))
+            (should (eq clutch-result-edit--return-buffer record-buf))
+            (erase-buffer)
+            (insert "ann")
+            (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                      ((symbol-function 'quit-window) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (clutch-result-edit-finish)))
+          (with-current-buffer record-buf
+            (should (string-match-p "name\\s-*:\\s-*ann" (buffer-string)))
+            (should (eq (get-text-property (point) 'clutch-col-idx) 1))))
+      (when (buffer-live-p edit-buf)
+        (kill-buffer edit-buf))
+      (kill-buffer record-buf)
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-record-edit-unchanged-numeric-does-not-stage ()
+  "Submitting an unchanged numeric Record field should not stage an edit."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (record-buf (generate-new-buffer "*clutch-record*"))
+        edit-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection nil
+                        clutch--connection-params '(:backend mysql)
+                        clutch--result-source-table "orders"
+                        clutch--result-columns '("id" "qty")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "qty" :type-category numeric))
+                        clutch--result-rows '((1 42))
+                        clutch--row-identity (clutch-test--primary-row-identity
+                                              "orders" '("id") '(0))
+                        clutch--pending-edits nil
+                        clutch--fk-info nil))
+          (with-current-buffer record-buf
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--expanded-fields nil)
+            (clutch-record--render)
+            (goto-char (point-min))
+            (search-forward "qty")
+            (goto-char (match-beginning 0)))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table &optional _strict)
+                       (list (list :name "qty" :type "int"))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq edit-buf buf)
+                       buf)))
+            (with-current-buffer record-buf
+              (clutch-result-edit-cell)))
+          (with-current-buffer edit-buf
+            (should (equal (buffer-string) "42"))
+            (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                      ((symbol-function 'quit-window) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (clutch-result-edit-finish)))
+          (with-current-buffer result-buf
+            (should-not clutch--pending-edits)))
+      (when (buffer-live-p edit-buf)
+        (kill-buffer edit-buf))
+      (kill-buffer record-buf)
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-record-discard-pending-edit-at-field ()
+  "Record buffers should discard the staged edit for the field at point."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (record-buf (generate-new-buffer "*clutch-record*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-columns '("id" "name")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "name" :type-category text))
+                        clutch--result-rows '((1 "alice"))
+                        clutch--row-identity (clutch-test--primary-row-identity
+                                              "users" '("id") '(0))
+                        clutch--pending-edits '((([1] . 1) . "ann"))
+                        clutch--pending-deletes nil
+                        clutch--pending-inserts nil
+                        clutch--fk-info nil))
+          (with-current-buffer record-buf
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--expanded-fields nil)
+            (clutch-record--render)
+            (should (string-match-p "name\\s-*:\\s-*ann" (buffer-string)))
+            (goto-char (point-min))
+            (search-forward "name")
+            (goto-char (match-beginning 0))
+            (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (clutch-result-discard-pending-at-point))
+            (should (string-match-p "name\\s-*:\\s-*alice" (buffer-string)))
+            (should (eq (get-text-property (point) 'clutch-col-idx) 1)))
+          (with-current-buffer result-buf
+            (should-not clutch--pending-edits)))
+      (kill-buffer record-buf)
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-record-render-inherits-live-connection-context ()
   "Record view should reuse the parent result buffer connection context."
   (let ((result-buf (generate-new-buffer "*clutch-result*")))
@@ -1749,6 +1933,49 @@ ROWS defaults to a small three-row sample."
       (when (buffer-live-p record-buf)
         (kill-buffer record-buf)))))
 
+(ert-deftest clutch-test-record-open-uses-filtered-display-row ()
+  "Opening a record from filtered results should show the visible row."
+  (let (record-buf)
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-result-mode)
+          (setq-local clutch-connection nil
+                      clutch--connection-params nil
+                      clutch--conn-sql-product nil
+                      clutch--result-columns '("id" "name")
+                      clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                   (:name "name" :type-category text))
+                      clutch--result-rows '((1 "alice") (2 "bob") (3 "carol"))
+                      clutch--filter-pattern "bob"
+                      clutch--filtered-rows '((2 "bob"))
+                      clutch--pending-edits nil
+                      clutch--pending-deletes nil
+                      clutch--pending-inserts nil
+                      clutch--marked-rows nil
+                      clutch--sort-column nil
+                      clutch--sort-descending nil
+                      clutch--page-current 0
+                      clutch--page-total-rows 3
+                      clutch--fk-info nil
+                      clutch--column-widths [2 5])
+          (clutch--refresh-display)
+          (goto-char (point-min))
+          (let ((match (text-property-search-forward 'clutch-row-idx 0 #'eq)))
+            (should match)
+            (goto-char (prop-match-beginning match)))
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq record-buf buf)
+                       buf)))
+            (clutch-result-open-record))
+          (with-current-buffer record-buf
+            (let ((rendered (buffer-string)))
+              (should (string-match-p "id\\s-*:\\s-*2" rendered))
+              (should (string-match-p "name\\s-*:\\s-*bob" rendered))
+              (should-not (string-match-p "alice" rendered)))))
+      (when (buffer-live-p record-buf)
+        (kill-buffer record-buf)))))
+
 (ert-deftest clutch-test-record-next-row-advances ()
   "Record view should advance to the next row."
   (let ((result-buf (generate-new-buffer "*clutch-result*")))
@@ -1777,6 +2004,23 @@ ROWS defaults to a small three-row sample."
             (clutch-record-mode)
             (setq-local clutch-record--result-buffer result-buf
                         clutch-record--row-idx 2
+                        clutch-record--expanded-fields nil)
+            (should-error (clutch-record-next-row) :type 'user-error)))
+      (kill-buffer result-buf))))
+
+(ert-deftest clutch-test-record-next-row-uses-filtered-row-count ()
+  "Record navigation should stay within the visible filtered rows."
+  (let ((result-buf (generate-new-buffer "*clutch-result*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-rows '((1 "alice") (2 "bob"))
+                        clutch--filter-pattern "bob"
+                        clutch--filtered-rows '((2 "bob"))))
+          (with-temp-buffer
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
                         clutch-record--expanded-fields nil)
             (should-error (clutch-record-next-row) :type 'user-error)))
       (kill-buffer result-buf))))
@@ -2079,6 +2323,19 @@ ROWS defaults to a small three-row sample."
         (should-not (string-match-p "commit:" footer))
         (should-not (string-match-p "discard:" footer))))))
 
+(ert-deftest clutch-test-footer-sort-icon-handles-uppercase-direction ()
+  "Footer sort icons should not depend on `case-fold-search'."
+  (with-temp-buffer
+    (setq-local clutch--order-by '("name" . "DESC"))
+    (let (icon-spec)
+      (cl-letf (((symbol-function 'clutch--footer-icon)
+                 (lambda (spec _fallback _face)
+                   (setq icon-spec spec)
+                   "")))
+        (let ((case-fold-search nil))
+          (clutch--footer-sort-part)))
+      (should (equal icon-spec '(octicon . "nf-oct-sort_desc"))))))
+
 (ert-deftest clutch-test-render-footer-shows-global-row-range ()
   "Footer should describe the visible global row range instead of page counts."
   (let ((first-page (substring-no-properties
@@ -2332,6 +2589,14 @@ ROWS defaults to a small three-row sample."
 
 ;;;; Filter
 
+(ert-deftest clutch-test-reset-result-state-clears-where-filter ()
+  "A fresh result should not inherit the previous query's WHERE filter."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (setq-local clutch--where-filter "id > 10")
+    (clutch-result--reset-state)
+    (should-not clutch--where-filter)))
+
 (ert-deftest clutch-test-filter-matches-substring-case-insensitive ()
   "Client-side filter should match substrings case-insensitively."
   (with-temp-buffer
@@ -2377,6 +2642,18 @@ ROWS defaults to a small three-row sample."
       (clutch-result--apply-filter "42")
       (should (equal clutch--filtered-rows '((2 42))))
       (should (equal clutch--filter-pattern "42")))))
+
+(ert-deftest clutch-test-filter-with-no-matches-displays-no-rows ()
+  "An active zero-match filter must not fall back to all result rows."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (setq-local clutch--result-rows '((1 "alice") (2 "bob"))
+                clutch--filter-pattern nil
+                clutch--filtered-rows nil)
+    (cl-letf (((symbol-function 'clutch--render-result) #'ignore))
+      (clutch-result--apply-filter "missing")
+      (should clutch--filter-pattern)
+      (should-not (clutch--result-display-rows)))))
 
 (ert-deftest clutch-test-filter-clear-restores-all-rows ()
   "Clearing the client-side filter should restore the full result set."
@@ -3737,6 +4014,128 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
       (should-not (overlayp clutch-result-edit--null-placeholder-overlay))
       (should (equal (buffer-string) "hello")))))
 
+(ert-deftest clutch-test-edit-cell-unchanged-numeric-does-not-stage ()
+  "Submitting an unchanged numeric edit should not stage a string value."
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("id" "qty")
+       '((:name "id" :type-category numeric)
+         (:name "qty" :type-category numeric))
+       '((1 42))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "orders" '("id") '(0))
+       'clutch--pending-edits nil)
+      '(0 1 42)
+      "orders"
+      (list (list :name "qty" :type "int"))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (equal (buffer-string) "42"))
+          (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                    ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                    ((symbol-function 'quit-window) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch-result-edit-finish))
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-edits)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-edit-cell-reverting-to-original-discards-pending-edit ()
+  "Editing a staged value back to its original value should discard the stage."
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("id" "qty")
+       '((:name "id" :type-category numeric)
+         (:name "qty" :type-category numeric))
+       '((1 42))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "orders" '("id") '(0))
+       'clutch--pending-edits '((([1] . 1) . "43")))
+      '(0 1 "43")
+      "orders"
+      (list (list :name "qty" :type "int"))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (equal (buffer-string) "43"))
+          (erase-buffer)
+          (insert "42")
+          (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                    ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                    ((symbol-function 'quit-window) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch-result-edit-finish))
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-edits)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-edit-cell-rejects-stale-row-identity ()
+  "Finishing an edit should not stage changes for a different visible row."
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("id" "name")
+       '((:name "id" :type-category numeric)
+         (:name "name" :type-category text))
+       '((1 "alice") (2 "bob"))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "users" '("id") '(0))
+       'clutch--pending-edits nil)
+      '(0 1 "alice")
+      "users"
+      (list (list :name "name" :type "text"))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-rows '((2 "bob") (1 "alice"))))
+          (with-current-buffer buf
+            (erase-buffer)
+            (insert "ann")
+            (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                      ((symbol-function 'quit-window) #'ignore))
+              (let ((err (should-error (clutch-result-edit-finish)
+                                       :type 'user-error)))
+                (should (string-match-p "Edited row changed"
+                                        (error-message-string err))))))
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-edits)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-test-edit-cell-rejects-stale-original-value ()
+  "Finishing an edit should not stage over a changed source cell."
+  (clutch-test--with-open-edit-cell buf
+      (result-buf
+       '("id" "name")
+       '((:name "id" :type-category numeric)
+         (:name "name" :type-category text))
+       '((1 "alice"))
+       'clutch--row-identity
+       (clutch-test--primary-row-identity "users" '("id") '(0))
+       'clutch--pending-edits nil)
+      '(0 1 "alice")
+      "users"
+      (list (list :name "name" :type "text"))
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch--result-rows '((1 "remote"))))
+          (with-current-buffer buf
+            (erase-buffer)
+            (insert "ann")
+            (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                      ((symbol-function 'quit-window) #'ignore))
+              (let ((err (should-error (clutch-result-edit-finish)
+                                       :type 'user-error)))
+                (should (string-match-p "Edited row changed"
+                                        (error-message-string err))))))
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-edits)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (ert-deftest clutch-test-edit-cell-errors-clearly-without-row-identity ()
   "Edit entry should fail early when the result is not updateable."
   (clutch-test--with-edit-cell-result-buffer
@@ -4131,6 +4530,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
         (progn
           (with-current-buffer result-buf
             (setq-local clutch-connection 'fake-conn
+                        clutch--result-source-table "shipping_incidents"
                         clutch--result-columns '("id" "severity" "owner" "created_at")
                         clutch--result-column-defs '((:name "id" :type-category numeric)
                                                      (:name "severity" :type-category text)
@@ -4253,6 +4653,47 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
         (kill-buffer record-buf))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-clone-row-to-insert-from-filtered-record-buffer ()
+  "Cloning from a filtered record should prefill the visible row."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        (record-buf (generate-new-buffer "*clutch-record*"))
+        insert-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--connection-params '(:backend mysql)
+                        clutch--last-query "SELECT * FROM shipping_incidents"
+                        clutch--result-source-table "shipping_incidents"
+                        clutch--result-columns '("id" "owner")
+                        clutch--result-column-defs '((:name "id" :type-category numeric)
+                                                     (:name "owner" :type-category text))
+                        clutch--result-rows '((1 "alice") (2 "bob"))
+                        clutch--filter-pattern "bob"
+                        clutch--filtered-rows '((2 "bob"))))
+          (with-current-buffer record-buf
+            (clutch-record-mode)
+            (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (_conn _table)
+                       (list (list :name "id" :type "int" :generated t :nullable nil)
+                             (list :name "owner" :type "varchar(64)" :nullable t))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (with-current-buffer record-buf
+              (clutch-clone-row-to-insert)))
+          (with-current-buffer insert-buf
+            (should (string-match-p "^owner[ ]*: bob$" (buffer-string)))
+            (should-not (string-match-p "alice" (buffer-string)))))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (when (buffer-live-p record-buf)
+        (kill-buffer record-buf))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-clone-row-to-insert-hides-primary-key-by-default ()
   "Clone-to-insert should not prefill or sparsely render primary-key fields."
   (let ((result-buf (generate-new-buffer "*clutch-result*"))
@@ -4300,6 +4741,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
         (progn
           (with-current-buffer result-buf
             (setq-local clutch-connection 'fake-conn
+                        clutch--result-source-table "shipping_incidents"
                         clutch--result-columns '("owner" "severity")
                         clutch--result-column-defs '((:name "owner" :type-category text)
                                                      (:name "severity" :type-category text))))
@@ -4330,6 +4772,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
         (progn
           (with-current-buffer result-buf
             (setq-local clutch-connection 'fake-conn
+                        clutch--result-source-table "shipping_incidents"
                         clutch--result-columns '("severity" "owner" "created_at")
                         clutch--result-column-defs '((:name "severity" :type-category text)
                                                      (:name "owner" :type-category text)
@@ -4380,6 +4823,48 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                            '((("severity" . "high")))))))
       (kill-buffer result-buf))))
 
+(ert-deftest clutch-test-insert-commit-rejects-stale-result-table-before-closing ()
+  "Insert commit should keep the form open when the parent result table changed."
+  (let ((result-buf (generate-new-buffer "*clutch-result*"))
+        insert-buf
+        closed)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-source-table "users"
+                        clutch--result-columns '("name")
+                        clutch--result-column-defs '((:name "name" :type-category text))
+                        clutch--pending-inserts nil))
+          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args)
+                       (setq insert-buf buf)
+                       buf)))
+            (clutch-result-insert--open-buffer "users" result-buf))
+          (with-current-buffer insert-buf
+            (goto-char (point-min))
+            (goto-char (clutch-result-insert--current-field-value-start))
+            (let ((inhibit-modification-hooks t))
+              (insert "alice")))
+          (with-current-buffer result-buf
+            (setq-local clutch--result-source-table "orders"))
+          (with-current-buffer insert-buf
+            (cl-letf (((symbol-function 'quit-window)
+                       (lambda (&rest _) (setq closed t)))
+                      ((symbol-function 'clutch--refresh-display) #'ignore))
+              (let ((err (should-error (clutch-result-insert-commit)
+                                       :type 'user-error)))
+                (should (string-match-p "Result table changed"
+                                        (error-message-string err))))))
+          (should-not closed)
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-inserts)))
+      (when (buffer-live-p insert-buf)
+        (kill-buffer insert-buf))
+      (kill-buffer result-buf))))
+
 (ert-deftest clutch-test-build-render-state-creates-fast-lookups ()
   "Render-state tables should preserve staged edit/delete/mark semantics."
   (with-temp-buffer
@@ -4407,7 +4892,11 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                 clutch--result-source-table "users"
                 clutch--result-rows '((1 "before"))
                 clutch--filtered-rows nil)
-    (let ((err (should-error (clutch-result--apply-edit 0 1 "after")
+    (let ((err (should-error (clutch-result--apply-edit
+                              0 1 "after"
+                              (list :identity [1]
+                                    :original "before"
+                                    :original-state '(nil . "before")))
                              :type 'user-error)))
       (should (string-match-p
                "no primary, unique, or row locator identity available for table users"
@@ -4420,6 +4909,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                 clutch--result-columns '("id" "name")
                 clutch--result-source-table "users"
                 clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filter-pattern "beta"
                 clutch--filtered-rows '((2 "beta"))
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0))
@@ -4427,7 +4917,10 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
     (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
               ((symbol-function 'clutch--refresh-footer-line) #'ignore)
               ((symbol-function 'message) #'ignore))
-      (clutch-result--apply-edit 0 1 "beta")
+      (clutch-result--apply-edit
+       0 1 "beta" (list :identity [2]
+                        :original "beta"
+                        :original-state '(nil . "beta")))
       (should-not clutch--pending-edits))))
 
 (ert-deftest clutch-test-delete-rows-errors-clearly-without-row-identity ()
@@ -4549,7 +5042,10 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
     (setq-local clutch--filtered-rows nil)
     (setq-local clutch--pending-edits nil)
     (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
-      (clutch-result--apply-edit 0 1 "carol")
+      (clutch-result--apply-edit
+       0 1 "carol" (list :identity [7]
+                         :original "bob"
+                         :original-state '(nil . "bob")))
       (should (= (length clutch--pending-edits) 1))
       (let ((key (caar clutch--pending-edits)))
         (should (vectorp (car key)))
@@ -5190,11 +5686,13 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
   (with-temp-buffer
-    (setq-local clutch--result-columns '("id" "name"))
-    (let ((csv (clutch--export-csv-content '((1 "a,b") (2 "x\"y")))))
-      (should (string-match-p "^id,name\n" csv))
+    (setq-local clutch--result-columns '("id" "display,name"))
+    (let ((csv (clutch--export-csv-content
+                '((1 "a,b") (2 "x\"y") (3 "x\ry")))))
+      (should (string-match-p "^id,\"display,name\"\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
-      (should (string-match-p "2,\"x\"\"y\"" csv)))))
+      (should (string-match-p "2,\"x\"\"y\"" csv))
+      (should (string-match-p "3,\"x\ry\"" csv)))))
 
 (ert-deftest clutch-test-insert-content-builds-full-row-sql ()
   "INSERT export content should build SQL from the ROWS argument."
@@ -5449,6 +5947,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filter-pattern "beta"
                 clutch--filtered-rows '((2 "beta")))
     (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
               ((symbol-function 'clutch--cell-at-point)
@@ -5466,6 +5965,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
                 clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filter-pattern "beta"
                 clutch--filtered-rows '((2 "beta")))
     (should (equal (clutch--csv-lines-for-rows
                     (clutch-result--rows-for-display-indices '(0)) '(1))
@@ -5477,6 +5977,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
     (setq-local clutch-connection 'fake-conn
                 clutch--result-columns '("id" "name")
                 clutch--result-rows '((1 "alpha") (2 "beta"))
+                clutch--filter-pattern "beta"
                 clutch--filtered-rows '((2 "beta")))
     (cl-letf (((symbol-function 'clutch-db-escape-identifier)
                (lambda (_conn s) s))
@@ -5798,6 +6299,22 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
           (should (string-match-p "avg=2.5" summary))
           (should (string-match-p "\\[rows=1 cells=1 skipped=0\\]" summary)))))))
 
+(ert-deftest clutch-test-aggregate-uses-filtered-display-row ()
+  "Aggregate should read values from the currently visible filtered rows."
+  (with-temp-buffer
+    (let (kill-ring kill-ring-yank-pointer)
+      (setq-local clutch--result-columns '("id" "score")
+                  clutch--result-rows '((1 10) (2 20))
+                  clutch--filter-pattern "20"
+                  clutch--filtered-rows '((2 20)))
+      (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+                ((symbol-function 'clutch--cell-at-point)
+                 (lambda () '(0 1 20))))
+        (clutch-result-aggregate)
+        (let ((summary (current-kill 0)))
+          (should (string-match-p "sum=20" summary))
+          (should-not (string-match-p "sum=10" summary)))))))
+
 (ert-deftest clutch-test-aggregate-region-multi-column-aggregates-all-columns ()
   "Aggregate should summarize all selected cells as one result."
   (with-temp-buffer
@@ -5880,6 +6397,19 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                      '((0 1 r0c1)
                        (1 1 r1c1)
                        (2 1 r2c1)))))))
+
+(ert-deftest clutch-test-region-cells-use-filtered-display-rows ()
+  "Region cell extraction should read from filtered visible rows."
+  (with-temp-buffer
+    (setq-local clutch--result-rows '((1 "alice") (2 "bob"))
+                clutch--filter-pattern "bob"
+                clutch--filtered-rows '((2 "bob")))
+    (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
+              ((symbol-function 'region-end) (lambda () 20))
+              ((symbol-function 'clutch--cell-at-or-near)
+               (lambda (_pos) '(0 1 nil))))
+      (should (equal (clutch-result--region-cells)
+                     '((0 1 "bob")))))))
 
 (ert-deftest clutch-test-yank-cell-with-region-copies-region-cells ()
   "Yank cell should copy region cells as TSV when region is active."

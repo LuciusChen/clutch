@@ -235,6 +235,8 @@ Typical flow:
 |-------------+-------------------------------|
 | =RET=       | Expand long field / follow FK |
 | =n= / =p=  | Next row / previous row       |
+| =C-c '=     | Edit / re-edit current field  |
+| =C-c C-k=   | Discard staged change at field |
 | =I=         | Clone current record into a prefilled insert form (without PK values) |
 | =v=         | View field value (JSON / XML / BLOB preview) |
 | =V=         | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
@@ -295,7 +297,7 @@ field.
 #+begin_src
 1. SELECT * FROM users;      → C-c C-c to execute
 2. Move cursor to the cell to modify
-3. C-c '                      → opens edit buffer; JSON columns jump straight into the JSON sub-editor
+3. C-c '                      → opens edit buffer from a result cell or record-view field; JSON columns jump straight into the JSON sub-editor
 4. Header shows edit-relevant tags like [enum], [json], or [datetime]
                                M-TAB completes enum / bool-like values when available
                                non-JSON edit buffers still use C-c ' for the JSON sub-editor fallback

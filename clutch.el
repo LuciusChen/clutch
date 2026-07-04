@@ -684,6 +684,8 @@ Key bindings:
 (defvar clutch-repl-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map comint-mode-map)
+    (define-key map (kbd "RET") #'clutch-repl-send-input)
+    (define-key map (kbd "<return>") #'clutch-repl-send-input)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
     (define-key map (kbd "C-c C-m") #'clutch-commit)
     (define-key map (kbd "C-c C-u") #'clutch-rollback)
@@ -719,6 +721,38 @@ When CONTINUATION is non-nil, return the continuation prompt."
   (propertize (if continuation "    -> " "db> ")
               'face 'minibuffer-prompt))
 
+(defun clutch-repl--input-start-position ()
+  "Return the best input-start position for the current REPL line."
+  (save-excursion
+    (beginning-of-line)
+    (if (looking-at comint-prompt-regexp)
+        (match-end 0)
+      (point))))
+
+(defun clutch-repl--ensure-process ()
+  "Ensure the current REPL buffer has a live dummy comint process."
+  (let ((proc (get-buffer-process (current-buffer))))
+    (if (and proc (process-live-p proc))
+        proc
+      (let ((mark-pos (and proc
+                           (markerp (process-mark proc))
+                           (marker-position (process-mark proc)))))
+        (when proc
+          (delete-process proc))
+        (setq proc (start-process "clutch-repl" (current-buffer) "cat"))
+        (set-process-query-on-exit-flag proc nil)
+        (set-marker (process-mark proc)
+                    (or mark-pos (clutch-repl--input-start-position))
+                    (current-buffer))
+        proc))))
+
+;;;###autoload
+(defun clutch-repl-send-input ()
+  "Send REPL input, recreating the dummy comint process when needed."
+  (interactive)
+  (clutch-repl--ensure-process)
+  (comint-send-input))
+
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
 Accumulates input until a semicolon is found, then executes."
@@ -751,7 +785,7 @@ Accumulates input until a semicolon is found, then executes."
 (defun clutch-repl--output (text)
   "Insert TEXT into the REPL buffer at the process mark."
   (let ((inhibit-read-only t)
-        (proc (get-buffer-process (current-buffer))))
+        (proc (clutch-repl--ensure-process)))
     (goto-char (process-mark proc))
     (insert (clutch-repl--font-lock-output text))
     (set-marker (process-mark proc) (point))))
@@ -853,11 +887,10 @@ Accumulates input until a semicolon is found, then executes."
          (buf (get-buffer-create buf-name)))
     (unless (comint-check-proc buf)
       (with-current-buffer buf
-        ;; Start a dummy process for comint
-        (let ((proc (start-process "clutch-repl" buf "cat")))
-          (set-process-query-on-exit-flag proc nil)
-          (clutch-repl-mode)
-          (clutch-repl--output (clutch-repl--prompt)))))
+        (unless (derived-mode-p 'clutch-repl-mode)
+          (clutch-repl-mode))
+        (clutch-repl--ensure-process)
+        (clutch-repl--output (clutch-repl--prompt))))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))
 
 ;;;; Transient dispatch menus

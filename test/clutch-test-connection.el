@@ -3511,6 +3511,47 @@ This applies when the buffer owns the connection."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest clutch-test-open-query-console-keeps-same-name-identities-separate ()
+  "Opening a same-name console should not overwrite a different identity."
+  (let* ((name "same-name-identity")
+         (base-name (clutch--console-buffer-base-name name))
+         (old-params '(:backend mysql :host "old.example" :database "app"))
+         (new-params '(:backend mysql :host "new.example" :database "app"))
+         (old-storage (clutch--console-persistence-name name old-params))
+         (old-buffer (get-buffer-create base-name))
+         (clutch-console-directory (make-temp-file "clutch-console-" t))
+         opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer old-buffer
+            (clutch-mode)
+            (setq-local clutch--console-name name
+                        clutch--console-storage-name old-storage
+                        clutch--connection-params old-params
+                        clutch-connection 'old-conn))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (eq conn 'old-conn)))
+                    ((symbol-function 'clutch--effective-sql-product)
+                     (lambda (_params) 'mysql))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (_params) 'new-conn))
+                    ((symbol-function 'clutch--activate-current-buffer-connection)
+                     (lambda (conn params _product)
+                       (setq-local clutch-connection conn
+                                   clutch--connection-params params)))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     #'ignore))
+            (clutch--open-query-console name new-params new-params)
+            (setq opened (current-buffer)))
+          (should-not (eq opened old-buffer))
+          (with-current-buffer old-buffer
+            (should (eq clutch-connection 'old-conn))
+            (should (equal clutch--connection-params old-params))))
+      (dolist (buffer (delete-dups (list opened old-buffer)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))
+      (delete-directory clutch-console-directory t))))
+
 (ert-deftest clutch-test-find-console-buffer-matches-legacy-buffer-by-params ()
   "Open legacy console buffers without storage state should still match by params."
   (let* ((params '(:backend mysql

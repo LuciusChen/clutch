@@ -136,6 +136,10 @@ the header cell was rendered.")
 (declare-function clutch--tx-dirty-p "clutch-connection" (conn))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 
+(defun clutch--result-display-rows ()
+  "Return result rows selected by the current client filter state."
+  (if clutch--filter-pattern clutch--filtered-rows clutch--result-rows))
+
 (defcustom clutch-column-displayers nil
   "Per-table/per-column display functions for result cells.
 Each entry is (TABLE-NAME . ((COLUMN-NAME . FUNCTION) ...)).
@@ -1693,7 +1697,7 @@ Returns a list of propertized strings (may be empty)."
                        (list clutch--sort-column
                              (if clutch--sort-descending "DESC" "ASC") t)))))
     (pcase-let ((`(,column ,direction ,local-p) state))
-      (let ((icon (if (string-match-p "\\`desc\\'" direction)
+      (let ((icon (if (string= (downcase direction) "desc")
                       '(octicon . "nf-oct-sort_desc")
                     '(octicon . "nf-oct-sort_asc")))
             (hi 'font-lock-keyword-face))
@@ -2161,7 +2165,7 @@ RENDER-STATE contains render lookup tables for staged UI state."
 
 (defun clutch--refresh-footer-line ()
   "Rebuild the mode-line footer format without touching the table body."
-  (let ((rows (or clutch--filtered-rows clutch--result-rows)))
+  (let ((rows (clutch--result-display-rows)))
     (setq clutch--footer-base-string
           (clutch--render-footer
            (length rows) clutch--page-current
@@ -2182,7 +2186,7 @@ RENDER-STATE contains render lookup tables for staged UI state."
   (let* ((page-offset (or clutch--page-offset
                           (* clutch--page-current clutch-result-max-rows)))
          (global-row  (+ page-offset ridx))
-         (rows        (or clutch--filtered-rows clutch--result-rows))
+         (rows        (clutch--result-display-rows))
          (row-count   (length rows))
          (ncols       (length clutch--result-columns))
          (col-name    (when cidx (nth cidx clutch--result-columns)))
@@ -2320,7 +2324,7 @@ Preserves point position (row + column) across the render."
          (inhibit-read-only t)
          (visible-cols (clutch--visible-columns))
          (widths (clutch--effective-widths))
-         (rows (or clutch--filtered-rows clutch--result-rows))
+         (rows (clutch--result-display-rows))
          (pixel-metric (clutch--pixel-metric-signature))
          (scan-cols (clutch--pixel-layout-scan-columns widths pixel-metric))
          (base-pixel-widths
@@ -2354,7 +2358,7 @@ Preserves point position (row + column) across the render."
 (defun clutch--replace-row-at-index (ridx)
   "Re-render row RIDX in place without a full body redraw.
 Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
-  (let* ((rows (or clutch--filtered-rows clutch--result-rows))
+  (let* ((rows (clutch--result-display-rows))
          (nrows (length rows))
          (line-pos (and (vectorp clutch--row-start-positions)
                         (integerp ridx)
@@ -2482,7 +2486,7 @@ Falls back to the same row (any column), then point-min."
 
 (defun clutch--row-number-digits ()
   "Return the digit width needed for row numbers."
-  (let* ((row-count (length clutch--result-rows))
+  (let* ((row-count (length (clutch--result-display-rows)))
          (global-last (+ (or clutch--page-offset
                              (* clutch--page-current clutch-result-max-rows))
                          row-count)))
