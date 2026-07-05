@@ -154,6 +154,7 @@ artifact from Maven Central rather than a nonexistent plain
         ;; DuckDB (local embedded database through generic JDBC URL)
         ("duckdb" . (:backend jdbc
                       :url "jdbc:duckdb:/path/to/analytics.duckdb"
+                      :driver-class "org.duckdb.DuckDBDriver"
                       :display-name "DuckDB"))
 
         ;; Generic JDBC (any database with a JDBC driver jar in drivers/)

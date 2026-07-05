@@ -483,10 +483,11 @@ bridge live in separate repositories and carry their own focused test suites.
 #+end_src
 
 The native live runner starts or reuses local containers and covers MySQL,
-PostgreSQL, and ordinary MongoDB native protocol connections against real
-databases.  Other JDBC live suites remain environment-driven and are skipped by
-default.  MongoDB SQL Interface JDBC live tests require a SQL Interface
-endpoint; ordinary MongoDB work uses the default =mongodb= document surface.
+PostgreSQL, ordinary MongoDB native protocol, and Redis native protocol
+connections against real databases.  Other JDBC live suites remain
+environment-driven and are skipped by default.  MongoDB SQL Interface JDBC live
+tests require a SQL Interface endpoint; ordinary MongoDB work uses the default
+=mongodb= document surface.
 Contributor release gates are
 listed in =AGENTS.md= §Pre-Commit Checklist.
 
