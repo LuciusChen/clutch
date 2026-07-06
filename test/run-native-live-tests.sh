@@ -253,7 +253,7 @@ run_ert_live() {
 run_clutch_live_mysql() {
   run_ert_live \
     "Running UI live tests against MySQL" \
-    clutch-test \
+    clutch-test-live \
     "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\")" \
     "'(tag :clutch-live)"
 }
@@ -261,7 +261,7 @@ run_clutch_live_mysql() {
 run_clutch_live_pg() {
   run_ert_live \
     "Running UI live tests against PostgreSQL" \
-    clutch-test \
+    clutch-test-live \
     "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\")" \
     "'(tag :clutch-live)"
 }

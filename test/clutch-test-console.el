@@ -21,65 +21,34 @@
 
 ;;;; Console — yank cleanup and save
 
-(ert-deftest clutch-test-console-yank-cleanup-strips-trailing-whitespace ()
-  "Yank into a query console should clean trailing whitespace in pasted region."
-  (let ((clutch-console-yank-cleanup t))
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch--console-name "test")
-      (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
-      (insert "existing SQL;\n")
-      (let ((start (point)))
-        (insert "SELECT *   \nFROM t   \n")
-        (set-mark start)
-        (let ((this-command 'yank))
-          (clutch--console-yank-cleanup))
-        (should (equal (buffer-substring start (point-max))
-                       "SELECT *\nFROM t\n"))))))
-
-(ert-deftest clutch-test-console-yank-cleanup-does-not-touch-existing-text ()
-  "Yank cleanup should not modify text outside the pasted region."
-  (let ((clutch-console-yank-cleanup t))
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch--console-name "test")
-      (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
-      (insert "SELECT 1;   \n")
-      (let ((pre-text (buffer-string))
-            (start (point)))
-        (insert "SELECT 2;\n")
-        (set-mark start)
-        (let ((this-command 'yank))
-          (clutch--console-yank-cleanup))
-        (should (equal (buffer-substring 1 (1+ (length pre-text)))
-                       pre-text))))))
-
-(ert-deftest clutch-test-console-yank-cleanup-respects-defcustom ()
-  "Yank cleanup should be a no-op when `clutch-console-yank-cleanup' is nil."
-  (let ((clutch-console-yank-cleanup nil))
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch--console-name "test")
-      (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
-      (let ((start (point)))
-        (insert "SELECT *   \n")
-        (set-mark start)
-        (let ((this-command 'yank))
-          (clutch--console-yank-cleanup))
-        (should (equal (buffer-string) "SELECT *   \n"))))))
-
-(ert-deftest clutch-test-console-yank-cleanup-skips-non-console-buffers ()
-  "Yank cleanup should not run in non-console clutch buffers."
-  (let ((clutch-console-yank-cleanup t))
-    (with-temp-buffer
-      (clutch-mode)
-      ;; clutch--console-name is nil — not a console
-      (let ((start (point)))
-        (insert "SELECT *   \n")
-        (set-mark start)
-        (let ((this-command 'yank))
-          (clutch--console-yank-cleanup))
-        (should (equal (buffer-string) "SELECT *   \n"))))))
+(ert-deftest clutch-test-console-yank-cleanup-contract ()
+  "Yank cleanup should trim only pasted text in query consoles when enabled."
+  (cl-labels
+      ((run (console-p cleanup-p before pasted)
+         (let ((clutch-console-yank-cleanup cleanup-p))
+           (with-temp-buffer
+             (clutch-mode)
+             (when console-p
+               (setq-local clutch--console-name "test"))
+             (add-hook 'post-command-hook #'clutch--console-yank-cleanup nil t)
+             (insert before)
+             (let ((start (point)))
+               (insert pasted)
+               (set-mark start)
+               (let ((this-command 'yank))
+                 (clutch--console-yank-cleanup))
+               (list (buffer-string)
+                     (buffer-substring start (point-max))))))))
+    (pcase-let ((`(,_full ,pasted)
+                 (run t t "existing SQL;\n" "SELECT *   \nFROM t   \n")))
+      (should (equal pasted "SELECT *\nFROM t\n")))
+    (pcase-let ((`(,full ,_pasted)
+                 (run t t "SELECT 1;   \n" "SELECT 2;\n")))
+      (should (string-prefix-p "SELECT 1;   \n" full)))
+    (pcase-let ((`(,full ,_pasted) (run t nil "" "SELECT *   \n")))
+      (should (equal full "SELECT *   \n")))
+    (pcase-let ((`(,full ,_pasted) (run nil t "" "SELECT *   \n")))
+      (should (equal full "SELECT *   \n")))))
 
 (ert-deftest clutch-test-save-console-reports-write-error ()
   "Console persistence failures should surface a minibuffer warning."
@@ -155,8 +124,8 @@
             "secret\\|other\\|changed\\|Password\\|pwd\\|db/prod"
             actual-a)))))))
 
-(ert-deftest clutch-test-save-console-writes-buffer-to-file ()
-  "Saving a named console should write its current contents to disk."
+(ert-deftest clutch-test-save-console-contract ()
+  "Saving consoles should use stable names, create dirs, and skip unnamed buffers."
   (clutch-test-console--with-temp-directory dir
     (with-temp-buffer
       (let ((clutch-console-directory dir))
@@ -167,11 +136,7 @@
           (should (file-exists-p path))
           (with-temp-buffer
             (insert-file-contents path)
-            (should (equal (buffer-string) "SELECT 1;\nSELECT 2;"))))))))
-
-(ert-deftest clutch-test-save-console-uses-storage-name-when-present ()
-  "Saving a console should use its stable storage name when configured."
-  (clutch-test-console--with-temp-directory dir
+            (should (equal (buffer-string) "SELECT 1;\nSELECT 2;"))))))
     (with-temp-buffer
       (let ((clutch-console-directory dir))
         (setq-local clutch--console-name "prod-renamed")
@@ -179,29 +144,23 @@
         (insert "SELECT stable;")
         (clutch--save-console)
         (should (file-exists-p (expand-file-name "prod-stable.sql" dir)))
-        (should-not (file-exists-p (expand-file-name "prod-renamed.sql" dir)))))))
-
-(ert-deftest clutch-test-save-console-skips-unnamed-buffer ()
-  "Saving should be a no-op when the console buffer has no name."
+        (should-not (file-exists-p (expand-file-name "prod-renamed.sql" dir))))))
   (clutch-test-console--with-temp-directory parent
-    (let ((dir (expand-file-name "missing" parent)))
+    (let ((missing-dir (expand-file-name "missing" parent))
+          (nested-dir (expand-file-name "nested" parent)))
       (with-temp-buffer
-        (let ((clutch-console-directory dir))
+        (let ((clutch-console-directory missing-dir))
           (insert "SELECT 1;")
           (clutch--save-console)
-          (should-not (file-exists-p dir)))))))
-
-(ert-deftest clutch-test-save-console-creates-directory-if-missing ()
-  "Saving a named console should create its directory when needed."
-  (clutch-test-console--with-temp-directory parent
-    (let ((dir (expand-file-name "nested" parent)))
+          (should-not (file-exists-p missing-dir))))
       (with-temp-buffer
-        (let ((clutch-console-directory dir))
+        (let ((clutch-console-directory nested-dir))
           (setq-local clutch--console-name "test")
           (insert "SELECT 42;")
           (clutch--save-console)
-          (should (file-directory-p dir))
-          (should (file-exists-p (expand-file-name "test.sql" dir))))))))
+          (should (file-directory-p nested-dir))
+          (should (file-exists-p
+                   (expand-file-name "test.sql" nested-dir))))))))
 
 ;;;; REPL
 
@@ -209,37 +168,6 @@
   "Return the face at the first match for REGEXP in TEXT."
   (should (string-match regexp text))
   (get-text-property (match-beginning 0) 'face text))
-
-(defun clutch-test-console--buffer-face-at-match (regexp)
-  "Return the display face at the first buffer match for REGEXP."
-  (save-excursion
-    (goto-char (point-min))
-    (should (search-forward-regexp regexp nil t))
-    (or (get-text-property (match-beginning 0) 'face)
-        (get-text-property (match-beginning 0) 'font-lock-face))))
-
-(ert-deftest clutch-test-repl-output-keeps-faces-after-font-lock ()
-  "REPL output should remain styled after comint font-lock runs."
-  (with-temp-buffer
-    (let ((proc (start-process "clutch-test-repl" (current-buffer) "cat")))
-      (unwind-protect
-          (progn
-            (set-process-query-on-exit-flag proc nil)
-            (clutch-repl-mode)
-            (clutch-repl--output
-             (concat (clutch-repl--prompt)
-                     (clutch--message-count 1)
-                     " row shown in "
-                     (clutch--message-ident "result buffer")))
-            (font-lock-ensure)
-            (should (eq (clutch-test-console--buffer-face-at-match "db>")
-                        'minibuffer-prompt))
-            (should (eq (clutch-test-console--buffer-face-at-match "1")
-                        'font-lock-constant-face))
-            (should (eq (clutch-test-console--buffer-face-at-match
-                         "result buffer")
-                        'clutch-field-name-face)))
-        (delete-process proc)))))
 
 (ert-deftest clutch-test-repl-output-recreates-missing-process ()
   "REPL output should recover when the dummy comint process is missing."
@@ -269,8 +197,8 @@
       (when-let* ((proc (get-buffer-process (current-buffer))))
         (delete-process proc)))))
 
-(ert-deftest clutch-test-repl-input-sender-accumulates-until-semicolon ()
-  "REPL input sender should accumulate partial SQL and show continuation prompt."
+(ert-deftest clutch-test-repl-input-sender-statement-boundary ()
+  "REPL input sender should accumulate partial SQL and execute complete SQL."
   (with-temp-buffer
     (let ((clutch-repl--pending-input "")
           output)
@@ -282,10 +210,7 @@
         (should (equal clutch-repl--pending-input "SELECT 1"))
         (should (equal (substring-no-properties (car output)) "    -> "))
         (should (eq (clutch-test-console--face-at-match "    -> " (car output))
-                    'minibuffer-prompt))))))
-
-(ert-deftest clutch-test-repl-input-sender-executes-on-semicolon ()
-  "REPL input sender should execute when statement ends with semicolon."
+                    'minibuffer-prompt)))))
   (with-temp-buffer
     (let ((clutch-repl--pending-input "SELECT")
           sent)

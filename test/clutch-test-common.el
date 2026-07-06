@@ -101,6 +101,104 @@ SPEC is (CONN BACKEND MODEL)."
          ('document-conn 'mongodb 'document)
        ,@body)))
 
+(defun clutch-test--column-defs (columns)
+  "Return simple column definitions for COLUMNS."
+  (mapcar (lambda (name) (list :name name)) columns))
+
+(defun clutch-test--column-widths (columns)
+  "Return simple display widths matching COLUMNS."
+  (vconcat (cl-loop for idx below (length columns)
+                    collect (if (= idx 0) 2 8))))
+
+(defun clutch-test--init-result-state (spec)
+  "Initialize the current buffer as a small result buffer.
+SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
+:connection, :connection-params, :source-table, :base-query, :last-query,
+:where-filter, :order-by, :row-identity, :row-identity-status,
+:row-identity-error-message, :filter-pattern, :filtered-rows, :marked-rows,
+:pending-edits, :pending-deletes, :pending-inserts, :sort-column,
+:sort-descending, :page-current, :page-total-rows, :column-widths,
+:server-pageable, :server-rewritable, :result-max-rows, and :render."
+  (let* ((columns (if (plist-member spec :columns)
+                      (plist-get spec :columns)
+                    '("id" "name")))
+         (column-defs (if (plist-member spec :column-defs)
+                          (plist-get spec :column-defs)
+                        (clutch-test--column-defs columns)))
+         (rows (if (plist-member spec :rows)
+                   (plist-get spec :rows)
+                 '((1 "alice") (2 "bob"))))
+         (connection (if (plist-member spec :connection)
+                         (plist-get spec :connection)
+                       'fake-conn))
+         (page-current (if (plist-member spec :page-current)
+                           (plist-get spec :page-current)
+                         0))
+         (page-total-rows (if (plist-member spec :page-total-rows)
+                              (plist-get spec :page-total-rows)
+                            (length rows)))
+         (result-max-rows (if (plist-member spec :result-max-rows)
+                              (plist-get spec :result-max-rows)
+                            100))
+         (column-widths (if (plist-member spec :column-widths)
+                            (plist-get spec :column-widths)
+                          (clutch-test--column-widths columns))))
+    (clutch-result-mode)
+    (setq-local clutch-connection connection
+                clutch--connection-params (plist-get spec :connection-params)
+                clutch--result-source-table (plist-get spec :source-table)
+                clutch--base-query (plist-get spec :base-query)
+                clutch--last-query (plist-get spec :last-query)
+                clutch--where-filter (plist-get spec :where-filter)
+                clutch--order-by (plist-get spec :order-by)
+                clutch--result-columns columns
+                clutch--result-column-defs column-defs
+                clutch--result-rows rows
+                clutch--filtered-rows (plist-get spec :filtered-rows)
+                clutch--filter-pattern (plist-get spec :filter-pattern)
+                clutch--pending-edits (plist-get spec :pending-edits)
+                clutch--pending-deletes (plist-get spec :pending-deletes)
+                clutch--pending-inserts (plist-get spec :pending-inserts)
+                clutch--marked-rows (plist-get spec :marked-rows)
+                clutch--row-identity (plist-get spec :row-identity)
+                clutch--row-identity-status (plist-get spec
+                                                       :row-identity-status)
+                clutch--row-identity-error-message
+                (plist-get spec :row-identity-error-message)
+                clutch--sort-column (plist-get spec :sort-column)
+                clutch--sort-descending (plist-get spec :sort-descending)
+                clutch--page-current page-current
+                clutch--page-total-rows page-total-rows
+                clutch--result-server-pageable (plist-get spec :server-pageable)
+                clutch--result-server-rewritable (plist-get spec
+                                                             :server-rewritable)
+                clutch--query-elapsed nil
+                clutch-result-max-rows result-max-rows
+                clutch--column-widths column-widths)
+    (when (plist-get spec :render)
+      (clutch--render-result))))
+
+(defmacro clutch-test--with-result-state (spec &rest body)
+  "Run BODY in a temporary `clutch-result-mode' buffer.
+SPEC has the same shape as `clutch-test--init-result-state'."
+  (declare (indent 1) (debug (sexp body)))
+  `(with-temp-buffer
+     (clutch-test--init-result-state (list ,@spec))
+     (let ((inhibit-read-only t))
+       ,@body)))
+
+(defmacro clutch-test--with-result-state-buffer (var spec &rest body)
+  "Bind VAR to a named result buffer initialized from SPEC while running BODY."
+  (declare (indent 2) (debug (symbolp sexp body)))
+  `(let ((,var (generate-new-buffer "*clutch-result*")))
+     (unwind-protect
+         (progn
+           (with-current-buffer ,var
+             (clutch-test--init-result-state (list ,@spec)))
+           ,@body)
+       (when (buffer-live-p ,var)
+         (kill-buffer ,var)))))
+
 (defmacro clutch-test--with-result-buffer (spec &rest body)
   "Run BODY with result rendering isolated to buffer NAME.
 SPEC is (NAME &optional REFRESH-FN).
@@ -119,6 +217,43 @@ REFRESH-FN, when non-nil, replaces `clutch--refresh-display'."
              (progn ,@body)
            (when-let* ((buf (get-buffer clutch-test--result-name)))
              (kill-buffer buf)))))))
+
+(defun clutch-test--setup-rendered-result (&optional rows)
+  "Populate the current buffer with a rendered three-column result table.
+ROWS defaults to a small three-row sample."
+  (let ((rows (or rows '((1 "alpha" "oslo")
+                         (2 "bravo" "rome")
+                         (3 "charlie" "paris")))))
+    (clutch-result-mode)
+    (setq-local clutch--result-columns '("id" "name" "city")
+                clutch--result-column-defs
+                '((:name "id" :type-category numeric)
+                  (:name "name" :type-category text)
+                  (:name "city" :type-category text))
+                clutch--result-rows rows
+                clutch--filtered-rows nil
+                clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
+                clutch--marked-rows nil
+                clutch--row-identity (clutch-test--primary-row-identity
+                                       "users" '("id") '(0))
+                clutch--sort-column nil
+                clutch--sort-descending nil
+                clutch--page-current 0
+                clutch--page-total-rows (length rows)
+                clutch--query-elapsed nil
+                clutch-result-max-rows 100
+                clutch--column-widths [3 8 8])
+    (clutch--render-result)))
+
+(defun clutch-test--rendered-line-at (ridx)
+  "Return rendered line RIDX from the current result buffer."
+  (let ((start (aref clutch--row-start-positions ridx))
+        (end (or (and (< (1+ ridx) (length clutch--row-start-positions))
+                      (aref clutch--row-start-positions (1+ ridx)))
+                 (point-max))))
+    (buffer-substring start end)))
 
 (provide 'clutch-test-common)
 
