@@ -266,8 +266,12 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
       (and (symbolp val)
            (string= (symbol-name val) "clutch-jdbc-json-false"))))
 
+(defun clutch--json-normalize-text (text)
+  "Return TEXT parsed and serialized as compact JSON."
+  (clutch--json-serialize-text (json-parse-string text)))
+
 (defun clutch--json-value-to-string (val)
-  "Convert VAL to valid JSON text suitable for JSON editing and viewing."
+  "Convert VAL to valid JSON text for JSON viewing."
   (cond
    ((null val)
     "null")
@@ -275,7 +279,7 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
          (fboundp 'json-serialize)
          (fboundp 'json-parse-string))
     (condition-case nil
-        (clutch--json-serialize-text (json-parse-string val))
+        (clutch--json-normalize-text val)
       (error (clutch--json-serialize-text val))))
    ((clutch--json-false-value-p val)
     "false")

@@ -436,12 +436,15 @@ All field types use the same delay so feedback timing is consistent."
   (interactive)
   (unless (clutch-result-edit--json-p)
     (user-error "Column %s is not a JSON field" clutch-result-edit--column-name))
-  (let ((parent-buf (current-buffer))
-        (field-name clutch-result-edit--column-name)
-        (parent-text (buffer-substring-no-properties (point-min) (point-max)))
-        (buf-name (format "*clutch-edit-json: %s*" clutch-result-edit--column-name)))
+  (let* ((parent-buf (current-buffer))
+         (field-name clutch-result-edit--column-name)
+         (parent-text (buffer-substring-no-properties (point-min) (point-max)))
+         (initial-text (clutch-result--json-normalize-string
+                        (string-trim parent-text)
+                        field-name))
+         (buf-name (format "*clutch-edit-json: %s*" clutch-result-edit--column-name)))
     (let ((buf (clutch--open-json-sub-editor
-                buf-name parent-text field-name
+                buf-name initial-text field-name
                 #'clutch-result-edit-json-finish
                 #'clutch-result-edit-json-cancel)))
       (with-current-buffer buf
@@ -480,7 +483,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
   (let* ((parent clutch-result-edit-json--parent-buffer)
          (field-name clutch-result-edit-json--field-name)
          (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
-         (value (clutch-result-insert--json-normalize-string raw)))
+         (value (clutch-result--json-normalize-string raw field-name)))
     (clutch--finish-json-sub-editor
      parent "Edit buffer no longer exists"
      (lambda ()
@@ -1127,33 +1130,6 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
   (cl-loop for col in col-names
            collect (cons col (or (cdr (assoc col fields)) ""))))
 
-(defun clutch-result-insert--ensure-seed-fields ()
-  "Populate canonical field values from the current visible buffer when missing."
-  (unless clutch-result-insert--seed-fields
-    (clutch-result-insert--ensure-field-state)
-    (let ((fields
-           (mapcar (lambda (field)
-                     (clutch-result-insert--sync-field-value field)
-                     (cons (plist-get field :name)
-                           (plist-get field :value)))
-                   clutch-result-insert--fields)))
-      (setq-local clutch-result-insert--seed-fields
-                  (clutch-result-insert--canonicalize-fields
-                   (clutch-result-insert--all-column-names)
-                   fields)))))
-
-(defun clutch-result-insert--seed-field-value (field-name)
-  "Return canonical insert value for FIELD-NAME."
-  (clutch-result-insert--ensure-seed-fields)
-  (cdr (assoc field-name clutch-result-insert--seed-fields)))
-
-(defun clutch-result-insert--set-seed-field-value (field-name value)
-  "Store VALUE as the canonical insert value for FIELD-NAME."
-  (clutch-result-insert--ensure-seed-fields)
-  (when-let* ((cell (assoc field-name clutch-result-insert--seed-fields)))
-    (setcdr cell (or value "")))
-  value)
-
 (defun clutch-result-insert--field-empty-p (value)
   "Return non-nil when VALUE should be treated as empty."
   (or (null value) (string-empty-p value)))
@@ -1170,12 +1146,9 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
             (let* ((name (string-trim-right (match-string-no-properties 1)))
                    (value-start (match-end 0))
                    (line-start (line-beginning-position))
-                   (line-end (min (point-max) (1+ (line-end-position))))
-                   (value (buffer-substring-no-properties value-start
-                                                          (line-end-position))))
+                   (line-end (min (point-max) (1+ (line-end-position)))))
               (clutch-result-insert--annotate-field-line name line-start line-end)
               (push (list :name name
-                          :value value
                           :value-marker (copy-marker value-start))
                     field-states)))
           (forward-line 1)))
@@ -1226,22 +1199,43 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
       (goto-char beg)
       (cons beg (line-end-position)))))
 
-(defun clutch-result-insert--sync-field-value (field)
-  "Refresh FIELD value from the current buffer and return FIELD."
+(defun clutch-result-insert--field-value (field)
+  "Return the current buffer value for structured FIELD."
   (when-let* ((bounds (clutch-result-insert--field-value-bounds field)))
-    (setf (plist-get field :value)
-          (buffer-substring-no-properties (car bounds) (cdr bounds))))
-  field)
+    (buffer-substring-no-properties (car bounds) (cdr bounds))))
 
-(defun clutch-result-insert--sync-fields-from-buffer ()
-  "Refresh all structured insert field values from the current buffer."
+(defun clutch-result-insert--ensure-seed-fields ()
+  "Populate canonical field values from the current visible buffer when missing."
+  (unless clutch-result-insert--seed-fields
+    (clutch-result-insert--ensure-field-state)
+    (setq-local clutch-result-insert--seed-fields
+                (clutch-result-insert--canonicalize-fields
+                 (clutch-result-insert--all-column-names)
+                 (cl-loop for field in clutch-result-insert--fields
+                          collect (cons (plist-get field :name)
+                                        (or (clutch-result-insert--field-value field)
+                                            "")))))))
+
+(defun clutch-result-insert--seed-field-value (field-name)
+  "Return canonical insert value for FIELD-NAME."
+  (clutch-result-insert--ensure-seed-fields)
+  (cdr (assoc field-name clutch-result-insert--seed-fields)))
+
+(defun clutch-result-insert--set-seed-field-value (field-name value)
+  "Store VALUE as the canonical insert value for FIELD-NAME."
+  (clutch-result-insert--ensure-seed-fields)
+  (when-let* ((cell (assoc field-name clutch-result-insert--seed-fields)))
+    (setcdr cell (or value "")))
+  value)
+
+(defun clutch-result-insert--record-visible-values ()
+  "Copy visible insert buffer values into canonical insert state."
   (clutch-result-insert--ensure-seed-fields)
   (clutch-result-insert--ensure-field-state)
   (dolist (field clutch-result-insert--fields)
-    (clutch-result-insert--sync-field-value field)
     (clutch-result-insert--set-seed-field-value
      (plist-get field :name)
-     (plist-get field :value))))
+     (clutch-result-insert--field-value field))))
 
 (defun clutch-result-insert--json-field-p (field)
   "Return non-nil for structured JSON FIELD values."
@@ -1297,7 +1291,8 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
 (defun clutch-result-insert--field-validation-message (field)
   "Return a validation message for structured FIELD, or nil."
   (let* ((name (plist-get field :name))
-         (value (plist-get field :value))
+         (value (or (clutch-result-insert--field-value field)
+                    (clutch-result-insert--seed-field-value name)))
          (detail (or (plist-get field :detail)
                      (clutch-result-insert--column-detail name)))
          (col-def (or (plist-get field :column-def)
@@ -1309,7 +1304,9 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
 
 (defun clutch-result-insert--validate-field-live (field)
   "Run local validation for structured FIELD and update inline UI."
-  (clutch-result-insert--sync-field-value field)
+  (when-let* ((name (plist-get field :name)))
+    (clutch-result-insert--set-seed-field-value
+     name (clutch-result-insert--field-value field)))
   (if-let* ((message (clutch-result-insert--field-validation-message field)))
       (clutch-result-insert--show-field-error field message)
     (clutch-result-insert--clear-field-error field)))
@@ -1375,18 +1372,15 @@ All field types use the same delay so feedback timing is consistent."
                                  'face 'clutch-insert-field-tag-face))))
     (concat name-part tag-part)))
 
-(defun clutch-result-insert--json-normalize-string (value)
-  "Return VALUE normalized as compact JSON."
+(defun clutch-result--json-normalize-string (value field-name)
+  "Return VALUE normalized as compact JSON for FIELD-NAME."
   (if (string-empty-p value)
       ""
     (condition-case nil
         (if (fboundp 'json-serialize)
-            (json-serialize (json-parse-string value))
+            (clutch--json-serialize-text (json-parse-string value))
           value)
-      (error (user-error "Field %s expects valid JSON"
-                         (or clutch-result-insert-json--field-name
-                             (clutch-result-insert--current-field-name)
-                             "JSON"))))))
+      (error (user-error "Field %s expects valid JSON" field-name)))))
 
 (defun clutch-result-insert--json-editor-mode ()
   "Select the best available major mode for JSON field editing."
@@ -1719,23 +1713,23 @@ If nothing handles the completion, fall back to `completing-read'."
   (interactive)
   (let* ((field (clutch-result-insert--current-field-or-error))
          (field-name (plist-get field :name))
-         (value (progn
-                  (clutch-result-insert--sync-field-value field)
-                  (plist-get field :value)))
+         (raw (string-trim (or (clutch-result-insert--field-value field) "")))
          (parent-buf (current-buffer)))
     (unless (clutch-result-insert--json-field-p field)
       (user-error "Field %s is not a JSON column" field-name))
-    (let ((buf (clutch--open-json-sub-editor
-                (format "*clutch-insert-json: %s.%s*"
-                        clutch-result-insert--table field-name)
-                value field-name
-                #'clutch-result-insert-json-finish
-                #'clutch-result-insert-json-cancel)))
-      (with-current-buffer buf
-        (clutch--result-insert-json-mode 1)
-        (setq-local clutch-result-insert-json--parent-buffer parent-buf
-                    clutch-result-insert-json--field-name field-name))
-      buf)))
+    (let ((value (clutch-result--json-normalize-string raw field-name)))
+      (clutch-result-insert--set-seed-field-value field-name value)
+      (let ((buf (clutch--open-json-sub-editor
+                  (format "*clutch-insert-json: %s.%s*"
+                          clutch-result-insert--table field-name)
+                  value field-name
+                  #'clutch-result-insert-json-finish
+                  #'clutch-result-insert-json-cancel)))
+        (with-current-buffer buf
+          (clutch--result-insert-json-mode 1)
+          (setq-local clutch-result-insert-json--parent-buffer parent-buf
+                      clutch-result-insert-json--field-name field-name))
+        buf))))
 
 ;;;###autoload
 (defun clutch-result-insert-json-finish ()
@@ -1744,7 +1738,7 @@ If nothing handles the completion, fall back to `completing-read'."
   (let* ((parent clutch-result-insert-json--parent-buffer)
          (field-name clutch-result-insert-json--field-name)
          (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
-         (value (clutch-result-insert--json-normalize-string raw)))
+         (value (clutch-result--json-normalize-string raw field-name)))
     (clutch--finish-json-sub-editor
      parent "Insert buffer no longer exists"
      (lambda ()
@@ -1794,7 +1788,6 @@ the canonical seed values before rendering the current visible subset."
             (insert value "\n")
             (clutch-result-insert--annotate-field-line col prefix-start (point))
             (push (list :name col
-                        :value value
                         :detail (clutch-result-insert--column-detail col)
                         :column-def (clutch-result-insert--column-def col)
                         :value-marker value-marker)
@@ -1980,7 +1973,7 @@ fields until the user expands to all columns."
 (defun clutch-result-insert-toggle-field-layout ()
   "Toggle the insert buffer between sparse and all-column layouts."
   (interactive)
-  (clutch-result-insert--sync-fields-from-buffer)
+  (clutch-result-insert--record-visible-values)
   (setq-local clutch-result-insert--show-all-fields
               (not clutch-result-insert--show-all-fields))
   (clutch-result-insert--populate-buffer
@@ -2117,7 +2110,7 @@ Otherwise reads from the active region or the current kill.
 Single-row imports prefill the current form.  Multi-row imports stage inserts
 immediately."
   (interactive)
-  (clutch-result-insert--sync-fields-from-buffer)
+  (clutch-result-insert--record-visible-values)
   (pcase-let* ((raw (or text (clutch-result-insert--read-import-text)))
                (`(,delim . ,rows) (clutch-result-insert--parse-delimited-text raw))
                (`(,columns . ,data-rows) (clutch-result-insert--import-target-columns rows))
@@ -2158,7 +2151,7 @@ immediately."
 (defun clutch-result-insert--parse-fields ()
   "Parse the insert buffer into an alist of (COLUMN . VALUE).
 Skips columns with empty values."
-  (clutch-result-insert--sync-fields-from-buffer)
+  (clutch-result-insert--record-visible-values)
   (cl-loop for col in (clutch-result-insert--all-column-names)
            for value = (clutch-result-insert--seed-field-value col)
            unless (clutch-result-insert--field-empty-p value)

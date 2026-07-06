@@ -1775,39 +1775,35 @@ Enable --refine to exclude rows/columns interactively before copying
 
 ;;;; Agent context export
 
-(defun clutch--agent-context-sql-from-bounds (bounds)
-  "Return trimmed SQL text from BOUNDS."
-  (pcase-let ((`(,beg . ,end) bounds))
-    (string-trim (buffer-substring-no-properties beg end))))
-
-(defun clutch--agent-context-dwim-sql ()
-  "Return current SQL for agent context from `clutch-mode'."
-  (let ((sql (clutch--agent-context-sql-from-bounds
-              (clutch--dwim-bounds-at-point))))
-    (if (not (string-empty-p sql))
-        sql
-      (save-excursion
-        (skip-chars-backward " \t\n\r;")
-        (when (and (not (bobp))
-                   (eq (char-after) ?\;))
-          (backward-char))
-        (when (not (eobp))
-          (clutch--agent-context-sql-from-bounds
-           (clutch--dwim-bounds-at-point)))))))
-
 (defun clutch--agent-context-current-sql ()
   "Return SQL text that should anchor an external agent context export."
-  (let ((sql
-         (cond
-          ((derived-mode-p 'clutch-result-mode)
-           (clutch-result--effective-query))
-          ((use-region-p)
-           (buffer-substring-no-properties (region-beginning) (region-end)))
-          ((derived-mode-p 'clutch-mode)
-           (clutch--agent-context-dwim-sql))
-          (t clutch--last-query))))
-    (when (stringp sql)
-      (string-trim sql))))
+  (cl-labels ((sql-from-bounds
+               (bounds)
+               (pcase-let ((`(,beg . ,end) bounds))
+                 (string-trim (buffer-substring-no-properties beg end))))
+              (dwim-sql
+               ()
+               (let ((sql (sql-from-bounds (clutch--dwim-bounds-at-point))))
+                 (if (not (string-empty-p sql))
+                     sql
+                   (save-excursion
+                     (skip-chars-backward " \t\n\r;")
+                     (when (and (not (bobp))
+                                (eq (char-after) ?\;))
+                       (backward-char))
+                     (when (not (eobp))
+                       (sql-from-bounds (clutch--dwim-bounds-at-point))))))))
+    (let ((sql
+           (cond
+            ((derived-mode-p 'clutch-result-mode)
+             (clutch-result--effective-query))
+            ((use-region-p)
+             (buffer-substring-no-properties (region-beginning) (region-end)))
+            ((derived-mode-p 'clutch-mode)
+             (dwim-sql))
+            (t clutch--last-query))))
+      (when (stringp sql)
+        (string-trim sql)))))
 
 (defun clutch--agent-context-tables (sql)
   "Return table names that should be documented for SQL."
@@ -1819,121 +1815,112 @@ Enable --refine to exclude rows/columns interactively before copying
         (append tables (list clutch--result-source-table))
       tables)))
 
-(defun clutch--agent-context-inline-value (value)
-  "Format VALUE as one compact line for copied agent context."
-  (let ((text (replace-regexp-in-string
-               "[\n\r\t ]+" " "
-               (clutch--format-value value))))
-    (setq text (string-trim text))
-    (if (> (string-width text) clutch-agent-context-max-cell-width)
-        (truncate-string-to-width text clutch-agent-context-max-cell-width
-                                  nil nil "...")
-      text)))
-
-(defun clutch--agent-context-table-section (conn table)
-  "Return the Markdown context section for TABLE on CONN."
-  (concat
-   "## Table: " table "\n\n"
-   (condition-case err
-       (concat "```text\n"
-               (clutch--object-describe-text
-                conn
-                (list :name table :type "TABLE"))
-               "\n```\n\n")
-     (error
-      (let ((message (error-message-string err)))
-        (format "- Table metadata unavailable: %s\n\n" message))))))
-
-(defun clutch--agent-context-row-list (row)
-  "Return ROW as a list."
-  (cond
-   ((vectorp row)
-    (cl-loop for i below (length row) collect (aref row i)))
-   ((listp row) row)
-   (t (list row))))
-
-(defun clutch--agent-context-format-tsv-line (values)
-  "Format VALUES as one TSV line for copied agent context."
-  (mapconcat #'clutch--agent-context-inline-value values "\t"))
-
-(defun clutch--agent-context-sql-match-p (a b)
-  "Return non-nil when SQL strings A and B refer to the same exported query."
-  (let ((a (and (stringp a) (clutch-db-sql-normalize a)))
-        (b (and (stringp b) (clutch-db-sql-normalize b))))
-    (and a b (string= a b))))
-
-(defun clutch--agent-context-result-buffer (sql)
-  "Return the result buffer whose rows should accompany SQL, or nil."
-  (cond
-   ((derived-mode-p 'clutch-result-mode)
-    (current-buffer))
-   ((and (buffer-live-p clutch--last-result-buffer)
-         (with-current-buffer clutch--last-result-buffer
-           (and (derived-mode-p 'clutch-result-mode)
-                clutch--result-columns
-                (clutch--agent-context-sql-match-p
-                 sql (clutch-result--effective-query)))))
-    clutch--last-result-buffer)))
-
-(defun clutch--agent-context-result-sample (result-buffer)
-  "Return a Markdown section with the sample rows from RESULT-BUFFER, or nil."
-  (when (and (buffer-live-p result-buffer)
-             (with-current-buffer result-buffer
-               (and (derived-mode-p 'clutch-result-mode)
-                    clutch--result-columns)))
-    (with-current-buffer result-buffer
-      (let* ((rows (clutch--result-display-rows))
-             (col-indices (clutch--visible-columns))
-             (columns (clutch--column-names-for-indices col-indices))
-             (max-rows (max 0 clutch-agent-context-max-result-rows))
-             (sample (cl-subseq rows 0 (min max-rows (length rows)))))
-        (when columns
-          (concat
-           "## Result sample\n\n"
-           (format "Showing %d of %d visible rows from the latest matching result buffer.\n\n"
-                   (length sample) (length rows))
-           "```text\n"
-           (clutch--agent-context-format-tsv-line columns)
-           "\n"
-           (mapconcat
-            (lambda (row)
-              (let ((values (clutch--agent-context-row-list row)))
-                (clutch--agent-context-format-tsv-line
-                 (mapcar (lambda (i) (nth i values)) col-indices))))
-            sample
-            "\n")
-           (when sample "\n")
-           "```\n\n"))))))
-
-(defun clutch--agent-context-connection-section (conn)
-  "Return a Markdown connection section for CONN."
-  (let ((schema (clutch-db-current-schema conn))
-        (database (clutch-db-database conn)))
-    (concat "## Connection\n\n"
-            (format "- Backend: %s\n" (clutch-db-display-name conn))
-            (format "- Connection: %s\n" (clutch--connection-key conn))
-            (format "- Database: %s\n" (or database "none"))
-            (format "- Current schema/database: %s\n\n" (or schema database "none")))))
-
 (defun clutch--agent-context-text (conn sql &optional tables)
   "Return Markdown context text for CONN, SQL, and optional TABLES."
-  (let* ((tables (or tables (clutch--agent-context-tables sql)))
-         (result-buffer (clutch--agent-context-result-buffer sql))
-         (sample (clutch--agent-context-result-sample result-buffer)))
-    (with-temp-buffer
-      (insert "# Clutch database context\n\n")
-      (insert (clutch--agent-context-connection-section conn))
-      (insert "## SQL\n\n```sql\n" sql "\n```\n\n")
-      (insert "## Referenced tables\n\n")
-      (if tables
-          (insert (mapconcat (lambda (table) (concat "- " table)) tables "\n")
-                  "\n\n")
-        (insert "- None detected\n\n"))
-      (when sample
-        (insert sample))
-      (dolist (table tables)
-        (insert (clutch--agent-context-table-section conn table)))
-      (string-trim-right (buffer-string)))))
+  (cl-labels
+      ((inline-value
+        (value)
+        (let ((text (replace-regexp-in-string
+                     "[\n\r\t ]+" " "
+                     (clutch--format-value value))))
+          (setq text (string-trim text))
+          (if (> (string-width text) clutch-agent-context-max-cell-width)
+              (truncate-string-to-width text clutch-agent-context-max-cell-width
+                                        nil nil "...")
+            text)))
+       (format-tsv-line
+        (values)
+        (mapconcat #'inline-value values "\t"))
+       (row-list
+        (row)
+        (cond
+         ((vectorp row)
+          (cl-loop for i below (length row) collect (aref row i)))
+         ((listp row) row)
+         (t (list row))))
+       (sql-match-p
+        (a b)
+        (let ((a (and (stringp a) (clutch-db-sql-normalize a)))
+              (b (and (stringp b) (clutch-db-sql-normalize b))))
+          (and a b (string= a b))))
+       (matching-result-buffer
+        ()
+        (cond
+         ((derived-mode-p 'clutch-result-mode)
+          (current-buffer))
+         ((and (buffer-live-p clutch--last-result-buffer)
+               (with-current-buffer clutch--last-result-buffer
+                 (and (derived-mode-p 'clutch-result-mode)
+                      clutch--result-columns
+                      (sql-match-p sql (clutch-result--effective-query)))))
+          clutch--last-result-buffer)))
+       (result-sample
+        ()
+        (when-let* ((result-buffer (matching-result-buffer)))
+          (with-current-buffer result-buffer
+            (when (and (derived-mode-p 'clutch-result-mode)
+                       clutch--result-columns)
+              (let* ((rows (clutch--result-display-rows))
+                     (col-indices (clutch--visible-columns))
+                     (columns (clutch--column-names-for-indices col-indices))
+                     (max-rows (max 0 clutch-agent-context-max-result-rows))
+                     (sample (cl-subseq rows 0 (min max-rows (length rows)))))
+                (when columns
+                  (concat
+                   "## Result sample\n\n"
+                   (format "Showing %d of %d visible rows from the latest matching result buffer.\n\n"
+                           (length sample) (length rows))
+                   "```text\n"
+                   (format-tsv-line columns)
+                   "\n"
+                   (mapconcat
+                    (lambda (row)
+                      (let ((values (row-list row)))
+                        (format-tsv-line
+                         (mapcar (lambda (i) (nth i values)) col-indices))))
+                    sample
+                    "\n")
+                   (when sample "\n")
+                   "```\n\n")))))))
+       (connection-section
+        ()
+        (let ((schema (clutch-db-current-schema conn))
+              (database (clutch-db-database conn)))
+          (concat "## Connection\n\n"
+                  (format "- Backend: %s\n" (clutch-db-display-name conn))
+                  (format "- Connection: %s\n" (clutch--connection-key conn))
+                  (format "- Database: %s\n" (or database "none"))
+                  (format "- Current schema/database: %s\n\n"
+                          (or schema database "none")))))
+       (table-section
+        (table)
+        (concat
+         "## Table: " table "\n\n"
+         (condition-case err
+             (concat "```text\n"
+                     (clutch--object-describe-text
+                      conn
+                      (list :name table :type "TABLE"))
+                     "\n```\n\n")
+           ((clutch-db-error user-error)
+            (let ((message (error-message-string err)))
+              (format "- Table metadata unavailable: %s\n\n" message)))))))
+    (let* ((tables (or tables (clutch--agent-context-tables sql)))
+           (sample (result-sample)))
+      (with-temp-buffer
+        (insert "# Clutch database context\n\n")
+        (insert (connection-section))
+        (insert "## SQL\n\n```sql\n" sql "\n```\n\n")
+        (insert "## Referenced tables\n\n")
+        (if tables
+            (insert (mapconcat (lambda (table) (concat "- " table)) tables "\n")
+                    "\n\n")
+          (insert "- None detected\n\n"))
+        (when sample
+          (insert sample))
+        (dolist (table tables)
+          (insert (table-section table)))
+        (string-trim-right (buffer-string))))))
 
 ;;;###autoload
 (defun clutch-copy-context-for-agent ()

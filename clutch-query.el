@@ -905,6 +905,18 @@ unique.  Arbitrary query results are displayed as result sets instead."
     (insert "\n" title "\n")
     (insert (clutch--debug-indent-block rendered 2) "\n")))
 
+(defun clutch--debug-insert-fields (fields)
+  "Insert FIELDS into the current debug buffer.
+Each field is a cons cell (LABEL . VALUE)."
+  (dolist (field fields)
+    (clutch--debug-insert-field (car field) (cdr field))))
+
+(defun clutch--debug-insert-sections (sections)
+  "Insert SECTIONS into the current debug buffer.
+Each section is a cons cell (TITLE . VALUE)."
+  (dolist (section sections)
+    (clutch--debug-insert-section (car section) (cdr section))))
+
 (defun clutch--debug-context-without-inline-sql (context)
   "Return CONTEXT plist without inline SQL payload entries."
   (when context
@@ -940,34 +952,27 @@ unique.  Arbitrary query results are displayed as result sets instead."
             (clutch--debug-context-without-inline-sql context))
            (body
             (with-temp-buffer
-              (clutch--debug-insert-field "Recorded"
-                                          (format-time-string "%F %T"))
-              (clutch--debug-insert-field "Backend"
-                                          (and backend
-                                               (upcase (symbol-name backend))))
-              (clutch--debug-insert-field "Source"
-                                          (clutch--debug-buffer-source-label buffer))
-              (clutch--debug-insert-field "Connection"
-                                          (clutch--debug-buffer-connection-label connection))
-              (clutch--debug-insert-field "Summary"
-                                          (plist-get problem :summary))
-              (clutch--debug-insert-field "Category" (plist-get diag :category))
-              (clutch--debug-insert-field "Operation" (plist-get diag :op))
-              (clutch--debug-insert-field "Request ID" (plist-get diag :request-id))
-              (clutch--debug-insert-field "Conn ID" (plist-get diag :conn-id))
-              (clutch--debug-insert-field "Exception"
-                                          (plist-get diag :exception-class))
-              (clutch--debug-insert-field "SQLState" (plist-get diag :sql-state))
-              (clutch--debug-insert-field "Vendor code" (plist-get diag :vendor-code))
-              (clutch--debug-insert-field "Raw message"
-                                          (plist-get diag :raw-message))
-              (clutch--debug-insert-section "SQL" sql)
-              (clutch--debug-insert-section "Generated SQL" generated-sql)
-              (clutch--debug-insert-section "Context" display-context)
-              (clutch--debug-insert-section "Cause chain"
-                                            (plist-get diag :cause-chain))
-              (clutch--debug-insert-section "Backend debug" debug-payload)
-              (clutch--debug-insert-section "Agent stderr tail" stderr-tail)
+              (clutch--debug-insert-fields
+               `(("Recorded" . ,(format-time-string "%F %T"))
+                 ("Backend" . ,(and backend (upcase (symbol-name backend))))
+                 ("Source" . ,(clutch--debug-buffer-source-label buffer))
+                 ("Connection" . ,(clutch--debug-buffer-connection-label connection))
+                 ("Summary" . ,(plist-get problem :summary))
+                 ("Category" . ,(plist-get diag :category))
+                 ("Operation" . ,(plist-get diag :op))
+                 ("Request ID" . ,(plist-get diag :request-id))
+                 ("Conn ID" . ,(plist-get diag :conn-id))
+                 ("Exception" . ,(plist-get diag :exception-class))
+                 ("SQLState" . ,(plist-get diag :sql-state))
+                 ("Vendor code" . ,(plist-get diag :vendor-code))
+                 ("Raw message" . ,(plist-get diag :raw-message))))
+              (clutch--debug-insert-sections
+               `(("SQL" . ,sql)
+                 ("Generated SQL" . ,generated-sql)
+                 ("Context" . ,display-context)
+                 ("Cause chain" . ,(plist-get diag :cause-chain))
+                 ("Backend debug" . ,debug-payload)
+                 ("Agent stderr tail" . ,stderr-tail)))
               (string-trim-right (buffer-string)))))
       (clutch--append-debug-buffer-entry "Problem" body))))
 
@@ -977,26 +982,20 @@ unique.  Arbitrary query results are displayed as result sets instead."
     (let* ((backend (plist-get event :backend))
            (body
             (with-temp-buffer
-              (clutch--debug-insert-field "Recorded"
-                                          (or (plist-get event :time)
-                                              (format-time-string "%F %T")))
-              (clutch--debug-insert-field "Operation" (plist-get event :op))
-              (clutch--debug-insert-field "Phase" (plist-get event :phase))
-              (clutch--debug-insert-field "Backend"
-                                          (and backend
-                                               (upcase (symbol-name backend))))
-              (clutch--debug-insert-field "Source"
-                                          (clutch--debug-buffer-source-label buffer))
-              (clutch--debug-insert-field "Connection"
-                                          (clutch--debug-buffer-connection-label connection))
-              (when-let* ((elapsed (plist-get event :elapsed)))
-                (clutch--debug-insert-field "Elapsed"
-                                            (clutch--format-elapsed elapsed)))
-              (clutch--debug-insert-field "Summary" (plist-get event :summary))
-              (clutch--debug-insert-field "SQL preview"
-                                          (plist-get event :sql-preview))
-              (clutch--debug-insert-section "Context"
-                                            (plist-get event :context))
+              (clutch--debug-insert-fields
+               `(("Recorded" . ,(or (plist-get event :time)
+                                    (format-time-string "%F %T")))
+                 ("Operation" . ,(plist-get event :op))
+                 ("Phase" . ,(plist-get event :phase))
+                 ("Backend" . ,(and backend (upcase (symbol-name backend))))
+                 ("Source" . ,(clutch--debug-buffer-source-label buffer))
+                 ("Connection" . ,(clutch--debug-buffer-connection-label connection))
+                 ("Elapsed" . ,(when-let* ((elapsed (plist-get event :elapsed)))
+                                 (clutch--format-elapsed elapsed)))
+                 ("Summary" . ,(plist-get event :summary))
+                 ("SQL preview" . ,(plist-get event :sql-preview))))
+              (clutch--debug-insert-sections
+               `(("Context" . ,(plist-get event :context))))
               (string-trim-right (buffer-string)))))
       (clutch--append-debug-buffer-entry "Trace Event" body))))
 

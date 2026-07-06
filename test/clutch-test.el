@@ -229,7 +229,7 @@
                    "{\"quote\":\"记忆碎片已封存\",\"operator\":\"Saito\",\"thermoptic\":false}"))))
 
 (ert-deftest clutch-test-json-value-to-string-scalars ()
-  "JSON scalar values should remain valid JSON when edited or viewed."
+  "JSON scalar values should remain valid JSON when viewed."
   (should (equal (clutch--json-value-to-string "hello") "\"hello\""))
   (should (equal (clutch--json-value-to-string nil) "null"))
   (should (equal (clutch--json-value-to-string t) "true"))
@@ -4273,7 +4273,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
     (insert "id: \nname: alice\ncreated_at: \n")
     (clutch-result-insert-mode 1)
     (goto-char (point-min))
-    (goto-char (clutch-result-insert--current-field-value-position))
+    (clutch-test--goto-insert-field-value-end "id")
     (should (= (current-column) (length "id: ")))
     (clutch-result-insert-next-field)
     (should (equal (buffer-substring-no-properties
@@ -4303,7 +4303,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
     (backward-char 1)
     (should (equal (get-text-property (point) 'clutch-insert-field-name)
                    "owner"))
-    (should (equal (clutch-result-insert--current-field-name) "owner"))))
+    (should (equal (clutch-test--current-insert-field-name) "owner"))))
 
 (ert-deftest clutch-test-insert-return-key-navigates-like-tab ()
   "RET should advance to the next insert field without replacing TAB."
@@ -4311,11 +4311,11 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
     (insert "id: \nname: alice\ncreated_at: \n")
     (clutch-result-insert-mode 1)
     (goto-char (point-min))
-    (goto-char (clutch-result-insert--current-field-value-start))
+    (clutch-test--goto-insert-field-value-start "id")
     (call-interactively (key-binding (kbd "RET")))
-    (should (equal (clutch-result-insert--current-field-name) "name"))
+    (should (equal (clutch-test--current-insert-field-name) "name"))
     (call-interactively (key-binding (kbd "TAB")))
-    (should (equal (clutch-result-insert--current-field-name) "created_at"))))
+    (should (equal (clutch-test--current-insert-field-name) "created_at"))))
 
 (ert-deftest clutch-test-insert-buffer-renders-tight-tags-and-highlights-current-line ()
   "Insert buffer should keep tags tight to the colon and highlight the active field line."
@@ -4343,10 +4343,11 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
               (let (prefixes)
                 (goto-char (point-min))
                 (while (not (eobp))
-                  (let* ((field (clutch-result-insert--current-field-or-error))
-                         (bounds (clutch-result-insert--field-value-bounds field)))
+                  (unless (looking-at "^.*: ")
+                    (ert-fail "Current line is not an insert field"))
+                  (let ((prefix-end (match-end 0)))
                     (push (buffer-substring-no-properties (line-beginning-position)
-                                                          (car bounds))
+                                                          prefix-end)
                           prefixes))
                   (forward-line 1))
                 (setq prefixes (nreverse prefixes))
@@ -4484,9 +4485,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
               (search-forward "[generated]")
               (should (eq (get-text-property (1- (point)) 'face)
                           'clutch-insert-field-tag-face))
-              (goto-char (point-min))
-              (search-forward "severity")
-              (goto-char (clutch-result-insert--current-field-value-position))
+              (clutch-test--goto-insert-field-value-end "severity")
               (insert "low")
               (goto-char (point-min))
               (let ((fields (clutch-result-insert--parse-fields)))
@@ -4844,8 +4843,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                        buf)))
             (clutch-result-insert--open-buffer "users" result-buf))
           (with-current-buffer insert-buf
-            (goto-char (point-min))
-            (goto-char (clutch-result-insert--current-field-value-start))
+            (clutch-test--goto-insert-field-value-start "name")
             (let ((inhibit-modification-hooks t))
               (insert "alice")))
           (with-current-buffer result-buf
@@ -5203,7 +5201,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
             (cl-letf (((symbol-function 'clutch--ensure-column-details)
                        (lambda (_conn _table)
                          (list (list :name "impact_score" :type "decimal(5,1)")))))
-              (goto-char (clutch-result-insert--current-field-value-start))
+              (clutch-test--goto-insert-field-value-start "impact_score")
               (insert "x")
               (let* ((field (clutch-result-insert--field-state "impact_score"))
                      (after (overlay-get (plist-get field :error-overlay)
@@ -5236,7 +5234,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                 (clutch-result-insert--validate-field-live field)
                 (setq field (clutch-result-insert--field-state "impact_score"))
                 (should (plist-get field :error-message))
-                (goto-char (clutch-result-insert--current-field-value-start))
+                (clutch-test--goto-insert-field-value-start "impact_score")
                 (delete-region (point) (line-end-position))
                 (insert "1.5")
                 (setq field (clutch-result-insert--field-state "impact_score"))
@@ -5266,7 +5264,7 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                        (lambda (secs _repeat fn &rest args)
                          (setq scheduled (list secs fn args))
                          'fake-timer)))
-              (goto-char (clutch-result-insert--current-field-value-start))
+              (clutch-test--goto-insert-field-value-start "postmortem")
               (insert "{")
               (should scheduled)
               (should (= (car scheduled) clutch-insert-validation-idle-delay))
@@ -5599,6 +5597,38 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
       (when (buffer-live-p editor-buf)
         (kill-buffer editor-buf)))))
 
+(ert-deftest clutch-test-insert-json-editor-rejects-invalid-field-text ()
+  "Opening the JSON child editor should require valid JSON field text."
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
+        editor-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer result-buf
+            (setq-local clutch-connection 'fake-conn
+                        clutch--result-columns '("postmortem")
+                        clutch--result-column-defs '((:name "postmortem" :type-category json))))
+          (with-temp-buffer
+            (insert "postmortem: hello\n")
+            (clutch-result-insert-mode 1)
+            (setq-local clutch-result-insert--result-buffer result-buf
+                        clutch-result-insert--table "shipping_incidents")
+            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                       (lambda (_conn _table)
+                         (list (list :name "postmortem" :type "json"))))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buf &rest _args)
+                         (setq editor-buf buf)
+                         buf)))
+              (let ((err (should-error (clutch-result-insert-edit-json-field)
+                                       :type 'user-error)))
+                (should (string-match-p "Field postmortem expects valid JSON"
+                                        (error-message-string err)))))
+            (should-not editor-buf)
+            (should (equal (buffer-string) "postmortem: hello\n"))))
+      (kill-buffer result-buf)
+      (when (buffer-live-p editor-buf)
+        (kill-buffer editor-buf)))))
+
 (ert-deftest clutch-test-edit-json-field-roundtrip ()
   "JSON edit sub-buffer should save normalized contents back to the parent edit buffer."
   (let ((parent-buf (generate-new-buffer "*clutch-edit-parent*")))
@@ -5618,6 +5648,25 @@ SPEC has the form (VAR COLUMNS COLUMN-DEFS . LOCALS)."
                 (clutch-result-edit-json-finish))
               (should (equal (with-current-buffer parent-buf (buffer-string))
                              "{\"a\":2}")))))
+      (kill-buffer parent-buf))))
+
+(ert-deftest clutch-test-edit-json-field-rejects-invalid-parent-text ()
+  "Opening the JSON sub-editor should require valid JSON edit-buffer text."
+  (let ((parent-buf (generate-new-buffer "*clutch-edit-parent*")))
+    (unwind-protect
+        (with-current-buffer parent-buf
+          (insert "hello")
+          (clutch--result-edit-mode 1)
+          (setq-local clutch-result-edit--column-name "payload"
+                      clutch-result-edit--column-def '(:name "payload" :type-category json)
+                      clutch-result-edit--column-detail '(:name "payload" :type "json"))
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (&rest _args)
+                       (ert-fail "JSON editor should not open"))))
+            (let ((err (should-error (clutch-result-edit-json-field)
+                                     :type 'user-error)))
+              (should (string-match-p "Field payload expects valid JSON"
+                                      (error-message-string err))))))
       (kill-buffer parent-buf))))
 
 ;;;; Export — dispatch and content
