@@ -64,20 +64,10 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
       (ert-fail (format "No visible insert field named %s" field-name)))
     (cons (point) (line-end-position))))
 
-(defun clutch-test--goto-insert-field-value-start (field-name)
-  "Move point to the visible value start for FIELD-NAME."
-  (goto-char (car (clutch-test--insert-field-value-bounds field-name))))
-
-(defun clutch-test--goto-insert-field-value-end (field-name)
-  "Move point to the visible value end for FIELD-NAME."
-  (goto-char (cdr (clutch-test--insert-field-value-bounds field-name))))
-
-(defun clutch-test--current-insert-field-name ()
-  "Return the visible insert field name on the current line."
-  (save-excursion
-    (beginning-of-line)
-    (when (looking-at "\\([^[:space:]:]+\\)")
-      (match-string-no-properties 1))))
+(defun clutch-test--goto-insert-field-value (field-name &optional end)
+  "Move point to FIELD-NAME's visible value start, or end when END is non-nil."
+  (let ((bounds (clutch-test--insert-field-value-bounds field-name)))
+    (goto-char (if end (cdr bounds) (car bounds)))))
 
 (defmacro clutch-test--with-connection-data-model (spec &rest body)
   "Run BODY with SPEC identifying a test connection's backend data model.
