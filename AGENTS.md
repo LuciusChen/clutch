@@ -42,6 +42,11 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Tests must fail when the code is wrong**: If deleting or breaking the function under test does not turn the test red, the test is worthless. Assert specific, distinguishable output values.
 - **Test the real dispatch path for dispatch bugs**: When the bug is in completion, hooks, command routing, async callbacks, or another dispatcher, include a test that drives the installed/public entry path. Helper-level tests are fine, but they must use the same filtering/input shape as the real caller; do not assert only against an unfiltered candidate collection unless the test is explicitly about candidate construction.
 - **Match test weight to change size**: Use the smallest test that proves the intended behavior. Do not turn comment edits, documentation changes, mechanical refactors, or message-only wording changes into heavy red/green exercises.
+- **Do not test cosmetic presentation by default**: For pure UI copy, punctuation,
+  separator, truncation, icon, face, padding, or display-order tweaks, do not add
+  new tests unless the text carries a real product contract such as state
+  visibility, command availability, destructive-action warning, execution
+  payload, accessibility-relevant meaning, or a previously regressed behavior.
 - **Treat tests as part of the architecture budget**: Keep tests that prove public workflows, real invariants, and meaningful edge cases. Remove or simplify tests that only lock in implementation details, duplicate another assertion, or cannot fail when product behavior is wrong.
 - **No hard-coded expectations**: Use diverse inputs — multiple data sets, random values, boundary cases — so that a hard-coded return cannot satisfy all assertions.
 - **Red before green for real bug fixes**: When fixing a user-visible bug, correctness issue, regression, or timing-sensitive behavior, first write a failing test that reproduces it. Confirm it fails. Then fix the code. If an existing test already proves the path and the change is only a small wording or expectation update, updating that test is sufficient.

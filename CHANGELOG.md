@@ -68,6 +68,8 @@
   entries without repeated list appends.
 - Reduced wide result-grid TAB navigation latency by caching fixed-width header
   icons and reusing computed column widths during horizontal visibility checks.
+- Clarified result footer cursor text by labeling column position as
+  `Col current/total [column-name]`.
 
 ## 0.2.2 - 2026-07-02
 

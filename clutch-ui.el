@@ -1817,14 +1817,18 @@ records one-row lookahead."
              (dim 'font-lock-comment-face)
              (total-cols (length clutch--result-columns))
              (raw-name (or (nth cidx clutch--result-columns) ""))
-             (col-name (if (> (length raw-name) 20)
-                           (concat (substring raw-name 0 17) "...")
-                         raw-name)))
+             (col-name (if (> (string-width raw-name) 20)
+                           (truncate-string-to-width raw-name 20 nil nil "...")
+                         raw-name))
+             (sep (propertize " • " 'face dim)))
         (concat (clutch--footer-icon '(mdicon . "nf-md-cursor_default_click_outline") "⌖" hi)
                 (propertize (format "R-%d" (1+ ridx)) 'face hi)
-                (propertize ":" 'face dim)
-                (propertize (format "%s-%d/%d" col-name (1+ cidx) total-cols)
-                            'face hi))))))
+                sep
+                (propertize (format "Col-%d/%d" (1+ cidx) total-cols)
+                            'face hi)
+                (unless (string-empty-p col-name)
+                  (concat " " (propertize (format "[%s]" col-name)
+                                          'face hi))))))))
 
 (defun clutch--render-footer (row-count page-num page-size total-rows
                                         &optional page-offset page-has-more)
@@ -2206,14 +2210,14 @@ RENDER-STATE contains render lookup tables for staged UI state."
          (ncols       (length clutch--result-columns))
          (col-name    (when cidx (nth cidx clutch--result-columns)))
          (parts       nil))
-    (push (format "R%d/%s C%d/%d"
+    (push (format "R-%d/%s • Col-%d/%d%s"
                   (1+ global-row)
                   (if clutch--page-total-rows
                       (number-to-string clutch--page-total-rows)
                     (number-to-string row-count))
-                  (if cidx (1+ cidx) 0) ncols)
+                  (if cidx (1+ cidx) 0) ncols
+                  (if col-name (format " [%s]" col-name) ""))
           parts)
-    (when col-name  (push (format "[%s]" col-name) parts))
     (push (format "pg %d" (1+ clutch--page-current)) parts)
     (when clutch--query-elapsed
       (push (clutch--format-elapsed clutch--query-elapsed) parts))
