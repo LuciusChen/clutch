@@ -783,6 +783,9 @@ wide-table rendering from repeatedly walking column definition lists."
 (defvar clutch--nerd-icons-warning-families nil
   "Nerd-icons glyph-set families already reported as unavailable.")
 
+(defvar clutch--fixed-width-icon-cache (make-hash-table :test 'equal)
+  "Cache fixed-width icon strings by icon identity and display metrics.")
+
 (defun clutch--nerd-icons-available-p ()
   "Return non-nil when nerd-icons is loadable and exposes public icon functions."
   (and (require 'nerd-icons nil t)
@@ -972,34 +975,49 @@ over a placeholder whose `string-width' is an integral number of text cells.
 If the glyph is narrower than those cells, a second placeholder character
 displays the remaining pixel padding so following text stays aligned with
 monospace table cells."
-  (let* ((raw (or (clutch--icon spec fallback) ""))
-         (raw (if (string-empty-p raw) (or fallback "") raw))
-         (raw (clutch--append-face raw face)))
-    (if (or (string-empty-p raw)
-            (not (and (fboundp 'string-pixel-width)
-                      (fboundp 'default-font-width)
-                      (display-graphic-p))))
-        raw
-        (let* ((pw (string-pixel-width raw))
-               (fw (default-font-width))
-               (raw-width (max 1 (string-width raw)))
-               (cells (if (> fw 0)
-                          (max raw-width
-                               (ceiling (/ (float pw) fw)))
-                        raw-width))
-               (target-px (* cells fw))
-               (pad-px (and (> fw 0) (- target-px pw))))
-          (if (and (= cells raw-width) (not (and pad-px (> pad-px 0))))
-              raw
-            (let ((placeholder (make-string cells ?\s)))
-              (put-text-property 0 1 'display raw placeholder)
-              (when (> cells 1)
-                (put-text-property 1 cells 'display "" placeholder)
-                (when (and pad-px (> pad-px 0))
-                  (put-text-property 1 2 'display
-                                     (list 'space :width (list pad-px))
-                                     placeholder)))
-              placeholder))))))
+  (let* ((graphical (display-graphic-p))
+         (key (list spec fallback face graphical
+                    (and graphical
+                         (fboundp 'default-font-width)
+                         (default-font-width))
+                    (and graphical (frame-parameter nil 'font))
+                    (and graphical face-remapping-alist)))
+         (missing (make-symbol "missing"))
+         (cached (gethash key clutch--fixed-width-icon-cache missing)))
+    (if (not (eq cached missing))
+        (copy-sequence cached)
+      (let* ((raw (or (clutch--icon spec fallback) ""))
+             (raw (if (string-empty-p raw) (or fallback "") raw))
+             (raw (clutch--append-face raw face))
+             (icon
+              (if (or (string-empty-p raw)
+                      (not (and (fboundp 'string-pixel-width)
+                                (fboundp 'default-font-width)
+                                graphical)))
+                  raw
+                (let* ((pw (string-pixel-width raw))
+                       (fw (default-font-width))
+                       (raw-width (max 1 (string-width raw)))
+                       (cells (if (> fw 0)
+                                  (max raw-width
+                                       (ceiling (/ (float pw) fw)))
+                                raw-width))
+                       (target-px (* cells fw))
+                       (pad-px (and (> fw 0) (- target-px pw))))
+                  (if (and (= cells raw-width)
+                           (not (and pad-px (> pad-px 0))))
+                      raw
+                    (let ((placeholder (make-string cells ?\s)))
+                      (put-text-property 0 1 'display raw placeholder)
+                      (when (> cells 1)
+                        (put-text-property 1 cells 'display "" placeholder)
+                        (when (and pad-px (> pad-px 0))
+                          (put-text-property 1 2 'display
+                                             (list 'space :width (list pad-px))
+                                             placeholder)))
+                      placeholder))))))
+        (puthash key icon clutch--fixed-width-icon-cache)
+        (copy-sequence icon)))))
 
 (defun clutch--footer-icon (spec fallback face)
   "Return footer icon SPEC/FALLBACK with explicit FACE."
@@ -2411,10 +2429,11 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
   "Return the column index at point, from data cells."
   (get-text-property (point) 'clutch-col-idx))
 
-(defun clutch--column-border-position (cidx)
-  "Return the buffer column of the left border `│' for column CIDX."
-  (let* ((widths (clutch--effective-widths))
-         (nw (clutch--row-number-digits))
+(defun clutch--column-border-position (cidx &optional widths nw)
+  "Return the buffer column of the left border `│' for column CIDX.
+Optional WIDTHS and NW reuse precomputed effective widths and row-number width."
+  (let* ((widths (or widths (clutch--effective-widths)))
+         (nw (or nw (clutch--row-number-digits)))
          (pad clutch-column-padding)
          ;; │ + mark + row-num + padding
          (pos (+ 1 1 nw pad)))
@@ -2432,7 +2451,7 @@ hscroll to that column's left border so it appears at the window edge."
            (width (max 1 (window-body-width win)))
            (widths (clutch--effective-widths))
            (pad clutch-column-padding)
-           (border (clutch--column-border-position cidx))
+           (border (clutch--column-border-position cidx widths))
            (col-end (+ border 1 (* 2 pad) (aref widths cidx))))
       (cond
        ;; Column border is left of visible area — page backward:
@@ -2452,7 +2471,7 @@ hscroll to that column's left border so it appears at the window edge."
                  (<= 0 cidx)
                  (< cidx (length widths)))
         (let* ((window-width (max 1 (window-body-width win)))
-               (border (clutch--column-border-position cidx))
+               (border (clutch--column-border-position cidx widths))
                (column-width (+ 1 (* 2 clutch-column-padding)
                                 (aref widths cidx)))
                (target (if (>= column-width window-width)

@@ -1659,6 +1659,22 @@
                        '((mdicon . "nf-md-sort")
                          (octicon . "nf-oct-sort_asc"))))))))
 
+(ert-deftest clutch-test-fixed-width-icon-caches-rendered-icons ()
+  "Fixed-width icons should not re-render on repeated calls."
+  (let ((clutch--fixed-width-icon-cache (make-hash-table :test 'equal))
+        (calls 0))
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'clutch--icon)
+               (lambda (_spec _fallback)
+                 (cl-incf calls)
+                 "S")))
+      (should (equal (clutch--fixed-width-icon '(mdicon . "nf-md-sort") nil)
+                     "S"))
+      (should (equal (clutch--fixed-width-icon '(mdicon . "nf-md-sort") nil)
+                     "S"))
+      (should (= calls 1)))))
+
 (ert-deftest clutch-test-header-cell-installs-sort-click-map ()
   "Result header cells should expose a mouse keymap for sort cycling."
   (with-temp-buffer
@@ -3618,28 +3634,46 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal staged-value "NULL"))))))
 
 (ert-deftest clutch-test-edit-finish-restores-result-cell-position ()
-  "Finishing a cell edit should return point to the edited result cell."
+  "Finishing a cell edit should restore point without shifting the viewport."
   (save-window-excursion
     (let ((result-buf (generate-new-buffer "*clutch-result-test*"))
           edit-buf)
       (unwind-protect
           (progn
             (switch-to-buffer result-buf)
-            (clutch-test--setup-rendered-result)
+            (clutch-test--init-result-state
+             (list :columns '("id" "name" "city" "note" "flag")
+                   :rows '((1 "alpha" "oslo" "before" "x")
+                           (2 "bravo" "rome" "target" "y"))
+                   :page-total-rows 2
+                   :column-widths [3 18 18 18 18]
+                   :render t
+                   :row-identity
+                   (clutch-test--primary-row-identity "users" '("id") '(0))))
             (setq-local clutch-connection nil
                         clutch--connection-params '(:backend mysql)
                         clutch--result-source-table "users")
-            (clutch--goto-cell 1 1)
+            (clutch--goto-cell 1 4)
+            (set-window-hscroll (selected-window) 40)
             (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (&rest _) nil)))
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'window-body-width)
+                       (lambda (&rest _) 40)))
               (clutch-result-edit-cell))
             (setq edit-buf (current-buffer))
             (erase-buffer)
-            (insert "beta")
-            (clutch-result-edit-finish)
+            (insert "z")
+            (cl-letf (((symbol-function 'quit-window)
+                       (lambda (&rest _args)
+                         (switch-to-buffer result-buf)
+                         (set-window-hscroll (selected-window) 0)))
+                      ((symbol-function 'window-body-width)
+                       (lambda (&rest _) 40)))
+              (clutch-result-edit-finish))
             (should (eq (current-buffer) result-buf))
             (should (= (get-text-property (point) 'clutch-row-idx) 1))
-            (should (= (get-text-property (point) 'clutch-col-idx) 1)))
+            (should (= (get-text-property (point) 'clutch-col-idx) 4))
+            (should (= (window-hscroll) 40)))
         (when (buffer-live-p result-buf)
           (kill-buffer result-buf))
         (when (buffer-live-p edit-buf)

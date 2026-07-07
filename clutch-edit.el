@@ -92,6 +92,9 @@
 (defvar-local clutch-result-edit--return-buffer nil
   "Buffer that opened the current single-cell edit buffer.")
 
+(defvar-local clutch-result-edit--result-viewport nil
+  "Result window viewport captured when the edit buffer opened.")
+
 (defvar-local clutch-result-edit--initial-value-state nil
   "Cons of null-state and editable text captured when the edit buffer opened.")
 
@@ -282,15 +285,27 @@ placeholder is displayed.  The placeholder is not part of the buffer text."
           (clutch-result-edit--refresh-target-row (car cell))))))
   (setq-local clutch-result-edit--target-cell nil))
 
-(defun clutch-result-edit--restore-result-position (result-buf cell &optional return-buf)
-  "Restore point in RESULT-BUF to CELL and return to RETURN-BUF when needed."
+(defun clutch-result-edit--restore-result-position
+    (result-buf cell &optional return-buf viewport)
+  "Restore point in RESULT-BUF to CELL and return to RETURN-BUF.
+VIEWPORT, when non-nil, restores the result window start and hscroll."
   (when (and (buffer-live-p result-buf) cell)
     (pcase-let ((`(,ridx . ,cidx) cell))
       (if-let* ((win (and (or (not (buffer-live-p return-buf))
                               (eq return-buf result-buf))
                           (get-buffer-window result-buf t))))
           (with-selected-window win
-            (clutch--goto-cell ridx cidx))
+            (clutch--goto-cell ridx cidx)
+            (when viewport
+              (when-let* ((raw-start (plist-get viewport :window-start))
+                          (start (if (markerp raw-start)
+                                     (marker-position raw-start)
+                                   raw-start))
+                          ((<= (point-min) start))
+                          ((<= start (point-max))))
+                (set-window-start win start))
+              (when-let* ((hscroll (plist-get viewport :hscroll)))
+                (set-window-hscroll win hscroll))))
         (with-current-buffer result-buf
           (clutch--goto-cell ridx cidx)))))
   (when (and (buffer-live-p return-buf)
@@ -539,6 +554,9 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                           :original-state original-state))
              (result-buf (current-buffer))
              (target-cell (cons ridx cidx))
+             (viewport (when-let* ((win (get-buffer-window result-buf t)))
+                         (list :window-start (window-start win)
+                               :hscroll (window-hscroll win))))
              (edit-buf (get-buffer-create
                         (format "*clutch-edit: [%d].%s*" ridx col-name))))
         (with-current-buffer edit-buf
@@ -550,6 +568,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                       clutch-result-edit--target-cell target-cell
                       clutch-result--edit-result-buffer result-buf
                       clutch-result-edit--return-buffer return-buffer
+                      clutch-result-edit--result-viewport viewport
                       clutch-result-edit--initial-value-state nil
                       completion-at-point-functions
                       '(clutch-result-edit-completion-at-point))
@@ -617,7 +636,8 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
          (cb clutch-result--edit-callback)
          (result-buf clutch-result--edit-result-buffer)
          (return-buf clutch-result-edit--return-buffer)
-         (target-cell clutch-result-edit--target-cell))
+         (target-cell clutch-result-edit--target-cell)
+         (viewport clutch-result-edit--result-viewport))
     (clutch-result-edit--cancel-validation-timer)
     (clutch-result--validate-field-value
      clutch-result-edit--column-name
@@ -634,7 +654,8 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
     (clutch-result-edit--clear-active-target)
     (quit-window 'kill)
     (clutch-result-edit--restore-result-position result-buf target-cell
-                                                 return-buf)))
+                                                 return-buf
+                                                 viewport)))
 
 ;;;###autoload
 (defun clutch-result-edit-cancel ()
@@ -642,12 +663,14 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   (interactive)
   (let ((result-buf clutch-result--edit-result-buffer)
         (return-buf clutch-result-edit--return-buffer)
-        (target-cell clutch-result-edit--target-cell))
+        (target-cell clutch-result-edit--target-cell)
+        (viewport clutch-result-edit--result-viewport))
     (clutch-result-edit--cancel-validation-timer)
     (clutch-result-edit--clear-active-target)
     (quit-window 'kill)
     (clutch-result-edit--restore-result-position result-buf target-cell
-                                                 return-buf)))
+                                                 return-buf
+                                                 viewport)))
 
 (defun clutch-result--apply-edit (ridx cidx new-value target-row)
   "Record edit for row RIDX, column CIDX with NEW-VALUE.

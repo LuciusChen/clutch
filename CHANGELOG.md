@@ -44,8 +44,8 @@
   actions aligned with the currently visible filtered rows, including filters
   that match no rows.
 - Centered the target column in the result window when jumping by column name.
-- Preserved the result buffer's horizontal scroll position after committing
-  staged row edits and refreshing the query result.
+- Preserved the result buffer viewport when returning from cell edit buffers
+  and when query-result refreshes restore the current cell.
 - Rendered SQL NULL values in record view with the same `<null>` placeholder
   used by result cells.
 - Allowed `C-c '` to edit fields from record view and refreshed the record view
@@ -66,6 +66,8 @@
 - Reduced large-schema completion and object discovery spikes by scanning query
   buffers once for referenced table identifiers and grouping object-cache
   entries without repeated list appends.
+- Reduced wide result-grid TAB navigation latency by caching fixed-width header
+  icons and reusing computed column widths during horizontal visibility checks.
 
 ## 0.2.2 - 2026-07-02
 
