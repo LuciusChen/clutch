@@ -1924,6 +1924,24 @@
     (should (= clutch--column-displayer-version 3))
     (should-not clutch-column-displayers)))
 
+(ert-deftest clutch-test-column-displayer-custom-set-invalidates-cache ()
+  "Customize updates should invalidate custom displayer render caches."
+  (let ((old-displayers clutch-column-displayers)
+        (old-version clutch--column-displayer-version)
+        (first (lambda (_value) "first")))
+    (unwind-protect
+        (progn
+          (setq clutch-column-displayers nil
+                clutch--column-displayer-version 0)
+          (funcall (get 'clutch-column-displayers 'custom-set)
+                   'clutch-column-displayers
+                   `(("Orders" . (("Status" . ,first)))))
+          (should (= clutch--column-displayer-version 1))
+          (should (eq (clutch--lookup-column-displayer "orders" "status")
+                      first)))
+      (setq clutch-column-displayers old-displayers
+            clutch--column-displayer-version old-version))))
+
 (ert-deftest clutch-test-cell-display-content-custom-displayer-contract ()
   "Custom column displayers should match, fall back, and truncate predictably."
   (let ((clutch-column-displayers nil))

@@ -140,22 +140,32 @@ value stored in =clutch-full-value= and may return a propertized string.  A
 faces, and the value viewers (=v= / =V=) still use the normal clutch pipeline.
 
 #+begin_src emacs-lisp
-;; Simple registration API
-(clutch-register-column-displayer
- "tasks" "status"
- (lambda (value)
-   (pcase value
-     (0 (propertize "pending" 'face 'warning))
-     (1 (propertize "active" 'face 'success))
-     (2 (propertize "done" 'face 'shadow)))))
+;; Define ordinary functions for reusable business display rules.
+(defun my-clutch-status-displayer (value)
+  (pcase value
+    (0 (propertize "pending" 'face 'warning))
+    (1 (propertize "active" 'face 'success))
+    (2 (propertize "done" 'face 'shadow))))
 
-;; Or customize the full registry directly
-(setq clutch-column-displayers
-      '(("bookmarks" . (("url" . my-bookmark-url-displayer)))))
+;; Register them explicitly for each table/column pair where the rule applies.
+(dolist (table '("orders" "tasks" "jobs"))
+  (clutch-register-column-displayer
+   table "status" #'my-clutch-status-displayer))
 #+end_src
 
 Table and column names are matched case-insensitively.  Use
-=clutch-unregister-column-displayer= to remove one registration.
+=clutch-unregister-column-displayer= to remove one registration.  Use the
+registration functions or Customize for runtime changes so existing result
+buffers invalidate cached cell displays.
+
+Keep displayers pure and cheap: they run on the result rendering path, though
+rendered cell strings are cached while the result state is unchanged.  A
+displayer should not query the database, read files, start processes, mutate
+Clutch state, or schedule asynchronous work.  Return =nil= for values the
+function does not handle so the default renderer can display them normally.
+If a generic rule depends on SQL type, schema metadata, or backend-specific
+state, prefer Clutch's built-in renderer or schema/cache layer over a column
+displayer.
 
 ** Insert Buffer Keys
 

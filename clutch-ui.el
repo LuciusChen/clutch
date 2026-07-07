@@ -140,6 +140,11 @@ the header cell was rendered.")
   "Return result rows selected by the current client filter state."
   (if clutch--filter-pattern clutch--filtered-rows clutch--result-rows))
 
+(defun clutch--set-column-displayers (symbol value)
+  "Set SYMBOL to VALUE and invalidate custom displayer render caches."
+  (set-default-toplevel-value symbol value)
+  (cl-incf clutch--column-displayer-version))
+
 (defcustom clutch-column-displayers nil
   "Per-table/per-column display functions for result cells.
 Each entry is (TABLE-NAME . ((COLUMN-NAME . FUNCTION) ...)).
@@ -148,6 +153,7 @@ FUNCTION receives the raw cell value and must return a string, which may
 include text properties.  Return nil to fall back to default rendering."
   :type '(alist :key-type string
                 :value-type (alist :key-type string :value-type function))
+  :set #'clutch--set-column-displayers
   :group 'clutch)
 
 (defun clutch--case-insensitive-string= (left right)
@@ -169,33 +175,20 @@ include text properties.  Return nil to fall back to default rendering."
 (defun clutch-register-column-displayer (table column function)
   "Register FUNCTION as the renderer for COLUMN in TABLE.
 FUNCTION receives the raw cell value and should return a string.  Return
-nil from FUNCTION to fall back to default display.
+nil from FUNCTION to fall back to default display.  Keep FUNCTION pure and
+cheap because it runs on the result rendering path.
 
-Examples:
+Example:
 
-  ;; Show JSON column as a compact summary.
-  (clutch-register-column-displayer \"orders\" \"metadata\"
-    (lambda (value)
-      (when (stringp value)
-        (ignore-errors
-          (format \"{%d keys}\"
-                  (hash-table-count (json-parse-string value)))))))
+  (defun my-clutch-status-displayer (value)
+    (pcase value
+      (0 (propertize \"pending\" (quote face) (quote warning)))
+      (1 (propertize \"active\" (quote face) (quote success)))
+      (2 (propertize \"done\" (quote face) (quote shadow)))))
 
-  ;; Show a URL as a clickable button.
-  (clutch-register-column-displayer \"bookmarks\" \"url\"
-    (lambda (value)
-      (when (stringp value)
-        (propertize (truncate-string-to-width value 40 nil nil \"…\")
-                    (quote face) (quote link)
-                    (quote help-echo) value))))
-
-  ;; Map numeric status codes to styled labels.
-  (clutch-register-column-displayer \"tasks\" \"status\"
-    (lambda (value)
-      (pcase value
-        (0 (propertize \"pending\" (quote face) (quote warning)))
-        (1 (propertize \"active\" (quote face) (quote success)))
-        (2 (propertize \"done\" (quote face) (quote shadow))))))"
+  (dolist (table \\='(\"orders\" \"tasks\" \"jobs\"))
+    (clutch-register-column-displayer
+     table \"status\" #\\='my-clutch-status-displayer))"
   (unless (stringp table)
     (signal 'wrong-type-argument (list 'stringp table)))
   (unless (stringp column)
