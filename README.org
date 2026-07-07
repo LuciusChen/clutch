@@ -481,8 +481,11 @@ Common entry points:
   non-rewritable results sort the current page locally.  Use =C= to jump to
   another visible column first, or click a result header to cycle it
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
-- =C-c '= edits the current result cell or record-view field; in that edit
-  buffer, =C-c C-n= stages database =NULL=
+- =C-c '= edits the current result cell or record-view field; JSON columns and
+  text values containing JSON objects or arrays open in a JSON editor, and
+  =C-c C-c= stages or =C-c C-k= cancels the edit directly when that JSON editor
+  opened automatically.  In ordinary edit buffers, =C-c C-n= stages database
+  =NULL=
 - =C-c C-k= discards the staged change at point from a result cell or
   record-view field
 - =M-x clutch-copy-context-for-agent= copies SQL, table metadata, and the latest

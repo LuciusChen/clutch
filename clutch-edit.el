@@ -45,6 +45,7 @@
 (declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
 (declare-function clutch--json-value-to-string "clutch-ui" (value))
+(declare-function clutch--json-like-string-p "clutch-ui" (value))
 (declare-function clutch--key-hints "clutch-ui" (hints))
 (declare-function clutch--result-source-table-or-user-error "clutch-ui" (op))
 (declare-function clutch--result-display-rows "clutch-ui" ())
@@ -130,6 +131,9 @@
 
 (defvar-local clutch-result-edit-json--field-name nil
   "Field name for the current JSON sub-editor.")
+
+(defvar-local clutch-result-edit-json--whole-edit-p nil
+  "Non-nil when this JSON editor owns the whole result cell edit.")
 
 (defvar clutch--result-edit-mode-map
   (let ((map (make-sparse-keymap)))
@@ -241,6 +245,23 @@ Return nil when validation succeeds, or signal `user-error' when invalid."
   (clutch-result--field-json-p clutch-result-edit--column-def
                                clutch-result-edit--column-detail))
 
+(defun clutch-result-edit--json-text-p (text)
+  "Return non-nil when TEXT is a JSON object or array string."
+  (and (clutch--json-like-string-p text)
+       (condition-case nil
+           (progn
+             (ignore (json-parse-string text))
+             t)
+         (error nil))))
+
+(defun clutch-result-edit--json-editor-available-p ()
+  "Return non-nil when the current edit buffer can use the JSON editor."
+  (or (clutch-result-edit--json-p)
+      (and (not clutch-result-edit--null-p)
+           (clutch-result-edit--json-text-p
+            (string-trim
+             (buffer-substring-no-properties (point-min) (point-max)))))))
+
 (defun clutch-result-edit--metadata-tags ()
   "Return short metadata tags for the current edit buffer."
   (clutch-result--field-metadata-tags clutch-result-edit--column-def
@@ -336,7 +357,7 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
       (push '("M-TAB" "complete") affordances))
     (when (clutch-result-edit--temporal-p)
       (push '("C-c ." "now") affordances))
-    (when (clutch-result-edit--json-p)
+    (when (clutch-result-edit--json-editor-available-p)
       (push '("C-c '" "JSON") affordances))
     (concat " "
             (when tag-text
@@ -446,11 +467,14 @@ All field types use the same delay so feedback timing is consistent."
   (message "Cell set to NULL"))
 
 ;;;###autoload
-(defun clutch-result-edit-json-field ()
-  "Open a dedicated JSON editor for the current edit buffer."
+(defun clutch-result-edit-json-field (&optional whole-edit-p)
+  "Open a dedicated JSON editor for the current edit buffer.
+When WHOLE-EDIT-P is non-nil, saving or canceling the JSON editor also saves or
+cancels the parent edit buffer."
   (interactive)
-  (unless (clutch-result-edit--json-p)
-    (user-error "Column %s is not a JSON field" clutch-result-edit--column-name))
+  (unless (clutch-result-edit--json-editor-available-p)
+    (user-error "Column %s is not JSON and current text is not a JSON object or array"
+                clutch-result-edit--column-name))
   (let* ((parent-buf (current-buffer))
          (field-name clutch-result-edit--column-name)
          (parent-text (buffer-substring-no-properties (point-min) (point-max)))
@@ -464,7 +488,8 @@ All field types use the same delay so feedback timing is consistent."
                 #'clutch-result-edit-json-cancel)))
       (with-current-buffer buf
         (setq-local clutch-result-edit-json--parent-buffer parent-buf
-                    clutch-result-edit-json--field-name field-name))
+                    clutch-result-edit-json--field-name field-name
+                    clutch-result-edit-json--whole-edit-p whole-edit-p))
       buf)))
 
 (defun clutch--finish-json-sub-editor (parent missing-message updater
@@ -499,19 +524,37 @@ When RESTORER is non-nil, run it in PARENT before switching back."
          (field-name clutch-result-edit-json--field-name)
          (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
          (value (clutch-result--json-normalize-string raw field-name)))
-    (clutch--finish-json-sub-editor
-     parent "Edit buffer no longer exists"
-     (lambda ()
-       (erase-buffer)
-       (insert value)
-       (goto-char (point-min)))
-     (format "Updated JSON for %s" field-name))))
+    (if clutch-result-edit-json--whole-edit-p
+        (progn
+          (unless (buffer-live-p parent)
+            (user-error "Edit buffer no longer exists"))
+          (quit-window 'kill)
+          (with-current-buffer parent
+            (erase-buffer)
+            (insert value)
+            (goto-char (point-min))
+            (clutch-result-edit--finish-buffer t)))
+      (clutch--finish-json-sub-editor
+       parent "Edit buffer no longer exists"
+       (lambda ()
+         (erase-buffer)
+         (insert value)
+         (goto-char (point-min)))
+       (format "Updated JSON for %s" field-name)))))
 
 ;;;###autoload
 (defun clutch-result-edit-json-cancel ()
   "Cancel JSON sub-editing and return to the parent edit buffer."
   (interactive)
-  (clutch--cancel-json-sub-editor clutch-result-edit-json--parent-buffer))
+  (let ((parent clutch-result-edit-json--parent-buffer)
+        (whole-edit-p clutch-result-edit-json--whole-edit-p))
+    (if whole-edit-p
+        (progn
+          (quit-window 'kill)
+          (when (buffer-live-p parent)
+            (with-current-buffer parent
+              (clutch-result-edit--cancel-buffer t))))
+      (clutch--cancel-json-sub-editor parent))))
 
 (defun clutch-result--edit-pending-insert (ridx)
   "Re-open staged insert at result row RIDX in the insert buffer."
@@ -596,9 +639,9 @@ RETURN-BUFFER is the buffer that invoked the edit command."
             (clutch-result-edit--refresh-target-row ridx)))
         (if (with-current-buffer edit-buf
               (and (not clutch-result-edit--null-p)
-                   (clutch-result-edit--json-p)))
+                   (clutch-result-edit--json-editor-available-p)))
             (with-current-buffer edit-buf
-              (clutch-result-edit-json-field))
+              (clutch-result-edit-json-field t))
           (pop-to-buffer edit-buf))))))
 
 ;;;###autoload
@@ -630,6 +673,12 @@ RETURN-BUFFER is the buffer that invoked the edit command."
   "Stage the edit and return to the result buffer.
 Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to commit all staged edits."
   (interactive)
+  (clutch-result-edit--finish-buffer))
+
+(defun clutch-result-edit--finish-buffer (&optional kill-buffer-directly)
+  "Stage the current edit buffer and return to the result buffer.
+When KILL-BUFFER-DIRECTLY is non-nil, kill the current buffer without relying on
+the selected window."
   (let* ((raw-value (string-trim-right (buffer-string)))
          (new-value (if clutch-result-edit--null-p nil raw-value))
          (new-state (cons clutch-result-edit--null-p raw-value))
@@ -652,7 +701,9 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
     (clutch-result-edit--refresh-record-return-buffer return-buf
                                                       (cdr target-cell))
     (clutch-result-edit--clear-active-target)
-    (quit-window 'kill)
+    (if kill-buffer-directly
+        (kill-buffer (current-buffer))
+      (quit-window 'kill))
     (clutch-result-edit--restore-result-position result-buf target-cell
                                                  return-buf
                                                  viewport)))
@@ -661,13 +712,21 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
   (interactive)
+  (clutch-result-edit--cancel-buffer))
+
+(defun clutch-result-edit--cancel-buffer (&optional kill-buffer-directly)
+  "Cancel the current edit buffer and return to the result buffer.
+When KILL-BUFFER-DIRECTLY is non-nil, kill the current buffer without relying on
+the selected window."
   (let ((result-buf clutch-result--edit-result-buffer)
         (return-buf clutch-result-edit--return-buffer)
         (target-cell clutch-result-edit--target-cell)
         (viewport clutch-result-edit--result-viewport))
     (clutch-result-edit--cancel-validation-timer)
     (clutch-result-edit--clear-active-target)
-    (quit-window 'kill)
+    (if kill-buffer-directly
+        (kill-buffer (current-buffer))
+      (quit-window 'kill))
     (clutch-result-edit--restore-result-position result-buf target-cell
                                                  return-buf
                                                  viewport)))
@@ -1431,6 +1490,8 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
             (json-pretty-print-buffer))
         (error nil))
       (clutch-result-insert--json-editor-mode)
+      (when (fboundp 'font-lock-ensure)
+        (font-lock-ensure (point-min) (point-max)))
       (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
         (define-key map (kbd "C-c C-c") finish-fn)
         (define-key map (kbd "C-c C-k") cancel-fn)

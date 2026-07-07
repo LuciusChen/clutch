@@ -81,6 +81,11 @@
   icons and reusing computed column widths during horizontal visibility checks.
 - Clarified result footer cursor text by labeling column position as
   `Col current/total [column-name]`.
+- Opened valid JSON object and array text cells in the JSON cell editor so
+  JSON-like text fields get formatting and highlighting while editing.
+- Made `C-c C-c` and `C-c C-k` in automatically opened JSON cell editors stage
+  or cancel the whole cell edit instead of falling back to the compact parent
+  edit buffer first.
 
 ## 0.2.2 - 2026-07-02
 

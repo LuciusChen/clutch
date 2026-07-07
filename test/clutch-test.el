@@ -2656,6 +2656,28 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (when (buffer-live-p ,edit-var)
              (kill-buffer ,edit-var)))))))
 
+(defmacro clutch-test--with-auto-json-edit-cell
+    (json-var parent-var result-var &rest body)
+  "Open an auto JSON edit cell and run BODY with buffers bound."
+  (declare (indent 3))
+  `(let (,parent-var)
+     (unwind-protect
+         (clutch-test--with-open-edit-cell ,json-var ,result-var
+             (:columns '("payload")
+              :column-defs '((:name "payload" :type-category text))
+              :rows '(("{\"ok\":true}"))
+              :row-identity
+              (clutch-test--primary-row-identity "events" '("payload") '(0)))
+             '(0 0 "{\"ok\":true}")
+             "events"
+             (list (list :name "payload" :type "text"))
+           (with-current-buffer ,json-var
+             (setq ,parent-var clutch-result-edit-json--parent-buffer)
+             (should clutch-result-edit-json--whole-edit-p))
+           ,@body)
+       (when (buffer-live-p ,parent-var)
+         (kill-buffer ,parent-var)))))
+
 (defmacro clutch-test--with-result-edit-buffer (var initial-text &rest body)
   "Bind VAR to an edit buffer seeded with INITIAL-TEXT while running BODY."
   (declare (indent 2))
@@ -2919,6 +2941,66 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   (should (string-match-p pattern text)))
                 (dolist (pattern (plist-get case :not-matches))
                   (should-not (string-match-p pattern text)))))))))))
+
+(ert-deftest clutch-test-edit-cell-json-looking-text-opens-json-sub-editor ()
+  "Text cells containing JSON objects should still use the JSON editor."
+  (skip-unless (fboundp 'json-serialize))
+  (clutch-test--with-open-edit-cell buf result-buf
+      (:columns '("payload")
+       :column-defs '((:name "payload" :type-category text))
+       :rows '(("{\"order\":{\"id\":42},\"lines\":[1,2]}"))
+       :row-identity
+       (clutch-test--primary-row-identity "events" '("payload") '(0)))
+      '(0 0 "{\"order\":{\"id\":42},\"lines\":[1,2]}")
+      "events"
+      (list (list :name "payload" :type "text"))
+    (should (string-match-p "\\*clutch-edit-json: payload\\*"
+                            (buffer-name buf)))
+    (with-current-buffer buf
+      (should (string-match-p "JSON field payload"
+                              (format "%s" header-line-format)))
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     "{\n  \"order\": {\n    \"id\": 42\n  },\n  \"lines\": [\n    1,\n    2\n  ]\n}")))))
+
+(ert-deftest clutch-test-edit-cell-auto-json-cancel-closes-edit-flow ()
+  "Canceling an auto-opened JSON editor should return directly to results."
+  (skip-unless (fboundp 'json-serialize))
+  (clutch-test--with-auto-json-edit-cell json-buf parent-buf result-buf
+    (cl-letf (((symbol-function 'quit-window)
+               (lambda (&optional kill _window)
+                 (when kill
+                   (kill-buffer (current-buffer))))))
+      (with-current-buffer json-buf
+        (clutch-result-edit-json-cancel)))
+    (should-not (buffer-live-p json-buf))
+    (should-not (buffer-live-p parent-buf))
+    (should-not (with-current-buffer result-buf
+                  clutch--active-edit-cell))))
+
+(ert-deftest clutch-test-edit-cell-auto-json-finish-closes-edit-flow ()
+  "Saving an auto-opened JSON editor should stage and return to results."
+  (skip-unless (fboundp 'json-serialize))
+  (clutch-test--with-auto-json-edit-cell json-buf parent-buf result-buf
+    (with-current-buffer json-buf
+      (erase-buffer)
+      (insert "{\"ok\":false}"))
+    (cl-letf (((symbol-function 'quit-window)
+               (lambda (&optional kill _window)
+                 (when kill
+                   (kill-buffer (current-buffer)))))
+              ((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table &optional _strict)
+                 (list (list :name "payload" :type "text")))))
+      (with-current-buffer json-buf
+        (clutch-result-edit-json-finish)))
+    (should-not (buffer-live-p json-buf))
+    (should-not (buffer-live-p parent-buf))
+    (with-current-buffer result-buf
+      (should-not clutch--active-edit-cell)
+      (should (equal clutch--pending-edits
+                     (list
+                      (cons (cons (vector "{\"ok\":true}") 0)
+                            "{\"ok\":false}")))))))
 
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
   "The edit-buffer current-time helper should replace the current value with now."
@@ -3854,6 +3936,37 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-result-edit-json-finish))
         (should (equal (with-current-buffer parent-buf (buffer-string))
                        "{\"a\":2}")))))
+  (ert-info ("manual edit editor cancel returns to parent edit buffer")
+    (let (json-buf popped-buf)
+      (clutch-test--with-result-edit-buffer parent-buf "{\"a\":1}"
+        (setq-local clutch-result-edit--column-name "payload"
+                    clutch-result-edit--column-def
+                    '(:name "payload" :type-category json)
+                    clutch-result-edit--column-detail
+                    '(:name "payload" :type "json"))
+        (cl-letf (((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args)
+                     (setq json-buf buf)
+                     buf)))
+          (clutch-result-edit-json-field))
+        (should (buffer-live-p json-buf))
+        (with-current-buffer json-buf
+          (should-not clutch-result-edit-json--whole-edit-p))
+        (cl-letf (((symbol-function 'quit-window)
+                   (lambda (&optional kill _window)
+                     (when kill
+                       (kill-buffer (current-buffer)))))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args)
+                     (setq popped-buf buf)
+                     buf)))
+          (with-current-buffer json-buf
+            (clutch-result-edit-json-cancel)))
+        (should-not (buffer-live-p json-buf))
+        (should (buffer-live-p parent-buf))
+        (should (eq popped-buf parent-buf))
+        (should (equal (with-current-buffer parent-buf (buffer-string))
+                       "{\"a\":1}")))))
   (ert-info ("edit editor rejects invalid parent text")
     (clutch-test--with-result-edit-buffer _parent-buf "hello"
       (setq-local clutch-result-edit--column-name "payload"
