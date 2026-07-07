@@ -50,7 +50,7 @@ See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-
 - Result browser: single-page table view, fixed clickable header/status line, horizontal scrolling, row numbers, sort indicators, and right-aligned numeric columns
 - Execution flow: run a region or statement, keep focus in the SQL buffer, refresh results below, and mark the last executed statement in the gutter
 - SQL editing workflow: record view, foreign-key navigation, staged insert/edit/delete, SQL preview, and guarded commit
-- Filtering and export: server-side =WHERE= filters, client-side fuzzy filters, =ORDER BY= sorting, horizontal paging, CSV/TSV/Org table copy/export, SQL INSERT/UPDATE copy/export for SQL results, and native document helper copy/export for MongoDB results
+- Filtering and export: server-side =WHERE= filters, client-side fuzzy filters, =ORDER BY= sorting, horizontal paging, CSV copy/export, TSV/aligned Org table copy, SQL INSERT/UPDATE copy/export for SQL results, and native document helper copy/export for MongoDB results
 - SQL intelligence: scoped table/column completion, Eldoc, object lookup, MySQL =HELP= lookup, and cache-first metadata loading that avoids blocking point motion
 - Connection feedback: per-connection consoles, persisted console contents, auto-reconnect, explicit schema-refresh states, transaction status, and a dedicated debug buffer
 - Stateful transient feedback: active auto-commit, filters, sort, copy refinement, result layout, staged mutation count, and Record field action are shown directly in their menus

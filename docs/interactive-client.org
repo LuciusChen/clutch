@@ -59,7 +59,7 @@ keys such as =M-TAB= inherited from Emacs.
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-k=     | Discard pending change at point               |
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
-| =c=            | Open copy transient menu (choose TSV / CSV / Org table / INSERT / UPDATE; =-r= controls refinement) |
+| =c=            | Open copy transient menu (choose TSV / CSV / aligned Org table / INSERT / UPDATE; =-r= controls refinement) |
 | =k=            | Copy SQL, table metadata, and bounded result sample for an external agent |
 | =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
 | =V=            | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |

@@ -36,6 +36,8 @@
   identities in separate buffers instead of overwriting the existing console.
 - Kept malformed JSON-looking text values in the plain value viewer instead of
   routing them to the JSON viewer.
+- Copied Org tables with display-width alignment and right-aligned numeric
+  columns.
 - Required JSON edit sub-editors to start from valid JSON text, keeping invalid
   insert/edit buffer contents in place with a field-specific error.
 - Rejected stale edit buffers when the target row or original cell value changes

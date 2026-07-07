@@ -4612,7 +4612,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
   "Public CSV and TSV copy commands should copy through the real entry point."
   (dolist (case '((clutch-result-copy-csv "name\nalice")
-                  (clutch-result-copy-org-table "| name |\n|---|\n| alice |")
+                  (clutch-result-copy-org-table "| name  |\n|-------|\n| alice |")
                   (clutch-result-copy-tsv "alice")))
     (pcase-let ((`(,command ,expected-text) case))
       (ert-info ((symbol-name command))
@@ -4657,16 +4657,22 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-copy-org-table-escapes-table-sensitive-content ()
   "Org table copy should keep one logical table row per result row."
   (clutch-test--with-result-state
-      (:columns '("name" "note")
-       :rows '(("alice" "a|b")
-               ("bob" "x\ny")))
+      (:columns '("city" "amount" "note")
+       :column-defs '((:name "city" :type-category text)
+                      (:name "amount" :type-category numeric)
+                      (:name "note" :type-category text))
+       :rows '(("sh" 1 "a|b")
+               ("Tokyo" 200 "x\ny")))
     (let (kill-ring kill-ring-yank-pointer)
       (cl-letf (((symbol-function 'use-region-p) (lambda () t))
                 ((symbol-function 'clutch-result--region-rectangle-indices)
-                 (lambda () '((0 1) 0 1))))
+                 (lambda () '((0 1) . (0 1 2)))))
         (clutch-result-copy 'org-table)
         (should (equal (current-kill 0)
-                       "| name | note |\n|---+---|\n| alice | a\\vertb |\n| bob | x\\ny |"))))))
+                       (concat "| city  | amount | note    |\n"
+                               "|-------+--------+---------|\n"
+                               "| sh    |      1 | a\\vertb |\n"
+                               "| Tokyo |    200 | x\\ny    |")))))))
 
 (ert-deftest clutch-test-copy-csv-unified-entry-uses-selection ()
   "Unified CSV copy should use either the active region or current cell."

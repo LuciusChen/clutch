@@ -2801,26 +2801,55 @@ rectangle and inactive regions fall back to the current cell."
                    collect (mapconcat #'clutch--csv-escape vals ",")))))
 
 (defun clutch--org-table-lines-for-rows (rows col-indices)
-  "Return Org table lines for ROWS using COL-INDICES."
+  "Return aligned Org table lines for ROWS using COL-INDICES."
   (cl-labels
       ((cell (val)
          (let ((s (clutch--format-value val)))
            (setq s (replace-regexp-in-string "[\r\n]+" "\\\\n" s))
            (string-replace "|" "\\vert" s)))
-       (table-row (values)
-         (format "| %s |" (mapconcat #'cell values " | "))))
+       (table-row (values widths numeric-cols &optional header)
+         (format "| %s |"
+                 (mapconcat
+                  #'identity
+                  (cl-mapcar
+                   (lambda (text width numericp)
+                     (let ((pad (make-string
+                                 (max 0 (- width (string-width text)))
+                                 ?\s)))
+                       (if (and numericp (not header))
+                           (concat pad text)
+                         (concat text pad))))
+                   values widths numeric-cols)
+                  " | "))))
     (let* ((col-names (clutch--column-names-for-indices col-indices))
+           (numeric-cols
+            (mapcar (lambda (i)
+                      (eq (plist-get (nth i clutch--result-column-defs)
+                                     :type-category)
+                          'numeric))
+                    col-indices))
+           (data-rows
+            (cl-loop for row in rows
+                     collect (mapcar (lambda (i) (nth i row)) col-indices)))
+           (table-rows
+            (cons (mapcar #'cell col-names)
+                  (cl-loop for row in data-rows
+                           collect (mapcar #'cell row))))
+           (widths
+            (cl-loop for index below (length col-indices)
+                     collect
+                     (max 3
+                          (cl-loop for row in table-rows
+                                   maximize (string-width (nth index row))))))
            (separator
             (format "|%s|"
-                    (mapconcat #'identity
-                               (make-list (length col-indices) "---")
-                               "+"))))
-      (cons (table-row col-names)
+                    (mapconcat (lambda (width)
+                                 (make-string (+ width 2) ?-))
+                               widths "+"))))
+      (cons (table-row (car table-rows) widths numeric-cols t)
             (cons separator
-	                  (cl-loop for row in rows
-	                           for vals = (mapcar (lambda (i) (nth i row))
-	                                              col-indices)
-	                           collect (table-row vals)))))))
+                  (cl-loop for row in (cdr table-rows)
+                           collect (table-row row widths numeric-cols)))))))
 
 ;;;; Export commands
 
