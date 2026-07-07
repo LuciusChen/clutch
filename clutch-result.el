@@ -141,6 +141,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--debug-workflow-message "clutch-query" (message))
 (declare-function clutch--debug-sql-preview "clutch-query" (sql))
 (declare-function clutch--dwim-bounds-at-point "clutch-query" ())
+(declare-function clutch--center-column-in-window "clutch-ui" (col-idx))
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
 (declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--format-value "clutch-ui" (val))
@@ -2986,7 +2987,7 @@ When point is at line-end or a border, scan backward to find the row."
       (when-let* ((found (text-property-search-forward
                           'clutch-col-idx col-idx #'eq)))
         (goto-char (prop-match-beginning found))))
-    (clutch--ensure-point-visible-horizontally)))
+    (clutch--center-column-in-window col-idx)))
 
 ;;;###autoload
 (defun clutch-result-column-info ()

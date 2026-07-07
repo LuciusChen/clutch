@@ -536,6 +536,40 @@
       (should (equal candidates '("id" "name")))
       (should (= target-index 2)))))
 
+(ert-deftest clutch-test-goto-column-centers-target-column ()
+  "Column jumps should center the target column in the current window."
+  (save-window-excursion
+    (let ((buf (generate-new-buffer "*clutch-goto-column-test*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer buf)
+            (clutch-test--init-result-state
+             (list :columns '("id" "name" "city" "note" "flag")
+                   :rows '((1 "alpha" "oslo" "before" "x")
+                           (2 "bravo" "rome" "target" "y"))
+                   :page-total-rows 2
+                   :column-widths [3 18 18 18 18]
+                   :render t))
+            (clutch--goto-cell 1 0)
+            (let (hscroll)
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _args) "flag"))
+                        ((symbol-function 'get-buffer-window)
+                         (lambda (&rest _args) (selected-window)))
+                        ((symbol-function 'window-hscroll)
+                         (lambda (&rest _args) (or hscroll 0)))
+                        ((symbol-function 'window-body-width)
+                         (lambda (&rest _args) 80))
+                        ((symbol-function 'set-window-hscroll)
+                         (lambda (_window value &optional _min)
+                           (setq hscroll value))))
+                (clutch-result-goto-column))
+              (should (= (get-text-property (point) 'clutch-row-idx) 1))
+              (should (= (get-text-property (point) 'clutch-col-idx) 4))
+              (should (= hscroll 46))))
+        (when (buffer-live-p buf)
+          (kill-buffer buf))))))
+
 (ert-deftest clutch-test-row-identity-prep-augments-row-preserving-selects ()
   "Row-preserving SELECTs should receive hidden identity expressions."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
@@ -828,25 +862,29 @@
             (switch-to-buffer buf)
             (with-current-buffer buf
               (clutch-test--init-result-state
-               (list :columns '("c1" "c2" "c3")
-                     :column-defs '(nil nil nil)
+               (list :columns '("c1" "c2" "c3" "c4" "c5" "c6")
+                     :column-defs '(nil nil nil nil nil nil)
                      :rows (cl-loop for i from 1 to 40
-                                    collect (list (format "row%02d-a" i)
-                                                  (format "row%02d-b" i)
-                                                  (format "row%02d-c" i)))
+                                    collect
+                                    (cl-loop for suffix in '("a" "b" "c"
+                                                             "d" "e" "f")
+                                             collect
+                                             (format "row%02d-%s" i suffix)))
                      :page-total-rows 40
-                     :column-widths [8 8 8]))
+                     :column-widths [16 16 16 16 16 16]))
               (clutch--refresh-display)
               (let* ((win (selected-window))
                      (top-ridx 10)
                      (point-ridx 15))
                 (set-window-start win (aref clutch--row-start-positions top-ridx))
+                (set-window-hscroll win 24)
                 (goto-char (aref clutch--row-start-positions point-ridx))
                 (forward-char 2)
                 (let ((before-top-ridx
                        (save-excursion
                          (goto-char (window-start win))
                          (clutch--row-idx-at-line)))
+                      (before-hscroll (window-hscroll win))
                       (before-line
                        (count-screen-lines (window-start win)
                                            (line-beginning-position))))
@@ -858,6 +896,7 @@
                   (should (= (count-screen-lines (window-start win)
                                                  (line-beginning-position))
                              before-line))
+                  (should (= (window-hscroll win) before-hscroll))
                   (clutch--refresh-display)
                   (should (= (save-excursion
                                (goto-char (window-start win))
@@ -865,7 +904,8 @@
                              before-top-ridx))
                   (should (= (count-screen-lines (window-start win)
                                                  (line-beginning-position))
-                             before-line))))))
+                             before-line))
+                  (should (= (window-hscroll win) before-hscroll))))))
         (when (buffer-live-p buf)
           (kill-buffer buf))))))
 

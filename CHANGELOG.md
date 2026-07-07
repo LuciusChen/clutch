@@ -43,6 +43,9 @@
 - Kept record view, region TSV copy, aggregate, edit/re-edit, and clone-to-insert
   actions aligned with the currently visible filtered rows, including filters
   that match no rows.
+- Centered the target column in the result window when jumping by column name.
+- Preserved the result buffer's horizontal scroll position after committing
+  staged row edits and refreshing the query result.
 - Rendered SQL NULL values in record view with the same `<null>` placeholder
   used by result cells.
 - Allowed `C-c '` to edit fields from record view and refreshed the record view

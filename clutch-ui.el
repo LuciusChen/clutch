@@ -2451,6 +2451,23 @@ hscroll to that column's left border so it appears at the window edge."
        ((> col-end (+ hscroll width))
         (set-window-hscroll win border))))))
 
+(defun clutch--center-column-in-window (cidx)
+  "Horizontally scroll the current result window to center CIDX."
+  (when-let* ((win (get-buffer-window (current-buffer))))
+    (let ((widths (clutch--effective-widths)))
+      (when (and (vectorp widths)
+                 (<= 0 cidx)
+                 (< cidx (length widths)))
+        (let* ((window-width (max 1 (window-body-width win)))
+               (border (clutch--column-border-position cidx))
+               (column-width (+ 1 (* 2 clutch-column-padding)
+                                (aref widths cidx)))
+               (target (if (>= column-width window-width)
+                           border
+                         (max 0 (- border
+                                   (/ (- window-width column-width) 2))))))
+          (set-window-hscroll win target))))))
+
 (defun clutch--goto-cell (ridx cidx)
   "Move point to the cell at ROW-IDX RIDX and COL-IDX CIDX.
 Falls back to the same row (any column), then point-min."
@@ -2498,7 +2515,7 @@ Falls back to the same row (any column), then point-min."
 
 (defun clutch--refresh-display ()
   "Re-render the current result table after column-width recalculation.
-Preserve cursor position (row + column) and the top visible row."
+Preserve cursor position, top visible row, and horizontal scroll."
   (when clutch--column-widths
     (when (timerp clutch--column-width-refresh-timer)
       (cancel-timer clutch--column-width-refresh-timer)
@@ -2510,6 +2527,7 @@ Preserve cursor position (row + column) and the top visible row."
                                (cdr-safe clutch--last-cell-position))))
            (win (get-buffer-window (current-buffer)))
            (win-width (if win (window-body-width win) 80))
+           (save-hscroll (and win (window-hscroll win)))
            (save-top-ridx
             (when win
               (with-selected-window win
@@ -2532,9 +2550,15 @@ Preserve cursor position (row + column) and the top visible row."
           (with-selected-window win
             (when-let* ((top-pos (and (vectorp clutch--row-start-positions)
                                       (<= 0 save-top-ridx)
-                                      (< save-top-ridx (length clutch--row-start-positions))
-                                      (aref clutch--row-start-positions save-top-ridx))))
-              (set-window-start win top-pos))))))))
+                                      (< save-top-ridx
+                                         (length clutch--row-start-positions))
+                                      (aref clutch--row-start-positions
+                                            save-top-ridx))))
+              (set-window-start win top-pos)))))
+      (when (and (integerp save-hscroll)
+                 (window-live-p win)
+                 (eq (window-buffer win) (current-buffer)))
+        (set-window-hscroll win save-hscroll)))))
 
 (defun clutch--run-column-width-refresh (buffer)
   "Apply a pending coalesced column-width redraw in BUFFER."

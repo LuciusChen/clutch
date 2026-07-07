@@ -254,7 +254,7 @@ run_clutch_live_mysql() {
   run_ert_live \
     "Running UI live tests against MySQL" \
     clutch-test-live \
-    "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\")" \
+    "(setq clutch-test-backend 'mysql clutch-test-host \"127.0.0.1\" clutch-test-port ${mysql_port} clutch-test-user \"root\" clutch-test-password \"test\" clutch-test-database \"mysql\" clutch-test-url nil clutch-test-display-name nil clutch-test-props nil)" \
     "'(tag :clutch-live)"
 }
 
@@ -262,7 +262,7 @@ run_clutch_live_pg() {
   run_ert_live \
     "Running UI live tests against PostgreSQL" \
     clutch-test-live \
-    "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\")" \
+    "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\" clutch-test-url nil clutch-test-display-name nil clutch-test-props nil)" \
     "'(tag :clutch-live)"
 }
 
