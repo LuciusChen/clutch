@@ -2,6 +2,12 @@
 
 ## 0.2.3 - Unreleased
 
+### Added
+
+- Added `:profile-entry` saved-connection profiles so encrypted pass or
+  `.authinfo.gpg` entries can provide connection metadata while explicit
+  `clutch-connection-alist` keys override profile defaults.
+
 ### Fixed
 
 - Prevented Query Console Eldoc from looping indefinitely when resolving table
@@ -32,6 +38,9 @@
 - Avoided broad auth-source password lookups when connection params have no
   host/user/port target, and avoided resolving saved connection passwords twice
   during interactive connect.
+- Let explicit saved-connection `:backend` values guide backend-specific
+  parsing for `:profile-entry` fields, so profiles can omit `backend` while
+  keeping typed values such as Redis database numbers.
 - Kept query consoles with the same display name but different connection
   identities in separate buffers instead of overwriting the existing console.
 - Kept malformed JSON-looking text values in the plain value viewer instead of

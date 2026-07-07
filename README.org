@@ -205,13 +205,18 @@ everything in one repository, this is a breaking packaging change:
                           :database "/path/to/my.db"))))
 #+end_src
 
-- Every entry must specify =:backend= (=mysql=, =pg=, =sqlite=, =mongodb=,
-  =redis=, or a JDBC driver symbol such as =oracle=).
+- Every entry must resolve to a backend (=mysql=, =pg=, =sqlite=, =mongodb=,
+  =redis=, or a JDBC driver symbol such as =oracle=).  Prefer keeping
+  =:backend= in =clutch-connection-alist= so completion can show backend icons;
+  if it is omitted, an encrypted =:profile-entry= must provide =backend=.
 - SQLite is local and file-based: only =:database= is required; use =":memory:"=
   for a transient database.  Do not combine SQLite with =:ssh-host=,
   =:ssh-tunnel=, or =:tramp=.
 - =:password= is optional for network backends; see [[*Password Management][Password Management]] for
   auth-source integration.
+- =:profile-entry= can load missing connection fields from encrypted =pass= or
+  =.authinfo.gpg= profiles when host/user/database metadata should not live in
+  Emacs init files.
 - Network backends accept =:connect-timeout= and =:read-idle-timeout=.
   PostgreSQL and JDBC also accept =:query-timeout=; JDBC additionally accepts
   =:rpc-timeout=.
@@ -278,6 +283,7 @@ toggle/disconnect stays blocked until you commit or roll back.
 Connection entries may include =:password=, but auth-source is preferred.  When
 =:password= is omitted, clutch resolves credentials through:
 
+- an explicit =:profile-entry= whose profile contains a password/secret
 - pass entries via =auth-source-pass=, matching the connection name suffix or
   an explicit =:pass-entry=
 - standard =auth-source-search= by =:host=, =:user=, and =:port=
@@ -300,6 +306,71 @@ For JDBC connections (including Org-Babel blocks), an explicit =:pass-entry=
 that resolves to no password now fails fast in Emacs instead of sending a null
 password to the driver.  If you use =pass=, make sure =auth-source-pass= is
 enabled first.
+
+*** Encrypted connection profiles
+
+If host/IP addresses, usernames, database names, or tunnel metadata should not
+live in your Emacs configuration, use =:profile-entry=.  The profile is read
+before normal connection canonicalization, so Clutch-level fields such as
+=:ssh-host=, =:ssh-tunnel=, =:tramp=, and =:tramp-default-directory= work the
+same way as if they had been written directly in =clutch-connection-alist=.
+
+#+begin_src emacs-lisp
+(setq clutch-connection-alist
+      '(("prod-mysql" . (:backend mysql :profile-entry "mysql/prod"))
+        ("prod-reporting" . (:backend mysql :profile-entry "mysql/reporting"))))
+#+end_src
+
+Clutch treats profile fields as defaults.  Explicit keywords in
+=clutch-connection-alist= override values from =pass= or =.authinfo.gpg=,
+including =:backend=, =:host=, =:port=, =:user=, =:database=, =:ssh-host=, and
+=:ssh-tunnel=.  Keeping non-sensitive hints such as =:backend= in the alist lets
+Clutch show backend icons in completion without decrypting encrypted profiles
+just to render the candidate list.  If =:backend= is omitted, Clutch will still
+read it from the profile when connecting.
+
+With =pass=, the first line remains the password and the remaining lines use
+the standard =key: value= convention:
+
+#+begin_src text
+db-password-here
+backend: mysql
+host: db.example.com
+port: 3306
+user: app_user
+database: app_db
+ssh-host: arch
+ssh-tunnel: direct-first
+connect-timeout: 8
+read-idle-timeout: 30
+#+end_src
+
+Create or edit the entry with:
+
+#+begin_src sh
+pass edit mysql/prod
+#+end_src
+
+With =.authinfo.gpg=, use the =machine= field as the logical profile id.  Since
+auth-source maps =machine= to =:host=, put the real database host in =db-host=:
+
+#+begin_src text
+machine mysql/prod login app_user password db-password-here \
+  backend mysql db-host db.example.com port 3306 database app_db \
+  ssh-host arch ssh-tunnel direct-first
+#+end_src
+
+Explicit fields are useful for variants such as a read-only database while still
+keeping the host and password encrypted:
+
+#+begin_src emacs-lisp
+("prod-mysql-ro" . (:backend mysql :profile-entry "mysql/prod"
+                    :database "app_readonly"))
+#+end_src
+
+=:pass-entry= keeps its existing meaning: it is only a password source.  Use
+=:profile-entry= when the encrypted entry should provide full connection
+metadata.
 
 See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][auth-source manual]] for supported credential stores.
 

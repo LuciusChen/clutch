@@ -1107,6 +1107,156 @@ crashing the UI layer."
     (should-not (clutch--resolve-password
                  '(:backend sqlite :database "/tmp/app.db")))))
 
+(ert-deftest clutch-test-profile-entry-loads-pass-connection-fields ()
+  "Pass profiles should fill connection params before backend setup."
+  (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
+             (lambda (entry)
+               (and (equal entry "mysql/prod")
+                    "mysql/prod")))
+            ((symbol-function 'auth-source-pass-parse-entry)
+             (lambda (_entry)
+               '((secret . "secret")
+                 ("backend" . "mysql")
+                 ("host" . "db.example.com")
+                 ("port" . "3306")
+                 ("user" . "app_user")
+                 ("database" . "app_db")
+                 ("ssh-host" . "arch")
+                 ("ssh-tunnel" . "direct-first")
+                 ("connect-timeout" . "8")))))
+    (let ((params (clutch--canonicalize-connection-params
+                   '(:profile-entry "mysql/prod"))))
+      (should (eq (plist-get params :backend) 'mysql))
+      (should (equal (plist-get params :host) "db.example.com"))
+      (should (= (plist-get params :port) 3306))
+      (should (equal (plist-get params :user) "app_user"))
+      (should (equal (plist-get params :database) "app_db"))
+      (should (equal (plist-get params :ssh-host) "arch"))
+      (should (eq (plist-get params :ssh-tunnel) 'direct-first))
+      (should (= (plist-get params :connect-timeout) 8))
+      (should (equal (plist-get params :password) "secret"))
+      (should-not (plist-member params :profile-entry)))))
+
+(ert-deftest clutch-test-profile-entry-loads-authinfo-connection-fields ()
+  "Authinfo profiles should use machine as profile id and db-host as host."
+  (cl-letf (((symbol-function 'clutch--pass-profile-params)
+             (lambda (_entry &optional _default-backend) nil))
+            ((symbol-function 'auth-source-search)
+             (lambda (&rest args)
+               (should (equal args '(:host "mysql/reporting"
+                                     :type netrc
+                                     :max 1)))
+               (list (list :host "mysql/reporting"
+                           :backend "mysql"
+                           :db-host "db.example.com"
+                           :port "3306"
+                           :user "report_user"
+                           :database "reporting"
+                           :ssh-host "arch"
+                           :ssh-tunnel "direct-first"
+                           :secret (lambda () "secret"))))))
+    (let ((params (clutch--canonicalize-connection-params
+                   '(:profile-entry "mysql/reporting"))))
+      (should (eq (plist-get params :backend) 'mysql))
+      (should (equal (plist-get params :host) "db.example.com"))
+      (should (= (plist-get params :port) 3306))
+      (should (equal (plist-get params :user) "report_user"))
+      (should (equal (plist-get params :database) "reporting"))
+      (should (equal (plist-get params :ssh-host) "arch"))
+      (should (eq (plist-get params :ssh-tunnel) 'direct-first))
+      (should (equal (plist-get params :password) "secret"))
+      (should-not (plist-member params :profile-entry)))))
+
+(ert-deftest clutch-test-profile-entry-authinfo-parse-errors-surface ()
+  "Authinfo profile field errors should not be wrapped as lookup failures."
+  (cl-letf (((symbol-function 'clutch--pass-profile-params)
+             (lambda (_entry &optional _default-backend) nil))
+            ((symbol-function 'auth-source-search)
+             (lambda (&rest _args)
+               (list (list :host "mysql/bad"
+                           :backend "mysql"
+                           :db-host "db.example.com"
+                           :port "bad")))))
+    (let ((err (should-error
+                (clutch--canonicalize-connection-params
+                 '(:profile-entry "mysql/bad"))
+                :type 'user-error)))
+      (should (equal
+               (cadr err)
+               "Connection profile field :port must be a non-negative integer, got \"bad\"")))))
+
+(ert-deftest clutch-test-profile-entry-explicit-fields-win ()
+  "Saved connection fields should override profile defaults."
+  (cl-letf (((symbol-function 'clutch--profile-entry-params)
+             (lambda (_entry &optional _default-backend)
+               '(:backend pg
+                 :host "db.example.com"
+                 :port 3306
+                 :user "profile_user"
+                 :database "profile_db"
+                 :password "profile-secret"
+                 :ssh-host "arch"))))
+    (let ((params (clutch--canonicalize-connection-params
+                   '(:backend mysql
+                     :profile-entry "mysql/prod"
+                     :database "readonly"
+                     :pass-entry "override-pass"))))
+      (should (eq (plist-get params :backend) 'mysql))
+      (should (equal (plist-get params :host) "db.example.com"))
+      (should (= (plist-get params :port) 3306))
+      (should (equal (plist-get params :user) "profile_user"))
+      (should (equal (plist-get params :database) "readonly"))
+      (should (equal (plist-get params :pass-entry) "override-pass"))
+      (should (equal (plist-get params :ssh-host) "arch"))
+      (should-not (plist-member params :password))
+      (should-not (plist-member params :profile-entry)))))
+
+(ert-deftest clutch-test-profile-entry-explicit-backend-guides-profile-parsing ()
+  "Explicit backend should guide backend-specific profile value parsing."
+  (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
+             (lambda (entry)
+               (and (equal entry "redis/prod")
+                    "redis/prod")))
+            ((symbol-function 'auth-source-pass-parse-entry)
+             (lambda (_entry)
+               '(("host" . "127.0.0.1")
+                 ("port" . "6379")
+                 ("database" . "0")))))
+    (let ((params (clutch--canonicalize-connection-params
+                   '(:backend redis :profile-entry "redis/prod"))))
+      (should (eq (plist-get params :backend) 'redis))
+      (should (equal (plist-get params :host) "127.0.0.1"))
+      (should (= (plist-get params :port) 6379))
+      (should (= (plist-get params :database) 0)))))
+
+(ert-deftest clutch-test-profile-entry-is-not-passed-to-backend ()
+  "Profile-entry is a Clutch-level field and should not reach adapters."
+  (let (captured-backend captured-params)
+    (cl-letf (((symbol-function 'clutch--profile-entry-params)
+               (lambda (_entry &optional _default-backend)
+                 '(:backend mysql
+                   :host "db.example.com"
+                   :port 3306
+                   :user "u"
+                   :database "app"
+                   :password "secret")))
+              ((symbol-function 'clutch-db-connect)
+               (lambda (backend params)
+                 (setq captured-backend backend
+                       captured-params params)
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
+      (should (eq (clutch--build-conn '(:profile-entry "clutch/app"))
+                  'fake-conn))
+      (should (eq captured-backend 'mysql))
+      (should (equal captured-params
+                     '(:host "db.example.com"
+                       :port 3306
+                       :user "u"
+                       :database "app"
+                       :password "secret"))))))
+
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
   (let ((err (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)

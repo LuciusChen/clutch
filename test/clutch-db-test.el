@@ -74,6 +74,8 @@
 (defvar clutch-db-mysql--connection-params)
 (defvar clutch-db-mysql-cancel-timeout-seconds)
 (defvar clutch-db-pg--oid-bool)
+(defvar auth-sources)
+(defvar auth-source-do-cache)
 (defvar clutch-db-test--live-name-counter 0
   "Counter used to generate isolated live database object names.")
 (declare-function clutch-db-mysql--type-category "clutch-db-mysql" (type character-set))
@@ -91,6 +93,7 @@
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--format-value "clutch-ui" (value))
+(declare-function auth-source-forget-all-cached "auth-source" ())
 (declare-function clutch-db-value-to-literal "clutch-backend"
                   (conn value &optional fallback-format-fn))
 (declare-function make-mysql-conn "mysql" (&rest args))
@@ -215,6 +218,47 @@ connection as live and not busy."
      (unwind-protect
          (progn ,@body)
        (delete-directory ,var t))))
+
+(defun clutch-db-test--write-authinfo-profile (path profile fields)
+  "Write a temporary authinfo PATH for PROFILE with alternating FIELDS."
+  (with-temp-file path
+    (insert "machine " profile)
+    (cl-loop for (key value) on fields by #'cddr
+             do (insert " " (format "%s" key) " " (format "%s" value)))
+    (insert "\n")))
+
+(defmacro clutch-db-test--with-authinfo-profile (profile fields &rest body)
+  "Bind auth-source to a temporary authinfo PROFILE with FIELDS."
+  (declare (indent 2))
+  `(let ((authinfo-file (make-temp-file "clutch-authinfo-profile-")))
+     (unwind-protect
+         (let ((auth-sources (list authinfo-file))
+               (auth-source-do-cache nil))
+           (clutch-db-test--write-authinfo-profile
+            authinfo-file ,profile ,fields)
+           (auth-source-forget-all-cached)
+           ,@body)
+       (auth-source-forget-all-cached)
+       (ignore-errors
+         (delete-file authinfo-file)))))
+
+(defmacro clutch-db-test--with-authinfo-profile-conn
+    (conn-var profile-prefix fields params &rest body)
+  "Bind CONN-VAR to a connection built from an authinfo profile.
+PROFILE-PREFIX names the temporary profile, FIELDS are written to
+authinfo, and PARAMS are explicit connection parameters."
+  (declare (indent 4))
+  (let ((profile-var (make-symbol "profile")))
+    `(let ((,profile-var (format "clutch-live/%s"
+                                  (make-temp-name ,profile-prefix))))
+       (clutch-db-test--with-authinfo-profile
+           ,profile-var ,fields
+         (let ((,conn-var (clutch--build-conn
+                           (append ,params
+                                   (list :profile-entry ,profile-var)))))
+           (unwind-protect
+               (progn ,@body)
+             (clutch-db-disconnect ,conn-var)))))))
 
 (defmacro clutch-db-test--with-jdbc-temp-dir (var prefix &rest body)
   "Bind VAR and `clutch-jdbc-agent-dir' to a temporary directory."
@@ -4021,6 +4065,27 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
  (:db-live :mysql-live)
  "MySQL")
 
+(ert-deftest clutch-db-test-mysql-live-authinfo-profile-connect ()
+  :tags '(:db-live :mysql-live)
+  "MySQL should connect through an authinfo `:profile-entry'."
+  (if (not (clutch-db-test--mysql-live-configured-p))
+      (ert-skip "Set clutch-db-test-mysql-password to enable MySQL live tests")
+    (clutch-db-test--with-local-mysql-tls
+      (clutch-db-test--with-authinfo-profile-conn
+          conn "mysql-"
+          (list "login" clutch-db-test-mysql-user
+                "password" clutch-db-test-mysql-password
+                "db-host" clutch-db-test-mysql-host
+                "port" clutch-db-test-mysql-port
+                "database" clutch-db-test-mysql-database)
+          '(:backend mysql)
+        (should (clutch-db-live-p conn))
+        (should (equal (clutch-db-user conn)
+                       clutch-db-test-mysql-user))
+        (should (equal (clutch-db-database conn)
+                       clutch-db-test-mysql-database))
+        (clutch-db-test--assert-live-basic-query conn)))))
+
 (ert-deftest clutch-db-test-mysql-live-interrupt-keeps-connection-usable ()
   :tags '(:db-live :mysql-live)
   "MySQL query interruption should keep the original session usable."
@@ -4233,6 +4298,27 @@ Skips if `clutch-db-test-pg-password' is nil."
  (:db-live :pg-live)
  "PostgreSQL")
 
+(ert-deftest clutch-db-test-pg-live-authinfo-profile-provides-backend ()
+  :tags '(:db-live :pg-live)
+  "PostgreSQL should connect when authinfo profile provides the backend."
+  (if (not (clutch-db-test--pg-live-configured-p))
+      (ert-skip "Set clutch-db-test-pg-password to enable PostgreSQL live tests")
+    (clutch-db-test--with-authinfo-profile-conn
+        conn "pg-"
+        (list "backend" "pg"
+              "login" clutch-db-test-pg-user
+              "password" clutch-db-test-pg-password
+              "db-host" clutch-db-test-pg-host
+              "port" clutch-db-test-pg-port
+              "database" clutch-db-test-pg-database)
+        nil
+      (should (clutch-db-live-p conn))
+      (should (equal (clutch-db-user conn)
+                     clutch-db-test-pg-user))
+      (should (equal (clutch-db-database conn)
+                     clutch-db-test-pg-database))
+      (clutch-db-test--assert-live-basic-query conn))))
+
 (ert-deftest clutch-db-test-pg-live-schema ()
   :tags '(:db-live :pg-live)
   "Test PostgreSQL schema introspection."
@@ -4314,6 +4400,40 @@ Skips if `clutch-db-test-pg-password' is nil."
     (should (equal (clutch-db-display-name conn) "MongoDB"))
     (should-not (clutch-db-manual-commit-supported-p conn))
     (should-not (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-mongodb-live-authinfo-profile-connect ()
+  :tags '(:db-live :mongodb-live)
+  "Native MongoDB should connect through an authinfo `:profile-entry'."
+  (if (not (and clutch-db-test-mongodb-live-enabled
+                clutch-db-test-mongodb-host
+                clutch-db-test-mongodb-port
+                clutch-db-test-mongodb-database))
+      (ert-skip "Set MongoDB host, port, and database to enable profile live tests")
+    (clutch-db-test--with-authinfo-profile-conn
+        conn "mongodb-"
+        (append
+         (list "backend" "mongodb"
+               "db-host" clutch-db-test-mongodb-host
+               "port" clutch-db-test-mongodb-port
+               "database" clutch-db-test-mongodb-database)
+         (when clutch-db-test-mongodb-user
+           (list "login" clutch-db-test-mongodb-user))
+         (when clutch-db-test-mongodb-password
+           (list "password" clutch-db-test-mongodb-password))
+         (when clutch-db-test-mongodb-auth-database
+           (list "auth-database" clutch-db-test-mongodb-auth-database)))
+        nil
+      (should (clutch-db-live-p conn))
+      (should (eq (clutch-db-backend-key conn) 'mongodb))
+      (should (equal (clutch-db-display-name conn) "MongoDB"))
+      (let* ((result (clutch-db-query
+                      conn "db.runCommand({ping: 1})"))
+             (columns (clutch-db-result-column-names
+                       (clutch-db-result-columns result)))
+             (ok-pos (cl-position "ok" columns :test #'equal)))
+        (should ok-pos)
+        (should (= (nth ok-pos (car (clutch-db-result-rows result)))
+                   1.0))))))
 
 (ert-deftest clutch-db-test-mongodb-live-query ()
   :tags '(:db-live :mongodb-live)
@@ -4694,6 +4814,28 @@ Skips if `clutch-db-test-pg-password' is nil."
     (should (equal (clutch-db-display-name conn) "Redis"))
     (should (equal (clutch-db-current-schema conn)
                    (format "%s" clutch-db-test-redis-database)))))
+
+(ert-deftest clutch-db-test-redis-live-authinfo-profile-connect ()
+  :tags '(:db-live :redis-live)
+  "Redis should connect through an authinfo `:profile-entry'."
+  (if (not (clutch-db-test--redis-live-configured-p))
+      (ert-skip "Set Redis host and port to enable profile live tests")
+    (clutch-db-test--with-authinfo-profile-conn
+        conn "redis-"
+        (append
+         (list "backend" "redis"
+               "db-host" clutch-db-test-redis-host
+               "port" clutch-db-test-redis-port
+               "database" clutch-db-test-redis-database)
+         (when clutch-db-test-redis-user
+           (list "login" clutch-db-test-redis-user))
+         (when clutch-db-test-redis-password
+           (list "password" clutch-db-test-redis-password)))
+        nil
+      (should (clutch-db-live-p conn))
+      (should (eq (clutch-db-backend-key conn) 'redis))
+      (should (equal (clutch-db-current-schema conn)
+                     (format "%s" clutch-db-test-redis-database))))))
 
 (ert-deftest clutch-db-test-redis-live-query ()
   :tags '(:db-live :redis-live)

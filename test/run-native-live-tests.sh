@@ -294,7 +294,7 @@ run_db_live_mongodb() {
   run_ert_live \
     "Running backend live tests against MongoDB native protocol" \
     clutch-db-test \
-    "(setq clutch-db-test-mongodb-live-enabled t clutch-db-test-mongodb-url \"mongodb://127.0.0.1:${mongo_port}/clutch_test\")" \
+    "(setq clutch-db-test-mongodb-live-enabled t clutch-db-test-mongodb-url \"mongodb://127.0.0.1:${mongo_port}/clutch_test\" clutch-db-test-mongodb-host \"127.0.0.1\" clutch-db-test-mongodb-port ${mongo_port})" \
     "'(tag :mongodb-live)"
 }
 

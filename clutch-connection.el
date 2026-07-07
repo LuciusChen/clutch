@@ -883,6 +883,200 @@ cannot be read."
                     (plist-get params :port))
             (clutch--resolve-auth-source-password params)))))))
 
+(defconst clutch--profile-symbol-fields
+  '(:backend :driver :sql-product :surface :ssh-tunnel :ssl-mode :sslmode)
+  "Connection profile fields parsed as symbols.")
+
+(defconst clutch--profile-number-fields
+  '(:port :connect-timeout :read-idle-timeout :query-timeout :rpc-timeout)
+  "Connection profile fields parsed as non-negative integers.")
+
+(defconst clutch--profile-boolean-fields
+  '(:tls :manual-commit)
+  "Connection profile fields parsed as booleans.")
+
+(defun clutch--profile-field-name (key)
+  "Return normalized profile field name for KEY."
+  (replace-regexp-in-string
+   "_"
+   "-"
+   (downcase
+    (string-trim
+     (cond
+      ((keywordp key) (substring (symbol-name key) 1))
+      ((symbolp key) (symbol-name key))
+      ((stringp key) key)
+      (t (format "%s" key)))))))
+
+(defun clutch--profile-field-keyword (key auth-source-profile-p)
+  "Return connection plist keyword for profile KEY.
+AUTH-SOURCE-PROFILE-P means KEY came from auth-source rather than pass."
+  (pcase (clutch--profile-field-name key)
+    ((or "user" "username" "login") :user)
+    ("secret" :password)
+    ("db-host" :host)
+    ("profile-entry" :profile-entry)
+    ("host" (unless auth-source-profile-p :host))
+    ("backend" :backend)
+    (field (intern (concat ":" field)))))
+
+(defun clutch--profile-parse-symbol (field value)
+  "Parse profile FIELD string VALUE as a symbol."
+  (let ((text (string-trim value)))
+    (when (string-prefix-p ":" text)
+      (setq text (substring text 1)))
+    (if (string-empty-p text)
+        (user-error "Connection profile field %s must not be empty" field)
+      (intern text))))
+
+(defun clutch--profile-parse-number (field value)
+  "Parse profile FIELD string VALUE as a non-negative integer."
+  (let ((text (string-trim value)))
+    (if (string-match-p "\\`[0-9]+\\'" text)
+        (string-to-number text)
+      (user-error
+       "Connection profile field %s must be a non-negative integer, got %S"
+       field value))))
+
+(defun clutch--profile-parse-boolean (field value)
+  "Parse profile FIELD string VALUE as a boolean."
+  (pcase (downcase (string-trim value))
+    ((or "t" "true" "yes" "1") t)
+    ((or "nil" "false" "no" "0") nil)
+    (_
+     (user-error "Connection profile field %s must be boolean, got %S"
+                 field value))))
+
+(defun clutch--profile-read-lisp (field value)
+  "Parse profile FIELD string VALUE as one Lisp object."
+  (condition-case err
+      (let* ((read-data (read-from-string value))
+             (object (car read-data))
+             (tail (substring value (cdr read-data))))
+        (unless (string-match-p "\\`[[:space:]\n\r\t]*\\'" tail)
+          (user-error "Connection profile field %s has trailing data: %S"
+                      field tail))
+        object)
+    (end-of-file
+     (user-error "Connection profile field %s must be a Lisp literal" field))
+    (invalid-read-syntax
+     (user-error "Connection profile field %s must be a Lisp literal: %s"
+                 field (error-message-string err)))))
+
+(defun clutch--profile-parse-props (field value)
+  "Parse profile FIELD string VALUE as a JDBC properties alist."
+  (let ((props (clutch--profile-read-lisp field value)))
+    (unless (or (null props)
+                (and (listp props)
+                     (cl-every #'consp props)))
+      (user-error "Connection profile field %s must be an alist, got %S"
+                  field props))
+    props))
+
+(defun clutch--profile-parse-value (field value backend)
+  "Parse profile FIELD VALUE using BACKEND context."
+  (let ((value (if (and (eq field :password) (functionp value))
+                   (clutch--auth-source-secret-value value
+                                                     "connection profile")
+                 value)))
+    (cond
+     ((not (stringp value)) value)
+     ((memq field clutch--profile-symbol-fields)
+      (clutch--profile-parse-symbol field value))
+     ((memq field clutch--profile-number-fields)
+      (clutch--profile-parse-number field value))
+     ((memq field clutch--profile-boolean-fields)
+      (clutch--profile-parse-boolean field value))
+     ((eq field :props)
+      (clutch--profile-parse-props field value))
+     ((and (eq field :database)
+           (eq (clutch-backend-normalize backend) 'redis)
+           (string-match-p "\\`[0-9]+\\'" (string-trim value)))
+      (string-to-number (string-trim value)))
+     (t value))))
+
+(defun clutch--profile-data-to-params (data auth-source-profile-p
+                                            &optional default-backend)
+  "Convert profile DATA to connection params.
+AUTH-SOURCE-PROFILE-P means DATA came from auth-source rather than pass.
+DEFAULT-BACKEND is the explicit saved-connection backend, when present."
+  (let ((backend (or default-backend
+                     (cl-loop
+                      for (key . value) in data
+                      for field = (clutch--profile-field-keyword
+                                   key auth-source-profile-p)
+                      when (eq field :backend)
+                      return (clutch--profile-parse-symbol field value))))
+        params)
+    (dolist (pair data)
+      (let* ((raw-key (car pair))
+             (field (clutch--profile-field-keyword
+                     raw-key auth-source-profile-p))
+             (value (cdr pair)))
+        (when (and field (not (eq field :profile-entry)))
+          (setq params
+                (plist-put params field
+                           (clutch--profile-parse-value
+                            field value backend))))))
+    params))
+
+(defun clutch--pass-profile-params (entry &optional default-backend)
+  "Return connection params read from pass profile ENTRY, or nil.
+The first line becomes `:password'.  Additional `key: value' lines become
+connection plist fields.  DEFAULT-BACKEND guides backend-specific parsing."
+  (when-let* ((path (clutch--pass-entry-by-suffix entry)))
+    (let ((parsed (auth-source-pass-parse-entry path)))
+      (unless parsed
+        (user-error
+         "Connection profile lookup failed for pass entry %s. Unlock pass/auth-source-pass and retry"
+         path))
+      (clutch--profile-data-to-params parsed nil default-backend))))
+
+(defun clutch--auth-source-profile-params (entry &optional default-backend)
+  "Return connection params read from auth-source profile ENTRY, or nil.
+For .authinfo/.authinfo.gpg, ENTRY is the logical `machine' value.  Use
+`db-host' for the real database host because `machine' is the profile id.
+DEFAULT-BACKEND guides backend-specific parsing."
+  (when-let* ((found (condition-case err
+                         (car (auth-source-search :host entry
+                                                  :type 'netrc
+                                                  :max 1))
+                       (error
+                        (user-error
+                         "Connection profile lookup failed via auth-source for %s: %s"
+                         entry
+                         (error-message-string err))))))
+    (clutch--profile-data-to-params
+     (cl-loop for (key value) on found by #'cddr
+              collect (cons key value))
+     t
+     default-backend)))
+
+(defun clutch--profile-entry-params (entry &optional default-backend)
+  "Return connection params read from profile ENTRY.
+Pass profiles are tried first, then auth-source/.authinfo profiles.
+DEFAULT-BACKEND guides backend-specific parsing."
+  (or (clutch--pass-profile-params entry default-backend)
+      (clutch--auth-source-profile-params entry default-backend)
+      (user-error "No pass or auth-source profile found for %s" entry)))
+
+(defun clutch--merge-profile-entry-params (params)
+  "Return PARAMS merged with defaults from `:profile-entry'.
+Explicit fields in PARAMS win over profile fields.  An explicit `:pass-entry'
+also wins over the profile's first-line password."
+  (if-let* ((entry (plist-get params :profile-entry)))
+      (let ((out (copy-sequence params))
+            (profile (clutch--profile-entry-params
+                      entry (plist-get params :backend))))
+        (cl-loop for (key value) on profile by #'cddr
+                 unless (or (plist-member out key)
+                            (and (eq key :password)
+                                 (plist-member out :pass-entry)))
+                 do (setq out (plist-put out key value)))
+        (cl-remf out :profile-entry)
+        out)
+    params))
+
 (defun clutch--canonicalize-backend-aliases (params)
   "Return PARAMS with public backend aliases normalized."
   (let ((out (copy-sequence params)))
@@ -900,7 +1094,8 @@ cannot be read."
 
 (defun clutch--canonicalize-connection-params (params)
   "Return PARAMS with public connection aliases normalized."
-  (let* ((params (clutch--canonicalize-backend-aliases params))
+  (let* ((params (clutch--merge-profile-entry-params params))
+         (params (clutch--canonicalize-backend-aliases params))
          (has-tramp (plist-member params :tramp))
          (has-tramp-default-directory
           (plist-member params :tramp-default-directory))
@@ -1688,7 +1883,8 @@ port and TRANSPORT contains the live process metadata."
   (let ((password (plist-get connect-params :password))
         (db-params (cl-loop for (k v) on connect-params by #'cddr
                             unless (memq k '(:sql-product :backend :password
-                                             :pass-entry :ssh-host :ssh-tunnel
+                                             :pass-entry :profile-entry
+                                             :ssh-host :ssh-tunnel
                                              :tramp :tramp-default-directory))
                             append (list k v))))
     (if password
@@ -1851,16 +2047,19 @@ Returns a live connection object or signals a `user-error'."
   "Open a database connection from PARAMS using Clutch connection rules.
 PARAMS must include `:backend' and backend endpoint keys.  It may also include
 Clutch connection keys such as `:ssh-host', `:tramp',
-`:tramp-default-directory', `:pass-entry', and `:sql-product'.  The caller owns
-the returned connection and should close it with `clutch-db-disconnect'.  Call
-`clutch-prepare-connection-params' first when the current command source should
-be allowed to supply TRAMP context."
+`:tramp-default-directory', `:profile-entry', `:pass-entry', and
+`:sql-product'.  The caller owns the returned connection and should close it
+with `clutch-db-disconnect'.  Call `clutch-prepare-connection-params' first
+when the current command source should be allowed to supply TRAMP context."
   (clutch--build-conn params))
 
 (defun clutch--inject-entry-name (params name)
   "Return PARAMS with :pass-entry defaulting to NAME.
-Leaves PARAMS unchanged when :password or :pass-entry is already set."
-  (if (or (plist-get params :pass-entry) (plist-get params :password))
+Leaves PARAMS unchanged when :password, :pass-entry, or :profile-entry is
+already set."
+  (if (or (plist-get params :pass-entry)
+          (plist-get params :profile-entry)
+          (plist-get params :password))
       params
     (append params (list :pass-entry name))))
 

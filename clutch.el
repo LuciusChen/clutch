@@ -225,7 +225,8 @@ Underlined to indicate clickable (RET to follow)."
   "Alist of saved database connections.
 Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
-           [:backend SYM] [:sql-product SYM] [:pass-entry STR]
+           [:backend SYM] [:sql-product SYM]
+           [:profile-entry STR] [:pass-entry STR]
            [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
            [:tramp TRAMP-DIRECTORY]
            [:url STR] [:display-name STR] [:props ALIST]
@@ -261,14 +262,26 @@ briefly and skips the tunnel when the database endpoint is already reachable.
 :tramp enables the same local forward from an ssh-like TRAMP directory such as
 /ssh:host:/path/ or /rpc:host:/path/.  `:tramp-default-directory' is also
 accepted as a longer spelling.
+:profile-entry reads missing connection fields from an encrypted profile in
+pass or .authinfo/.authinfo.gpg.  For pass, use the normal first-line password
+and `key: value' fields such as `backend:', `host:', `port:', `user:',
+`database:', `ssh-host:', and `ssh-tunnel:'.  For .authinfo, the `machine'
+value is the profile id; use `db-host' for the real database host.  Profile
+fields are defaults: explicit fields in `clutch-connection-alist' override
+profile fields, including :backend, :host, :port, :user, :database, and
+transport keys.  Keeping non-sensitive hints such as :backend in this alist lets
+completion show backend icons without decrypting profiles for display.  If
+:backend is omitted here, the profile must provide it before connecting.
 
 Password resolution order:
   1. :password — used as-is when present.
-  2. Pass store by connection name — when `auth-source-pass' is loaded,
+  2. :profile-entry — uses the profile's first-line/`password' secret when no
+     explicit :password or :pass-entry is configured.
+  3. Pass store by connection name — when `auth-source-pass' is loaded,
      clutch automatically looks up a pass entry whose name matches NAME
      (the car of this alist entry).  The password is on the first line.
      Use :pass-entry STR to override the entry name if it differs.
-  3. `auth-source-search' — searches ~/.authinfo / ~/.authinfo.gpg / pass
+  4. `auth-source-search' — searches ~/.authinfo / ~/.authinfo.gpg / pass
      by :host, :user, and :port (standard auth-source matching)."
   :type '(alist :key-type string
                 :value-type (plist :options
@@ -281,6 +294,7 @@ Password resolution order:
                                     (:auth-source string)
                                     (:backend symbol)
                                     (:sql-product symbol)
+                                    (:profile-entry string)
                                     (:pass-entry string)
                                     (:ssh-host string)
                                     (:ssh-tunnel
