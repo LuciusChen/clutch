@@ -15,6 +15,7 @@ semantics, see [[file:jdbc-agent-protocol.md][jdbc-agent-protocol.md]].
 |----------------+-----------------------+---------------+---------------------+--------------|
 | =oracle=       | Oracle Database       | Core SQL      | Maven Central       | 1521         |
 | =sqlserver=    | Microsoft SQL Server  | Core SQL      | Maven Central       | 1433         |
+| =saphana=      | SAP HANA              | Core SQL      | Maven Central       | —            |
 | =redshift=     | Amazon Redshift       | Basic SQL     | Maven Central       | 5439         |
 | =snowflake=    | Snowflake             | Basic SQL     | Maven Central       | —            |
 | =clickhouse=   | ClickHouse            | Basic SQL     | Maven Central       | 8123         |
@@ -36,6 +37,12 @@ See MongoDB's
 [[https://www.mongodb.com/docs/sql-interface/install-driver/][SQL Interface driver setup]]
 and [[https://www.mongodb.com/docs/sql-interface/language-reference/][SQL Interface language reference]]
 for the upstream contract.
+
+SAP HANA uses SAP's official =ngdbc= JDBC driver from Maven Central.  The
+generic JDBC path handles URL construction, transactions, pagination, and
+identifier quoting.  HANA-specific behavior (=currentSchema= mapping,
+=.hana.gpg= auth-source discovery, transaction default, lazy schema
+enumeration) lives in [[file:saphana-backend.org][docs/saphana-backend.org]].
 
 Support levels are defined in [[file:backend-support.org][docs/backend-support.org]].
 
@@ -61,6 +68,7 @@ If you prefer to pre-install everything up front:
 (clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar plus SLF4J jars from Maven Central
 (clutch-jdbc-install-driver 'duckdb)      ; duckdb_jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'mongodb)     ; MongoDB SQL Interface JDBC driver
+(clutch-jdbc-install-driver 'saphana)     ; ngdbc.jar from Maven Central
 ;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
 #+end_src
 

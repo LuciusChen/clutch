@@ -40,6 +40,7 @@
 (require 'clutch-backend)
 (require 'json)
 (require 'sql)
+(require 'url-util)
 
 ;;;; Configuration
 
@@ -155,6 +156,9 @@ A stuck disconnect should not block the user or kill the agent.")
     (mongodb    . (:maven "org.mongodb:mongodb-jdbc:3.0.6:all"
                   :filename "mongodb-jdbc.jar"
                   :class "com.mongodb.jdbc.MongoDriver"))
+    (saphana    . (:maven "com.sap.cloud.db.jdbc:ngdbc:2.20.17"
+                  :filename "ngdbc.jar"
+                  :class "com.sap.db.jdbc.Driver"))
     (slf4j-api  . (:maven "org.slf4j:slf4j-api:2.0.16"
                    :filename "slf4j-api.jar"))
     (slf4j-nop  . (:maven "org.slf4j:slf4j-nop:2.0.16"
@@ -165,7 +169,7 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 ;;;; Drivers that default to JDBC backend
 
 (defconst clutch-jdbc--jdbc-drivers
-  '(jdbc oracle sqlserver db2 snowflake redshift clickhouse)
+  '(jdbc oracle sqlserver db2 snowflake redshift clickhouse saphana)
   "Backend/driver symbols that are routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-metadata
@@ -197,7 +201,16 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
                   :support-level basic
-                  :data-model relational)))
+                  :data-model relational))
+    (saphana    . (:display-name "SAP HANA"
+                  :support-level core
+                  :data-model relational
+                  ;; HANA has no canonical port (30013/30015 for on-prem,
+                  ;; 443 for HANA Cloud); the manual connect flow expects a
+                  ;; numeric default, so opt HANA out of that picker and
+                  ;; require users to configure it via `clutch-connection-alist'
+                  ;; or `.hana.gpg' discovery.
+                  :manual-choice nil)))
   "User-facing metadata for JDBC-backed concrete drivers.")
 
 (defconst clutch-jdbc--driver-companions
@@ -771,6 +784,17 @@ or :sid (Oracle SID-style connection)."
           ('clickhouse
            (format "jdbc:clickhouse://%s:%d/%s"
                    host (or port 8123) database))
+          ('saphana
+           (unless (and (integerp port) (> port 0))
+             (signal 'clutch-db-error
+                     (list "SAP HANA JDBC requires an explicit :port (no canonical default: 30013/30015 for on-prem, 443 for HANA Cloud)")))
+           (let ((schema (plist-get params :schema)))
+             (format "jdbc:sap://%s:%d/%s"
+                     host port
+                     (if (and (stringp schema) (not (string-empty-p schema)))
+                         (format "?currentSchema=%s"
+                                 (url-hexify-string schema))
+                       ""))))
           ('mongodb
            (clutch-jdbc--sql-interface-url params))
           (_
@@ -862,14 +886,43 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
     (and (eq driver 'oracle)
          clutch-jdbc-oracle-manual-commit))))
 
-(defun clutch-jdbc--apply-timeout-defaults (params)
-  "Return a copy of PARAMS with absent timeout keys set to their global defaults."
-  (clutch-db--apply-connect-defaults
-   (clutch-db--reject-removed-connect-params params)
-   `((:connect-timeout . ,clutch-connect-timeout-seconds)
-     (:read-idle-timeout . ,clutch-read-idle-timeout-seconds)
-     (:query-timeout . ,clutch-query-timeout-seconds)
-     (:rpc-timeout . ,clutch-jdbc-rpc-timeout-seconds))))
+(defcustom clutch-jdbc-saphana-rpc-timeout-seconds 180
+  "Default RPC timeout in seconds for SAP HANA JDBC connections.
+HANA calculation-view metadata (getColumns / getImportedKeys / getPrimaryKeys
+against `_SYS_BIC.*') can take tens of seconds per call because HANA
+compiles view metadata dynamically.  When a single RPC times out clutch
+kills the entire JDBC agent, so this default is intentionally generous.
+Set to nil (or override per connection with `:rpc-timeout') to fall back
+to `clutch-jdbc-rpc-timeout-seconds'."
+  :type '(choice (const :tag "Use global default" nil) natnum)
+  :group 'clutch-jdbc)
+
+(defcustom clutch-jdbc-saphana-read-idle-timeout-seconds 300
+  "Default `:read-idle-timeout' for SAP HANA JDBC connections.
+Same rationale as `clutch-jdbc-saphana-rpc-timeout-seconds' — HANA
+metadata calls hold the JDBC network round trip open longer than the
+30 s used for interactive OLTP backends.  nil falls back to
+`clutch-read-idle-timeout-seconds'."
+  :type '(choice (const :tag "Use global default" nil) natnum)
+  :group 'clutch-jdbc)
+
+(defun clutch-jdbc--apply-timeout-defaults (driver params)
+  "Return a copy of PARAMS with absent timeout keys set to their global defaults.
+DRIVER is the JDBC driver symbol; SAP HANA connections use higher RPC /
+read-idle defaults because metadata calls (particularly against `_SYS_BIC'
+calculation views) can take tens of seconds each and timing out one
+triggers agent-kill."
+  (let* ((saphana-p (eq driver 'saphana))
+         (rpc (or (and saphana-p clutch-jdbc-saphana-rpc-timeout-seconds)
+                  clutch-jdbc-rpc-timeout-seconds))
+         (read-idle (or (and saphana-p clutch-jdbc-saphana-read-idle-timeout-seconds)
+                        clutch-read-idle-timeout-seconds)))
+    (clutch-db--apply-connect-defaults
+     (clutch-db--reject-removed-connect-params params)
+     `((:connect-timeout . ,clutch-connect-timeout-seconds)
+       (:read-idle-timeout . ,read-idle)
+       (:query-timeout . ,clutch-query-timeout-seconds)
+       (:rpc-timeout . ,rpc)))))
 
 (defun clutch-jdbc--setup-prerequisites (driver)
   "Ensure agent jar and DRIVER jar are present."
@@ -918,7 +971,7 @@ Returns a `clutch-jdbc-conn'."
   "Connect to JDBC DRIVER using PARAMS after driver dispatch is resolved."
   (clutch-jdbc--setup-prerequisites driver)
   (clutch-jdbc--ensure-agent)
-  (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
+  (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults driver params))
          (manual-commit-p (clutch-jdbc--manual-commit-mode driver normalized-params))
          (url      (clutch-jdbc--build-url driver normalized-params))
          (user     (plist-get normalized-params :user))
@@ -1043,6 +1096,18 @@ Emacs RPC timeout."
   "Return non-nil when CONN is an Oracle JDBC connection."
   (eq (clutch-jdbc--conn-driver conn) 'oracle))
 
+(defun clutch-jdbc--saphana-conn-p (conn)
+  "Return non-nil when CONN is a SAP HANA JDBC connection."
+  (eq (clutch-jdbc--conn-driver conn) 'saphana))
+
+(defun clutch-jdbc--lazy-schema-conn-p (conn)
+  "Return non-nil when CONN should defer full schema enumeration.
+Large enterprise tenants (Oracle, SAP HANA) commonly hold tens of
+thousands of tables, so completion is served through prefix lookups and
+the object-discovery cache is refreshed in the background."
+  (or (clutch-jdbc--oracle-conn-p conn)
+      (clutch-jdbc--saphana-conn-p conn)))
+
 (defun clutch-jdbc--url-prefix-p (conn prefix)
   "Return non-nil for JDBC CONN URLs with PREFIX."
   (let ((url (plist-get (clutch-jdbc-conn-params conn) :url)))
@@ -1054,13 +1119,21 @@ Emacs RPC timeout."
   (clutch-jdbc--url-prefix-p conn "jdbc:duckdb:"))
 
 (defun clutch-jdbc--limit-offset-conn-p (conn)
-  "Return non-nil when JDBC CONN should use LIMIT/OFFSET pagination."
+  "Return non-nil when JDBC CONN should use LIMIT/OFFSET pagination.
+SAP HANA supports both `LIMIT n OFFSET m' (native) and the ANSI
+`OFFSET/FETCH NEXT ROWS ONLY' form, but the ANSI form requires the
+query to end with a real ORDER BY — the `ORDER BY (SELECT NULL)'
+placeholder that the generic path emits parses in HANA but often
+produces a top-level SQL syntax error when combined with SELECT lists
+that already project computed columns.  Use HANA's native LIMIT syntax
+to avoid the mismatch."
   (let ((driver (clutch-jdbc--conn-driver conn)))
-    (or (memq driver '(redshift clickhouse))
+    (or (memq driver '(redshift clickhouse saphana))
         (clutch-jdbc--mongodb-conn-p conn)
         (clutch-jdbc--duckdb-conn-p conn)
         (clutch-jdbc--url-prefix-p conn "jdbc:redshift:")
-        (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:"))))
+        (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:")
+        (clutch-jdbc--url-prefix-p conn "jdbc:sap:"))))
 
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
@@ -1168,13 +1241,15 @@ unknown effect."
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((conn clutch-jdbc-conn))
   "Return non-nil when CONN should refresh schema eagerly.
-Oracle JDBC schema enumeration is too slow to block connect."
-  (not (clutch-jdbc--oracle-conn-p conn)))
+Large-tenant JDBC drivers (Oracle, SAP HANA) enumerate schema in the
+background instead of blocking connect."
+  (not (clutch-jdbc--lazy-schema-conn-p conn)))
 
 (cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
   "Return non-nil when CONN may synchronously load completion columns.
-This is allowed in the hot path."
-  (not (clutch-jdbc--oracle-conn-p conn)))
+Suppressed for large-tenant JDBC drivers (Oracle, SAP HANA) so the hot
+path stays non-blocking."
+  (not (clutch-jdbc--lazy-schema-conn-p conn)))
 
 ;;;; Query methods
 
@@ -1410,9 +1485,14 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
     (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name))))
 
 (cl-defmethod clutch-db--source-table-name ((conn clutch-jdbc-conn) token)
-  "Return source table name for JDBC CONN and SQL table TOKEN."
+  "Return source table name for JDBC CONN and SQL table TOKEN.
+Oracle and SAP HANA fold unquoted identifiers to uppercase in their
+data dictionaries, so an unquoted SQL token like `mytable' must be
+upcased before it is used to look up columns, primary keys, or foreign
+keys via DatabaseMetaData."
   (let ((name (cl-call-next-method)))
-    (if (and (clutch-jdbc--oracle-conn-p conn)
+    (if (and (or (clutch-jdbc--oracle-conn-p conn)
+                 (clutch-jdbc--saphana-conn-p conn))
              (not (string-match-p "\\`\\s-*\""
                                   (clutch-db-sql-table-qualifier token))))
         (upcase name)
@@ -1467,9 +1547,15 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
 
 (defun clutch-jdbc--default-schema (conn)
   "Return a default schema filter for CONN, or nil for no filtering.
-Oracle uses the username as schema (uppercased).  Other backends return nil."
-  (when (clutch-jdbc--oracle-conn-p conn)
-    (when-let* ((user (plist-get (clutch-jdbc-conn-params conn) :user)))
+Oracle and SAP HANA use the uppercased username as the schema when no
+explicit `:schema' is configured.  Both dictionaries store identifiers
+uppercase by default, so the login user's own schema is a sensible
+default that keeps `search-tables' / `search-columns' RPCs bounded on
+large tenants."
+  (when (or (clutch-jdbc--oracle-conn-p conn)
+            (clutch-jdbc--saphana-conn-p conn))
+    (when-let* ((user (plist-get (clutch-jdbc-conn-params conn) :user))
+                ((not (string-empty-p user))))
       (upcase user))))
 
 (defun clutch-jdbc--conn-schema (conn)
@@ -1664,7 +1750,7 @@ the metadata request."
 
 (cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
   "Return table name candidates matching PREFIX for JDBC CONN."
-  (when (clutch-jdbc--oracle-conn-p conn)
+  (when (clutch-jdbc--lazy-schema-conn-p conn)
     (let ((result (clutch-jdbc--rpc
                    "search-tables"
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -1693,49 +1779,70 @@ the metadata request."
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
   "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
-  (let ((driver (clutch-jdbc--conn-driver conn)))
-    (cond
-     ((eq driver 'oracle)
-      (let* ((result (clutch-jdbc--rpc
-                      "search-columns"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                        (table   . ,table)
-                        (prefix  . ,prefix)
-                        ,@(clutch-jdbc--metadata-scope-params conn)))))
-        (mapcar (lambda (col) (plist-get col :name))
-                (plist-get result :columns)))))))
+  (when (clutch-jdbc--lazy-schema-conn-p conn)
+    (let* ((result (clutch-jdbc--rpc
+                    "search-columns"
+                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                      (table   . ,table)
+                      (prefix  . ,prefix)
+                      ,@(clutch-jdbc--metadata-scope-params conn)))))
+      (mapcar (lambda (col) (plist-get col :name))
+              (plist-get result :columns)))))
+
+(defun clutch-jdbc--skip-object-category-p (conn category)
+  "Return non-nil when CATEGORY should not be enumerated for CONN.
+
+SAP HANA skips several categories where the JDBC driver's
+`DatabaseMetaData' implementation either errors or is prohibitively
+expensive:
+
+- `indexes' — `getIndexInfo' is unusually slow AND serialized on the
+  JDBC connection monitor.  Every call re-issues session-handshake
+  statements, so warmup on a large tenant starves the shared JDBC
+  agent thread pool.
+- `procedures' / `functions' — `getProcedures' / `getFunctions'
+  reference the ANSI `SPECIFIC_NAME' column, which HANA's
+  `SYS.PROCEDURES' / `SYS.FUNCTIONS' views do not expose.  Calls fail
+  with `Invalid column name: SPECIFIC_NAME'.
+
+Users who want per-object listings can query `SYS.INDEXES',
+`SYS.PROCEDURES', or `SYS.FUNCTIONS' directly."
+  (and (clutch-jdbc--saphana-conn-p conn)
+       (memq category '(indexes procedures functions))))
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
   "Return object entry plists for CATEGORY on JDBC CONN."
-  (when-let* ((spec (clutch-jdbc--object-category-spec category)))
-    (let* ((op (plist-get spec :op))
-           (key (plist-get spec :key))
-           (result (clutch-jdbc--rpc
-                    op
-                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                      ,@(clutch-jdbc--metadata-scope-params conn)))))
-      (mapcar #'clutch-jdbc--normalize-object-entry
-              (plist-get result key)))))
+  (unless (clutch-jdbc--skip-object-category-p conn category)
+    (when-let* ((spec (clutch-jdbc--object-category-spec category)))
+      (let* ((op (plist-get spec :op))
+             (key (plist-get spec :key))
+             (result (clutch-jdbc--rpc
+                      op
+                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                        ,@(clutch-jdbc--metadata-scope-params conn)))))
+        (mapcar #'clutch-jdbc--normalize-object-entry
+                (plist-get result key))))))
 
 (cl-defmethod clutch-db-list-objects-async ((conn clutch-jdbc-conn) category callback
                                             &optional errback)
   "Fetch object entry plists for CATEGORY on JDBC CONN asynchronously."
-  (when-let* ((spec (clutch-jdbc--object-category-spec category)))
-    (let ((op (plist-get spec :op))
-          (key (plist-get spec :key)))
-      (clutch-jdbc--rpc-async
-       op
-       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-         ,@(clutch-jdbc--metadata-scope-params conn))
-       (lambda (result)
-         (when callback
-           (funcall callback
-                    (mapcar #'clutch-jdbc--normalize-object-entry
-                            (plist-get result key)))))
-       errback
-       (clutch-jdbc--conn-rpc-timeout conn)
-       conn)
-      t)))
+  (unless (clutch-jdbc--skip-object-category-p conn category)
+    (when-let* ((spec (clutch-jdbc--object-category-spec category)))
+      (let ((op (plist-get spec :op))
+            (key (plist-get spec :key)))
+        (clutch-jdbc--rpc-async
+         op
+         `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+           ,@(clutch-jdbc--metadata-scope-params conn))
+         (lambda (result)
+           (when callback
+             (funcall callback
+                      (mapcar #'clutch-jdbc--normalize-object-entry
+                              (plist-get result key)))))
+         errback
+         (clutch-jdbc--conn-rpc-timeout conn)
+         conn)
+        t))))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-jdbc-conn) entry)
   "Return detail plists for JDBC object ENTRY on CONN."
@@ -1877,9 +1984,19 @@ the metadata request."
           :where-sql "ROWID = ?")))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table)
-  "Return row identity candidates for TABLE on JDBC CONN."
+  "Return row identity candidates for TABLE on JDBC CONN.
+
+Falls through PK → unique-not-null key → (Oracle only) ROWID.  SAP HANA
+skips the unique-not-null fallback because its JDBC driver's
+`getIndexInfo' call is very slow (it re-issues session-handshake
+statements internally) AND it serializes on the connection monitor,
+which starves clutch's shared JDBC agent under concurrent requests.
+HANA schemas in the wild always carry PKs on user tables; the
+fallback would only fire for system views (e.g. `DUMMY') or generated
+schemas that are read-only in practice anyway."
   (or (cl-call-next-method)
-      (clutch-jdbc--unique-not-null-identities conn table)
+      (unless (clutch-jdbc--saphana-conn-p conn)
+        (clutch-jdbc--unique-not-null-identities conn table))
       (when-let* ((rowid (clutch-jdbc--rowid-identity conn)))
         (list rowid))))
 

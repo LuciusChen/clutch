@@ -15,7 +15,7 @@ Emacs users lack a seamless, integrated database client that operates within the
 
 clutch integrates directly into Emacs, offering:
 - Native MySQL/PostgreSQL backends via external pure Elisp protocol packages, built-in SQLite, native MongoDB through the external `mongodb.el` client, and basic Redis key/value support through the external `redis.el` client
-- JDBC sidecar support for Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB SQL Interface, and generic JDBC URLs
+- JDBC sidecar support for Oracle, SQL Server, SAP HANA, DB2, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB SQL Interface, and generic JDBC URLs
 - Interactive SQL editing with completion
 - Unified transient-based mutation workflow (edit/delete/insert with staged preview/commit)
 - Schema caching and intelligent completion
@@ -69,6 +69,7 @@ backend adapters
   clutch-mongodb.el      MongoDB document adapter over external mongodb.el
   clutch-redis.el        Redis key/value adapter over external redis.el
   clutch-db-jdbc.el      JVM sidecar plus JDBC drivers
+  clutch-db-saphana.el   SAP HANA JDBC helpers (.hana.gpg auth-source discovery)
 ```
 
 ### File Responsibilities
@@ -92,6 +93,7 @@ backend adapters
 | `clutch-mongodb.el` | MongoDB basic document backend over external `mongodb.el` |
 | `clutch-redis.el` | Redis basic key/value backend over external `redis.el` |
 | `clutch-db-jdbc.el` | JDBC backend: sidecar management, JSON protocol, async schema, runtime schema switching |
+| `clutch-db-saphana.el` | SAP HANA-specific helpers on top of the JDBC backend: `currentSchema` URL mapping is registered in `clutch-db-jdbc.el`; this file owns `.hana.gpg` auth-source discovery and registers it via `clutch-external-connection-source-functions` |
 | External dependency: `mysql` | Pure Elisp MySQL wire protocol client (separate package) |
 | External dependency: `pg` | PostgreSQL client from upstream `pg-el` (separate package) |
 | External dependency: `mongodb` | Native MongoDB client from `mongodb.el` (separate package) |
@@ -127,6 +129,7 @@ user queries on the same JDBC session.
 | **Oracle** | Core SQL support | `ojdbc8` | 19.21.0.0 | Maven Central (auto-download) |
 | **Oracle i18n** | Companion driver | `orai18n` | 21.13.0.0 | Maven Central (optional, for non-ASCII) |
 | **SQL Server** | Core SQL support | `mssql-jdbc` | 13.4.0.jre11 | Maven Central (auto-download) |
+| **SAP HANA** | Core SQL support | `ngdbc` | 2.20.17 | Maven Central (auto-download) |
 | **Snowflake** | Basic SQL / query-first support | `snowflake-jdbc` | 3.14.4 | Maven Central (auto-download) |
 | **Amazon Redshift** | Basic SQL / query-first support | `redshift-jdbc42` | 2.1.0.30 | Maven Central (auto-download) |
 | **ClickHouse** | Basic SQL / query-first support | `clickhouse-jdbc` | 0.9.8:all | Maven Central (auto-download) |
@@ -584,7 +587,7 @@ Connection profile plist keys:
 | `:password` | string | Password (prefer auth-source instead) |
 | `:database` | string | Database/schema name |
 | `:sid` | string | Oracle SID when using `@host:port:SID` style connections |
-| `:backend` | symbol | `mysql`, `pg`, `postgresql`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
+| `:backend` | symbol | `mysql`, `pg`, `postgresql`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `saphana`, `snowflake`, `redshift`, `db2` |
 | `:sql-product` | symbol | SQL highlight product for `sql-mode` |
 | `:pass-entry` | string | Pass store suffix for password lookup |
 | `:ssh-host` | string | OpenSSH host alias from `~/.ssh/config` used for an automatic local tunnel |

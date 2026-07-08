@@ -56,6 +56,7 @@
 (require 'clutch-object)
 (require 'clutch-edit)
 (require 'clutch-result)
+(require 'clutch-db-saphana)
 (require 'xref)
 
 ;;;; Customization

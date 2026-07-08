@@ -1,0 +1,179 @@
+#+TITLE: clutch SAP HANA Backend Guide
+
+* SAP HANA JDBC (clutch-db-saphana.el)
+
+=clutch-db-saphana.el= layers SAP HANA-specific conveniences on top of the
+generic JDBC transport in [[file:jdbc-backend.org][clutch-db-jdbc.el]].  It reuses the JDBC agent, URL
+plumbing, and dialect glue; only the =currentSchema= URL mapping and the
+=.hana.gpg= auth-source discovery source are HANA-specific.
+
+** Setup
+
+The HANA JDBC driver (=ngdbc=) auto-installs from Maven Central on first
+connect, like every other Maven-backed driver:
+
+#+begin_src emacs-lisp
+(clutch-jdbc-ensure-agent)
+(clutch-jdbc-install-driver 'saphana)   ; ngdbc.jar from Maven Central
+#+end_src
+
+The driver jar lands in =~/.emacs.d/clutch-jdbc/drivers/ngdbc.jar= (configurable
+via =clutch-jdbc-agent-dir=).  No companion jars are needed.
+
+** Connection Plists
+
+HANA connections use =:backend saphana= plus the standard structured
+=:host= / =:port= / =:user= keys:
+
+#+begin_src emacs-lisp
+(setq clutch-connection-alist
+      '(;; Classic single-container tenant (SYSTEMDB or a specific tenant port)
+        ("hana-system" . (:backend saphana
+                           :host "10.0.0.5" :port 30013
+                           :user "SYSTEM" :pass-entry "hana-system"))
+
+        ;; Application schema on a tenant DB
+        ("hana-app"    . (:backend saphana
+                           :host "10.0.0.5" :port 30015
+                           :user "APPUSER" :pass-entry "hana-app"
+                           :schema "APP_DATA"))
+
+        ;; HANA Cloud with tenant routing and TLS via :props
+        ("hana-cloud"  . (:backend saphana
+                           :host "cluster.hanacloud.ondemand.com" :port 443
+                           :user "REPORTER" :pass-entry "hana-cloud"
+                           :schema "ANALYTICS"
+                           :props (("encrypt" . "true")
+                                   ("databaseName" . "TENANT1"))))))
+#+end_src
+
+HANA has no canonical default port — always set =:port= explicitly.  Common
+values: =3<instance>13= (SYSTEMDB), =3<instance>15= (single container / first
+tenant), =443= (HANA Cloud).
+
+** URL Construction
+
+Structured plists are turned into =jdbc:sap://{host}:{port}/= URLs.  The only
+plist key that is auto-mapped into the URL is =:schema=, which becomes the
+=currentSchema= JDBC property.  Everything else must be passed through =:props=
+explicitly:
+
+| Plist key | JDBC URL destination                             |
+|-----------+--------------------------------------------------|
+| =:host=   | URL host                                         |
+| =:port=   | URL port                                         |
+| =:user=   | JDBC user                                        |
+| =:schema= | =?currentSchema=<value>=                         |
+| =:props=  | additional =key=value= pairs appended verbatim   |
+
+There is no auto-mapping for TLS (=encrypt=), tenant routing (=databaseName=),
+or any other HANA property — put those in =:props= to keep the URL contract
+explicit.  Users who need a fully custom connection string can pass =:url= and
+=:driver-class= like any other generic JDBC connection.
+
+The =currentSchema= property is quoted by the driver (see [[https://me.sap.com/notes/2632458/E][SAP Note 2632458]]),
+so do not pre-quote =:schema= yourself.
+
+** Password Management
+
+HANA connections use the same =:pass-entry= / auth-source integration as every
+other clutch backend.  See [[file:../README.org::*Password Management][Password Management]] for the resolution order.
+
+** =.hana.gpg= Auth-Source Discovery
+
+Existing users of =sql-hana.el= keep their tenants in an encrypted
+=auth-source= file (typically =~/.hana.gpg=), one line per host:
+
+#+begin_example
+machine my-prod-tenant server 10.0.0.5 port 30015 user SYSTEM password secret schema MY_SCHEMA
+machine dev-hana       server 127.0.0.1 port 39015 user DBADMIN password s3cret
+#+end_example
+
+Clutch reads those files at picker time and surfaces each entry as a virtual
+saved connection in =M-x clutch-query-console=.  Field mapping:
+
+| Auth-source key         | Clutch connection plist                             |
+|-------------------------+-----------------------------------------------------|
+| =:host=                 | connection NAME (picker label / persistence key)    |
+| =:server=               | connection =:host= (real HANA hostname)             |
+| =:port=                 | =:port= (parsed to number)                          |
+| =:user=                 | =:user=                                             |
+| =:secret=               | resolved lazily at connect time                     |
+| =:schema=               | =:schema= (becomes =currentSchema=)                 |
+
+=clutch-saphana-auth-source-files= defaults to ='("~/.hana.gpg")=.  Missing
+files are silently skipped, so the default costs nothing on machines without a
+HANA setup.  You can point it at multiple files, or set it to =nil= to disable
+discovery.
+
+Entries in =clutch-connection-alist= always win over auth-source entries when
+names collide, so you can override a discovered entry (e.g. to add =:props=)
+without touching the =.gpg= file.
+
+Passwords are resolved through the standard chain at connect time:
+=:pass-entry= → =auth-source-search= on host/user/port → =read-passwd= prompt.
+The =:secret= thunk in the auth-source entry is only invoked when clutch
+actually reaches the auth-source fallback.
+
+** Transaction Control
+
+HANA JDBC uses auto-commit by default, matching every other JDBC backend
+except Oracle.  Opt into manual-commit per connection with =:manual-commit t=:
+
+#+begin_src emacs-lisp
+("hana-safer" . (:backend saphana
+                  :host "10.0.0.5" :port 30015
+                  :user "APPUSER" :pass-entry "hana-safer"
+                  :manual-commit t))
+#+end_src
+
+With manual-commit on, the console header shows =Tx: Manual= / =Tx: Manual*=
+and =C-c C-a= / =C-c C-m= / =C-c C-u= behave as documented in the main
+[[file:jdbc-backend.org::*Transaction Control][JDBC transaction section]].
+
+** Staged Mutation Row Identity
+
+HANA follows the standard JDBC row-identity policy: primary key first, then
+non-null unique key.  There is no =$rowid$= physical fallback — result sets
+from tables without a PK or non-null unique key stay read-only for staged
+=UPDATE= / =DELETE=.
+
+** Schema Enumeration
+
+HANA tenants routinely hold tens of thousands of tables across schemas like
+=SAPSR3=, =_SYS_BIC=, and per-application containers.  Clutch treats HANA the
+same way it treats Oracle:
+
+- =clutch-connect= returns immediately; no full schema enumeration blocks the
+  console.
+- SQL completion at point issues prefix queries against HANA's data
+  dictionary.
+- =C-c C-j= object discovery is served from a cache that a background job
+  populates after connect.
+- =clutch-schema-refresh= re-fetches the snapshot on demand.
+
+No system-schema filtering is applied; =SYS=, =_SYS_*=, =PUBLIC=, and every
+application container show up in =C-c C-j= exactly as HANA reports them.
+
+** Pagination and Identifier Quoting
+
+HANA uses the generic =LIMIT n OFFSET m= paginated SQL path.  Identifier
+quoting uses ANSI double quotes, matching Oracle / MSSQL / DB2.  Both are
+default JDBC behaviors — no HANA-specific SQL builder.
+
+** Live Test Coverage
+
+Live HANA coverage is tagged =:saphana-live= and requires a real HANA endpoint
+supplied via environment variables:
+
+#+begin_src sh
+CLUTCH_TEST_SAPHANA_URL="jdbc:sap://cluster.hanacloud.ondemand.com:443/" \
+CLUTCH_TEST_SAPHANA_USER="REPORTER" \
+CLUTCH_TEST_SAPHANA_PASSWORD="secret" \
+CLUTCH_TEST_SAPHANA_SCHEMA="ANALYTICS" \
+emacs -Q --batch -L . -L test -l ert -l clutch-db-test \
+  --eval "(ert-run-tests-batch-and-exit '(tag :saphana-live))"
+#+end_src
+
+The =:saphana-live= suite is not part of =./test/run-ci.sh native-live=
+because there is no local HANA container we can bring up unattended.

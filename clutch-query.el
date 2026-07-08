@@ -362,7 +362,7 @@ console window; (3) nil, meaning use the selected window."
 (defun clutch--read-query-console-target ()
   "Read a saved connection name or an ad hoc connection target."
   (clutch--ensure-clutch-loaded)
-  (let* ((names (mapcar #'car clutch-connection-alist))
+  (let* ((names (clutch--all-connection-names))
          (choice (if names
                      (clutch--read-query-console-choice names)
                    "")))

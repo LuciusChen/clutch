@@ -6079,4 +6079,567 @@ It does so without touching the agent process."
                          '((:id 42 :ok t)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
+
+;;;; SAP HANA (saphana)
+
+(require 'clutch-db-saphana)
+
+(ert-deftest clutch-db-test-saphana-driver-registered ()
+  "SAP HANA appears in the JDBC driver registry and connection dispatch."
+  (should (memq 'saphana clutch-jdbc--jdbc-drivers))
+  (let ((spec (alist-get 'saphana clutch-jdbc--driver-sources))
+        (meta (alist-get 'saphana clutch-jdbc--driver-metadata)))
+    (should (equal (plist-get spec :filename) "ngdbc.jar"))
+    (should (equal (plist-get spec :class) "com.sap.db.jdbc.Driver"))
+    (should (string-match-p "\\`com\\.sap\\.cloud\\.db\\.jdbc:ngdbc:"
+                            (plist-get spec :maven)))
+    (should (equal (plist-get meta :display-name) "SAP HANA"))
+    (should (eq (plist-get meta :support-level) 'core))
+    (should (eq (plist-get meta :data-model) 'relational)))
+  (let ((entry (alist-get 'saphana clutch-backend--registry)))
+    (should entry)
+    (should (functionp (plist-get entry :connect-fn)))))
+
+(ert-deftest clutch-db-test-saphana-url-plain-tenant ()
+  "Structured HANA connection with no schema yields a bare URL."
+  (should (equal (clutch-jdbc--build-url
+                  'saphana
+                  '(:host "10.0.0.5" :port 30015 :user "SYSTEM"))
+                 "jdbc:sap://10.0.0.5:30015/")))
+
+(ert-deftest clutch-db-test-saphana-url-with-schema ()
+  ":schema maps to the currentSchema JDBC property (only auto-mapped key)."
+  (should (equal (clutch-jdbc--build-url
+                  'saphana
+                  '(:host "h" :port 30015 :user "u" :schema "MY_SCHEMA"))
+                 "jdbc:sap://h:30015/?currentSchema=MY_SCHEMA")))
+
+(ert-deftest clutch-db-test-saphana-url-hana-cloud ()
+  "HANA Cloud style connection (port 443) still leaves TLS to :props."
+  (should (equal (clutch-jdbc--build-url
+                  'saphana
+                  '(:host "cluster.hanacloud.ondemand.com" :port 443
+                    :user "REPORTER" :schema "ANALYTICS"))
+                 "jdbc:sap://cluster.hanacloud.ondemand.com:443/?currentSchema=ANALYTICS")))
+
+(ert-deftest clutch-db-test-saphana-url-does-not-map-tls-or-database ()
+  ":tls and :database are never auto-added to the URL for HANA.
+Only :schema (currentSchema) is auto-mapped; encrypt/databaseName must
+come through :props explicitly.  The generated URL therefore excludes
+databaseName and encrypt even when those keys appear on the plist."
+  (let ((url (clutch-jdbc--build-url
+              'saphana
+              '(:host "h" :port 30013 :user "SYSTEM"
+                :database "TENANT1" :tls t))))
+    (should (equal url "jdbc:sap://h:30013/"))
+    (should-not (string-match-p "databaseName" url))
+    (should-not (string-match-p "encrypt" url))))
+
+(ert-deftest clutch-db-test-saphana-url-respects-explicit-url ()
+  "An explicit :url overrides structured HANA URL construction."
+  (should (equal (clutch-jdbc--build-url
+                  'saphana
+                  '(:url "jdbc:sap://cluster.example.com:443/?encrypt=true&databaseName=TENANT1"
+                    :schema "IGNORED"))
+                 "jdbc:sap://cluster.example.com:443/?encrypt=true&databaseName=TENANT1")))
+
+(ert-deftest clutch-db-test-saphana-connect-defaults-to-auto-commit ()
+  "SAP HANA JDBC connects with auto-commit enabled (unlike Oracle).
+Runs both drivers under `clutch-jdbc-oracle-manual-commit' = t so a stub
+that always returned auto-commit=t for every driver would fail the
+Oracle branch — the assertion is really \"drivers diverge here\", not
+\"saphana returns t\"."
+  (let ((clutch-jdbc-oracle-manual-commit t)
+        (cases '((oracle  :expected nil :conn-id 8
+                          :driver-class "oracle.jdbc.OracleDriver")
+                 (saphana :expected t   :conn-id 9
+                          :driver-class "com.sap.db.jdbc.Driver"))))
+    (dolist (case cases)
+      (let* ((driver (car case))
+             (spec (cdr case))
+             (expected (plist-get spec :expected))
+             captured-params)
+        (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+                  ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                  ((symbol-function 'clutch-jdbc--rpc)
+                   (lambda (_op params &optional _timeout-seconds)
+                     (setq captured-params params)
+                     `(:conn-id ,(plist-get spec :conn-id)))))
+          (clutch-db-jdbc-connect
+           driver
+           '(:host "h" :port 30015 :user "u" :password "p"))
+          (should (equal (alist-get 'driver-class captured-params)
+                         (plist-get spec :driver-class)))
+          (should (eq (alist-get 'auto-commit captured-params)
+                      (if expected t clutch-jdbc--json-false))))))))
+
+(ert-deftest clutch-db-test-saphana-connect-manual-commit-opt-in ()
+  ":manual-commit t opts a SAP HANA connection into manual mode."
+  (let (captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional _timeout-seconds)
+                 (setq captured-params params)
+                 '(:conn-id 10))))
+      (clutch-db-jdbc-connect
+       'saphana
+       '(:host "h" :port 30015 :user "u" :password "p"
+         :manual-commit t))
+      (should (eq (alist-get 'auto-commit captured-params)
+                  clutch-jdbc--json-false)))))
+
+(ert-deftest clutch-db-test-saphana-lazy-schema-refresh ()
+  "HANA connections defer full schema refresh, matching Oracle behavior."
+  (let ((hana (make-clutch-jdbc-conn :conn-id 1 :driver 'saphana
+                                     :params '(:backend saphana :user "u"))))
+    (should (clutch-jdbc--saphana-conn-p hana))
+    (should (clutch-jdbc--lazy-schema-conn-p hana))
+    (should-not (clutch-db-eager-schema-refresh-p hana))
+    (should-not (clutch-db-completion-sync-columns-p hana))))
+
+(ert-deftest clutch-db-test-saphana-prefix-completion-uses-search-tables ()
+  "HANA table completion issues search-tables RPCs (lazy prefix path)."
+  (let (captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (setq captured-op op captured-params params)
+                 '(:tables ((:name "CUSTOMERS") (:name "CUSTOMER_ORDERS"))))))
+      (should (equal
+               (clutch-db-complete-tables
+                (make-clutch-jdbc-conn
+                 :conn-id 3
+                 :driver 'saphana
+                 :params '(:backend saphana :schema "APP" :user "u"))
+                "CUS")
+               '("CUSTOMERS" "CUSTOMER_ORDERS")))
+      (should (equal captured-op "search-tables"))
+      (should (equal (alist-get 'prefix captured-params) "CUS"))
+      (should (equal (alist-get 'schema captured-params) "APP")))))
+
+(ert-deftest clutch-db-test-saphana-row-identity-no-rowid-fallback ()
+  "HANA row identity stops at the primary key.
+No $rowid$ physical fallback like Oracle, and no unique-not-null index
+fallback either — the HANA JDBC driver's `getIndexInfo' call is slow
+and connection-serialized, so falling back to a full-schema index scan
+on every PK-less table would starve the JDBC agent thread pool."
+  (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+             (lambda (_conn _table) nil))
+            ((symbol-function 'clutch-jdbc--unique-not-null-identities)
+             (lambda (_conn _table)
+               (error "unique-not-null-identities must NOT be invoked on HANA"))))
+    (let ((hana (make-clutch-jdbc-conn :conn-id 4 :driver 'saphana
+                                       :params '(:backend saphana :user "u"))))
+      (should (null (clutch-jdbc--rowid-identity hana)))
+      (should (null (clutch-db-row-identity-candidates hana "T"))))))
+
+(ert-deftest clutch-db-test-saphana-auth-source-discovery ()
+  "clutch-saphana--discovered-connections parses .hana.gpg-style entries."
+  (let ((file (make-temp-file "clutch-hana-" nil ".authinfo"))
+        (clutch-saphana--auth-entries-cache nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "machine my-prod-tenant server 10.0.0.5 port 30015 "
+                    "user SYSTEM password secret schema MY_SCHEMA\n")
+            (insert "machine dev-hana server 127.0.0.1 port 39015 "
+                    "user DBADMIN password devsecret\n"))
+          (let* ((clutch-saphana-auth-source-files (list file))
+                 (entries (clutch-saphana--discovered-connections)))
+            (should (= (length entries) 2))
+            (let ((prod (cdr (assoc "my-prod-tenant" entries)))
+                  (dev  (cdr (assoc "dev-hana" entries))))
+              (should (eq (plist-get prod :backend) 'saphana))
+              (should (equal (plist-get prod :host) "10.0.0.5"))
+              (should (= (plist-get prod :port) 30015))
+              (should (equal (plist-get prod :user) "SYSTEM"))
+              (should (equal (plist-get prod :schema) "MY_SCHEMA"))
+              ;; Password is captured from :secret at discovery time so
+              ;; connect does not need `~/.hana.gpg' to appear in the
+              ;; global `auth-sources'.  Value must be the resolved
+              ;; string, not the raw thunk.
+              (should (equal (plist-get prod :password) "secret"))
+              (should-not (plist-member prod :secret))
+              (should (equal (plist-get dev :host) "127.0.0.1"))
+              (should (= (plist-get dev :port) 39015))
+              (should (equal (plist-get dev :password) "devsecret"))
+              (should-not (plist-member dev :schema)))))
+      (delete-file file))))
+
+(ert-deftest clutch-db-test-saphana-auth-source-missing-file-silent ()
+  "Missing auth-source files are silently skipped instead of erroring."
+  (let ((clutch-saphana-auth-source-files
+         (list (expand-file-name "clutch-hana-not-there-XYZZY.gpg"
+                                 temporary-file-directory)))
+        (clutch-saphana--auth-entries-cache nil))
+    (should (null (clutch-saphana--discovered-connections)))))
+
+(ert-deftest clutch-db-test-saphana-discovery-registered-as-source ()
+  "The HANA discovery function is on `clutch-external-connection-source-functions'."
+  (should (memq 'clutch-saphana--discovered-connections
+                clutch-external-connection-source-functions)))
+
+(ert-deftest clutch-db-test-saphana-picker-merges-discovered-names ()
+  "clutch--all-connection-names surfaces HANA auth-source entries alongside static ones."
+  (let ((file (make-temp-file "clutch-hana-picker-" nil ".authinfo")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "machine hana-alpha server h1 port 30015 "
+                    "user U password P\n"))
+          (let* ((clutch-saphana-auth-source-files (list file))
+                 (clutch-saphana--auth-entries-cache nil)
+                 (clutch-connection-alist
+                  '(("dev-mysql" . (:backend mysql
+                                    :host "127.0.0.1" :port 3306
+                                    :user "root"))))
+                 (names (clutch--all-connection-names))
+                 (params (clutch--saved-connection-params "hana-alpha")))
+            (should (member "dev-mysql" names))
+            (should (member "hana-alpha" names))
+            ;; Static entries win over discovered entries on name collision.
+            (should (eq (plist-get (clutch--saved-connection-params "dev-mysql")
+                                   :backend)
+                        'mysql))
+            (should (eq (plist-get params :backend) 'saphana))
+            (should (equal (plist-get params :host) "h1"))
+            ;; Discovered entries carry their own :password (captured
+            ;; eagerly from :secret at discovery time), so the
+            ;; :pass-entry fallback in `clutch--inject-entry-name'
+            ;; correctly leaves it unset — there is no auth-source
+            ;; lookup to redirect.
+            (should (equal (plist-get params :password) "P"))
+            (should-not (plist-member params :pass-entry))))
+      (delete-file file))))
+
+;;;; Regression tests for review-round fixes
+
+(ert-deftest clutch-db-test-saphana-url-requires-port ()
+  "HANA URL builder refuses to emit a portless URL — HANA has no default port."
+  (should-error
+   (clutch-jdbc--build-url 'saphana '(:host "db.corp" :user "u"))
+   :type 'clutch-db-error)
+  (should-error
+   (clutch-jdbc--build-url 'saphana '(:host "db.corp" :port 0 :user "u"))
+   :type 'clutch-db-error)
+  (should-error
+   (clutch-jdbc--build-url 'saphana '(:host "db.corp" :port -1 :user "u"))
+   :type 'clutch-db-error))
+
+(ert-deftest clutch-db-test-saphana-url-encodes-schema-value ()
+  "HANA URL builder percent-encodes `currentSchema' to prevent property injection."
+  (let ((url (clutch-jdbc--build-url
+              'saphana
+              '(:host "h" :port 30015
+                :schema "PROD&extra=INJECTED"))))
+    ;; The raw `&' from a malicious schema value must be escaped,
+    ;; otherwise the driver would see two properties.
+    (should (string-match-p "currentSchema=PROD%26extra%3DINJECTED" url))
+    (should-not (string-match-p "extra=INJECTED&" url))
+    (should-not (string-match-p "\\?extra=" url)))
+  ;; Spaces likewise need encoding.
+  (should (equal (clutch-jdbc--build-url
+                  'saphana
+                  '(:host "h" :port 30015 :schema "MY SCHEMA"))
+                 "jdbc:sap://h:30015/?currentSchema=MY%20SCHEMA")))
+
+(ert-deftest clutch-db-test-saphana-default-schema-from-user ()
+  "HANA falls back to (upcase :user) as the schema filter for metadata RPCs.
+Otherwise `search-tables' would enumerate the entire tenant."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 1 :driver 'saphana
+               :params '(:backend saphana :host "h" :port 30015
+                         :user "myapp"))))
+    (should (equal (clutch-jdbc--default-schema conn) "MYAPP"))
+    (should (equal (clutch-jdbc--conn-schema conn) "MYAPP"))
+    (should (equal (alist-get 'schema (clutch-jdbc--metadata-scope-params conn))
+                   "MYAPP")))
+  ;; Explicit :schema overrides the user-derived default.
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 2 :driver 'saphana
+               :params '(:backend saphana :host "h" :port 30015
+                         :user "myapp" :schema "OTHER"))))
+    (should (equal (clutch-jdbc--conn-schema conn) "OTHER"))))
+
+(ert-deftest clutch-db-test-saphana-source-table-name-upcases-unquoted ()
+  "HANA unquoted tokens fold to uppercase, matching HANA's dictionary storage.
+Without this, `SELECT * FROM mytable' → get-columns TABLE=mytable, which
+misses the real MYTABLE row in HANA's dictionary."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 1 :driver 'saphana
+               :params '(:backend saphana :user "u"))))
+    (should (equal (clutch-db--source-table-name conn "mytable") "MYTABLE"))
+    ;; Quoted identifiers preserve case (HANA respects double quotes).
+    (should (equal (clutch-db--source-table-name conn "\"mytable\"") "mytable"))))
+
+(ert-deftest clutch-db-test-saphana-discovery-accepts-netrc-style ()
+  "Auth-source entries with only `machine <host>' (no `server' key) still resolve.
+Netrc convention exposes `machine' as `:host'; entry-to-params must
+fall back to `:host' when `:server' is absent, or the picker will silently
+drop these entries."
+  (let ((file (make-temp-file "clutch-hana-netrc-" nil ".authinfo"))
+        (clutch-saphana--auth-entries-cache nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "machine mydb.corp login myuser password secret port 30015\n"))
+          (let* ((clutch-saphana-auth-source-files (list file))
+                 (entries (clutch-saphana--discovered-connections)))
+            (should (= (length entries) 1))
+            (let ((params (cdr (car entries))))
+              (should (eq (plist-get params :backend) 'saphana))
+              ;; Netrc `machine' → :host in auth-source parlance, but
+              ;; clutch's connection plist wants it as :host too.  With
+              ;; no `server' field, the fallback treats :host as the
+              ;; server.
+              (should (equal (plist-get params :host) "mydb.corp"))
+              (should (= (plist-get params :port) 30015))
+              (should (equal (plist-get params :user) "myuser"))
+              (should (equal (plist-get params :password) "secret")))))
+      (delete-file file))))
+
+(ert-deftest clutch-db-test-saphana-discovery-drops-port-less-entries ()
+  "Entries lacking a valid `:port' are filtered out.
+A shared `.authinfo.gpg' listing SSH tokens or HTTP creds must not
+pollute the HANA picker."
+  (let ((file (make-temp-file "clutch-hana-noport-" nil ".authinfo"))
+        (clutch-saphana--auth-entries-cache nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "machine ssh-bastion login me password sshpw\n")
+            (insert "machine hana-real server 10.0.0.5 port 30015 "
+                    "user SYSTEM password p\n")
+            (insert "machine bogus-port server 10.0.0.6 port abc "
+                    "user u password p\n")
+            (insert "machine negative-port server 10.0.0.7 port -30 "
+                    "user u password p\n")
+            (insert "machine zero-port server 10.0.0.8 port 0 "
+                    "user u password p\n"))
+          (let* ((clutch-saphana-auth-source-files (list file))
+                 (entries (clutch-saphana--discovered-connections))
+                 (names (mapcar #'car entries)))
+            (should (equal names '("hana-real")))))
+      (delete-file file))))
+
+(ert-deftest clutch-db-test-saphana-auth-entries-memoized-by-mtime ()
+  "Repeated discovery calls reuse a cached parse until the file's mtime changes."
+  (let ((file (make-temp-file "clutch-hana-cache-" nil ".authinfo"))
+        (clutch-saphana--auth-entries-cache nil)
+        (call-count 0))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "machine cached-hana server h1 port 30015 user u password p\n"))
+          (let ((clutch-saphana-auth-source-files (list file)))
+            (cl-letf* ((real (symbol-function 'auth-source-search))
+                       ((symbol-function 'auth-source-search)
+                        (lambda (&rest args)
+                          (cl-incf call-count)
+                          (apply real args))))
+              ;; First call parses.
+              (clutch-saphana--discovered-connections)
+              (should (= call-count 1))
+              ;; Second call within the same mtime bucket reuses cache.
+              (clutch-saphana--discovered-connections)
+              (should (= call-count 1))
+              ;; Rewriting the file with a new mtime re-parses.
+              ;; `set-file-times' with a future time is more reliable
+              ;; than sleeping.
+              (set-file-times file (time-add (current-time) 10))
+              (clutch-saphana--discovered-connections)
+              (should (= call-count 2)))))
+      (delete-file file))))
+
+(ert-deftest clutch-db-test-saphana-discovery-error-surfaces ()
+  "A broken discovery source reports via `message', not silent zero-entries.
+`condition-case nil ... (error nil)' would hide a bug in
+`clutch-saphana--entry-to-params'; the new handler catches the same
+class but emits a diagnostic so the user knows discovery failed."
+  (let ((clutch-external-connection-source-functions
+         (list (lambda () (error "boom"))))
+        (messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (should (null (clutch--external-connection-entries)))
+      (should (cl-some (lambda (m) (string-match-p "\\bboom\\b" m))
+                       messages)))))
+
+(ert-deftest clutch-db-test-saphana-connect-uses-generous-timeout-defaults ()
+  "SAP HANA connect applies the HANA-specific RPC / read-idle defaults.
+Metadata calls against `_SYS_BIC' calculation views can take tens of
+seconds each; if the RPC timeout kills the agent partway through, the
+whole session dies with `Connection lost'.  The connect helper must
+consult `clutch-jdbc-saphana-*' defcustoms, not the generic
+`clutch-jdbc-rpc-timeout-seconds' / `clutch-read-idle-timeout-seconds'."
+  (let ((clutch-jdbc-saphana-rpc-timeout-seconds 180)
+        (clutch-jdbc-saphana-read-idle-timeout-seconds 300)
+        (clutch-jdbc-rpc-timeout-seconds 30)
+        (clutch-read-idle-timeout-seconds 60)
+        (clutch-connect-timeout-seconds 10)
+        (clutch-query-timeout-seconds 30)
+        captured-params captured-timeout)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_op params &optional timeout-seconds)
+                 (setq captured-params params
+                       captured-timeout timeout-seconds)
+                 '(:conn-id 11))))
+      (let ((conn (clutch-db-jdbc-connect
+                   'saphana
+                   '(:host "h" :port 30015 :user "u" :password "p"))))
+        (should (= captured-timeout 180))
+        (should (= (alist-get 'network-timeout-seconds captured-params) 300))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
+                   180))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :read-idle-timeout)
+                   300))
+        ;; Non-HANA drivers still use the generic defaults.
+        (setq captured-timeout nil)
+        (clutch-db-jdbc-connect
+         'sqlserver
+         '(:host "h" :port 1433 :database "d" :user "u" :password "p"))
+        (should (= captured-timeout 30))
+        (should (= (alist-get 'network-timeout-seconds captured-params) 60))))
+    ;; A per-connection :rpc-timeout override wins over the HANA default.
+    (let (captured-timeout)
+      (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+                ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                ((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_op _params &optional timeout-seconds)
+                   (setq captured-timeout timeout-seconds)
+                   '(:conn-id 12))))
+        (clutch-db-jdbc-connect
+         'saphana
+         '(:host "h" :port 30015 :user "u" :password "p"
+           :rpc-timeout 45))
+        (should (= captured-timeout 45))))))
+
+(ert-deftest clutch-db-test-saphana-list-objects-skips-indexes ()
+  "HANA never enumerates the `indexes', `procedures', or `functions'
+categories through JDBC DatabaseMetaData.
+`getIndexInfo' is slow AND connection-serialized; `getProcedures' and
+`getFunctions' reference the ANSI `SPECIFIC_NAME' column that HANA does
+not expose, so the JDBC driver raises `Invalid column name'.  Both the
+sync and async list-objects paths must short-circuit for these
+categories.  Sequences and triggers stay reachable."
+  (let (rpc-ops async-ops)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op _params &optional _timeout)
+                 (push op rpc-ops)
+                 (list :indexes nil :sequences nil :procedures nil
+                       :functions nil :triggers nil)))
+              ((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (op _params callback &rest _)
+                 (push op async-ops)
+                 (when callback
+                   (funcall callback
+                            (list :indexes nil :sequences nil
+                                  :procedures nil :functions nil
+                                  :triggers nil)))
+                 t)))
+      (let ((hana (make-clutch-jdbc-conn
+                   :conn-id 1 :driver 'saphana
+                   :params '(:backend saphana :user "u"))))
+        ;; Categories that hit HANA JDBC bugs must never dispatch.
+        (dolist (bad-category '(indexes procedures functions))
+          (should (null (clutch-db-list-objects hana bad-category))))
+        (dolist (bad-op '("get-indexes" "get-procedures" "get-functions"))
+          (should-not (member bad-op rpc-ops)))
+        ;; Reachable categories still dispatch normally.
+        (clutch-db-list-objects hana 'sequences)
+        (should (member "get-sequences" rpc-ops))
+        (clutch-db-list-objects hana 'triggers)
+        (should (member "get-triggers" rpc-ops))
+        ;; Async path enforces the same skips.
+        (dolist (bad-category '(indexes procedures functions))
+          (let (received)
+            (clutch-db-list-objects-async
+             hana bad-category
+             (lambda (entries) (setq received (or entries 'called))))
+            (should (null received))))
+        (dolist (bad-op '("get-indexes" "get-procedures" "get-functions"))
+          (should-not (member bad-op async-ops)))))))
+
+(ert-deftest clutch-db-test-saphana-uses-native-limit-offset-pagination ()
+  "SAP HANA paginates with `LIMIT n OFFSET m', not ANSI OFFSET/FETCH.
+HANA parses ANSI OFFSET/FETCH but rejects the `ORDER BY (SELECT NULL)'
+placeholder clutch inserts on non-Oracle backends when the base query
+already projects computed columns — see the SAP DBTech JDBC `sql
+syntax error' reported from the field.  The LIMIT form is the same
+syntax the Redshift/ClickHouse/DuckDB peers already use."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 1 :driver 'saphana
+               :params '(:backend saphana :host "h" :port 30015 :user "u"))))
+    (should (clutch-jdbc--limit-offset-conn-p conn))
+    (let ((paged (clutch-db-build-paged-sql
+                  conn "SELECT * FROM \"T\"" 2 50)))
+      (should (string-match-p "\\bLIMIT[[:space:]]+50\\b" paged))
+      (should (string-match-p "\\bOFFSET[[:space:]]+100\\b" paged))
+      (should-not (string-match-p "FETCH[[:space:]]+NEXT" paged))
+      (should-not (string-match-p "ORDER[[:space:]]+BY[[:space:]]+(SELECT[[:space:]]+NULL)"
+                                  paged)))))
+
+(ert-deftest clutch-db-test-saphana-entry-secret-shapes ()
+  "clutch-saphana--entry-secret resolves both thunk-style and string
+`:secret' values, and returns nil for missing / empty / non-callable
+garbage so downstream code can rely on a clean string-or-nil result."
+  (should (equal (clutch-saphana--entry-secret
+                  (list :secret (lambda () "p1")))
+                 "p1"))
+  (should (equal (clutch-saphana--entry-secret (list :secret "p2")) "p2"))
+  (should (null (clutch-saphana--entry-secret (list :secret nil))))
+  (should (null (clutch-saphana--entry-secret (list :secret ""))))
+  (should (null (clutch-saphana--entry-secret
+                 (list :secret (lambda () "")))))
+  (should (null (clutch-saphana--entry-secret nil))))
+
+(ert-deftest clutch-db-test-saphana-console-fingerprint-drift ()
+  "A saved console refuses to silently reconnect when the endpoint changes.
+Simulates the case where `foo' is dropped from `clutch-connection-alist'
+and a `.hana.gpg' entry named `foo' is discovered — the picker must not
+reroute the console to a different database."
+  ;; The fingerprint check calls `clutch--console-persistence-name',
+  ;; which lives in clutch-query.el.  Load it here so the test runs
+  ;; regardless of which test harness lists the file.
+  (require 'clutch-query)
+  (let ((buf (generate-new-buffer " *clutch-fingerprint-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq-local clutch--console-name "shared-name")
+          (setq-local clutch--console-ad-hoc-params nil)
+          ;; The console was opened for a mysql endpoint; storage-name
+          ;; is the fingerprint at open time.
+          (let ((original-params '(:backend mysql :host "old-host"
+                                   :port 3306 :user "u")))
+            (setq-local clutch--console-storage-name
+                        (clutch--console-persistence-name
+                         "shared-name" original-params)))
+          ;; Now `clutch--saved-connection-params' returns HANA — a
+          ;; completely different endpoint that happens to reuse the
+          ;; same name.  The connect flow must refuse.
+          (cl-letf (((symbol-function 'clutch--saved-connection-params)
+                     (lambda (name)
+                       (when (equal name "shared-name")
+                         '(:backend saphana :host "hana-host"
+                           :port 30015 :user "u"))))
+                    ((symbol-function 'clutch--carry-current-connection-origin)
+                     (lambda (p) p)))
+            (should-error (clutch--connect-params-for-current-buffer)
+                          :type 'user-error))
+          ;; Same-endpoint resolution passes.
+          (cl-letf (((symbol-function 'clutch--saved-connection-params)
+                     (lambda (_name)
+                       '(:backend mysql :host "old-host"
+                         :port 3306 :user "u")))
+                    ((symbol-function 'clutch--carry-current-connection-origin)
+                     (lambda (p) p)))
+            (should
+             (equal (plist-get (clutch--connect-params-for-current-buffer)
+                               :backend)
+                    'mysql))))
+      (kill-buffer buf))))
+
 ;;; clutch-db-test.el ends here

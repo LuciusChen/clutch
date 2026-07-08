@@ -9,8 +9,8 @@ An Emacs database client with an interactive data browsing UI.
 Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite
 through Emacs built-in =sqlite-*= functions, MongoDB through the external
 =mongodb.el= native client, Redis through the external =redis.el= native
-client, plus Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB,
-and generic JDBC URLs through a
+client, plus Oracle, SQL Server, SAP HANA, DB2, Snowflake, Redshift,
+ClickHouse, DuckDB, and generic JDBC URLs through a
 lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
 
 Architecture diagrams are in [[file:docs/architecture.md][docs/architecture.md]], and module ownership is
@@ -28,6 +28,7 @@ For Org-Babel integration, install the separate [[https://github.com/LuciusChen/
 | PostgreSQL | Core SQL support | Functional and compatible, with less daily-use coverage than MySQL |
 | SQLite | Core SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
+| SAP HANA | Core SQL support via JDBC | Requires Java 17+; =ngdbc.jar= auto-installed from Maven Central.  =.hana.gpg= auth-source entries appear as virtual saved connections |
 | DuckDB | Core SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |
 | MongoDB | Basic native document support; optional SQL Interface surface | Normal connections use external =mongodb.el= native protocol support plus Clutch's MongoDB Shell / MQL helper query buffers; SQL Interface endpoints use =:surface sql-interface= and require the JDBC driver |
 | Redis | Basic key/value support | Normal connections use external =redis.el= native RESP support plus Clutch's line-oriented Redis command buffers, key browsing, and type-aware value display |
@@ -66,6 +67,7 @@ Row identity support for staged =UPDATE= / =DELETE=:
 | PostgreSQL native | non-null unique keys, then =ctid= for ordinary heap tables |
 | SQLite native | non-null unique keys, then =rowid= for tables not declared =WITHOUT ROWID= |
 | Oracle JDBC | non-null unique keys, then =ROWID= |
+| SAP HANA JDBC | non-null unique keys only |
 | Other JDBC backends | non-null unique keys only |
 
 Joined, grouped, derived, or otherwise ambiguous result sets remain read-only
@@ -79,6 +81,7 @@ and inject or read a matching row identity.
 - [[file:docs/backend-support.org][Backend support levels]] — Core SQL, basic support, MongoDB SQL Interface, DuckDB, and Redis.
 - [[file:docs/native-backends.md][Native backend guide]] — MySQL, PostgreSQL, SQLite, SSH tunnels, TLS, timeout behavior, and backend-specific examples.
 - [[file:docs/jdbc-backend.org][JDBC backend guide]] — JDBC driver setup, connection examples, Oracle notes, transaction behavior, and generic JDBC URLs.
+- [[file:docs/saphana-backend.org][SAP HANA backend guide]] — HANA-specific setup, =currentSchema= mapping, =.hana.gpg= auth-source discovery, and transaction defaults.
 - [[file:docs/org-babel.org][Org-Babel guide]] — =ob-clutch= setup, source block examples, header arguments, and connection caching.
 - [[file:docs/jdbc-agent-protocol.md][JDBC agent protocol]] — sidecar RPC protocol and implementation notes.
 
@@ -90,7 +93,7 @@ and inject or read a matching row identity.
   TLS with =mysql_native_password= has also been live-validated; other
   MariaDB versions are expected to be broadly compatible but are not yet part
   of the regular test matrix
-- Java 17+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB)
+- Java 17+ for the JDBC backend (Oracle, SQL Server, SAP HANA, DB2, Snowflake, Redshift, ClickHouse, DuckDB)
 
 For MySQL-family servers, core functionality (connect/query/object workflow,
 editing, prepared statements, and clutch UI workflows) is expected to work on
@@ -514,11 +517,13 @@ workflows.  See [[file:docs/backend-support.org][docs/backend-support.org]] and
 
 ** JDBC Backend
 
-JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse,
-MongoDB SQL Interface, DuckDB, and generic JDBC URLs through the
+JDBC support covers Oracle, SQL Server, SAP HANA, DB2, Snowflake, Redshift,
+ClickHouse, MongoDB SQL Interface, DuckDB, and generic JDBC URLs through the
 [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] sidecar.  For setup, driver installation, connection
 examples, backend-specific notes, and transaction behavior, see
-[[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
+[[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].  SAP HANA also has a dedicated guide covering
+=currentSchema= mapping and =.hana.gpg= auth-source discovery in
+[[file:docs/saphana-backend.org][docs/saphana-backend.org]].
 
 For the sidecar wire protocol and agent internals, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]].
 

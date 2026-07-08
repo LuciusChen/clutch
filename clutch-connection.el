@@ -48,6 +48,7 @@
 (defvar clutch--connection-params)
 (defvar clutch--console-name)
 (defvar clutch--console-ad-hoc-params)
+(defvar clutch--console-storage-name)
 (defvar clutch--describe-object-entry)
 (defvar clutch-connection-alist nil)
 (defvar clutch-connect-timeout-seconds 10)
@@ -84,6 +85,7 @@
 (declare-function clutch--remember-debug-event "clutch-query" (&rest event))
 (declare-function clutch--remember-problem-record "clutch-query" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch-query" ())
+(declare-function clutch--console-persistence-name "clutch-query" (name &optional params))
 (declare-function clutch--refresh-result-status-line "clutch-ui" ())
 (declare-function clutch--debug-workflow-message "clutch-query" (message))
 (declare-function clutch--render-object-describe
@@ -671,19 +673,20 @@ using the stored params.  Signals a user-error if not recoverable."
 
 (defun clutch--connection-candidates-affixation (candidates)
   "Return affixation triples for saved connection CANDIDATES."
-  (mapcar
-   (lambda (candidate)
-     (let* ((params (cdr (assoc candidate clutch-connection-alist)))
-            (backend (and params (clutch--backend-key-from-params params))))
-       (list candidate
-             (if backend
-                 (clutch--completion-backend-icon-prefix backend)
-               "")
-             (if params
-                 (clutch--completion-annotation
-                  (list (clutch--connection-candidate-target params)))
-               ""))))
-   candidates))
+  (let ((entries (clutch--all-connection-entries)))
+    (mapcar
+     (lambda (candidate)
+       (let* ((params (cdr (assoc candidate entries)))
+              (backend (and params (clutch--backend-key-from-params params))))
+         (list candidate
+               (if backend
+                   (clutch--completion-backend-icon-prefix backend)
+                 "")
+               (if params
+                   (clutch--completion-annotation
+                    (list (clutch--connection-candidate-target params)))
+                 ""))))
+     candidates)))
 
 (defun clutch--backend-candidates-affixation (candidates)
   "Return affixation triples for backend-name CANDIDATES."
@@ -2063,9 +2066,63 @@ already set."
       params
     (append params (list :pass-entry name))))
 
+(defvar clutch-external-connection-source-functions nil
+  "Functions returning discovered connection alists to merge into the picker.
+Each function is called with no arguments and returns an alist mapping
+connection NAME strings to connection plists (same shape as
+`clutch-connection-alist' entries).  Discovered entries appear in the query
+console picker after entries in `clutch-connection-alist'; names already
+present in `clutch-connection-alist' take precedence.
+
+Sources should be cheap (memoize their own I/O) and should signal only
+for programming errors that a user needs to see.  Missing backing stores
+are expected and should be returned as an empty alist instead of an
+error — for example, `clutch-saphana--discovered-connections' returns
+nil when its configured auth-source files do not exist.")
+
+(defun clutch--external-connection-entries ()
+  "Return the merged connection entries from every registered discovery source.
+Duplicate NAMEs are dropped in favor of the first occurrence, so
+`clutch-connection-alist' always wins over discovered entries.
+
+Errors from a discovery source surface as messages and drop that source
+for the current call, rather than silently returning zero entries — a
+misconfigured source should be observable, not invisible."
+  (let (result seen)
+    (dolist (fn clutch-external-connection-source-functions)
+      (condition-case err
+          (dolist (entry (funcall fn))
+            (let ((name (car entry)))
+              (unless (member name seen)
+                (push name seen)
+                (push entry result))))
+        (error
+         (message "clutch: connection discovery source %s failed: %s"
+                  fn (error-message-string err)))))
+    (nreverse result)))
+
+(defun clutch--all-connection-entries ()
+  "Return the merged connection entries for pickers.
+Entries from `clutch-connection-alist' come first; discovered entries via
+`clutch-external-connection-source-functions' are appended, skipping names
+already present."
+  (let ((static-names (mapcar #'car clutch-connection-alist))
+        (merged (copy-sequence clutch-connection-alist)))
+    (dolist (entry (clutch--external-connection-entries))
+      (unless (member (car entry) static-names)
+        (setq merged (append merged (list entry)))))
+    merged))
+
+(defun clutch--all-connection-names ()
+  "Return connection names visible to pickers.
+Union of `clutch-connection-alist' and discovered sources."
+  (mapcar #'car (clutch--all-connection-entries)))
+
 (defun clutch--saved-connection-params (name)
-  "Return saved connection params for NAME, or nil when missing."
-  (when-let* ((params (cdr (assoc name clutch-connection-alist))))
+  "Return saved connection params for NAME, or nil when missing.
+Searches `clutch-connection-alist' first, then external discovery sources."
+  (when-let* ((params (or (cdr (assoc name clutch-connection-alist))
+                          (cdr (assoc name (clutch--external-connection-entries))))))
     (clutch--inject-entry-name params name)))
 
 (defun clutch-saved-connection-params (name)
@@ -2137,15 +2194,30 @@ as a request for a temporary connection."
       (funcall read-choice))))
 
 (defun clutch--connect-params-for-current-buffer ()
-  "Return connection params appropriate for the current buffer."
+  "Return connection params appropriate for the current buffer.
+When the current buffer is a query console bound to a saved connection
+NAME, refuse to silently reconnect if resolving NAME now produces a
+different endpoint than the one the console was opened for.  This
+catches the case where a static entry is removed from
+`clutch-connection-alist' and a discovered auth-source entry
+(e.g. `~/.hana.gpg') happens to reuse the same NAME — the picker would
+otherwise reroute the console to an entirely different database
+without asking."
   (cond
    (clutch--console-ad-hoc-params
     clutch--console-ad-hoc-params)
    (clutch--console-name
-    (clutch--carry-current-connection-origin
-     (or (clutch--saved-connection-params clutch--console-name)
-         (user-error "Saved connection %s for this query console no longer exists"
-                             clutch--console-name))))
+    (let* ((params (or (clutch--saved-connection-params clutch--console-name)
+                       (user-error "Saved connection %s for this query console no longer exists"
+                                   clutch--console-name)))
+           (expected clutch--console-storage-name)
+           (actual (clutch--console-persistence-name clutch--console-name params)))
+      (when (and expected
+                 (not (equal expected actual)))
+        (user-error
+         "Saved connection %s now resolves to a different endpoint (was %s, is %s); refusing silent reconnect"
+         clutch--console-name expected actual))
+      (clutch--carry-current-connection-origin params)))
    (t
     (clutch--read-connection-params))))
 
@@ -2157,7 +2229,7 @@ or unmatched input starts the temporary connection flow, matching
 backend-specific connection parameters.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
   (clutch--ensure-clutch-loaded)
-  (let* ((names (mapcar #'car clutch-connection-alist))
+  (let* ((names (clutch--all-connection-names))
          (choice (if names
                      (clutch--read-saved-connection-choice "Connection: " names)
                    "")))
