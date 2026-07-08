@@ -1083,8 +1083,47 @@
         (cl-letf (((symbol-function 'clutch--refresh-display)
                    (lambda ()
                      (setq refreshed t))))
-          (clutch--replace-row-at-index 0)
-          (should refreshed))))))
+              (clutch--replace-row-at-index 0)
+              (should refreshed))))))
+
+(ert-deftest clutch-test-append-and-delete-pending-insert-row-contract ()
+  "Pending insert row append/delete should update rendered text and row starts."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-source-table "users"
+                clutch--pending-inserts
+                '((("name" . "dana") ("city" . "lima"))))
+    (cl-letf (((symbol-function 'clutch--cached-column-details)
+               (lambda (_conn _table)
+                 '((:name "id")
+                   (:name "name")
+                   (:name "city"))))
+              ((symbol-function 'clutch--ensure-column-details-async)
+               (lambda (&rest _)
+                 (error "cached details should avoid async placeholder load"))))
+      (clutch--append-pending-insert-row 0)
+      (should (= (length clutch--row-start-positions) 4))
+      (let ((line (substring-no-properties (clutch-test--rendered-line-at 3))))
+        (should (string-prefix-p "│I I1 " line))
+        (should (string-match-p "dana" line))
+        (should (string-match-p "lima" line)))
+      (clutch--delete-row-at-index 3)
+      (should (= (length clutch--row-start-positions) 3))
+      (should-not (string-match-p "dana" (buffer-string))))))
+
+(ert-deftest clutch-test-delete-pending-insert-middle-row-falls-back ()
+  "Deleting a non-final rendered row should fall back to a full redraw."
+  (with-temp-buffer
+    (clutch-test--setup-rendered-result)
+    (setq-local clutch--pending-inserts
+                '((("name" . "dana")) (("name" . "erin"))))
+    (let (refreshed)
+      (cl-letf (((symbol-function 'clutch--refresh-display)
+                 (lambda ()
+                   (setq refreshed t))))
+        (clutch--delete-row-at-index 3)
+        (should refreshed)))))
 
 (ert-deftest clutch-test-render-row-displays-null-placeholder ()
   "Result cells should display database NULL as a compact placeholder."
@@ -2277,6 +2316,8 @@
          (clutch--column-details-active-cache (make-hash-table :test 'equal))
          (clutch--table-comment-cache (make-hash-table :test 'equal))
          (clutch--table-comment-status-cache (make-hash-table :test 'equal))
+         (clutch--foreign-keys-cache (make-hash-table :test 'equal))
+         (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
          (clutch--help-doc-cache (make-hash-table :test 'equal))
          (clutch--object-cache (make-hash-table :test 'equal))
          (clutch--object-warmup-timers (make-hash-table :test 'equal))
@@ -2612,8 +2653,74 @@
 		(setq alive nil)))
              (funcall callback (list (list :name (symbol-name column)
                                            :type "int")))
-             (should-not
+            (should-not
               (clutch--cached-column-details 'fake-conn "users")))))))))
+
+(ert-deftest clutch-test-load-fk-info-is-cache-first-and-async ()
+  "Result FK display metadata should not synchronously hit the backend."
+  (clutch-test--with-isolated-metadata-caches
+   (with-temp-buffer
+     (clutch-result-mode)
+     (setq-local clutch-connection 'fake-conn
+                 clutch--result-source-table "users"
+                 clutch--result-columns '("id" "account_id"))
+     (let (queued)
+       (cl-letf (((symbol-function 'clutch--connection-key)
+                  (lambda (_conn) "dev-key"))
+                 ((symbol-function 'clutch-db-foreign-keys)
+                  (lambda (&rest _)
+                    (error "foreign keys should not load synchronously")))
+                 ((symbol-function 'clutch--ensure-foreign-keys-async)
+                  (lambda (_conn table)
+                    (setq queued table))))
+         (clutch--load-fk-info)
+         (should (equal queued "users"))
+         (should-not clutch--fk-info))))))
+
+(ert-deftest clutch-test-foreign-keys-async-caches-and-refreshes-results ()
+  "Foreign-key async callbacks should cache metadata and notify listeners."
+  (clutch-test--with-isolated-metadata-caches
+   (let (callback notified)
+     (let ((clutch--table-metadata-updated-hook
+            (list (lambda (conn table kind)
+                    (setq notified (list conn table kind))))))
+       (cl-letf (((symbol-function 'clutch--connection-key)
+                  (lambda (_conn) "dev-key"))
+                 ((symbol-function 'clutch--connection-alive-p)
+                  (lambda (_conn) t))
+                 ((symbol-function 'clutch-db-foreign-keys-async)
+                  (lambda (_conn _table cb &optional _errback)
+                    (setq callback cb)
+                    t))
+                 ((symbol-function 'clutch--refresh-schema-status-ui)
+                  #'ignore))
+         (clutch--ensure-foreign-keys-async 'fake-conn "users")
+         (funcall callback '(("account_id" :ref-table "accounts"
+                              :ref-column "id")))
+         (should (equal (clutch--cached-foreign-keys 'fake-conn "users")
+                        '(("account_id" :ref-table "accounts"
+                           :ref-column "id"))))
+         (should (equal notified '(fake-conn "users" foreign-keys)))
+         (should-not (clutch--foreign-keys-status 'fake-conn "users")))))))
+
+(ert-deftest clutch-test-foreign-keys-async-unsupported-caches-empty-result ()
+  "Backends without async foreign-key metadata should not be retried on each render."
+  (clutch-test--with-isolated-metadata-caches
+   (let ((calls 0))
+     (cl-letf (((symbol-function 'clutch--connection-key)
+                (lambda (_conn) "dev-key"))
+               ((symbol-function 'clutch-db-foreign-keys-async)
+                (lambda (&rest _args)
+                  (cl-incf calls)
+                  nil))
+               ((symbol-function 'clutch--refresh-schema-status-ui)
+                #'ignore))
+       (clutch--ensure-foreign-keys-async 'fake-conn "users")
+       (clutch--ensure-foreign-keys-async 'fake-conn "users")
+       (should (= calls 1))
+       (should (clutch--foreign-keys-cached-p 'fake-conn "users"))
+       (should-not (clutch--cached-foreign-keys 'fake-conn "users"))
+       (should-not (clutch--foreign-keys-status 'fake-conn "users"))))))
 
 (ert-deftest clutch-test-refresh-result-metadata-buffers-updates-only-matching-results ()
   "Result metadata refresh should only touch matching live result buffers."
@@ -2651,6 +2758,43 @@
         (kill-buffer buf-a))
       (when (buffer-live-p buf-b)
         (kill-buffer buf-b)))))
+
+(ert-deftest clutch-test-column-details-refresh-redraws-pending-insert-placeholders ()
+  "Async column details should redraw staged insert metadata placeholders."
+  (clutch-test--with-isolated-metadata-caches
+   (let ((buf (generate-new-buffer " *clutch-result-pending-insert*"))
+         callback)
+     (unwind-protect
+         (cl-letf (((symbol-function 'clutch--connection-key)
+                    (lambda (_conn) "dev-key"))
+                   ((symbol-function 'clutch--connection-alive-p)
+                    (lambda (_conn) t))
+                   ((symbol-function 'clutch-db-column-details-async)
+                    (lambda (_conn _table cb &optional _errback)
+                      (setq callback cb)
+                      t))
+                   ((symbol-function 'clutch--refresh-schema-status-ui)
+                    #'ignore))
+           (with-current-buffer buf
+             (clutch-test--init-result-state
+              (list :connection 'fake-conn
+                    :columns '("id" "name")
+                    :column-defs '((:name "id" :type-category numeric)
+                                   (:name "name" :type-category text))
+                    :rows nil
+                    :source-table "users"
+                    :pending-inserts '((("name" . "alice")))
+                    :column-widths [12 12]
+                    :render t))
+             (should-not (string-match-p "<generated>" (buffer-string))))
+           (should callback)
+           (funcall callback '((:name "id" :generated t)
+                               (:name "name")))
+           (with-current-buffer buf
+             (should (string-match-p "<generated>" (buffer-string)))
+             (should (string-match-p "alice" (buffer-string)))))
+       (when (buffer-live-p buf)
+         (kill-buffer buf))))))
 
 (ert-deftest clutch-test-column-info-string-contract ()
   "Column info strings should format detail text, faces, and missing metadata."
@@ -3147,6 +3291,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (let ((row-positions (make-vector 1 nil))
           render-state)
       (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                 (lambda (&rest _)
+                   (error "render should not synchronously load column details")))
+                ((symbol-function 'clutch--cached-column-details)
                  (lambda (_conn _table)
                    (list (list :name "id" :generated t)
                          (list :name "name")
@@ -3160,6 +3307,42 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (string-match-p "<generated>" rendered))
           (should (string-match-p "<default>" rendered))
           (should (string-match-p "alice" rendered)))))))
+
+(ert-deftest clutch-test-pending-insert-placeholders-skip-metadata-without-inserts ()
+  "Result rendering should not request insert placeholder metadata without inserts."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name")
+                clutch--result-source-table "users"
+                clutch--pending-inserts nil)
+    (cl-letf (((symbol-function 'clutch--cached-column-details)
+               (lambda (&rest _)
+                 (error "column details cache should not be consulted")))
+              ((symbol-function 'clutch--ensure-column-details-async)
+               (lambda (&rest _)
+                 (error "column details should not be queued"))))
+      (should-not (plist-get (clutch--build-render-state)
+                             :insert-placeholders)))))
+
+(ert-deftest clutch-test-pending-insert-placeholders-queue-metadata-and-render-empty ()
+  "Staged insert rendering should keep column shape while metadata loads."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--result-columns '("id" "name")
+                clutch--result-source-table "users"
+                clutch--pending-inserts '((("name" . "alice"))))
+    (let (queued)
+      (cl-letf (((symbol-function 'clutch--cached-column-details)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'clutch--ensure-column-details-async)
+                 (lambda (_conn table)
+                   (setq queued table))))
+        (let ((render-state (clutch--build-render-state)))
+          (should (equal queued "users"))
+          (should (equal (plist-get render-state :insert-placeholders)
+                         '(nil nil)))
+          (should (equal (clutch--pending-insert-render-rows render-state)
+                         '((nil "alice")))))))))
 
 (ert-deftest clutch-test-insert-fill-current-time-respects-column-type ()
   "The insert buffer time-filling helper should use result column metadata."
@@ -3451,17 +3634,48 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts '((("severity" . "low"))))
-    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
-              ((symbol-function 'quit-window) #'ignore))
-      (with-temp-buffer
-        (insert "severity: high\n")
-        (clutch-result-insert-mode 1)
-        (setq-local clutch-result-insert--result-buffer result-buf
-                    clutch-result-insert--pending-index 0)
-        (clutch-result-insert-commit))
+    (let (replaced)
+      (cl-letf (((symbol-function 'clutch--refresh-display)
+                 (lambda ()
+                   (error "existing insert update should use row replacement")))
+                ((symbol-function 'clutch--replace-row-at-index)
+                 (lambda (ridx)
+                   (setq replaced ridx)))
+                ((symbol-function 'quit-window) #'ignore))
+        (with-temp-buffer
+          (insert "severity: high\n")
+          (clutch-result-insert-mode 1)
+          (setq-local clutch-result-insert--result-buffer result-buf
+                      clutch-result-insert--pending-index 0)
+          (clutch-result-insert-commit)))
+      (should (= replaced 2))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
                      '((("severity" . "high"))))))))
+
+(ert-deftest clutch-test-insert-commit-appends-new-pending-insert-locally ()
+  "Committing a new insert should append one ghost row without full redraw."
+  (clutch-test--with-result-state-buffer result-buf
+      (:connection nil
+       :pending-inserts nil)
+    (let (appended)
+      (cl-letf (((symbol-function 'clutch--refresh-display)
+                 (lambda ()
+                   (error "new insert should use row append")))
+                ((symbol-function 'clutch--append-pending-insert-row)
+                 (lambda (iidx)
+                   (setq appended iidx)))
+                ((symbol-function 'quit-window) #'ignore))
+      (with-temp-buffer
+          (insert "name: carol\n")
+        (clutch-result-insert-mode 1)
+        (setq-local clutch-result-insert--result-buffer result-buf
+                      clutch-result-insert--pending-index nil)
+          (clutch-result-insert-commit)))
+      (should (= appended 0))
+      (should (equal (with-current-buffer result-buf
+                       clutch--pending-inserts)
+                     '((("name" . "carol"))))))))
 
 (ert-deftest clutch-test-insert-commit-rejects-stale-result-table-before-closing ()
   "Insert commit should keep the form open when the parent result table changed."

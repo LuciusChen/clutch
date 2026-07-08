@@ -624,6 +624,8 @@ document connection."
         (clutch--column-details-active-cache (make-hash-table :test 'equal))
         (clutch--table-comment-cache (make-hash-table :test 'equal))
         (clutch--table-comment-status-cache (make-hash-table :test 'equal))
+        (clutch--foreign-keys-cache (make-hash-table :test 'equal))
+        (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
         (detail-calls 0))
     (let ((schema (make-hash-table :test 'equal))
           (details (make-hash-table :test 'equal))

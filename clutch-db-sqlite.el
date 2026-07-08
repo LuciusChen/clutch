@@ -336,6 +336,12 @@ Result: ((from-col :ref-table T :ref-column C) ...)"
       (clutch-db-sqlite--fk-alist (clutch-db-sqlite-conn-handle conn) table)
     (sqlite-error nil)))
 
+(cl-defmethod clutch-db-foreign-keys-async ((conn clutch-db-sqlite-conn) table
+                                            callback &optional errback)
+  "Fetch SQLite foreign key info for TABLE on CONN when idle."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback #'clutch-db-foreign-keys nil table))
+
 (defun clutch-db-sqlite--column-detail (row pk-cols fks)
   "Convert a table_info ROW to a clutch-db column plist.
 PK-COLS is a list of pk column names.  FKS is an FK alist."

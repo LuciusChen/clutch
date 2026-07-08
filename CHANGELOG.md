@@ -91,6 +91,9 @@
 - Reduced wide result-grid TAB navigation latency by caching normalized header
   sort indicators and reusing computed column widths during horizontal
   visibility checks.
+- Avoided synchronous foreign-key and insert-placeholder metadata loads while
+  rendering result buffers, and used row-local redraws for staged insert rows
+  when the rendered grid shape stays stable.
 - Clarified result footer cursor text by labeling column position as
   `Col current/total [column-name]`.
 - Opened valid JSON object and array text cells in the JSON cell editor so

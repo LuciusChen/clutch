@@ -113,6 +113,7 @@ the header cell was rendered.")
 (defvar clutch-connection)
 (defvar clutch-describe--header-base)
 (defvar clutch-result-max-rows)
+(defvar clutch--table-metadata-updated-hook)
 
 (defconst clutch--null-cell-display-text "<null>"
   "Display text for database NULL values in result cells.")
@@ -134,6 +135,7 @@ the header cell was rendered.")
 (declare-function clutch--connection-display-key "clutch-connection" (conn))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
+(declare-function clutch--foreign-key-column-info "clutch-schema" (conn table col-names))
 (declare-function clutch--current-namespace-name "clutch-connection" (conn))
 (declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
 (declare-function clutch--schema-status-header-line-segment "clutch-schema" (conn))
@@ -1271,18 +1273,26 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
 
 (defun clutch--pending-insert-placeholders ()
   "Return placeholder sentinels aligned with `clutch--result-columns'."
-  (when-let* ((conn clutch-connection)
-              (table clutch--result-source-table)
-              (details (clutch--ensure-column-details conn table)))
-    (mapcar (lambda (col-name)
-              (when-let* ((detail (cl-find col-name details
-                                           :key (lambda (d) (plist-get d :name))
-                                           :test #'string=)))
-                (cond
-                 ((plist-get detail :generated) clutch--cell-generated-placeholder)
-                 ((plist-get detail :default) clutch--cell-default-placeholder)
-                 (t nil))))
-            clutch--result-columns)))
+  (when (and clutch--pending-inserts
+             clutch-connection
+             clutch--result-source-table)
+    (let ((details (clutch--cached-column-details
+                    clutch-connection clutch--result-source-table)))
+      (unless details
+        (clutch--ensure-column-details-async
+         clutch-connection clutch--result-source-table))
+      (if details
+          (mapcar (lambda (col-name)
+                    (when-let* ((detail (cl-find col-name details
+                                                 :key (lambda (d)
+                                                        (plist-get d :name))
+                                                 :test #'string=)))
+                      (cond
+                       ((plist-get detail :generated) clutch--cell-generated-placeholder)
+                       ((plist-get detail :default) clutch--cell-default-placeholder)
+                       (t nil))))
+                  clutch--result-columns)
+        (make-list (length clutch--result-columns) nil)))))
 
 (defun clutch--build-render-state ()
   "Return hash-table lookups for the current result render.
@@ -1609,6 +1619,25 @@ COLUMN-SPECS optionally precomputes visible column metadata."
             pad-str
             data-row
             "\n")))
+
+(defun clutch--render-pending-insert-row-line
+    (row iidx ridx visible-cols widths nw render-state &optional column-specs)
+  "Return the rendered ghost insert ROW line.
+ROW is the expanded insert row.  IIDX and RIDX are the staged-insert and
+display row indexes.  VISIBLE-COLS, WIDTHS, NW, RENDER-STATE, and optional
+COLUMN-SPECS use the same rendering contract as ordinary result rows."
+  (let* ((bface 'clutch-border-face)
+         (pad-str (make-string clutch-column-padding ?\s))
+         (data-row (propertize
+                    (clutch--render-row row ridx visible-cols widths
+                                        render-state column-specs)
+                    'face 'clutch-pending-insert-face))
+         (num-label (string-pad (format "I%d" (1+ iidx)) nw nil t)))
+    (concat (propertize "│" 'face bface)
+            (propertize "I" 'face 'clutch-pending-insert-face)
+            (propertize num-label 'face 'clutch-pending-insert-face)
+            pad-str
+            data-row "\n")))
 
 (defun clutch--footer-row-summary (row-count page-num page-size total-rows
                                              &optional page-offset page-has-more)
@@ -2001,7 +2030,36 @@ missing table metadata."
                      (equal clutch--result-source-table table))
             (setq-local clutch--result-column-details
                         (clutch--result-column-details
-                         clutch-connection table clutch--result-columns))))))))
+                         clutch-connection table clutch--result-columns))
+            (when clutch--pending-inserts
+              (clutch--refresh-display))))))))
+
+(defun clutch--refresh-result-foreign-key-buffers (conn table)
+  "Refresh cached foreign-key display metadata for result buffers on CONN/TABLE."
+  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'clutch-result-mode)
+                     clutch-connection
+                     clutch--result-columns
+                     (string= (clutch--connection-key clutch-connection) conn-key)
+                     (equal clutch--result-source-table table))
+            (setq-local clutch--fk-info
+                        (clutch--foreign-key-column-info
+                         clutch-connection table clutch--result-columns))
+            (clutch--refresh-display)))))))
+
+(defun clutch--handle-table-metadata-updated (conn table kind)
+  "Refresh result UI after CONN/TABLE metadata KIND changes."
+  (pcase kind
+    ('column-details
+     (clutch--refresh-result-metadata-buffers conn table))
+    ('foreign-keys
+     (clutch--refresh-result-foreign-key-buffers conn table))))
+
+(add-hook 'clutch--table-metadata-updated-hook
+          #'clutch--handle-table-metadata-updated)
 
 (defun clutch--header-cell (cidx widths &optional active-cidx)
   "Build a single header cell string for column CIDX.
@@ -2149,23 +2207,14 @@ VISIBLE-COLS, WIDTHS describe columns.  NW is row-number digit width.
 NROWS is the count of real rows (used to compute ghost row indices).
 ROW-POSITIONS stores line starts keyed by rendered row index.
 RENDER-STATE contains render lookup tables for staged UI state."
-  (let ((bface 'clutch-border-face)
-        (pad-str (make-string clutch-column-padding ?\s))
-        (column-specs (clutch--visible-column-specs visible-cols widths)))
+  (let ((column-specs (clutch--visible-column-specs visible-cols widths)))
     (cl-loop for row in (clutch--pending-insert-render-rows render-state)
              for iidx from 0
              for ridx = (+ nrows iidx)
              do (aset row-positions ridx (point))
-             for data-row = (propertize
-                             (clutch--render-row row ridx visible-cols widths
-                                                 render-state column-specs)
-                             'face 'clutch-pending-insert-face)
-             for num-label = (string-pad (format "I%d" (1+ iidx)) nw nil t)
-             do (insert (propertize "│" 'face bface)
-                        (propertize "I" 'face 'clutch-pending-insert-face)
-                        (propertize num-label 'face 'clutch-pending-insert-face)
-                        pad-str
-                        data-row "\n"))))
+             do (insert (clutch--render-pending-insert-row-line
+                         row iidx ridx visible-cols widths nw render-state
+                         column-specs)))))
 
 (defun clutch--refresh-header-line ()
   "Rebuild the header-line format without touching the table body."
@@ -2395,15 +2444,18 @@ Preserves point position (row + column) across the render."
 Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
   (let* ((rows (clutch--result-display-rows))
          (nrows (length rows))
+         (total-rows (and (vectorp clutch--row-start-positions)
+                          (length clutch--row-start-positions)))
          (line-pos (and (vectorp clutch--row-start-positions)
                         (integerp ridx)
                         (<= 0 ridx)
-                        (< ridx (length clutch--row-start-positions))
+                        (< ridx total-rows)
                         (aref clutch--row-start-positions ridx))))
     (if (or (not line-pos)
+            (not total-rows)
             (not (integerp ridx))
             (< ridx 0)
-            (>= ridx nrows))
+            (>= ridx total-rows))
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
              (save-cidx (get-text-property (point) 'clutch-col-idx))
@@ -2414,21 +2466,36 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
                             (goto-char line-pos)
                             (forward-line 1)
                             (point))))
-             (row (nth ridx rows))
+             (pendingp (>= ridx nrows))
+             (iidx (- ridx nrows))
              (widths (clutch--effective-widths))
              (pixel-metric (clutch--pixel-metric-signature))
+             (base-render-state (clutch--build-render-state))
+             (row (if pendingp
+                      (nth iidx
+                           (clutch--pending-insert-render-rows
+                            base-render-state))
+                    (nth ridx rows)))
              (render-state (clutch--prepare-pixel-layout
                             widths (list row)
-                            (clutch--build-render-state)
+                            base-render-state
                             clutch--column-pixel-widths ridx
                             pixel-metric))
              (pixel-widths (plist-get render-state :pixel-widths))
              (inhibit-read-only t))
-        (if (not (equal pixel-widths clutch--column-pixel-widths))
+        (if (or (not row)
+                (not (equal pixel-widths clutch--column-pixel-widths)))
             (clutch--refresh-display)
-          (let ((line (clutch--render-row-line
-                       row ridx (clutch--visible-columns)
-                       widths (clutch--row-number-digits) render-state)))
+          (let* ((visible-cols (clutch--visible-columns))
+                 (nw (clutch--row-number-digits))
+                 (column-specs (clutch--visible-column-specs visible-cols widths))
+                 (line (if pendingp
+                           (clutch--render-pending-insert-row-line
+                            row iidx ridx visible-cols widths nw
+                            render-state column-specs)
+                         (clutch--render-row-line
+                          row ridx visible-cols widths nw render-state
+                          column-specs))))
             (let ((delta (- (length line) (- end-pos line-pos))))
               (save-excursion
                 (goto-char line-pos)
@@ -2444,6 +2511,85 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
                                   (+ pos delta)))))
             (when save-ridx
               (clutch--goto-cell save-ridx save-cidx))))))))
+
+(defun clutch--append-pending-insert-row (iidx)
+  "Append staged insert ghost row IIDX without a full body redraw when safe."
+  (let* ((rows (clutch--result-display-rows))
+         (nrows (length rows))
+         (ridx (+ nrows iidx))
+         (old-count (and (vectorp clutch--row-start-positions)
+                         (length clutch--row-start-positions))))
+    (if (or (not old-count)
+            (/= old-count ridx))
+        (clutch--refresh-display)
+      (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+             (save-cidx (get-text-property (point) 'clutch-col-idx))
+             (widths (clutch--effective-widths))
+             (pixel-metric (clutch--pixel-metric-signature))
+             (base-render-state (clutch--build-render-state))
+             (row (nth iidx
+                       (clutch--pending-insert-render-rows base-render-state)))
+             (render-state (clutch--prepare-pixel-layout
+                            widths (list row)
+                            base-render-state
+                            clutch--column-pixel-widths ridx
+                            pixel-metric))
+             (pixel-widths (plist-get render-state :pixel-widths))
+             (inhibit-read-only t))
+        (if (or (not row)
+                (not (equal pixel-widths clutch--column-pixel-widths)))
+            (clutch--refresh-display)
+          (let* ((visible-cols (clutch--visible-columns))
+                 (nw (clutch--row-number-digits))
+                 (column-specs (clutch--visible-column-specs visible-cols widths))
+                 (line (clutch--render-pending-insert-row-line
+                        row iidx ridx visible-cols widths nw
+                        render-state column-specs))
+                 (new-positions (make-vector (1+ old-count) nil)))
+            (dotimes (idx old-count)
+              (aset new-positions idx (aref clutch--row-start-positions idx)))
+            (save-excursion
+              (goto-char (point-max))
+              (aset new-positions ridx (point))
+              (insert line))
+            (setq clutch--row-start-positions new-positions)
+            (when save-ridx
+              (clutch--goto-cell save-ridx save-cidx))))))))
+
+(defun clutch--delete-row-at-index (ridx)
+  "Delete rendered row RIDX without a full redraw when it is the final row.
+Falls back to `clutch--refresh-display' when deleting RIDX would require
+renumbering later rendered rows."
+  (let* ((old-count (and (vectorp clutch--row-start-positions)
+                         (length clutch--row-start-positions)))
+         (line-pos (and old-count
+                        (integerp ridx)
+                        (<= 0 ridx)
+                        (< ridx old-count)
+                        (aref clutch--row-start-positions ridx))))
+    (if (or (not line-pos)
+            (not (= ridx (1- old-count))))
+        (clutch--refresh-display)
+      (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
+             (save-cidx (get-text-property (point) 'clutch-col-idx))
+             (end-pos (save-excursion
+                        (goto-char line-pos)
+                        (forward-line 1)
+                        (point)))
+             (new-count (1- old-count))
+             (new-positions (make-vector new-count nil))
+             (inhibit-read-only t))
+        (dotimes (idx new-count)
+          (aset new-positions idx (aref clutch--row-start-positions idx)))
+        (delete-region line-pos end-pos)
+        (setq clutch--row-start-positions new-positions)
+        (cond
+         ((and save-ridx (< save-ridx new-count))
+          (clutch--goto-cell save-ridx save-cidx))
+         ((> new-count 0)
+          (clutch--goto-cell (1- new-count) save-cidx))
+         (t
+          (goto-char (point-min))))))))
 
 (defun clutch--col-idx-at-point ()
   "Return the column index at point, from data cells."

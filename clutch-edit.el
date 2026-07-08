@@ -54,9 +54,13 @@
 (declare-function clutch--string-pad "clutch-ui" (s width &optional pad-left numeric))
 (declare-function clutch--visible-column-names "clutch-ui" ())
 (declare-function clutch--visible-columns "clutch-ui" ())
+(declare-function clutch--append-pending-insert-row "clutch-ui" (iidx))
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
+(declare-function clutch--ensure-foreign-keys-async "clutch-schema" (conn table))
+(declare-function clutch--foreign-key-column-info "clutch-schema" (conn table col-names))
+(declare-function clutch--foreign-keys-cached-p "clutch-schema" (conn table))
 (declare-function clutch-record--render "clutch-result" ())
 (declare-function clutch--message-count "clutch-ui" (value))
 (declare-function clutch--message-keyword "clutch-ui" (value))
@@ -71,7 +75,6 @@
 (declare-function clutch-db-result-p "clutch-backend" (result))
 (declare-function clutch-db-sql-find-top-level-clause "clutch-backend" (sql pattern &optional start))
 (declare-function clutch-db-substitute-params "clutch-backend" (sql params render-fn))
-(declare-function clutch-db-foreign-keys "clutch-backend" (conn table))
 
 (defun clutch-edit--sql-surface-p ()
   "Return non-nil when SQL staged mutation is available in this result."
@@ -789,17 +792,11 @@ column indices to their referenced table and column."
   (when-let* ((conn clutch-connection)
               (table clutch--result-source-table)
               (col-names clutch--result-columns))
-    (condition-case err
-        (let ((fks (clutch-db-foreign-keys conn table)))
-          (pcase-dolist (`(,col-name . ,ref-info) fks)
-            (let ((idx (cl-position col-name col-names :test #'string=)))
-              (when idx
-                (push (cons idx ref-info) clutch--fk-info)))))
-      (clutch-db-error
-       (clutch--remember-recoverable-metadata-warning
-        conn "foreign-key metadata" err `(:table ,table))
-       (message "Foreign-key metadata unavailable: %s"
-                (error-message-string err))))))
+    (when (clutch--foreign-keys-cached-p conn table)
+      (setq clutch--fk-info
+            (clutch--foreign-key-column-info conn table col-names)))
+    (unless (clutch--foreign-keys-cached-p conn table)
+      (clutch--ensure-foreign-keys-async conn table))))
 
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
@@ -2370,11 +2367,17 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (clutch-result-insert--validate-fields fields)
     (quit-window 'kill)
     (with-current-buffer result-buf
-      (if pending-index
-          (setcar (nthcdr pending-index clutch--pending-inserts) fields)
-        (setq clutch--pending-inserts
-              (append clutch--pending-inserts (list fields))))
-      (clutch--refresh-display)
+      (let ((new-index (length clutch--pending-inserts))
+            (nrows (length (clutch--result-display-rows))))
+        (if pending-index
+            (progn
+              (setcar (nthcdr pending-index clutch--pending-inserts) fields)
+              (clutch--replace-row-at-index (+ nrows pending-index)))
+          (setq clutch--pending-inserts
+                (append clutch--pending-inserts (list fields)))
+          (clutch--append-pending-insert-row new-index))
+        (clutch--refresh-footer-line)
+        (force-mode-line-update))
       (if pending-index
           (message "Staged insert updated — C-c C-c to commit")
         (message "%s insertion%s staged — C-c C-c to commit"

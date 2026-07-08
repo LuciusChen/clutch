@@ -1099,6 +1099,29 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (plist-get candidate :select-expressions) '("rowid")))
       (should (equal (plist-get candidate :where-sql) "rowid = ?")))))
 
+(ert-deftest clutch-db-test-sqlite-foreign-keys-async ()
+  "SQLite foreign-key metadata should remain available through async dispatch."
+  (skip-unless (require 'clutch-db-sqlite nil t))
+  (skip-unless (and (fboundp 'sqlite-available-p)
+                    (sqlite-available-p)))
+  (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-fk-"
+    (clutch-db-query conn "CREATE TABLE accounts (id INTEGER PRIMARY KEY)")
+    (clutch-db-query
+     conn
+     "CREATE TABLE users (account_id INTEGER REFERENCES accounts(id))")
+    (let (timer-fn result)
+      (cl-letf (((symbol-function 'run-with-idle-timer)
+                 (lambda (_secs _repeat fn &rest _args)
+                   (setq timer-fn fn)
+                   'fake-timer)))
+        (should (eq (clutch-db-foreign-keys-async
+                     conn "users" (lambda (value) (setq result value)))
+                    'fake-timer))
+        (funcall timer-fn)
+        (should (equal result
+                       '(("account_id" :ref-table "accounts"
+                          :ref-column "id"))))))))
+
 (ert-deftest clutch-db-test-sqlite-memory-does-not-create-file ()
   "SQLite :memory: profiles should open an in-memory database."
   (skip-unless (require 'clutch-db-sqlite nil t))
@@ -1256,6 +1279,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                     (list-columns . ("id" "name"))
                     (column-details . ((:name "id" :type "integer")))
                     (table-comment . "Users table")
+                    (foreign-keys . (("account_id" :ref-table "accounts"
+                                      :ref-column "id")))
                     (list-objects . ((:name "users_pkey" :type "INDEX")))))
       (let ((op (car case))
             (expected (cdr case))
@@ -1281,6 +1306,12 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                        (should (eq context conn))
                        (should (equal table "users"))
                        "Users table"))
+                    ((symbol-function 'clutch-db-foreign-keys)
+                     (lambda (context table)
+                       (should (eq context conn))
+                       (should (equal table "users"))
+                       '(("account_id" :ref-table "accounts"
+                          :ref-column "id"))))
                     ((symbol-function 'clutch-db-list-objects)
                      (lambda (context category)
                        (should (eq context conn))
@@ -1300,6 +1331,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                   conn "users" (lambda (value) (setq callback-result value))))
                 ('table-comment
                  (clutch-db-table-comment-async
+                  conn "users" (lambda (value) (setq callback-result value))))
+                ('foreign-keys
+                 (clutch-db-foreign-keys-async
                   conn "users" (lambda (value) (setq callback-result value))))
                 ('list-objects
                  (clutch-db-list-objects-async
