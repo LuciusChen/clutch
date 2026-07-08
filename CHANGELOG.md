@@ -23,6 +23,8 @@
 - Kept the current result cell selected when clicking the empty window area
   below the rendered table, while preserving normal cell clicks and mouse drag
   selection.
+- Kept the result cursor on the last rendered row when mouse-wheel scrolling to
+  the bottom of the table.
 - Opened REPL `SELECT` results in the standard result buffer instead of
   expanding wide tables inline in the REPL history, and styled REPL prompts,
   errors, and execution summaries for clearer command history.

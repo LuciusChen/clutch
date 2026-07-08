@@ -2236,6 +2236,22 @@ RENDER-STATE contains render lookup tables for staged UI state."
     (setq mode-line-position
           (when ridx (clutch--position-indicator-parts ridx cidx)))))
 
+(defun clutch--clamp-point-to-result-grid ()
+  "Move point back onto the result grid after scrolling past the last row."
+  (when (and (vectorp clutch--row-start-positions)
+             (> (length clutch--row-start-positions) 0)
+             (not (clutch--cell-at-point)))
+    (let* ((last-ridx (1- (length clutch--row-start-positions)))
+           (last-row-start (aref clutch--row-start-positions last-ridx)))
+      (when (>= (point) last-row-start)
+        (let* ((win (get-buffer-window (current-buffer)))
+               (hscroll (and win (window-hscroll win)))
+               (old-point (point)))
+          (clutch--goto-cell last-ridx (cdr-safe clutch--last-cell-position))
+          (when (integerp hscroll)
+            (set-window-hscroll win hscroll))
+          (/= (point) old-point))))))
+
 (defun clutch--update-row-highlight ()
   "Highlight the entire row under the cursor.
 Reuses the existing overlay via `move-overlay' when possible."
@@ -2254,26 +2270,28 @@ Reuses the existing overlay via `move-overlay' when possible."
         (delete-overlay clutch--row-overlay)
         (setq clutch--row-overlay nil)))))
 
-(defun clutch--update-header-highlight ()
-  "Highlight the header cell for the column under the cursor.
-Rebuilds `header-line-format' with the active column highlighted.
-Skips work for scroll commands that do not move point."
-  (when (and clutch--column-widths
-             (not (memq this-command
-                        '(clutch-result-widen-column
-                          clutch-result-narrow-column
-                          scroll-down-line scroll-up-line
-                          scroll-down scroll-up
-                          scroll-down-command scroll-up-command
-                          mwheel-scroll))))
-    (clutch--update-position-indicator)
-    (clutch--update-row-highlight)
-    (clutch--refresh-footer-cursor)
-    (force-mode-line-update)
-    (let ((cidx (clutch--col-idx-at-point)))
-      (unless (eql cidx clutch--header-active-col)
-        (setq clutch--header-active-col cidx)
-        (clutch--refresh-header-line)))))
+(defun clutch--sync-result-cursor-ui ()
+  "Synchronize result cursor UI after a command.
+Updates row/header/footer cursor state.  Skips scroll commands unless point must
+be clamped to the result grid."
+  (when clutch--column-widths
+    (let ((point-clamped (clutch--clamp-point-to-result-grid)))
+      (when (or point-clamped
+                (not (memq this-command
+                           '(clutch-result-widen-column
+                             clutch-result-narrow-column
+                             scroll-down-line scroll-up-line
+                             scroll-down scroll-up
+                             scroll-down-command scroll-up-command
+                             mwheel-scroll))))
+        (clutch--update-position-indicator)
+        (clutch--update-row-highlight)
+        (clutch--refresh-footer-cursor)
+        (force-mode-line-update)
+        (let ((cidx (clutch--col-idx-at-point)))
+          (unless (eql cidx clutch--header-active-col)
+            (setq clutch--header-active-col cidx)
+            (clutch--refresh-header-line)))))))
 
 (defun clutch--row-idx-at-line ()
   "Return the rendered row index for the current line, or nil.

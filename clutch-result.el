@@ -154,6 +154,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--schedule-column-width-refresh "clutch-ui" ())
+(declare-function clutch--sync-result-cursor-ui "clutch-ui" ())
 (declare-function clutch--remember-query-error
                   "clutch-query"
                   (buffer connection op sql err &optional context diag))
@@ -968,7 +969,7 @@ Edit:
   (setq-local revert-buffer-function #'clutch-result--revert)
   (setq-local clutch--header-sort-function #'clutch-result--sort-by-column-index)
   (add-hook 'post-command-hook
-            #'clutch--update-header-highlight nil t)
+            #'clutch--sync-result-cursor-ui nil t)
   (add-hook 'kill-buffer-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (clutch--enable-window-size-hook))

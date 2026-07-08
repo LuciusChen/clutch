@@ -815,6 +815,21 @@
         (should (= header-count 0))
         (should (= row-count 0))))))
 
+(ert-deftest clutch-test-scroll-command-clamps-point-below-table ()
+  "Scrolling past the table should leave point on the last rendered row."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (clutch-test--setup-rendered-result)
+      (clutch--goto-cell 1 2)
+      (set-window-hscroll (selected-window) 12)
+      (goto-char (point-max))
+      (let ((this-command 'mwheel-scroll))
+        (run-hooks 'post-command-hook))
+      (should (= (get-text-property (point) 'clutch-row-idx) 2))
+      (should (= (get-text-property (point) 'clutch-col-idx) 2))
+      (should (= (window-hscroll) 12)))))
+
 (ert-deftest clutch-test-goto-cell-uses-row-starts-and-fallbacks ()
   "Cell navigation should use cached row starts and fall back within a row."
   (with-temp-buffer
