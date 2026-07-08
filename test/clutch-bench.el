@@ -22,6 +22,8 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'benchmark)
+(require 'clutch)
 (require 'clutch-backend)
 
 (defvar clutch-bench-iterations 30
@@ -36,6 +38,18 @@ project-shipped demo schema.")
 (defvar clutch-bench-pg-params
   '(:host "127.0.0.1" :port 5432 :user "postgres" :password "test" :database "postgres")
   "PostgreSQL benchmark connection parameters.")
+
+(defvar clutch-bench-ui-rows 1000
+  "Number of synthetic result rows for UI render benchmarks.")
+
+(defvar clutch-bench-ui-columns 120
+  "Number of synthetic result columns for UI render benchmarks.")
+
+(defvar clutch-bench-ui-full-render-iterations 3
+  "Number of full result redraw iterations for UI benchmarks.")
+
+(defvar clutch-bench-ui-row-refresh-iterations 100
+  "Number of row-local refresh iterations for UI benchmarks.")
 
 (defconst clutch-bench--mysql-medium-sql
   "WITH RECURSIVE seq AS (
@@ -118,6 +132,97 @@ project-shipped demo schema.")
                    (clutch-bench--format-ms (plist-get result :connect))))
     (clutch-bench--print-query-line "select1" (plist-get result :select1))
     (clutch-bench--print-query-line "medium" (plist-get result :medium))))
+
+(defun clutch-bench--ui-columns ()
+  "Return synthetic UI benchmark column names."
+  (cl-loop for i below clutch-bench-ui-columns
+           collect (format "c%03d" i)))
+
+(defun clutch-bench--ui-column-defs (columns)
+  "Return synthetic column defs for COLUMNS."
+  (mapcar (lambda (column)
+            (list :name column
+                  :type-category
+                  (if (string-suffix-p "0" column) 'numeric 'text)))
+          columns))
+
+(defun clutch-bench--ui-rows ()
+  "Return synthetic UI benchmark rows."
+  (cl-loop for r below clutch-bench-ui-rows
+           collect
+           (cl-loop for c below clutch-bench-ui-columns
+                    collect (format "r%d-c%d-value" r c))))
+
+(defun clutch-bench--setup-ui-buffer ()
+  "Install synthetic result state in the current buffer."
+  (let* ((columns (clutch-bench--ui-columns))
+         (defs (clutch-bench--ui-column-defs columns))
+         (rows (clutch-bench--ui-rows)))
+    (clutch-result-mode)
+    (setq-local clutch-connection nil
+                clutch--connection-params nil
+                clutch--conn-sql-product nil
+                clutch--result-columns columns
+                clutch--result-column-defs defs
+                clutch--result-rows rows
+                clutch--filtered-rows nil
+                clutch--filter-pattern nil
+                clutch--pending-edits nil
+                clutch--pending-deletes nil
+                clutch--pending-inserts nil
+                clutch--marked-rows nil
+                clutch--fk-info nil
+                clutch--active-edit-cell nil
+                clutch--row-identity nil
+                clutch--row-identity-status nil
+                clutch--result-source-table nil
+                clutch--page-current 0
+                clutch--page-offset 0
+                clutch--page-total-rows nil
+                clutch--page-has-more nil
+                clutch--query-elapsed nil
+                clutch--where-filter nil
+                clutch--aggregate-summary nil
+                clutch-result-max-rows clutch-bench-ui-rows
+                clutch--column-widths
+                (clutch--compute-column-widths columns rows defs))))
+
+(defun clutch-bench--print-ui-line (label stats iterations)
+  "Print UI benchmark LABEL from STATS over ITERATIONS."
+  (let ((avg (/ (car stats) (float iterations))))
+    (princ (format "  %-12s total=%s avg=%s gcs=%d gc-time=%s\n"
+                   label
+                   (clutch-bench--format-ms (car stats))
+                   (clutch-bench--format-ms avg)
+                   (cadr stats)
+                   (clutch-bench--format-ms (caddr stats))))))
+
+;;;###autoload
+(defun clutch-bench-run-ui ()
+  "Run synthetic result-buffer UI benchmarks."
+  (interactive)
+  (princ (format "clutch UI benchmark (%d rows x %d columns)\n"
+                 clutch-bench-ui-rows clutch-bench-ui-columns))
+  (princ (format-time-string "timestamp: %Y-%m-%d %H:%M:%S %z\n"))
+  (with-temp-buffer
+    (clutch-bench--setup-ui-buffer)
+    (let ((full (benchmark-run clutch-bench-ui-full-render-iterations
+                  (clutch--render-result)))
+          row
+          footer)
+      (clutch--render-result)
+      (setq row (benchmark-run clutch-bench-ui-row-refresh-iterations
+                  (clutch--replace-row-at-index
+                   (/ clutch-bench-ui-rows 2))))
+      (setq footer (benchmark-run clutch-bench-ui-row-refresh-iterations
+                     (clutch--refresh-footer-line)))
+      (clutch-bench--print-ui-line
+       "full-render" full clutch-bench-ui-full-render-iterations)
+      (clutch-bench--print-ui-line
+       "row-refresh" row clutch-bench-ui-row-refresh-iterations)
+      (clutch-bench--print-ui-line
+       "footer" footer clutch-bench-ui-row-refresh-iterations)))
+  (princ "\nDone.\n"))
 
 ;;;###autoload
 (defun clutch-bench-run-all ()
