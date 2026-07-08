@@ -1877,13 +1877,17 @@ crashing the UI layer."
   "Icon helper should dispatch through public nerd-icons render functions."
   (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
             ((symbol-function 'nerd-icons-octicon)
-             (lambda (name) (concat "oct:" name)))
+             (lambda (name)
+               (unless (string= name "missing")
+                 (concat "oct:" name))))
             ((symbol-function 'nerd-icons-devicon)
              (lambda (name) (concat "dev:" name))))
     (should (equal (clutch--icon '(octicon . "nf-oct-sort_desc") "fallback")
                    "oct:nf-oct-sort_desc"))
     (should (equal (clutch--icon '(devicon . "nf-dev-mysql") "fallback")
-                   "dev:nf-dev-mysql"))))
+                   "dev:nf-dev-mysql"))
+    (should (equal (clutch--icon '(octicon . "missing") "fallback")
+                   "fallback"))))
 
 (ert-deftest clutch-test-header-line-schema-segment-contract ()
   "Connection header line should show effective schema or database context."

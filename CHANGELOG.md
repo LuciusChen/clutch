@@ -12,6 +12,8 @@
 
 - Unified header-line shortcut hints around status-first text followed by
   colored key/action pairs.
+- Result headers now fall back to built-in text sort indicators (`↕`, `↑`,
+  `↓`) when `nerd-icons` is unavailable, so sortable columns remain visible.
 
 ### Fixed
 
@@ -86,8 +88,9 @@
 - Reduced large-schema completion and object discovery spikes by scanning query
   buffers once for referenced table identifiers and grouping object-cache
   entries without repeated list appends.
-- Reduced wide result-grid TAB navigation latency by caching fixed-width header
-  icons and reusing computed column widths during horizontal visibility checks.
+- Reduced wide result-grid TAB navigation latency by caching normalized header
+  sort indicators and reusing computed column widths during horizontal
+  visibility checks.
 - Clarified result footer cursor text by labeling column position as
   `Col current/total [column-name]`.
 - Opened valid JSON object and array text cells in the JSON cell editor so
@@ -95,6 +98,8 @@
 - Made `C-c C-c` and `C-c C-k` in automatically opened JSON cell editors stage
   or cancel the whole cell edit instead of falling back to the compact parent
   edit buffer first.
+- Kept result header horizontal scrolling aligned with the body when graphical
+  pixel padding and icon sort indicators are active.
 
 ## 0.2.2 - 2026-07-02
 

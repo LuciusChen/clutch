@@ -787,8 +787,8 @@ wide-table rendering from repeatedly walking column definition lists."
 (defvar clutch--nerd-icons-warning-families nil
   "Nerd-icons glyph-set families already reported as unavailable.")
 
-(defvar clutch--fixed-width-icon-cache (make-hash-table :test 'equal)
-  "Cache fixed-width icon strings by icon identity and display metrics.")
+(defvar clutch--header-sort-indicator-cache (make-hash-table :test 'equal)
+  "Cache header sort indicators by icon identity and display metrics.")
 
 (defun clutch--nerd-icons-available-p ()
   "Return non-nil when nerd-icons is loadable and exposes public icon functions."
@@ -812,16 +812,53 @@ NAME is a cons (FAMILY . ICON-NAME), where FAMILY maps to a public
 nerd-icons glyph-set function such as `nerd-icons-mdicon'.
 ICON-ARGS are keyword arguments forwarded to the nerd-icons function
 \(e.g. :height 1.2).  Falls back to FALLBACK when nerd-icons is not
-installed, the family is unsupported, or the icon is unknown."
+installed, the family is unsupported, or the renderer returns nil/empty."
   (pcase-let ((`(,family . ,icon-name) name))
-    (let ((fn (alist-get family clutch--nerd-icons-function-alist)))
-      (or (and (clutch--nerd-icons-available-p)
-               (if (and fn (fboundp fn))
-                   (apply fn icon-name icon-args)
-                 (clutch--nerd-icons-warn-unavailable-family family)
-                 nil))
-          fallback
-          ""))))
+    (let* ((fn (alist-get family clutch--nerd-icons-function-alist))
+           (icon (and (clutch--nerd-icons-available-p)
+                      (if (and fn (fboundp fn))
+                          (apply fn icon-name icon-args)
+                        (clutch--nerd-icons-warn-unavailable-family family)
+                        nil))))
+      (if (and (stringp icon)
+               (not (string-empty-p icon)))
+          icon
+        (or fallback "")))))
+
+(defun clutch--header-sort-indicator-glyph (spec fallback)
+  "Return sort indicator SPEC/FALLBACK snapped to integral cell width."
+  (let* ((graphical (display-graphic-p))
+         (cell-width (and graphical
+                          (fboundp 'default-font-width)
+                          (default-font-width)))
+         (metric (and cell-width
+                      (> cell-width 0)
+                      (fboundp 'string-pixel-width)
+                      (list cell-width
+                            (frame-parameter nil 'font)
+                            face-remapping-alist)))
+         (key (list spec fallback metric))
+         (missing (make-symbol "missing"))
+         (cached (gethash key clutch--header-sort-indicator-cache missing)))
+    (if (not (eq cached missing))
+        (copy-sequence cached)
+      (let* ((raw (clutch--icon spec fallback))
+             (indicator
+              (if (and metric (not (string-empty-p raw)))
+                  (let* ((pixels (string-pixel-width raw))
+                         (raw-width (string-width raw))
+                         (cells (max raw-width
+                                     (ceiling (/ (float pixels) cell-width))))
+                         (target (* cells cell-width))
+                         (pad (- target pixels)))
+                    (if (or (> cells raw-width) (> pad 0))
+                        (concat raw
+                                (clutch--pixel-padding-string
+                                 (- cells raw-width) pad))
+                      raw))
+                raw)))
+        (puthash key indicator clutch--header-sort-indicator-cache)
+        (copy-sequence indicator)))))
 
 (defun clutch--append-face (string face)
   "Return STRING with FACE appended, preserving existing properties."
@@ -968,61 +1005,6 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                  (key (mapconcat #'identity (cons key tail) sep))
                  (t (mapconcat #'identity tail sep))))))))
 
-(defun clutch--fixed-width-icon (spec fallback &optional face)
-  "Return icon with graphical width snapped to text-cell width.
-SPEC is (FAMILY . ICON-NAME) for `clutch--icon'.
-FALLBACK is the string used when nerd-icons is unavailable, or nil.
-Optional FACE is applied to the result.
-
-When `string-pixel-width' is available, measure the icon glyph and display it
-over a placeholder whose `string-width' is an integral number of text cells.
-If the glyph is narrower than those cells, a second placeholder character
-displays the remaining pixel padding so following text stays aligned with
-monospace table cells."
-  (let* ((graphical (display-graphic-p))
-         (key (list spec fallback face graphical
-                    (and graphical
-                         (fboundp 'default-font-width)
-                         (default-font-width))
-                    (and graphical (frame-parameter nil 'font))
-                    (and graphical face-remapping-alist)))
-         (missing (make-symbol "missing"))
-         (cached (gethash key clutch--fixed-width-icon-cache missing)))
-    (if (not (eq cached missing))
-        (copy-sequence cached)
-      (let* ((raw (or (clutch--icon spec fallback) ""))
-             (raw (if (string-empty-p raw) (or fallback "") raw))
-             (raw (clutch--append-face raw face))
-             (icon
-              (if (or (string-empty-p raw)
-                      (not (and (fboundp 'string-pixel-width)
-                                (fboundp 'default-font-width)
-                                graphical)))
-                  raw
-                (let* ((pw (string-pixel-width raw))
-                       (fw (default-font-width))
-                       (raw-width (max 1 (string-width raw)))
-                       (cells (if (> fw 0)
-                                  (max raw-width
-                                       (ceiling (/ (float pw) fw)))
-                                raw-width))
-                       (target-px (* cells fw))
-                       (pad-px (and (> fw 0) (- target-px pw))))
-                  (if (and (= cells raw-width)
-                           (not (and pad-px (> pad-px 0))))
-                      raw
-                    (let ((placeholder (make-string cells ?\s)))
-                      (put-text-property 0 1 'display raw placeholder)
-                      (when (> cells 1)
-                        (put-text-property 1 cells 'display "" placeholder)
-                        (when (and pad-px (> pad-px 0))
-                          (put-text-property 1 2 'display
-                                             (list 'space :width (list pad-px))
-                                             placeholder)))
-                      placeholder))))))
-        (puthash key icon clutch--fixed-width-icon-cache)
-        (copy-sequence icon)))))
-
 (defun clutch--footer-icon (spec fallback face)
   "Return footer icon SPEC/FALLBACK with explicit FACE."
   (concat (clutch--icon-with-face spec fallback face)
@@ -1106,9 +1088,9 @@ MESSAGE, when non-nil, is used as hover text for failed SQL."
   "Mark the last failed SQL region BEG..END with MESSAGE."
   (clutch--mark-sql-status-region beg end 'failed message))
 
-(defun clutch--header-sort-icon (name include-unsorted &optional cidx)
-  "Return the sort icon for column NAME.
-When INCLUDE-UNSORTED is non-nil, return the neutral sort icon for unsorted
+(defun clutch--header-sort-indicator (name include-unsorted &optional cidx)
+  "Return the sort indicator for column NAME.
+When INCLUDE-UNSORTED is non-nil, return the neutral sort indicator for unsorted
 columns; otherwise return nil for unsorted columns.  CIDX disambiguates
 page-local sorts for duplicate column names."
   (let* ((state (cond
@@ -1118,22 +1100,21 @@ page-local sorts for duplicate column names."
                            (and (integerp cidx)
                                 (= cidx clutch--local-sort-column-index))))
                   (if clutch--sort-descending 'desc 'asc))
-                 (include-unsorted 'none)))
-         (icon-spec (pcase state
-                      ('desc '(octicon . "nf-oct-sort_desc"))
-                      ('asc '(octicon . "nf-oct-sort_asc"))
-                      ('none '(mdicon . "nf-md-sort"))))
-         (icon (and state
-                    (clutch--fixed-width-icon icon-spec nil))))
-    (when (and icon (not (string-empty-p icon)))
-      (propertize icon 'clutch-header-icon t))))
+                 (include-unsorted 'none))))
+    (when state
+      (pcase-let ((`(,spec ,fallback)
+                   (pcase state
+                     ('desc '((octicon . "nf-oct-sort_desc") "↓"))
+                     ('asc '((octicon . "nf-oct-sort_asc") "↑"))
+                     ('none '((mdicon . "nf-md-sort") "↕")))))
+        (clutch--header-sort-indicator-glyph spec fallback)))))
 
 (defun clutch--header-label (name &optional include-unsorted-sort cidx)
   "Build the display label for column NAME.
 Appends the sort indicator when the column is active.
 When INCLUDE-UNSORTED-SORT is non-nil, append the neutral sort
 indicator for unsorted columns too.  CIDX disambiguates duplicate names."
-  (let* ((sort (clutch--header-sort-icon name include-unsorted-sort cidx)))
+  (let* ((sort (clutch--header-sort-indicator name include-unsorted-sort cidx)))
     (if sort
         (concat (propertize name 'clutch-header-name t) " " sort)
       (propertize name 'clutch-header-name t))))
@@ -1151,7 +1132,7 @@ ACTIVE-CIDX identifies the highlighted column, if any."
     (when (eql cidx active-cidx)
       (add-face-text-property 0 (length label) 'clutch-header-active-face
                               'append label))
-    ;; Only underline the column name, not its spacer or sort icon.
+    ;; Only underline the column name, not its spacer or sort indicator.
     (dotimes (i (length label))
       (when (get-text-property i 'clutch-header-name label)
         (add-face-text-property i (1+ i) '(:underline t) 'append label)))
@@ -1886,7 +1867,7 @@ The cache is rebuilt by `clutch--refresh-footer-display'."
   (clutch--assemble-footer-display))
 
 (defun clutch--effective-widths ()
-  "Return column widths adjusted for header indicator icons.
+  "Return column widths adjusted for header sort indicators.
 Columns with sort indicators get wider to fit the label."
   (let ((widths (copy-sequence clutch--column-widths)))
     (dotimes (cidx (length widths))
@@ -2060,8 +2041,9 @@ ACTIVE-CIDX highlights that column when non-nil."
 
 (defun clutch--pixel-crop-left (string pixels)
   "Return STRING with PIXELS cropped from the left.
-Display spaces can be cropped partially; ordinary glyphs are removed only at
-character boundaries."
+Display spaces can be cropped partially.  When the crop point falls inside an
+ordinary glyph, replace the clipped remainder with zero-logical-width padding so
+following content keeps its pixel position."
   (catch 'done
     (let ((pos 0)
           (len (length string))
@@ -2077,22 +2059,28 @@ character boundaries."
             (setq remaining (- remaining part-pixels)
                   pos next))
            (t
-            (let* ((rest (substring string pos))
-                   (display (get-text-property pos 'display string))
-                   (width (and (consp display)
-                               (eq (car display) 'space)
-                               (plist-get (cdr display) :width)))
-                   (space-width (cond
-                                 ((consp width) (car width))
-                                 ((numberp width) width))))
-              (if space-width
-                  (progn
-                    (put-text-property
-                     0 1 'display
-                     `(space :width (,(max 0 (- space-width remaining))))
-                     rest)
-                    (throw 'done rest))
-                (throw 'done (substring string next))))))))
+            (let* ((display (get-text-property pos 'display string))
+                   (after (substring string next))
+                   (carry (clutch--pixel-padding-string
+                           0 (- part-pixels remaining))))
+              (pcase display
+                (`(space . ,props)
+                 (let* ((rest (substring string pos))
+                        (width (plist-get props :width))
+                        (space-width (cond
+                                      ((consp width) (car width))
+                                      ((numberp width) width))))
+                   (if space-width
+                       (progn
+                         (put-text-property
+                          0 1 'display
+                          `(space :width (,(max 0 (- space-width remaining))))
+                         rest)
+                         (throw 'done rest))
+                     (throw 'done
+                            (concat carry after)))))
+                (_
+                 (throw 'done (concat carry after)))))))))
       (substring string pos))))
 
 (defun clutch--header-line-with-hscroll ()
