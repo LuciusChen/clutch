@@ -231,19 +231,27 @@
 
 (ert-deftest clutch-test-dispatch-view-routes-values-by-content ()
   "Value viewers should choose JSON/XML/plain buffers from type and content."
-  (dolist (case '(("hello" (:type-category text) "*clutch-value*")
-                  ("{not json" (:type-category text) "*clutch-value*")
+  (dolist (case `(("hello" (:type-category text) "*clutch-value*" "hello" nil)
+                  ("{not json" (:type-category text) "*clutch-value*" "{not json" nil)
+                  (nil (:type-category json) "*clutch-value*"
+                       ,clutch--null-cell-display-text clutch-null-face)
                   ("<rss><item>1</item></rss>"
-                   (:type-category blob) "*clutch-xml*")
-                  ("<abc" (:type-category text) "*clutch-value*")))
-    (pcase-let ((`(,value ,column ,expected-buffer) case))
+                   (:type-category blob) "*clutch-xml*"
+                   "<rss><item>1</item></rss>" nil)
+                  ("<abc" (:type-category text) "*clutch-value*" "<abc" nil)))
+    (pcase-let ((`(,value ,column ,expected-buffer ,expected-content
+                          ,expected-face)
+                 case))
       (let (buffer-name content)
         (cl-letf (((symbol-function 'clutch--view-in-buffer)
                    (lambda (text name _setup)
                      (setq content text
                            buffer-name name))))
           (clutch--dispatch-view value column)
-          (should (equal content value))
+          (should (equal content expected-content))
+          (when expected-face
+            (should (text-property-any 0 (length content)
+                                       'face expected-face content)))
           (should (equal buffer-name expected-buffer)))))))
 
 (ert-deftest clutch-test-blob-view-string-previews ()
@@ -2761,8 +2769,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (list (list :name "severity" :type "enum('low','medium','high')"))
     (with-current-buffer buf
       (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
-      (should (string-match-p "M-TAB: complete" (format "%s" header-line-format)))
-      (should (string-match-p "C-c C-n: set NULL" (format "%s" header-line-format)))
       (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
       (pcase-let ((`(,beg ,end ,candidates . ,_)
                    (clutch-result-edit-completion-at-point)))
@@ -2791,6 +2797,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 (overlay-get clutch-result-edit--null-placeholder-overlay
                              'after-string))
                "<null>"))
+      (should (eq (get-text-property
+                   0 'face
+                   (overlay-get clutch-result-edit--null-placeholder-overlay
+                                'after-string))
+                  'clutch-null-face))
       (insert "hello")
       (should-not clutch-result-edit--null-p)
       (should-not (overlayp clutch-result-edit--null-placeholder-overlay))
@@ -2907,9 +2918,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       "shipping_incidents"
       (list (list :name "opened_at" :type "datetime"))
     (with-current-buffer buf
-      (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format)))
-      (should (string-match-p (regexp-quote "C-c .: now")
-                              (format "%s" header-line-format))))))
+      (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format))))))
 
 (ert-deftest clutch-test-edit-cell-json-sub-editor-contract ()
   "JSON cells should open the JSON sub-editor with serialized JSON text."

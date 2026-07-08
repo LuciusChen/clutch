@@ -8,6 +8,11 @@
   `.authinfo.gpg` entries can provide connection metadata while explicit
   `clutch-connection-alist` keys override profile defaults.
 
+### Changed
+
+- Unified header-line shortcut hints around status-first text followed by
+  colored key/action pairs.
+
 ### Fixed
 
 - Prevented Query Console Eldoc from looping indefinitely when resolving table
@@ -25,6 +30,8 @@
   selection.
 - Kept the result cursor on the last rendered row when mouse-wheel scrolling to
   the bottom of the table.
+- Displayed database NULL as `<null>` in value viewers to match result and
+  record cells.
 - Opened REPL `SELECT` results in the standard result buffer instead of
   expanding wide tables inline in the REPL history, and styled REPL prompts,
   errors, and execution summaries for clearer command history.

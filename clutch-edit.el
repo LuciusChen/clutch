@@ -47,6 +47,7 @@
 (declare-function clutch--json-value-to-string "clutch-ui" (value))
 (declare-function clutch--json-like-string-p "clutch-ui" (value))
 (declare-function clutch--key-hints "clutch-ui" (hints))
+(declare-function clutch--null-display-string "clutch-ui" ())
 (declare-function clutch--result-source-table-or-user-error "clutch-ui" (op))
 (declare-function clutch--result-display-rows "clutch-ui" ())
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
@@ -267,9 +268,6 @@ Return nil when validation succeeds, or signal `user-error' when invalid."
   (clutch-result--field-metadata-tags clutch-result-edit--column-def
                                       clutch-result-edit--column-detail))
 
-(defconst clutch-result-edit--null-placeholder-text "<null>"
-  "Display text for database NULL values in cell edit buffers.")
-
 (defun clutch-result-edit--set-null-state (enabled)
   "Set whether this edit buffer represents database NULL.
 When ENABLED is non-nil, the buffer text is cleared and a visual
@@ -281,9 +279,7 @@ placeholder is displayed.  The placeholder is not part of the buffer text."
   (when enabled
     (erase-buffer)
     (let ((ov (make-overlay (point-min) (point-min) nil t nil)))
-      (overlay-put ov 'after-string
-                   (propertize clutch-result-edit--null-placeholder-text
-                               'face 'clutch-null-face))
+      (overlay-put ov 'after-string (clutch--null-display-string))
       (setq-local clutch-result-edit--null-placeholder-overlay ov))
     (goto-char (point-min))))
 
@@ -351,22 +347,23 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
 (defun clutch-result-edit--header-line (_ridx _col-name)
   "Build the edit-buffer header line."
   (let* ((tags (clutch-result-edit--metadata-tags))
-         (tag-text (and tags (format "[%s]" (string-join tags " "))))
+         (title (concat " Editing cell"
+                        (when tags
+                          (format " [%s]" (string-join tags " ")))))
          (affordances nil))
     (when (clutch-result-edit--field-candidates)
-      (push '("M-TAB" "complete") affordances))
+      (push '("M-TAB" "Complete") affordances))
     (when (clutch-result-edit--temporal-p)
-      (push '("C-c ." "now") affordances))
+      (push '("C-c ." "Now") affordances))
     (when (clutch-result-edit--json-editor-available-p)
-      (push '("C-c '" "JSON") affordances))
-    (concat " "
-            (when tag-text
-              (concat tag-text "  "))
+      (push '("C-c '" "Edit JSON") affordances))
+    (concat title
+            (clutch--status-separator)
             (clutch--key-hints
              (append (nreverse affordances)
-                     '(("C-c C-c" "stage")
-                       ("C-c C-k" "cancel")
-                       ("C-c C-n" "set NULL")))))))
+                     '(("C-c C-c" "Stage edit")
+                       ("C-c C-k" "Cancel")
+                       ("C-c C-n" "Set NULL")))))))
 
 (defun clutch-result-edit--refresh-header-line ()
   "Refresh the edit-buffer header line, including any validation token."
@@ -1500,8 +1497,8 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
                   (concat
                    (format " JSON field %s" field-name)
                    (clutch--status-separator)
-                   (clutch--key-hints '(("C-c C-c" "save")
-                                        ("C-c C-k" "cancel"))))))
+                   (clutch--key-hints '(("C-c C-c" "Save JSON")
+                                        ("C-c C-k" "Cancel"))))))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--current-field-or-error ()
@@ -1670,15 +1667,11 @@ TIME defaults to `current-time'."
            (if clutch-result-insert--show-all-fields "all columns" "sparse"))
    (clutch--status-separator)
    (clutch--key-hints
-    `(("TAB/S-TAB" "field")
-      ("M-TAB" "complete")
-      ("C-c ." "now")
+    `(("C-c C-c" "Stage insert")
+      ("C-c C-k" "Cancel")
       ("C-c C-a" ,(if clutch-result-insert--show-all-fields
-                      "sparse fields"
-                    "all fields"))
-      ("C-c C-y" "import TSV/CSV")
-      ("C-c C-c" "stage")
-      ("C-c C-k" "cancel")))))
+                      "Sparse fields"
+                    "All fields"))))))
 
 (defun clutch-result-insert--refresh-header-line ()
   "Refresh the insert form header line."

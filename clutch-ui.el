@@ -117,6 +117,10 @@ the header cell was rendered.")
 (defconst clutch--null-cell-display-text "<null>"
   "Display text for database NULL values in result cells.")
 
+(defun clutch--null-display-string ()
+  "Return the propertized display string for database NULL values."
+  (propertize clutch--null-cell-display-text 'face 'clutch-null-face))
+
 (defconst clutch--column-width-refresh-delay 0.08
   "Seconds before applying a throttled column-width redraw.")
 
@@ -1924,7 +1928,7 @@ Columns with sort indicators get wider to fit the label."
 (defun clutch--key-hint (key description)
   "Return a colored header-line hint for KEY and DESCRIPTION."
   (concat (propertize key 'face 'clutch-key-hint-key-face)
-          (propertize ": " 'face 'font-lock-comment-face)
+          " "
           (propertize description 'face 'clutch-key-hint-description-face)))
 
 (defun clutch--key-hints (hints)
@@ -1935,7 +1939,7 @@ HINTS is a list of (KEY DESCRIPTION) pairs."
      (pcase-let ((`(,key ,description) hint))
        (clutch--key-hint key description)))
    hints
-   "  "))
+   (clutch--status-separator)))
 
 (defun clutch--column-info-field (label value &optional face)
   "Return a propertized column-info LABEL and VALUE using optional FACE."

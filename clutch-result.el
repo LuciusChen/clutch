@@ -151,6 +151,7 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--message-keyword "clutch-ui" (value))
 (declare-function clutch--message-literal "clutch-ui" (value))
+(declare-function clutch--null-display-string "clutch-ui" ())
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--schedule-column-width-refresh "clutch-ui" ())
@@ -2307,11 +2308,21 @@ When QUIET is non-nil, suppress informational fallback messages."
            (progn (ignore (json-parse-string val)) t)
          (json-parse-error nil))))
 
+(defun clutch--view-format-value (val)
+  "Format VAL for value viewers."
+  (if (null val)
+      (clutch--null-display-string)
+    (clutch--format-value val)))
+
 (defun clutch--view-spec (val col-def &optional quiet)
   "Return rendering spec for VAL with column metadata COL-DEF.
 When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
+     ((null val)
+      (list :kind "Value"
+            :content (clutch--view-format-value val)
+            :setup #'clutch--setup-plain-view-buffer))
      ((or (eq cat 'json)
           (clutch--json-view-string-p val))
       (list :kind "JSON"
@@ -2328,7 +2339,7 @@ When QUIET is non-nil, suppress nonessential viewer messages."
             :setup #'clutch--setup-plain-view-buffer))
      (t
       (list :kind "Value"
-            :content (clutch--format-value val)
+            :content (clutch--view-format-value val)
             :setup #'clutch--setup-plain-view-buffer)))))
 
 (defun clutch--dispatch-view (val col-def)
@@ -2410,9 +2421,9 @@ blob type with non-text value → binary string; otherwise plain text."
            (if frozen "FROZEN" "FOLLOW")
            label
            (format "R%d/%d C%d" (1+ ridx) row-count (1+ cidx))
-           (clutch--key-hints '(("f" "freeze")
-                                ("g" "refresh")
-                                ("q" "quit"))))
+           (clutch--key-hints '(("f" "Toggle freeze")
+                                ("g" "Refresh")
+                                ("q" "Quit"))))
      (clutch--status-separator))))
 
 (defun clutch--live-view-detach-source (source-buf &optional viewer-buf)
@@ -3372,7 +3383,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
            (clutch-record--render)))
         ('show-value
          (message "%s"
-                  (clutch--format-value (plist-get context :value)))))
+                  (clutch--view-format-value (plist-get context :value)))))
     (user-error "No field at point")))
 
 ;;;###autoload

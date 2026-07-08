@@ -1340,9 +1340,9 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
                                                     "▦" 'header-line))
                       (hints (concat "["
                                      (clutch--key-hints
-                                      '(("s" "show definition")
-                                        ("C-c C-o" "object actions")
-                                        ("g" "refresh")))
+                                      '(("s" "Show definition")
+                                        ("C-c C-o" "Object actions")
+                                        ("g" "Refresh")))
                                      "]")))
                   (if (string-empty-p icon)
                       (concat " " hints)
