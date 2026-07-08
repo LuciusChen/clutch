@@ -100,6 +100,8 @@
   edit buffer first.
 - Kept result header horizontal scrolling aligned with the body when graphical
   pixel padding and icon sort indicators are active.
+- Kept result headers aligned with rows when fallback sort indicators and
+  short NULL columns are displayed together.
 
 ## 0.2.2 - 2026-07-02
 

@@ -694,6 +694,12 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
     (:clutch-default-placeholder "<default>")
     (_ nil)))
 
+(defun clutch--column-width-sample (val)
+  "Return the untruncated result-cell text used to size VAL."
+  (or (clutch--cell-placeholder-value val)
+      (and (null val) clutch--null-cell-display-text)
+      (clutch--format-value val)))
+
 (defun clutch--compute-column-widths (col-names rows column-defs
                                                 &optional max-width)
   "Compute display width for each column.
@@ -716,7 +722,7 @@ Returns a vector of integers."
         (let ((header-w (string-width (nth i col-names)))
               (data-w 0))
           (dolist (row sample)
-            (let ((formatted (clutch--format-value (nth i row))))
+            (let ((formatted (clutch--column-width-sample (nth i row))))
               (setq data-w (max data-w (string-width formatted)))))
           (aset widths i (max 5 (min max-w (max header-w data-w)))))))
     widths))

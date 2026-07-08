@@ -515,6 +515,30 @@
                         col-names rows columns)))
           (should (funcall predicate (aref widths 0) expected)))))))
 
+(ert-deftest clutch-test-render-result-aligns-short-null-columns-with-fallback-sort ()
+  "Short NULL columns should not shift later columns when sort icons fall back."
+  (let* ((columns '("hb" "party" "rh"))
+         (rows '((nil 5 nil) (nil 6 nil)))
+         (column-defs (mapcar (lambda (name) (list :name name)) columns))
+         (clutch--header-sort-indicator-cache (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'clutch--icon)
+               (lambda (_spec fallback &rest _args) fallback)))
+      (clutch-test--with-result-state
+          (:columns columns
+           :column-defs column-defs
+           :rows rows
+           :column-widths (clutch--compute-column-widths columns rows column-defs)
+           :render t)
+        (let* ((row (buffer-substring (line-beginning-position)
+                                      (line-end-position)))
+               (border-columns
+                (lambda (string)
+                  (cl-loop for idx below (length string)
+                           when (= (aref string idx) ?│)
+                           collect (string-width (substring string 0 idx))))))
+          (should (equal (funcall border-columns clutch--header-line-string)
+                         (funcall border-columns row))))))))
+
 (ert-deftest clutch-test-visible-columns-contract ()
   "Visible column helpers should include user columns and skip hidden metadata."
   (with-temp-buffer
