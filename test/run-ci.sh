@@ -48,11 +48,20 @@ Usage: test/run-ci.sh [TARGET...]
 Targets:
   all            Run every non-live CI check.
   main           Run the main ERT suite.
-  db             Run the database backend ERT suite.
+  db             Run the database backend unit suite.
+  db-contract    Run backend contract unit tests.
+  db-cross       Run cross-backend live tests using configured credentials.
+  db-jdbc        Run JDBC backend unit tests.
+  db-mongodb     Run MongoDB backend unit tests.
+  db-mysql       Run MySQL backend unit tests.
+  db-pg          Run PostgreSQL backend unit tests.
+  db-redis       Run Redis backend unit tests.
+  db-sqlite      Run SQLite backend unit tests.
+  db-live        Run database backend live tests using configured credentials.
   byte-compile   Byte-compile distributable clutch*.el files.
   package-lint   Run package-lint with clutch.el as package metadata source.
   checkdoc       Run checkdoc on distributable clutch*.el files.
-  native-live    Run MySQL/PostgreSQL/MongoDB live tests against local containers.
+  native-live    Run native backend/UI live tests against local containers.
 EOF
 }
 
@@ -65,11 +74,16 @@ run_main_tests() {
 }
 
 run_db_tests() {
+  run_db_tests_matching "'(not (tag :db-live))"
+}
+
+run_db_tests_matching() {
+  local selector="$1"
   run_emacs \
     -l ert \
     -l clutch-db-jdbc \
     -l clutch-db-test \
-    --eval "(ert-run-tests-batch-and-exit)"
+    --eval "(ert-run-tests-batch-and-exit $selector)"
 }
 
 run_byte_compile() {
@@ -117,6 +131,55 @@ run_target() {
       ;;
     main) run_main_tests ;;
     db) run_db_tests ;;
+    db-live) run_db_tests_matching "'(tag :db-live)" ;;
+    db-contract)
+      run_db_tests_matching \
+        "'(and (not (tag :db-live))
+               (not (or \"^clutch-db-test-jdbc-\"
+                        \"^clutch-db-test-mongodb-\"
+                        \"^clutch-db-test-mysql-\"
+                        \"^clutch-db-test-native-mysql-\"
+                        \"^clutch-db-test-native-pg-\"
+                        \"^clutch-db-test-pg-\"
+                        \"^clutch-db-test-redis-\"
+                        \"^clutch-db-test-sql-interface-mongodb-\"
+                        \"^clutch-db-test-sqlite-\"
+                        \"^clutch-db-test-cross-\")))"
+      ;;
+    db-cross) run_db_tests_matching '"^clutch-db-test-cross-"' ;;
+    db-jdbc)
+      run_db_tests_matching \
+        "'(and \"^clutch-db-test-jdbc-\"
+               (not (tag :db-live)))"
+      ;;
+    db-mongodb)
+      run_db_tests_matching \
+        "'(and (or \"^clutch-db-test-mongodb-\"
+                   \"^clutch-db-test-sql-interface-mongodb-\")
+               (not (tag :db-live)))"
+      ;;
+    db-mysql)
+      run_db_tests_matching \
+        "'(and (or \"^clutch-db-test-mysql-\"
+                   \"^clutch-db-test-native-mysql-\")
+               (not (tag :db-live)))"
+      ;;
+    db-pg)
+      run_db_tests_matching \
+        "'(and (or \"^clutch-db-test-pg-\"
+                   \"^clutch-db-test-native-pg-\")
+               (not (tag :db-live)))"
+      ;;
+    db-redis)
+      run_db_tests_matching \
+        "'(and \"^clutch-db-test-redis-\"
+               (not (tag :db-live)))"
+      ;;
+    db-sqlite)
+      run_db_tests_matching \
+        "'(and \"^clutch-db-test-sqlite-\"
+               (not (tag :db-live)))"
+      ;;
     byte-compile) run_byte_compile ;;
     package-lint) run_package_lint ;;
     checkdoc) run_checkdoc ;;
