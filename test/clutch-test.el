@@ -3277,6 +3277,23 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                              (buffer-substring-no-properties
                               (line-beginning-position) (line-end-position))))))
 
+(ert-deftest clutch-test-insert-buffer-header-line-is-form-title ()
+  "Insert buffer header should use form wording instead of SQL text."
+  (with-temp-buffer
+    (clutch-result-insert-mode 1)
+    (setq-local clutch-result-insert--table "shipping_incidents"
+                clutch-result-insert--show-all-fields nil)
+    (let ((header (substring-no-properties
+                   (clutch-result-insert--header-line))))
+      (should (string-match-p "Insert buffer \\[sparse\\]" header))
+      (should-not (string-match-p "INSERT into" header))
+      (should-not (string-match-p "shipping_incidents" header)))
+    (setq-local clutch-result-insert--show-all-fields t)
+    (should (string-match-p
+             "Insert buffer \\[all columns\\]"
+             (substring-no-properties
+              (clutch-result-insert--header-line))))))
+
 (ert-deftest clutch-test-pending-insert-render-contract ()
   "Staged insert rows should show insert markers and metadata placeholders."
   (with-temp-buffer

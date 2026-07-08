@@ -1659,8 +1659,7 @@ TIME defaults to `current-time'."
 (defun clutch-result-insert--header-line ()
   "Return the insert form header line."
   (concat
-   (format " INSERT into %s [%s]"
-           clutch-result-insert--table
+   (format " Insert buffer [%s]"
            (if clutch-result-insert--show-all-fields "all columns" "sparse"))
    (clutch--status-separator)
    (clutch--key-hints
