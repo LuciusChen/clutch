@@ -829,6 +829,17 @@ started, nil when unsupported.")
   "Backends without asynchronous column-name support return nil."
   nil)
 
+(cl-defgeneric clutch-db-foreign-keys-async (conn table callback &optional errback)
+  "Start an asynchronous foreign-key fetch for TABLE on CONN.
+CALLBACK receives the foreign-key alist on success.  ERRBACK receives an
+error message string on failure.  Return non-nil when async fetch was
+started, nil when unsupported.")
+
+(cl-defmethod clutch-db-foreign-keys-async ((_conn t) _table _callback
+                                             &optional _errback)
+  "Backends without asynchronous foreign-key metadata support return nil."
+  nil)
+
 (defun clutch-db--schedule-idle-metadata-call (conn callback errback fn
                                                     &optional initial-delay
                                                     &rest args)
@@ -1207,6 +1218,13 @@ BACKEND-NAME is used only in generated docstrings."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
         conn callback errback #'clutch-db-table-comment nil table))
+
+     (cl-defmethod clutch-db-foreign-keys-async ((conn ,type) table callback
+                                                 &optional errback)
+       ,(format "Fetch %s foreign keys on the main thread when idle."
+                backend-name)
+       (clutch-db--schedule-idle-metadata-call
+        conn callback errback #'clutch-db-foreign-keys nil table))
 
      (cl-defmethod clutch-db-list-objects-async ((conn ,type) category callback
                                                  &optional errback)

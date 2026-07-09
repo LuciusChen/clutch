@@ -152,6 +152,8 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--message-keyword "clutch-ui" (value))
 (declare-function clutch--message-literal "clutch-ui" (value))
 (declare-function clutch--null-display-string "clutch-ui" ())
+(declare-function clutch--append-pending-insert-row "clutch-ui" (iidx))
+(declare-function clutch--delete-row-at-index "clutch-ui" (ridx))
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--schedule-column-width-refresh "clutch-ui" ())
@@ -795,7 +797,9 @@ If the result has columns, shows a table; otherwise shows DML summary."
       (let ((iidx (- ridx nrows)))
         (setq clutch--pending-inserts
               (delq (nth iidx clutch--pending-inserts) clutch--pending-inserts))
-        (clutch--refresh-display)
+        (clutch--delete-row-at-index ridx)
+        (clutch--refresh-footer-line)
+        (force-mode-line-update)
         (message "Staged insert discarded")))
      (t
       (let* ((row-identity clutch--row-identity)
@@ -3461,12 +3465,13 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("Y" "Save staged SQL"  clutch-result-save-pending-sql
      :inapt-if-not clutch-result--pending-changes-p)]
    ["Filter / Sort"
-    ("/" clutch-result--client-filter-transient-description
-     clutch-result-filter)
-    ("W" clutch-result--where-filter-transient-description
-     clutch-result-apply-filter
+    ("/" "Client filter" clutch-result-filter
+     :description clutch-result--client-filter-transient-description)
+    ("W" "WHERE filter" clutch-result-apply-filter
+     :description clutch-result--where-filter-transient-description
      :if clutch-result--server-rewritable-p)
-    ("s" clutch-result--sort-transient-description clutch-result-sort-by-column
+    ("s" "Sort current" clutch-result-sort-by-column
+     :description clutch-result--sort-transient-description
      :inapt-if-not clutch-result--column-name-at-point)]]
   [ :pad-keys t
    ["Pages"
@@ -3489,8 +3494,8 @@ Selects JSON, XML, or binary string view based on column type and content."
    ["Layout"
     ("=" "Widen column"      clutch-result-widen-column)
     ("-" "Narrow column"     clutch-result-narrow-column)
-    ("f" clutch-result--fullscreen-transient-description
-     clutch-result-fullscreen-toggle)]]
+    ("f" "Fullscreen" clutch-result-fullscreen-toggle
+     :description clutch-result--fullscreen-transient-description)]]
   [ :pad-keys t
    ["Inspect"
     ("v" "View value" clutch-result-view-value)
@@ -3506,8 +3511,8 @@ Selects JSON, XML, or binary string view based on column type and content."
    ["Navigate"
     ("n" "Next row"     clutch-record-next-row)
     ("p" "Prev row"     clutch-record-prev-row)
-    ("RET" clutch-record--field-action-description
-     clutch-record-toggle-expand
+    ("RET" "Toggle field" clutch-record-toggle-expand
+     :description clutch-record--field-action-description
      :inapt-if-not clutch-record--field-action-context)]
    ["Inspect"
     ("v" "View value" clutch-record-view-value)

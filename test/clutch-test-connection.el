@@ -2589,6 +2589,8 @@ crashing the UI layer."
         (clutch--columns-status-cache (make-hash-table :test 'equal))
         (clutch--table-comment-cache (make-hash-table :test 'equal))
         (clutch--table-comment-status-cache (make-hash-table :test 'equal))
+        (clutch--foreign-keys-cache (make-hash-table :test 'equal))
+        (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
         (clutch--help-doc-cache (make-hash-table :test 'equal))
         (clutch--schema-install-timers (make-hash-table :test 'equal))
         (clutch--schema-status-cache (make-hash-table :test 'equal))
