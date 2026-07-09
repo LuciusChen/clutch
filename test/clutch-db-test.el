@@ -340,6 +340,7 @@ authinfo, and PARAMS are explicit connection parameters."
                      '(:database "app" :normalized-by alpha))))))
 
 (ert-deftest clutch-db-test-redis-query-mapping-contract ()
+  :tags '(:smoke)
   "Redis query results should map command responses to result grids."
   (let ((conn (make-clutch-redis-conn :client 'redis-client)))
     (cl-letf (((symbol-function 'redis-command)
@@ -1140,6 +1141,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (delete-directory dir t))))
 
 (ert-deftest clutch-db-test-sqlite-returning-yields-result-rows ()
+  :tags '(:smoke)
   "SQLite DML with RETURNING should produce columns and rows."
   (skip-unless (require 'clutch-db-sqlite nil t))
   (skip-unless (and (fboundp 'sqlite-available-p)
@@ -1671,6 +1673,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (clutch-db-object-definition conn email-entry)))))))
 
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
+  :tags '(:smoke)
   "Native MongoDB query results should flatten top-level document keys."
   (let ((docs '((("_id" . (("$oid" . "64f")))
                  ("name" . "Ann")
@@ -3046,6 +3049,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
+  :tags '(:smoke)
   "Test that backend features are correctly registered."
   (let ((mysql-features (alist-get 'mysql clutch-backend--registry))
         (pg-features (alist-get 'pg clutch-backend--registry))
@@ -3205,6 +3209,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (equal (clutch-db-display-name conn) "KingbaseES"))))
 
 (ert-deftest clutch-db-test-build-conn-routes-generic-jdbc-through-jdbc-backend ()
+  :tags '(:smoke)
   "The generic JDBC backend should pass :url through to `clutch-db-connect'."
   (require 'clutch)
   (let (captured-backend captured-params)
@@ -3396,6 +3401,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 ;;;; Unit tests — SQL building (paged queries)
 
 (ert-deftest clutch-db-test-mysql-build-paged-sql ()
+  :tags '(:smoke)
   "Test MySQL paged SQL generation."
   (require 'clutch-db-mysql)
   (require 'mysql)
@@ -3435,6 +3441,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
 
 (ert-deftest clutch-db-test-pg-build-paged-sql ()
+  :tags '(:smoke)
   "Test PostgreSQL paged SQL generation."
   (require 'clutch-db-pg)
   (let ((conn (clutch-db-test--make-pgcon :host "localhost")))

@@ -78,6 +78,7 @@ crashing the UI layer."
               'jdbc)))
 
 (ert-deftest clutch-test-connection-key ()
+  :tags '(:smoke)
   "Test connection key generation."
   (require 'clutch-db-mysql)
   (require 'mysql)
@@ -858,16 +859,26 @@ crashing the UI layer."
     (unwind-protect
         (progn
           (setq server
-                (make-network-process
-                 :name "clutch-test-container-forward"
-                 :server t
-                 :host "127.0.0.1"
-                 :service t
-                 :family 'ipv4
-                 :coding 'no-conversion
-                 :filter #'clutch--container-forward-client-filter
-                 :sentinel #'clutch--container-forward-client-sentinel
-                 :noquery t))
+                (condition-case err
+                    (make-network-process
+                     :name "clutch-test-container-forward"
+                     :server t
+                     :host "127.0.0.1"
+                     :service t
+                     :family 'ipv4
+                     :coding 'no-conversion
+                     :filter #'clutch--container-forward-client-filter
+                     :sentinel #'clutch--container-forward-client-sentinel
+                     :noquery t)
+                  (file-error
+                   (let ((message (error-message-string err)))
+                     (if (string-match-p
+                          "\\`Cannot bind server socket: Operation not permitted\\'"
+                          message)
+                         (ert-skip
+                          (format "Cannot bind localhost server socket: %s"
+                                  message))
+                       (signal (car err) (cdr err)))))))
           (set-process-query-on-exit-flag server nil)
           (process-put server :clutch-container-command (list "cat"))
           (process-put server :clutch-container-listener server)

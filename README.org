@@ -545,6 +545,20 @@ The non-live CI gate used by GitHub Actions can be run locally:
 ./test/run-ci.sh all
 #+end_src
 
+Focused local runs can start with tagged smoke coverage, or pass any ERT
+selector to =main= or =db=.  =main= defaults to the historical
+=clutch-test= gate; it can also load a colon-separated module list for focused
+runs:
+
+#+begin_src sh
+./test/run-ci.sh smoke
+CLUTCH_TEST_MODULES=clutch-test-sql ./test/run-ci.sh main
+CLUTCH_TEST_SELECTOR='"^clutch-test-completion-"' ./test/run-ci.sh main
+#+end_src
+
+Backend targets such as =db-jdbc=, =db-mysql=, =db-pg=, =db-mongodb=,
+=db-redis=, and =db-sqlite= remain available.
+
 Default ERT runs intentionally skip live tests when database credentials are not
 set.  Treat those runs as unit/regression coverage, not proof that real
 database workflows still work.  External protocol packages and the Org-Babel

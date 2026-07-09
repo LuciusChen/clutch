@@ -200,6 +200,7 @@ SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
                            expected))))))))
 
 (ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
+  :tags '(:smoke)
   "DWIM execution should prefer semicolon-delimited statement bounds."
   (with-temp-buffer
     (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")

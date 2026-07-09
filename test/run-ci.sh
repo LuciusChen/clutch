@@ -48,6 +48,7 @@ Usage: test/run-ci.sh [TARGET...]
 Targets:
   all            Run every non-live CI check.
   main           Run the main ERT suite.
+  smoke          Run minimal tagged non-live coverage.
   db             Run the database backend unit suite.
   db-contract    Run backend contract unit tests.
   db-cross       Run cross-backend live tests using configured credentials.
@@ -66,15 +67,25 @@ EOF
 }
 
 run_main_tests() {
+  run_main_tests_matching "${CLUTCH_TEST_SELECTOR:-t}"
+}
+
+run_main_tests_matching() {
+  local selector="$1"
+  local -a modules args
+  IFS=: read -r -a modules <<<"${CLUTCH_TEST_MODULES:-clutch-test}"
+  args=(-l ert -l clutch)
+  local module
+  for module in "${modules[@]}"; do
+    args+=(-l "$module")
+  done
   run_emacs \
-    -l ert \
-    -l clutch \
-    -l clutch-test \
-    --eval "(ert-run-tests-batch-and-exit)"
+    "${args[@]}" \
+    --eval "(ert-run-tests-batch-and-exit $selector)"
 }
 
 run_db_tests() {
-  run_db_tests_matching "'(not (tag :db-live))"
+  run_db_tests_matching "${CLUTCH_TEST_SELECTOR:-'(not (tag :db-live))'}"
 }
 
 run_db_tests_matching() {
@@ -123,11 +134,15 @@ run_native_live() {
 run_target() {
   case "$1" in
     all)
-      run_main_tests
-      run_db_tests
+      CLUTCH_TEST_MODULES=clutch-test run_main_tests_matching t
+      run_db_tests_matching "'(not (tag :db-live))"
       run_byte_compile
       run_package_lint
       run_checkdoc
+      ;;
+    smoke)
+      run_main_tests_matching "'(tag :smoke)"
+      run_db_tests_matching "'(and (not (tag :db-live)) (tag :smoke))"
       ;;
     main) run_main_tests ;;
     db) run_db_tests ;;

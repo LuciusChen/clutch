@@ -91,6 +91,7 @@
 ;;;; Test backend matrix
 
 (ert-deftest clutch-test-backend-matrix-selects-live-workflow-capabilities ()
+  :tags '(:smoke)
   "Live backend matrix should replace hard-coded workflow backend lists."
   (let ((clutch-test-backend 'jdbc)
         (clutch-test-url "jdbc:duckdb:/tmp/clutch-test.duckdb"))
@@ -114,6 +115,7 @@
 ;;;; Rendering — value formatting
 
 (ert-deftest clutch-test-format-value-values ()
+  :tags '(:smoke)
   "Result values should render as compact display strings."
   (dolist (case '((nil "NULL")
                   (:false "false")
@@ -1146,6 +1148,7 @@
                                  'face 'clutch-modified-face cell)))))
 
 (ert-deftest clutch-test-display-select-contract ()
+  :tags '(:smoke)
   "SELECT display should install source metadata, errors, and window metrics."
   (let ((result-name "*clutch-test-result*")
         (result (make-clutch-db-result
@@ -3185,45 +3188,37 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (equal (buffer-substring-no-properties (point-min) (point-max))
                      "{\n  \"order\": {\n    \"id\": 42\n  },\n  \"lines\": [\n    1,\n    2\n  ]\n}")))))
 
-(ert-deftest clutch-test-edit-cell-auto-json-cancel-closes-edit-flow ()
-  "Canceling an auto-opened JSON editor should return directly to results."
+(ert-deftest clutch-test-edit-cell-auto-json-closes-edit-flow ()
+  "Auto-opened JSON editors should close the parent edit flow."
   (skip-unless (fboundp 'json-serialize))
-  (clutch-test--with-auto-json-edit-cell json-buf parent-buf result-buf
-    (cl-letf (((symbol-function 'quit-window)
-               (lambda (&optional kill _window)
-                 (when kill
-                   (kill-buffer (current-buffer))))))
-      (with-current-buffer json-buf
-        (clutch-result-edit-json-cancel)))
-    (should-not (buffer-live-p json-buf))
-    (should-not (buffer-live-p parent-buf))
-    (should-not (with-current-buffer result-buf
-                  clutch--active-edit-cell))))
-
-(ert-deftest clutch-test-edit-cell-auto-json-finish-closes-edit-flow ()
-  "Saving an auto-opened JSON editor should stage and return to results."
-  (skip-unless (fboundp 'json-serialize))
-  (clutch-test--with-auto-json-edit-cell json-buf parent-buf result-buf
-    (with-current-buffer json-buf
-      (erase-buffer)
-      (insert "{\"ok\":false}"))
-    (cl-letf (((symbol-function 'quit-window)
-               (lambda (&optional kill _window)
-                 (when kill
-                   (kill-buffer (current-buffer)))))
-              ((symbol-function 'clutch--ensure-column-details)
-               (lambda (_conn _table &optional _strict)
-                 (list (list :name "payload" :type "text")))))
-      (with-current-buffer json-buf
-        (clutch-result-edit-json-finish)))
-    (should-not (buffer-live-p json-buf))
-    (should-not (buffer-live-p parent-buf))
-    (with-current-buffer result-buf
-      (should-not clutch--active-edit-cell)
-      (should (equal clutch--pending-edits
-                     (list
-                      (cons (cons (vector "{\"ok\":true}") 0)
-                            "{\"ok\":false}")))))))
+  (dolist (case '(cancel finish))
+    (ert-info ((format "case: %s" case))
+      (clutch-test--with-auto-json-edit-cell json-buf parent-buf result-buf
+        (when (eq case 'finish)
+          (with-current-buffer json-buf
+            (erase-buffer)
+            (insert "{\"ok\":false}")))
+        (cl-letf (((symbol-function 'quit-window)
+                   (lambda (&optional kill _window)
+                     (when kill
+                       (kill-buffer (current-buffer)))))
+                  ((symbol-function 'clutch--ensure-column-details)
+                   (lambda (_conn _table &optional _strict)
+                     (list (list :name "payload" :type "text")))))
+          (with-current-buffer json-buf
+            (pcase case
+              ('cancel (clutch-result-edit-json-cancel))
+              ('finish (clutch-result-edit-json-finish)))))
+        (should-not (buffer-live-p json-buf))
+        (should-not (buffer-live-p parent-buf))
+        (with-current-buffer result-buf
+          (should-not clutch--active-edit-cell)
+          (if (eq case 'finish)
+              (should (equal clutch--pending-edits
+                             (list
+                              (cons (cons (vector "{\"ok\":true}") 0)
+                                    "{\"ok\":false}"))))
+            (should-not clutch--pending-edits)))))))
 
 (ert-deftest clutch-test-edit-set-current-time-replaces-existing-value ()
   "The edit-buffer current-time helper should replace the current value with now."
@@ -3454,6 +3449,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                 (buffer-string)))))))
 
 (ert-deftest clutch-test-insert-buffer-shows-all-fields-by-default ()
+  :tags '(:smoke)
   "Insert buffers should render every field without a sparse toggle."
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-insert-result-buffer result-buf
@@ -3889,31 +3885,54 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should-not (plist-get field :error-message))
           (should-not (plist-get field :error-overlay)))))))
 
-(ert-deftest clutch-test-insert-json-validation-is-scheduled-on-idle ()
-  "JSON fields should defer local validation until the user goes idle."
-  (let (scheduled)
-    (clutch-test--with-insert-result-buffer result-buf
-        (:columns '("postmortem")
-         :column-defs '((:name "postmortem" :type-category json))
-         :connection 'fake-conn)
-      (with-temp-buffer
-        (insert "postmortem: \n")
-        (clutch-result-insert-mode 1)
-        (setq-local clutch-result-insert--result-buffer result-buf
-                    clutch-result-insert--table "shipping_incidents")
-        (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                   (lambda (_conn _table)
-                     (list (list :name "postmortem" :type "json"))))
-                  ((symbol-function 'run-with-idle-timer)
+(ert-deftest clutch-test-json-validation-is-scheduled-on-idle ()
+  "JSON insert and edit buffers should defer local validation until idle."
+  (dolist (case '(insert edit))
+    (ert-info ((format "case: %s" case))
+      (let (scheduled)
+        (cl-letf (((symbol-function 'run-with-idle-timer)
                    (lambda (secs _repeat fn &rest args)
                      (setq scheduled (list secs fn args))
                      'fake-timer)))
-          (clutch-test--goto-insert-field-value "postmortem")
-          (insert "{")
-          (should scheduled)
-          (should (= (car scheduled) clutch-insert-validation-idle-delay))
-          (should (eq (cadr scheduled)
-                      #'clutch-result-insert--run-idle-validation)))))))
+          (pcase case
+            ('insert
+             (clutch-test--with-insert-result-buffer result-buf
+                 (:columns '("postmortem")
+                  :column-defs '((:name "postmortem" :type-category json))
+                  :connection 'fake-conn)
+               (with-temp-buffer
+                 (insert "postmortem: \n")
+                 (clutch-result-insert-mode 1)
+                 (setq-local clutch-result-insert--result-buffer result-buf
+                             clutch-result-insert--table "shipping_incidents")
+                 (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                            (lambda (_conn _table)
+                              (list (list :name "postmortem" :type "json")))))
+                   (clutch-test--goto-insert-field-value "postmortem")
+                   (insert "{")
+                   (should scheduled)
+                   (should (= (car scheduled)
+                              clutch-insert-validation-idle-delay))
+                   (should (eq (cadr scheduled)
+                               #'clutch-result-insert--run-idle-validation))
+                   (should (equal (caddr scheduled)
+                                  (list (current-buffer) "postmortem")))))))
+            ('edit
+             (with-temp-buffer
+               (clutch--result-edit-mode 1)
+               (setq-local clutch-result-edit--row-idx 0
+                           clutch-result-edit--column-name "payload"
+                           clutch-result-edit--column-def
+                           '(:name "payload" :type-category json)
+                           clutch-result-edit--column-detail
+                           '(:name "payload" :type "json"))
+               (clutch-result-edit--schedule-validation)
+               (should scheduled)
+               (should (= (car scheduled) clutch-insert-validation-idle-delay))
+               (should (eq (cadr scheduled)
+                           #'clutch-result-edit--run-idle-validation))
+               (should (equal (caddr scheduled)
+                              (list (current-buffer))))))))))))
 
 (ert-deftest clutch-test-edit-live-validation-updates-header ()
   "Edit buffers should update the compact live-validation token."
@@ -3936,24 +3955,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (should-not clutch-result-edit--error-message)
     (should-not (string-match-p "\\[invalid numeric\\]"
                                 (format "%s" header-line-format)))))
-
-(ert-deftest clutch-test-edit-json-live-validation-is-scheduled-on-idle ()
-  "JSON edit buffers should defer live validation until the user goes idle."
-  (with-temp-buffer
-    (let (scheduled)
-      (clutch--result-edit-mode 1)
-      (setq-local clutch-result-edit--row-idx 0
-                  clutch-result-edit--column-name "payload"
-                  clutch-result-edit--column-def '(:name "payload" :type-category json)
-                  clutch-result-edit--column-detail '(:name "payload" :type "json"))
-      (cl-letf (((symbol-function 'run-with-idle-timer)
-                 (lambda (delay _repeat fn &rest args)
-                   (setq scheduled (list delay fn args))
-                   :fake-timer)))
-        (clutch-result-edit--schedule-validation)
-        (should (= (car scheduled) clutch-insert-validation-idle-delay))
-        (should (eq (cadr scheduled) #'clutch-result-edit--run-idle-validation))
-        (should (equal (caddr scheduled) (list (current-buffer))))))))
 
 (ert-deftest clutch-test-edit-finish-validates-before-stage ()
   "Edit staging should reject invalid values before calling the edit callback."
@@ -4360,6 +4361,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (string-match-p "3,\"x\ry\"" csv)))))
 
 (ert-deftest clutch-test-insert-content-builds-full-row-sql ()
+  :tags '(:smoke)
   "INSERT export content should build SQL from the ROWS argument."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
@@ -5931,6 +5933,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                   "\n")))))))
 
 (ert-deftest clutch-test-result-effective-query-applies-where-filter ()
+  :tags '(:smoke)
   "Result workflows should reuse the filtered SQL, not just display the filter."
   (with-temp-buffer
     (setq-local clutch--base-query "SELECT * FROM t"
