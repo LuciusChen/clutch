@@ -3285,7 +3285,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (let ((header (substring-no-properties
                    (clutch-result-insert--header-line))))
       (should (string-match-p "Insert buffer" header))
-      (should (string-match-p "C-c \\. Now" header))
+      (should (string-match-p "C-c \\. Set current time" header))
       (should-not (string-match-p "INSERT into" header))
       (should-not (string-match-p "shipping_incidents" header))
       (should-not (string-match-p "sparse" header))

@@ -357,7 +357,7 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
     (when (clutch-result-edit--field-candidates)
       (push '("M-TAB" "Complete") affordances))
     (when (clutch-result-edit--temporal-p)
-      (push '("C-c ." "Now") affordances))
+      (push '("C-c ." "Set current time") affordances))
     (when (clutch-result-edit--json-editor-available-p)
       (push '("C-c '" "Edit JSON") affordances))
     (concat title
@@ -1625,7 +1625,7 @@ TIME defaults to `current-time'."
    (clutch--key-hints
     `(("C-c C-c" "Stage insert")
       ("C-c C-k" "Cancel")
-      ("C-c ." "Now")))))
+      ("C-c ." "Set current time")))))
 
 (defun clutch-result-insert--refresh-header-line ()
   "Refresh the insert form header line."
