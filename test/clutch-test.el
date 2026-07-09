@@ -57,6 +57,8 @@
 
 (declare-function make-mysql-conn "mysql" (&rest args))
 
+(declare-function make-pgcon "pg" (&rest args))
+
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 
 (defvar clutch-test-backend 'mysql)
@@ -4540,6 +4542,39 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (concat
                       "INSERT INTO MY_TABLE (id, name) VALUES (1, 'a');\n"
                       "INSERT INTO MY_TABLE (id, name) VALUES (2, 'b');\n"))))))
+
+(ert-deftest clutch-test-pg-array-mutation-builders-use-array-literals ()
+  "PostgreSQL array mutations should render JSON-style edits as array literals."
+  (require 'clutch-db-pg)
+  (let ((conn (make-pgcon :dbname "test" :process nil)))
+    (clutch-test--with-result-state
+        (:connection conn
+         :source-table "models"
+         :columns '("id" "precision")
+         :column-defs '((:name "id" :type-category numeric)
+                        (:name "precision" :type-category text
+                         :backend-type "_int4"))
+         :rows '((1 [0 1]))
+         :row-identity (clutch-test--primary-row-identity
+                        "models" '("id") '(0))
+         :pending-edits
+         (list (cons (cons (vector 1) 1) "[0,1,2]")))
+      (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                 (lambda (_conn _table &optional _strict)
+                   '((:name "id" :type "integer" :backend-type "int4")
+                     (:name "precision" :type "ARRAY"
+                      :backend-type "_int4")))))
+        (should (equal (clutch-result--pending-sql-statements)
+                       '("UPDATE \"models\" SET \"precision\" = E'{0,1,2}' WHERE \"id\" = 1")))
+        (should (equal
+                 (clutch-result--render-statements
+                  (list (clutch-result-insert--build-sql
+                         conn "models" '(("precision" . "[0,1,2]")))))
+                 '("INSERT INTO \"models\" (\"precision\") VALUES (E'{0,1,2}')")))
+        (should (equal
+                 (clutch-result--build-insert-statements-for-rows
+                  '((1 [0 1 2])) '(1) "models")
+                 '("INSERT INTO \"models\" (\"precision\") VALUES (E'{0,1,2}');")))))))
 
 (ert-deftest clutch-test-copy-update-uses-selection ()
   "UPDATE copy should generate SQL from the active row/column selection."

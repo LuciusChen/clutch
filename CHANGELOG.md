@@ -60,6 +60,8 @@
   columns.
 - Required JSON edit sub-editors to start from valid JSON text, keeping invalid
   insert/edit buffer contents in place with a field-specific error.
+- Rendered PostgreSQL array mutation parameters as curly-brace array literals, so
+  editing array cells no longer sends JSON-style `[ ... ]` text as a string.
 - Rejected stale edit buffers when the target row or original cell value changes
   before the edit is finished, avoiding staged updates against replaced results.
 - Kept record view, region TSV copy, aggregate, edit/re-edit, and clone-to-insert

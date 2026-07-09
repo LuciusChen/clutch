@@ -157,8 +157,10 @@ Return a `clutch-db-result'."
     (unwind-protect
         (clutch-db--translate-library-error sqlite-error
           (if (clutch-db-sqlite--select-p sql)
-              (clutch-db-sqlite--run-select handle sql params)
-            (clutch-db-sqlite--run-dml handle sql params)))
+              (clutch-db-sqlite--run-select
+               handle sql (clutch-db-param-values params))
+            (clutch-db-sqlite--run-dml
+             handle sql (clutch-db-param-values params))))
       (setf (clutch-db-sqlite-conn-busy conn) nil))))
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)

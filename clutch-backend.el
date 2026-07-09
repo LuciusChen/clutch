@@ -185,9 +185,9 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
 (cl-defstruct clutch-db-result
   "A database query result.
 CONNECTION is the backend connection object.
-COLUMNS is a list of plists (:name STR :type-category SYM) where
-:type-category is one of: numeric, blob, json, text, date, time,
-datetime, other.
+COLUMNS is a list of plists.  Required keys are :name STR and
+:type-category SYM, where :type-category is one of: numeric, blob, json,
+text, date, time, datetime, other.  Backends may add :backend-type metadata.
 ROWS is a list of lists (one per row).
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
@@ -893,8 +893,9 @@ Substitute PARAMS into SQL before calling `clutch-db-query'."
   (clutch-db-query
    conn
    (clutch-db-substitute-params sql params
-                                (lambda (value)
-                                  (clutch-db-value-to-literal conn value)))))
+                                (lambda (param)
+                                  (clutch-db-value-to-literal
+                                   conn param)))))
 
 (cl-defgeneric clutch-db-interrupt-query (conn)
   "Interrupt the current query on CONN.
@@ -934,7 +935,37 @@ when non-nil, overrides PAGE-NUM for last-window pagination.")
   "Return the default SQL derived-table alias clause for ALIAS."
   (format "AS %s" alias))
 
-(defun clutch-db-value-to-literal (conn value &optional fallback-format-fn)
+(cl-defstruct (clutch-db-param
+               (:constructor clutch-db-param-create)
+               (:conc-name clutch-db-param--))
+  "A SQL parameter value with optional backend type metadata.
+VALUE is the raw Elisp value.  TYPE is backend-specific metadata such as a
+PostgreSQL type name."
+  value type)
+
+(defun clutch-db-typed-param (value type)
+  "Return VALUE tagged with backend TYPE for parameterized SQL.
+When TYPE is nil, return VALUE unchanged."
+  (if type
+      (clutch-db-param-create :value value :type type)
+    value))
+
+(defun clutch-db-param-value (param)
+  "Return PARAM's raw value, ignoring type metadata."
+  (if (clutch-db-param-p param)
+      (clutch-db-param--value param)
+    param))
+
+(defun clutch-db-param-type (param)
+  "Return PARAM's backend type metadata, or nil."
+  (when (clutch-db-param-p param)
+    (clutch-db-param--type param)))
+
+(defun clutch-db-param-values (params)
+  "Return PARAMS with backend type metadata removed."
+  (mapcar #'clutch-db-param-value params))
+
+(defun clutch-db--basic-value-to-literal (conn value &optional fallback-format-fn)
   "Render VALUE as a SQL literal for CONN.
 FALLBACK-FORMAT-FN formats non-scalar result values before string escaping.
 When absent, non-scalar values fall back to `format' with `%S'."
@@ -955,6 +986,25 @@ When absent, non-scalar values fall back to `format' with `%S'."
      (if fallback-format-fn
          (funcall fallback-format-fn value)
        (format "%S" value))))))
+
+(cl-defgeneric clutch-db-value-to-typed-literal
+    (conn value type fallback-format-fn)
+  "Render VALUE as a SQL literal for CONN using backend TYPE metadata.")
+
+(cl-defmethod clutch-db-value-to-typed-literal
+    ((conn t) value _type fallback-format-fn)
+  "Render VALUE for CONN, ignoring backend TYPE metadata by default."
+  (clutch-db--basic-value-to-literal conn value fallback-format-fn))
+
+(defun clutch-db-value-to-literal (conn param &optional fallback-format-fn)
+  "Render PARAM as a SQL literal for CONN.
+PARAM may be a raw value or a `clutch-db-param' with backend type metadata.
+FALLBACK-FORMAT-FN formats non-scalar result values before string escaping."
+  (let ((value (clutch-db-param-value param))
+        (type (clutch-db-param-type param)))
+    (if type
+        (clutch-db-value-to-typed-literal conn value type fallback-format-fn)
+      (clutch-db--basic-value-to-literal conn value fallback-format-fn))))
 
 (defun clutch-db-substitute-params (sql params render-fn)
   "Return SQL with PARAMS substituted using RENDER-FN.
@@ -1274,7 +1324,7 @@ Returns a list of plists with keys:
   :name STR  :type STR  :nullable BOOL
   :primary-key BOOL  :foreign-key PLIST-OR-NIL  :comment STR-OR-NIL
 Optional keys:
-  :default STR-OR-NIL  :generated BOOL")
+  :default STR-OR-NIL  :generated BOOL  :backend-type ANY")
 
 ;; Re-entrancy guard
 

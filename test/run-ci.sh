@@ -85,7 +85,11 @@ run_main_tests_matching() {
 }
 
 run_db_tests() {
-  run_db_tests_matching "${CLUTCH_TEST_SELECTOR:-'(not (tag :db-live))'}"
+  local selector="${CLUTCH_TEST_SELECTOR:-}"
+  if [[ -z "$selector" ]]; then
+    selector="'(not (tag :db-live))"
+  fi
+  run_db_tests_matching "$selector"
 }
 
 run_db_tests_matching() {

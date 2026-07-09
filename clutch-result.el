@@ -2587,14 +2587,18 @@ Selects JSON, XML, or binary string view based on column type and content."
          (cols      (mapconcat (lambda (c) (clutch-db-escape-identifier conn c))
                                col-names ", ")))
     (cl-loop for row in rows
-             for vals = (mapcar (lambda (i) (nth i row)) col-indices)
+             for vals = (cl-mapcar
+                          (lambda (cidx col-name)
+                            (clutch-result--typed-param-for-column
+                             table col-name (nth cidx row) cidx))
+                          col-indices col-names)
              collect (format "INSERT INTO %s (%s) VALUES (%s);"
                              (clutch-db-escape-identifier conn table)
                              cols
                              (mapconcat
-                              (lambda (value)
+                              (lambda (param)
                                 (clutch-db-value-to-literal
-                                 conn value #'clutch--format-value))
+                                 conn param #'clutch--format-value))
                               vals ", ")))))
 
 (defconst clutch--insert-placeholder-table "MY_TABLE"

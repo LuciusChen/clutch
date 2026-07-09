@@ -20,6 +20,7 @@
 (defvar clutch--connection-params)
 (defvar clutch--active-edit-cell)
 (defvar clutch--result-column-defs)
+(defvar clutch--result-column-details)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
 (defvar clutch--result-source-table)
@@ -59,6 +60,7 @@
 (declare-function clutch--refresh-display "clutch-ui" ())
 (declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
 (declare-function clutch--ensure-foreign-keys-async "clutch-schema" (conn table))
+(declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--foreign-key-column-info "clutch-schema" (conn table col-names))
 (declare-function clutch--foreign-keys-cached-p "clutch-schema" (conn table))
 (declare-function clutch-record--render "clutch-result" ())
@@ -70,6 +72,7 @@
 (declare-function clutch--goto-cell "clutch-ui" (ridx cidx))
 (declare-function clutch--row-idx-at-line "clutch-ui" ())
 (declare-function clutch--selected-row-indices "clutch-ui" ())
+(declare-function clutch-db-backend-key "clutch-backend" (conn))
 (declare-function clutch-db-escape-identifier "clutch-backend" (conn name))
 (declare-function clutch-db-result-affected-rows "clutch-backend" (result))
 (declare-function clutch-db-result-p "clutch-backend" (result))
@@ -807,19 +810,60 @@ column indices to their referenced table and column."
                   op-name
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
-(defun clutch--pk-where-parts (conn pk-names pk-values)
+(defun clutch-result--column-backend-type (table col-name &optional cidx)
+  "Return backend type metadata for COL-NAME in TABLE, or nil."
+  (or (when (integerp cidx)
+        (plist-get (nth cidx clutch--result-column-defs) :backend-type))
+      (when (integerp cidx)
+        (plist-get (nth cidx clutch--result-column-details) :backend-type))
+      (when-let* ((details (and table
+                                clutch-connection
+                                (clutch-db-backend-key clutch-connection)
+                                (clutch--ensure-column-details
+                                 clutch-connection table)))
+                  (detail (cl-find col-name details
+                                   :key (lambda (item)
+                                          (plist-get item :name))
+                                   :test #'string=)))
+        (plist-get detail :backend-type))))
+
+(defun clutch-result--typed-param-for-column (table col-name value &optional cidx)
+  "Return VALUE tagged with backend type metadata for TABLE.COL-NAME."
+  (clutch-db-typed-param
+   value
+   (clutch-result--column-backend-type table col-name cidx)))
+
+(defun clutch-result--row-identity-param-types (row-identity)
+  "Return backend type metadata aligned with ROW-IDENTITY values."
+  (let* ((table (plist-get row-identity :table))
+         (columns (plist-get row-identity :columns))
+         (indices (plist-get row-identity :indices))
+         (source-indices (plist-get row-identity :source-indices)))
+    (cl-loop for idx in indices
+             for col in (or columns (make-list (length indices) nil))
+             for source-idx in (or source-indices
+                                   (make-list (length indices) nil))
+             collect
+             (or (plist-get (nth idx clutch--result-column-defs)
+                            :backend-type)
+                 (and col
+                      (clutch-result--column-backend-type
+                       table col (or source-idx idx)))))))
+
+(defun clutch--pk-where-parts (conn pk-names pk-values &optional param-types)
   "Return `(PARTS . PARAMS)' for PK-NAMES with PK-VALUES using CONN.
 NULL primary-key values stay literal as `IS NULL' and are not added to
 the parameter list."
   (let (parts params)
     (cl-mapc
-     (lambda (col val)
+     (lambda (col val type)
        (let ((column-sql (clutch-db-escape-identifier conn col)))
          (if (null val)
              (push (format "%s IS NULL" column-sql) parts)
            (push (format "%s = ?" column-sql) parts)
-           (push val params))))
-     pk-names pk-values)
+           (push (clutch-db-typed-param val type) params))))
+     pk-names pk-values
+     (or param-types (make-list (length pk-values) nil)))
     (cons (nreverse parts) (nreverse params))))
 
 (defun clutch-result--render-statements (statements)
@@ -828,19 +872,25 @@ the parameter list."
             (pcase-let ((`(,sql . ,params) statement))
               (clutch-db-substitute-params
                sql params
-               (lambda (value)
+               (lambda (param)
                  (clutch-db-value-to-literal
-                  clutch-connection value #'clutch--format-value)))))
+                  clutch-connection param #'clutch--format-value)))))
           statements))
 
 (defun clutch--row-identity-where-parts (conn row-identity values)
   "Return `(PARTS . PARAMS)' for ROW-IDENTITY using VALUES on CONN."
-  (if-let* ((where-sql (plist-get row-identity :where-sql)))
-      (cons (list where-sql) (append values nil))
-    (clutch--pk-where-parts
-     conn
-     (plist-get row-identity :columns)
-     (append values nil))))
+  (let ((param-types (clutch-result--row-identity-param-types row-identity))
+        (param-values (append values nil)))
+    (if-let* ((where-sql (plist-get row-identity :where-sql)))
+        (cons (list where-sql)
+              (cl-loop for value in param-values
+                       for type-tail = param-types then (cdr type-tail)
+                       collect (clutch-db-typed-param value (car type-tail))))
+      (clutch--pk-where-parts
+       conn
+       (plist-get row-identity :columns)
+       param-values
+       param-types))))
 
 (defun clutch-result--build-update-stmt (table identity-vec edits col-names row-identity)
   "Build an UPDATE statement spec for TABLE.
@@ -853,11 +903,14 @@ WHERE predicate."
           (where-spec (clutch--row-identity-where-parts
                        conn row-identity identity-vec)))
       (dolist (edit edits)
-        (push (format "%s = ?"
-                      (clutch-db-escape-identifier
-                       conn (nth (car edit) col-names)))
-              set-parts)
-        (push (cdr edit) set-params))
+        (let* ((cidx (car edit))
+               (col-name (nth cidx col-names)))
+          (push (format "%s = ?"
+                        (clutch-db-escape-identifier conn col-name))
+                set-parts)
+          (push (clutch-result--typed-param-for-column
+                 table col-name (cdr edit) cidx)
+                set-params)))
       (cons (format "UPDATE %s SET %s WHERE %s"
                     (clutch-db-escape-identifier conn table)
                     (mapconcat #'identity (nreverse set-parts) ", ")
@@ -2274,10 +2327,14 @@ FIELDS is an alist of (column-name . value-string)."
                          fields ", "))
         (placeholders (mapconcat (lambda (_field) "?") fields ", "))
         (params (mapcar (lambda (field)
-                          (let ((value (cdr field)))
-                            (if (string= (upcase value) "NULL")
-                                nil
-                              value)))
+                          (let* ((col-name (car field))
+                                 (value (cdr field))
+                                 (param-value
+                                  (if (string= (upcase value) "NULL")
+                                      nil
+                                    value)))
+                            (clutch-result--typed-param-for-column
+                             table col-name param-value)))
                         fields)))
     (cons (format "INSERT INTO %s (%s) VALUES (%s)"
                   (clutch-db-escape-identifier conn table)

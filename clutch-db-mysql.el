@@ -434,7 +434,8 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
           (condition-case err
               (setq result
                     (clutch-db-mysql--wrap-result
-                     (apply #'mysql-execute stmt params)))
+                     (apply #'mysql-execute
+                            stmt (clutch-db-param-values params))))
             (mysql-error
              (setq pending-error err)))
         (condition-case err

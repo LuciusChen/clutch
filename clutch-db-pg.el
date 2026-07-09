@@ -30,6 +30,7 @@
 (require 'cl-lib)
 (require 'clutch-backend)
 (require 'eieio)
+(require 'json)
 
 (defvar pg-connect-timeout)
 (defvar pg-read-timeout)
@@ -55,6 +56,7 @@
 (declare-function pgcon-process "pg" (object))
 (declare-function pgcon-dbname "pg" (object))
 (declare-function pgcon-connect-plist "pg" (object))
+(declare-function pgcon-typname-by-oid "pg" (object))
 (declare-function pg-escape-identifier "pg" (identifier))
 (declare-function pg-escape-literal "pg" (string))
 (defvar clutch-db-pg--methods-installed nil
@@ -168,12 +170,22 @@
   (or (alist-get oid clutch-db-pg--type-category-alist)
       'text))
 
-(defun clutch-db-pg--convert-columns (pg-columns)
-  "Convert PG-COLUMNS to `clutch-db' column plists."
+(defun clutch-db-pg--type-name (conn oid)
+  "Return PostgreSQL type name for OID from CONN's type cache, or nil."
+  (when (and conn oid)
+    (gethash oid (pgcon-typname-by-oid conn))))
+
+(defun clutch-db-pg--convert-columns (pg-columns &optional conn)
+  "Convert PG-COLUMNS to `clutch-db' column plists.
+When CONN is non-nil, include backend type metadata from its type cache."
   (mapcar (lambda (col)
             (pcase-let ((`(,name ,type-oid . ,_) col))
-              (list :name name
-                    :type-category (clutch-db-pg--type-category type-oid))))
+              (let ((column (list :name name
+                                  :type-category
+                                  (clutch-db-pg--type-category type-oid))))
+                (if-let* ((type-name (clutch-db-pg--type-name conn type-oid)))
+                    (plist-put column :backend-type type-name)
+                  column))))
           pg-columns))
 
 (defun clutch-db-pg--normalize-date-value (value)
@@ -256,15 +268,16 @@
 
 (defun clutch-db-pg--wrap-result (pg-result)
   "Convert PG-RESULT to a `clutch-db-result'."
-  (let* ((raw-cols (clutch-db-pg--columns pg-result))
-         (cols (when raw-cols (clutch-db-pg--convert-columns raw-cols)))
+  (let* ((conn (clutch-db-pg--result-connection pg-result))
+         (raw-cols (clutch-db-pg--columns pg-result))
+         (cols (when raw-cols (clutch-db-pg--convert-columns raw-cols conn)))
          (rows (if cols
                    (mapcar (lambda (row)
                              (clutch-db-pg--normalize-row row cols))
                            (clutch-db-pg--rows pg-result))
                  (clutch-db-pg--rows pg-result))))
     (make-clutch-db-result
-     :connection (clutch-db-pg--result-connection pg-result)
+     :connection conn
      :columns cols
      :rows rows
      :affected-rows (clutch-db-pg--affected-rows pg-result)
@@ -548,11 +561,103 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
             (cl-incf pos)))))
     (apply #'concat (nreverse parts))))
 
+(defun clutch-db-pg--array-type-name-p (type)
+  "Return non-nil when PostgreSQL TYPE names an array type."
+  (and (stringp type)
+       (string-prefix-p "_" type)))
+
+(defun clutch-db-pg--parse-json-array-param (value type)
+  "Parse JSON array VALUE for PostgreSQL array TYPE."
+  (condition-case err
+      (let ((parsed (json-parse-string value
+                                       :array-type 'array
+                                       :object-type 'hash-table
+                                       :null-object nil
+                                       :false-object :false)))
+        (unless (vectorp parsed)
+          (user-error "PostgreSQL array value for %s must be a JSON array"
+                      type))
+        parsed)
+    (error
+     (user-error "PostgreSQL array value for %s must be a JSON array or curly-brace array literal: %s"
+                 type
+                 (error-message-string err)))))
+
+(defun clutch-db-pg--array-sequence-value-p (value)
+  "Return non-nil when VALUE should be rendered as a PostgreSQL array sequence."
+  (or (vectorp value)
+      (and (listp value)
+           (not (keywordp (car value)))
+           (not (clutch-db-format-temporal value)))))
+
+(defun clutch-db-pg--quote-array-element (text)
+  "Quote TEXT as a PostgreSQL array element."
+  (concat "\""
+          (string-replace "\""
+                          "\\\""
+                          (string-replace "\\" "\\\\" text))
+          "\""))
+
+(defun clutch-db-pg--array-element-literal (value)
+  "Return VALUE as one PostgreSQL array element."
+  (cond
+   ((null value) "NULL")
+   ((clutch-db-format-temporal value)
+    (clutch-db-pg--quote-array-element (clutch-db-format-temporal value)))
+   ((clutch-db-pg--array-sequence-value-p value)
+    (clutch-db-pg--array-literal-from-sequence value))
+   ((numberp value) (number-to-string value))
+   ((eq value t) "true")
+   ((eq value :false) "false")
+   ((hash-table-p value)
+    (clutch-db-pg--quote-array-element
+     (clutch--json-serialize-text value "PostgreSQL array element")))
+   ((stringp value) (clutch-db-pg--quote-array-element value))
+   (t (clutch-db-pg--quote-array-element (format "%s" value)))))
+
+(defun clutch-db-pg--array-literal-from-sequence (value)
+  "Return PostgreSQL array literal text from sequence VALUE."
+  (concat "{"
+          (mapconcat #'clutch-db-pg--array-element-literal
+                     (if (vectorp value) (append value nil) value)
+                     ",")
+          "}"))
+
+(defun clutch-db-pg--array-literal-string (value type)
+  "Return PostgreSQL array literal text for VALUE of PostgreSQL TYPE."
+  (cond
+   ((stringp value)
+    (let ((trimmed (string-trim value)))
+      (cond
+       ((string-prefix-p "{" trimmed) trimmed)
+       ((string-match-p "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+="
+                        trimmed)
+        (user-error
+         "PostgreSQL array values with explicit dimension bounds are not supported"))
+       ((string-prefix-p "[" trimmed)
+        (clutch-db-pg--array-literal-from-sequence
+         (clutch-db-pg--parse-json-array-param trimmed type)))
+       (t
+        (user-error "PostgreSQL array value for %s must be a JSON array or curly-brace array literal"
+                    type)))))
+   ((clutch-db-pg--array-sequence-value-p value)
+    (clutch-db-pg--array-literal-from-sequence value))
+   (t
+    (user-error "PostgreSQL array value for %s must be a sequence, JSON array, or curly-brace array literal"
+                type))))
+
+(defun clutch-db-pg--typed-argument (param)
+  "Return PARAM as one pg-el typed argument."
+  (let ((value (clutch-db-param-value param))
+        (type (clutch-db-param-type param)))
+    (if (and (not (null value))
+             (clutch-db-pg--array-type-name-p type))
+        (cons (clutch-db-pg--array-literal-string value type) nil)
+      (cons value nil))))
+
 (defun clutch-db-pg--typed-arguments (params)
-  "Return PARAMS as pg-el typed arguments using unspecified types."
-  (mapcar (lambda (value)
-            (cons value nil))
-          params))
+  "Return PARAMS as pg-el typed arguments."
+  (mapcar #'clutch-db-pg--typed-argument params))
 
 (defun clutch-db-pg--bind-with-null-params (conn statement-name typed-arguments)
   "Bind TYPED-ARGUMENTS to STATEMENT-NAME on CONN, preserving nil as SQL NULL."
@@ -653,8 +758,8 @@ information_schema type."
   "Convert a column-details ROW to a clutch-db column plist.
 PK-COLS is a list of primary key column names.
 FKS is an alist of (column-name . fk-plist)."
-  (pcase-let ((`(,name ,dtype ,nullable-str ,max-len ,num-prec ,num-scale
-                 ,default-val ,identity-str ,comment) row))
+  (pcase-let ((`(,name ,dtype ,backend-type ,nullable-str ,max-len
+                 ,num-prec ,num-scale ,default-val ,identity-str ,comment) row))
     (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
            (nullable (string= nullable-str "YES"))
            (pk-p     (member name pk-cols))
@@ -662,12 +767,17 @@ FKS is an alist of (column-name . fk-plist)."
            (generated (or (string= identity-str "YES")
                           (and default-val
                                (string-match-p "\\`nextval(" default-val)))))
-      (list :name name :type type :nullable nullable
-            :primary-key (and pk-p t)
-            :foreign-key fk
-            :default (and default-val (not generated) default-val)
-            :generated (and generated t)
-            :comment (and comment (not (string-empty-p comment)) comment)))))
+      (let ((detail (list :name name :type type :nullable nullable
+                          :primary-key (and pk-p t)
+                          :foreign-key fk
+                          :default (and default-val (not generated) default-val)
+                          :generated (and generated t)
+                          :comment (and comment
+                                        (not (string-empty-p comment))
+                                        comment))))
+        (if (and backend-type (not (string-empty-p backend-type)))
+            (plist-put detail :backend-type backend-type)
+          detail)))))
 
 ;;;; Lifecycle methods
 
@@ -763,7 +873,10 @@ manual-commit mode via lazy BEGIN."
    (lambda ()
      (let* ((pg-sql (clutch-db-pg--rewrite-param-sql sql))
             (typed-arguments (clutch-db-pg--typed-arguments params))
-            (result (if (memq nil params)
+            (result (if (cl-some
+                         (lambda (param)
+                           (null (clutch-db-param-value param)))
+                         params)
                         (clutch-db-pg--exec-prepared-with-nulls
                          conn pg-sql typed-arguments)
                       (pg-exec-prepared conn pg-sql typed-arguments))))
@@ -796,6 +909,16 @@ when non-nil."
 (cl-defmethod clutch-db-escape-literal ((_conn pgcon) value)
   "Escape VALUE as a PostgreSQL string literal."
   (pg-escape-literal value))
+
+(cl-defmethod clutch-db-value-to-typed-literal
+    ((conn pgcon) value type fallback-format-fn)
+  "Render VALUE as a PostgreSQL literal for CONN using TYPE metadata."
+  (if (and (not (null value))
+           (clutch-db-pg--array-type-name-p type))
+      (clutch-db-escape-literal
+       conn
+       (clutch-db-pg--array-literal-string value type))
+    (clutch-db--basic-value-to-literal conn value fallback-format-fn)))
 
 ;;;; Schema methods
 
@@ -1190,7 +1313,7 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
       (let* ((col-result
               (pg-exec
                conn
-               (format "SELECT c.column_name, c.data_type, c.is_nullable, \
+               (format "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
 c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
 c.column_default, c.is_identity, col_description(pc.oid, a.attnum) \
 FROM information_schema.columns c \

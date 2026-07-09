@@ -83,9 +83,12 @@
 (declare-function clutch-db-mysql-connect "clutch-db-mysql" (params))
 (declare-function clutch-db-pg--ctid-identity "clutch-db-pg" (conn table))
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
-(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
+(declare-function clutch-db-pg--column-details-row
+                  "clutch-db-pg" (row pk-cols fks))
+(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns &optional conn))
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
 (declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg" (sql))
+(declare-function clutch-db-pg--typed-arguments "clutch-db-pg" (params))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
 (declare-function clutch--jdbc-backend-p "clutch-connection" (backend))
@@ -95,7 +98,7 @@
 (declare-function clutch--format-value "clutch-ui" (value))
 (declare-function auth-source-forget-all-cached "auth-source" ())
 (declare-function clutch-db-value-to-literal "clutch-backend"
-                  (conn value &optional fallback-format-fn))
+                  (conn param &optional fallback-format-fn))
 (declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function make-mysql-result "mysql" (&rest args))
 (declare-function mysql-current-database "mysql" (conn))
@@ -104,6 +107,7 @@
 (declare-function make-pgresult "pg" (&rest args))
 (declare-function pgcon-connect-plist "pg" (conn))
 (declare-function pgcon-dbname "pg" (conn))
+(declare-function pgcon-typname-by-oid "pg" (conn))
 (declare-function sqlite-available-p "sqlite" ())
 
 ;;;; Test configuration
@@ -157,6 +161,7 @@
 (defconst clutch-db-test--pg-oid-int4 23)
 (defconst clutch-db-test--pg-oid-json 114)
 (defconst clutch-db-test--pg-oid-float8 701)
+(defconst clutch-db-test--pg-oid-int4-array 1007)
 (defconst clutch-db-test--pg-oid-date 1082)
 (defconst clutch-db-test--pg-oid-time 1083)
 (defconst clutch-db-test--pg-oid-timestamp 1114)
@@ -3370,6 +3375,47 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (eq (plist-get (nth 1 converted) :type-category) 'json))
     (should (equal (plist-get (nth 2 converted) :name) "created"))
     (should (eq (plist-get (nth 2 converted) :type-category) 'datetime))))
+
+(ert-deftest clutch-db-test-pg-convert-columns-preserves-backend-type ()
+  "PostgreSQL column conversion should keep backend type metadata."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test")))
+    (puthash clutch-db-test--pg-oid-int4-array "_int4"
+             (pgcon-typname-by-oid conn))
+    (let ((converted
+           (clutch-db-pg--convert-columns
+            `(("precision" ,clutch-db-test--pg-oid-int4-array -1))
+            conn)))
+      (should (equal (plist-get (car converted) :name) "precision"))
+      (should (equal (plist-get (car converted) :backend-type) "_int4")))))
+
+(ert-deftest clutch-db-test-pg-array-params-use-postgresql-literals ()
+  "PostgreSQL array params should render and execute as array literals."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pgcon :database "test"))
+         (param (clutch-db-typed-param "[0,1,2]" "_int4")))
+    (should (string-match-p
+             (regexp-quote "{0,1,2}")
+             (clutch-db-value-to-literal conn param)))
+    (should (equal (clutch-db-pg--typed-arguments (list param))
+                   '(("{0,1,2}" . nil))))
+    (should (equal (clutch-db-pg--typed-arguments
+                    (list (clutch-db-typed-param [0 1 2] "_int4")))
+                   '(("{0,1,2}" . nil))))
+    (let ((err (should-error
+                (clutch-db-pg--typed-arguments
+                 (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
+                :type 'user-error)))
+      (should (string-match-p "explicit dimension bounds" (cadr err))))))
+
+(ert-deftest clutch-db-test-pg-column-details-keep-array-display-type ()
+  "PostgreSQL column details should keep display type while saving backend type."
+  (require 'clutch-db-pg)
+  (let ((detail (clutch-db-pg--column-details-row
+                 '("precision" "ARRAY" "_int4" "YES" nil nil nil nil "NO" nil)
+                 nil nil)))
+    (should (equal (plist-get detail :type) "ARRAY"))
+    (should (equal (plist-get detail :backend-type) "_int4"))))
 
 (ert-deftest clutch-db-test-pg-wrap-result-normalizes-temporal-values ()
   "PostgreSQL results should normalize upstream pg-el temporal values."
