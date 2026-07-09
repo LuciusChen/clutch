@@ -2051,7 +2051,7 @@ missing table metadata."
             (clutch--refresh-display)))))))
 
 (defun clutch--handle-table-metadata-updated (conn table kind)
-  "Refresh result UI after CONN/TABLE metadata KIND changes."
+  "Refresh result UI for CONN/TABLE metadata KIND."
   (pcase kind
     ('column-details
      (clutch--refresh-result-metadata-buffers conn table))

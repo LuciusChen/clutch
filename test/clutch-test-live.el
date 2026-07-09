@@ -555,11 +555,6 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                              buf)))
                   (clutch-result-insert-row)))
               (with-current-buffer insert-buf
-                (unless (save-excursion
-                          (goto-char (point-min))
-                          (re-search-forward "^name.*: " nil t))
-                  (cl-letf (((symbol-function 'message) #'ignore))
-                    (clutch-result-insert-toggle-field-layout)))
                 (goto-char (point-min))
                 (should (re-search-forward "^id.*: " nil t))
                 (insert "1")
