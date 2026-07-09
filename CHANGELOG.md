@@ -94,6 +94,8 @@
 - Avoided synchronous foreign-key and insert-placeholder metadata loads while
   rendering result buffers, and used row-local redraws for staged insert rows
   when the rendered grid shape stays stable.
+- Made insert buffers show all fields by default and advertise the `C-c .`
+  current-time shortcut in the header line.
 - Clarified result footer cursor text by labeling column position as
   `Col current/total [column-name]`.
 - Opened valid JSON object and array text cells in the JSON cell editor so

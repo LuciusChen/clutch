@@ -3281,18 +3281,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Insert buffer header should use form wording instead of SQL text."
   (with-temp-buffer
     (clutch-result-insert-mode 1)
-    (setq-local clutch-result-insert--table "shipping_incidents"
-                clutch-result-insert--show-all-fields nil)
+    (setq-local clutch-result-insert--table "shipping_incidents")
     (let ((header (substring-no-properties
                    (clutch-result-insert--header-line))))
-      (should (string-match-p "Insert buffer \\[sparse\\]" header))
+      (should (string-match-p "Insert buffer" header))
+      (should (string-match-p "C-c \\. Now" header))
       (should-not (string-match-p "INSERT into" header))
-      (should-not (string-match-p "shipping_incidents" header)))
-    (setq-local clutch-result-insert--show-all-fields t)
-    (should (string-match-p
-             "Insert buffer \\[all columns\\]"
-             (substring-no-properties
-              (clutch-result-insert--header-line))))))
+      (should-not (string-match-p "shipping_incidents" header))
+      (should-not (string-match-p "sparse" header))
+      (should-not (string-match-p "all columns" header))
+      (should-not (string-match-p "C-c C-a" header)))))
 
 (ert-deftest clutch-test-pending-insert-render-contract ()
   "Staged insert rows should show insert markers and metadata placeholders."
@@ -3401,8 +3399,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (with-temp-buffer
       (clutch-result-insert-mode 1)
       (setq-local clutch-result-insert--result-buffer result-buf
-                  clutch-result-insert--table "shipping_incidents"
-                  clutch-result-insert--show-all-fields t)
+                  clutch-result-insert--table "shipping_incidents")
       (cl-letf (((symbol-function 'clutch--ensure-column-details)
                  (lambda (_conn _table)
                    (list (list :name "id" :type "int" :generated t :nullable nil)
@@ -3456,8 +3453,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (string-match-p "^severity \\[enum required\\]: high$"
                                 (buffer-string)))))))
 
-(ert-deftest clutch-test-insert-sparse-layout-toggle-preserves-hidden-values ()
-  "Sparse insert layout should hide defaulted fields without dropping their values."
+(ert-deftest clutch-test-insert-buffer-shows-all-fields-by-default ()
+  "Insert buffers should render every field without a sparse toggle."
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-insert-result-buffer result-buf
         (:columns '("id" "severity" "owner" "created_at")
@@ -3476,17 +3473,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                :default "CURRENT_TIMESTAMP" :nullable t)))))
         (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
       (with-current-buffer insert-buf
+        (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
         (should (string-match-p "^severity[ ]+\\[enum required\\]: $" (buffer-string)))
-        (should-not (string-match-p "^owner" (buffer-string)))
-        (should-not (string-match-p "^created_at" (buffer-string)))
-        (clutch-result-insert-toggle-field-layout)
+        (should (string-match-p "^owner[ ]+\\[default=system\\]: $" (buffer-string)))
+        (should (string-match-p "^created_at[ ]+\\[default=CURRENT_TIMESTAMP datetime\\]: "
+                                (buffer-string)))
+        (should-not (lookup-key clutch-result-insert-mode-map (kbd "C-c C-a")))
         (goto-char (point-min))
         (re-search-forward "^owner.*: " nil t)
         (insert "bob")
-        (clutch-result-insert-toggle-field-layout)
-        (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
-                                (buffer-string)))
-        (clutch-result-insert-toggle-field-layout)
         (should (string-match-p "^owner[ ]+\\[default=system\\]: bob$"
                                 (buffer-string)))))))
 
@@ -3518,7 +3513,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (with-current-buffer result-buf
           (clutch-clone-row-to-insert)))
       (with-current-buffer insert-buf
-        (should-not (string-match-p "^id" (buffer-string)))
+        (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
         (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
                                 (buffer-string)))
         (should (string-match-p "^owner[ ]*: alice$" (buffer-string)))
@@ -3559,7 +3554,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                     (with-current-buffer record-buf
                       (clutch-clone-row-to-insert)))
                   (with-current-buffer insert-buf
-                    (should-not (string-match-p "^id" (buffer-string)))
+                    (should (string-match-p "^id[ ]+\\[generated\\]: $"
+                                            (buffer-string)))
                     (should (string-match-p
                              (format "^owner[ ]*: %s$" expected)
                              (buffer-string)))
@@ -3569,8 +3565,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (when (buffer-live-p record-buf)
               (kill-buffer record-buf))))))))
 
-(ert-deftest clutch-test-clone-row-to-insert-hides-primary-key-by-default ()
-  "Clone-to-insert should not prefill or sparsely render primary-key fields."
+(ert-deftest clutch-test-clone-row-to-insert-leaves-primary-key-empty ()
+  "Clone-to-insert should render primary-key fields without prefilling them."
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-result-state-buffer result-buf
         (:connection-params '(:backend mysql)
@@ -3589,11 +3585,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (with-current-buffer result-buf
           (clutch-clone-row-to-insert)))
       (with-current-buffer insert-buf
-        (should-not (string-match-p "^id" (buffer-string)))
+        (should (string-match-p "^id[ ]+\\[required\\]: $" (buffer-string)))
         (should (string-match-p "^label[ ]+\\[required\\]: duplicate me$"
-                                (buffer-string)))
-        (clutch-result-insert-toggle-field-layout)
-        (should (string-match-p "^id[ ]+\\[required\\]: $" (buffer-string)))))))
+                                (buffer-string)))))))
 
 (ert-deftest clutch-test-insert-import-delimited-parses-quoted-csv-row ()
   "Single-row CSV import should prefill the current insert form."
