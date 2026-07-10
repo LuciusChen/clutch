@@ -1250,10 +1250,13 @@ WHERE c.relname = %s AND n.nspname = current_schema()"
     (let ((result (pg-exec
                    conn
                    (format "SELECT a.attname
-FROM pg_index i
-JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-WHERE i.indrelid = %s::regclass AND i.indisprimary
-ORDER BY array_position(i.indkey, a.attnum)"
+FROM (SELECT i.indrelid, i.indkey::smallint[] AS key_array,
+             generate_subscripts(i.indkey::smallint[], 1) AS ord
+      FROM pg_index i
+      WHERE i.indrelid = %s::regclass AND i.indisprimary) pk
+JOIN pg_attribute a
+  ON a.attrelid = pk.indrelid AND a.attnum = pk.key_array[pk.ord]
+ORDER BY pk.ord"
                            (pg-escape-literal table)))))
       (mapcar #'car (clutch-db-pg--rows result)))))
 

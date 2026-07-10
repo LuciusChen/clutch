@@ -486,7 +486,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
            (insert-sql
              (format "INSERT INTO %s (id, name) VALUES (1, 'before')" table))
            (select-sql
-            (format "SELECT id, name FROM %s ORDER BY id" table))
+            (concat (and (eq (clutch-db-backend-key conn) 'pg)
+                         "-- row identity comment regression\n")
+                    (format "SELECT id, name FROM %s ORDER BY id" table)))
            (result-name (format " *clutch-edit-live-%d*" (emacs-pid))))
       (unwind-protect
           (progn

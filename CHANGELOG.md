@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.5 - Unreleased
+
+### Fixed
+
+- Replaced PostgreSQL primary-key ordering through
+  `array_position(int2vector, smallint)` with explicit array subscripts over
+  `pg_index.indkey`, restoring row identity and result editing on GaussDB in
+  PostgreSQL compatibility mode while preserving composite-key order.
+
 ## 0.2.4 - 2026-07-10
 
 ### Changed

@@ -3864,6 +3864,23 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (eq (clutch-db-backend-key conn) 'pg))
     (should (equal (clutch-db-display-name conn) "PostgreSQL"))))
 
+(ert-deftest clutch-db-test-pg-primary-keys-use-compatible-int2vector-ordering ()
+  "PostgreSQL primary keys should preserve compatible int2vector order."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        sql)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (_conn actual-sql)
+                 (setq sql actual-sql)
+                 (make-pgresult :tuples '(("tenant_id") ("id"))))))
+      (should (equal (clutch-db-primary-key-columns conn "orders")
+                     '("tenant_id" "id")))
+      (should (string-search
+               "generate_subscripts(i.indkey::smallint[], 1)" sql))
+      (should (string-search "a.attnum = pk.key_array[pk.ord]" sql))
+      (should (string-search "ORDER BY pk.ord" sql))
+      (should-not (string-search "array_position" sql)))))
+
 (ert-deftest clutch-db-test-pg-list-schemas-filters-system-schemas ()
   "PostgreSQL schema listing should omit built-in system schemas."
   (require 'clutch-db-pg)
@@ -4635,15 +4652,19 @@ Skips if `clutch-db-test-pg-password' is nil."
             (clutch-db-query conn drop-sql)
             (clutch-db-query
              conn
-             (format "CREATE TABLE %s (id SERIAL PRIMARY KEY, name TEXT)"
+             (format "CREATE TABLE %s (tenant_id SMALLINT, id SERIAL,
+name TEXT, PRIMARY KEY (tenant_id, id))"
                      table))
             (let ((tables (clutch-db-list-tables conn)))
               (should (listp tables))
               (should (member table tables)))
             (let ((columns (clutch-db-list-columns conn table)))
               (should (listp columns))
+              (should (member "tenant_id" columns))
               (should (member "id" columns))
               (should (member "name" columns)))
+            (should (equal (clutch-db-primary-key-columns conn table)
+                           '("tenant_id" "id")))
             (let ((ddl (clutch-db-object-definition
                         conn (list :name table :type "TABLE"))))
               (should (stringp ddl))
