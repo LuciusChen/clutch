@@ -225,7 +225,7 @@
       (cl-letf (((symbol-function 'json-ts-mode)
                  (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
                 ((symbol-function 'treesit-language-available-p)
-                 (lambda (_language) nil))
+                 (lambda (_language &optional _quiet) nil))
                 ((symbol-function 'json-mode)
                  (lambda () (setq selected-mode 'json-mode)))
                 ((symbol-function 'js-mode)
@@ -2687,9 +2687,10 @@
              (should (eq (plist-get (funcall status) :state) 'failed)))))))))
 
 (ert-deftest clutch-test-transient-metadata-errors-are-not-cached ()
-  "Transient metadata failures should not be memoized as missing values."
+  "Transient metadata failures should stay observable and retryable."
   (clutch-test--with-isolated-metadata-caches
-   (let ((calls (make-hash-table :test 'eq)))
+   (let ((calls (make-hash-table :test 'eq))
+         warnings)
      (cl-letf (((symbol-function 'clutch--connection-key)
 		(lambda (_conn) "dev-key"))
                ((symbol-function 'clutch-db-table-comment)
@@ -2703,7 +2704,10 @@
                   (cl-incf (gethash 'help calls 0))
                   (if (= (gethash 'help calls) 1)
                       (signal 'clutch-db-error '("help boom"))
-                    '(:sig "ABS(X)" :desc "Returns absolute value.")))))
+                    '(:sig "ABS(X)" :desc "Returns absolute value."))))
+               ((symbol-function 'clutch--remember-recoverable-metadata-warning)
+                (lambda (_conn op _err &optional context)
+                  (push (list op context) warnings))))
        (dolist (case `((comment
 			,(lambda ()
                            (clutch--ensure-table-comment 'fake-conn "orders"))
@@ -2718,7 +2722,11 @@
            (ert-info ((format "case: %s" label))
              (should-not (funcall load))
              (should (funcall match expected (funcall load)))
-             (should (= (gethash label calls) 2)))))))))
+             (should (= (gethash label calls) 2)))))
+       (should (equal (sort warnings
+                            (lambda (a b) (string< (car a) (car b))))
+                      '(("symbol help" (:symbol "abs"))
+                        ("table comment" (:table "orders" :schema nil)))))))))
 
 (ert-deftest clutch-test-column-details-async-ignores-invalid-callbacks ()
   "Async detail callbacks should not cache stale or dead-connection results."
@@ -4254,7 +4262,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (cl-letf (((symbol-function 'json-ts-mode)
                  (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
                 ((symbol-function 'treesit-language-available-p)
-                 (lambda (_language) nil))
+                 (lambda (_language &optional _quiet) nil))
                 ((symbol-function 'js-mode)
                  (lambda () (setq selected-mode 'js-mode))))
         (clutch-result-insert--json-editor-mode)))

@@ -759,7 +759,7 @@ document connection."
                 ((symbol-function 'json-ts-mode)
                  (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
                 ((symbol-function 'treesit-language-available-p)
-                 (lambda (_language) nil))
+                 (lambda (_language &optional _quiet) nil))
                 ((symbol-function 'json-mode)
                  (lambda () (setq selected-mode 'json-mode)))
                 ((symbol-function 'clutch--bind-connection-context)

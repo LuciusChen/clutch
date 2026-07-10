@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.7"
+(defcustom clutch-jdbc-agent-version "0.2.8"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "a5a311b3180d8147626ac9d218672f2341205d0d9675c4f351d82df4f2301e33"
+  "257ebc4d6b56989afdf9072295122ba88c2c1567baba948602b08886a3b23fe4"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -495,9 +495,11 @@ Defaults to 8 lines.  Return nil when stderr is empty."
 (defun clutch-jdbc--send (op params)
   "Send OP with PARAMS to the agent and return the request id."
   (let* ((id (cl-incf clutch-jdbc--next-request-id))
-         (msg (json-encode `((id . ,id)
-                             (op . ,op)
-                             (params . ,(clutch-jdbc--request-params params))))))
+         (request `((id . ,id)
+                    (op . ,op)
+                    (params . ,(clutch-jdbc--request-params params))))
+         (msg (let ((json-false clutch-jdbc--json-false))
+                (json-encode request))))
     (process-send-string clutch-jdbc--agent-process (concat msg "\n"))
     id))
 
@@ -1078,15 +1080,20 @@ Emacs RPC timeout."
   (not (or (clutch-jdbc--oracle-conn-p conn)
            (clutch-jdbc--clickhouse-conn-p conn))))
 
-(defun clutch-jdbc--metadata-conn-for-schema (conn schema)
-  "Return a JDBC metadata view of CONN scoped to SCHEMA."
-  (if (or (not schema)
-          (equal schema (clutch-jdbc--conn-schema conn)))
+(defun clutch-jdbc--metadata-conn-for-scope (conn schema &optional catalog)
+  "Return a JDBC metadata view of CONN scoped to SCHEMA and CATALOG."
+  (if (and (or (not schema)
+               (equal schema (clutch-jdbc--conn-schema conn)))
+           (or (not catalog)
+               (equal catalog (clutch-jdbc--conn-catalog conn))))
       conn
     (let ((metadata-conn (copy-clutch-jdbc-conn conn)))
-      (setf (clutch-jdbc-conn-params metadata-conn)
-            (plist-put (copy-sequence (clutch-jdbc-conn-params conn))
-                       :schema schema))
+      (let ((params (copy-sequence (clutch-jdbc-conn-params conn))))
+        (when schema
+          (setq params (plist-put params :schema schema)))
+        (when catalog
+          (setq params (plist-put params :catalog catalog)))
+        (setf (clutch-jdbc-conn-params metadata-conn) params))
       metadata-conn)))
 
 (defun clutch-jdbc--table-like-entry-p (conn entry)
@@ -1327,8 +1334,27 @@ Clob plists become their :preview string."
   "Return JDBC object RPC spec plist for CATEGORY, or nil."
   (alist-get category clutch-jdbc--object-category-specs))
 
-(cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
-  "Execute SQL on JDBC CONN and return a `clutch-db-result'."
+(defun clutch-jdbc--rpc-result (conn result)
+  "Convert JDBC RPC RESULT for CONN to a `clutch-db-result'."
+  (if (equal (plist-get result :type) "dml")
+      (make-clutch-db-result
+       :connection conn
+       :affected-rows (plist-get result :affected-rows))
+    (let* ((first-rows (plist-get result :rows))
+           (cursor-id (plist-get result :cursor-id))
+           (done (eq t (plist-get result :done)))
+           (all-rows (if done first-rows
+                       (nconc first-rows
+                              (clutch-jdbc--fetch-all conn cursor-id)))))
+      (make-clutch-db-result
+       :connection conn
+       :columns (clutch-jdbc--make-columns
+                 (plist-get result :columns)
+                 (plist-get result :col-types))
+       :rows (mapcar #'clutch-jdbc--normalize-row all-rows)))))
+
+(defun clutch-jdbc--execute-rpc (conn op payload)
+  "Execute JDBC RPC OP with PAYLOAD on CONN and return a database result."
   (setf (clutch-jdbc-conn-busy conn) t)
   (unwind-protect
       (condition-case err
@@ -1336,36 +1362,28 @@ Clob plists become their :preview string."
                  (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
                  (result (clutch-jdbc--rpc-on-conn
                           conn
-                          "execute"
-                          `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
-                            (sql        . ,sql)
-                            (fetch-size . ,clutch-jdbc-fetch-size)
-                            ,@(when effective-qt
-                                `((query-timeout-seconds . ,effective-qt))))
-                          rpc-timeout))
-                 (type   (plist-get result :type)))
-            (if (equal type "dml")
-                ;; DML: no rows, just affected-rows.
-                (make-clutch-db-result
-                 :connection    conn
-                 :affected-rows (plist-get result :affected-rows))
-              ;; SELECT: consume remaining pages, return full result.
-              (let* ((first-rows  (plist-get result :rows))
-                     (cursor-id   (plist-get result :cursor-id))
-                     (done        (eq t (plist-get result :done)))
-                     (all-rows    (if done first-rows
-                                    (nconc first-rows
-                                           (clutch-jdbc--fetch-all conn cursor-id))))
-                     (columns     (clutch-jdbc--make-columns
-                                   (plist-get result :columns)
-                                   (plist-get result :col-types)))
-                     (rows        (mapcar #'clutch-jdbc--normalize-row all-rows)))
-                (make-clutch-db-result
-                 :connection conn
-                 :columns    columns
-                 :rows       rows))))
+                          op
+                          (append
+                           `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                           payload
+                           `((fetch-size . ,clutch-jdbc-fetch-size))
+                           (when effective-qt
+                             `((query-timeout-seconds . ,effective-qt))))
+                          rpc-timeout)))
+            (clutch-jdbc--rpc-result conn result))
         (clutch-db-error (signal (car err) (cdr err))))
     (setf (clutch-jdbc-conn-busy conn) nil)))
+
+(cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
+  "Execute SQL on JDBC CONN and return a `clutch-db-result'."
+  (clutch-jdbc--execute-rpc conn "execute" `((sql . ,sql))))
+
+(cl-defmethod clutch-db-execute-params ((conn clutch-jdbc-conn) sql params)
+  "Execute SQL with positional PARAMS on CONN through JDBC prepared binding."
+  (clutch-jdbc--execute-rpc
+   conn "execute-params"
+   `((sql . ,sql)
+     (values . ,(clutch-db-param-values params)))))
 
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-jdbc-conn))
   "Interrupt the active JDBC request on CONN without dropping the session."
@@ -1460,6 +1478,10 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
              (not (string-prefix-p "\"" token)))
         (upcase schema)
       schema)))
+
+(cl-defmethod clutch-db--source-table-catalog ((_conn clutch-jdbc-conn) token)
+  "Return source catalog for JDBC SQL table TOKEN."
+  (clutch-db-sql-table-catalog token))
 
 (cl-defmethod clutch-db-derived-table-alias ((conn clutch-jdbc-conn) alias)
   "Return a JDBC derived-table alias clause for ALIAS on CONN.
@@ -1914,7 +1936,7 @@ the metadata request."
 (cl-defmethod clutch-db-table-comment ((conn clutch-jdbc-conn) table
                                        &optional schema)
   "Return TABLE comment for CONN when metadata has one."
-  (let ((metadata-conn (clutch-jdbc--metadata-conn-for-schema conn schema)))
+  (let ((metadata-conn (clutch-jdbc--metadata-conn-for-scope conn schema)))
     (when (clutch-jdbc--metadata-table-comments-supported-p metadata-conn)
       (clutch-jdbc--table-comment-from-entries
        table
@@ -1974,9 +1996,10 @@ the metadata request."
           :where-sql "ROWID = ?")))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table
-                                                 &optional schema)
+                                                 &optional schema catalog)
   "Return row identity candidates for TABLE on JDBC CONN."
-  (let ((metadata-conn (clutch-jdbc--metadata-conn-for-schema conn schema)))
+  (let ((metadata-conn
+         (clutch-jdbc--metadata-conn-for-scope conn schema catalog)))
     (when (or (not (clutch-jdbc--oracle-conn-p metadata-conn))
               (let ((effective-schema
                      (clutch-jdbc--conn-schema metadata-conn)))
@@ -1994,7 +2017,7 @@ the metadata request."
                                        (downcase
                                         (or (plist-get entry :source-schema)
                                             "")))))))
-      (or (cl-call-next-method metadata-conn table schema)
+      (or (cl-call-next-method metadata-conn table schema catalog)
           (clutch-jdbc--unique-not-null-identities metadata-conn table)
           (when-let* ((rowid (clutch-jdbc--rowid-identity
                               metadata-conn table)))

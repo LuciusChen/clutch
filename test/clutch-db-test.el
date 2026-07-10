@@ -817,6 +817,30 @@ authinfo, and PARAMS are explicit connection parameters."
         (should (= timeout 12)))
       (should (plist-get (clutch-jdbc-conn-params conn) :manual-commit)))))
 
+(ert-deftest clutch-db-test-jdbc-execute-params-uses-agent-binding ()
+  "JDBC parameter execution should bind values in the agent."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 23
+               :params '(:driver sqlserver :rpc-timeout 12)))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (actual-conn op params &optional _timeout)
+                 (should (eq actual-conn conn))
+                 (setq captured-op op
+                       captured-params params)
+                 '(:type "dml" :affected-rows 2))))
+      (let ((result (clutch-db-execute-params
+                     conn
+                     "UPDATE dbo.orders SET note = ? WHERE id = ?"
+                     (list (clutch-db-typed-param "中文" "NVARCHAR")
+                           (clutch-db-typed-param 17 "INTEGER")))))
+        (should (equal captured-op "execute-params"))
+        (should (equal (alist-get 'sql captured-params)
+                       "UPDATE dbo.orders SET note = ? WHERE id = ?"))
+        (should (equal (alist-get 'values captured-params)
+                       '("中文" 17)))
+        (should (= (clutch-db-result-affected-rows result) 2))))))
+
 (ert-deftest clutch-db-test-native-mysql-manual-commit-follows-autocommit ()
   "Native MySQL manual-commit should mirror session autocommit state."
   (require 'clutch-db-mysql)
@@ -995,6 +1019,42 @@ authinfo, and PARAMS are explicit connection parameters."
                (lambda (_conn _table)
                  (signal 'clutch-db-error '("jdbc metadata failed")))))
       (should-error (clutch-db-row-identity-candidates jdbc-conn "DEMO")
+                    :type 'clutch-db-error))))
+
+(ert-deftest clutch-db-test-optional-metadata-adapters-surface-errors ()
+  "Optional native metadata adapters should not turn failures into nil."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (require 'clutch-db-sqlite)
+  (dolist (case `((mysql
+                   ,(make-mysql-conn :database "app")
+                   mysql-query mysql-error
+                   (:name "idx_orders" :type "INDEX"
+                    :target-table "orders"))
+                  (postgres
+                   ,(clutch-db-test--make-pgcon :database "app")
+                   pg-exec pg-error
+                   (:name "idx_orders" :type "INDEX"))))
+    (pcase-let ((`(,label ,conn ,query-fn ,error-type ,entry) case))
+      (ert-info ((format "backend: %s" label))
+        (cl-letf (((symbol-function query-fn)
+                   (lambda (&rest _args)
+                     (signal error-type '("metadata failed")))))
+          (dolist (call (list
+                         (lambda () (clutch-db-table-comment conn "orders"))
+                         (lambda () (clutch-db-foreign-keys conn "orders"))
+                         (lambda () (clutch-db-referencing-objects conn "orders"))
+                         (lambda () (clutch-db-column-details conn "orders"))
+                         (lambda () (clutch-db-object-details conn entry))))
+            (should-error (funcall call) :type 'clutch-db-error))))))
+  (let ((conn (make-clutch-db-sqlite-conn
+               :database "app.db" :handle 'sqlite-handle)))
+    (cl-letf (((symbol-function 'sqlite-select)
+               (lambda (&rest _args)
+                 (signal 'sqlite-error '("metadata failed")))))
+      (should-error (clutch-db-foreign-keys conn "orders")
+                    :type 'clutch-db-error)
+      (should-error (clutch-db-column-details conn "orders")
                     :type 'clutch-db-error))))
 
 (defun clutch-db-test--assert-row-identity-skips-lower-priority
@@ -3665,8 +3725,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (dolist (pattern not-matches)
           (should-not (string-match-p pattern sql))))))))
 
-(ert-deftest clutch-db-test-jdbc-oracle-source-table-name-canonicalizes-unquoted ()
-  "Oracle JDBC source tables should follow Oracle identifier case rules."
+(ert-deftest clutch-db-test-jdbc-source-table-scope-follows-dialect-rules ()
+  "JDBC source tables should preserve scope and dialect identifier rules."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle))))
     (should (equal (clutch-db--source-table-name conn "users") "USERS"))
     (should (equal (clutch-db--source-table-name conn "APP.users") "USERS"))
@@ -3678,7 +3738,26 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                    "APP"))
     (should (equal (clutch-db--source-table-schema
                     conn "\"App\".\"MixedCase\"")
-                   "App"))))
+                   "App")))
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver sqlserver))))
+    (should (equal (clutch-db--source-table-name
+                    conn "analytics.dbo.orders")
+                   "orders"))
+    (should (equal (clutch-db--source-table-schema
+                    conn "analytics.dbo.orders")
+                   "dbo"))
+    (should (equal (clutch-db--source-table-catalog
+                    conn "analytics.dbo.orders")
+                   "analytics"))
+    (should (equal (clutch-db--source-table-catalog
+                    conn "[Sales DB].[reporting].[Order.Items]")
+                   "Sales DB"))
+    (should (equal (clutch-db--source-table-schema
+                    conn "[Sales DB].[reporting].[Order.Items]")
+                   "reporting"))
+    (should (equal (clutch-db--source-table-name
+                    conn "[Sales DB].[reporting].[Order.Items]")
+                   "Order.Items"))))
 
 ;;;; Unit tests — SQL escaping
 
@@ -6059,8 +6138,8 @@ It does so without touching the agent process."
              (should (string-match-p (regexp-quote clutch-debug-buffer-name)
                                      (cadr err))))))))))
 
-(ert-deftest clutch-db-test-jdbc-send-adds-debug-flag-when-debug-mode-enabled ()
-  "JDBC requests should opt into backend debug payloads only in debug mode."
+(ert-deftest clutch-db-test-jdbc-send-encodes-debug-and-boolean-values ()
+  "JDBC requests should encode debug and false as JSON booleans."
   (let ((clutch-jdbc--next-request-id 0)
         (clutch-debug-mode t)
         sent)
@@ -6069,7 +6148,14 @@ It does so without touching the agent process."
                  (setq sent msg))))
       (let ((clutch-jdbc--agent-process 'fake-proc))
         (clutch-jdbc--send "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb"))))
-      (should (string-match-p "\"debug\":true" sent)))))
+      (should (string-match-p "\"debug\":true" sent))
+      (let ((clutch-debug-mode nil)
+            (clutch-jdbc--agent-process 'fake-proc))
+        (clutch-jdbc--send
+         "set-auto-commit"
+         `((conn-id . 9) (auto-commit . ,clutch-jdbc--json-false))))
+      (should (string-match-p "\"auto-commit\":false" sent))
+      (should-not (string-match-p "clutch-jdbc-json-false" sent)))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-connect-error-details-contract ()
   "Connect errors should carry structured diagnostics and debug payloads."

@@ -104,7 +104,9 @@ sessions inside the sidecar:
 - a metadata session for schema/object introspection
 
 This keeps Oracle-style metadata refresh and object warming from contending with
-user queries on the same JDBC session.
+user queries on the same JDBC session. If the metadata session is closed by an
+idle timeout, the agent replaces only that session, restores the current schema,
+and retries the metadata operation once.
 
 ---
 
@@ -660,7 +662,7 @@ migration fallback when the identity-keyed file has not been created yet.
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `clutch-jdbc-agent-dir` | `~/.emacs.d/clutch-jdbc/` | directory | Directory for agent jar and `drivers/` |
-| `clutch-jdbc-agent-version` | `"0.2.6"` | string | Agent version to download |
+| `clutch-jdbc-agent-version` | `"0.2.8"` | string | Agent version to download |
 | `clutch-jdbc-agent-sha256` | (hash string) | string or nil | Expected SHA-256 of agent jar; nil to disable |
 | `clutch-jdbc-agent-java-executable` | `"java"` | string | Java executable path |
 | `clutch-jdbc-agent-jvm-args` | `'("-Xss512k" "-Dpolyglot.engine.WarnInterpreterOnly=false")` | list of strings | Extra JVM arguments |
@@ -862,7 +864,7 @@ Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 1. `C-c '` on a cell → open a dedicated edit buffer
 2. Pending edit stored in `clutch--pending-edits` keyed by row identity + column
 3. Cell shown with `clutch-modified-face` until committed
-4. Confirmation preview renders literal SQL text, but native MySQL/PostgreSQL/SQLite execute staged DML through parameter binding via `clutch-db-execute-params`
+4. Confirmation preview renders literal SQL text, while SQL backends execute staged DML through parameter binding via `clutch-db-execute-params`
 
 #### Delete Row
 
@@ -1117,7 +1119,7 @@ runtime model are documented in `docs/jdbc-agent-protocol.md`.
 | **Physical row locators** | PostgreSQL `ctid`, SQLite `rowid`, and Oracle JDBC `ROWID` can identify rows without logical keys, but may change after UPDATE; explicit `ORDER BY` is still required for stable refresh ordering |
 | **MySQL query timeout** | `clutch-query-timeout-seconds` is not enforced for MySQL (applied for PostgreSQL and JDBC only) |
 | **Transaction control** | Native MySQL and PostgreSQL support `commit` / `rollback` / runtime auto-commit toggle; JDBC supports the same, with Oracle defaulting to manual-commit and `:manual-commit` remaining JDBC-only at connect time |
-| **Prepared statements** | DML mutations use parameterized execution for native MySQL/PostgreSQL/SQLite backends; JDBC still falls back to literal SQL rendering |
+| **Prepared statements** | DML mutations use parameterized execution for native MySQL/PostgreSQL/SQLite and JDBC backends; previews alone render readable literal SQL |
 | **CLOB/BLOB full content** | CLOBs show first 256 chars; BLOBs show length only; full streaming deferred |
 | **Multiple result sets** | Stored procedures returning multiple result sets not supported |
 | **Cancel/interrupt** | `C-g` is recoverable for JDBC and native MySQL/PostgreSQL; backends without explicit interrupt support still fall back to disconnect/reconnect |

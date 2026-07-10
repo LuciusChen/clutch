@@ -872,11 +872,14 @@ Returns a string or nil."
          (cached (gethash key cache 'missing)))
     (if (not (eq cached 'missing))
         cached
-      (condition-case nil
+      (condition-case err
           (let ((comment (clutch-db-table-comment conn table schema)))
             (puthash key comment cache)
             comment)
-        (clutch-db-error nil)))))
+        (clutch-db-error
+         (clutch--remember-recoverable-metadata-warning
+          conn "table comment" err `(:table ,table :schema ,schema))
+         nil)))))
 
 (defun clutch--ensure-table-comment-async (conn table)
   "Queue an async table-comment fetch for TABLE on CONN when needed."
@@ -1010,11 +1013,14 @@ Returns nil when SYM is not a known built-in on this server."
          (entry (gethash uname cache 'missing)))
     (cond
      ((eq entry 'missing)
-      (condition-case nil
+      (condition-case err
           (let ((doc (clutch-db-symbol-help conn sym)))
             (puthash uname (or doc 'not-found) cache)
             (when doc (clutch--format-help-doc doc)))
-        (clutch-db-error nil)))
+        (clutch-db-error
+         (clutch--remember-recoverable-metadata-warning
+          conn "symbol help" err `(:symbol ,sym))
+         nil)))
      ((eq entry 'not-found) nil)
      (t (clutch--format-help-doc entry)))))
 

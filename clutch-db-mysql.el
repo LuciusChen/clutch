@@ -575,8 +575,8 @@ ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
 
 (cl-defmethod clutch-db-object-details ((conn mysql-conn) entry)
   "Return detail plists for MySQL object ENTRY on CONN."
-  (condition-case _err
-      (let ((type (upcase (or (plist-get entry :type) ""))))
+  (clutch-db--translate-library-error mysql-error
+    (let ((type (upcase (or (plist-get entry :type) ""))))
         (pcase type
           ("INDEX"
            (let* ((name (plist-get entry :name))
@@ -617,8 +617,7 @@ ORDER BY ORDINAL_POSITION"
                 (pcase-let ((`(,param-name ,dtype ,mode ,position) row))
                   (list :name param-name :type dtype :mode mode :position position)))
               (mysql-result-rows result))))
-          (_ nil)))
-    (mysql-error nil)))
+          (_ nil)))))
 
 (cl-defmethod clutch-db-object-source ((conn mysql-conn) entry)
   "Return source text for MySQL object ENTRY on CONN."
@@ -692,8 +691,8 @@ ORDER BY ORDINAL_POSITION"
 
 (cl-defmethod clutch-db-table-comment ((conn mysql-conn) table &optional _schema)
   "Return the comment for TABLE on MySQL CONN, or nil if empty."
-  (condition-case _err
-      (let* ((result (mysql-query
+  (clutch-db--translate-library-error mysql-error
+    (let* ((result (mysql-query
                       conn
                       (format "SELECT TABLE_COMMENT \
 FROM INFORMATION_SCHEMA.TABLES \
@@ -701,9 +700,8 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
                               (mysql-escape-literal table))))
              (row (car (mysql-result-rows result)))
              (comment (car row)))
-        (when (and comment (not (string-empty-p comment)))
-          comment))
-    (mysql-error nil)))
+      (when (and comment (not (string-empty-p comment)))
+        comment))))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table)
   "Return primary key column names for TABLE on MySQL CONN."
@@ -719,7 +717,7 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
               rows))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn mysql-conn) table
-                                                 &optional _schema)
+                                                 &optional _schema _catalog)
   "Return row identity candidates for TABLE on MySQL CONN."
   (or (cl-call-next-method)
       (clutch-db-mysql--unique-not-null-identities conn table)))
@@ -727,8 +725,8 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
 (cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table)
   "Return foreign key info for TABLE on MySQL CONN.
 Returns alist of (COL-NAME . (:ref-table T :ref-column C))."
-  (condition-case _err
-      (let* ((sql (format
+  (clutch-db--translate-library-error mysql-error
+    (let* ((sql (format
                    "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
@@ -739,32 +737,30 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
         (cl-loop for row in rows
                  collect (pcase-let ((`(,n ,ref-table ,ref-column) row))
                            (let ((col-name (if (stringp n) n (format "%s" n))))
-                             (cons col-name (list :ref-table ref-table
-                                                  :ref-column ref-column))))))
-    (mysql-error nil)))
+                           (cons col-name (list :ref-table ref-table
+                                                :ref-column ref-column))))))))
 
 (cl-defmethod clutch-db-referencing-objects ((conn mysql-conn) table)
   "Return table entries that reference TABLE on MySQL CONN."
-  (condition-case _err
-      (let* ((sql (format
+  (clutch-db--translate-library-error mysql-error
+    (let* ((sql (format
                    "SELECT DISTINCT TABLE_NAME \
 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
 WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = %s"
                    (mysql-escape-literal table)))
              (result (mysql-query conn sql))
              (rows (mysql-result-rows result)))
-        (mapcar (lambda (row)
-                  (pcase-let ((`(,name) row))
-                    (list :name name :type "TABLE")))
-                rows))
-    (mysql-error nil)))
+      (mapcar (lambda (row)
+                (pcase-let ((`(,name) row))
+                  (list :name name :type "TABLE")))
+              rows))))
 
 ;;;; Column details
 
 (cl-defmethod clutch-db-column-details ((conn mysql-conn) table)
   "Return detailed column info for TABLE on MySQL CONN."
-  (condition-case _err
-      (let* ((col-result (mysql-query
+  (clutch-db--translate-library-error mysql-error
+    (let* ((col-result (mysql-query
                           conn
                           (format "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
 COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT \
@@ -775,24 +771,23 @@ ORDER BY ORDINAL_POSITION"
              (col-rows (mysql-result-rows col-result))
              (pk-cols (clutch-db-primary-key-columns conn table))
              (fks (clutch-db-foreign-keys conn table)))
-        (mapcar
-         (lambda (row)
-           (pcase-let ((`(,name ,type ,nullable-str ,default-val ,extra ,comment) row))
-             (let* ((nullable (string= nullable-str "YES"))
-                    (pk-p (member name pk-cols))
-                    (fk (cdr (assoc name fks)))
-                    (generated (and extra
-                                    (string-match-p
-                                     "\\_<\\(auto_increment\\|VIRTUAL GENERATED\\|STORED GENERATED\\)\\_>"
-                                     extra))))
-               (list :name name :type type :nullable nullable
-                     :primary-key (and pk-p t)
-                     :foreign-key fk
-                     :default (and default-val (not generated) default-val)
-                     :generated (and generated t)
-                     :comment (and comment (not (string-empty-p comment)) comment)))))
-         col-rows))
-    (mysql-error nil)))
+      (mapcar
+       (lambda (row)
+         (pcase-let ((`(,name ,type ,nullable-str ,default-val ,extra ,comment) row))
+           (let* ((nullable (string= nullable-str "YES"))
+                  (pk-p (member name pk-cols))
+                  (fk (cdr (assoc name fks)))
+                  (generated (and extra
+                                  (string-match-p
+                                   "\\_<\\(auto_increment\\|VIRTUAL GENERATED\\|STORED GENERATED\\)\\_>"
+                                   extra))))
+             (list :name name :type type :nullable nullable
+                   :primary-key (and pk-p t)
+                   :foreign-key fk
+                   :default (and default-val (not generated) default-val)
+                   :generated (and generated t)
+                   :comment (and comment (not (string-empty-p comment)) comment)))))
+       col-rows))))
 
 ;;;; Re-entrancy guard
 

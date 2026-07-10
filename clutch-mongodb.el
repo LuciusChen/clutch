@@ -2138,7 +2138,7 @@ of top-level field names for field-scoped snippets."
   nil)
 
 (cl-defmethod clutch-db-row-identity-candidates ((_conn clutch-mongodb-conn) _table
-                                                 &optional _schema)
+                                                 &optional _schema _catalog)
   "Return nil; native MongoDB staged SQL edits are unsupported."
   nil)
 

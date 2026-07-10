@@ -1,5 +1,8 @@
 # 077. Parameterized DML needs a separate preview path
 
+The JDBC fallback described here is superseded by
+[128](128-jdbc-prepared-mutation-execution.md).
+
 ## Context
 
 The staged mutation workflow in `clutch-edit.el` used to build final SQL

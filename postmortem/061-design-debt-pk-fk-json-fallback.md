@@ -1,5 +1,9 @@
 # 061 — Design Debt: Late-Stage PK/FK Loading and JSON Fallback
 
+Superseded by [115](115-result-state-and-action-ownership.md), which moved row
+identity ownership into result state and made foreign-key enrichment asynchronous
+and diagnostically observable.
+
 ## Items
 
 ### PK/FK late-stage detection (clutch-edit.el)

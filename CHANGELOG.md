@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.4 - 2026-07-10
+
+### Changed
+
+- Updated the bundled JDBC agent pin to 0.2.8. JDBC staged mutations now bind
+  positional values through `PreparedStatement` instead of rendering literals
+  into SQL.
+
+### Fixed
+
+- Recovered an idle-timed-out JDBC metadata session independently, restoring
+  its schema and retrying the metadata request once without replacing the
+  healthy primary session or its transaction state.
+- Encoded JDBC boolean parameters as JSON booleans, including false autocommit,
+  and made the agent reject non-boolean protocol values.
+- Preserved catalog, schema, and table components from qualified JDBC source
+  names when resolving row identity, including delimited SQL Server names.
+- Surfaced native MySQL, PostgreSQL, and SQLite metadata failures through the
+  shared backend error boundary; synchronous Eldoc lookups remain quiet while
+  recording recoverable warnings for diagnostics.
+
 ## 0.2.3 - 2026-07-10
 
 ### Added

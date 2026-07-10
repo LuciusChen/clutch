@@ -1098,8 +1098,8 @@ ORDER BY t.event_object_table, t.trigger_name")))
 
 (cl-defmethod clutch-db-object-details ((conn pgcon) entry)
   "Return detail plists for PostgreSQL object ENTRY on CONN."
-  (condition-case _err
-      (pcase (upcase (or (plist-get entry :type) ""))
+  (clutch-db--translate-library-error pg-error
+    (pcase (upcase (or (plist-get entry :type) ""))
         ("INDEX"
          (let* ((result
                  (pg-exec
@@ -1157,8 +1157,7 @@ ORDER BY position" oid)))
               (pcase-let ((`(,name ,type ,mode ,position) row))
                 (list :name name :type type :mode mode :position position)))
             (clutch-db-pg--rows result))))
-        (_ nil))
-    (pg-error nil)))
+      (_ nil))))
 
 (cl-defmethod clutch-db-object-source ((conn pgcon) entry)
   "Return source text for PostgreSQL object ENTRY on CONN."
@@ -1232,8 +1231,8 @@ WHERE schemaname = current_schema()
 
 (cl-defmethod clutch-db-table-comment ((conn pgcon) table &optional _schema)
   "Return the comment for TABLE on PostgreSQL CONN, or nil if none."
-  (condition-case _err
-      (let* ((result (pg-exec
+  (clutch-db--translate-library-error pg-error
+    (let* ((result (pg-exec
                       conn
                       (format "SELECT obj_description(c.oid) \
 FROM pg_class c \
@@ -1242,9 +1241,8 @@ WHERE c.relname = %s AND n.nspname = current_schema()"
                               (pg-escape-literal table))))
              (row (car (clutch-db-pg--rows result)))
              (comment (car row)))
-        (when (and comment (not (string-empty-p comment)))
-          comment))
-    (pg-error nil)))
+      (when (and comment (not (string-empty-p comment)))
+        comment))))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn pgcon) table)
   "Return primary key column names for TABLE on PostgreSQL CONN."
@@ -1260,7 +1258,7 @@ ORDER BY array_position(i.indkey, a.attnum)"
       (mapcar #'car (clutch-db-pg--rows result)))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn pgcon) table
-                                                 &optional _schema)
+                                                 &optional _schema _catalog)
   "Return row identity candidates for TABLE on PostgreSQL CONN."
   (or (cl-call-next-method)
       (clutch-db-pg--unique-not-null-identities conn table)
@@ -1269,8 +1267,8 @@ ORDER BY array_position(i.indkey, a.attnum)"
 
 (cl-defmethod clutch-db-foreign-keys ((conn pgcon) table)
   "Return foreign key info for TABLE on PostgreSQL CONN."
-  (condition-case _err
-      (let* ((sql (format "SELECT
+  (clutch-db--translate-library-error pg-error
+    (let* ((sql (format "SELECT
     kcu.column_name,
     ccu.table_name AS referenced_table,
     ccu.column_name AS referenced_column
@@ -1288,15 +1286,14 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
              (result (pg-exec conn sql)))
         (cl-loop for row in (clutch-db-pg--rows result)
                  collect (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
-                           (cons col-name
-                                 (list :ref-table ref-table
-                                       :ref-column ref-column)))))
-    (pg-error nil)))
+                         (cons col-name
+                               (list :ref-table ref-table
+                                     :ref-column ref-column)))))))
 
 (cl-defmethod clutch-db-referencing-objects ((conn pgcon) table)
   "Return table entries that reference TABLE on PostgreSQL CONN."
-  (condition-case _err
-      (let* ((sql (format "SELECT DISTINCT tc.table_name
+  (clutch-db--translate-library-error pg-error
+    (let* ((sql (format "SELECT DISTINCT tc.table_name
 FROM information_schema.table_constraints tc
 JOIN information_schema.constraint_column_usage ccu
   ON ccu.constraint_name = tc.constraint_name
@@ -1307,16 +1304,15 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
   AND ccu.table_name = %s"
                           (pg-escape-literal table)))
              (result (pg-exec conn sql)))
-        (mapcar (lambda (row)
-                  (pcase-let ((`(,name) row))
-                    (list :name name :type "TABLE")))
-                (clutch-db-pg--rows result)))
-    (pg-error nil)))
+      (mapcar (lambda (row)
+                (pcase-let ((`(,name) row))
+                  (list :name name :type "TABLE")))
+              (clutch-db-pg--rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn pgcon) table)
   "Return detailed column info for TABLE on PostgreSQL CONN."
-  (condition-case _err
-      (let* ((col-result
+  (clutch-db--translate-library-error pg-error
+    (let* ((col-result
               (pg-exec
                conn
                (format "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
@@ -1333,9 +1329,8 @@ ORDER BY c.ordinal_position"
              (col-rows (clutch-db-pg--rows col-result))
              (pk-cols  (clutch-db-primary-key-columns conn table))
              (fks      (clutch-db-foreign-keys conn table)))
-        (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
-                col-rows))
-    (pg-error nil)))
+      (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
+              col-rows))))
 
 ;;;; Re-entrancy guard
 

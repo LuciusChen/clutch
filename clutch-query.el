@@ -674,6 +674,8 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
                          (clutch-db--source-table-name conn source-token))))
          (source-schema (and source-token
                              (clutch-db--source-table-schema conn source-token)))
+         (source-catalog (and source-token
+                              (clutch-db--source-table-catalog conn source-token)))
          candidates
          identity-error)
     (cond
@@ -682,8 +684,9 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
      (table
       (condition-case err
           (setq candidates
-                (if source-schema
-                    (clutch-db-row-identity-candidates conn table source-schema)
+                (if (or source-schema source-catalog)
+                    (clutch-db-row-identity-candidates
+                     conn table source-schema source-catalog)
                   (clutch-db-row-identity-candidates conn table)))
         (clutch-db-error
          (setq identity-error err)))))
@@ -708,6 +711,7 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
             :table table
             :source-token source-token
             :source-schema source-schema
+            :source-catalog source-catalog
             :candidate candidate
             :candidates candidates
             :hidden-aliases (and augment-p aliases)
@@ -747,6 +751,7 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
          (list :table (plist-get prep :table)
                :source-token (plist-get prep :source-token)
                :source-schema (plist-get prep :source-schema)
+               :source-catalog (plist-get prep :source-catalog)
                :indices indices
                :source-indices source-indices
                :hidden-aliases aliases)

@@ -537,12 +537,15 @@ PATTERNS is a list of case-insensitive regex fragments passed to
                  "EXCEPT"))
               (length sql)))))
 
+(defconst clutch-db-sql--identifier-token-pattern
+  "\\(?:`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\|[^[:space:],();.]+\\)"
+  "SQL identifier token pattern accepted by source-table helpers.")
+
 (defconst clutch-db-sql--table-token-pattern
-  (concat "\\(?:`[^`]+`\\."
-          "\\)?`[^`]+`"
-          "\\|\\(?:\"[^\"]+\"\\.\\)?\"[^\"]+\""
-          "\\|\\(?:\\[[^]]+\\]\\.\\)?\\[[^]]+\\]"
-          "\\|[^[:space:],();]+")
+  (concat clutch-db-sql--identifier-token-pattern
+          "\\(?:\\."
+          clutch-db-sql--identifier-token-pattern
+          "\\)*")
   "SQL table token pattern accepted by source-table helpers.")
 
 (defun clutch-db-sql-from-body-parts (body)
@@ -558,14 +561,35 @@ PATTERNS is a list of case-insensitive regex fragments passed to
          (list (match-string 1 body)
                (match-string 2 body)))))
 
+(defun clutch-db-sql--table-raw-parts (table)
+  "Return delimiter-preserving identifier parts from TABLE, or nil."
+  (let ((len (length table))
+        (pos 0)
+        parts
+        valid)
+    (while (< pos len)
+      (let* ((start pos)
+             (quoted-end (clutch-db-sql-skip-literal-or-comment table pos t))
+             (end (or quoted-end
+                      (cl-loop for i from pos below len
+                               when (= (aref table i) ?.) return i
+                               finally return len))))
+        (if (= start end)
+            (setq pos len parts nil)
+          (push (substring table start end) parts)
+          (setq pos end)
+          (cond
+           ((= pos len)
+            (setq valid t))
+           ((= (aref table pos) ?.)
+            (cl-incf pos))
+           (t
+            (setq pos len parts nil))))))
+    (and valid (nreverse parts))))
+
 (defun clutch-db-sql-table-qualifier (table)
   "Return the exposed table qualifier from TABLE."
-  (cond
-   ((string-match "\\.\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\)\\'" table)
-    (match-string 1 table))
-   ((string-match "\\.\\([^.\"]+\\)\\'" table)
-    (match-string 1 table))
-   (t table)))
+  (car (last (clutch-db-sql--table-raw-parts table))))
 
 (defun clutch-db-sql--unquote-identifier (identifier)
   "Return IDENTIFIER without SQL identifier delimiters."
@@ -580,15 +604,20 @@ PATTERNS is a list of case-insensitive regex fragments passed to
 
 (defun clutch-db-sql-table-name (table)
   "Return the unquoted table name represented by TABLE."
-  (clutch-db-sql--unquote-identifier
-   (clutch-db-sql-table-qualifier table)))
+  (when-let* ((name (clutch-db-sql-table-qualifier table)))
+    (clutch-db-sql--unquote-identifier name)))
 
 (defun clutch-db-sql-table-schema (table)
   "Return the unquoted schema qualifier represented by TABLE, or nil."
-  (when (string-match
-         "\\`\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\|[^.]+\\)\\."
-         table)
-    (clutch-db-sql--unquote-identifier (match-string 1 table))))
+  (let ((parts (clutch-db-sql--table-raw-parts table)))
+    (when (> (length parts) 1)
+      (clutch-db-sql--unquote-identifier (nth (- (length parts) 2) parts)))))
+
+(defun clutch-db-sql-table-catalog (table)
+  "Return the unquoted catalog qualifier represented by TABLE, or nil."
+  (let ((parts (clutch-db-sql--table-raw-parts table)))
+    (when (> (length parts) 2)
+      (clutch-db-sql--unquote-identifier (nth (- (length parts) 3) parts)))))
 
 (defun clutch-db-sql--source-table-token (sql &optional simple-only)
   "Return the top-level source table token for SQL, or nil.
@@ -941,6 +970,14 @@ when non-nil, overrides PAGE-NUM for last-window pagination.")
 
 (cl-defmethod clutch-db--source-table-schema ((_conn t) token)
   "Return nil because TOKEN has no default schema-aware metadata scope."
+  (ignore token)
+  nil)
+
+(cl-defgeneric clutch-db--source-table-catalog (conn token)
+  "Return source catalog for CONN and SQL table TOKEN, or nil.")
+
+(cl-defmethod clutch-db--source-table-catalog ((_conn t) token)
+  "Return nil because TOKEN has no default catalog-aware metadata scope."
   (ignore token)
   nil)
 
@@ -1310,16 +1347,18 @@ BACKEND-NAME is used only in generated docstrings."
   "Return nil because CONN has no default primary-key metadata support."
   nil)
 
-(cl-defgeneric clutch-db-row-identity-candidates (conn table &optional schema)
+(cl-defgeneric clutch-db-row-identity-candidates (conn table &optional schema catalog)
   "Return row identity candidate plists for TABLE on CONN.
 SCHEMA identifies TABLE's namespace when the SQL source was qualified.
+CATALOG identifies the enclosing JDBC catalog when present.
 Candidates are ordered from most stable to least stable.  A candidate with
 :kind `primary-key' or `unique-key' has :columns as source column names.  A
 candidate with :kind `row-locator' has :select-expressions as SQL expressions
 that can be hidden in SELECT results and :where-sql as the predicate used by
 UPDATE and DELETE.")
 
-(cl-defmethod clutch-db-row-identity-candidates ((conn t) table &optional _schema)
+(cl-defmethod clutch-db-row-identity-candidates ((conn t) table
+                                                 &optional _schema _catalog)
   "Return the primary-key row identity candidate for CONN and TABLE."
   (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
     (list (list :kind 'primary-key

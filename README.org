@@ -135,8 +135,9 @@ safest way to clear stale autoload or native-compile state after installation.
 
 JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+
 and =clutch-jdbc-agent.jar=.  Individual JDBC databases may also need driver
-jars.  Clutch 0.2.3 pins JDBC agent 0.2.7 and verifies the published jar before
-starting it.
+jars.  Clutch 0.2.4 pins JDBC agent 0.2.8 and verifies the published jar before
+starting it.  JDBC staged mutations use prepared values, and an idle-timed-out
+metadata session is recovered without replacing the foreground session.
 For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 For source checkouts, add =clutch= and any native protocol backend checkout you
