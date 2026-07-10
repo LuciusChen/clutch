@@ -65,12 +65,16 @@ Row identity support for staged =UPDATE= / =DELETE=:
 | MySQL native | non-null unique keys; no physical row-locator fallback |
 | PostgreSQL native | non-null unique keys, then =ctid= for ordinary heap tables |
 | SQLite native | non-null unique keys, then =rowid= for tables not declared =WITHOUT ROWID= |
-| Oracle JDBC | non-null unique keys, then =ROWID= |
+| Oracle JDBC | non-null unique keys, then =ROWID= for confirmed base tables |
 | Other JDBC backends | non-null unique keys only |
 
 Joined, grouped, derived, or otherwise ambiguous result sets remain read-only
 for staged =UPDATE= / =DELETE= unless clutch can identify a single source table
 and inject or read a matching row identity.
+Schema-qualified JDBC sources keep that schema for identity lookup and for the
+eventual staged =UPDATE= / =DELETE= target.
+Oracle views and synonyms, including dictionary relations such as =USER_TABLES=,
+remain read-only and skip row-identity metadata probes.
 
 * Documentation
 
@@ -131,7 +135,8 @@ safest way to clear stale autoload or native-compile state after installation.
 
 JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+
 and =clutch-jdbc-agent.jar=.  Individual JDBC databases may also need driver
-jars.
+jars.  Clutch 0.2.3 pins JDBC agent 0.2.7 and verifies the published jar before
+starting it.
 For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 For source checkouts, add =clutch= and any native protocol backend checkout you

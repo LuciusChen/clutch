@@ -2128,7 +2128,8 @@ of top-level field names for field-scoped snippets."
      (when-let* ((document (clutch-mongodb--index-document conn entry)))
        (clutch-mongodb--json-encode-text document)))))
 
-(cl-defmethod clutch-db-table-comment ((_conn clutch-mongodb-conn) _table)
+(cl-defmethod clutch-db-table-comment ((_conn clutch-mongodb-conn) _table
+                                       &optional _schema)
   "Return nil; MongoDB collections have no SQL table comments."
   nil)
 
@@ -2136,7 +2137,8 @@ of top-level field names for field-scoped snippets."
   "Return nil; native MongoDB results are not edited through SQL row identity."
   nil)
 
-(cl-defmethod clutch-db-row-identity-candidates ((_conn clutch-mongodb-conn) _table)
+(cl-defmethod clutch-db-row-identity-candidates ((_conn clutch-mongodb-conn) _table
+                                                 &optional _schema)
   "Return nil; native MongoDB staged SQL edits are unsupported."
   nil)
 

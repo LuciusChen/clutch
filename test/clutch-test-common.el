@@ -34,6 +34,30 @@
       (with-current-buffer buf
         (setq-local clutch--buffer-error-details nil)))))
 
+(defmacro clutch-test--with-isolated-metadata-caches (&rest body)
+  "Run BODY with fresh schema, table, and object metadata state."
+  (declare (indent 0) (debug (body)))
+  `(let ((clutch--schema-cache (make-hash-table :test 'equal))
+         (clutch--columns-status-cache (make-hash-table :test 'equal))
+         (clutch--column-details-cache (make-hash-table :test 'equal))
+         (clutch--column-details-status-cache (make-hash-table :test 'equal))
+         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
+         (clutch--column-details-active-cache (make-hash-table :test 'equal))
+         (clutch--table-comment-cache (make-hash-table :test 'equal))
+         (clutch--table-comment-status-cache (make-hash-table :test 'equal))
+         (clutch--foreign-keys-cache (make-hash-table :test 'equal))
+         (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
+         (clutch--help-doc-cache (make-hash-table :test 'equal))
+         (clutch--object-cache (make-hash-table :test 'equal))
+         (clutch--object-warmup-timers (make-hash-table :test 'equal))
+         (clutch--object-warmup-generations (make-hash-table :test 'equal))
+         (clutch--schema-status-cache (make-hash-table :test 'equal))
+         (clutch--schema-refresh-tickets (make-hash-table :test 'equal))
+         (clutch--schema-refresh-ticket-counter 0)
+         (clutch--schema-install-timers (make-hash-table :test 'equal))
+         (clutch--metadata-ticket-counter 0))
+     ,@body))
+
 (defun clutch-test--primary-row-identity (&optional table columns indices)
   "Return primary-key row identity metadata for tests."
   (let ((indices (or indices '(0))))

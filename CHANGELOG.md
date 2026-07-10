@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.3 - Unreleased
+## 0.2.3 - 2026-07-10
 
 ### Added
 
@@ -10,6 +10,8 @@
 
 ### Changed
 
+- Updated the bundled JDBC agent pin to 0.2.7, adding generic JDBC table
+  remarks while retaining checksum verification against the published jar.
 - Unified header-line shortcut hints around status-first text followed by
   colored key/action pairs.
 - Result headers now fall back to built-in text sort indicators (`↕`, `↑`,
@@ -17,6 +19,9 @@
 
 ### Fixed
 
+- Finished failed background schema refreshes when the connection closes, so
+  query consoles no longer remain stuck at `[schema...]` after a MySQL metadata
+  query hits a closed process.
 - Prevented Query Console Eldoc from looping indefinitely when resolving table
   aliases in a non-final UNION branch.
 - Allowed sorting UNION, grouped, derived, and other non-rewritable query
@@ -90,6 +95,9 @@
 - Reduced large-schema completion and object discovery spikes by scanning query
   buffers once for referenced table identifiers and grouping object-cache
   entries without repeated list appends.
+- Reduced Query Console Eldoc table-comment latency by priming comments from
+  table discovery for MySQL/PostgreSQL and accepting optional JDBC table-entry
+  comments when the agent supplies them.
 - Reduced wide result-grid TAB navigation latency by caching normalized header
   sort indicators and reusing computed column widths during horizontal
   visibility checks.
@@ -109,6 +117,11 @@
   pixel padding and icon sort indicators are active.
 - Kept result headers aligned with rows when fallback sort indicators and
   short NULL columns are displayed together.
+- Classified Oracle sources before row-identity metadata lookup, so dictionary
+  views such as `ALL_TABLES` and `USER_TABLES` skip JDBC primary-key, column,
+  index, and `ROWID` probes.  This prevents ORA-01445 and ORA-12592 while
+  keeping `ROWID` fallback for confirmed base tables.  Schema-qualified JDBC
+  queries retain the same schema for metadata and staged mutation targets.
 
 ## 0.2.2 - 2026-07-02
 

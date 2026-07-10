@@ -240,7 +240,8 @@ WHERE type='table' AND name=%s"
          (or (caar rows) (format "-- No DDL found for %s" table))))
       (_ nil))))
 
-(cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table)
+(cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table
+                                       &optional _schema)
   "Return nil; SQLite does not support table comments."
   nil)
 
@@ -310,7 +311,8 @@ WHERE type='table' AND name=%s"
               :select-expressions '("rowid")
               :where-sql "rowid = ?")))))
 
-(cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table)
+(cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table
+                                                 &optional _schema)
   "Return row identity candidates for TABLE on SQLite CONN."
   (or (cl-call-next-method)
       (clutch-db-sqlite--unique-not-null-identities conn table)

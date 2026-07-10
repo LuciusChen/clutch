@@ -13,31 +13,36 @@
 
 (defmacro clutch-test-sql--with-xref-buffer (spec &rest body)
   "Run BODY in a temporary clutch SQL buffer for xref tests.
-SPEC is a literal plist.  Supported keys are :sql, :schema, :aliases,
-:tables, and :connection-alive."
+SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
+:schema, :aliases, :tables, and :connection-alive."
   (declare (indent 1) (debug (sexp body)))
-  (let ((sql (plist-get spec :sql))
-        (schema (plist-get spec :schema))
-        (aliases (plist-get spec :aliases))
-        (tables (plist-get spec :tables))
-        (has-live-stub (memq :connection-alive spec))
-        (live-p (plist-get spec :connection-alive)))
-    `(with-temp-buffer
+  `(let* ((spec ,spec)
+          (schema (plist-get spec :schema))
+          (aliases (plist-get spec :aliases))
+          (tables (plist-get spec :tables))
+          (has-live-stub (plist-member spec :connection-alive))
+          (live-p (plist-get spec :connection-alive))
+          (orig-alive (symbol-function 'clutch--connection-alive-p)))
+     (with-temp-buffer
        (clutch-mode)
        (setq-local clutch-connection 'fake-conn)
-       (insert ,sql)
+       (insert (plist-get spec :sql))
        (goto-char (point-min))
+       (when-let* ((pre-needle (plist-get spec :pre-needle)))
+         (search-forward pre-needle))
+       (search-forward (plist-get spec :needle))
+       (goto-char (+ (match-beginning 0) (or (plist-get spec :offset) 0)))
        (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                  (lambda (&optional _conn) ,schema))
-                 ,@(when (or aliases tables)
-                     `(((symbol-function 'clutch--tables-in-query-cache-entry)
-                        (lambda (_schema)
-                          (list :beg (point-min) :end (point-max)
-                                :statement-aliases ,aliases
-                                :statement-tables ,tables)))))
-                 ,@(when has-live-stub
-                     `(((symbol-function 'clutch--connection-alive-p)
-                        (lambda (_conn) ,live-p)))))
+                  (lambda (&optional _conn) schema))
+                 ((symbol-function 'clutch--tables-in-query-cache-entry)
+                  (lambda (_schema)
+                    (when (or aliases tables)
+                      (list :beg (point-min) :end (point-max)
+                            :statement-aliases aliases
+                            :statement-tables tables))))
+                 ((symbol-function 'clutch--connection-alive-p)
+                  (lambda (conn)
+                    (if has-live-stub live-p (funcall orig-alive conn)))))
          ,@body))))
 
 (defun clutch-test-sql--xref-definition-position (identifier)
@@ -1707,45 +1712,20 @@ ORDER BY id"
                   :id "User Name"
                   :char ?\")))
     (ert-info ((format "case: %s" (plist-get case :label)))
-      (with-temp-buffer
-        (clutch-mode)
-        (setq-local clutch-connection 'fake-conn)
-        (insert (plist-get case :sql))
-        (goto-char (point-min))
-        (when-let* ((pre-needle (plist-get case :pre-needle)))
-          (search-forward pre-needle))
-        (search-forward (plist-get case :needle))
-        (goto-char (+ (match-beginning 0) (or (plist-get case :offset) 0)))
-        (let ((schema (plist-get case :schema))
-              (aliases (plist-get case :aliases))
-              (tables (plist-get case :tables))
-              (has-live-stub (plist-member case :connection-alive))
-              (live-p (plist-get case :connection-alive))
-              (orig-alive (symbol-function 'clutch--connection-alive-p)))
-          (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                     (lambda (&optional _conn) schema))
-                    ((symbol-function 'clutch--tables-in-query-cache-entry)
-                     (lambda (_schema)
-                       (when (or aliases tables)
-                         (list :beg (point-min) :end (point-max)
-                               :statement-aliases aliases
-                               :statement-tables tables))))
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn)
-                       (if has-live-stub live-p (funcall orig-alive conn)))))
-            (let* ((id (xref-backend-identifier-at-point 'clutch))
-                   (pos (clutch-test-sql--xref-definition-position id)))
-              (should (equal id (plist-get case :id)))
-              (when-let* ((char (plist-get case :char)))
-                (should (eq (char-after pos) char)))
-              (when-let* ((text (plist-get case :text)))
-                (should (equal (buffer-substring-no-properties
-                                pos (+ pos (length text)))
-                               text)))
-              (when-let* ((before (plist-get case :before)))
-                (goto-char pos)
-                (should (looking-back before
-                                      (max (point-min) (- pos 40))))))))))))
+      (clutch-test-sql--with-xref-buffer case
+        (let* ((id (xref-backend-identifier-at-point 'clutch))
+               (pos (clutch-test-sql--xref-definition-position id)))
+          (should (equal id (plist-get case :id)))
+          (when-let* ((char (plist-get case :char)))
+            (should (eq (char-after pos) char)))
+          (when-let* ((text (plist-get case :text)))
+            (should (equal (buffer-substring-no-properties
+                            pos (+ pos (length text)))
+                           text)))
+          (when-let* ((before (plist-get case :before)))
+            (goto-char pos)
+            (should (looking-back before
+                                  (max (point-min) (- pos 40))))))))))
 
 (ert-deftest clutch-test-xref-non-alias-contract ()
   "Xref should not treat source tables, strings, comments, or fields as aliases."
@@ -1778,38 +1758,21 @@ ORDER BY id"
                   :needle "u.id'"
                   :no-definitions t)))
     (ert-info ((format "case: %s" (plist-get case :label)))
-      (with-temp-buffer
-        (clutch-mode)
-        (setq-local clutch-connection 'fake-conn)
-        (insert (plist-get case :sql))
-        (goto-char (point-min))
-        (search-forward (plist-get case :needle))
-        (goto-char (match-beginning 0))
-        (let ((schema (plist-get case :schema))
-              (aliases (plist-get case :aliases))
-              (tables (plist-get case :tables)))
-          (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                     (lambda (&optional _conn) schema))
-                    ((symbol-function 'clutch--tables-in-query-cache-entry)
-                     (lambda (_schema)
-                       (when (or aliases tables)
-                         (list :beg (point-min) :end (point-max)
-                               :statement-aliases aliases
-                               :statement-tables tables)))))
-            (let ((id (or (plist-get case :find)
-                          (xref-backend-identifier-at-point 'clutch))))
-              (when-let* ((expected-id (plist-get case :id)))
-                (should (equal id expected-id)))
-              (if-let* ((error-pattern (plist-get case :error)))
-                  (let ((err (if (plist-get case :find)
-                                 (should-error (xref-find-definitions id)
-                                               :type 'user-error)
-                               (should-error
-                                (xref-backend-definitions 'clutch id)
-                                :type 'user-error))))
-                    (should (string-match-p error-pattern
-                                            (error-message-string err))))
-                (should-not (xref-backend-definitions 'clutch id))))))))))
+      (clutch-test-sql--with-xref-buffer case
+        (let ((id (or (plist-get case :find)
+                      (xref-backend-identifier-at-point 'clutch))))
+          (when-let* ((expected-id (plist-get case :id)))
+            (should (equal id expected-id)))
+          (if-let* ((error-pattern (plist-get case :error)))
+              (let ((err (if (plist-get case :find)
+                             (should-error (xref-find-definitions id)
+                                           :type 'user-error)
+                           (should-error
+                            (xref-backend-definitions 'clutch id)
+                            :type 'user-error))))
+                (should (string-match-p error-pattern
+                                        (error-message-string err))))
+            (should-not (xref-backend-definitions 'clutch id))))))))
 
 (provide 'clutch-test-sql)
 

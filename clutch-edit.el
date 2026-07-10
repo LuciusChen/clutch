@@ -912,7 +912,8 @@ WHERE predicate."
                  table col-name (cdr edit) cidx)
                 set-params)))
       (cons (format "UPDATE %s SET %s WHERE %s"
-                    (clutch-db-escape-identifier conn table)
+                    (or (plist-get row-identity :source-token)
+                        (clutch-db-escape-identifier conn table))
                     (mapconcat #'identity (nreverse set-parts) ", ")
                     (mapconcat #'identity (car where-spec) " AND "))
             (append (nreverse set-params) (cdr where-spec))))))
@@ -1072,7 +1073,8 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
          (where-spec (clutch--row-identity-where-parts
                       conn row-identity identity-vec)))
     (cons (format "DELETE FROM %s WHERE %s"
-                  (clutch-db-escape-identifier conn table)
+                  (or (plist-get row-identity :source-token)
+                      (clutch-db-escape-identifier conn table))
                   (mapconcat #'identity (car where-spec) " AND "))
           (cdr where-spec))))
 

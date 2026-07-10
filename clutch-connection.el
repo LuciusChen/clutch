@@ -2214,12 +2214,16 @@ still needs an initial passphrase entry or host-key confirmation."
 (defun clutch-disconnect ()
   "Disconnect from the current database server."
   (interactive)
-  (when (clutch--connection-alive-p clutch-connection)
-    (clutch--confirm-disconnect-transaction-loss
-     clutch-connection
-     "Uncommitted changes will be lost.  Disconnect? ")
-    (clutch--do-disconnect clutch-connection)
-    (message "Disconnected"))
+  (let ((conn clutch-connection))
+    (cond
+     ((clutch--connection-alive-p conn)
+      (clutch--confirm-disconnect-transaction-loss
+       conn
+       "Uncommitted changes will be lost.  Disconnect? ")
+      (clutch--do-disconnect conn)
+      (message "Disconnected"))
+     (conn
+      (clutch--cleanup-dead-connection conn))))
   (setq clutch-connection nil)
   (when clutch--console-name
     (clutch--update-console-buffer-name))
@@ -2236,13 +2240,25 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
         (setq-local clutch-connection nil)
         (force-mode-line-update)))))
 
+(defun clutch--clear-connection-client-state (conn)
+  "Clear Clutch-owned client state for CONN."
+  (clutch--mark-dml-results-connection-closed conn)
+  (clutch--invalidate-derived-buffers conn)
+  (clutch--clear-tx-dirty conn)
+  (when (clutch--backend-key-from-conn conn)
+    (clutch--clear-connection-metadata-caches conn)))
+
+(defun clutch--cleanup-dead-connection (conn)
+  "Release Clutch-owned state for already closed CONN."
+  (clutch--clear-connection-client-state conn)
+  (clutch--forget-problem-record nil conn)
+  (clutch--release-connection-transport conn))
+
 (defun clutch--do-disconnect (conn)
   "Perform full disconnect sequence for CONN.
 Marks DML results, invalidates derived buffers, clears transaction
 state, and disconnects the underlying connection."
-  (clutch--mark-dml-results-connection-closed conn)
-  (clutch--invalidate-derived-buffers conn)
-  (clutch--clear-tx-dirty conn)
+  (clutch--clear-connection-client-state conn)
   (when clutch-debug-mode
     (clutch--remember-debug-event
      :connection conn
@@ -2262,11 +2278,14 @@ state, and disconnects the underlying connection."
 Invalidates all derived buffers that share the same connection.
 Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
   (when (and (not (bound-and-true-p clutch--indirect-mode))
-             (clutch--connection-alive-p clutch-connection))
-    (clutch--confirm-disconnect-transaction-loss
-     clutch-connection
-     "Uncommitted changes will be lost.  Kill buffer? ")
-    (clutch--do-disconnect clutch-connection)))
+             clutch-connection)
+    (if (clutch--connection-alive-p clutch-connection)
+        (progn
+          (clutch--confirm-disconnect-transaction-loss
+           clutch-connection
+           "Uncommitted changes will be lost.  Kill buffer? ")
+          (clutch--do-disconnect clutch-connection))
+      (clutch--cleanup-dead-connection clutch-connection))))
 
 ;;;; Transaction commands
 

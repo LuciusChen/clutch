@@ -252,8 +252,17 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
 - JDBC result-buffer staged =UPDATE= / =DELETE= workflows use row identity
   metadata in the same order as native backends: primary key first, then
   non-null unique keys discovered from index metadata.  Oracle JDBC can also
-  fall back to =ROWID= for base tables without a logical key.  Other JDBC
-  backends require a primary key or non-null unique key for editable results.
+  fall back to =ROWID= for confirmed base tables without a logical key.  Other
+  JDBC backends require a primary key or non-null unique key for editable
+  results.
+- A schema-qualified source keeps its parsed schema for primary-key, unique-key,
+  and Oracle =ROWID= metadata lookup.  Staged =UPDATE= / =DELETE= statements
+  retain the same qualified source token instead of targeting the current
+  schema's table with the same name.
+- Oracle views and synonyms are classified before primary-key, column, index,
+  or =ROWID= metadata lookup.  Dictionary relations such as =ALL_TABLES= and
+  =USER_TABLES= therefore remain read-only without invoking unsafe identity
+  probes.
 - Oracle =ROWID= is a physical row locator and can change after =UPDATE=;
   stable result order after refresh still requires an explicit SQL =ORDER BY=.
 

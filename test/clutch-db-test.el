@@ -986,6 +986,11 @@ authinfo, and PARAMS are explicit connection parameters."
                         :type 'clutch-db-error))))
     (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
                (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (context table)
+                 (should (eq context jdbc-conn))
+                 (should (equal table "DEMO"))
+                 '((:name "DEMO" :type "TABLE"))))
               ((symbol-function 'clutch-db-column-details)
                (lambda (_conn _table)
                  (signal 'clutch-db-error '("jdbc metadata failed")))))
@@ -1089,8 +1094,13 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (pcase-let ((`(,conn ,table ,pk-columns ,unique-fn ,locator-fn
                    ,locator-value)
                  case))
-      (clutch-db-test--assert-row-identity-skips-lower-priority
-       conn table pk-columns unique-fn locator-fn locator-value))))
+      (cl-letf (((symbol-function 'clutch-db-search-table-entries)
+                 (lambda (context actual-table)
+                   (should (clutch-jdbc-conn-p context))
+                   (should (equal actual-table table))
+                   (list (list :name table :type "TABLE")))))
+        (clutch-db-test--assert-row-identity-skips-lower-priority
+         conn table pk-columns unique-fn locator-fn locator-value)))))
 
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
@@ -1190,12 +1200,33 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
                (lambda (_conn _table) nil))
               ((symbol-function 'clutch-jdbc--unique-not-null-identities)
-               (lambda (_conn _table) nil)))
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn prefix)
+                 (should (equal prefix "DEMO"))
+                 '((:name "DEMO" :type "TABLE"
+                    :schema "CLUTCH" :source-schema "CLUTCH")))))
       (should (equal (clutch-db-row-identity-candidates conn "DEMO")
                      '((:kind row-locator
                         :name "ROWID"
                         :select-expressions ("ROWID")
                         :where-sql "ROWID = ?")))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-row-identity-skips-dictionary-view ()
+  "Oracle JDBC should not offer ROWID for dictionary views."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "CLUTCH"))))
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-jdbc--unique-not-null-identities)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn prefix)
+                 (should (equal prefix "ALL_TABLES"))
+                 '((:name "ALL_TABLES" :type "PUBLIC SYNONYM"
+                    :schema "SYS" :source-schema "PUBLIC")))))
+      (should-not (clutch-db-row-identity-candidates conn "ALL_TABLES")))))
 
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-returns-table-names ()
   "Async JDBC schema refresh should return only table names to its callback."
@@ -1228,14 +1259,77 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
                (lambda (&rest _args)
                  '(:cursor-id nil
-                   :columns ("name" "type" "schema" "source_schema")
+                   :columns ("name" "type" "schema" "source_schema" "comment")
                    :rows (("ORDERS" "SYNONYM" "DATA_OWNER" "APP")
+                          ("USERS" "TABLE" "APP" "APP" "用户")
                           ("USER_TABLES" "PUBLIC SYNONYM" "SYS" "PUBLIC"))
                    :done t))))
       (let ((entries (clutch-db-list-table-entries conn)))
         (should (equal entries
                        '((:name "ORDERS" :type "SYNONYM" :schema "DATA_OWNER" :source-schema "APP")
+                         (:name "USERS" :type "TABLE" :schema "APP" :source-schema "APP" :comment "用户")
                          (:name "USER_TABLES" :type "PUBLIC SYNONYM" :schema "SYS" :source-schema "PUBLIC"))))))))
+
+(ert-deftest clutch-db-test-jdbc-table-comment-async-uses-table-search-remarks ()
+  "JDBC table-comment async should use table remarks surfaced by search-tables."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver generic
+                                               :schema "APP"
+                                               :rpc-timeout 7)))
+        captured-op captured-params captured-timeout callback-result)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (op params callback &optional _errback timeout _conn)
+                 (setq captured-op op)
+                 (setq captured-params params)
+                 (setq captured-timeout timeout)
+                 (funcall callback
+                          '(:tables ((:name "ORDERS" :type "TABLE"
+                                       :schema "APP" :source-schema "APP"
+                                       :comment "订单")
+                                      (:name "ORDER_LOG" :type "TABLE"
+                                       :schema "APP" :source-schema "APP"
+                                       :comment "日志"))))
+                 t)))
+      (should (clutch-db-table-comment-async
+               conn "ORDERS" (lambda (comment)
+                               (setq callback-result comment))))
+      (should (equal captured-op "search-tables"))
+      (should (equal (alist-get 'prefix captured-params) "ORDERS"))
+      (should (= captured-timeout 7))
+      (should (equal callback-result "订单")))))
+
+(ert-deftest clutch-db-test-jdbc-table-comment-uses-table-search-remarks ()
+  "JDBC table-comment should use remarks surfaced by search-tables."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver generic
+                                               :schema "APP"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (should (equal op "search-tables"))
+                 (should (equal (alist-get 'prefix params) "ORDERS"))
+                 '(:tables ((:name "ORDERS" :type "TABLE"
+                              :schema "APP" :source-schema "APP"
+                              :comment "订单"))))))
+      (should (equal (clutch-db-table-comment conn "ORDERS") "订单")))))
+
+(ert-deftest clutch-db-test-jdbc-table-comment-skips-special-metadata-paths ()
+  "JDBC table comments should not probe special metadata paths."
+  (dolist (driver '(oracle clickhouse))
+    (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                       :params `(:driver ,driver
+                                                 :schema "APP")))
+          rpc-called)
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (&rest _args)
+                   (setq rpc-called t)))
+                ((symbol-function 'clutch-jdbc--rpc-async)
+                 (lambda (&rest _args)
+                   (setq rpc-called t)
+                   t)))
+        (should-not (clutch-db-table-comment conn "ORDERS"))
+        (should-not (clutch-db-table-comment-async
+                     conn "ORDERS" #'ignore))
+        (should-not rpc-called)))))
 
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-scheduling ()
   "Async JDBC schema refresh should respect connection timeout and idle delay."
@@ -1309,7 +1403,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                        (should (equal table "users"))
                        '((:name "id" :type "integer"))))
                     ((symbol-function 'clutch-db-table-comment)
-                     (lambda (context table)
+                     (lambda (context table &optional _schema)
                        (should (eq context conn))
                        (should (equal table "users"))
                        "Users table"))
@@ -3579,7 +3673,12 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (equal (clutch-db--source-table-name conn "\"MixedCase\"")
                    "MixedCase"))
     (should (equal (clutch-db--source-table-name conn "APP.\"MixedCase\"")
-                   "MixedCase"))))
+                   "MixedCase"))
+    (should (equal (clutch-db--source-table-schema conn "app.users")
+                   "APP"))
+    (should (equal (clutch-db--source-table-schema
+                    conn "\"App\".\"MixedCase\"")
+                   "App"))))
 
 ;;;; Unit tests — SQL escaping
 
@@ -3655,6 +3754,25 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                      '(:sig "ABS(X)" :desc "Returns absolute value.")))
       (should (equal captured-sql "HELP 'ABS'")))))
 
+(ert-deftest clutch-db-test-mysql-list-table-entries-carries-comments ()
+  "MySQL table discovery should return comments with table entries."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        captured-sql)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-mysql-result
+                  :rows '(("orders" "BASE TABLE" "订单")
+                          ("audit_log" "BASE TABLE" nil))))))
+      (should
+       (equal (clutch-db-list-table-entries conn)
+              '((:name "orders" :type "TABLE" :schema "app"
+                 :source-schema "app" :comment "订单")
+                (:name "audit_log" :type "TABLE" :schema "app"
+                 :source-schema "app" :comment nil))))
+      (should (string-match-p "TABLE_COMMENT" captured-sql)))))
+
 (ert-deftest clutch-db-test-pg-metadata ()
   "Test PostgreSQL metadata accessors."
   (require 'clutch-db-pg)
@@ -3679,6 +3797,27 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (clutch-db-list-schemas conn) '("app" "public")))
       (should (string-match-p "information_schema" captured-sql))
       (should (string-match-p "NOT LIKE 'pg" captured-sql)))))
+
+(ert-deftest clutch-db-test-pg-list-table-entries-carries-comments ()
+  "PostgreSQL table discovery should return comments with table entries."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "app"))
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-current-schema)
+               (lambda (_conn) "public"))
+              ((symbol-function 'pg-exec)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-pgresult
+                  :tuples '(("orders" "TABLE" "订单")
+                            ("audit_log" "TABLE" nil))))))
+      (should
+       (equal (clutch-db-list-table-entries conn)
+              '((:name "orders" :type "TABLE" :schema "public"
+                 :source-schema "public" :comment "订单")
+                (:name "audit_log" :type "TABLE" :schema "public"
+                 :source-schema "public" :comment nil))))
+      (should (string-match-p "obj_description" captured-sql)))))
 
 (ert-deftest clutch-db-test-pg-list-tables-uses-current-schema ()
   "PostgreSQL table listing should be scoped to the active search_path schema."

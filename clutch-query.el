@@ -666,11 +666,14 @@ The returned plist contains :sql, :table, :candidate, :hidden-aliases,
 is the original SQL.
 CANDIDATE and TABLE reuse row identity already established by a result buffer."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
-         (source-token (and (not table)
-                            (clutch-db-sql--source-table-token analysis-sql)))
+         (source-token (or (plist-get candidate :source-token)
+                           (and (not table)
+                                (clutch-db-sql--source-table-token analysis-sql))))
          (table (or table
                     (and source-token
                          (clutch-db--source-table-name conn source-token))))
+         (source-schema (and source-token
+                             (clutch-db--source-table-schema conn source-token)))
          candidates
          identity-error)
     (cond
@@ -678,7 +681,10 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
       (setq candidates (list candidate)))
      (table
       (condition-case err
-          (setq candidates (clutch-db-row-identity-candidates conn table))
+          (setq candidates
+                (if source-schema
+                    (clutch-db-row-identity-candidates conn table source-schema)
+                  (clutch-db-row-identity-candidates conn table)))
         (clutch-db-error
          (setq identity-error err)))))
     (let* ((candidate (car candidates))
@@ -700,6 +706,8 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
                       conn analysis-sql expressions aliases)
                    sql)
             :table table
+            :source-token source-token
+            :source-schema source-schema
             :candidate candidate
             :candidates candidates
             :hidden-aliases (and augment-p aliases)
@@ -737,6 +745,8 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
       (when indices
         (append
          (list :table (plist-get prep :table)
+               :source-token (plist-get prep :source-token)
+               :source-schema (plist-get prep :source-schema)
                :indices indices
                :source-indices source-indices
                :hidden-aliases aliases)

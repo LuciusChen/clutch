@@ -185,6 +185,32 @@ RPC.
 - `fetch-size`
 - `query-timeout-seconds`
 
+## Table metadata payload
+
+`get-tables` returns a cursor-shaped result:
+
+- `columns`
+- `rows`
+- `cursor-id`
+- `done`
+
+Generic JDBC rows contain:
+
+- `name`
+- `type`
+- `schema`
+- `source_schema`
+- `comment`
+
+`comment` is populated from `DatabaseMetaData.getTables(...).REMARKS` when the
+driver returns a non-blank value.  It may be `null`, and backend-specific paths
+may omit it.  In particular, Oracle's direct SQL table discovery intentionally
+keeps the smaller `name`/`type`/`schema`/`source_schema` row shape.
+
+`search-tables` returns table entry objects with the same logical fields.  The
+Elisp side treats `comment` as optional; absence means unknown or unsupported,
+not an empty comment.
+
 ## Error semantics
 
 There are three distinct failure classes:

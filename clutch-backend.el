@@ -567,17 +567,28 @@ PATTERNS is a list of case-insensitive regex fragments passed to
     (match-string 1 table))
    (t table)))
 
+(defun clutch-db-sql--unquote-identifier (identifier)
+  "Return IDENTIFIER without SQL identifier delimiters."
+  (cond
+   ((string-match "\\`\"\\([^\"]+\\)\"\\'" identifier)
+    (match-string 1 identifier))
+   ((string-match "\\``\\([^`]+\\)`\\'" identifier)
+    (match-string 1 identifier))
+   ((string-match "\\`\\[\\([^]]+\\)\\]\\'" identifier)
+    (match-string 1 identifier))
+   (t identifier)))
+
 (defun clutch-db-sql-table-name (table)
   "Return the unquoted table name represented by TABLE."
-  (let ((name (clutch-db-sql-table-qualifier table)))
-    (cond
-     ((string-match "\\`\"\\([^\"]+\\)\"\\'" name)
-      (match-string 1 name))
-     ((string-match "\\``\\([^`]+\\)`\\'" name)
-      (match-string 1 name))
-     ((string-match "\\`\\[\\([^]]+\\)\\]\\'" name)
-      (match-string 1 name))
-     (t name))))
+  (clutch-db-sql--unquote-identifier
+   (clutch-db-sql-table-qualifier table)))
+
+(defun clutch-db-sql-table-schema (table)
+  "Return the unquoted schema qualifier represented by TABLE, or nil."
+  (when (string-match
+         "\\`\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\|[^.]+\\)\\."
+         table)
+    (clutch-db-sql--unquote-identifier (match-string 1 table))))
 
 (defun clutch-db-sql--source-table-token (sql &optional simple-only)
   "Return the top-level source table token for SQL, or nil.
@@ -925,6 +936,14 @@ when non-nil, overrides PAGE-NUM for last-window pagination.")
   "Return the default backend-canonical source table name for TOKEN."
   (clutch-db-sql-table-name token))
 
+(cl-defgeneric clutch-db--source-table-schema (conn token)
+  "Return source schema for CONN and SQL table TOKEN, or nil.")
+
+(cl-defmethod clutch-db--source-table-schema ((_conn t) token)
+  "Return nil because TOKEN has no default schema-aware metadata scope."
+  (ignore token)
+  nil)
+
 (cl-defgeneric clutch-db-escape-literal (conn value)
   "Escape VALUE as a SQL string literal for CONN's dialect.")
 
@@ -1064,7 +1083,7 @@ RENDER-FN is called once per parameter and must return the replacement string."
 (cl-defgeneric clutch-db-list-table-entries (conn)
   "Return browseable table-like object entries for CONN.
 Each entry is a plist containing at least :name and :type, and may also
-include :schema, :source-schema, :target-schema, and :target-name.")
+include :schema, :source-schema, :target-schema, :target-name, and :comment.")
 
 (cl-defmethod clutch-db-list-table-entries ((conn t))
   "Default table-entry implementation for CONN.
@@ -1213,8 +1232,9 @@ field names for field-scoped actions.")
   "Default: return nil when query explain is unavailable."
   nil)
 
-(cl-defgeneric clutch-db-table-comment (conn table)
-  "Return the comment string for TABLE on CONN, or nil if none.")
+(cl-defgeneric clutch-db-table-comment (conn table &optional schema)
+  "Return TABLE's comment on CONN, or nil if none.
+SCHEMA, when non-nil, identifies TABLE's namespace.")
 
 (cl-defgeneric clutch-db-symbol-help (conn symbol)
   "Return backend-specific help for SYMBOL on CONN.
@@ -1290,15 +1310,16 @@ BACKEND-NAME is used only in generated docstrings."
   "Return nil because CONN has no default primary-key metadata support."
   nil)
 
-(cl-defgeneric clutch-db-row-identity-candidates (conn table)
+(cl-defgeneric clutch-db-row-identity-candidates (conn table &optional schema)
   "Return row identity candidate plists for TABLE on CONN.
+SCHEMA identifies TABLE's namespace when the SQL source was qualified.
 Candidates are ordered from most stable to least stable.  A candidate with
 :kind `primary-key' or `unique-key' has :columns as source column names.  A
 candidate with :kind `row-locator' has :select-expressions as SQL expressions
 that can be hidden in SELECT results and :where-sql as the predicate used by
 UPDATE and DELETE.")
 
-(cl-defmethod clutch-db-row-identity-candidates ((conn t) table)
+(cl-defmethod clutch-db-row-identity-candidates ((conn t) table &optional _schema)
   "Return the primary-key row identity candidate for CONN and TABLE."
   (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
     (list (list :kind 'primary-key

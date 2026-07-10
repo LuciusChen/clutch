@@ -965,7 +965,7 @@ ORDER BY tablename")))
     (let* ((schema (clutch-db-current-schema conn))
            (result (pg-exec
                     conn
-                    "SELECT name, type
+                    "SELECT objects.name, objects.type, obj_description(c.oid, 'pg_class')
 FROM (
   SELECT tablename AS name, 'TABLE' AS type
   FROM pg_tables
@@ -975,14 +975,19 @@ FROM (
   FROM pg_views
   WHERE schemaname = current_schema()
 ) objects
-ORDER BY name")))
+JOIN pg_class c ON c.relname = objects.name
+JOIN pg_namespace n ON n.oid = c.relnamespace
+  AND n.nspname = current_schema()
+ORDER BY objects.name")))
       (mapcar
        (lambda (row)
-         (pcase-let ((`(,name ,type) row))
+         (pcase-let ((`(,name ,type ,comment) row))
            (list :name name
                  :type type
                  :schema schema
-                 :source-schema schema)))
+                 :source-schema schema
+                 :comment (and (not (string-empty-p (or comment "")))
+                               comment))))
        (clutch-db-pg--rows result)))))
 
 (cl-defmethod clutch-db-list-columns ((conn pgcon) table)
@@ -1225,7 +1230,7 @@ WHERE schemaname = current_schema()
                          (pg-escape-literal name))))))
         (_ nil)))))
 
-(cl-defmethod clutch-db-table-comment ((conn pgcon) table)
+(cl-defmethod clutch-db-table-comment ((conn pgcon) table &optional _schema)
   "Return the comment for TABLE on PostgreSQL CONN, or nil if none."
   (condition-case _err
       (let* ((result (pg-exec
@@ -1254,7 +1259,8 @@ ORDER BY array_position(i.indkey, a.attnum)"
                            (pg-escape-literal table)))))
       (mapcar #'car (clutch-db-pg--rows result)))))
 
-(cl-defmethod clutch-db-row-identity-candidates ((conn pgcon) table)
+(cl-defmethod clutch-db-row-identity-candidates ((conn pgcon) table
+                                                 &optional _schema)
   "Return row identity candidates for TABLE on PostgreSQL CONN."
   (or (cl-call-next-method)
       (clutch-db-pg--unique-not-null-identities conn table)

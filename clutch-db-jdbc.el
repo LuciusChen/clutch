@@ -39,6 +39,7 @@
 (require 'cl-lib)
 (require 'clutch-backend)
 (require 'json)
+(require 'seq)
 (require 'sql)
 
 ;;;; Configuration
@@ -53,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.6"
+(defcustom clutch-jdbc-agent-version "0.2.7"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "75c75ab8d43d918a62ee869a7647c00068862974a235d0bc82069616d5d0add2"
+  "a5a311b3180d8147626ac9d218672f2341205d0d9675c4f351d82df4f2301e33"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1072,6 +1073,22 @@ Emacs RPC timeout."
    (clutch-jdbc--conn-driver conn)
    (clutch-jdbc-conn-params conn)))
 
+(defun clutch-jdbc--metadata-table-comments-supported-p (conn)
+  "Return non-nil when CONN can use JDBC metadata table remarks."
+  (not (or (clutch-jdbc--oracle-conn-p conn)
+           (clutch-jdbc--clickhouse-conn-p conn))))
+
+(defun clutch-jdbc--metadata-conn-for-schema (conn schema)
+  "Return a JDBC metadata view of CONN scoped to SCHEMA."
+  (if (or (not schema)
+          (equal schema (clutch-jdbc--conn-schema conn)))
+      conn
+    (let ((metadata-conn (copy-clutch-jdbc-conn conn)))
+      (setf (clutch-jdbc-conn-params metadata-conn)
+            (plist-put (copy-sequence (clutch-jdbc-conn-params conn))
+                       :schema schema))
+      metadata-conn)))
+
 (defun clutch-jdbc--table-like-entry-p (conn entry)
   "Return non-nil when ENTRY should be used as a table-like object for CONN."
   (ignore conn)
@@ -1223,11 +1240,28 @@ cursor-style :rows format used in tests."
 
 (defun clutch-jdbc--table-entry-from-row (row)
   "Convert a get-tables ROW into a table entry plist."
-  (pcase-let ((`(,name ,type ,schema ,src-schema) row))
-    (list :name name
-          :type type
-          :schema schema
-          :source-schema (or src-schema schema))))
+  (pcase-let ((`(,name ,type ,schema ,src-schema . ,rest) row))
+    (let ((entry (list :name name
+                       :type type
+                       :schema schema
+                       :source-schema (or src-schema schema))))
+      (if rest
+          (append entry (list :comment (car rest)))
+        entry))))
+
+(defun clutch-jdbc--table-comment-from-entries (table entries &optional schema)
+  "Return TABLE's unambiguous comment from JDBC ENTRIES in SCHEMA."
+  (let ((matches
+         (cl-loop for entry in entries
+                  when (and (string= (downcase table)
+                                     (downcase (or (plist-get entry :name) "")))
+                            (or (not schema)
+                                (string= (downcase schema)
+                                         (downcase (or (plist-get entry :schema)
+                                                       "")))))
+                  collect entry)))
+    (when (= (length matches) 1)
+      (plist-get (car matches) :comment))))
 
 (defun clutch-jdbc--type-category (jdbc-type-name)
   "Map JDBC-TYPE-NAME to a `clutch-db' type-category symbol."
@@ -1417,6 +1451,15 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
                                   (clutch-db-sql-table-qualifier token))))
         (upcase name)
       name)))
+
+(cl-defmethod clutch-db--source-table-schema ((conn clutch-jdbc-conn) token)
+  "Return source schema for JDBC CONN and SQL table TOKEN."
+  (let ((schema (clutch-db-sql-table-schema token)))
+    (if (and schema
+             (clutch-jdbc--oracle-conn-p conn)
+             (not (string-prefix-p "\"" token)))
+        (upcase schema)
+      schema)))
 
 (cl-defmethod clutch-db-derived-table-alias ((conn clutch-jdbc-conn) alias)
   "Return a JDBC derived-table alias clause for ALIAS on CONN.
@@ -1714,6 +1757,31 @@ the metadata request."
                 (clutch-jdbc--normalize-table-entry conn entry))
               (plist-get result :tables)))))
 
+(cl-defmethod clutch-db-table-comment-async ((conn clutch-jdbc-conn) table callback
+                                             &optional errback)
+  "Fetch TABLE comment for CONN asynchronously when metadata has it."
+  (when (clutch-jdbc--metadata-table-comments-supported-p conn)
+    (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
+          (schema (clutch-jdbc--conn-schema conn)))
+      (clutch-jdbc--rpc-async
+       "search-tables"
+       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+         (prefix  . ,table)
+         ,@(clutch-jdbc--metadata-scope-params conn))
+       (lambda (result)
+         (when callback
+           (funcall callback
+                    (clutch-jdbc--table-comment-from-entries
+                     table
+                     (mapcar (lambda (entry)
+                               (clutch-jdbc--normalize-table-entry conn entry))
+                             (plist-get result :tables))
+                     schema))))
+       errback
+       rpc-timeout
+       conn)
+      t)))
+
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
   "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
   (let ((driver (clutch-jdbc--conn-driver conn)))
@@ -1843,9 +1911,15 @@ the metadata request."
                          ,@(clutch-jdbc--metadata-scope-params conn)))))
          (plist-get result :ddl))))))
 
-(cl-defmethod clutch-db-table-comment ((_conn clutch-jdbc-conn) _table)
-  "Return nil — table comments are not available via standard DatabaseMetaData."
-  nil)
+(cl-defmethod clutch-db-table-comment ((conn clutch-jdbc-conn) table
+                                       &optional schema)
+  "Return TABLE comment for CONN when metadata has one."
+  (let ((metadata-conn (clutch-jdbc--metadata-conn-for-schema conn schema)))
+    (when (clutch-jdbc--metadata-table-comments-supported-p metadata-conn)
+      (clutch-jdbc--table-comment-from-entries
+       table
+       (clutch-db-search-table-entries metadata-conn table)
+       (clutch-jdbc--conn-schema metadata-conn)))))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table)
   "Return primary key columns for TABLE on JDBC CONN."
@@ -1891,20 +1965,40 @@ the metadata request."
                            :name (plist-get index :name)
                            :columns cols))))
 
-(defun clutch-jdbc--rowid-identity (conn)
-  "Return a JDBC row locator candidate for CONN, or nil."
-  (when (eq (clutch-jdbc--conn-driver conn) 'oracle)
+(defun clutch-jdbc--rowid-identity (conn _table)
+  "Return a JDBC row locator candidate for TABLE on CONN, or nil."
+  (when (clutch-jdbc--oracle-conn-p conn)
     (list :kind 'row-locator
           :name "ROWID"
           :select-expressions '("ROWID")
           :where-sql "ROWID = ?")))
 
-(cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table)
+(cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table
+                                                 &optional schema)
   "Return row identity candidates for TABLE on JDBC CONN."
-  (or (cl-call-next-method)
-      (clutch-jdbc--unique-not-null-identities conn table)
-      (when-let* ((rowid (clutch-jdbc--rowid-identity conn)))
-        (list rowid))))
+  (let ((metadata-conn (clutch-jdbc--metadata-conn-for-schema conn schema)))
+    (when (or (not (clutch-jdbc--oracle-conn-p metadata-conn))
+              (let ((effective-schema
+                     (clutch-jdbc--conn-schema metadata-conn)))
+                (cl-loop for entry in (clutch-db-search-table-entries
+                                       metadata-conn table)
+                         thereis
+                         (and (string= (downcase table)
+                                       (downcase
+                                        (or (plist-get entry :name) "")))
+                              (clutch-jdbc--entry-type= entry "TABLE")
+                              (string= (downcase (or effective-schema ""))
+                                       (downcase
+                                        (or (plist-get entry :schema) "")))
+                              (string= (downcase (or effective-schema ""))
+                                       (downcase
+                                        (or (plist-get entry :source-schema)
+                                            "")))))))
+      (or (cl-call-next-method metadata-conn table schema)
+          (clutch-jdbc--unique-not-null-identities metadata-conn table)
+          (when-let* ((rowid (clutch-jdbc--rowid-identity
+                              metadata-conn table)))
+            (list rowid))))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table)
   "Return foreign key info for TABLE on JDBC CONN."

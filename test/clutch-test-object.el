@@ -642,7 +642,7 @@ document connection."
       (puthash "dev-key" details-status clutch--column-details-status-cache)
       (puthash "USERS" '(:state failed :error "old columns") columns-status)
       (puthash "dev-key" columns-status clutch--columns-status-cache)
-      (puthash "USERS" "old comment" comments)
+      (puthash '("APP" . "USERS") "old comment" comments)
       (puthash "dev-key" comments clutch--table-comment-cache)
       (puthash "dev-key" '("USERS" "ORDERS")
                clutch--column-details-queue-cache)
@@ -955,6 +955,31 @@ document connection."
       (should (equal (plist-get captured :orders-group) "Tables"))
       (should (equal (plist-get captured :proc-group) "Procedures"))
       (should (equal (plist-get captured :proc-ann) "  APP/procedure")))))
+
+(ert-deftest clutch-test-object-cache-primes-table-entry-comments ()
+  "Object cache storage should prime table comments carried by entries."
+  (let ((clutch--object-cache (make-hash-table :test 'equal))
+        (clutch--table-comment-cache (make-hash-table :test 'equal))
+        (clutch--table-comment-status-cache (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'clutch--connection-key)
+               (lambda (_conn) "fake-key"))
+              ((symbol-function 'clutch-db-list-table-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "TABLE" :schema "APP"
+                    :source-schema "APP" :comment "订单")
+                   (:name "ORDERS" :type "TABLE" :schema "ARCHIVE"
+                    :source-schema "ARCHIVE" :comment "历史订单")
+                   (:name "AUDIT_LOG" :type "TABLE" :schema "APP"
+                    :source-schema "APP" :comment nil))))
+              ((symbol-function 'clutch-db-current-schema)
+               (lambda (_conn) "APP"))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn _prefix) nil)))
+      (clutch--store-object-cache-type-entries 'fake-conn "INDEX" nil)
+      (should (equal (clutch--cached-table-comment 'fake-conn "ORDERS")
+                     "订单"))
+      (should (clutch--table-comment-cached-p 'fake-conn "AUDIT_LOG"))
+      (should-not (clutch--cached-table-comment 'fake-conn "AUDIT_LOG")))))
 
 (ert-deftest clutch-test-jump-default-action-contract ()
   "Jump should resolve once and run the shared default action."

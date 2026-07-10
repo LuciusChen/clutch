@@ -49,9 +49,10 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
 (declare-function clutch--clear-table-metadata-caches "clutch-schema" (conn table))
+(declare-function clutch--cache-table-entry-comments "clutch-schema" (conn entries))
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch--ensure-table-comment "clutch-schema" (conn table))
+(declare-function clutch--ensure-table-comment "clutch-schema" (conn table &optional schema))
 (declare-function clutch--icon-with-face "clutch-ui"
                   (name fallback face &rest icon-args))
 (declare-function clutch--json-display-mode "clutch-ui" ())
@@ -211,6 +212,7 @@ minibuffer has been quit.")
 
 (defun clutch--store-object-cache (conn entries)
   "Store object ENTRIES for CONN and return ENTRIES."
+  (clutch--cache-table-entry-comments conn entries)
   (puthash (clutch--object-cache-key conn)
            (list :entries entries
                  :by-type (clutch--make-object-type-cache entries)
@@ -235,20 +237,22 @@ minibuffer has been quit.")
                      ("TRIGGER" 'triggers)
                      (_ nil))))
     (puthash type entries by-type)
-    (when category
-      (cl-pushnew category loaded))
-    (puthash key
-             (list :entries (clutch--merge-object-entries
-                             (clutch--browseable-object-entries conn)
-                             (apply #'append
-                                    (delq nil
-                                          (mapcar (lambda (object-type)
-                                                    (gethash object-type by-type))
-                                                  clutch--object-type-order))))
-                   :by-type by-type
-                   :loaded-categories loaded
-                   :fetched-at (float-time))
-             clutch--object-cache)
+    (let ((browseable (clutch--browseable-object-entries conn)))
+      (clutch--cache-table-entry-comments conn browseable)
+      (when category
+        (cl-pushnew category loaded))
+      (puthash key
+               (list :entries (clutch--merge-object-entries
+                               browseable
+                               (apply #'append
+                                      (delq nil
+                                            (mapcar (lambda (object-type)
+                                                      (gethash object-type by-type))
+                                                    clutch--object-type-order))))
+                     :by-type by-type
+                     :loaded-categories loaded
+                     :fetched-at (float-time))
+               clutch--object-cache))
     entries))
 
 (defun clutch--table-like-entry-p (entry)
@@ -1206,11 +1210,13 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
   "Return describe sections for ENTRY on CONN."
   (pcase (clutch--object-type-string entry)
     ((or "TABLE" "VIEW")
-     (let ((name (plist-get entry :name)))
+     (let ((name (plist-get entry :name))
+           (schema (plist-get entry :schema)))
        (delq nil
              (list
               (when-let* ((comment (and (string= (clutch--object-type-string entry) "TABLE")
-                                         (clutch--ensure-table-comment conn name))))
+                                         (clutch--ensure-table-comment
+                                          conn name schema))))
                 (cons "Comment" (list (format "  %s" comment))))
               (when-let* ((details (or (clutch--ensure-column-details conn name t)
                                        (clutch-db-list-columns conn name))))

@@ -498,7 +498,7 @@ when non-nil."
   (clutch-db--translate-library-error mysql-error
     (let* ((result (mysql-query
                     conn
-                    "SELECT TABLE_NAME, TABLE_TYPE
+                    "SELECT TABLE_NAME, TABLE_TYPE, NULLIF(TABLE_COMMENT, '')
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_SCHEMA = DATABASE()
   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
@@ -506,11 +506,12 @@ ORDER BY TABLE_NAME"))
            (schema (clutch-db-database conn)))
       (mapcar
        (lambda (row)
-         (pcase-let ((`(,name ,table-type) row))
+         (pcase-let ((`(,name ,table-type ,comment) row))
            (list :name name
                  :type (if (string= table-type "VIEW") "VIEW" "TABLE")
                  :schema schema
-                 :source-schema schema)))
+                 :source-schema schema
+                 :comment comment)))
        (mysql-result-rows result)))))
 
 (cl-defmethod clutch-db-list-columns ((conn mysql-conn) table)
@@ -689,7 +690,7 @@ ORDER BY ORDINAL_POSITION"
                    columns)))
         (_ nil)))))
 
-(cl-defmethod clutch-db-table-comment ((conn mysql-conn) table)
+(cl-defmethod clutch-db-table-comment ((conn mysql-conn) table &optional _schema)
   "Return the comment for TABLE on MySQL CONN, or nil if empty."
   (condition-case _err
       (let* ((result (mysql-query
@@ -717,7 +718,8 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
                   (if (stringp name) name (format "%s" name))))
               rows))))
 
-(cl-defmethod clutch-db-row-identity-candidates ((conn mysql-conn) table)
+(cl-defmethod clutch-db-row-identity-candidates ((conn mysql-conn) table
+                                                 &optional _schema)
   "Return row identity candidates for TABLE on MySQL CONN."
   (or (cl-call-next-method)
       (clutch-db-mysql--unique-not-null-identities conn table)))

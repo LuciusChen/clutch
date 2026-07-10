@@ -732,9 +732,92 @@
               (should-not (plist-get prep :augmented))
               (should (equal (plist-get prep :sql) sql)))))))))
 
+(ert-deftest clutch-test-row-identity-prep-skips-oracle-dictionary-metadata ()
+  "Oracle dictionary views should skip all row identity metadata probes."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle
+                                               :schema "ZJSY"))))
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (&rest _args)
+                 (ert-fail "Dictionary views must skip primary-key metadata")))
+              ((symbol-function 'clutch-jdbc--unique-not-null-identities)
+               (lambda (&rest _args)
+                 (ert-fail "Dictionary views must skip unique-key metadata")))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn prefix)
+                 (list (list :name prefix :type "PUBLIC SYNONYM"
+                             :schema "SYS" :source-schema "PUBLIC")))))
+      (dolist (sql '("SELECT table_name FROM all_tables"
+                     "SELECT table_name FROM user_tables"))
+        (let ((prep (clutch--prepare-row-identity-query conn sql)))
+          (should (equal (plist-get prep :identity-status) 'unsupported))
+          (should-not (plist-get prep :candidate))
+          (should-not (plist-get prep :augmented))
+          (should (equal (plist-get prep :sql) sql))
+          (should-not (string-match-p "\\bROWID\\b"
+                                      (plist-get prep :sql))))))))
+
+(ert-deftest clutch-test-row-identity-prep-scopes-qualified-oracle-source ()
+  "Qualified Oracle sources should resolve identity in their named schema."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle
+                                               :schema "ZJSY"))))
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (metadata-conn table)
+                 (should (equal table "REPORTS"))
+                 (should (equal
+                          (plist-get (clutch-jdbc-conn-params metadata-conn)
+                                     :schema)
+                          "APP"))
+                 nil))
+              ((symbol-function 'clutch-jdbc--unique-not-null-identities)
+               (lambda (metadata-conn table)
+                 (should (equal table "REPORTS"))
+                 (should (equal
+                          (plist-get (clutch-jdbc-conn-params metadata-conn)
+                                     :schema)
+                          "APP"))
+                 nil))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (metadata-conn prefix)
+                 (should (equal prefix "REPORTS"))
+                 (if (equal (plist-get (clutch-jdbc-conn-params metadata-conn)
+                                       :schema)
+                            "APP")
+                     '((:name "REPORTS" :type "VIEW"
+                        :schema "APP" :source-schema "APP"))
+                   '((:name "REPORTS" :type "TABLE"
+                      :schema "ZJSY" :source-schema "ZJSY"))))))
+      (let ((prep (clutch--prepare-row-identity-query
+                   conn "SELECT id FROM APP.reports")))
+        (should (equal (plist-get prep :table) "REPORTS"))
+        (should (equal (plist-get prep :source-token) "APP.reports"))
+        (should (eq (plist-get prep :identity-status) 'unsupported))
+        (should-not (plist-get prep :augmented))
+        (should (equal (plist-get prep :sql)
+                       "SELECT id FROM APP.reports"))))))
+
+(ert-deftest clutch-test-qualified-row-identity-preserves-mutation-target ()
+  "Qualified source tokens should remain the target of staged mutations."
+  (let ((clutch-connection
+         (make-clutch-jdbc-conn :params '(:driver oracle)))
+        (clutch--result-column-defs
+         '((:name "ID" :backend-type "NUMBER")
+           (:name "STATUS" :backend-type "VARCHAR2")))
+        (identity '(:kind primary-key :name "PRIMARY"
+                    :table "REPORTS" :source-token "APP.reports"
+                    :columns ("ID") :indices (0) :source-indices (0))))
+    (pcase-let ((`(,update-sql . ,_)
+                 (clutch-result--build-update-stmt
+                  "REPORTS" [7] '((1 . "ready")) '("ID" "STATUS") identity))
+                (`(,delete-sql . ,_)
+                 (clutch-result--build-delete-stmt-for-identity
+                  "REPORTS" [7] identity)))
+      (should (string-prefix-p "UPDATE APP.reports SET" update-sql))
+      (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql)))))
+
 (ert-deftest clutch-test-row-identity-finalize-separates-hidden-and-source-pk ()
   "Hidden locator indices and visible source PK indices should stay distinct."
   (let* ((prep (list :table "users"
+                     :source-token "APP.users"
                      :candidate (list :kind 'primary-key
                                       :name "PRIMARY"
                                       :columns '("id"))
@@ -746,7 +829,8 @@
          (row-identity (clutch--finalize-row-identity prep columns)))
     (should (plist-get (nth 2 columns) :hidden))
     (should (equal (plist-get row-identity :indices) '(2)))
-    (should (equal (plist-get row-identity :source-indices) '(0)))))
+    (should (equal (plist-get row-identity :source-indices) '(0)))
+    (should (equal (plist-get row-identity :source-token) "APP.users"))))
 
 (ert-deftest clutch-test-render-result-includes-all-columns ()
   "Wide tables should keep later columns searchable and reachable by TAB."
@@ -2310,29 +2394,6 @@
 
 ;;;; Schema cache — refresh and status
 
-(defmacro clutch-test--with-isolated-metadata-caches (&rest body)
-  "Run BODY with fresh schema, column, comment, and object metadata caches."
-  (declare (indent 0) (debug (body)))
-  `(let ((clutch--schema-cache (make-hash-table :test 'equal))
-         (clutch--columns-status-cache (make-hash-table :test 'equal))
-         (clutch--column-details-cache (make-hash-table :test 'equal))
-         (clutch--column-details-status-cache (make-hash-table :test 'equal))
-         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
-         (clutch--column-details-active-cache (make-hash-table :test 'equal))
-         (clutch--table-comment-cache (make-hash-table :test 'equal))
-         (clutch--table-comment-status-cache (make-hash-table :test 'equal))
-         (clutch--foreign-keys-cache (make-hash-table :test 'equal))
-         (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
-         (clutch--help-doc-cache (make-hash-table :test 'equal))
-         (clutch--object-cache (make-hash-table :test 'equal))
-         (clutch--object-warmup-timers (make-hash-table :test 'equal))
-         (clutch--schema-status-cache (make-hash-table :test 'equal))
-         (clutch--schema-refresh-tickets (make-hash-table :test 'equal))
-         (clutch--schema-refresh-ticket-counter 0)
-         (clutch--schema-install-timers (make-hash-table :test 'equal))
-         (clutch--metadata-ticket-counter 0))
-     ,@body))
-
 (ert-deftest clutch-test-refresh-schema-cache-records-ready-status ()
   "Schema refresh entry points should record ready state and table count."
   (dolist (mode '(sync async))
@@ -2398,6 +2459,36 @@
              (should (string-match-p "Phase: submit" text))
              (should (string-match-p "Phase: success" text))
              (should (string-match-p "Phase: stale-drop" text)))))))))
+
+(ert-deftest clutch-test-refresh-schema-cache-async-records-current-closed-error ()
+  "Async schema refresh should finish current closed-connection errors."
+  (clutch-test--with-isolated-metadata-caches
+   (let ((alive t)
+         errback
+         problem)
+     (cl-letf (((symbol-function 'clutch--connection-key)
+                (lambda (_conn) "fake"))
+               ((symbol-function 'clutch--connection-alive-p)
+                (lambda (_conn) alive))
+               ((symbol-function 'clutch--backend-key-from-conn)
+                (lambda (_conn) 'mysql))
+               ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+               ((symbol-function 'clutch--remember-problem-record)
+                (lambda (&rest args) (setq problem args)))
+               ((symbol-function 'clutch-db-refresh-schema-async)
+                (lambda (_conn _callback captured-errback &optional _idle-delay)
+                  (setq errback captured-errback)
+                  t)))
+       (should (clutch--refresh-schema-cache-async 'fake-conn))
+       (should (eq (plist-get (gethash "fake" clutch--schema-status-cache)
+                              :state)
+                   'refreshing))
+       (setq alive nil)
+       (funcall errback "Connection closed")
+       (let ((status (gethash "fake" clutch--schema-status-cache)))
+         (should (eq (plist-get status :state) 'failed))
+         (should (equal (plist-get status :error) "Connection closed")))
+       (should problem)))))
 
 (ert-deftest clutch-test-console-buffer-name-reflects-schema-status ()
   "Console buffer names should expose schema status."
@@ -2602,7 +2693,7 @@
      (cl-letf (((symbol-function 'clutch--connection-key)
 		(lambda (_conn) "dev-key"))
                ((symbol-function 'clutch-db-table-comment)
-		(lambda (_conn _table)
+		(lambda (_conn _table &optional _schema)
                   (cl-incf (gethash 'comment calls 0))
                   (if (= (gethash 'comment calls) 1)
                       (signal 'clutch-db-error '("comment boom"))
@@ -4752,7 +4843,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               ((symbol-function 'clutch-db-current-schema)
                (lambda (_conn) "public"))
               ((symbol-function 'clutch-db-table-comment)
-               (lambda (_conn table)
+               (lambda (_conn table &optional _schema)
                  (when (string= table "users")
                    "application users")))
               ((symbol-function 'clutch-db-column-details)
