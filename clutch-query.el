@@ -1636,10 +1636,25 @@ Semicolons inside strings, line comments, and block comments are skipped."
 (defun clutch--dwim-bounds-at-point ()
   "Return point-local SQL bounds for DWIM execute and preview workflows.
 Prefer semicolon-delimited statement bounds when the current buffer
-contains any top-level semicolon; otherwise fall back to query-at-point
-bounds, which also split on blank lines."
+contains any top-level semicolon, but drop detached leading paragraphs made
+only of line comments.  Otherwise fall back to query-at-point bounds, which
+also split on blank lines."
   (if (clutch--statement-delimited-buffer-p)
-      (clutch--statement-bounds-at-point)
+      (let* ((statement-bounds (clutch--statement-bounds-at-point))
+             (query-bounds (clutch--query-bounds-at-point))
+             (statement-beg (car statement-bounds))
+             (query-beg (car query-bounds)))
+        (if (and (< statement-beg query-beg)
+                 (cl-every
+                  (lambda (line)
+                    (let ((trimmed (string-trim-left line)))
+                      (or (string-empty-p trimmed)
+                          (string-prefix-p "--" trimmed))))
+                  (split-string
+                   (buffer-substring-no-properties statement-beg query-beg)
+                   "\n")))
+            (cons query-beg (cdr statement-bounds))
+          statement-bounds))
     (clutch--query-bounds-at-point)))
 
 (defun clutch--split-statement-specs (sql &optional base-position)

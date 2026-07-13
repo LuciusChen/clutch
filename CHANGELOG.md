@@ -23,6 +23,8 @@
 
 ### Fixed
 
+- Prevented point-local DWIM execution from sending detached `--` divider
+  paragraphs before the semicolon-delimited SQL at point.
 - Removed hidden connection-construction retries and broad capability
   fallbacks, so backend failures reach the normal command error boundary with
   their original cause.

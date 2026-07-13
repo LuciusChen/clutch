@@ -224,6 +224,28 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                        '("INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"
                          "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')")))))))
 
+(ert-deftest clutch-test-execute-dwim-drops-comment-only-prefix-paragraphs ()
+  "DWIM execution should not send detached comment dividers before SQL at point."
+  (with-temp-buffer
+    (insert (concat
+             "INSERT INTO audit_log VALUES (1);\n\n"
+             "-------------------------------------------------\n\n"
+             "-- update the subject name\n"
+             "UPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4;"))
+    (search-backward "UPDATE cap_sale_subject")
+    (let (captured)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--execute-and-mark)
+                 (lambda (sql beg end &optional _conn)
+                   (setq captured
+                         (list sql
+                               (string-trim
+                                (buffer-substring-no-properties beg end)))))))
+        (clutch-execute-dwim (point) (point))
+        (should (equal captured
+                       '("-- update the subject name\nUPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4"
+                         "-- update the subject name\nUPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4")))))))
+
 (ert-deftest clutch-test-execute-dwim-at-semicolon-edge ()
   "DWIM execution should handle semicolon-edge cursor positions."
   (with-temp-buffer
