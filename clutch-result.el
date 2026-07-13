@@ -47,8 +47,6 @@
 (defvar-local clutch--aggregate-summary nil
   "Last aggregate summary plist for result footer, or nil.
 Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
-(defvar-local clutch--cached-pk-indices nil
-  "Cached list of primary-key column indices for the current result buffer.")
 (defvar-local clutch--dml-result nil
   "Non-nil when this result buffer shows a DML result.")
 (defvar-local clutch--filter-pattern nil
@@ -164,14 +162,69 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--remember-execute-error
                   "clutch-query"
                   (buffer connection sql err &optional context))
-(declare-function clutch--queue-result-column-details-enrichment "clutch-ui"
-                  (conn table))
-(declare-function clutch--result-column-details "clutch-ui"
-                  (conn table col-names &optional load))
 (declare-function clutch--status-separator "clutch-ui" ())
 (declare-function clutch-preview-execution-sql "clutch-query" ())
 
 ;;;; Result buffer lifecycle
+
+(defun clutch--result-column-details (conn table col-names &optional load)
+  "Return detail plists aligned with result columns COL-NAMES.
+Uses cached metadata for CONN/TABLE.  When LOAD is non-nil, synchronously load
+missing table metadata."
+  (when-let* ((details (and table
+                            (or (clutch--cached-column-details conn table)
+                                (and load
+                                     (clutch--ensure-column-details conn table))))))
+    (let ((by-name (make-hash-table :test 'equal)))
+      (dolist (detail details)
+        (puthash (downcase (plist-get detail :name)) detail by-name))
+      (mapcar (lambda (name)
+                (gethash (downcase name) by-name))
+              col-names))))
+
+(defun clutch--refresh-result-metadata-buffers (conn table)
+  "Refresh cached result column metadata for live result buffers on CONN/TABLE."
+  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'clutch-result-mode)
+                     clutch-connection
+                     clutch--result-columns
+                     (string= (clutch--connection-key clutch-connection) conn-key)
+                     (equal clutch--result-source-table table))
+            (setq-local clutch--result-column-details
+                        (clutch--result-column-details
+                         clutch-connection table clutch--result-columns))
+            (when clutch--pending-inserts
+              (clutch--refresh-display))))))))
+
+(defun clutch--refresh-result-foreign-key-buffers (conn table)
+  "Refresh cached foreign-key display metadata for result buffers on CONN/TABLE."
+  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'clutch-result-mode)
+                     clutch-connection
+                     clutch--result-columns
+                     (string= (clutch--connection-key clutch-connection) conn-key)
+                     (equal clutch--result-source-table table))
+            (setq-local clutch--fk-info
+                        (clutch--foreign-key-column-info
+                         clutch-connection table clutch--result-columns))
+            (clutch--refresh-display)))))))
+
+(defun clutch--handle-table-metadata-updated (conn table kind)
+  "Refresh result UI for CONN/TABLE metadata KIND."
+  (pcase kind
+    ('column-details
+     (clutch--refresh-result-metadata-buffers conn table))
+    ('foreign-keys
+     (clutch--refresh-result-foreign-key-buffers conn table))))
+
+(add-hook 'clutch--table-metadata-updated-hook
+          #'clutch--handle-table-metadata-updated)
 
 (defun clutch-result--show-buffer (buf)
   "Display BUF in the result window slot.
@@ -400,11 +453,7 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
          (column-widths
           (if same-columns
               existing-widths
-            (clutch--compute-column-widths column-names rows column-defs)))
-         (cached-pk-indices
-          (and (eq (plist-get row-identity :kind) 'primary-key)
-               (or (plist-get row-identity :source-indices)
-                   (plist-get row-identity :indices)))))
+            (clutch--compute-column-widths column-names rows column-defs))))
     (setq-local clutch--dml-result nil
                 clutch--result-columns column-names
                 clutch--result-column-defs column-defs
@@ -417,7 +466,6 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                 clutch--page-current page-num
                 clutch--page-offset offset
                 clutch--page-has-more page-has-more
-                clutch--cached-pk-indices cached-pk-indices
                 clutch--query-elapsed elapsed
                 clutch--filter-pattern nil
                 clutch--filtered-rows nil
@@ -603,7 +651,6 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--row-identity nil
               clutch--row-identity-status nil
               clutch--row-identity-error-message nil
-              clutch--cached-pk-indices nil
               clutch--sort-column nil
               clutch--sort-descending nil
               clutch--order-by nil

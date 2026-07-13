@@ -30,40 +30,17 @@
 
 ;;;; Connection — build, timeout, and lifecycle
 
-(ert-deftest clutch-test-backend-key-from-conn-returns-nil-for-non-jdbc-or-opaque-connections ()
-  "Backend key detection should tolerate non-JDBC and opaque connections."
-  (dolist (case '(non-jdbc opaque))
-    (ert-info ((format "case: %s" case))
-      (cl-letf (((symbol-function 'clutch-db-display-name)
-                 (lambda (_conn)
-                   (pcase case
-                     ('non-jdbc "DuckDB")
-                     ('opaque
-                      (signal 'cl-no-applicable-method
-                              '(clutch-db-display-name fake-conn)))))))
-        (should-not (clutch--backend-key-from-conn 'fake-conn))))))
+(ert-deftest clutch-test-backend-key-from-conn-returns-nil-for-opaque-connections ()
+  "Backend key detection should tolerate opaque connections."
+  (should-not (clutch--backend-key-from-conn 'fake-conn)))
 
-(ert-deftest clutch-test-backend-key-from-conn-swallows-jdbc-param-errors ()
-  "Backend key detection should return nil when JDBC plist access fails.
-The function catches `clutch-db-error' and `wrong-type-argument' to avoid
-crashing the UI layer."
-  (let* ((sentinel (list :driver 'oracle))
-         (conn (make-clutch-jdbc-conn :params sentinel)))
-    (cl-letf (((symbol-function 'plist-get)
-               (lambda (plist prop &optional predicate)
-                 (if (eq plist sentinel)
-                     (signal 'clutch-db-error '("backend key boom"))
-                   (let ((tail plist)
-                         found)
-                     (while tail
-                       (when (funcall (or predicate #'eq) (car tail) prop)
-                         (setq found (cadr tail)
-                               tail nil))
-                       (setq tail (cddr tail)))
-                     found))))
-              ((symbol-function 'clutch-db-display-name)
-               (lambda (_conn) nil)))
-      (should-not (clutch--backend-key-from-conn conn)))))
+(ert-deftest clutch-test-backend-key-from-conn-propagates-backend-errors ()
+  "Backend key detection should expose invalid backend state."
+  (cl-letf (((symbol-function 'clutch-db-backend-key)
+             (lambda (_conn)
+               (signal 'clutch-db-error '("backend key boom")))))
+    (should-error (clutch--backend-key-from-conn 'broken-conn)
+                  :type 'clutch-db-error)))
 
 (ert-deftest clutch-test-backend-key-from-params-prefers-concrete-backend ()
   "Concrete :backend should win over generic JDBC :driver metadata."
@@ -192,22 +169,12 @@ crashing the UI layer."
             (when (plist-get case :expect-asked)
               (should asked))))))))
 
-(ert-deftest clutch-test-prepare-connection-params-normalizes-tramp-alias ()
-  "The shorter :tramp key should be canonicalized before connection setup."
-  (let ((params (clutch-prepare-connection-params
-                 '(:backend pg :host "db" :port 5432 :user "app"
-                   :tramp "/ssh:devbox:/workspace/"))))
-    (should-not (plist-member params :tramp))
-    (should (equal (plist-get params :tramp-default-directory)
-                   "/ssh:devbox:/workspace/"))))
-
-(ert-deftest clutch-test-prepare-connection-params-rejects-conflicting-tramp-aliases ()
-  "The short and long TRAMP keys must not describe different origins."
+(ert-deftest clutch-test-prepare-connection-params-rejects-removed-tramp-key ()
+  "The removed :tramp key should fail instead of being ignored."
   (should-error
    (clutch-prepare-connection-params
     '(:backend pg :host "db" :port 5432 :user "app"
-      :tramp "/ssh:a:/work/"
-      :tramp-default-directory "/ssh:b:/work/"))
+      :tramp "/ssh:devbox:/workspace/"))
    :type 'user-error))
 
 (ert-deftest clutch-test-build-conn-leaves-timeout-defaults-to-backends ()
@@ -218,7 +185,9 @@ crashing the UI layer."
               ((symbol-function 'clutch-db-connect)
                (lambda (_backend params)
                  (setq captured params)
-                 'fake-conn)))
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
       (dolist (params '((:backend mysql :host "127.0.0.1" :port 3306 :user "u")
                         (:backend pg :host "127.0.0.1" :port 5432 :user "u")
                         (:backend oracle :host "db" :port 1521 :user "u")
@@ -275,7 +244,9 @@ crashing the UI layer."
                    (lambda (backend params)
                      (should (eq backend (plist-get input :backend)))
                      (setq captured params)
-                     (plist-get case :conn))))
+                     (plist-get case :conn)))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t)))
           (let ((conn (plist-get case :conn)))
             (should (eq (clutch--build-conn input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
@@ -315,7 +286,9 @@ crashing the UI layer."
                      'fake-conn))
                   ((symbol-function 'clutch-db--restore-connection-timeouts)
                    (lambda (conn params)
-                     (setq restored (list conn params)))))
+                     (setq restored (list conn params))))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t)))
           (should (eq (clutch--build-conn
                        '(:backend pg
                          :host "db.internal"
@@ -380,7 +353,9 @@ crashing the UI layer."
                    'fake-conn)))
               ((symbol-function 'clutch-db--restore-connection-timeouts)
                (lambda (conn params)
-                 (setq restored (list conn params)))))
+                 (setq restored (list conn params))))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
       (should (eq (clutch--build-conn
                    '(:backend oracle
                      :host "db.internal"
@@ -461,7 +436,9 @@ crashing the UI layer."
                    (lambda (backend params)
                      (should (eq backend (plist-get input :backend)))
                      (setq captured params)
-                     (plist-get case :conn))))
+                     (plist-get case :conn)))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) t)))
           (let ((conn (plist-get case :conn)))
             (should (eq (clutch--build-conn input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
@@ -480,8 +457,8 @@ crashing the UI layer."
                          :kind)
                         'tramp))))))))
 
-(ert-deftest clutch-test-open-connection-supports-tramp-alias ()
-  "The public connection API should support the short :tramp key."
+(ert-deftest clutch-test-open-connection-supports-tramp-default-directory ()
+  "The public connection API should support TRAMP default-directory origin."
   (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
         (clutch--connection-transport-cache (make-hash-table :test 'eq))
         captured)
@@ -489,7 +466,6 @@ crashing the UI layer."
                (lambda (_params) nil))
               ((symbol-function 'clutch--start-tramp-tcp-forward)
                (lambda (params)
-                 (should-not (plist-member params :tramp))
                  (should (equal (plist-get params :tramp-default-directory)
                                 "/ssh:devbox:/workspace/"))
                  '(:kind tramp
@@ -499,18 +475,19 @@ crashing the UI layer."
               ((symbol-function 'clutch-db-connect)
                (lambda (_backend params)
                  (setq captured params)
-                 'fake-conn)))
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
       (should (eq (clutch-open-connection
                    '(:backend pg
                      :host "db"
                      :port 5432
                      :user "alice"
                      :database "appdb"
-                     :tramp "/ssh:devbox:/workspace/"))
+                     :tramp-default-directory "/ssh:devbox:/workspace/"))
                   'fake-conn))
       (should (equal (plist-get captured :host) "127.0.0.1"))
       (should (= (plist-get captured :port) 40124))
-      (should-not (plist-member captured :tramp))
       (should-not (plist-member captured :tramp-default-directory)))))
 
 (ert-deftest clutch-test-prepare-connect-params-rejects-ambiguous-transports ()
@@ -521,7 +498,7 @@ crashing the UI layer."
       :host "db"
       :port 5432
       :ssh-host "bastion-prod"
-      :tramp "/ssh:devbox:/workspace/"))
+      :tramp-default-directory "/ssh:devbox:/workspace/"))
    :type 'user-error))
 
 (ert-deftest clutch-test-prepare-connect-params-validates-ssh-tunnel-mode ()
@@ -1361,7 +1338,9 @@ crashing the UI layer."
               ((symbol-function 'clutch-db-connect)
                (lambda (_backend params)
                  (setq captured params)
-                 'fake-conn)))
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
       (clutch--build-conn '(:backend sqlite :database ":memory:"))
       (should-not (plist-member captured :connect-timeout))
       (should-not (plist-member captured :read-idle-timeout))
@@ -1984,7 +1963,8 @@ crashing the UI layer."
           (should (equal (cadr capf) (point)))
           (should (member "users" candidates))
           (should (member "orders" candidates))
-          (should (member "getCollectionNames()" candidates)))
+          (should (member "runCommand()" candidates))
+          (should-not (member "getSiblingDB()" candidates)))
         (erase-buffer)
         (insert "db.users.")
         (let* ((capf (clutch-mongodb-completion-at-point))
@@ -1994,7 +1974,8 @@ crashing the UI layer."
           (should (member "find({}).limit(20)" candidates))
           (should (member "aggregate([{ $match: {} }, { $limit: 20 }])"
                           candidates))
-          (should (member "estimatedDocumentCount()" candidates)))
+          (should (member "countDocuments()" candidates))
+          (should-not (member "estimatedDocumentCount()" candidates)))
         (erase-buffer)
         (insert "db.users.fi")
         (cl-letf (((symbol-function 'completion-in-region)
@@ -2039,6 +2020,7 @@ crashing the UI layer."
       (should (member "limit()" candidates))
       (should (member "sort()" candidates))
       (should (member "explain()" candidates))
+      (should-not (member "batchSize()" candidates))
       (should-not (member "find()" candidates)))
     (erase-buffer)
     (insert "db.users.find({}).sort({createdAt: -1}).")
@@ -2421,7 +2403,8 @@ crashing the UI layer."
         (new-conn (list 'new))
         (result (generate-new-buffer " *clutch-result-reconnect*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (c) (eq c old-conn)))
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (c) (memq c (list old-conn new-conn))))
                   ((symbol-function 'clutch-db-disconnect) #'ignore)
                   ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
                   ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
@@ -2488,9 +2471,33 @@ crashing the UI layer."
                  (lambda (_conn) 'done))
                 ((symbol-function 'clutch--connection-key)
                  (lambda (_conn) "alice@db.internal:5432/appdb"))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (eq conn 'new-conn)))
                 ((symbol-function 'message) #'ignore))
         (should (clutch--try-reconnect))
         (should (eq released 'old-conn))))))
+
+(ert-deftest clutch-test-replace-connection-rejects-dead-candidate-once ()
+  "Replacement should not retry or bind a candidate lost during teardown."
+  (let ((new-live t) released rebound (builds 0))
+    (cl-letf (((symbol-function 'clutch--build-conn)
+               (lambda (_params) (cl-incf builds) 'new-conn))
+              ((symbol-function 'clutch--connection-key) (lambda (_conn) "old"))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (conn) (if (eq conn 'new-conn) new-live t)))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq new-live nil)))
+              ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+              ((symbol-function 'clutch--release-connection-transport)
+               (lambda (conn) (push conn released)))
+              ((symbol-function 'clutch--rebind-connection-buffers)
+               (lambda (&rest _args) (setq rebound t))))
+      (should-error
+       (clutch--replace-connection 'old-conn '(:backend pg) 'pg)
+       :type 'clutch-db-error)
+      (should (= builds 1))
+      (should-not rebound)
+      (should (equal released '(new-conn old-conn))))))
 
 (ert-deftest clutch-test-result-buffer-reconnects-using-inherited-context ()
   "Result buffers should inherit reconnect params from their source buffer."
@@ -2606,8 +2613,8 @@ crashing the UI layer."
         (should (eq clutch-connection 'old-conn))
         (should-not disconnected)))))
 
-(ert-deftest clutch-test-connect-rebuilds-conn-when-agent-dies-during-disconnect ()
-  "Reconnect should rebuild a dead new connection after old disconnect."
+(ert-deftest clutch-test-connect-rejects-connection-that-dies-during-disconnect ()
+  "Reconnect should not retry or activate a new connection that became dead."
   (let ((built nil)
         (activated nil))
     (with-temp-buffer
@@ -2628,10 +2635,7 @@ crashing the UI layer."
                 ((symbol-function 'clutch--build-conn)
                  (lambda (params)
                    (push params built)
-                   (pcase (length built)
-                     (1 'new-conn-1)
-                     (2 'new-conn-2)
-                     (_ 'unexpected-conn))))
+                   'new-conn-1))
                 ((symbol-function 'clutch--do-disconnect)
                  #'ignore)
                 ((symbol-function 'clutch--activate-current-buffer-connection)
@@ -2640,16 +2644,9 @@ crashing the UI layer."
                 ((symbol-function 'clutch--connection-key)
                  (lambda (_conn) "test-conn"))
                 ((symbol-function 'message) #'ignore))
-        (clutch-connect)
-        (should (= (length built) 2))
-        (should (equal (nreverse built)
-                       '((:backend jdbc :database "newdb")
-                         (:backend jdbc :database "newdb"))))
-        (should (equal activated
-                       (list 'new-conn-2
-                             (clutch--materialize-connection-params
-                              '(:backend jdbc :database "newdb"))
-                             'jdbc)))))))
+        (should-error (clutch-connect) :type 'clutch-db-error)
+        (should (equal built '((:backend jdbc :database "newdb"))))
+        (should-not activated)))))
 
 (ert-deftest clutch-test-connect-clears-stale-schema-refresh-state-before-prime ()
   "Reconnect should not inherit a stale `refreshing' schema status."
@@ -2681,50 +2678,6 @@ crashing the UI layer."
           (clutch-connect)
           (should (eq clutch-connection 'new-conn))
           (should-not status-before-prime))))))
-
-(ert-deftest clutch-test-replace-connection-rebuilds-dead-conn-after-disconnect ()
-  "Replacing a connection should rebuild if the first new conn dies during disconnect."
-  (let (built rebound finalized disconnected cleared)
-    (cl-letf (((symbol-function 'clutch--effective-sql-product)
-               (lambda (_params) 'clickhouse))
-              ((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "default-key"))
-              ((symbol-function 'clutch--build-conn)
-               (lambda (params)
-                 (push params built)
-                 (pcase (length built)
-                   (1 'new-conn-1)
-                   (2 'new-conn-2)
-                   (_ 'unexpected-conn))))
-              ((symbol-function 'clutch--clear-tx-dirty)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (conn)
-                 (pcase conn
-                   ('old-conn t)
-                   ('new-conn-1 nil)
-                   ('new-conn-2 t)
-                   (_ nil))))
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (conn) (setq disconnected conn)))
-              ((symbol-function 'clutch--rebind-connection-buffers)
-               (lambda (_old new params product)
-                 (setq rebound (list new params product))))
-              ((symbol-function 'clutch--clear-connection-metadata-caches)
-               (lambda (conn &optional key)
-                 (push (list conn key) cleared)))
-              ((symbol-function 'clutch--finalize-rebound-connection)
-               (lambda (conn) (setq finalized conn) conn)))
-      (clutch--replace-connection 'old-conn '(:backend clickhouse :database "demo") 'clickhouse)
-      (should (equal (nreverse built)
-                     '((:backend clickhouse :database "demo")
-                       (:backend clickhouse :database "demo"))))
-      (should (eq disconnected 'old-conn))
-      (should (equal rebound '(new-conn-2 (:backend clickhouse :database "demo") clickhouse)))
-      (should (eq finalized 'new-conn-2))
-      (should (equal (nreverse cleared)
-                     '((old-conn "default-key")
-                       (new-conn-2 nil)))))))
 
 (defmacro clutch-test--with-connect-build-stubs (spec &rest body)
   "Run BODY with connection construction recorded.
@@ -2843,7 +2796,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                        (ert-fail "unforwardable profile should not prompt for TRAMP")))
                     ((symbol-function 'clutch--resolve-password)
                      (lambda (params)
-                       (when (clutch--jdbc-backend-p (plist-get params :backend))
+                       (when (clutch-backend-jdbc-transport-p
+                              (plist-get params :backend) params)
                          "secret"))))
             (clutch-test--with-connect-build-stubs (built 'generic 'new-conn)
               (clutch-connect)

@@ -169,8 +169,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
       (let ((clutch--object-cache (make-hash-table :test 'equal))
             (clutch--object-warmup-timers (make-hash-table :test 'equal))
             (clutch--object-warmup-generations (make-hash-table :test 'equal))
-            (clutch--column-details-cache (make-hash-table :test 'equal))
-            (clutch--column-details-status-cache (make-hash-table :test 'equal)))
+            (clutch--table-metadata-cache (make-hash-table :test 'equal)))
         (unwind-protect
             (progn
               (clutch-db-query conn drop-sql)

@@ -383,8 +383,7 @@ Useful =M-x= entry points outside the main keymaps:
 - =clutch-switch-database= — ClickHouse-only reconnect-based database switch
 - =clutch-describe-refresh= — refresh the current describe buffer
 - =clutch-object-show-ddl-or-source= — show object DDL/source directly
-- =clutch-browse-table= — insert =SELECT *= for a table-like object into a live console
-- =clutch-describe-table= / =clutch-describe-table-at-point= — describe a table explicitly
+- =clutch-describe-dwim= / =clutch-act-dwim= — resolve objects and choose describe, browse, or backend-specific actions
 - =clutch-result-copy-pending-sql= / =clutch-result-save-pending-sql= — export the exact staged DML batch
 - =clutch-copy-context-for-agent= — copy the current SQL, connection context,
   referenced table metadata, and the visible columns from the latest matching

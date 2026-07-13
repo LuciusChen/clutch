@@ -283,9 +283,6 @@
                        (make-clutch-db-result
                         :columns '((:name "id"))
                         :rows '((1)))))
-                    ((symbol-function 'clutch--render-static-table)
-                     (lambda (&rest _)
-                       (ert-fail "REPL SELECT should use result buffers")))
                     ((symbol-function 'clutch-result--display)
                      (lambda (result sql elapsed)
                        (setq displayed (list result sql elapsed))

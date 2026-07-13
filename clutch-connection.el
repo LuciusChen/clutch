@@ -323,10 +323,7 @@ interactive readers inspect shared customization such as
 
 (defun clutch--manual-commit-supported-p (conn)
   "Return non-nil when CONN supports Clutch transaction controls."
-  (and conn
-       (condition-case nil
-           (clutch-db-manual-commit-supported-p conn)
-         ((clutch-db-error cl-no-applicable-method wrong-type-argument) nil))))
+  (and conn (clutch-db-manual-commit-supported-p conn)))
 
 (defun clutch--query-buffer-p ()
   "Return non-nil when the current buffer is a clutch query console."
@@ -421,6 +418,13 @@ interactive readers inspect shared customization such as
   "Return non-nil if CONN is live."
   (and conn (clutch-db-live-p conn)))
 
+(defun clutch--require-live-connection (conn)
+  "Return CONN, or signal when connection setup did not leave it live."
+  (unless (clutch--connection-alive-p conn)
+    (clutch--release-connection-transport conn)
+    (signal 'clutch-db-error '("Connection closed during setup")))
+  conn)
+
 (defun clutch--connection-context (conn)
   "Return `(PARAMS PRODUCT)' for CONN from any attached buffer, or nil."
   (when conn
@@ -505,23 +509,21 @@ still references the same dead connection, then rebind all attached buffers
 to the new connection on success.
 Staged result-buffer changes are preserved across reconnects because
 they are client-side DML.  Only query re-execution should discard them.
-Returns non-nil on success, nil on failure."
+Returns non-nil on success and nil when no reconnect context exists.
+Connection failures propagate to the calling command."
   (when-let* ((old-conn clutch-connection)
               (context (clutch--connection-context old-conn))
               (params (car context))
               (product (cadr context)))
-    (condition-case err
-        (let ((conn (clutch--build-conn params)))
-          (clutch--clear-tx-dirty old-conn)
-          (clutch--release-connection-transport old-conn)
-          (clutch--clear-reconnect-metadata-caches old-conn conn nil)
-          (clutch--rebind-connection-buffers old-conn conn params product)
-          (clutch--finalize-rebound-connection conn)
-          (message "Reconnected to %s" (clutch--connection-key conn))
-          t)
-      (error
-       (message "Reconnect failed: %s" (error-message-string err))
-       nil))))
+    (let ((conn (clutch--build-conn params)))
+      (clutch--clear-tx-dirty old-conn)
+      (clutch--release-connection-transport old-conn)
+      (clutch--require-live-connection conn)
+      (clutch--clear-reconnect-metadata-caches old-conn conn nil)
+      (clutch--rebind-connection-buffers old-conn conn params product)
+      (clutch--finalize-rebound-connection conn)
+      (message "Reconnected to %s" (clutch--connection-key conn))
+      t)))
 
 (defun clutch--replace-connection (old-conn params &optional product)
   "Replace OLD-CONN with a new connection built from PARAMS.
@@ -534,8 +536,7 @@ PRODUCT is the effective SQL product for the new logical session."
         (when (clutch--connection-alive-p old-conn)
           (clutch-db-disconnect old-conn))
       (clutch--release-connection-transport old-conn))
-    (unless (clutch--connection-alive-p new-conn)
-      (setq new-conn (clutch--build-conn params)))
+    (clutch--require-live-connection new-conn)
     (clutch--rebind-connection-buffers old-conn new-conn params product)
     (clutch--clear-reconnect-metadata-caches old-conn new-conn old-key)
     (clutch--finalize-rebound-connection new-conn)))
@@ -585,18 +586,8 @@ using the stored params.  Signals a user-error if not recoverable."
 ;;;; Backend detection
 
 (defun clutch--backend-key-from-conn (conn)
-  "Return backend icon key for live connection CONN, or nil."
-  (or (condition-case nil
-          (clutch-db-backend-key conn)
-        ((clutch-db-error cl-no-applicable-method wrong-type-argument) nil))
-      (let ((display-name
-             (condition-case nil
-                 (clutch-db-display-name conn)
-               ((cl-no-applicable-method wrong-type-argument) nil))))
-        (cl-loop for backend in (clutch-backends)
-                 when (equal display-name
-                             (clutch-backend-display-name backend))
-                 return backend))))
+  "Return the registered backend key for live connection CONN, or nil."
+  (and conn (clutch-db-backend-key conn)))
 
 (defun clutch--normalize-backend-key (backend)
   "Return the registered backend key for BACKEND, including public aliases."
@@ -755,13 +746,6 @@ using the stored params.  Signals a user-error if not recoverable."
     ;; keeping alignment correct when display-line-numbers-mode is toggled.
     (setq header-line-format '((:eval (clutch--build-connection-header-line)))))
   (force-mode-line-update))
-
-;;;; JDBC backend detection
-
-(defun clutch--jdbc-backend-p (backend)
-  "Return non-nil when BACKEND is handled by JDBC."
-  (eq (plist-get (clutch-backend-feature backend) :require)
-      'clutch-db-jdbc))
 
 (defun clutch--jdbc-connection-params-p (params)
   "Return non-nil when PARAMS will execute through the JDBC backend."
@@ -1093,28 +1077,12 @@ also wins over the profile's first-line password."
     out))
 
 (defun clutch--canonicalize-connection-params (params)
-  "Return PARAMS with public connection aliases normalized."
+  "Return PARAMS with profiles and backend aliases normalized."
   (let* ((params (clutch--merge-profile-entry-params params))
-         (params (clutch--canonicalize-backend-aliases params))
-         (has-tramp (plist-member params :tramp))
-         (has-tramp-default-directory
-          (plist-member params :tramp-default-directory))
-         (tramp (plist-get params :tramp))
-         (tramp-default-directory
-          (plist-get params :tramp-default-directory)))
-    (cond
-     ((not has-tramp) params)
-     ((and has-tramp-default-directory
-           (not (equal tramp tramp-default-directory)))
-      (user-error
-       "Connection cannot set both :tramp and :tramp-default-directory"))
-     (t
-      (let ((out (cl-loop for (k v) on params by #'cddr
-                          unless (eq k :tramp)
-                          append (list k v))))
-        (if has-tramp-default-directory
-            out
-          (plist-put out :tramp-default-directory tramp)))))))
+         (params (clutch--canonicalize-backend-aliases params)))
+    (when (plist-member params :tramp)
+      (user-error "Connection parameter :tramp was removed; use :tramp-default-directory"))
+    params))
 
 (defun clutch--debug-connection-context (backend params)
   "Return a redacted connect context for BACKEND and PARAMS."
@@ -1153,7 +1121,7 @@ also wins over the profile's first-line password."
     (cond
      ((and ssh tramp)
       (user-error
-       "Connection cannot combine :ssh-host with :tramp"))
+       "Connection cannot combine :ssh-host with :tramp-default-directory"))
      ((and ssh-mode (not ssh))
       (user-error "Connection :ssh-tunnel requires :ssh-host"))
      (ssh 'ssh)
@@ -1234,9 +1202,8 @@ TRAMP methods are ignored for inference."
 (defun clutch-prepare-connection-params
     (params &optional source-default-directory)
   "Return PARAMS prepared according to Clutch connection rules.
-This normalizes public aliases such as `:tramp'.  When PARAMS has no explicit
-transport, SOURCE-DEFAULT-DIRECTORY may provide a TRAMP origin according to
-`clutch-tramp-context-policy'."
+When PARAMS has no explicit transport, SOURCE-DEFAULT-DIRECTORY may provide a
+TRAMP origin according to `clutch-tramp-context-policy'."
   (clutch--prepare-connection-origin-params params source-default-directory))
 
 (defun clutch--carry-current-connection-origin (params)
@@ -1885,7 +1852,7 @@ port and TRANSPORT contains the live process metadata."
                             unless (memq k '(:sql-product :backend :password
                                              :pass-entry :profile-entry
                                              :ssh-host :ssh-tunnel
-                                             :tramp :tramp-default-directory))
+                                             :tramp-default-directory))
                             append (list k v))))
     (if password
         (append db-params (list :password password))
@@ -2011,6 +1978,7 @@ Returns a live connection object or signals a `user-error'."
                             backend (clutch--backend-connect-params
                                      (car fallback)))))
                  (signal (car direct-err) (cdr direct-err)))))
+            (clutch--require-live-connection conn)
             (clutch--remember-connection-transport conn effective-params transport)
             (when clutch-debug-mode
               (clutch--remember-debug-event
@@ -2046,8 +2014,8 @@ Returns a live connection object or signals a `user-error'."
 (defun clutch-open-connection (params)
   "Open a database connection from PARAMS using Clutch connection rules.
 PARAMS must include `:backend' and backend endpoint keys.  It may also include
-Clutch connection keys such as `:ssh-host', `:tramp',
-`:tramp-default-directory', `:profile-entry', `:pass-entry', and
+Clutch connection keys such as `:ssh-host', `:tramp-default-directory',
+`:profile-entry', `:pass-entry', and
 `:sql-product'.  The caller owns the returned connection and should close it
 with `clutch-db-disconnect'.  Call `clutch-prepare-connection-params' first
 when the current command source should be allowed to supply TRAMP context."
@@ -2190,8 +2158,7 @@ params; see `clutch-connection-alist' for details."
            (conn    (clutch--build-conn effective-params)))
       (when old-live-p
         (clutch--do-disconnect old-conn))
-      (unless (clutch--connection-alive-p conn)
-        (setq conn (clutch--build-conn effective-params)))
+      (clutch--require-live-connection conn)
       (clutch--clear-reconnect-metadata-caches old-conn conn nil)
       (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))

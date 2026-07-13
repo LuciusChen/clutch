@@ -91,7 +91,6 @@
 (declare-function clutch-db-pg--typed-arguments "clutch-db-pg" (params))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
-(declare-function clutch--jdbc-backend-p "clutch-connection" (backend))
 (declare-function clutch--manual-backend-choices "clutch-connection" ())
 (declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
 (declare-function clutch--build-conn "clutch-connection" (params))
@@ -1935,16 +1934,12 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                           "db.users.find({active: true}, {name: 1})"
                           ".sort({createdAt: -1})"
                           ".maxTimeMS(250)"
-                          ".batchSize(50)"
-                          ".comment('scan-users')"
                           ".allowDiskUse(true)"
                           ".skip(5).limit(10)")
                   :limit 10
                   :skip 5
                   :sort '(("createdAt" . -1))
                   :options '(("maxTimeMS" . 250)
-                             ("batchSize" . 50)
-                             ("comment" . "scan-users")
                              ("allowDiskUse" . t)))))
     (ert-info ((format "case: %s" (plist-get case :label)))
       (let (captured)
@@ -1989,19 +1984,42 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 (ert-deftest clutch-db-test-mongodb-eval-validation-contract ()
   "Native MongoDB helper parsing should reject unsupported or invalid inputs."
   (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
-    (dolist (query '("db.users.find({}).allowDiskUse('yes')"
-                     "db.users.find({}).explain({mode: 'executionStats'})"
-                     "db.users.deleteOne()"
-                     "db.users.deleteMany()"
-                     "db.users.deleteOne('name')"
-                     "db.users.deleteMany(1)"
-                     "db.users.insertOne('name')"
-                     "db.users.insertMany({name: 'Ann'})"
-                     "db.users.insertMany([1])"
-                     "db.users.find({name: /ann/i})"))
-      (ert-info ((format "query: %s" query))
-        (should-error (clutch-mongodb--eval conn query)
-                      :type 'clutch-db-error)))))
+    (cl-letf (((symbol-function 'mongodb-find)
+               (lambda (&rest _) 'unexpected-success))
+              ((symbol-function 'mongodb-count-documents)
+               (lambda (&rest _) 'unexpected-success))
+              ((symbol-function 'mongodb-update)
+               (lambda (&rest _) 'unexpected-success)))
+      (dolist (query '("db.users.find('name')"
+                       "db.users.find({}, {}, {})"
+                       "db.users.findOne({}).limit(1)"
+                       "db.users.aggregate([]).sort({_id: 1})"
+                       "db.users.countDocuments('name')"
+                       "db.users.updateOne({}, 'name')"
+                       "db.users.deleteOne({}).limit(1)"
+                       "db.users.find({}).allowDiskUse('yes')"
+                       "db.users.find({}).explain({mode: 'executionStats'})"
+                       "db.users.deleteOne()"
+                       "db.users.deleteOne('name')"
+                       "db.users.deleteMany({})"
+                       "db.users.insertOne('name')"
+                       "db.users.insertMany({name: 'Ann'})"
+                       "db.users.insertMany([1])"
+                       "db.users.find({_id: NumberLong(7)})"
+                       "db.getSiblingDB('admin').runCommand({ping: 1})"
+                       "db.users.find({name: /ann/i})"))
+        (ert-info ((format "query: %s" query))
+          (should-error (clutch-mongodb--eval conn query)
+                        :type 'clutch-db-error))))))
+
+(ert-deftest clutch-db-test-mongodb-helper-chains-are-method-specific ()
+  "MongoDB parsing should reject chains that execution would ignore."
+  (dolist (query '("db.users.findOne({}).limit(1)"
+                   "db.users.aggregate([]).sort({_id: 1})"
+                   "db.users.deleteOne({}).limit(1)"))
+    (ert-info ((format "query: %s" query))
+      (should-error (clutch-mongodb--parse-db-call query)
+                    :type 'clutch-db-error))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
   "Native MongoDB eval should translate aggregate options and helper chains."
@@ -2016,10 +2034,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
               (clutch-db-test--make-mongodb-conn "app" 'client)
               (concat
                "db.users.aggregate([{$match: {active: true}}], "
-               "{allowDiskUse: false, comment: 'base'})"
+               "{allowDiskUse: false})"
                ".allowDiskUse(true)"
-               ".batchSize(25)"
-               ".comment('chain')"
                ".maxTimeMS(500)"))))
         (should (equal value '((("_id" . "active") ("n" . 2)))))))
     (pcase-let ((`(,client ,database ,collection ,pipeline ,options)
@@ -2035,45 +2051,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (mongodb-document-p options))
       (let ((pairs (mongodb-document-pairs options)))
         (should (eq (cdr (assoc "allowDiskUse" pairs)) t))
-        (should (equal (cdr (assoc "comment" pairs)) "chain"))
-        (should (= (cdr (assoc "batchSize" pairs)) 25))
         (should (= (cdr (assoc "maxTimeMS" pairs)) 500))))))
-
-(ert-deftest clutch-db-test-mongodb-eval-translates-database-aggregate ()
-  "Native MongoDB eval should translate db.aggregate() to database aggregate."
-  (let (calls)
-    (cl-letf (((symbol-function 'mongodb-aggregate-database)
-               (lambda (client database pipeline &optional options)
-                 (push (list client database pipeline options) calls)
-                 `((("database" . ,database))))))
-      (let ((value
-             (clutch-mongodb--eval
-              (clutch-db-test--make-mongodb-conn "app" 'client)
-              (concat
-               "db.aggregate([{$documents: [{n: 1}]}], "
-               "{comment: 'db-agg'});"
-               "db.getSiblingDB('admin').aggregate([{$currentOp: {}}])"))))
-        (should (equal value '((("database" . "admin")))))))
-    (setq calls (nreverse calls))
-    (should (= (length calls) 2))
-    (pcase-let ((`(,client ,database ,pipeline ,options) (car calls)))
-      (should (eq client 'client))
-      (should (equal database "app"))
-      (should (vectorp pipeline))
-      (let ((stage (aref pipeline 0)))
-        (should (mongodb-document-p stage))
-        (should (assoc "$documents" (mongodb-document-pairs stage))))
-      (should (mongodb-document-p options))
-      (should (equal (mongodb-document-pairs options)
-                     '(("comment" . "db-agg")))))
-    (pcase-let ((`(,client ,database ,pipeline ,options) (cadr calls)))
-      (should (eq client 'client))
-      (should (equal database "admin"))
-      (should (vectorp pipeline))
-      (let ((stage (aref pipeline 0)))
-        (should (mongodb-document-p stage))
-        (should (assoc "$currentOp" (mongodb-document-pairs stage))))
-      (should-not options))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-explain-chain ()
   "Native MongoDB eval should translate find/aggregate explain chains."
@@ -2107,8 +2085,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (should (assoc "pipeline" command))
         (should (eq (cdr (assoc "allowDiskUse" command)) t))))))
 
-(ert-deftest clutch-db-test-mongodb-eval-translates-count-distinct-index-helpers ()
-  "Native MongoDB eval should translate count, distinct, and index helpers."
+(ert-deftest clutch-db-test-mongodb-eval-translates-count-and-distinct ()
+  "Native MongoDB eval should translate common scalar read helpers."
   (let (calls)
     (cl-letf (((symbol-function 'mongodb-count-documents)
                (lambda (client database collection filter &optional options)
@@ -2120,33 +2098,14 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (push (list 'distinct client database collection field
                              filter options)
                        calls)
-                 '("a" "b")))
-              ((symbol-function 'mongodb-list-indexes)
-               (lambda (client database collection)
-                 (push (list 'list-indexes client database collection) calls)
-                 '((("name" . "_id_")))))
-              ((symbol-function 'mongodb-create-index)
-               (lambda (client database collection keys &optional options)
-                 (push (list 'create-index client database collection keys
-                             options)
-                       calls)
-                 '(("ok" . 1))))
-              ((symbol-function 'mongodb-drop-index)
-               (lambda (client database collection index)
-                 (push (list 'drop-index client database collection index)
-                       calls)
-                 '(("ok" . 1)))))
+                 '("a" "b"))))
       (clutch-mongodb--eval
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.users.countDocuments({active: true}, {limit: 10});"
-        "db.users.estimatedDocumentCount();"
-        "db.users.distinct('name', {active: true});"
-        "db.users.listIndexes();"
-        "db.users.createIndex({active: 1}, {name: 'active_idx'});"
-        "db.users.dropIndex('active_idx')")))
+        "db.users.distinct('name', {active: true})")))
     (setq calls (nreverse calls))
-    (should (= (length calls) 6))
+    (should (= (length calls) 2))
     (pcase-let ((`(count ,client ,database ,collection ,filter ,options)
                  (nth 0 calls)))
       (should (eq client 'client))
@@ -2158,31 +2117,14 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (mongodb-document-p options))
       (should (equal (mongodb-document-pairs options)
                      '(("limit" . 10)))))
-    (pcase-let ((`(count ,_client ,_database ,_collection ,filter ,options)
-                 (nth 1 calls)))
-      (should-not filter)
-      (should-not options))
     (pcase-let ((`(distinct ,_client ,_database ,_collection ,field
                             ,filter ,options)
-                 (nth 2 calls)))
+                 (nth 1 calls)))
       (should (equal field "name"))
       (should (mongodb-document-p filter))
       (should (equal (mongodb-document-pairs filter)
                      '(("active" . t))))
-      (should-not options))
-    (should (equal (nth 3 calls)
-                   '(list-indexes client "app" "users")))
-    (pcase-let ((`(create-index ,_client ,_database ,_collection ,keys
-                                ,options)
-                 (nth 4 calls)))
-      (should (mongodb-document-p keys))
-      (should (equal (mongodb-document-pairs keys)
-                     '(("active" . 1))))
-      (should (mongodb-document-p options))
-      (should (equal (mongodb-document-pairs options)
-                     '(("name" . "active_idx")))))
-    (should (equal (nth 5 calls)
-                   '(drop-index client "app" "users" "active_idx")))))
+      (should-not options))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-update-helpers ()
   "Native MongoDB eval should translate update helpers to mongodb.el calls."
@@ -2199,10 +2141,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
        (concat
         "db.users.updateOne({name: 'Ann'}, {$set: {seen: true}}, "
         "{upsert: true});"
-        "db.users.updateMany({active: true}, {$inc: {visits: 1}});"
         "db.users.replaceOne({_id: 'b'}, {_id: 'b', name: 'Bob'})")))
     (setq calls (nreverse calls))
-    (should (= (length calls) 3))
+    (should (= (length calls) 2))
     (pcase-let ((`(,client ,database ,collection ,filter ,update
                    ,multi ,options)
                  (car calls)))
@@ -2222,23 +2163,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (mongodb-document-p options))
       (should (equal (mongodb-document-pairs options)
                      '(("upsert" . t)))))
-    (pcase-let ((`(,_client ,_database ,_collection ,filter ,update
-                   ,multi ,options)
-                 (cadr calls)))
-      (should (mongodb-document-p filter))
-      (should (equal (mongodb-document-pairs filter)
-                     '(("active" . t))))
-      (should (mongodb-document-p update))
-      (let ((inc-doc (cdr (assoc "$inc"
-                                  (mongodb-document-pairs update)))))
-        (should (mongodb-document-p inc-doc))
-        (should (equal (mongodb-document-pairs inc-doc)
-                       '(("visits" . 1)))))
-      (should (eq multi t))
-      (should-not options))
     (pcase-let ((`(,_client ,_database ,_collection ,filter ,replacement
                    ,multi ,options)
-                 (caddr calls)))
+                 (cadr calls)))
       (should (mongodb-document-p filter))
       (should (equal (mongodb-document-pairs filter)
                      '(("_id" . "b"))))
@@ -2250,7 +2177,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should-not options))))
 
 (ert-deftest clutch-db-test-mongodb-mql-parses-bson-constructors ()
-  "Native MongoDB MQL parsing should preserve supported BSON constructors."
+  "Native MongoDB MQL parsing should preserve common query constructors."
   (should (= (clutch-mongodb--mql-iso-date-millis
               "2024-01-02T03:04:05.678Z")
              1704164645678))
@@ -2268,169 +2195,58 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
        (clutch-db-test--make-mongodb-conn "app" 'client)
        (concat
         "db.events.find({"
-        "createdAt: ISODate('2024-01-02T03:04:05.678Z'), "
-        "ts: Timestamp(1700000000, 7), "
-        "a: Int32('7'), b: NumberInt(8), "
-        "c: Long(7), d: NumberLong('9223372036854775807'), "
-        "price: Decimal128('12.3400'), tax: NumberDecimal('1.23')"
+        "_id: ObjectId('507f1f77bcf86cd799439011'), "
+        "createdAt: ISODate('2024-01-02T03:04:05.678Z')"
         "})")))
     (should (mongodb-document-p captured-filter))
     (let* ((pairs (mongodb-document-pairs captured-filter))
-           (created-at (cdr (assoc "createdAt" pairs)))
-           (timestamp (cdr (assoc "ts" pairs)))
-           (a (cdr (assoc "a" pairs)))
-           (b (cdr (assoc "b" pairs)))
-           (c (cdr (assoc "c" pairs)))
-           (d (cdr (assoc "d" pairs)))
-           (price (cdr (assoc "price" pairs)))
-           (tax (cdr (assoc "tax" pairs))))
+           (id (cdr (assoc "_id" pairs)))
+           (created-at (cdr (assoc "createdAt" pairs))))
+      (should (mongodb-object-id-p id))
+      (should (equal (mongodb-object-id-hex id)
+                     "507f1f77bcf86cd799439011"))
       (should (mongodb-datetime-p created-at))
-      (should (= (mongodb-datetime-millis created-at) 1704164645678))
-      (should (mongodb-timestamp-p timestamp))
-      (should (= (mongodb-timestamp-seconds timestamp) 1700000000))
-      (should (= (mongodb-timestamp-increment timestamp) 7))
-      (should (mongodb-int32-p a))
-      (should (= (mongodb-int32-value a) 7))
-      (should (mongodb-int32-p b))
-      (should (= (mongodb-int32-value b) 8))
-      (should (mongodb-int64-p c))
-      (should (= (mongodb-int64-value c) 7))
-      (should (mongodb-int64-p d))
-      (should (= (mongodb-int64-value d) 9223372036854775807))
-      (should (mongodb-decimal128-p price))
-      (should (equal (mongodb-decimal128-value price) "12.3400"))
-      (should (mongodb-decimal128-p tax))
-      (should (equal (mongodb-decimal128-value tax) "1.23")))))
+      (should (= (mongodb-datetime-millis created-at) 1704164645678)))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-db-helper-contract ()
-  "Native MongoDB db helpers should call database-level protocol helpers."
-  (let (command-call collection-call)
+  "Native MongoDB runCommand should call the public command API."
+  (let (command-call)
     (cl-letf (((symbol-function 'mongodb-command)
                (lambda (client database command &optional _timeout)
                  (setq command-call (list client database command))
-                 '(("ok" . 1))))
-              ((symbol-function 'mongodb-create-collection)
-               (lambda (client database collection &optional options)
-                 (setq collection-call
-                       (list client database collection options))
                  '(("ok" . 1)))))
       (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
         (should (equal (clutch-mongodb--eval conn "db.runCommand({ping: 1})")
-                       '(("ok" . 1))))
-        (should (equal
-                 (clutch-mongodb--eval
-                  conn
-                  "db.createCollection('events', {capped: true, size: 4096})")
-                 '(("ok" . 1))))))
+                       '(("ok" . 1))))))
     (pcase-let ((`(,client ,database ,command) command-call))
       (should (eq client 'client))
       (should (equal database "app"))
       (should (mongodb-document-p command))
       (should (equal (mongodb-document-pairs command)
-                     '(("ping" . 1)))))
-    (pcase-let ((`(,client ,database ,collection ,options) collection-call))
-      (should (eq client 'client))
-      (should (equal database "app"))
-      (should (equal collection "events"))
-      (should (mongodb-document-p options))
-      (should (equal (mongodb-document-pairs options)
-                     '(("capped" . t)
-                       ("size" . 4096)))))))
+                     '(("ping" . 1)))))))
 
-(ert-deftest clutch-db-test-mongodb-eval-translates-sibling-db-helpers ()
-  "Native MongoDB getSiblingDB() should target commands at the sibling database."
-  (let (commands collections finds)
-    (cl-letf (((symbol-function 'mongodb-command)
-               (lambda (client database command &optional _timeout)
-                 (push (list client database command) commands)
-                 '(("ok" . 1))))
-              ((symbol-function 'mongodb-create-collection)
-               (lambda (client database collection &optional options)
-                 (push (list client database collection options) collections)
-                 '(("ok" . 1))))
-              ((symbol-function 'mongodb-find)
-               (lambda (client database collection filter projection limit skip
-                             sort &optional options)
-                 (push (list client database collection filter projection
-                             limit skip sort options)
-                       finds)
-                 '((("_id" . "a"))))))
-      (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
-        (should (equal (clutch-mongodb--eval conn "db.getName()")
-                       "app"))
-        (should (equal (clutch-mongodb--eval
-                        conn
-                        "db.getSiblingDB('analytics')")
-                       "analytics"))
-        (should (equal (clutch-mongodb--eval
-                        conn
-                        "db.getSiblingDB('analytics').getName()")
-                       "analytics"))
-        (clutch-mongodb--eval
-         conn
-         (concat
-          "db.getSiblingDB('analytics').runCommand({ping: 1});"
-          "db.getSiblingDB('analytics').createCollection('events');"
-          "db.getSiblingDB('analytics').getCollection('users').find({_id: 'a'});"
-          "db.getSiblingDB('analytics').orders.find({_id: 'b'})"))))
-    (setq commands (nreverse commands)
-          collections (nreverse collections)
-          finds (nreverse finds))
-    (should (= (length commands) 1))
-    (should (= (length collections) 1))
-    (should (= (length finds) 2))
-    (pcase-let ((`(,client ,database ,command) (car commands)))
-      (should (eq client 'client))
-      (should (equal database "analytics"))
-      (should (mongodb-document-p command))
-      (should (equal (mongodb-document-pairs command)
-                     '(("ping" . 1)))))
-    (pcase-let ((`(,client ,database ,collection ,options)
-                 (car collections)))
-      (should (eq client 'client))
-      (should (equal database "analytics"))
-      (should (equal collection "events"))
-      (should-not options))
-    (pcase-let ((`(,client ,database ,collection ,filter ,_projection
-                         ,_limit ,_skip ,_sort ,_options)
-                 (car finds)))
-      (should (eq client 'client))
-      (should (equal database "analytics"))
-      (should (equal collection "users"))
-      (should (equal (mongodb-document-pairs filter)
-                     '(("_id" . "a")))))
-    (pcase-let ((`(,_client ,database ,collection ,filter ,_projection
-                          ,_limit ,_skip ,_sort ,_options)
-                 (cadr finds)))
-      (should (equal database "analytics"))
-      (should (equal collection "orders"))
-      (should (equal (mongodb-document-pairs filter)
-                     '(("_id" . "b")))))))
-
-(ert-deftest clutch-db-test-mongodb-metadata-uses-mongodb-helpers ()
+(ert-deftest clutch-db-test-mongodb-metadata-uses-public-client-api ()
   "Native MongoDB metadata should map databases and collections into Clutch objects."
   (let ((clutch-mongodb-schema-sample-size 2)
-        sample-codes)
-    (cl-letf (((symbol-function 'clutch-mongodb--eval)
-               (lambda (_conn code)
-                 (cond
-                  ((equal code "db.getCollectionNames()")
-                   '("users" "orders"))
-                  ((string-match-p
-                    (regexp-quote "db.getCollection(\"users\").find({}).limit(2)")
-                    code)
-                   (push code sample-codes)
-                   '((("_id" . (("$oid" . "64f")))
+        (documents '((("_id" . (("$oid" . "64f")))
                       ("name" . "Ann")
                       ("score" . 10)
                       ("profile" . (("age" . 30))))
                      (("_id" . (("$oid" . "650")))
                       ("score" . "high")
                       ("active" . :false))))
-                  ((string-match-p "getCollectionInfos" code)
-                   '((("name" . "users")
-                      ("type" . "collection"))))
-                  (t (error "unexpected code: %s" code))))))
+        sample-collections)
+    (cl-letf (((symbol-function 'mongodb-list-collections)
+               (lambda (_client _database) '("users" "orders")))
+              ((symbol-function 'mongodb-find)
+               (lambda (_client _database collection _filter _projection limit
+                                 &rest _)
+                 (push (list collection limit) sample-collections)
+                 documents))
+              ((symbol-function 'mongodb-list-collection-docs)
+               (lambda (_client _database &optional _filter _options)
+                 '((("name" . "users")
+                    ("type" . "collection"))))))
       (let ((conn (clutch-db-test--make-mongodb-conn)))
         (should (equal (clutch-db-list-schemas conn) '("app")))
         (should (equal (clutch-db-list-tables conn) '("users" "orders")))
@@ -2471,10 +2287,35 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                           :type-category text
                           :nullable t
                           :comment "present in 1/2 sampled documents"))))
-        (should (equal (length sample-codes) 2))
+        (should (equal sample-collections
+                       '(("users" 2) ("users" 2))))
         (should (string-match-p "\"users\""
                                 (clutch-db-object-definition
                                  conn '(:name "users" :type "COLLECTION"))))))))
+
+(ert-deftest clutch-db-test-mongodb-metadata-translates-client-errors ()
+  "Native MongoDB metadata should translate client errors at the adapter boundary."
+  (let ((conn (clutch-db-test--make-mongodb-conn)))
+    (dolist (case '((list-tables . mongodb-list-collections)
+                    (sample-documents . mongodb-find)
+                    (collection-info . mongodb-list-collection-docs)))
+      (pcase-let ((`(,operation . ,api) case))
+        (ert-info ((symbol-name operation))
+          (cl-letf (((symbol-function api)
+                     (lambda (&rest _args)
+                       (signal 'mongodb-error
+                               (list (format "%s failed" operation))))))
+            (let ((err
+                   (should-error
+                    (pcase operation
+                      ('list-tables (clutch-db-list-tables conn))
+                      ('sample-documents
+                       (clutch-mongodb--sample-documents conn "users"))
+                      ('collection-info
+                       (clutch-mongodb--collection-info conn "users")))
+                    :type 'clutch-db-error)))
+              (should (equal (cadr err)
+                             (format "%s failed" operation))))))))))
 
 (ert-deftest clutch-db-test-mongodb-schema-sample-size-rejects-invalid ()
   "Native MongoDB metadata should reject invalid schema sample sizes."
@@ -2484,7 +2325,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-mongodb-schema-sampling-rejects-non-documents ()
   "Native MongoDB metadata should reject non-document sampling results."
-  (cl-letf (((symbol-function 'clutch-mongodb--eval)
+  (cl-letf (((symbol-function 'mongodb-find)
              (lambda (&rest _args) 42)))
     (should-error
      (clutch-mongodb--sample-documents
@@ -2502,10 +2343,10 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                . (("required" . ["status"])))))
                          ("validationAction" . "warn")
                          ("validationLevel" . "moderate"))))))
-        captured-code)
-    (cl-letf (((symbol-function 'clutch-mongodb--eval)
-               (lambda (_conn code)
-                 (setq captured-code code)
+        captured-filter)
+    (cl-letf (((symbol-function 'mongodb-list-collection-docs)
+               (lambda (_client _database &optional filter _options)
+                 (setq captured-filter filter)
                  metadata)))
       (should
        (equal
@@ -2514,8 +2355,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
          '(:name "users" :type "COLLECTION")
          'show-validation)
         "{\"collection\":\"users\",\"configured\":true,\"validationAction\":\"warn\",\"validationLevel\":\"moderate\",\"validator\":{\"$jsonSchema\":{\"required\":[\"status\"]}}}"))
-      (should (equal captured-code
-                     "db.getCollectionInfos({name: \"users\"})")))))
+      (should (mongodb-document-p captured-filter))
+      (should (equal (mongodb-document-elements captured-filter)
+                     '(("name" . "users")))))))
 
 (ert-deftest clutch-db-test-mongodb-collection-stats-uses-collstats-stage ()
   "Native MongoDB should expose collection storage statistics."
@@ -2587,11 +2429,12 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (id-index (mongodb-document
                    `(("name" . "_id_")
                      ("key" . ,(mongodb-document '(("_id" . 1))))))))
-    (cl-letf (((symbol-function 'clutch-mongodb--eval)
-               (lambda (_conn code)
-                 (should (string-match-p
-                          "db.getCollection(\"users\").find({}).limit(3)"
-                          code))
+    (cl-letf (((symbol-function 'mongodb-find)
+               (lambda (_client database collection _filter _projection limit
+                                 &rest _)
+                 (should (equal database "app"))
+                 (should (equal collection "users"))
+                 (should (= limit 3))
                  sample-docs))
               ((symbol-function 'mongodb-list-indexes)
                (lambda (_client _database collection)
@@ -2633,7 +2476,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                          ((value . "blocked") (count . 1)))))))))
 
 (ert-deftest clutch-db-test-mongodb-index-insight-combines-definitions-and-usage ()
-  "Native MongoDB index insight should combine listIndexes and indexStats."
+  "Native MongoDB index insight should combine definitions and usage."
   (let ((captured-pipeline nil)
         (id-index (mongodb-document
                    `(("name" . "_id_")
@@ -3360,8 +3203,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   (require 'clutch)
   (let ((conn (make-clutch-jdbc-conn
                :params '(:driver jdbc :display-name "KingbaseES"))))
-    (should (clutch--jdbc-backend-p 'jdbc))
-    (should (clutch--jdbc-backend-p 'clickhouse))
+    (should (clutch-backend-jdbc-transport-p 'jdbc '(:backend jdbc)))
+    (should (clutch-backend-jdbc-transport-p
+             'clickhouse '(:backend clickhouse)))
     (should (equal (clutch--backend-display-name-from-params
                     '(:backend jdbc :display-name "KingbaseES"))
                    "KingbaseES"))
@@ -3378,7 +3222,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                (lambda (backend params)
                  (setq captured-backend backend
                        captured-params params)
-                 'fake-conn)))
+                 'fake-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t)))
       (should (eq (clutch--build-conn
                    '(:backend jdbc
                      :url "jdbc:kingbase8://127.0.0.1:54321/test"
@@ -4698,6 +4544,19 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
   "Return an isolated MongoDB live collection name using SUFFIX."
   (format "clutch_%s_%d" suffix (emacs-pid)))
 
+(defun clutch-db-test--mongodb-live-drop-collection (conn collection)
+  "Drop MongoDB COLLECTION through CONN, ignoring absence errors."
+  (ignore-errors
+    (mongodb-drop-collection
+     (clutch-mongodb-conn-client conn)
+     (clutch-mongodb-conn-database conn)
+     collection)))
+
+(defun clutch-db-test--mongodb-live-drop-database (conn database)
+  "Drop MongoDB DATABASE through CONN, ignoring absence errors."
+  (ignore-errors
+    (mongodb-drop-database (clutch-mongodb-conn-client conn) database)))
+
 (defun clutch-db-test--visible-result-column-indexes (result)
   "Return non-hidden column indexes for RESULT."
   (cl-loop for column in (clutch-db-result-columns result)
@@ -4768,6 +4627,7 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
     (let ((collection (clutch-db-test--mongodb-live-collection "query")))
       (unwind-protect
           (progn
+            (clutch-db-test--mongodb-live-drop-collection conn collection)
             (let* ((result (clutch-db-query conn "db.runCommand({ping: 1})"))
                    (columns (clutch-db-result-column-names
                              (clutch-db-result-columns result)))
@@ -4775,28 +4635,17 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
               (should ok-pos)
               (should (= (nth ok-pos (car (clutch-db-result-rows result)))
                          1.0)))
-            (ignore-errors
-              (clutch-db-query
-               conn
-               (format "db.getCollection(%S).drop()" collection)))
-            (clutch-db-query
-             conn
-             (format "db.createCollection(%S)" collection))
-            (should (member collection (clutch-db-list-tables conn)))
-            (clutch-db-query
-             conn
-             (format "db.getCollection(%S).deleteMany({})" collection))
             (clutch-db-query
              conn
              (format
               (concat
                "db.getCollection(%S).insertMany(["
                "{_id: 'a', n: 1, s: 'hello', code: 'a);b]/c', "
-               "createdAt: ISODate('2024-01-02T03:04:05.678Z'), "
-               "amount: Decimal128('12.3400')},"
+               "createdAt: ISODate('2024-01-02T03:04:05.678Z')},"
                "{_id: 'b', n: 2, nested: {ok: true}}"
                "])")
               collection))
+            (should (member collection (clutch-db-list-tables conn)))
             (let* ((code (format
                           (concat
                            "db.getCollection(%S).find({}, "
@@ -4824,9 +4673,7 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                            "db.getCollection(%S).aggregate(["
                            "{$match: {_id: {$in: ['a', 'b']}}}, "
                            "{$group: {_id: null, total: {$sum: \"$n\"}}}"
-                           "], {allowDiskUse: true, comment: 'agg-base'})"
-                           ".batchSize(2)"
-                           ".comment('agg-chain')"
+                           "], {allowDiskUse: true})"
                            ".maxTimeMS(1000)")
                           collection))
                    (result (clutch-db-query conn code))
@@ -4855,9 +4702,7 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                            "db.getCollection(%S).find("
                            "{_id: {$gte: 'a'}}, {_id: 1, n: 1})"
                            ".sort({_id: -1})"
-                           ".batchSize(1)"
                            ".maxTimeMS(1000)"
-                           ".comment('clutch-live')"
                            ".allowDiskUse(true)"
                            ".skip(0)"
                            ".limit(1)")
@@ -4876,12 +4721,11 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                "{_id: 'c'}, {$set: {n: 3, group: 'upd'}}, "
                "{upsert: true});"
                "db.getCollection(%S).insertOne({_id: 'd', group: 'upd', n: 0});"
-               "db.getCollection(%S).updateMany({group: 'upd'}, {$inc: {n: 1}});"
                "db.getCollection(%S).replaceOne("
                "{_id: 'd'}, {_id: 'd', group: 'replaced', n: 9});"
                "db.getCollection(%S).insertOne({_id: 'e', n: 5});"
                "db.getCollection(%S).deleteOne({_id: 'e'})")
-              collection collection collection collection collection collection))
+              collection collection collection collection collection))
             (let* ((code (format
                           (concat
                            "db.getCollection(%S).find("
@@ -4905,20 +4749,8 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                                          (cell row "n")
                                          (cell row "group")))
                                         rows)
-                         '(("c" 4 "upd")
+                         '(("c" 3 "upd")
                            ("d" 9 "replaced"))))))
-            (let* ((code (format
-                          (concat
-                           "db.getCollection(%S).find("
-                           "{amount: Decimal128('12.3400')}, "
-                           "{_id: 1, amount: 1})")
-                          collection))
-                   (result (clutch-db-query conn code)))
-              (should (equal (clutch-db-test--visible-result-column-names
-                              result)
-                             '("_id" "amount")))
-              (should (equal (clutch-db-test--visible-result-rows result)
-                             '(("a" "{\"$numberDecimal\":\"12.3400\"}")))))
             (let* ((code (format
                           (concat
                            "db.getCollection(%S).find("
@@ -4931,10 +4763,7 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                              '("_id" "createdAt")))
               (should (equal (clutch-db-test--visible-result-rows result)
                              '(("a" "{\"$date\":1704164645678}"))))))
-        (ignore-errors
-          (clutch-db-query
-           conn
-           (format "db.getCollection(%S).drop()" collection)))))))
+        (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-schema ()
   :tags '(:db-live :mongodb-live)
@@ -4944,25 +4773,28 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
            (validation-collection (concat collection "_validation")))
       (unwind-protect
           (progn
+            (clutch-db-test--mongodb-live-drop-collection conn collection)
+            (clutch-db-test--mongodb-live-drop-collection
+             conn validation-collection)
             (clutch-db-query
              conn
              (format
               (concat
-               "db.getCollection(%S).deleteMany({});"
                "db.getCollection(%S).insertOne({_id: 'sample-a', field: 1});"
                "db.getCollection(%S).insertOne({_id: 'sample-b', extra: true})")
-              collection collection collection))
-            (clutch-db-query
-             conn
-             (format
-              "db.getCollection(%S).createIndex({field: 1}, {name: 'field_idx'})"
-              collection))
+              collection collection))
+            (mongodb-create-index
+             (clutch-mongodb-conn-client conn)
+             (clutch-mongodb-conn-database conn)
+             collection
+             (mongodb-document '(("field" . 1)))
+             (mongodb-document '(("name" . "field_idx"))))
             (clutch-db-query
              conn
              (format
               (concat
-               "db.createCollection(%S, "
-               "{validator: {$jsonSchema: {bsonType: 'object', "
+               "db.runCommand({create: %S, "
+               "validator: {$jsonSchema: {bsonType: 'object', "
                "required: ['status'], "
                "properties: {status: {bsonType: 'string'}}}}, "
                "validationAction: 'error', validationLevel: 'strict'})")
@@ -5020,12 +4852,9 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
               (should (string-match-p "\"validationLevel\":\"strict\""
                                       validation))
               (should (string-match-p "\"\\$jsonSchema\"" validation))))
-        (ignore-errors
-          (clutch-db-query
-           conn
-           (format
-            "db.getCollection(%S).drop();db.getCollection(%S).drop()"
-            collection validation-collection)))))))
+        (clutch-db-test--mongodb-live-drop-collection conn collection)
+        (clutch-db-test--mongodb-live-drop-collection
+         conn validation-collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-set-current-schema ()
   :tags '(:db-live :mongodb-live)
@@ -5044,61 +4873,8 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
              conn
              (format "db.getCollection(%S).insertOne({_id: 'ok'})" collection))
             (should (member collection (clutch-db-list-tables conn))))
-        (ignore-errors (clutch-db-query conn "db.dropDatabase()"))
+        (clutch-db-test--mongodb-live-drop-database conn schema)
         (clutch-db-set-current-schema conn original)))))
-
-(ert-deftest clutch-db-test-mongodb-live-sibling-db ()
-  :tags '(:db-live :mongodb-live)
-  "Native MongoDB getSiblingDB() should target another database without switching."
-  (clutch-db-test--with-mongodb conn
-    (let ((original (clutch-db-current-schema conn))
-          (schema (format "%s_sibling_%d"
-                          clutch-db-test-mongodb-database
-                          (emacs-pid)))
-          (collection "clutch_sibling"))
-      (unwind-protect
-          (progn
-            (should (equal
-                     (caar (clutch-db-result-rows
-                            (clutch-db-query conn "db.getName()")))
-                     original))
-            (should (equal
-                     (caar
-                      (clutch-db-result-rows
-                       (clutch-db-query
-                        conn
-                        (format "db.getSiblingDB(%S).getName()" schema))))
-                     schema))
-            (clutch-db-query
-             conn
-             (format "db.getSiblingDB(%S).createCollection(%S)"
-                     schema collection))
-            (clutch-db-query
-             conn
-             (format
-              (concat
-               "db.getSiblingDB(%S).getCollection(%S)"
-               ".insertOne({_id: 'ok', n: 1})")
-              schema collection))
-            (let* ((result
-                    (clutch-db-query
-                     conn
-                     (format
-                      (concat
-                       "db.getSiblingDB(%S).getCollection(%S)"
-                       ".find({_id: 'ok'}, {_id: 1, n: 1})")
-                      schema collection)))
-                   (columns (mapcar (lambda (column)
-                                      (plist-get column :name))
-                                    (clutch-db-result-columns result))))
-              (should (equal columns '("_id" "n" "clutch__document")))
-              (should (equal (clutch-db-test--visible-result-rows result)
-                             '(("ok" 1)))))
-            (should (equal (clutch-db-current-schema conn) original)))
-        (ignore-errors
-          (clutch-db-query
-           conn
-           (format "db.getSiblingDB(%S).dropDatabase()" schema)))))))
 
 (ert-deftest clutch-db-test-mongodb-live-error ()
   :tags '(:db-live :mongodb-live)
@@ -5109,13 +4885,12 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
     (let ((collection (clutch-db-test--mongodb-live-collection "error")))
       (unwind-protect
           (progn
+            (clutch-db-test--mongodb-live-drop-collection conn collection)
             (clutch-db-query
              conn
              (format
-              (concat
-               "db.getCollection(%S).deleteMany({});"
-               "db.getCollection(%S).insertOne({_id: 'dup'})")
-              collection collection))
+              "db.getCollection(%S).insertOne({_id: 'dup'})"
+              collection))
             (let ((err (should-error
                         (clutch-db-query
                          conn
@@ -5126,10 +4901,7 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
               (should (string-match-p
                        "\\(DuplicateKey\\|duplicate key\\|E11000\\)"
                        (error-message-string err)))))
-        (ignore-errors
-          (clutch-db-query
-           conn
-           (format "db.getCollection(%S).drop()" collection)))))))
+        (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-redis-live-connect ()
   :tags '(:db-live :redis-live)

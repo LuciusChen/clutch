@@ -305,19 +305,16 @@ document connection."
                       (eq action-id 'show-stats)))))
       (let ((clutch--object-action-entry '(:name "ORDERS" :type "TABLE")))
         (should-not (clutch--object-act-jump-target-p))
-        (should (clutch--object-act-jump-target-inapt-p))
         (should-not (clutch--object-act-document-actions-p))
-        (should (clutch--object-act-show-stats-inapt-p)))
+        (should-not (clutch--object-act-backend-action-p 'show-stats)))
       (let ((clutch--object-action-entry '(:name "ORDER_IDX" :type "INDEX")))
         (should (clutch--object-act-jump-target-p))
-        (should-not (clutch--object-act-jump-target-inapt-p))
         (should-not (clutch--object-act-document-actions-p))
-        (should (clutch--object-act-show-stats-inapt-p)))
+        (should-not (clutch--object-act-backend-action-p 'show-stats)))
       (let ((clutch--object-action-entry '(:name "users" :type "COLLECTION")))
         (should-not (clutch--object-act-jump-target-p))
-        (should (clutch--object-act-jump-target-inapt-p))
         (should (clutch--object-act-document-actions-p))
-        (should-not (clutch--object-act-show-stats-inapt-p))))))
+        (should (clutch--object-act-backend-action-p 'show-stats))))))
 
 (ert-deftest clutch-test-object-key-is-browseable-but-not-document-action-target ()
   "Redis KEY objects should browse without becoming document collections."
@@ -404,44 +401,6 @@ document connection."
               ((symbol-function 'message) #'ignore))
       (clutch-copy-object-fqname)
       (should (equal prompt "Copy object fqname: ")))))
-
-(ert-deftest clutch-test-browse-table-inserts-escaped-select ()
-  "Browse-table compatibility wrapper should still escape identifiers."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn)
-    (insert "-- tail")
-    (cl-letf (((symbol-function 'clutch-object-browse)
-               (lambda (entry)
-                 (let ((sql (format "SELECT * FROM %s;"
-                                    (clutch-db-escape-identifier
-                                     clutch-connection
-                                     (plist-get entry :name)))))
-                   (goto-char (point-max))
-                   (unless (bolp) (insert "\n"))
-                   (insert "\n" sql))))
-              ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn tbl) (format "\"%s\"" tbl))))
-      (clutch-browse-table "order-items"))
-    (should (string-suffix-p
-             "\n\nSELECT * FROM \"order-items\";"
-             (buffer-string)))))
-
-(ert-deftest clutch-test-browse-table-interactive-preserves-entry-schema ()
-  "Interactive browse-table should preserve schema-qualified entries."
-  (let (captured-entry)
-    (cl-letf (((symbol-function 'clutch-object-read)
-               (lambda (&rest _args)
-                 '(:name "background_schedule_pool_log"
-                   :type "TABLE"
-                   :source-schema "system")))
-              ((symbol-function 'clutch-object-browse)
-               (lambda (entry)
-                 (setq captured-entry entry))))
-      (call-interactively #'clutch-browse-table))
-    (should (equal captured-entry
-                   '(:name "background_schedule_pool_log"
-                     :type "TABLE"
-                     :source-schema "system")))))
 
 ;;;; Object — describe and DDL
 
@@ -587,8 +546,7 @@ document connection."
 
 (ert-deftest clutch-test-object-describe-table-propagates-column-detail-errors ()
   "Table describe should not hide column-detail failures behind list-columns."
-  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
-        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
         (detail-calls 0)
         (list-columns-calls 0))
     (cl-letf (((symbol-function 'clutch--connection-key)
@@ -617,33 +575,22 @@ document connection."
 (ert-deftest clutch-test-render-object-describe-refreshes-table-metadata-cache ()
   "Describe rendering should reload table metadata instead of reusing stale fields."
   (let ((clutch--schema-cache (make-hash-table :test 'equal))
-        (clutch--columns-status-cache (make-hash-table :test 'equal))
-        (clutch--column-details-cache (make-hash-table :test 'equal))
-        (clutch--column-details-status-cache (make-hash-table :test 'equal))
+        (clutch--table-metadata-cache (make-hash-table :test 'equal))
         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
         (clutch--column-details-active-cache (make-hash-table :test 'equal))
-        (clutch--table-comment-cache (make-hash-table :test 'equal))
-        (clutch--table-comment-status-cache (make-hash-table :test 'equal))
-        (clutch--foreign-keys-cache (make-hash-table :test 'equal))
-        (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
         (detail-calls 0))
     (let ((schema (make-hash-table :test 'equal))
-          (details (make-hash-table :test 'equal))
-          (details-status (make-hash-table :test 'equal))
-          (columns-status (make-hash-table :test 'equal))
-          (comments (make-hash-table :test 'equal)))
+          (metadata (make-hash-table :test 'equal)))
       (puthash "USERS" '("id" "old_col") schema)
       (puthash "dev-key" schema clutch--schema-cache)
-      (puthash "USERS" '((:name "id" :type "int")
-                         (:name "old_col" :type "text"))
-               details)
-      (puthash "dev-key" details clutch--column-details-cache)
-      (puthash "USERS" '(:state failed :error "old failure") details-status)
-      (puthash "dev-key" details-status clutch--column-details-status-cache)
-      (puthash "USERS" '(:state failed :error "old columns") columns-status)
-      (puthash "dev-key" columns-status clutch--columns-status-cache)
-      (puthash '("APP" . "USERS") "old comment" comments)
-      (puthash "dev-key" comments clutch--table-comment-cache)
+      (puthash "USERS"
+               '(:column-details ((:name "id" :type "int")
+                                  (:name "old_col" :type "text"))
+                 :column-details-status (:state failed :error "old failure")
+                 :columns-status (:state failed :error "old columns"))
+               metadata)
+      (puthash '("APP" . "USERS") '(:comment "old comment") metadata)
+      (puthash "dev-key" metadata clutch--table-metadata-cache)
       (puthash "dev-key" '("USERS" "ORDERS")
                clutch--column-details-queue-cache)
       (puthash "dev-key" (cons "USERS" 7)
@@ -792,8 +739,7 @@ document connection."
   "Describe failures should record source-buffer problems and optional debug trace."
   (dolist (debug-p '(nil t))
     (ert-info ((format "debug: %s" debug-p))
-      (let ((clutch--column-details-cache (make-hash-table :test 'equal))
-            (clutch--column-details-status-cache (make-hash-table :test 'equal))
+      (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
             (details '(:backend jdbc
                        :summary "ORA-12592: TNS:bad packet"
                        :diag (:category "metadata"
@@ -892,25 +838,14 @@ document connection."
   "Object reader should expose warmed non-table metadata in the flat picker."
   (let ((clutch--object-cache (make-hash-table :test 'equal))
         captured)
-    (let ((by-type (make-hash-table :test 'equal)))
-      (puthash "INDEX"
-               '((:name "ORDER_IDX" :type "INDEX"
-                  :schema "APP" :source-schema "APP"))
-               by-type)
-      (puthash "PROCEDURE"
-               '((:name "PROCESS_ORDER" :type "PROCEDURE"
-                  :schema "APP" :source-schema "APP"
-                  :status "VALID"))
-               by-type)
-      (puthash "fake-key"
-               (list :entries '((:name "ORDER_IDX" :type "INDEX"
-                                 :schema "APP" :source-schema "APP")
-                                (:name "PROCESS_ORDER" :type "PROCEDURE"
-                                 :schema "APP" :source-schema "APP"
-                                 :status "VALID"))
-                     :by-type by-type
-                     :loaded-categories '(indexes procedures))
-               clutch--object-cache))
+    (puthash "fake-key"
+             (list :entries '((:name "ORDER_IDX" :type "INDEX"
+                               :schema "APP" :source-schema "APP")
+                              (:name "PROCESS_ORDER" :type "PROCEDURE"
+                               :schema "APP" :source-schema "APP"
+                               :status "VALID"))
+                   :loaded-categories '(indexes procedures))
+             clutch--object-cache)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch--warn-schema-cache-state) #'ignore)
               ((symbol-function 'clutch--connection-key)
@@ -959,8 +894,7 @@ document connection."
 (ert-deftest clutch-test-object-cache-primes-table-entry-comments ()
   "Object cache storage should prime table comments carried by entries."
   (let ((clutch--object-cache (make-hash-table :test 'equal))
-        (clutch--table-comment-cache (make-hash-table :test 'equal))
-        (clutch--table-comment-status-cache (make-hash-table :test 'equal)))
+        (clutch--table-metadata-cache (make-hash-table :test 'equal)))
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "fake-key"))
               ((symbol-function 'clutch-db-list-table-entries)
@@ -1225,6 +1159,32 @@ document connection."
                            (lambda (m) (string-match-p symbol m))
                            messages)))))))))))
 
+(ert-deftest clutch-test-resolve-entry-remote-search-errors-surface ()
+  "Remote object search failures should reach the command error boundary."
+  (cl-letf (((symbol-function 'clutch--buffer-current-object)
+             (lambda (&rest _) nil))
+            ((symbol-function 'clutch--object-matches-at-point)
+             (lambda (&rest _) nil))
+            ((symbol-function 'clutch--ensure-connection) #'ignore)
+            ((symbol-function 'clutch--warn-schema-cache-state) #'ignore)
+            ((symbol-function 'clutch--object-connection-alive-p)
+             (lambda (_) t))
+            ((symbol-function 'thing-at-point)
+             (lambda (&rest _) "REMOTE_ONLY"))
+            ((symbol-function 'clutch--object-entries)
+             (lambda (&rest _) nil))
+            ((symbol-function 'clutch-db-search-table-entries)
+             (lambda (&rest _)
+               (signal 'clutch-db-error '("remote search failed"))))
+            ((symbol-function 'clutch--object-cache-complete-p)
+             (lambda (_) t))
+            ((symbol-function 'clutch--object-entry-reader)
+             (lambda (&rest _) nil)))
+    (with-temp-buffer
+      (setq-local clutch-connection 'fake-conn)
+      (should-error (clutch--resolve-object-entry "Describe: ")
+                    :type 'clutch-db-error))))
+
 (ert-deftest clutch-test-resolve-entry-incomplete-cache-refresh-contract ()
   "Incomplete object caches should sync-refresh non-table candidates."
   (dolist (case '(("single refreshed procedure"
@@ -1328,17 +1288,11 @@ document connection."
   "Unified object entries should avoid synchronous full metadata scans."
   (let ((clutch--object-cache (make-hash-table :test 'equal))
         scheduled)
-    (let ((by-type (make-hash-table :test 'equal)))
-      (puthash "PROCEDURE"
-               '((:name "PROCESS_ORDER" :type "PROCEDURE"
-                  :schema "APP" :source-schema "APP"))
-               by-type)
-      (puthash "fake-key"
-               (list :entries '((:name "PROCESS_ORDER" :type "PROCEDURE"
-                                 :schema "APP" :source-schema "APP"))
-                     :by-type by-type
-                     :loaded-categories '(procedures))
-               clutch--object-cache))
+    (puthash "fake-key"
+             (list :entries '((:name "PROCESS_ORDER" :type "PROCEDURE"
+                               :schema "APP" :source-schema "APP"))
+                   :loaded-categories '(procedures))
+             clutch--object-cache)
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "fake-key"))
               ((symbol-function 'clutch--connection-alive-p)
@@ -1643,6 +1597,20 @@ document connection."
       (goto-char (point-min))
       (should (equal (clutch--resolve-object-entry "Test: ")
                      '(:name "xxx_detail" :type "TABLE"))))))
+
+(ert-deftest clutch-test-resolve-object-entry-scopes-action-target-to-transient ()
+  "A closed object menu should not override normal object resolution."
+  (let ((clutch--object-action-entry '(:name "OLD" :type "TABLE")))
+    (cl-letf (((symbol-function 'clutch--buffer-current-object)
+               (lambda (&rest _) '(:name "CURRENT" :type "TABLE")))
+              ((symbol-function 'clutch--object-matches-at-point)
+               (lambda (&rest _) nil)))
+      (let ((transient-current-command nil))
+        (should (equal (clutch--resolve-object-entry "Test: ")
+                       '(:name "CURRENT" :type "TABLE"))))
+      (let ((transient-current-command 'clutch-object-actions-menu))
+        (should (equal (clutch--resolve-object-entry "Test: ")
+                       '(:name "OLD" :type "TABLE")))))))
 
 (ert-deftest clutch-test-embark-action-specs-contract ()
   "Embark menus should hide default duplicates unless target actions need them."

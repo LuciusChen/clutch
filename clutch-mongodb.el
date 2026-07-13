@@ -43,13 +43,9 @@
 (declare-function clutch-db-jdbc-connect "clutch-db-jdbc" (driver params))
 (declare-function mongodb-aggregate "mongodb" (client database collection pipeline &optional options))
 (declare-function mongodb-aggregate-command "mongodb" (collection pipeline &optional options))
-(declare-function mongodb-aggregate-database "mongodb" (client database pipeline &optional options))
 (declare-function mongodb-command "mongodb" (client database command &optional timeout sequences))
 (declare-function mongodb-connect "mongodb" (params))
 (declare-function mongodb-count-documents "mongodb" (client database collection filter &optional options))
-(declare-function mongodb-create-collection "mongodb" (client database collection &optional options))
-(declare-function mongodb-create-index "mongodb" (client database collection keys &optional options))
-(declare-function mongodb-decimal128 "mongodb" (value))
 (declare-function mongodb-delete "mongodb" (client database collection filter &optional multi))
 (declare-function mongodb-datetime "mongodb" (millis))
 (declare-function mongodb-disconnect "mongodb" (conn))
@@ -57,22 +53,16 @@
 (declare-function mongodb-document "mongodb" (elements))
 (declare-function mongodb-document-elements "mongodb" (document))
 (declare-function mongodb-document-p "mongodb" (value))
-(declare-function mongodb-drop-collection "mongodb" (client database collection))
-(declare-function mongodb-drop-database "mongodb" (client database))
-(declare-function mongodb-drop-index "mongodb" (client database collection index))
 (declare-function mongodb-error-labels "mongodb" (condition))
 (declare-function mongodb-explain "mongodb" (client database command &optional verbosity))
 (declare-function mongodb-find "mongodb" (client database collection filter &optional projection limit skip sort options))
 (declare-function mongodb-find-command "mongodb" (collection filter &optional projection limit skip sort options))
 (declare-function mongodb-insert "mongodb" (client database collection documents))
-(declare-function mongodb-int32 "mongodb" (value))
-(declare-function mongodb-int64 "mongodb" (value))
 (declare-function mongodb-list-collection-docs "mongodb" (client database &optional filter options))
 (declare-function mongodb-list-collections "mongodb" (client database &optional filter options))
 (declare-function mongodb-list-indexes "mongodb" (client database collection))
 (declare-function mongodb-live-p "mongodb" (conn))
 (declare-function mongodb-object-id "mongodb" (hex))
-(declare-function mongodb-timestamp "mongodb" (time increment))
 (declare-function mongodb-update "mongodb" (client database collection filter update &optional multi upsert))
 (declare-function mongodb-conn-database "mongodb" (conn))
 
@@ -137,13 +127,9 @@
 (defconst clutch-mongodb--required-mongodb-functions
   '(mongodb-aggregate
     mongodb-aggregate-command
-    mongodb-aggregate-database
     mongodb-command
     mongodb-connect
     mongodb-count-documents
-    mongodb-create-collection
-    mongodb-create-index
-    mongodb-decimal128
     mongodb-delete
     mongodb-datetime
     mongodb-disconnect
@@ -151,22 +137,16 @@
     mongodb-document
     mongodb-document-elements
     mongodb-document-p
-    mongodb-drop-collection
-    mongodb-drop-database
-    mongodb-drop-index
     mongodb-error-labels
     mongodb-explain
     mongodb-find
     mongodb-find-command
     mongodb-insert
-    mongodb-int32
-    mongodb-int64
     mongodb-list-collection-docs
     mongodb-list-collections
     mongodb-list-indexes
     mongodb-live-p
     mongodb-object-id
-    mongodb-timestamp
     mongodb-update
     mongodb-conn-database)
   "Public mongodb.el functions required by the native MongoDB adapter.")
@@ -289,21 +269,7 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (let ((token (substring (clutch-mongodb--mql-reader-text reader)
                             start
                             (clutch-mongodb--mql-reader-pos reader))))
-      (if (string-match-p "[.eE]" token)
-          (string-to-number token)
-        (string-to-number token)))))
-
-(defun clutch-mongodb--mql-integer-arg (value constructor)
-  "Return VALUE as an integer argument for MongoDB CONSTRUCTOR."
-  (cond
-   ((integerp value) value)
-   ((and (stringp value)
-         (string-match-p "\\`[-+]?[0-9]+\\'" value))
-    (string-to-number value))
-   (t
-    (signal 'clutch-db-error
-            (list (format "%s() expects an integer or integer string"
-                          constructor))))))
+      (string-to-number token))))
 
 (defun clutch-mongodb--mql-nonnegative-integer-arg (value method)
   "Return VALUE as a non-negative integer argument for MongoDB METHOD."
@@ -427,34 +393,6 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
                  (list "ISODate() expects one ISO-8601 string")))
        (mongodb-datetime
         (clutch-mongodb--mql-iso-date-millis (car args))))
-      ("Timestamp"
-       (unless (and (= (length args) 2)
-                    (integerp (car args))
-                    (integerp (cadr args)))
-         (signal 'clutch-db-error
-                 (list "Timestamp() expects integer seconds and increment")))
-       (mongodb-timestamp (car args) (cadr args)))
-      ((or "Int32" "NumberInt")
-       (unless (= (length args) 1)
-         (signal 'clutch-db-error
-                 (list (format "%s() expects one integer argument"
-                               name))))
-       (mongodb-int32
-        (clutch-mongodb--mql-integer-arg (car args) name)))
-      ((or "Long" "NumberLong")
-       (unless (= (length args) 1)
-         (signal 'clutch-db-error
-                 (list (format "%s() expects one integer argument"
-                               name))))
-       (mongodb-int64
-        (clutch-mongodb--mql-integer-arg (car args) name)))
-      ((or "Decimal128" "NumberDecimal")
-       (unless (and (= (length args) 1)
-                    (stringp (car args)))
-         (signal 'clutch-db-error
-                 (list (format "%s() expects one decimal string"
-                               name))))
-       (mongodb-decimal128 (car args)))
       (_
        (signal 'clutch-db-error
                (list (format "Unsupported MongoDB constructor: %s" name)))))))
@@ -607,9 +545,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
          (inside (substring text (1+ open-pos) close)))
     (cons (clutch-mongodb--mql-parse-args inside) close)))
 
-(defun clutch-mongodb--parse-method-call (text pos collection &optional database)
-  "Parse a collection method call in TEXT at POS for COLLECTION.
-When DATABASE is non-nil, attach it as the target database override."
+(defun clutch-mongodb--parse-method-call (text pos collection)
+  "Parse a collection method call in TEXT at POS for COLLECTION."
   (unless (and (< pos (length text))
                (eq (aref text pos) ?.))
     (signal 'clutch-db-error
@@ -626,15 +563,17 @@ When DATABASE is non-nil, attach it as the target database override."
       (setq args parsed-args
             close close-pos))
     (setq chain (clutch-mongodb--parse-helper-chain
-                 (substring text (1+ close))))
-    (append (list :collection collection :method method :args args
-                  :chain chain)
-            (when database
-              (list :database database)))))
+                 (substring text (1+ close)) method))
+    (list :collection collection :method method :args args :chain chain)))
 
-(defun clutch-mongodb--parse-helper-chain (text)
-  "Parse supported collection helper chain suffix TEXT."
+(defun clutch-mongodb--parse-helper-chain (text collection-method)
+  "Parse helper chain suffix TEXT supported by COLLECTION-METHOD."
   (let ((tail (string-trim text))
+        (allowed-methods
+         (pcase collection-method
+           ("find" '("sort" "skip" "limit" "maxTimeMS"
+                     "allowDiskUse" "explain"))
+           ("aggregate" '("maxTimeMS" "allowDiskUse" "explain"))))
         chain)
     (while (not (string-empty-p tail))
       (unless (string-prefix-p "." tail)
@@ -648,6 +587,10 @@ When DATABASE is non-nil, attach it as the target database override."
         (let ((method (string-trim (substring tail method-start open))))
           (pcase-let ((`(,args . ,close)
                        (clutch-mongodb--parse-call-args tail open)))
+            (unless (member method allowed-methods)
+              (signal 'clutch-db-error
+                      (list (format "Unsupported MongoDB %s() chain helper: %s"
+                                    collection-method method))))
             (pcase method
               ((or "limit" "skip")
                (unless (and (= (length args) 1)
@@ -656,7 +599,7 @@ When DATABASE is non-nil, attach it as the target database override."
                          (list (format "%s() expects one integer argument"
                                        method))))
                (push (cons method (car args)) chain))
-              ((or "maxTimeMS" "batchSize")
+              ("maxTimeMS"
                (unless (= (length args) 1)
                  (signal 'clutch-db-error
                          (list (format "%s() expects one integer argument"
@@ -677,11 +620,6 @@ When DATABASE is non-nil, attach it as the target database override."
                             (mongodb-document-p (car args)))
                  (signal 'clutch-db-error
                          (list "sort() expects one document argument")))
-               (push (cons method (car args)) chain))
-              ("comment"
-               (unless (= (length args) 1)
-                 (signal 'clutch-db-error
-                         (list "comment() expects one argument")))
                (push (cons method (car args)) chain))
               ("explain"
                (unless (<= (length args) 1)
@@ -722,41 +660,21 @@ When both are present, return the earlier one."
                (cons method value))))
          chain)))
 
-(defun clutch-mongodb--find-options-from-chain (chain)
-  "Return MongoDB find command options parsed from helper CHAIN."
-  (clutch-mongodb--options-from-chain
-   chain
-   '("maxTimeMS" "batchSize" "allowDiskUse" "comment")))
-
-(defun clutch-mongodb--aggregate-options-from-chain (chain)
-  "Return MongoDB aggregate command options parsed from helper CHAIN."
-  (clutch-mongodb--options-from-chain
-   chain
-   '("allowDiskUse" "batchSize" "comment" "maxTimeMS")))
-
-(defun clutch-mongodb--merge-option-pairs (base extra)
-  "Return a MongoDB option document from BASE pairs with EXTRA overriding."
+(defun clutch-mongodb--merge-options (base extra)
+  "Return option document merged from BASE document and EXTRA alist."
   (let ((pairs (append
                 (cl-remove-if (lambda (pair)
                                 (assoc (car pair) extra))
-                              (or base nil))
+                              (and base (mongodb-document-elements base)))
                 extra)))
-    (and pairs
-         (mongodb-document pairs))))
-
-(defun clutch-mongodb--merge-options (base extra)
-  "Return option document merged from BASE document and EXTRA alist."
-  (clutch-mongodb--merge-option-pairs
-   (and base (mongodb-document-elements base))
-   extra))
+    (and pairs (mongodb-document pairs))))
 
 (defun clutch-mongodb--explain-verbosity (chain)
   "Return explain verbosity requested by helper CHAIN, or nil."
   (cdr (assoc "explain" chain)))
 
-(defun clutch-mongodb--parse-db-member-call (text rest-pos &optional database)
-  "Parse a MongoDB DB member call in TEXT starting at REST-POS.
-DATABASE, when non-nil, is the database targeted by the parsed helper."
+(defun clutch-mongodb--parse-db-member-call (text rest-pos)
+  "Parse a MongoDB DB member call in TEXT starting at REST-POS."
   (cond
    ((string-prefix-p "getCollection(" (substring text rest-pos))
     (let* ((open (+ rest-pos (length "getCollection")))
@@ -767,25 +685,7 @@ DATABASE, when non-nil, is the database targeted by the parsed helper."
                    (stringp (car args)))
         (signal 'clutch-db-error
                 (list "db.getCollection() expects one collection name string")))
-      (clutch-mongodb--parse-method-call
-       text (1+ close) (car args) database)))
-   ((string-prefix-p "getSiblingDB(" (substring text rest-pos))
-    (let* ((open (+ rest-pos (length "getSiblingDB")))
-           (parsed (clutch-mongodb--parse-call-args text open))
-           (args (car parsed))
-           (close (cdr parsed)))
-      (unless (and (= (length args) 1)
-                   (stringp (car args)))
-        (signal 'clutch-db-error
-                (list "db.getSiblingDB() expects one database name string")))
-      (let ((tail (string-trim (substring text (1+ close)))))
-        (if (string-empty-p tail)
-            (list :db-method "getSiblingDB" :args args)
-          (unless (string-prefix-p "." tail)
-            (signal 'clutch-db-error
-                    (list "Unsupported MongoDB getSiblingDB() helper chain")))
-          (clutch-mongodb--parse-db-member-call
-           tail 1 (car args))))))
+      (clutch-mongodb--parse-method-call text (1+ close) (car args))))
    (t
     (let* ((token-end
             (clutch-mongodb--next-db-member-separator text rest-pos))
@@ -797,11 +697,8 @@ DATABASE, when non-nil, is the database targeted by the parsed helper."
             (unless (string-empty-p (string-trim (substring text (1+ close))))
               (signal 'clutch-db-error
                       (list "Unsupported MongoDB helper chain")))
-            (append (list :db-method token :args args)
-                    (when database
-                      (list :database database))))
-        (clutch-mongodb--parse-method-call
-         text token-end token database))))))
+            (list :db-method token :args args))
+        (clutch-mongodb--parse-method-call text token-end token))))))
 
 (defun clutch-mongodb--parse-db-call (statement)
   "Parse one MongoDB shell helper STATEMENT."
@@ -810,10 +707,6 @@ DATABASE, when non-nil, is the database targeted by the parsed helper."
       (signal 'clutch-db-error
               (list "Native MongoDB supports db.* helper calls, not arbitrary JavaScript")))
     (clutch-mongodb--parse-db-member-call text 3)))
-
-(defun clutch-mongodb--mql-doc-or-empty (value)
-  "Return VALUE or an empty MongoDB document."
-  (or value (mongodb-document nil)))
 
 (defun clutch-mongodb--mql-document-arg (value helper position)
   "Return VALUE as a MongoDB document argument for HELPER at POSITION."
@@ -839,12 +732,20 @@ DATABASE, when non-nil, is the database targeted by the parsed helper."
   "Return MongoDB find arguments parsed from ARGS and CHAIN.
 When SINGLE is non-nil, force a single-result limit and ignore cursor paging
 chain options."
-  (list (clutch-mongodb--mql-doc-or-empty (nth 0 args))
-        (nth 1 args)
+  (unless (<= (length args) 2)
+    (signal 'clutch-db-error
+            (list "find() expects optional filter and projection documents")))
+  (list (if (car args)
+            (clutch-mongodb--mql-document-arg (car args) "find" 1)
+          (mongodb-document nil))
+        (clutch-mongodb--mql-optional-document-arg
+         (nth 1 args) "find" 2)
         (if single 1 (cdr (assoc "limit" chain)))
         (unless single (cdr (assoc "skip" chain)))
         (unless single (cdr (assoc "sort" chain)))
-        (unless single (clutch-mongodb--find-options-from-chain chain))))
+        (unless single
+          (clutch-mongodb--options-from-chain
+           chain '("maxTimeMS" "allowDiskUse")))))
 
 (defun clutch-mongodb--find-command (collection args chain &optional single)
   "Return a MongoDB find command for COLLECTION from ARGS, CHAIN, and SINGLE."
@@ -864,7 +765,8 @@ chain options."
             (list "aggregate() options argument must be a document")))
   (clutch-mongodb--merge-options
    (nth 1 args)
-   (clutch-mongodb--aggregate-options-from-chain chain)))
+   (clutch-mongodb--options-from-chain
+    chain '("allowDiskUse" "maxTimeMS"))))
 
 (defun clutch-mongodb--aggregate-command (collection args chain)
   "Return a MongoDB aggregate command for COLLECTION from ARGS and CHAIN."
@@ -873,83 +775,12 @@ chain options."
    (car args)
    (clutch-mongodb--aggregate-options args chain)))
 
-(defun clutch-mongodb--execute-db-method
-    (conn method args &optional target-database)
-  "Execute database-level METHOD with ARGS on CONN.
-TARGET-DATABASE, when non-nil, overrides CONN's current database for this
-helper call."
-  (let ((client (clutch-mongodb-conn-client conn))
-        (database (or target-database
-                      (clutch-mongodb-conn-database conn))))
-    (pcase method
-      ("getName"
-       (unless (null args)
-         (signal 'clutch-db-error
-                 (list "db.getName() does not accept arguments")))
-       database)
-      ("getSiblingDB"
-       (unless (and (= (length args) 1)
-                    (stringp (car args)))
-         (signal 'clutch-db-error
-                 (list "db.getSiblingDB() expects one database name string")))
-       (car args))
-      ("aggregate"
-       (unless (and (<= 1 (length args) 2)
-                    (vectorp (car args)))
-         (signal 'clutch-db-error
-                 (list "db.aggregate() expects a pipeline array and optional options document")))
-       (when (and (nth 1 args)
-                  (not (mongodb-document-p (nth 1 args))))
-         (signal 'clutch-db-error
-                 (list "db.aggregate() options argument must be a document")))
-       (mongodb-aggregate-database
-        client database (car args) (nth 1 args)))
-      ("adminCommand"
-       (unless (= (length args) 1)
-         (signal 'clutch-db-error
-                 (list "db.adminCommand() expects one command document")))
-       (mongodb-command client "admin" (car args)))
-      ("runCommand"
-       (unless (= (length args) 1)
-         (signal 'clutch-db-error
-                 (list "db.runCommand() expects one command document")))
-       (mongodb-command client database (car args)))
-      ("getCollectionNames"
-       (unless (null args)
-         (signal 'clutch-db-error
-                 (list "db.getCollectionNames() does not accept arguments")))
-       (mongodb-list-collections client database))
-      ("getCollectionInfos"
-       (mongodb-list-collection-docs
-        client database (car args)))
-      ("createCollection"
-       (unless (and (<= 1 (length args) 2)
-                    (stringp (car args)))
-         (signal 'clutch-db-error
-                 (list "db.createCollection() expects collection name and optional options document")))
-       (mongodb-create-collection
-        client database
-        (car args)
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 1 args) method 2)))
-      ("dropDatabase"
-       (unless (null args)
-         (signal 'clutch-db-error
-                 (list "db.dropDatabase() does not accept arguments")))
-       (mongodb-drop-database client database))
-      (_
-       (signal 'clutch-db-error
-               (list (format "Unsupported MongoDB db helper: %s" method)))))))
-
 (defun clutch-mongodb--execute-collection-method
-    (conn collection method args &optional chain target-database)
+    (conn collection method args &optional chain)
   "Execute collection METHOD on COLLECTION with ARGS on CONN.
-CHAIN contains parsed cursor helper calls, when present.
-TARGET-DATABASE, when non-nil, overrides CONN's current database for this
-helper call."
+CHAIN contains parsed cursor helper calls, when present."
   (let ((client (clutch-mongodb-conn-client conn))
-        (database (or target-database
-                      (clutch-mongodb-conn-database conn))))
+        (database (clutch-mongodb-conn-database conn)))
     (pcase method
       ("find"
        (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
@@ -973,17 +804,11 @@ helper call."
                  (list "countDocuments() expects optional filter and options")))
        (mongodb-count-documents
         client database collection
-        (clutch-mongodb--mql-doc-or-empty (nth 0 args))
+        (if (car args)
+            (clutch-mongodb--mql-document-arg (car args) method 1)
+          (mongodb-document nil))
         (clutch-mongodb--mql-optional-document-arg
          (nth 1 args) method 2)))
-      ("estimatedDocumentCount"
-       (unless (<= (length args) 1)
-         (signal 'clutch-db-error
-                 (list "estimatedDocumentCount() expects optional options")))
-       (mongodb-count-documents
-        client database collection nil
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 0 args) method 1)))
       ("distinct"
        (unless (and (<= 1 (length args) 3)
                     (stringp (nth 0 args)))
@@ -1006,25 +831,6 @@ helper call."
           client database collection
           (car args)
           (clutch-mongodb--aggregate-options args chain))))
-      ("listIndexes"
-       (unless (null args)
-         (signal 'clutch-db-error
-                 (list "listIndexes() does not accept arguments")))
-       (mongodb-list-indexes client database collection))
-      ("createIndex"
-       (unless (<= 1 (length args) 2)
-         (signal 'clutch-db-error
-                 (list "createIndex() expects keys and optional options")))
-       (mongodb-create-index
-        client database collection
-        (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 1 args) method 2)))
-      ("dropIndex"
-       (unless (= (length args) 1)
-         (signal 'clutch-db-error
-                 (list "dropIndex() expects one index name or key document")))
-       (mongodb-drop-index client database collection (car args)))
       ("insertOne"
        (unless (= (length args) 1)
          (signal 'clutch-db-error
@@ -1042,11 +848,6 @@ helper call."
            (signal 'clutch-db-error
                    (list "insertMany() expects one document array")))
          (mongodb-insert client database collection documents)))
-      ("deleteMany"
-       (mongodb-delete
-        client database collection
-        (clutch-mongodb--delete-filter-arg args method)
-        t))
       ("deleteOne"
        (mongodb-delete
         client database collection
@@ -1059,19 +860,8 @@ helper call."
        (mongodb-update
         client database collection
         (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
-        (nth 1 args)
+        (clutch-mongodb--mql-document-arg (nth 1 args) method 2)
         nil
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 2 args) method 3)))
-      ("updateMany"
-       (unless (<= 2 (length args) 3)
-         (signal 'clutch-db-error
-                 (list "updateMany() expects filter, update, and optional options")))
-       (mongodb-update
-        client database collection
-        (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
-        (nth 1 args)
-        t
         (clutch-mongodb--mql-optional-document-arg
          (nth 2 args) method 3)))
       ("replaceOne"
@@ -1085,11 +875,6 @@ helper call."
         nil
         (clutch-mongodb--mql-optional-document-arg
          (nth 2 args) method 3)))
-      ("drop"
-       (unless (null args)
-         (signal 'clutch-db-error
-                 (list "drop() does not accept arguments")))
-       (mongodb-drop-collection client database collection))
       (_
        (signal 'clutch-db-error
                (list (format "Unsupported MongoDB collection helper: %s"
@@ -1098,18 +883,25 @@ helper call."
 (defun clutch-mongodb--eval-one (conn statement)
   "Evaluate one parsed MongoDB helper STATEMENT on CONN."
   (let ((call (clutch-mongodb--parse-db-call statement)))
-    (pcase call
-      (`(:db-method ,method :args ,args :database ,database)
-       (clutch-mongodb--execute-db-method conn method args database))
-      (`(:db-method ,method :args ,args)
-       (clutch-mongodb--execute-db-method conn method args))
-      (`(:collection ,collection :method ,method :args ,args :chain ,chain
-                     :database ,database)
-       (clutch-mongodb--execute-collection-method
-        conn collection method args chain database))
-      (`(:collection ,collection :method ,method :args ,args :chain ,chain)
-       (clutch-mongodb--execute-collection-method
-        conn collection method args chain)))))
+    (if-let* ((method (plist-get call :db-method)))
+        (if (string= method "runCommand")
+            (let ((args (plist-get call :args)))
+              (unless (and (= (length args) 1)
+                           (mongodb-document-p (car args)))
+                (signal 'clutch-db-error
+                        (list "db.runCommand() expects one command document")))
+              (mongodb-command
+               (clutch-mongodb-conn-client conn)
+               (clutch-mongodb-conn-database conn)
+               (car args)))
+          (signal 'clutch-db-error
+                  (list (format "Unsupported MongoDB db helper: %s" method))))
+      (clutch-mongodb--execute-collection-method
+       conn
+       (plist-get call :collection)
+       (plist-get call :method)
+       (plist-get call :args)
+       (plist-get call :chain)))))
 
 (defun clutch-mongodb--eval (conn code)
   "Evaluate supported MongoDB shell helper CODE on CONN."
@@ -1199,44 +991,24 @@ helper call."
 
 (defun clutch-mongodb--explain-call (conn call)
   "Return MongoDB explain value for parsed helper CALL on CONN."
-  (let ((client (clutch-mongodb-conn-client conn)))
-    (pcase call
-      (`(:collection ,collection :method "find" :args ,args :chain ,chain
-                     :database ,database)
-       (mongodb-explain
-        client database
-        (clutch-mongodb--find-command collection args chain)
-        (or (clutch-mongodb--explain-verbosity chain)
-            "executionStats")))
-      (`(:collection ,_collection :method "find" :args ,_args :chain ,_chain)
-       (clutch-mongodb--explain-call
-        conn
-        (append call (list :database (clutch-mongodb-conn-database conn)))))
-      (`(:collection ,collection :method "findOne" :args ,args :chain ,chain
-                     :database ,database)
-       (mongodb-explain
-        client database
-        (clutch-mongodb--find-command collection args chain t)
-        (or (clutch-mongodb--explain-verbosity chain)
-            "executionStats")))
-      (`(:collection ,_collection :method "findOne" :args ,_args :chain ,_chain)
-       (clutch-mongodb--explain-call
-        conn
-        (append call (list :database (clutch-mongodb-conn-database conn)))))
-      (`(:collection ,collection :method "aggregate" :args ,args :chain ,chain
-                     :database ,database)
-       (mongodb-explain
-        client database
-        (clutch-mongodb--aggregate-command collection args chain)
-        (or (clutch-mongodb--explain-verbosity chain)
-            "executionStats")))
-      (`(:collection ,_collection :method "aggregate" :args ,_args :chain ,_chain)
-       (clutch-mongodb--explain-call
-        conn
-        (append call (list :database (clutch-mongodb-conn-database conn)))))
-      (_
-       (signal 'clutch-db-error
-               (list "MongoDB explain supports find(), findOne(), and aggregate() helpers"))))))
+  (let* ((method (plist-get call :method))
+         (collection (plist-get call :collection))
+         (args (plist-get call :args))
+         (chain (plist-get call :chain))
+         (database (clutch-mongodb-conn-database conn)))
+    (unless (and collection
+                 (member method '("find" "findOne" "aggregate")))
+      (signal 'clutch-db-error
+              (list "MongoDB explain supports find(), findOne(), and aggregate() helpers")))
+    (mongodb-explain
+     (clutch-mongodb-conn-client conn)
+     database
+     (if (string= method "aggregate")
+         (clutch-mongodb--aggregate-command collection args chain)
+       (clutch-mongodb--find-command
+        collection args chain (string= method "findOne")))
+     (or (clutch-mongodb--explain-verbosity chain)
+         "executionStats"))))
 
 ;;;; Result conversion
 
@@ -1533,17 +1305,15 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (defun clutch-mongodb--sample-documents (conn collection)
   "Return sampled documents from COLLECTION on CONN."
-  (let ((value (clutch-mongodb--eval
-                conn
-                (format "db.getCollection(%s).find({}).limit(%d)"
-                        (clutch--json-serialize-text
-                         collection
-                         "MongoDB collection name")
-                        (clutch-mongodb--schema-sample-limit)))))
-    (cond
-     ((clutch-mongodb--document-list-p value) value)
-     (t (signal 'clutch-db-error
-                (list "MongoDB schema sampling returned a non-document result"))))))
+  (clutch-mongodb--with-mongodb-errors
+    (let ((value (mongodb-find
+                  (clutch-mongodb-conn-client conn)
+                  (clutch-mongodb-conn-database conn)
+                  collection nil nil (clutch-mongodb--schema-sample-limit))))
+      (cond
+       ((clutch-mongodb--document-list-p value) value)
+       (t (signal 'clutch-db-error
+                  (list "MongoDB schema sampling returned a non-document result")))))))
 
 (defun clutch-mongodb--profile-stat (stats path)
   "Return the mutable profile stat for PATH in STATS."
@@ -1853,7 +1623,10 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-mongodb-conn))
   "Return collection names for CONN's current MongoDB database."
-  (clutch-mongodb--eval conn "db.getCollectionNames()"))
+  (clutch-mongodb--with-mongodb-errors
+    (mongodb-list-collections
+     (clutch-mongodb-conn-client conn)
+     (clutch-mongodb-conn-database conn))))
 
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-mongodb-conn))
   "Return collection entries for MongoDB CONN."
@@ -1890,18 +1663,17 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 
 (defun clutch-mongodb--collection-info (conn collection)
   "Return the collection info document for COLLECTION on CONN."
-  (let ((infos (clutch-mongodb--eval
-                conn
-                (format "db.getCollectionInfos({name: %s})"
-                        (clutch--json-serialize-text
-                         collection
-                         "MongoDB collection name")))))
-    (unless (listp infos)
-      (signal 'clutch-db-error
-              (list "MongoDB collection metadata returned a non-list result")))
-    (or (car infos)
+  (clutch-mongodb--with-mongodb-errors
+    (let ((infos (mongodb-list-collection-docs
+                  (clutch-mongodb-conn-client conn)
+                  (clutch-mongodb-conn-database conn)
+                  (mongodb-document (list (cons "name" collection))))))
+      (unless (listp infos)
         (signal 'clutch-db-error
-                (list (format "MongoDB collection not found: %s" collection))))))
+                (list "MongoDB collection metadata returned a non-list result")))
+      (or (car infos)
+          (signal 'clutch-db-error
+                  (list (format "MongoDB collection not found: %s" collection)))))))
 
 (cl-defmethod clutch-db-object-browse-query
   ((_conn clutch-mongodb-conn) entry)

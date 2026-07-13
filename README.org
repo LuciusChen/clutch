@@ -203,7 +203,7 @@ everything in one repository, this is a breaking packaging change:
         ("remote-pg"  . (:backend pg
                           :host "127.0.0.1" :port 55433
                           :user "app" :database "appdb"
-                          :tramp "/ssh:devbox:/workspace/"))
+                          :tramp-default-directory "/ssh:devbox:/workspace/"))
         ("dev-redis"  . (:backend redis
                           :host "127.0.0.1" :port 6379
                           :database 0))
@@ -217,7 +217,7 @@ everything in one repository, this is a breaking packaging change:
   if it is omitted, an encrypted =:profile-entry= must provide =backend=.
 - SQLite is local and file-based: only =:database= is required; use =":memory:"=
   for a transient database.  Do not combine SQLite with =:ssh-host=,
-  =:ssh-tunnel=, or =:tramp=.
+  =:ssh-tunnel=, or =:tramp-default-directory=.
 - =:password= is optional for network backends; see [[*Password Management][Password Management]] for
   auth-source integration.
 - =:profile-entry= can load missing connection fields from encrypted =pass= or
@@ -228,10 +228,10 @@ everything in one repository, this is a breaking packaging change:
   =:rpc-timeout=.
 - TLS can be enabled with =:tls t=.  For explicit plaintext, prefer
   =:ssl-mode disabled= on MySQL and =:sslmode disable= on PostgreSQL.
-- =:ssh-host= and =:tramp= both create local forwards for structured
-  =:host= / =:port= endpoints.  =:ssh-host= uses a =~/.ssh/config= host alias,
-  while =:tramp= derives the origin from an ssh-like or container TRAMP
-  directory.  =:tramp-default-directory= remains accepted as a longer spelling.
+- =:ssh-host= and =:tramp-default-directory= both create local forwards for
+  structured =:host= / =:port= endpoints.  =:ssh-host= uses a =~/.ssh/config=
+  host alias, while =:tramp-default-directory= derives the origin from an
+  ssh-like or container TRAMP directory.
 - Query-console SQL is saved by connection identity rather than saved connection
   name, so renaming a saved connection keeps the same console SQL.
 
@@ -264,7 +264,9 @@ starts the temporary connection flow immediately.
 SELECT * FROM users LIMIT 10;
 #+end_src
 
-Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs; otherwise the statement at point runs.  Results appear in a split result buffer below.
+Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs;
+otherwise the statement at point runs.  Select a region first when exact
+execution boundaries matter.  Results appear in a split result buffer below.
 
 *** 4. Control transactions
 
@@ -318,8 +320,8 @@ enabled first.
 If host/IP addresses, usernames, database names, or tunnel metadata should not
 live in your Emacs configuration, use =:profile-entry=.  The profile is read
 before normal connection canonicalization, so Clutch-level fields such as
-=:ssh-host=, =:ssh-tunnel=, =:tramp=, and =:tramp-default-directory= work the
-same way as if they had been written directly in =clutch-connection-alist=.
+=:ssh-host=, =:ssh-tunnel=, and =:tramp-default-directory= work the same way as
+if they had been written directly in =clutch-connection-alist=.
 
 #+begin_src emacs-lisp
 (setq clutch-connection-alist
@@ -407,18 +409,20 @@ Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/nat
 
 Opening a TRAMP buffer does not globally change clutch.  TRAMP is considered
 only when a connection is created, and the chosen origin is stored for later
-reconnect, completion, refresh, and query execution.  Configure =:tramp= when a
-profile should always use a remote-machine or container endpoint:
+reconnect, completion, refresh, and query execution.  Configure
+=:tramp-default-directory= when a profile should always use a remote-machine or
+container endpoint:
 
 #+begin_src emacs-lisp
 ("remote-pg" . (:backend pg
                  :host "127.0.0.1" :port 55433
                  :user "app" :database "appdb"
-                 :tramp "/ssh:devbox:/workspace/"))
+                 :tramp-default-directory "/ssh:devbox:/workspace/"))
 #+end_src
 
-Without =:ssh-host= or =:tramp=, commands invoked from a TRAMP buffer can infer
-that buffer's remote context.  =clutch-tramp-context-policy= controls this:
+Without =:ssh-host= or =:tramp-default-directory=, commands invoked from a
+TRAMP buffer can infer that buffer's remote context.
+=clutch-tramp-context-policy= controls this:
 
 - =nil=: never infer TRAMP context
 - =ask= (default): ask before using the current TRAMP context

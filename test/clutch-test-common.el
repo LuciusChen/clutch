@@ -38,15 +38,9 @@
   "Run BODY with fresh schema, table, and object metadata state."
   (declare (indent 0) (debug (body)))
   `(let ((clutch--schema-cache (make-hash-table :test 'equal))
-         (clutch--columns-status-cache (make-hash-table :test 'equal))
-         (clutch--column-details-cache (make-hash-table :test 'equal))
-         (clutch--column-details-status-cache (make-hash-table :test 'equal))
+         (clutch--table-metadata-cache (make-hash-table :test 'equal))
          (clutch--column-details-queue-cache (make-hash-table :test 'equal))
          (clutch--column-details-active-cache (make-hash-table :test 'equal))
-         (clutch--table-comment-cache (make-hash-table :test 'equal))
-         (clutch--table-comment-status-cache (make-hash-table :test 'equal))
-         (clutch--foreign-keys-cache (make-hash-table :test 'equal))
-         (clutch--foreign-keys-status-cache (make-hash-table :test 'equal))
          (clutch--help-doc-cache (make-hash-table :test 'equal))
          (clutch--object-cache (make-hash-table :test 'equal))
          (clutch--object-warmup-timers (make-hash-table :test 'equal))
@@ -92,6 +86,14 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
   "Move point to FIELD-NAME's visible value start, or end when END is non-nil."
   (let ((bounds (clutch-test--insert-field-value-bounds field-name)))
     (goto-char (if end (cdr bounds) (car bounds)))))
+
+(defun clutch-test--set-insert-field-value (field-name value)
+  "Replace FIELD-NAME's visible insert-form value with VALUE."
+  (pcase-let ((`(,beg . ,end)
+               (clutch-test--insert-field-value-bounds field-name)))
+    (goto-char beg)
+    (delete-region beg end)
+    (insert value)))
 
 (defmacro clutch-test--with-connection-data-model (spec &rest body)
   "Run BODY with SPEC identifying a test connection's backend data model.

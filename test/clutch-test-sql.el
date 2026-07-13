@@ -92,7 +92,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
         (dolist (sql rejected)
           (should-not (funcall predicate sql)))))))
 
-(ert-deftest clutch-test-risky-dml-p ()
+(ert-deftest clutch-test-risky-dml-reason ()
   "Risky DML should detect UPDATE/DELETE without effective WHERE."
   (dolist (sql '("UPDATE users SET name='x'"
                  "DELETE FROM users"
@@ -111,7 +111,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE id=5 OR 1=1"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1)"
                  "UPDATE users SET name='x' WHERE 1=1 AND TRUE"))
-    (should (clutch--risky-dml-p sql)))
+    (should (clutch--risky-dml-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
@@ -121,7 +121,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "DELETE FROM users WHERE status='active'"
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))
-    (should-not (clutch--risky-dml-p sql))))
+    (should-not (clutch--risky-dml-reason sql))))
 
 ;;;; SQL parsing — statement bounds
 
@@ -958,7 +958,7 @@ ORDER BY id"
 
 (ert-deftest clutch-test-insert-completion-at-point-uses-enum-candidates ()
   "Insert buffer completion should return enum candidates for the current field."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")))
+  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")) insert-buf)
     (unwind-protect
         (progn
           (with-current-buffer result-buf
@@ -966,17 +966,18 @@ ORDER BY id"
                         clutch--result-columns '("severity" "is_ship_blocked" "owner")
                         clutch--result-column-defs '((:name "severity" :type-category text)
                                                      (:name "is_ship_blocked" :type-category numeric)
-                                                     (:name "owner" :type-category text))))
-          (with-temp-buffer
-            (insert "severity: \nis_ship_blocked: \nowner: alice\n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
+                                                     (:name "owner" :type-category text))
+                        clutch--result-source-table "shipping_incidents"))
             (cl-letf (((symbol-function 'clutch--ensure-column-details)
                        (lambda (_conn _table)
                          (list (list :name "severity" :type "enum('low','medium','high','critical')")
                                (list :name "is_ship_blocked" :type "tinyint(1)")
-                               (list :name "owner" :type "varchar(255)")))))
+                               (list :name "owner" :type "varchar(255)"))))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buf &rest _args) (setq insert-buf buf) buf)))
+              (clutch-result-insert--open-buffer
+               "shipping_incidents" result-buf '(("owner" . "alice")))
+              (with-current-buffer insert-buf
               (clutch-test--goto-insert-field-value "severity" t)
               (pcase-let ((`(,beg ,end ,candidates . ,_)
                            (clutch-result-insert-completion-at-point)))
@@ -988,7 +989,8 @@ ORDER BY id"
                 (should (equal candidates '("0" "1"))))
               (clutch-test--goto-insert-field-value "owner" t)
               (should-not (clutch-result-insert-completion-at-point)))))
-      (kill-buffer result-buf))))
+      (when (buffer-live-p result-buf) (kill-buffer result-buf))
+      (when (buffer-live-p insert-buf) (kill-buffer insert-buf)))))
 
 (ert-deftest clutch-test-insert-complete-field-falls-back-to-completing-read ()
   "Insert completion command should fall back when CAPF does not handle it."
@@ -1001,25 +1003,28 @@ ORDER BY id"
             (setq-local clutch-connection 'fake-conn
                         clutch--result-columns '("severity")
                         clutch--result-column-defs '((:name "severity" :type-category text))))
-          (with-current-buffer insert-buf
-            (erase-buffer)
-            (insert "severity: \n")
-            (clutch-result-insert-mode 1)
-            (setq-local clutch-result-insert--result-buffer result-buf
-                        clutch-result-insert--table "shipping_incidents")
-            (cl-letf (((symbol-function 'completion-at-point) (lambda () nil))
-                      ((symbol-function 'clutch--ensure-column-details)
+          (cl-letf (((symbol-function 'completion-at-point) (lambda () nil))
+                    ((symbol-function 'clutch--ensure-column-details)
                        (lambda (_conn _table)
                          (list (list :name "severity"
                                      :type "enum('low','medium','high','critical')"))))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (buf &rest _args) (setq insert-buf buf) buf))
                       ((symbol-function 'completing-read)
                        (lambda (&rest _args)
                          (setq completion-called t)
                          "critical")))
+            (with-current-buffer result-buf
+              (setq-local clutch--result-source-table "shipping_incidents"))
+            (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+            (with-current-buffer insert-buf
               (clutch-test--goto-insert-field-value "severity")
               (clutch-result-insert-complete-field)
               (should completion-called)
-              (should (equal (buffer-string) "severity: critical\n")))))
+              (should (equal
+                       (plist-get (clutch-result-insert--field-state "severity")
+                                  :value)
+                       "critical")))))
       (kill-buffer result-buf)
       (kill-buffer insert-buf))))
 
@@ -1036,7 +1041,7 @@ ORDER BY id"
              (clutch--result-edit-mode 1))
             ('insert
              (insert "severity: \n")
-             (clutch-result-insert-mode 1)
+             (clutch--result-insert-major-mode)
              (clutch-test--goto-insert-field-value "severity")))
           (cl-letf (((symbol-function 'completion-at-point)
                      (lambda ()

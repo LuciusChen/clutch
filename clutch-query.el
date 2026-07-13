@@ -1223,10 +1223,6 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
                "WHERE is always true")
         "no WHERE"))))
 
-(defun clutch--risky-dml-p (sql)
-  "Return non-nil when SQL is a top-level UPDATE/DELETE without effective WHERE."
-  (clutch--risky-dml-reason sql))
-
 (defun clutch--require-risky-dml-confirmation (sql)
   "Require explicit typed confirmation for risky DML SQL."
   (when-let* ((reason (clutch--risky-dml-reason sql)))
@@ -1625,17 +1621,6 @@ Return a plist with :message, :summary, and :display-summary."
 
 ;;;; Interactive commands
 
-;;;###autoload
-(defun clutch-execute-query-at-point ()
-  "Execute the SQL query at point."
-  (interactive)
-  (pcase-let* ((`(,beg . ,end) (clutch--query-bounds-at-point))
-               (sql (string-trim (buffer-substring-no-properties beg end))))
-    (when (string-empty-p sql)
-      (user-error "No query at point"))
-    (clutch--ensure-connection)
-    (clutch--execute-and-mark sql beg end)))
-
 (defun clutch--statement-bounds-at-point ()
   "Return the SQL statement bounds using only semicolons as delimiters.
 Unlike `clutch--query-bounds-at-point', blank lines are ignored so that
@@ -1656,18 +1641,6 @@ bounds, which also split on blank lines."
   (if (clutch--statement-delimited-buffer-p)
       (clutch--statement-bounds-at-point)
     (clutch--query-bounds-at-point)))
-
-;;;###autoload
-(defun clutch-execute-statement-at-point ()
-  "Execute the SQL statement at point, delimited only by semicolons.
-Blank lines inside the statement are preserved."
-  (interactive)
-  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds-at-point))
-               (sql (string-trim (buffer-substring-no-properties beg end))))
-    (when (string-empty-p sql)
-      (user-error "No statement at point"))
-    (clutch--ensure-connection)
-    (clutch--execute-and-mark sql beg end)))
 
 (defun clutch--split-statement-specs (sql &optional base-position)
   "Split SQL into `(STATEMENT BEG END)' specs on unquoted semicolons.

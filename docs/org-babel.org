@@ -83,8 +83,8 @@ Compatibility entry files live in the
 | =:user=        | Database user                                                       |
 | =:database=    | Database name or file path (SQLite)                                 |
 | =:pass-entry=  | auth-source entry name for password lookup                          |
-| =:ssh-host=    | OpenSSH host alias for Clutch SSH forwarding                        |
-| =:tramp=       | ssh-like TRAMP directory for Clutch TRAMP forwarding                 |
+| =:ssh-host=                | OpenSSH host alias for Clutch SSH forwarding                        |
+| =:tramp-default-directory= | ssh-like TRAMP directory for Clutch TRAMP forwarding                 |
 
 ** Connection Caching
 

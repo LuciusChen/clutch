@@ -97,11 +97,12 @@ failure, configure OpenSSH to authenticate non-interactively too, usually by
 loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 
 TRAMP-aware forwarding follows the same rule.  Configure
-`:tramp "/ssh:HOST:/path/"` when the database endpoint is reachable from that
-TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an interactive password
-does not make that password available to clutch's separate OpenSSH `-L` process.
-Use non-interactive OpenSSH auth or a reusable ControlMaster; `/rpc:` paths can
-reuse tramp-rpc's active ControlPath when tramp-rpc has one.
+`:tramp-default-directory "/ssh:HOST:/path/"` when the database endpoint is
+reachable from that TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an
+interactive password does not make that password available to clutch's separate
+OpenSSH `-L` process.  Use non-interactive OpenSSH auth or a reusable
+ControlMaster; `/rpc:` paths can reuse tramp-rpc's active ControlPath when
+tramp-rpc has one.
 
 ## MySQL (`mysql`)
 
@@ -286,8 +287,9 @@ Relevant variables:
 
 - SQLite does not use `:host`, `:port`, or `:user`
 - Network timeout settings do not apply
-- `:ssh-host`, `:ssh-tunnel`, and `:tramp` do not apply to SQLite; those
-  transports forward structured TCP endpoints, while SQLite opens a file
+- `:ssh-host`, `:ssh-tunnel`, and `:tramp-default-directory` do not apply to
+  SQLite; those transports forward structured TCP endpoints, while SQLite opens
+  a file
 - Schema/database switching is not part of the SQLite path
 
 ## Shared Native-Backend Notes

@@ -181,7 +181,7 @@ SQL query editing and execution mode. The primary entry point for interacting wi
 
 Shared schema metadata consulted by `clutch-mode` lives in global caches keyed
 by `clutch--connection-key`: `clutch--schema-cache`,
-`clutch--column-details-cache`, and `clutch--schema-status-cache`.
+`clutch--table-metadata-cache`, and `clutch--schema-status-cache`.
 
 **Keybindings**:
 
@@ -243,7 +243,6 @@ query is still running.
 | `clutch--pending-inserts` | Staged new rows |
 | `clutch--marked-rows` | Dired-style marked row index set |
 | `clutch--row-identity` | Current result row identity metadata for UPDATE/DELETE |
-| `clutch--cached-pk-indices` | Visible primary-key column positions when PK identity is available |
 | `clutch--fk-info` | Foreign key metadata for result table |
 | `clutch--page-current` | Current row page (0-based) |
 | `clutch--page-offset` | Zero-based row offset for the visible SQL page/window |
@@ -382,7 +381,7 @@ Read-only object describe view with shared object actions.
 
 ---
 
-### clutch-result-insert-mode (New Row Creation Form)
+### New Row Creation Form
 
 **Purpose**: Create and validate a new row with per-field editors.
 
@@ -400,7 +399,6 @@ Each field is displayed with:
 | `M-TAB` / `C-M-i` | `clutch-result-insert-complete-field` | Complete enum/bool-like values |
 | `C-c '` | `clutch-result-insert-edit-json-field` | Open JSON sub-editor for current field |
 | `C-c .` | `clutch-result-insert-fill-current-time` | Fill current temporal field with now |
-| `C-c C-a` | `clutch-result-insert-toggle-field-layout` | Toggle sparse vs all-column layout |
 | `C-c C-y` | `clutch-result-insert-import-delimited` | Import TSV / CSV into the form |
 | `C-c C-c` | `clutch-result-insert-commit` | Validate and stage row(s) |
 | `C-c C-k` | `clutch-result-insert-cancel` | Cancel and close buffer |
@@ -461,8 +459,6 @@ on public `M-x` entry points and named commands that users may call directly.
 | Command | Description |
 |---------|-------------|
 | `clutch-preview-execution-sql` | Preview the effective execution payload for the current workflow |
-| `clutch-execute-query-at-point` | Execute the SQL query at point |
-| `clutch-execute-statement-at-point` | Execute statement using `;` as only delimiter (blank lines preserved) |
 | `clutch-execute-dwim` | Execute the active region, otherwise prefer the current `;`-delimited statement and fall back to the query at point |
 | `clutch-execute-region` | Execute the active region |
 | `clutch-execute-buffer` | Execute the whole buffer |
@@ -478,7 +474,6 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-mode` | SQL editing major mode |
 | `clutch-result-mode` | Result-table major mode |
 | `clutch-record-mode` | Single-record detail major mode |
-| `clutch-result-insert-mode` | Insert-form major mode wrapper |
 | `clutch-describe-mode` | Object describe major mode |
 | `clutch-repl-mode` | REPL major mode |
 | `clutch-repl` | Open the shared `*clutch REPL*` buffer |
@@ -536,7 +531,6 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-result-insert-fill-current-time` | Fill the current temporal insert field with “now” |
 | `clutch-result-insert-edit-json-field` | Open the insert-form JSON sub-editor |
 | `clutch-result-insert-json-finish` / `clutch-result-insert-json-cancel` | Confirm / cancel the insert-form JSON editor |
-| `clutch-result-insert-toggle-field-layout` | Toggle sparse vs all-column layout |
 | `clutch-result-insert-import-delimited` | Import TSV / CSV into the current insert form |
 | `clutch-result-insert-commit` / `clutch-result-insert-cancel` | Stage / cancel the insert form |
 
@@ -554,8 +548,6 @@ on public `M-x` entry points and named commands that users may call directly.
 | `clutch-object-jump-target` | Jump to the target object of a synonym/index/trigger |
 | `clutch-object-default-action` | Run the resolved object’s default action |
 | `clutch-copy-object-name` / `clutch-copy-object-fqname` | Copy object name / fully qualified name |
-| `clutch-describe-table` / `clutch-describe-table-at-point` | Describe a table explicitly |
-| `clutch-browse-table` | Browse rows for a table-like object |
 
 ### JDBC Management
 
@@ -749,7 +741,7 @@ migration fallback when the identity-keyed file has not been created yet.
 | Cache | What | Key |
 |-------|------|-----|
 | `clutch--schema-cache` | Table names, column names/types | `clutch--connection-key` string |
-| `clutch--column-details-cache` | PK, FK, defaults, nullable, generated | `clutch--connection-key` string |
+| `clutch--table-metadata-cache` | Columns, foreign keys, comments, and load status | Connection key, then table or schema-qualified table |
 | `clutch--tables-in-buffer-cache` | Tables in current SQL buffer | `(tick . table-list)` |
 | `clutch--tables-in-query-cache` | Tables in last executed query | `(tick beg end . table-list)` |
 | `clutch--fk-info` | FK metadata for current result | Per-result buffer |
@@ -874,13 +866,12 @@ Footer shows staging status: `E-2  D-1  I-3  commit:C-c C-c  discard:C-c C-k`
 
 #### Insert Row
 
-1. `i` → open `clutch-result-insert-mode` buffer
-2. Default layout is sparse: required / no-default fields first, plus any prefilled values
+1. `i` → open the insert form buffer
+2. The form renders every visible result column and its schema metadata
 3. `I` clones the current result/record row into a prefilled insert form without primary-key values
-4. `C-c C-a` expands back to all columns without dropping existing values
-5. `C-c C-y` imports TSV / CSV: one row prefills the form, multiple rows stage pending inserts immediately
-6. Local validation runs on idle before staging
-7. `C-c C-c` validates all visible/hidden field values and stages pending INSERT rows
+4. `C-c C-y` imports TSV / CSV: one row prefills the form, multiple rows stage pending inserts immediately
+5. Local validation runs on idle before staging
+6. `C-c C-c` validates the canonical field values and stages pending INSERT rows
 
 ### Mutation SQL Generation Rules
 
@@ -901,20 +892,19 @@ Each field in the insert buffer is annotated:
 
 | Tag | Condition | Behavior |
 |-----|-----------|----------|
-| `[generated]` | AUTO_INCREMENT, SERIAL, `GENERATED ALWAYS` | Hidden in sparse mode; shown in all-column layout for awareness |
-| `[default=X]` | Column has explicit default | Hidden in sparse mode unless already prefilled; shown in all-column layout |
+| `[generated]` | AUTO_INCREMENT, SERIAL, `GENERATED ALWAYS` | Shown for awareness; leave empty to let the database generate it |
+| `[default=X]` | Column has explicit default | Shown for awareness; leave empty to use the default |
 | `[required]` | NOT NULL with no default | Error if submitted empty |
 | `[enum]` | ENUM or SET type | CAPF dropdown with allowed values |
 | `[bool]` | BOOLEAN type | Toggle editor |
 | `[json]` | JSON/JSONB type | Editor with syntax validation |
 | (no tag) | Regular column | Normal text input |
 
-### Sparse vs All-Column Layout
+### Canonical Field State
 
-- Sparse mode is the default insert view
-- Sparse mode shows non-generated columns that are required, have no default, or already carry a value
-- `C-c C-a` toggles to all columns and back
-- Hidden-field values are kept in canonical insert state, so toggling never drops edits
+- Every insert field stays rendered and searchable in the form
+- Field values and schema metadata live in one canonical field list; rendering
+  does not reconstruct state from buffer text
 
 ### Delimited Import
 

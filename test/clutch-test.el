@@ -985,13 +985,6 @@
 
 ;;;; Rendering — row and separator rendering
 
-(ert-deftest clutch-test-render-static-table-allows-missing-column-defs ()
-  "Static table rendering should not require column metadata."
-  (let ((table (clutch--render-static-table '("id" "name")
-                                            '((1 "alice")))))
-    (should (string-match-p "alice" table))
-    (should (string-match-p "id" table))))
-
 (ert-deftest clutch-test-refresh-display-preserves-visible-row-position ()
   "Refreshing the result view should not drift point downward on screen."
   (save-window-excursion
@@ -2594,20 +2587,19 @@
         (should (string-match-p (regexp-quote "Schema refreshed (2 tables)")
                                 seen-message))))))
 
-(ert-deftest clutch-test-describe-table-warns-when-schema-cache-is-stale ()
-  "Cache-backed table prompts should surface stale-schema recovery hints."
+(ert-deftest clutch-test-describe-dwim-warns-when-schema-cache-is-stale ()
+  "Object prompts should surface stale-schema recovery hints."
   (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
         hinted
         described)
     (cl-letf (((symbol-function 'clutch--connection-key)
                (lambda (_conn) "dev-key"))
-              ((symbol-function 'clutch--schema-for-connection)
-               (lambda ()
-                 (let ((h (make-hash-table :test 'equal)))
-                   (puthash "users" nil h)
-                   h)))
-              ((symbol-function 'clutch--read-table-name)
-               (lambda (_prompt _tables) "users"))
+              ((symbol-function 'clutch--object-entries)
+               (lambda (_conn)
+                 '((:name "users" :type "TABLE"))))
+              ((symbol-function 'clutch--object-entry-reader)
+               (lambda (_conn _prompt entries &rest _)
+                 (car entries)))
               ((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch-object-describe)
                (lambda (entry)
@@ -2618,7 +2610,7 @@
       (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
-        (call-interactively #'clutch-describe-table))
+        (call-interactively #'clutch-describe-dwim))
       (should (equal described '(:name "users" :type "TABLE")))
       (should (string-match-p "Schema cache is stale" hinted)))))
 
@@ -3338,45 +3330,30 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-insert-buffer-navigation ()
   "Insert buffer TAB and RET navigation should jump between field values."
-  (with-temp-buffer
-    (insert "id: \nname: alice\ncreated_at: \n")
-    (clutch-result-insert-mode 1)
-    (goto-char (point-min))
-    (clutch-test--goto-insert-field-value "id" t)
-    (should (= (current-column) (length "id: ")))
-    (clutch-result-insert-next-field)
-    (should (equal (buffer-substring-no-properties
-                    (line-beginning-position) (line-end-position))
-                   "name: alice"))
-    (should (= (point) (line-end-position)))
-    (clutch-result-insert-next-field)
-    (should (equal (buffer-substring-no-properties
-                    (line-beginning-position) (line-end-position))
-                   "created_at: "))
-    (should (= (current-column) (length "created_at: ")))
-    (clutch-result-insert-prev-field)
-    (should (equal (buffer-substring-no-properties
-                    (line-beginning-position) (line-end-position))
-                   "name: alice"))
-    (should (= (point) (line-end-position))))
-  (with-temp-buffer
-    (insert "id: \nname: alice\ncreated_at: \n")
-    (clutch-result-insert-mode 1)
-    (goto-char (point-min))
-    (clutch-test--goto-insert-field-value "id")
-    (call-interactively (key-binding (kbd "RET")))
-    (should (string-prefix-p "name: "
-                             (buffer-substring-no-properties
-                              (line-beginning-position) (line-end-position))))
-    (call-interactively (key-binding (kbd "TAB")))
-    (should (string-prefix-p "created_at: "
-                             (buffer-substring-no-properties
-                              (line-beginning-position) (line-end-position))))))
+  (clutch-test--with-pop-to-buffer-capture insert-buf
+    (clutch-test--with-insert-result-buffer result-buf
+        (:columns '("id" "name" "created_at")
+         :column-defs '((:name "id") (:name "name") (:name "created_at"))
+         :source-table "users")
+      (clutch-result-insert--open-buffer
+       "users" result-buf '(("name" . "alice")))
+      (with-current-buffer insert-buf
+        (clutch-test--goto-insert-field-value "id" t)
+        (clutch-result-insert-next-field)
+        (should (equal (clutch-result-insert--current-field-name) "name"))
+        (should (= (point) (line-end-position)))
+        (clutch-result-insert-next-field)
+        (should (string-prefix-p "created_at" (thing-at-point 'line t)))
+        (clutch-result-insert-prev-field)
+        (should (equal (clutch-result-insert--current-field-name) "name"))
+        (clutch-test--goto-insert-field-value "id")
+        (call-interactively (key-binding (kbd "RET")))
+        (should (equal (clutch-result-insert--current-field-name) "name"))))))
 
 (ert-deftest clutch-test-insert-buffer-header-line-is-form-title ()
   "Insert buffer header should use form wording instead of SQL text."
   (with-temp-buffer
-    (clutch-result-insert-mode 1)
+    (clutch--result-insert-major-mode)
     (setq-local clutch-result-insert--table "shipping_incidents")
     (let ((header (substring-no-properties
                    (clutch-result-insert--header-line))))
@@ -3462,40 +3439,40 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
        :column-defs '((:name "due_on" :type-category date)
                       (:name "created_at" :type-category datetime)
                       (:name "name" :type-category text)))
-    (with-temp-buffer
-      (insert "due_on: 2024-01-01\ncreated_at: 2024-01-01 00:00:00\nname: alice\n")
-      (clutch-result-insert-mode 1)
-      (setq-local clutch-result-insert--result-buffer result-buf)
+    (clutch-test--with-pop-to-buffer-capture insert-buf
+      (clutch-result-insert--open-buffer
+       "users" result-buf
+       '(("due_on" . "2024-01-01")
+         ("created_at" . "2024-01-01 00:00:00")
+         ("name" . "alice")))
+      (with-current-buffer insert-buf
       (cl-letf (((symbol-function 'current-time)
                  (lambda () (encode-time 30 45 13 12 3 2026))))
         (goto-char (point-min))
         (clutch-result-insert-fill-current-time)
-        (should (equal (buffer-substring-no-properties
-                        (line-beginning-position) (line-end-position))
-                       "due_on: 2026-03-12"))
+        (should (equal
+                 (plist-get (clutch-result-insert--field-state "due_on") :value)
+                 "2026-03-12"))
         (forward-line 1)
         (clutch-result-insert-fill-current-time)
-        (should (equal (buffer-substring-no-properties
-                        (line-beginning-position) (line-end-position))
-                       "created_at: 2026-03-12 13:45:30"))
+        (should (equal
+                 (plist-get (clutch-result-insert--field-state "created_at") :value)
+                 "2026-03-12 13:45:30"))
         (forward-line 1)
         (should-error (clutch-result-insert-fill-current-time)
-                      :type 'user-error)))))
+                      :type 'user-error))))))
 
 (ert-deftest clutch-test-insert-buffer-labels-show_field_metadata ()
   "Insert buffer labels should show field metadata without changing parsed names."
-  (clutch-test--with-insert-result-buffer result-buf
-      (:columns '("id" "severity" "postmortem" "is_ship_blocked" "opened_at")
-       :column-defs '((:name "id" :type-category numeric)
-                      (:name "severity" :type-category text)
-                      (:name "postmortem" :type-category json)
-                      (:name "is_ship_blocked" :type-category numeric)
-                      (:name "opened_at" :type-category datetime))
-       :connection 'fake-conn)
-    (with-temp-buffer
-      (clutch-result-insert-mode 1)
-      (setq-local clutch-result-insert--result-buffer result-buf
-                  clutch-result-insert--table "shipping_incidents")
+  (clutch-test--with-pop-to-buffer-capture insert-buf
+    (clutch-test--with-insert-result-buffer result-buf
+        (:columns '("id" "severity" "postmortem" "is_ship_blocked" "opened_at")
+         :column-defs '((:name "id" :type-category numeric)
+                        (:name "severity" :type-category text)
+                        (:name "postmortem" :type-category json)
+                        (:name "is_ship_blocked" :type-category numeric)
+                        (:name "opened_at" :type-category datetime))
+         :connection 'fake-conn)
       (cl-letf (((symbol-function 'clutch--ensure-column-details)
                  (lambda (_conn _table)
                    (list (list :name "id" :type "int" :generated t :nullable nil)
@@ -3503,8 +3480,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                          (list :name "postmortem" :type "json" :nullable t)
                          (list :name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)
                          (list :name "opened_at" :type "datetime" :nullable nil)))))
-        (clutch-result-insert--populate-buffer "shipping_incidents"
-                                              '("id" "severity" "postmortem" "is_ship_blocked" "opened_at"))
+        (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+      (with-current-buffer insert-buf
         (let ((rendered (buffer-string)))
           (should (string-match-p "^id[ ]+\\[generated\\]: $" rendered))
           (should (string-match-p "^severity[ ]+\\[enum required\\]: $" rendered))
@@ -3523,31 +3500,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (goto-char (point-min))
         (let ((fields (clutch-result-insert--parse-fields)))
           (should (equal fields '(("severity" . "low")))))))))
-
-(ert-deftest clutch-test-insert-populate-buffer-reuses-read-only-buffer ()
-  "Repopulating an insert buffer should work when prefixes are already read-only."
-  (clutch-test--with-insert-result-buffer result-buf
-      (:columns '("severity" "owner")
-       :column-defs '((:name "severity" :type-category text)
-                      (:name "owner" :type-category text))
-       :connection 'fake-conn)
-    (with-temp-buffer
-      (clutch-result-insert-mode 1)
-      (setq-local clutch-result-insert--result-buffer result-buf
-                  clutch-result-insert--table "shipping_incidents")
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "severity"
-                               :type "enum('low','medium','high')")
-                         (list :name "owner" :type "varchar(64)")))))
-        (clutch-result-insert--populate-buffer
-         "shipping_incidents" '("severity" "owner"))
-        (should (get-text-property (point-min) 'read-only))
-        (clutch-result-insert--populate-buffer
-         "shipping_incidents" '("severity" "owner")
-        '(("severity" . "high")))
-        (should (string-match-p "^severity \\[enum required\\]: high$"
-                                (buffer-string)))))))
 
 (ert-deftest clutch-test-insert-buffer-shows-all-fields-by-default ()
   :tags '(:smoke)
@@ -3575,7 +3527,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (string-match-p "^owner[ ]+\\[default=system\\]: $" (buffer-string)))
         (should (string-match-p "^created_at[ ]+\\[default=CURRENT_TIMESTAMP datetime\\]: "
                                 (buffer-string)))
-        (should-not (lookup-key clutch-result-insert-mode-map (kbd "C-c C-a")))
+        (should-not (lookup-key clutch--result-insert-major-mode-map
+                                (kbd "C-c C-a")))
         (goto-char (point-min))
         (re-search-forward "^owner.*: " nil t)
         (insert "bob")
@@ -3742,7 +3695,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts '((("severity" . "low"))))
-    (let (replaced)
+    (let (replaced insert-buf)
       (cl-letf (((symbol-function 'clutch--refresh-display)
                  (lambda ()
                    (error "existing insert update should use row replacement")))
@@ -3750,12 +3703,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (ridx)
                    (setq replaced ridx)))
                 ((symbol-function 'quit-window) #'ignore))
-        (with-temp-buffer
-          (insert "severity: high\n")
-          (clutch-result-insert-mode 1)
-          (setq-local clutch-result-insert--result-buffer result-buf
-                      clutch-result-insert--pending-index 0)
-          (clutch-result-insert-commit)))
+        (cl-letf (((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) (setq insert-buf buf) buf)))
+          (with-current-buffer result-buf
+            (setq-local clutch--result-columns '("severity")
+                        clutch--result-column-defs '((:name "severity"))
+                        clutch--result-source-table "incidents"))
+          (clutch-result-insert--open-buffer
+           "incidents" result-buf '(("severity" . "low")) 0)
+          (with-current-buffer insert-buf
+            (clutch-test--set-insert-field-value "severity" "high")
+            (clutch-result-insert-commit))))
+      (when (buffer-live-p insert-buf) (kill-buffer insert-buf))
       (should (= replaced 2))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
@@ -3766,7 +3725,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts nil)
-    (let (appended)
+    (let (appended insert-buf)
       (cl-letf (((symbol-function 'clutch--refresh-display)
                  (lambda ()
                    (error "new insert should use row append")))
@@ -3774,12 +3733,17 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (iidx)
                    (setq appended iidx)))
                 ((symbol-function 'quit-window) #'ignore))
-      (with-temp-buffer
-          (insert "name: carol\n")
-        (clutch-result-insert-mode 1)
-        (setq-local clutch-result-insert--result-buffer result-buf
-                      clutch-result-insert--pending-index nil)
-          (clutch-result-insert-commit)))
+        (cl-letf (((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args) (setq insert-buf buf) buf)))
+          (with-current-buffer result-buf
+            (setq-local clutch--result-columns '("name")
+                        clutch--result-column-defs '((:name "name"))
+                        clutch--result-source-table "users"))
+          (clutch-result-insert--open-buffer "users" result-buf)
+          (with-current-buffer insert-buf
+            (clutch-test--set-insert-field-value "name" "carol")
+            (clutch-result-insert-commit))))
+      (when (buffer-live-p insert-buf) (kill-buffer insert-buf))
       (should (= appended 0))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
@@ -3798,9 +3762,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                    (lambda (&rest _) nil)))
           (clutch-result-insert--open-buffer "users" result-buf))
         (with-current-buffer insert-buf
-          (clutch-test--goto-insert-field-value "name")
-          (let ((inhibit-modification-hooks t))
-            (insert "alice")))
+          (clutch-test--set-insert-field-value "name" "alice"))
         (with-current-buffer result-buf
           (setq-local clutch--result-source-table "orders"))
         (with-current-buffer insert-buf
@@ -3961,14 +3923,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (:columns '("impact_score")
        :column-defs '((:name "impact_score" :type-category numeric))
        :connection 'fake-conn)
-    (with-temp-buffer
-      (insert "impact_score: \n")
-      (clutch-result-insert-mode 1)
-      (setq-local clutch-result-insert--result-buffer result-buf
-                  clutch-result-insert--table "shipping_incidents")
+    (clutch-test--with-pop-to-buffer-capture insert-buf
       (cl-letf (((symbol-function 'clutch--ensure-column-details)
                  (lambda (_conn _table)
                    (list (list :name "impact_score" :type "decimal(5,1)")))))
+        (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+        (with-current-buffer insert-buf
         (clutch-test--goto-insert-field-value "impact_score")
         (insert "x")
         (let* ((field (clutch-result-insert--field-state "impact_score"))
@@ -3984,7 +3944,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (insert "1.5")
           (setq field (clutch-result-insert--field-state "impact_score"))
           (should-not (plist-get field :error-message))
-          (should-not (plist-get field :error-overlay)))))))
+          (should-not (plist-get field :error-overlay))))))))
 
 (ert-deftest clutch-test-json-validation-is-scheduled-on-idle ()
   "JSON insert and edit buffers should defer local validation until idle."
@@ -4001,23 +3961,22 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (:columns '("postmortem")
                   :column-defs '((:name "postmortem" :type-category json))
                   :connection 'fake-conn)
-               (with-temp-buffer
-                 (insert "postmortem: \n")
-                 (clutch-result-insert-mode 1)
-                 (setq-local clutch-result-insert--result-buffer result-buf
-                             clutch-result-insert--table "shipping_incidents")
+               (clutch-test--with-pop-to-buffer-capture insert-buf
                  (cl-letf (((symbol-function 'clutch--ensure-column-details)
                             (lambda (_conn _table)
                               (list (list :name "postmortem" :type "json")))))
-                   (clutch-test--goto-insert-field-value "postmortem")
-                   (insert "{")
-                   (should scheduled)
-                   (should (= (car scheduled)
-                              clutch-insert-validation-idle-delay))
-                   (should (eq (cadr scheduled)
-                               #'clutch-result-insert--run-idle-validation))
-                   (should (equal (caddr scheduled)
-                                  (list (current-buffer) "postmortem")))))))
+                   (clutch-result-insert--open-buffer
+                    "shipping_incidents" result-buf)
+                   (with-current-buffer insert-buf
+                     (clutch-test--goto-insert-field-value "postmortem")
+                     (insert "{")
+                     (should scheduled)
+                     (should (= (car scheduled)
+                                clutch-insert-validation-idle-delay))
+                     (should (eq (cadr scheduled)
+                                 #'clutch-result-insert--run-idle-validation))
+                     (should (equal (caddr scheduled)
+                                    (list (current-buffer) "postmortem"))))))))
             ('edit
              (with-temp-buffer
                (clutch--result-edit-mode 1)
@@ -4213,7 +4172,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               ((:name "severity" :type-category text)
                (:name "is_ship_blocked" :type-category numeric)
                (:name "postmortem" :type-category json))
-              "severity: nope\nis_ship_blocked: 7\npostmortem: not-json\n"
+              (("severity" . "nope")
+               ("is_ship_blocked" . "7")
+               ("postmortem" . "not-json"))
               ((:name "severity" :type "enum('low','medium')")
                (:name "is_ship_blocked" :type "tinyint(1)")
                (:name "postmortem" :type "json"))
@@ -4222,34 +4183,36 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               ((:name "opened_at" :type-category datetime)
                (:name "due_on" :type-category date)
                (:name "starts_at" :type-category time))
-              "opened_at: ss\ndue_on: 2026-02-30\nstarts_at: 25:61\n"
+              (("opened_at" . "ss")
+               ("due_on" . "2026-02-30")
+               ("starts_at" . "25:61"))
               ((:name "opened_at" :type "datetime")
                (:name "due_on" :type "date")
                (:name "starts_at" :type "time"))
               "Field opened_at expects YYYY-MM-DD HH:MM\\[:SS\\]")
              (("impact_score")
               ((:name "impact_score" :type-category numeric))
-              "impact_score: xx\n"
+              (("impact_score" . "xx"))
               ((:name "impact_score" :type "decimal(5,1)"))
               "Field impact_score expects a numeric value")))
-    (pcase-let ((`(,columns ,column-defs ,input ,details ,expected-message) case))
+    (pcase-let ((`(,columns ,column-defs ,fields ,details ,expected-message) case))
       (clutch-test--with-insert-result-buffer result-buf
           (:columns columns
            :column-defs column-defs
            :connection 'fake-conn
+           :source-table "shipping_incidents"
            :pending-inserts nil)
-        (with-temp-buffer
-          (insert input)
-          (clutch-result-insert-mode 1)
-          (setq-local clutch-result-insert--result-buffer result-buf
-                      clutch-result-insert--table "shipping_incidents")
+        (clutch-test--with-pop-to-buffer-capture insert-buf
           (cl-letf (((symbol-function 'clutch--ensure-column-details)
                      (lambda (_conn _table) details)))
-            (let ((err (should-error (clutch-result-insert-commit)
-                                     :type 'user-error)))
-              (when expected-message
-                (should (string-match-p expected-message
-                                        (error-message-string err)))))))
+            (clutch-result-insert--open-buffer
+             "shipping_incidents" result-buf fields)
+            (with-current-buffer insert-buf
+              (let ((err (should-error (clutch-result-insert-commit)
+                                       :type 'user-error)))
+                (when expected-message
+                  (should (string-match-p expected-message
+                                          (error-message-string err))))))))
         (should (buffer-live-p result-buf))
         (should-not (with-current-buffer result-buf clutch--pending-inserts))))))
 
@@ -4272,30 +4235,33 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "JSON child editors should validate parents, save JSON, and cancel cleanly."
   (dolist (case
            '((save
-              "postmortem: \n"
+              ""
               "{\n  \"severity\": \"high\",\n  \"ship_blocked\": true\n}"
               clutch-result-insert-json-finish
-              "postmortem: {\"severity\":\"high\",\"ship_blocked\":true}\n")
+              "{\"severity\":\"high\",\"ship_blocked\":true}")
              (cancel
-              "postmortem: {\"ok\":true}\n"
+              "{\"ok\":true}"
               "{\"ok\":false}"
               clutch-result-insert-json-cancel
-              "postmortem: {\"ok\":true}\n")))
-    (pcase-let ((`(,label ,parent-text ,editor-text ,command ,expected) case))
+              "{\"ok\":true}")))
+    (pcase-let ((`(,label ,parent-value ,editor-text ,command ,expected) case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-pop-to-buffer-capture editor-buf
           (clutch-test--with-insert-result-buffer result-buf
               (:columns '("postmortem")
-               :column-defs '((:name "postmortem" :type-category json)))
-            (with-temp-buffer
-              (insert parent-text)
-              (clutch-result-insert-mode 1)
-              (setq-local clutch-result-insert--result-buffer result-buf
-                          clutch-result-insert--table "shipping_incidents")
+               :column-defs '((:name "postmortem" :type-category json))
+               :connection 'fake-conn)
+            (let (insert-buf)
               (cl-letf (((symbol-function 'clutch--ensure-column-details)
                          (lambda (_conn _table)
                            (list (list :name "postmortem" :type "json")))))
-                (clutch-result-insert-edit-json-field))
+                (clutch-result-insert--open-buffer
+                 "shipping_incidents" result-buf
+                 `(("postmortem" . ,parent-value)))
+                (setq insert-buf editor-buf)
+                (with-current-buffer insert-buf
+                  (clutch-test--goto-insert-field-value "postmortem")
+                  (clutch-result-insert-edit-json-field)))
               (with-current-buffer editor-buf
                 (erase-buffer)
                 (insert editor-text)
@@ -4307,26 +4273,42 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                           ((symbol-function 'pop-to-buffer)
                            (lambda (buf &rest _args) buf)))
                   (funcall command)))
-              (should (equal (buffer-string) expected))))))))
+              (with-current-buffer insert-buf
+                (should (equal
+                         (plist-get
+                          (clutch-result-insert--field-state "postmortem")
+                          :value)
+                         expected)))
+              (when (buffer-live-p insert-buf)
+                (kill-buffer insert-buf))))))))
   (ert-info ("insert editor rejects invalid parent field text")
     (clutch-test--with-pop-to-buffer-capture editor-buf
       (clutch-test--with-insert-result-buffer result-buf
           (:columns '("postmortem")
-           :column-defs '((:name "postmortem" :type-category json)))
-        (with-temp-buffer
-          (insert "postmortem: hello\n")
-          (clutch-result-insert-mode 1)
-          (setq-local clutch-result-insert--result-buffer result-buf
-                      clutch-result-insert--table "shipping_incidents")
+           :column-defs '((:name "postmortem" :type-category json))
+           :connection 'fake-conn)
+        (let (insert-buf)
           (cl-letf (((symbol-function 'clutch--ensure-column-details)
                      (lambda (_conn _table)
                        (list (list :name "postmortem" :type "json")))))
-            (let ((err (should-error (clutch-result-insert-edit-json-field)
-                                     :type 'user-error)))
-              (should (string-match-p "Field postmortem expects valid JSON"
-                                      (error-message-string err)))))
+            (clutch-result-insert--open-buffer
+             "shipping_incidents" result-buf '(("postmortem" . "hello")))
+            (setq insert-buf editor-buf)
+            (setq editor-buf nil)
+            (with-current-buffer insert-buf
+              (clutch-test--goto-insert-field-value "postmortem")
+              (let ((err (should-error (clutch-result-insert-edit-json-field)
+                                       :type 'user-error)))
+                (should (string-match-p "Field postmortem expects valid JSON"
+                                        (error-message-string err))))))
           (should-not editor-buf)
-          (should (equal (buffer-string) "postmortem: hello\n"))))))
+          (with-current-buffer insert-buf
+            (should (equal
+                     (plist-get (clutch-result-insert--field-state "postmortem")
+                                :value)
+                     "hello")))
+          (when (buffer-live-p insert-buf)
+            (kill-buffer insert-buf))))))
   (ert-info ("edit editor saves normalized JSON")
     (clutch-test--with-pop-to-buffer-capture json-buf
       (clutch-test--with-result-edit-buffer parent-buf "{\"a\":1}"
@@ -4836,9 +4818,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (defun clutch-test--with-agent-context-stubs (body)
   "Call BODY with deterministic metadata for agent-context copy tests."
-  (let ((clutch--column-details-cache (make-hash-table :test 'equal))
-        (clutch--column-details-status-cache (make-hash-table :test 'equal))
-        (clutch--table-comment-cache (make-hash-table :test 'equal))
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
         (clutch--object-cache (make-hash-table :test 'equal)))
     (cl-letf (((symbol-function 'clutch--ensure-connection)
                #'ignore)
@@ -5505,6 +5485,19 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                              'face description)
                             'transient-value))))))))))
 
+(ert-deftest clutch-test-query-dispatches-route-x-to-dwim ()
+  "SQL and MongoDB dispatch menus should share the DWIM execute route."
+  (dolist (prefix '(clutch-dispatch clutch-mongodb-dispatch))
+    (ert-info ((format "prefix: %s" prefix))
+      (let ((execute
+             (cl-find-if
+              (lambda (suffix)
+                (and (slot-boundp suffix 'key)
+                     (equal (oref suffix key) "x")))
+              (transient-suffixes prefix))))
+        (should execute)
+        (should (eq (oref execute command) #'clutch-execute-dwim))))))
+
 (ert-deftest clutch-test-copy-refine-infix-display-follows-switch-value ()
   "Copy refinement should display the active switch object value."
   (let* ((suffixes (transient-suffixes 'clutch-result-copy-dispatch))
@@ -5839,10 +5832,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (eq captured-conn 'new-conn)))))))
 
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
-  "Primary key cache should be ready before the first result render."
+  "Primary-key identity should be ready before the first result render."
   (let ((clutch--source-window (selected-window))
         (result-name "*clutch-test-result*")
-        (captured-pk :unset))
+        (captured-identity :unset))
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
                (lambda (_conn sql _page-num _page-size
                               &optional _order-by _page-offset)
@@ -5861,9 +5854,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   :rows '((1 "a" 1))))))
       (clutch-test--with-result-buffer
           (result-name (lambda (&rest _args)
-                         (setq captured-pk clutch--cached-pk-indices)))
+                         (setq captured-identity clutch--row-identity)))
         (clutch--execute-select "SELECT * FROM users" 'fake-conn)
-        (should (equal captured-pk '(0)))
+        (should (eq (plist-get captured-identity :kind) 'primary-key))
+        (should (equal (plist-get captured-identity :source-indices) '(0)))
         (with-current-buffer result-name
           (should clutch--result-server-pageable)
           (should clutch--result-server-rewritable))))))

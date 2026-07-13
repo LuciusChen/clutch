@@ -20,7 +20,6 @@
 (defvar clutch--aggregate-summary)
 (defvar clutch--active-edit-cell)
 (defvar clutch--base-query)
-(defvar clutch--cached-pk-indices)
 (defvar clutch--cell-default-placeholder)
 (defvar clutch--cell-generated-placeholder)
 (defvar-local clutch--column-widths nil
@@ -113,7 +112,6 @@ the header cell was rendered.")
 (defvar clutch-connection)
 (defvar clutch-describe--header-base)
 (defvar clutch-result-max-rows)
-(defvar clutch--table-metadata-updated-hook)
 
 (defconst clutch--null-cell-display-text "<null>"
   "Display text for database NULL values in result cells.")
@@ -133,9 +131,7 @@ the header cell was rendered.")
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--connection-display-key "clutch-connection" (conn))
-(declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
-(declare-function clutch--foreign-key-column-info "clutch-schema" (conn table col-names))
 (declare-function clutch--current-namespace-name "clutch-connection" (conn))
 (declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
 (declare-function clutch--schema-status-header-line-segment "clutch-schema" (conn))
@@ -1541,42 +1537,6 @@ Returns a propertized string."
              specs "")
           (propertize "│" 'face 'clutch-border-face))))
 
-(defun clutch--render-static-table (col-names rows &optional column-defs)
-  "Render a table string from COL-NAMES and ROWS.
-Uses the same visual style as the result renderer.
-COLUMN-DEFS, if provided, is used for long-field detection.
-Returns a string (with text properties)."
-  (let* ((clutch--result-columns col-names)
-         (clutch--result-column-defs column-defs)
-         (clutch--result-source-table nil)
-         (clutch--row-identity nil)
-         (clutch--pending-edits nil)
-         (clutch--fk-info nil)
-         (ncols (length col-names))
-         (all-cols (number-sequence 0 (1- ncols)))
-         (widths (clutch--compute-column-widths col-names rows column-defs 1000))
-         (bface 'clutch-border-face)
-         (sep-top (propertize (clutch--render-separator all-cols widths 'top)
-                              'face bface))
-         (sep-mid (propertize (clutch--render-separator all-cols widths 'middle)
-                              'face bface))
-         (sep-bot (propertize (clutch--render-separator all-cols widths 'bottom)
-                              'face bface))
-         (header (clutch--render-header all-cols widths))
-         (render-state (clutch--build-render-state))
-         (column-specs (clutch--visible-column-specs all-cols widths))
-         (lines nil))
-    (push sep-top lines)
-    (push header lines)
-    (push sep-mid lines)
-    (cl-loop for row in rows
-             for ridx from 0
-             do (push (clutch--render-row
-                       row ridx all-cols widths render-state column-specs)
-                      lines))
-    (push sep-bot lines)
-    (mapconcat #'identity (nreverse lines) "\n")))
-
 (defun clutch--render-row-line (row ridx visible-cols widths nw render-state
                                     &optional column-specs)
   "Return the rendered buffer line string for ROW at RIDX.
@@ -1995,71 +1955,6 @@ HINTS is a list of (KEY DESCRIPTION) pairs."
       (when-let* ((name (plist-get col :name)))
         (push (propertize name 'face 'clutch-field-name-face) parts))
       (string-join parts "\n"))))
-
-(defun clutch--result-column-details (conn table col-names &optional load)
-  "Return detail plists aligned with result columns COL-NAMES.
-Uses cached metadata for CONN/TABLE.  When LOAD is non-nil, synchronously load
-missing table metadata."
-  (when-let* ((details (and table
-                            (or (clutch--cached-column-details conn table)
-                                (and load
-                                     (clutch--ensure-column-details conn table))))))
-    (let ((by-name (make-hash-table :test 'equal)))
-      (dolist (detail details)
-        (puthash (downcase (plist-get detail :name)) detail by-name))
-      (mapcar (lambda (name)
-                (gethash (downcase name) by-name))
-              col-names))))
-
-(defun clutch--queue-result-column-details-enrichment (conn table)
-  "Start async result column-detail preheat for CONN and TABLE when needed."
-  (when (and table
-             (not (clutch--cached-column-details conn table)))
-    (clutch--ensure-column-details-async conn table)))
-
-(defun clutch--refresh-result-metadata-buffers (conn table)
-  "Refresh cached result column metadata for live result buffers on CONN/TABLE."
-  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
-    (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (and (derived-mode-p 'clutch-result-mode)
-                     clutch-connection
-                     clutch--result-columns
-                     (string= (clutch--connection-key clutch-connection) conn-key)
-                     (equal clutch--result-source-table table))
-            (setq-local clutch--result-column-details
-                        (clutch--result-column-details
-                         clutch-connection table clutch--result-columns))
-            (when clutch--pending-inserts
-              (clutch--refresh-display))))))))
-
-(defun clutch--refresh-result-foreign-key-buffers (conn table)
-  "Refresh cached foreign-key display metadata for result buffers on CONN/TABLE."
-  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
-    (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (and (derived-mode-p 'clutch-result-mode)
-                     clutch-connection
-                     clutch--result-columns
-                     (string= (clutch--connection-key clutch-connection) conn-key)
-                     (equal clutch--result-source-table table))
-            (setq-local clutch--fk-info
-                        (clutch--foreign-key-column-info
-                         clutch-connection table clutch--result-columns))
-            (clutch--refresh-display)))))))
-
-(defun clutch--handle-table-metadata-updated (conn table kind)
-  "Refresh result UI for CONN/TABLE metadata KIND."
-  (pcase kind
-    ('column-details
-     (clutch--refresh-result-metadata-buffers conn table))
-    ('foreign-keys
-     (clutch--refresh-result-foreign-key-buffers conn table))))
-
-(add-hook 'clutch--table-metadata-updated-hook
-          #'clutch--handle-table-metadata-updated)
 
 (defun clutch--header-cell (cidx widths &optional active-cidx)
   "Build a single header cell string for column CIDX.

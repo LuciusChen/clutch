@@ -69,7 +69,6 @@ Each value is a plist with at least :entries and :fetched-at.")
                   (buffer connection sql err))
 (declare-function clutch--remember-debug-event "clutch-query" (&rest event))
 (declare-function clutch--refresh-current-schema "clutch-schema" (&optional silent))
-(declare-function clutch--schema-for-connection "clutch-schema" (&optional conn))
 (declare-function clutch--warn-completion-metadata-error-once "clutch-schema" (message-text))
 (declare-function clutch--warn-schema-cache-state "clutch-schema" (&optional conn))
 
@@ -167,10 +166,6 @@ minibuffer has been quit.")
   "Return cached object entries for CONN, or nil."
   (plist-get (clutch--object-cache-entry conn) :entries))
 
-(defun clutch--object-cache-type-table (conn)
-  "Return cached per-type object entries for CONN, or nil."
-  (plist-get (clutch--object-cache-entry conn) :by-type))
-
 (defun clutch--object-cache-loaded-categories (conn)
   "Return loaded object category symbols for CONN, or nil."
   (plist-get (clutch--object-cache-entry conn) :loaded-categories))
@@ -183,17 +178,6 @@ minibuffer has been quit.")
                      (memq category loaded))
                    clutch--object-categories))))
 
-(defun clutch--make-object-type-cache (entries)
-  "Return a hash table grouping ENTRIES by normalized object type."
-  (let ((by-type (make-hash-table :test 'equal)))
-    (dolist (entry entries)
-      (let ((type (clutch--normalize-object-type (plist-get entry :type))))
-        (puthash type (cons entry (gethash type by-type)) by-type)))
-    (maphash (lambda (type entries)
-               (puthash type (nreverse entries) by-type))
-             by-type)
-    by-type))
-
 (defun clutch--filter-object-entries-by-type (entries type)
   "Return ENTRIES filtered to normalized object TYPE."
   (seq-filter
@@ -204,18 +188,14 @@ minibuffer has been quit.")
 
 (defun clutch--object-cache-type-entries (conn type)
   "Return cached object entries for CONN filtered to TYPE, or nil."
-  (let ((type (clutch--normalize-object-type type)))
-    (or (when-let* ((entries (clutch--object-cache-entries conn)))
-          (clutch--filter-object-entries-by-type entries type))
-        (when-let* ((by-type (clutch--object-cache-type-table conn)))
-          (gethash type by-type)))))
+  (when-let* ((entries (clutch--object-cache-entries conn)))
+    (clutch--filter-object-entries-by-type entries type)))
 
 (defun clutch--store-object-cache (conn entries)
   "Store object ENTRIES for CONN and return ENTRIES."
   (clutch--cache-table-entry-comments conn entries)
   (puthash (clutch--object-cache-key conn)
            (list :entries entries
-                 :by-type (clutch--make-object-type-cache entries)
                  :loaded-categories (copy-sequence clutch--object-categories)
                  :fetched-at (float-time))
            clutch--object-cache)
@@ -225,8 +205,6 @@ minibuffer has been quit.")
   "Store per-type object ENTRIES for CONN and TYPE, returning ENTRIES."
   (let* ((key (clutch--object-cache-key conn))
          (cache (or (gethash key clutch--object-cache) (list)))
-         (by-type (or (plist-get cache :by-type)
-                      (make-hash-table :test 'equal)))
          (loaded (copy-sequence (plist-get cache :loaded-categories)))
          (type (clutch--normalize-object-type type))
          (category (pcase type
@@ -236,7 +214,6 @@ minibuffer has been quit.")
                      ("FUNCTION" 'functions)
                      ("TRIGGER" 'triggers)
                      (_ nil))))
-    (puthash type entries by-type)
     (let ((browseable (clutch--browseable-object-entries conn)))
       (clutch--cache-table-entry-comments conn browseable)
       (when category
@@ -244,12 +221,12 @@ minibuffer has been quit.")
       (puthash key
                (list :entries (clutch--merge-object-entries
                                browseable
-                               (apply #'append
-                                      (delq nil
-                                            (mapcar (lambda (object-type)
-                                                      (gethash object-type by-type))
-                                                    clutch--object-type-order))))
-                     :by-type by-type
+                               (cl-remove type (plist-get cache :entries)
+                                          :key (lambda (entry)
+                                                 (clutch--normalize-object-type
+                                                  (plist-get entry :type)))
+                                          :test #'equal)
+                               entries)
                      :loaded-categories loaded
                      :fetched-at (float-time))
                clutch--object-cache))
@@ -751,10 +728,7 @@ allowed by ALLOWED-TYPES."
 Returns a list of matching entries from table search and, when cache is
 incomplete and TABLE-LIKE-ONLY is nil, from a sync-refreshed full snapshot.
 Results are filtered by ALLOWED-TYPES and deduplicated."
-  (let* ((table-hits
-          (condition-case nil
-              (clutch-db-search-table-entries conn sym)
-            (clutch-db-error nil)))
+  (let* ((table-hits (clutch-db-search-table-entries conn sym))
          (full-entries
           (when (and (not table-like-only)
                      (not (clutch--object-cache-complete-p conn)))
@@ -791,6 +765,9 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
      (cond
       (clutch--object-dispatch-entry
        clutch--object-dispatch-entry)
+      ((and (eq transient-current-command 'clutch-object-actions-menu)
+            clutch--object-action-entry)
+       clutch--object-action-entry)
       (current-object
        current-object)
       ((clutch--preferred-object-match matches table-like-only))
@@ -837,17 +814,6 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
            (message "No matching object found for: %s" sym)
            (clutch--object-entry-reader clutch-connection
                                          (or prompt "Object: ") entries nil cat)))))))))
-
-(defun clutch--read-table-name (prompt tables)
-  "Read a table name from TABLES with PROMPT.
-Annotates the collection with `clutch-object' category so Embark
-can offer object actions on the completion candidates."
-  (completing-read prompt
-                   (lambda (str pred action)
-                     (if (eq action 'metadata)
-                         '(metadata (category . clutch-object))
-                       (complete-with-action action tables str pred)))
-                   nil t))
 
 (defun clutch--object-entry-label (entry)
   "Return a compact source/type label for object ENTRY."
@@ -1692,34 +1658,6 @@ passed to the fallback reader."
     (clutch--remember-current-object entry)
     (message "Copied object fqname: %s" (clutch--message-ident fqname))))
 
-;;;###autoload
-(defun clutch-describe-table (table)
-  "Describe TABLE using the unified object workflow."
-  (interactive
-   (list (if-let* ((schema (clutch--schema-for-connection)))
-             (progn
-               (clutch--warn-schema-cache-state)
-               (clutch--read-table-name "Table: " (hash-table-keys schema)))
-           (read-string "Table: "))))
-  (clutch-object-describe (list :name table :type "TABLE")))
-
-;;;###autoload
-(defun clutch-describe-table-at-point ()
-  "Describe the object at point, or prompt when none is resolved."
-  (interactive)
-  (clutch-describe-dwim))
-
-;;;###autoload
-(defun clutch-browse-table (table-or-entry)
-  "Insert SELECT * FROM TABLE-OR-ENTRY at the end of a query console."
-  (interactive
-   (list (clutch-object-read "Browse object: " t)))
-  (clutch-object-browse
-   (if (stringp table-or-entry)
-       (list :name table-or-entry :type "TABLE")
-     table-or-entry)))
-
-
 (defconst clutch--object-action-registry
   '((:id describe
      :key "d"
@@ -1834,16 +1772,6 @@ passed to the fallback reader."
   (clutch--remember-current-object entry)
   (funcall (clutch--object-action-command action-id) entry))
 
-(defun clutch--object-action-target ()
-  "Return the current object action target, prompting when needed."
-  (or clutch--object-action-entry
-      (setq clutch--object-action-entry
-            (clutch--resolve-object-dwim "Object actions for: "))))
-
-(defun clutch--object-act-jump-target-inapt-p ()
-  "Return non-nil when forward jumps are unavailable for the action target."
-  (not (clutch--object-act-jump-target-p)))
-
 (defun clutch--object-act-jump-target-p ()
   "Return non-nil when the current action target supports forward jumps."
   (let ((entry clutch--object-action-entry))
@@ -1858,10 +1786,6 @@ passed to the fallback reader."
          conn
          (clutch--object-action-available-p entry action-id conn))))
 
-(defun clutch--object-act-backend-action-inapt-p (action-id)
-  "Return non-nil when ACTION-ID is unavailable for the action target."
-  (not (clutch--object-act-backend-action-p action-id)))
-
 (defun clutch--object-act-document-actions-p ()
   "Return non-nil if any document action is available for action target."
   (let ((entry clutch--object-action-entry)
@@ -1872,98 +1796,36 @@ passed to the fallback reader."
                      (clutch--object-action-available-p entry action-id conn))
                    '(index-insight explain-sample show-validation show-stats)))))
 
-(defun clutch--object-act-index-insight-inapt-p ()
-  "Return non-nil when index insight is unavailable for the target."
-  (clutch--object-act-backend-action-inapt-p 'index-insight))
-
-(defun clutch--object-act-explain-sample-inapt-p ()
-  "Return non-nil when sample explain is unavailable for the target."
-  (clutch--object-act-backend-action-inapt-p 'explain-sample))
-
-(defun clutch--object-act-show-validation-inapt-p ()
-  "Return non-nil when validation metadata is unavailable for the target."
-  (clutch--object-act-backend-action-inapt-p 'show-validation))
-
-(defun clutch--object-act-show-stats-inapt-p ()
-  "Return non-nil when storage statistics are unavailable for the target."
-  (clutch--object-act-backend-action-inapt-p 'show-stats))
-
-(defun clutch--object-act-describe ()
-  "Describe the current object action target."
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'describe))
-
-(defun clutch--object-act-show-definition ()
-  "Show DDL or source for the current object action target."
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'show-definition))
-
-(transient-define-suffix clutch--object-act-jump-target ()
-  "Jump from the current object action target to its target object."
-  :inapt-if #'clutch--object-act-jump-target-inapt-p
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'jump-target))
-
-(transient-define-suffix clutch--object-act-index-insight ()
-  "Show index insight for the current collection action target."
-  :inapt-if #'clutch--object-act-index-insight-inapt-p
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'index-insight))
-
-(transient-define-suffix clutch--object-act-explain-sample ()
-  "Explain a sample query for the current collection action target."
-  :inapt-if #'clutch--object-act-explain-sample-inapt-p
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'explain-sample))
-
-(transient-define-suffix clutch--object-act-show-validation ()
-  "Show validation metadata for the current collection action target."
-  :inapt-if #'clutch--object-act-show-validation-inapt-p
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'show-validation))
-
-(transient-define-suffix clutch--object-act-show-stats ()
-  "Show storage statistics for the current collection action target."
-  :inapt-if #'clutch--object-act-show-stats-inapt-p
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'show-stats))
-
-(defun clutch--object-act-copy-name ()
-  "Copy the name of the current object action target."
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'copy-name))
-
-(defun clutch--object-act-copy-fqname ()
-  "Copy the fully qualified name of the current object action target."
-  (interactive)
-  (clutch--run-object-action (clutch--object-action-target) 'copy-fqname))
-
 (transient-define-prefix clutch-object-actions-menu ()
   "Transient fallback for clutch object actions."
   [["Open"
     ("d" (lambda () (clutch--object-action-label 'describe))
-     clutch--object-act-describe)
+     clutch-object-describe)
     ("s" (lambda () (clutch--object-action-label 'show-definition))
-     clutch--object-act-show-definition)]
+     clutch-object-show-ddl-or-source)]
    ["Document"
     :if clutch--object-act-document-actions-p
     ("i" (lambda () (clutch--object-action-label 'index-insight))
-     clutch--object-act-index-insight)
+     clutch-object-show-index-insight
+     :inapt-if (lambda () (not (clutch--object-act-backend-action-p 'index-insight))))
     ("e" (lambda () (clutch--object-action-label 'explain-sample))
-     clutch--object-act-explain-sample)
+     clutch-object-explain-sample-query
+     :inapt-if (lambda () (not (clutch--object-act-backend-action-p 'explain-sample))))
     ("v" (lambda () (clutch--object-action-label 'show-validation))
-     clutch--object-act-show-validation)
+     clutch-object-show-validation
+     :inapt-if (lambda () (not (clutch--object-act-backend-action-p 'show-validation))))
     ("t" (lambda () (clutch--object-action-label 'show-stats))
-     clutch--object-act-show-stats)]
+     clutch-object-show-stats
+     :inapt-if (lambda () (not (clutch--object-act-backend-action-p 'show-stats))))]
    ["Navigate"
     :if clutch--object-act-jump-target-p
     ("j" (lambda () (clutch--object-action-label 'jump-target))
-     clutch--object-act-jump-target)]
+     clutch-object-jump-target)]
    ["Copy"
     ("n" (lambda () (clutch--object-action-label 'copy-name))
-     clutch--object-act-copy-name)
+     clutch-copy-object-name)
     ("f" (lambda () (clutch--object-action-label 'copy-fqname))
-     clutch--object-act-copy-fqname)]
+     clutch-copy-object-fqname)]
    ["Cache"
     ("g" "Refresh schema" clutch-refresh-schema)]])
 
@@ -2034,22 +1896,13 @@ When PREDICATE is non-nil, keep only action specs matching it."
       'clutch-target-object
     'clutch-object))
 
-(defconst clutch--embark-command-labels
-  '((clutch-object-default-action . "Default action")
-    (clutch-object-describe . "Describe object")
-    (clutch-object-show-ddl-or-source . "Show definition")
-    (clutch-object-show-index-insight . "Show index insight")
-    (clutch-object-explain-sample-query . "Explain sample query")
-    (clutch-object-show-validation . "Show validation")
-    (clutch-object-show-stats . "Show stats")
-    (clutch-object-jump-target . "Jump target")
-    (clutch-copy-object-name . "Copy name")
-    (clutch-copy-object-fqname . "Copy fqname"))
-  "Display labels for clutch commands shown through Embark.")
-
 (defun clutch--embark-command-label (cmd)
   "Return Embark display label for clutch command CMD, or nil."
-  (alist-get cmd clutch--embark-command-labels))
+  (if (eq cmd 'clutch-object-default-action)
+      "Default action"
+    (cl-loop for spec in clutch--object-action-registry
+             when (eq cmd (plist-get spec :command))
+             return (plist-get spec :label))))
 
 (defun clutch--embark-command-name-advice (orig cmd)
   "Return a clutch-specific display name for CMD, delegating to ORIG otherwise."

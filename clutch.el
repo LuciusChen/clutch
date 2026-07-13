@@ -228,7 +228,7 @@ Each entry has the form:
            [:backend SYM] [:sql-product SYM]
            [:profile-entry STR] [:pass-entry STR]
            [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
-           [:tramp TRAMP-DIRECTORY]
+           [:tramp-default-directory TRAMP-DIRECTORY]
            [:url STR] [:display-name STR] [:props ALIST]
            [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
            [:connect-timeout N] [:read-idle-timeout N]
@@ -259,9 +259,8 @@ based JDBC entries.
 :ssh-tunnel controls when that tunnel is used.  The default `always'
 preserves the explicit tunnel behavior; `direct-first' probes `:host' / `:port'
 briefly and skips the tunnel when the database endpoint is already reachable.
-:tramp enables the same local forward from an ssh-like TRAMP directory such as
-/ssh:host:/path/ or /rpc:host:/path/.  `:tramp-default-directory' is also
-accepted as a longer spelling.
+:tramp-default-directory enables the same local forward from an ssh-like TRAMP
+directory such as /ssh:host:/path/ or /rpc:host:/path/.
 :profile-entry reads missing connection fields from an encrypted profile in
 pass or .authinfo/.authinfo.gpg.  For pass, use the normal first-line password
 and `key: value' fields such as `backend:', `host:', `port:', `user:',
@@ -300,7 +299,6 @@ Password resolution order:
                                     (:ssh-tunnel
                                      (choice (const always)
                                              (const direct-first)))
-                                    (:tramp string)
                                     (:tramp-default-directory string)
                                     (:url string)
                                     (:display-name string)
@@ -387,9 +385,8 @@ When nil, Clutch never infers TRAMP transport from the current buffer.
 When `ask', Clutch prompts before using the current TRAMP default directory.
 When `auto', Clutch uses the current TRAMP default directory without asking.
 This only applies when a connection has no explicit transport such as
-:ssh-host or :tramp.  TRAMP transport currently supports ssh-like TRAMP
-directories.  `:tramp-default-directory' remains accepted as a longer spelling
-for `:tramp'."
+:ssh-host or :tramp-default-directory.  TRAMP transport currently supports
+ssh-like TRAMP directories."
   :type '(choice (const :tag "Never infer TRAMP context" nil)
                  (const :tag "Ask before using current TRAMP context" ask)
                  (const :tag "Automatically use current TRAMP context" auto))
@@ -962,8 +959,7 @@ Accumulates input until a semicolon is found, then executes."
     ("a" clutch--dispatch-toggle-auto-commit)
     ("R" "REPL"              clutch-repl)]
    ["Execute"
-    ("x" "Query at point" clutch-execute-query-at-point)
-    ("X" "Statement (;-only)" clutch-execute-statement-at-point)
+    ("x" "DWIM"           clutch-execute-dwim)
     ("r" "Region"         clutch-execute-region)
     ("b" "Buffer"         clutch-execute-buffer)
     ("p" "Preview execution" clutch-preview-execution-sql)

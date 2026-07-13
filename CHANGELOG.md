@@ -1,9 +1,31 @@
 # Changelog
 
-## 0.2.5 - Unreleased
+## 0.3.0 - Unreleased
+
+### Breaking Changes
+
+- Removed the public `clutch-execute-query-at-point` and
+  `clutch-execute-statement-at-point` commands.  Use
+  `clutch-execute-dwim`, `clutch-execute-region`, or `clutch-execute-buffer`;
+  select a region first when exact execution boundaries matter.
+- Removed the table-specific `clutch-describe-table`,
+  `clutch-describe-table-at-point`, and `clutch-browse-table` commands.  Use
+  `clutch-describe-dwim` or `clutch-act-dwim`.
+- Removed the standalone `clutch-result-insert-mode` entry point and its public
+  map/hook.  Open insert forms with `clutch-result-insert-row` from a result.
+- Removed the `:tramp` saved-connection parameter spelling.  Use
+  `:tramp-default-directory` for explicit TRAMP connection origins.
+- Reduced the native MongoDB console to common reads, generated single-document
+  mutations, `runCommand`, and `ObjectId` / `ISODate`.  Database switching now
+  uses `clutch-switch-schema`; dedicated admin/index helpers, database
+  aggregation, multi-document mutations, cursor `batchSize` / `comment`, and
+  numeric/timestamp constructor aliases were removed.
 
 ### Fixed
 
+- Removed hidden connection-construction retries and broad capability
+  fallbacks, so backend failures reach the normal command error boundary with
+  their original cause.
 - Replaced PostgreSQL primary-key ordering through
   `array_position(int2vector, smallint)` with explicit array subscripts over
   `pg_index.indkey`, restoring row identity and result editing on GaussDB in

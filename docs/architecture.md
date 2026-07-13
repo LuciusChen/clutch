@@ -162,7 +162,7 @@ registered backend symbol; use it through the generic `jdbc` path.
 ```mermaid
 flowchart TB
   Saved["Saved connection params<br/>or manual reader params"]
-  Canon["Canonicalize params<br/>backend aliases, surface symbols,<br/>:tramp alias"]
+  Canon["Canonicalize params<br/>backend aliases, surface symbols"]
   Auth["Materialize credentials<br/>:password, :pass-entry,<br/>auth-source/pass"]
   Transport{"Transport requested?"}
   Structured{"Structured<br/>:host/:port?"}

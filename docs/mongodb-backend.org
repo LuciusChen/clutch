@@ -111,10 +111,9 @@ sampled field names for basic support.  It also offers cursor helper chains
 after =find(...).= and =aggregate(...).= so query-bar controls common in GUI
 MongoDB clients remain discoverable in the Emacs query buffer.  Projection stays
 as the second =find= argument; =find(...).= completion offers =sort()=,
-=skip()=, =limit()=, =maxTimeMS()=, =batchSize()=, =allowDiskUse()=,
-=comment()=, and =explain()=.  =aggregate(...).= completion offers the
-aggregate command option helpers =allowDiskUse()=, =batchSize()=,
-=maxTimeMS()=, =comment()=, and =explain()=.  Field completion and collection
+=skip()=, =limit()=, =maxTimeMS()=, =allowDiskUse()=, and =explain()=.
+=aggregate(...).= completion offers =allowDiskUse()=, =maxTimeMS()=, and
+=explain()=.  Field completion and collection
 metadata sample up to =clutch-mongodb-schema-sample-size= documents, merge
 field paths from those documents, and report sampled BSON type summaries.
 Collection-method completion also offers lightweight templates such as
@@ -127,25 +126,21 @@ helper parser and =mongodb.el= command layer support the query shape.
 Supported helper families include:
 
 - collection reads: =find=, =findOne=, =aggregate=, =countDocuments=,
-  =estimatedDocumentCount=, =distinct=, and =explain=
-- collection writes: =insertOne=, =insertMany=, =updateOne=, =updateMany=,
-  =replaceOne=, =deleteOne=, and =deleteMany=
-- metadata/admin helpers: =getCollectionNames=, =getCollectionInfos=,
-  =createCollection=,
-  =dropDatabase=, =listIndexes=, =createIndex=, =dropIndex=, =runCommand=, and
-  =adminCommand=
-- database helpers: =db.getName()=, =db.getSiblingDB(...)=, and
-  =db.aggregate(...)=
+  =distinct=, and =explain=
+- generated document mutations: =insertOne=, =insertMany=, =updateOne=,
+  =replaceOne=, and =deleteOne=
+- uncommon commands: =db.runCommand(...)= against the current database
+
+Database selection uses the shared =clutch-switch-schema= workflow.  Dedicated
+MongoDB Shell admin, index-management, database-switching, and multi-document
+mutation helpers are intentionally outside the basic console surface.
 
 Write helpers validate their documented argument shape before calling
 =mongodb.el=.  =insertOne= accepts one document, =insertMany= accepts one
-document array, and =deleteOne= / =deleteMany= require one explicit filter
-document.
+document array, and =deleteOne= requires one explicit filter document.
 
-BSON constructors such as =ObjectId()=, =ISODate()=, =Timestamp()=,
-=Int32()=, =Long()=, =NumberInt()=, =NumberLong()=, =Decimal128()=, and
-=NumberDecimal()= encode as native BSON wrapper values before being sent to
-=mongodb.el=.
+=ObjectId()= and =ISODate()= encode the common non-JSON query literals as native
+BSON wrapper values before being sent to =mongodb.el=.
 
 This parser is intentionally not a general JavaScript runtime.  Unsupported
 helpers and Mongo shell-only syntax such as regex literals should fail clearly
@@ -158,22 +153,22 @@ Clutch maps MongoDB concepts onto the generic database contract:
 - schemas are MongoDB databases
 - tables are collections
 - columns are sampled document field paths with sampled BSON type summaries
-- indexes are collection indexes returned by =listIndexes()=
+- indexes are collection indexes returned by the public MongoDB client API
 - nested documents and arrays render as JSON-valued cells
 
 Object actions use the same =C-c C-o= / Embark workflow as SQL backends.  For a
 MongoDB collection, Describe shows a formatted JSON schema profile with sampled
 field paths, presence counts, type counts, examples, top scalar values, and
-collection indexes.  Show definition displays =getCollectionInfos({name:
-...})= as JSON.  Browse inserts a =db.getCollection(...).find({}).limit(20);=
-helper.  Show index insight combines =listIndexes()= definitions with
-=$indexStats= usage data.  Show stats displays formatted JSON with
+collection indexes.  Show definition displays collection metadata as JSON.
+Browse inserts a =db.getCollection(...).find({}).limit(20);=
+helper.  Show index insight combines index definitions with =$indexStats= usage
+data.  Show stats displays formatted JSON with
 collection-level =count=, =avgObjSize=, =storageSize=, =totalIndexSize=,
 =totalSize=, and =indexSizes= values from a =$collStats= aggregation.  Explain
 sample query uses the same backend explain path as =C-c C-p= and explains
 =find({}).limit(1)= with =executionStats=.  Show validation displays collection
-=validator= / =validationAction= / =validationLevel= metadata from
-=getCollectionInfos(...)=.  Profile, index insight, stats, explain, and
+=validator= / =validationAction= / =validationLevel= collection metadata.
+Profile, index insight, stats, explain, and
 validation are MongoDB document features; Clutch exposes them through the
 shared object action UI for workflow consistency, not as SQL-compatible
 features or query-result footer fields.
