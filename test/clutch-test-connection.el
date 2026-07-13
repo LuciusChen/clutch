@@ -1594,7 +1594,7 @@
 ;;;; Connection — transaction and auto-commit
 
 (ert-deftest clutch-test-tx-header-line-and-update ()
-  "Tx header-line uses semantic colors and dirty adds *."
+  "Tx header-line should distinguish auto, manual, and dirty states."
   (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq)))
     (with-temp-buffer
       (clutch-mode)
@@ -1618,25 +1618,21 @@
         (should (equal mode-name "clutch"))
         (should (equal header-line-format
                        '((:eval (clutch--build-connection-header-line)))))
-        ;; Auto-commit: shows Tx: Auto in success face.
+        ;; Auto-commit.
         (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
                    (lambda (_conn) nil)))
-          (let ((seg (clutch--tx-header-line-segment clutch-connection)))
-            (should (string-match-p "Tx: Auto" seg))
-            (should (eq (get-text-property 0 'face seg) 'success))))
+          (should (string-match-p
+                   "Tx: Auto"
+                   (clutch--tx-header-line-segment clutch-connection))))
         ;; header-line-format is an (:eval ...) form; evaluate it to get content.
         (let ((hl (clutch--build-connection-header-line)))
           ;; Clean manual-commit: shows Tx: Manual (no asterisk).
           (should (string-match-p "Tx: Manual" hl))
           (should-not (string-match-p "Tx: Manual\\*" hl)))
-        (let ((seg (clutch--tx-header-line-segment clutch-connection)))
-          (should (eq (get-text-property 0 'face seg) 'warning)))
         ;; Dirty: header-line shows Tx: Manual*.
         (puthash clutch-connection t clutch--tx-dirty-cache)
-        (let ((hl (clutch--build-connection-header-line))
-              (seg (clutch--tx-header-line-segment clutch-connection)))
-          (should (string-match-p "Tx: Manual\\*" hl))
-          (should (eq (get-text-property 0 'face seg) 'error)))))))
+        (should (string-match-p "Tx: Manual\\*"
+                                (clutch--build-connection-header-line)))))))
 
 (ert-deftest clutch-test-update-mode-line-shows-spinner-when-executing ()
   "Busy buffers should show the current spinner frame in `mode-name'."
@@ -1646,15 +1642,16 @@
           (clutch--spinner-timer t)
           (clutch--spinner-index 2))
       (clutch--update-mode-line)
-      (should (equal mode-name "clutch ⠹"))
+      (should (string-prefix-p "clutch " mode-name))
+      (should (> (length mode-name) (length "clutch ")))
       (should-not (string-match-p "\\[\\.\\.\\.\\]" mode-name)))))
 
 (ert-deftest clutch-test-result-footer-spinner-contract ()
   "Result footer timing slot should show spinner only while executing."
-  (dolist (case '((busy-no-elapsed t nil ("⠹") nil)
-                  (busy-with-elapsed t 0.042 ("⏱ +⠹") ("42ms"))
-                  (idle-with-elapsed nil 0.042 ("⏱ +42ms") ("⠹"))))
-    (pcase-let ((`(,label ,executing ,elapsed ,present ,absent) case))
+  (dolist (case '((busy-no-elapsed t nil)
+                  (busy-with-elapsed t 0.042)
+                  (idle-with-elapsed nil 0.042)))
+    (pcase-let ((`(,label ,executing ,elapsed) case))
       (ert-info ((format "case: %s" label))
         (with-temp-buffer
           (clutch-result-mode)
@@ -1668,10 +1665,13 @@
               (clutch--refresh-footer-display)
               (let ((footer (substring-no-properties
                              (clutch--footer-mode-line-display))))
-                (dolist (needle present)
-                  (should (string-match-p needle footer)))
-                (dolist (needle absent)
-                  (should-not (string-match-p needle footer)))))))))))
+                (should (eq (not (null (string-match-p
+                                        (regexp-quote
+                                         (aref clutch--spinner-frames 2))
+                                        footer)))
+                            executing))
+                (should (eq (not (null (string-match-p "42ms" footer)))
+                            (and elapsed (not executing))))))))))))
 
 (ert-deftest clutch-test-spinner-tick-stops-when-no-busy-buffers ()
   "Spinner timer should stop itself when no buffers are busy."

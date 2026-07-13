@@ -58,13 +58,6 @@
   "Return non-nil when result workflow SQL is valid for the backend."
   (clutch-test-live-backend-capability-p :result-workflow))
 
-(defun clutch-test--live-column-type (kind)
-  "Return a live-test SQL column type for KIND."
-  (pcase kind
-    ('int (if (clutch-test--clickhouse-live-p) "Int32" "INT"))
-    ('string (if (clutch-test--clickhouse-live-p) "String" "VARCHAR(64)"))
-    (_ (error "Unknown live test column kind: %S" kind))))
-
 (defun clutch-test--live-create-table-sql (table columns)
   "Return CREATE TABLE SQL for TABLE with COLUMNS.
 COLUMNS entries have the shape (NAME KIND . ATTRS)."
@@ -75,7 +68,12 @@ COLUMNS entries have the shape (NAME KIND . ATTRS)."
              (pcase-let ((`(,name ,kind . ,attrs) column))
                (format "%s %s%s"
                        name
-                       (clutch-test--live-column-type kind)
+                       (pcase kind
+                         ('int (if (clutch-test--clickhouse-live-p)
+                                   "Int32" "INT"))
+                         ('string (if (clutch-test--clickhouse-live-p)
+                                      "String" "VARCHAR(64)"))
+                         (_ (error "Unknown live test column kind: %S" kind)))
                        (if (and (memq 'primary attrs)
                                 (not (clutch-test--clickhouse-live-p)))
                            " PRIMARY KEY"

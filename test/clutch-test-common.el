@@ -127,15 +127,6 @@ SPEC is (CONN BACKEND MODEL)."
          ('document-conn 'mongodb 'document)
        ,@body)))
 
-(defun clutch-test--column-defs (columns)
-  "Return simple column definitions for COLUMNS."
-  (mapcar (lambda (name) (list :name name)) columns))
-
-(defun clutch-test--column-widths (columns)
-  "Return simple display widths matching COLUMNS."
-  (vconcat (cl-loop for idx below (length columns)
-                    collect (if (= idx 0) 2 8))))
-
 (defun clutch-test--init-result-state (spec)
   "Initialize the current buffer as a small result buffer.
 SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
@@ -150,7 +141,7 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
                     '("id" "name")))
          (column-defs (if (plist-member spec :column-defs)
                           (plist-get spec :column-defs)
-                        (clutch-test--column-defs columns)))
+                        (mapcar (lambda (name) (list :name name)) columns)))
          (rows (if (plist-member spec :rows)
                    (plist-get spec :rows)
                  '((1 "alice") (2 "bob"))))
@@ -168,7 +159,9 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
                             100))
          (column-widths (if (plist-member spec :column-widths)
                             (plist-get spec :column-widths)
-                          (clutch-test--column-widths columns))))
+                          (vconcat
+                           (cl-loop for idx below (length columns)
+                                    collect (if (= idx 0) 2 8))))))
     (clutch-result-mode)
     (setq-local clutch-connection connection
                 clutch--connection-params (plist-get spec :connection-params)

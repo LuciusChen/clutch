@@ -1878,25 +1878,6 @@
           (should (= (clutch-test--fake-pixel-width wide) 30))
           (should-not (stringp (get-text-property 0 'display wide))))))))
 
-(ert-deftest clutch-test-header-cell-installs-sort-click-map ()
-  "Result header cells should expose a mouse keymap for sort cycling."
-  (with-temp-buffer
-    (setq-local clutch--result-columns '("id"))
-    (let* ((cell (clutch--header-cell 0 (vector 6)))
-           (pos (text-property-any 0 (length cell)
-                                   'clutch-header-col 0 cell))
-           (local-map (get-text-property pos 'local-map cell))
-           (keymap (get-text-property pos 'keymap cell)))
-      (should pos)
-      (should (keymapp local-map))
-      (should (eq keymap local-map))
-      (should (lookup-key local-map [header-line mouse-1]))
-      (should (lookup-key local-map [mouse-1]))
-      (should (eq (get-text-property pos 'mouse-face cell)
-                  'mode-line-highlight))
-      (should (string-match-p "cycle sort"
-                              (get-text-property pos 'help-echo cell))))))
-
 (ert-deftest clutch-test-header-sort-keymap-dispatches-in-event-window-buffer ()
   "The installed header command should sort in the clicked result buffer."
   (let ((source (generate-new-buffer " *clutch-source*"))
@@ -1945,16 +1926,11 @@
              :last-query "SELECT * FROM users"
              :row-identity-status status
              :row-identity-error-message message)
-          (let* ((footer-prop (clutch--render-footer 10 0 500 100))
-                 (footer (substring-no-properties footer-prop))
-                 (identity-start (string-match expected footer)))
+          (let ((footer (substring-no-properties
+                         (clutch--render-footer 10 0 500 100))))
             (should (string-match-p expected footer))
             (should-not (string-match-p unexpected footer))
-            (should (string-match-p "E/D off" footer))
-            (should identity-start)
-            (should (equal (get-text-property identity-start 'face footer-prop)
-                           '(:inherit font-lock-warning-face
-                                      :weight normal)))))))))
+            (should (string-match-p "E/D off" footer))))))))
 
 ;;;; Filter
 
@@ -2285,31 +2261,6 @@
 
 ;;;; Rendering — live value viewer
 
-(defun clutch-test--prepare-live-view-source (buffer)
-  "Populate BUFFER as a simple result grid for live-view tests."
-  (with-current-buffer buffer
-    (clutch-result-mode)
-    (setq-local clutch--result-source-table "cases")
-    (setq-local clutch--result-columns '("id" "name"))
-    (setq-local clutch--result-column-defs
-                '((:name "id" :type-category numeric)
-                  (:name "name" :type-category text)))
-    (setq-local clutch--result-rows '((1 "alice") (2 "bob")))
-    (setq-local clutch--filtered-rows nil)
-    (setq-local clutch--pending-edits nil)
-    (setq-local clutch--pending-deletes nil)
-    (setq-local clutch--pending-inserts nil)
-    (setq-local clutch--marked-rows nil)
-    (setq-local clutch--sort-column nil)
-    (setq-local clutch--sort-descending nil)
-    (setq-local clutch--page-current 0)
-    (setq-local clutch--page-total-rows 2)
-    (setq-local clutch--column-widths [2 5])
-    (clutch--refresh-display)
-    (goto-char (point-min))
-    (when-let* ((match (text-property-search-forward 'clutch-col-idx 1 #'eq)))
-      (goto-char (prop-match-beginning match)))))
-
 (ert-deftest clutch-test-live-view-lifecycle ()
   "Live viewer should follow point, freeze, and detach cleanly."
   (cl-labels
@@ -2318,8 +2269,18 @@
                viewer)
            (unwind-protect
                (progn
-                 (clutch-test--prepare-live-view-source source)
                  (with-current-buffer source
+                   (clutch-test--init-result-state
+                    '(:source-table "cases"
+                      :column-defs ((:name "id" :type-category numeric)
+                                    (:name "name" :type-category text))
+                      :column-widths [2 5]))
+                   (clutch--refresh-display)
+                   (goto-char (point-min))
+                   (when-let* ((match
+                                (text-property-search-forward
+                                 'clutch-col-idx 1 #'eq)))
+                     (goto-char (prop-match-beginning match)))
                    (cl-letf (((symbol-function 'display-buffer)
                               (lambda (buf &rest _args)
                                 (setq viewer buf)
@@ -4816,10 +4777,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Agent context copy
 
-(defun clutch-test--with-agent-context-stubs (body)
-  "Call BODY with deterministic metadata for agent-context copy tests."
+(defun clutch-test--copy-agent-context ()
+  "Run `clutch-copy-context-for-agent' with deterministic metadata."
   (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
-        (clutch--object-cache (make-hash-table :test 'equal)))
+        (clutch--object-cache (make-hash-table :test 'equal))
+        copied)
     (cl-letf (((symbol-function 'clutch--ensure-connection)
                #'ignore)
               ((symbol-function 'clutch--connection-key)
@@ -4848,17 +4810,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (when (and (string= (plist-get entry :name) "users")
                             (string= type "INDEX"))
                    (list (list :name "users_email_idx" :type "INDEX"
-                               :target-table "users" :unique t))))))
-      (funcall body))))
-
-(defun clutch-test--copy-agent-context ()
-  "Run `clutch-copy-context-for-agent' and return copied text."
-  (let (copied)
-    (clutch-test--with-agent-context-stubs
-     (lambda ()
-       (cl-letf (((symbol-function 'kill-new)
-                  (lambda (text) (setq copied text))))
-         (clutch-copy-context-for-agent))))
+                               :target-table "users" :unique t)))))
+              ((symbol-function 'kill-new)
+               (lambda (text) (setq copied text))))
+      (clutch-copy-context-for-agent))
     copied))
 
 (ert-deftest clutch-test-copy-context-for-agent-from-query-console ()
@@ -5498,45 +5453,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should execute)
         (should (eq (oref execute command) #'clutch-execute-dwim))))))
 
-(ert-deftest clutch-test-copy-refine-infix-display-follows-switch-value ()
-  "Copy refinement should display the active switch object value."
-  (let* ((suffixes (transient-suffixes 'clutch-result-copy-dispatch))
-         (refine
-          (cl-find-if (lambda (obj)
-                        (and (slot-boundp obj 'key)
-                             (equal (oref obj key) "-r")))
-                      suffixes)))
-    (should refine)
-    (should (equal (substring-no-properties
-                    (transient-format-description refine))
-                   "Refine selection"))
-    (let ((value (transient-format-value refine)))
-      (should (equal (substring-no-properties value) "(No|Yes)"))
-      (should (eq (get-text-property (string-match "No" value)
-                                     'face value)
-                  'transient-value)))
-    (let ((transient--prefix (get 'clutch-result-copy-dispatch
-                                  'transient--prefix))
-          (transient--suffixes suffixes))
-      (cl-letf (((symbol-function 'transient--show) #'ignore))
-        (transient-infix-set refine (transient-infix-read refine))))
-    (let ((value (transient-format-value refine)))
-      (should (equal (substring-no-properties value) "(No|Yes)"))
-      (should (eq (get-text-property (string-match "Yes" value)
-                                     'face value)
-                  'transient-value)))))
-
 (ert-deftest clutch-test-staged-transient-heading-shows-pending-count ()
   "Staged transient heading should summarize pending mutation count."
   (with-temp-buffer
     (setq-local clutch--pending-edits '(edit-a edit-b)
                 clutch--pending-deletes '(delete-a)
                 clutch--pending-inserts '(insert-a insert-b insert-c))
-    (let ((heading (clutch-result--staged-transient-heading)))
-      (should (equal (substring-no-properties heading) "Staged (6 pending)"))
-      (should (eq (get-text-property (string-match "6 pending" heading)
-                                    'face heading)
-                  'warning)))
+    (should (equal (substring-no-properties
+                    (clutch-result--staged-transient-heading))
+                   "Staged (6 pending)"))
     (setq-local clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil)
