@@ -23,6 +23,8 @@
 
 ### Fixed
 
+- Rejected Oracle URLs configured through generic `:backend jdbc` before
+  connection setup, with guidance to use the Oracle backend and its SQL dialect.
 - Prevented point-local DWIM execution from sending detached `--` divider
   paragraphs before the semicolon-delimited SQL at point.
 - Removed hidden connection-construction retries and broad capability

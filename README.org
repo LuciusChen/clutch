@@ -235,7 +235,9 @@ everything in one repository, this is a breaking packaging change:
 - Query-console SQL is saved by connection identity rather than saved connection
   name, so renaming a saved connection keeps the same console SQL.
 
-JDBC backends use a driver symbol as =:backend=.  See
+JDBC-backed databases use their clutch driver/dialect symbol as =:backend=, such
+as =oracle=; =:backend= does not merely select the Java driver.  Reserve
+=:backend jdbc= for databases without a dedicated clutch backend.  See
 [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]] for supported databases and setup.
 
 *** 2. Open a query console

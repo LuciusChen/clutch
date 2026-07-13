@@ -828,13 +828,19 @@ property even when the URL includes a default auth database."
 
 (defun clutch-jdbc--effective-driver (driver params)
   "Return internal JDBC driver for user-facing DRIVER and PARAMS."
-  (cond
-   ((eq driver 'mongodb)
-    (if (clutch-backend-jdbc-transport-p 'mongodb params)
-        'mongodb
+  (let ((url (plist-get params :url)))
+    (cond
+     ((eq driver 'mongodb)
+      (if (clutch-backend-jdbc-transport-p 'mongodb params)
+          'mongodb
+        (signal 'clutch-db-error
+                (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
+     ((and (eq driver 'jdbc)
+           (stringp url)
+           (string-prefix-p "jdbc:oracle:" url t))
       (signal 'clutch-db-error
-              (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
-   (t driver)))
+              (list "Oracle JDBC URLs require :backend oracle, not :backend jdbc")))
+     (t driver))))
 
 ;;;; Connect function
 

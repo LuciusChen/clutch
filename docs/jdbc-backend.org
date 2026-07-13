@@ -157,9 +157,9 @@ artifact from Maven Central rather than a nonexistent plain
                       :driver-class "org.duckdb.DuckDBDriver"
                       :display-name "DuckDB"))
 
-        ;; Generic JDBC (any database with a JDBC driver jar in drivers/)
-        ;; Use :backend jdbc with a full JDBC URL and driver class when no
-        ;; native backend exists.
+        ;; Generic JDBC (any database without a dedicated clutch backend)
+        ;; :backend selects clutch behavior and SQL dialect, not just the Java
+        ;; driver.  Use :backend jdbc only when no dedicated backend exists.
         ("kingbase" . (:backend jdbc
                         :url "jdbc:kingbase8://db.corp.com:54321/test"
                         :driver-class "com.kingbase8.Driver"
@@ -184,7 +184,8 @@ backends.  See [[file:../README.org::*Password Management][Password Management]]
 - *SID vs service name*: use =:sid "MYSID"= for SID-style connections
   (=@host:port:SID=); use =:database "myservice"= for service name style
   (=@//host:port/service=).  Mixing them up causes the connection to hang.
-  When in doubt, check with your DBA or use =:url= for full control.
+  When in doubt, check with your DBA or use =:url= with =:backend oracle= for
+  full control.
 - Schema is automatically set to the uppercase username (Oracle convention).
 - Oracle/JDBC completion does not rely on a full eager schema refresh.  Table
   names and column names are resolved through Oracle-specific prefix lookups, so

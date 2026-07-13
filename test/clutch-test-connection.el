@@ -1372,6 +1372,23 @@
               :type 'user-error)))
     (should (string-match-p ":backend" (cadr err)))))
 
+(ert-deftest clutch-test-open-connection-rejects-oracle-url-with-generic-jdbc ()
+  "Public connection setup should reject Oracle URLs using generic JDBC."
+  (require 'clutch-db-jdbc)
+  (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites)
+             (lambda (&rest _args)
+               (ert-fail "Oracle backend validation ran after JDBC setup"))))
+    (let ((err (should-error
+                (clutch-open-connection
+                 '(:backend jdbc
+                   :url "jdbc:oracle:thin:@db.example.com:1521:orcl"
+                   :driver-class "oracle.jdbc.OracleDriver"
+                   :user "scott"
+                   :password "tiger"))
+                :type 'user-error)))
+      (should (string-match-p ":backend oracle"
+                              (error-message-string err))))))
+
 (ert-deftest clutch-test-default-connect-timeout-is-10-seconds ()
   "Project default connect timeout should stay at 10 seconds."
   (should (= clutch-connect-timeout-seconds 10)))
