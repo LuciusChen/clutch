@@ -29,7 +29,8 @@
 ;;; Code:
 
 (eval-and-compile
-  (require 'clutch-test-common))
+  (require 'clutch-test-common)
+  (require 'clutch-db-sqlite))
 
 ;;;; Test configuration
 
@@ -52,8 +53,6 @@
 (defvar tramp-rpc-use-controlmaster)
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
-
-(declare-function make-clutch-db-sqlite-conn "clutch-db-sqlite" (&rest slot-value-pairs))
 
 (declare-function make-mysql-conn "mysql" (&rest args))
 
@@ -2002,41 +2001,6 @@
   "WHERE filtering should validate, rewrite, clear, and execute consistently."
   (with-temp-buffer
     (should-error (clutch-result-apply-filter) :type 'user-error))
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--last-query "SELECT * FROM t"
-                clutch--result-source-table "t"
-                clutch--result-server-pageable t
-                clutch--result-server-rewritable t
-                clutch--result-columns '("id" "name")
-                clutch--row-identity
-                (clutch-test--primary-row-identity "t" '("id") '(0))
-                clutch--where-filter nil)
-    (let (captured)
-      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _args) "id"))
-                ((symbol-function 'read-string) (lambda (&rest _args) "> 5"))
-                ((symbol-function 'clutch-db-escape-identifier)
-                 (lambda (_conn id) (format "`%s`" id)))
-                ((symbol-function 'clutch--execute)
-                 (lambda (sql conn &optional result-context)
-                   (setq captured
-                         (list sql conn
-                               (plist-get result-context :source-table)
-                               (plist-get
-                                (plist-get result-context :row-identity-prep)
-                                :sql))))))
-        (clutch-result-apply-filter)
-        (should (equal captured
-                       (list (clutch-db-apply-where
-                              'fake-conn "SELECT * FROM t" "`id` > 5")
-                             'fake-conn
-                             "t"
-                             (clutch-db-apply-where
-                              'fake-conn
-                              "SELECT t.*, `id` AS `clutch__rid_0` FROM t"
-                              "`id` > 5"))))
-        (should (equal clutch--where-filter "`id` > 5"))
-        (should (equal clutch--base-query "SELECT * FROM t")))))
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch--last-query "SELECT * FROM t"
@@ -5657,42 +5621,89 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Execute — query execution and error handling
 
+(ert-deftest clutch-test-result-filter-page-count-export-real-sqlite-workflow ()
+  "Public result commands preserve one filtered SQLite workflow end to end."
+  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-result-workflow-source*"))
+         (clutch-result-max-rows 2)
+         (clutch--spinner-timer nil)
+         (clutch--spinner-index 0)
+         (kill-ring nil)
+         (kill-ring-yank-pointer nil)
+         result)
+    (unwind-protect
+        (save-window-excursion
+          (clutch-db-query
+           conn
+           "CREATE TABLE metrics (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)")
+          (clutch-db-query
+           conn
+           (concat "INSERT INTO metrics (id, name, score) VALUES "
+                   "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30), "
+                   "(4, 'four', 40), (5, 'five', 50)"))
+          (set-window-buffer (selected-window) source)
+          (with-current-buffer source
+            (clutch-mode)
+            (setq-local clutch-connection conn
+                        clutch--connection-params
+                        '(:backend sqlite :database ":memory:"))
+            (insert "SELECT name, score FROM metrics ORDER BY id")
+            (clutch-execute-buffer)
+            (setq result clutch--last-result-buffer))
+          (should (buffer-live-p result))
+          (set-window-buffer (selected-window) result)
+          (with-current-buffer result
+            (should (derived-mode-p 'clutch-result-mode))
+            (should (memq 'clutch--header-line-display
+                          (flatten-tree header-line-format)))
+            (should (equal (clutch--column-names-for-indices
+                            (clutch--visible-columns))
+                           '("name" "score")))
+            (should (equal (plist-get clutch--row-identity :indices) '(2)))
+            (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
+                                   clutch--result-rows)
+                           '(("one" 10) ("two" 20))))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt &rest _args)
+                         (if (string-prefix-p "Export" prompt)
+                             "csv-copy"
+                           "score")))
+                      ((symbol-function 'read-string)
+                       (lambda (&rest _args) "> 20")))
+              (clutch-result-apply-filter)
+              (should (memq 'clutch--header-line-display
+                            (flatten-tree header-line-format)))
+              (should (equal clutch--where-filter "\"score\" > 20"))
+              (should (string-match-p "WHERE \"score\" > 20"
+                                      clutch--last-query))
+              (should (equal (plist-get clutch--row-identity :indices) '(2)))
+              (should (equal clutch--result-rows
+                             '(("three" 30 3) ("four" 40 4))))
+              (clutch-result-count-total)
+              (should (= clutch--page-total-rows 3))
+              (clutch-result-next-page)
+              (should (= clutch--page-current 1))
+              (should-not clutch--page-has-more)
+              (should (equal (plist-get clutch--row-identity :indices) '(2)))
+              (should (equal clutch--result-rows '(("five" 50 5))))
+              (clutch-result-export)
+              (let ((csv (current-kill 0 t)))
+                (should (equal csv
+                               "name,score\nthree,30\nfour,40\nfive,50\n"))
+                (should-not
+                 (string-match-p "one\\|two\\|clutch__rid\\|id," csv))))))
+      (clutch--spinner-stop)
+      (when (buffer-live-p result)
+        (kill-buffer result))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when (clutch-db-live-p conn)
+        (clutch-db-disconnect conn))
+      (should-not clutch--spinner-timer))))
+
 (ert-deftest clutch-test-collect-all-export-rows-contract ()
   "Export row collection should page, reuse local rows, and reconnect when needed."
-  (ert-info ("paged filtered result")
-    (clutch-test--with-result-state
-        (:base-query "SELECT name FROM t"
-         :last-query "SELECT name FROM t"
-         :where-filter "name LIKE 'ann%'"
-         :source-table "t"
-         :server-pageable t
-         :row-identity (clutch-test--primary-row-identity "t" '("id") '(1)))
-      (let ((clutch-result-max-rows 2)
-            captured-base)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch-db-apply-where)
-                   (lambda (_conn sql filter)
-                     (format "FILTER[%s]{%s}" filter sql)))
-                  ((symbol-function 'clutch-db-escape-identifier)
-                   (lambda (_conn id) (format "`%s`" id)))
-                  ((symbol-function 'clutch-db-build-paged-sql)
-                   (lambda (_conn sql page-num _page-size _order-by
-                           &optional _page-offset)
-                     (unless captured-base
-                       (setq captured-base sql))
-                     (format "SELECT name FROM t -- page:%d" page-num)))
-                  ((symbol-function 'clutch-db-query)
-                   (lambda (_conn sql)
-                     (make-clutch-db-result
-                      :rows (cond ((string-match-p "page:0\\'" sql)
-                                   '(("ann" 1) ("anna" 2)))
-                                  ((string-match-p "page:1\\'" sql)
-                                   '(("annie" 3))))))))
-          (should (equal (clutch-result--collect-all-export-rows)
-                         '(("ann" 1) ("anna" 2) ("annie" 3))))
-          (should (equal captured-base
-                         "FILTER[name LIKE 'ann%']{SELECT name, `id` AS `clutch__rid_0` FROM t}"))))))
   (dolist (case '(("plain limit"
                    "SELECT id FROM t LIMIT 2" nil ((1) (2)) 100)
                   ("sorted limit"
@@ -5983,41 +5994,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (equal (clutch-result--effective-query)
                      "FILTER[id = 1]{SELECT * FROM t}")))))
 
-(ert-deftest clutch-test-execute-page-uses-effective-filtered-query ()
-  "Paging should continue using the active WHERE filter."
-  (with-temp-buffer
-    (let (captured-base)
-      (setq-local clutch-connection 'fake-conn
-                  clutch--base-query "SELECT name FROM t"
-                  clutch--where-filter "id = 1"
-                  clutch--result-source-table "t"
-                  clutch--result-server-pageable t
-                  clutch--row-identity
-                  (clutch-test--primary-row-identity "t" '("id") '(1))
-                  clutch-result-max-rows 500)
-      (cl-letf (((symbol-function 'clutch-db-apply-where)
-                 (lambda (_conn sql filter)
-                   (format "FILTER[%s]{%s}" filter sql)))
-                ((symbol-function 'clutch-db-escape-identifier)
-                 (lambda (_conn id) (format "`%s`" id)))
-                ((symbol-function 'clutch-db-row-identity-candidates)
-                 (lambda (&rest _)
-                   (error "Should reuse result row identity")))
-                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-                ((symbol-function 'clutch-db-build-paged-sql)
-                 (lambda (_conn sql _page-num _page-size
-                              &optional _order-by _page-offset)
-                   (setq captured-base sql)
-                   "SELECT * FROM paged"))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (_conn _sql)
-                   (make-clutch-db-result :columns nil :rows nil)))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result--execute-page 0)
-        (should (equal captured-base
-                       "FILTER[id = 1]{SELECT name, `id` AS `clutch__rid_0` FROM t}"))))))
-
 (ert-deftest clutch-test-execute-page-fetches-lookahead-and-trims-visible-rows ()
   "Paging should fetch one extra row to distinguish exact last pages."
   (with-temp-buffer
@@ -6077,31 +6053,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (= clutch--local-sort-column-index 1))
       (should (equal clutch--local-sort-original-rows
                      '((4 30) (5 10) (6 20)))))))
-
-(ert-deftest clutch-test-count-total-uses-effective-filtered-query ()
-  "COUNT should run against the filtered SQL when a WHERE filter is active."
-  (with-temp-buffer
-    (let (captured-base)
-      (setq-local clutch-connection 'fake-conn
-                  clutch--base-query "SELECT * FROM t"
-                  clutch--where-filter "id = 1"
-                  clutch--result-server-rewritable t)
-      (cl-letf (((symbol-function 'clutch-db-apply-where)
-                 (lambda (_conn sql filter)
-                   (format "FILTER[%s]{%s}" filter sql)))
-                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-                ((symbol-function 'clutch-db-build-count-sql)
-                 (lambda (_conn sql)
-                   (setq captured-base sql)
-                   "SELECT COUNT(*)"))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (_conn _sql)
-                   (make-clutch-db-result :rows '((7)))))
-                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result-count-total)
-        (should (equal captured-base "FILTER[id = 1]{SELECT * FROM t}"))
-        (should (= clutch--page-total-rows 7))))))
 
 (ert-deftest clutch-test-count-total-errors-for-nonrewritable-query-result ()
   "COUNT should not wrap arbitrary query results in a derived table."
@@ -6523,28 +6474,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should spinner-started)
         (should execute-saw-spinner)
         (should-not clutch--executing-p)))))
-
-(ert-deftest clutch-test-execute-in-result-buffer-keeps-table-header-line ()
-  "Executing from a result buffer should not replace the table header line."
-  (with-temp-buffer
-    (clutch-result-mode)
-    (let ((clutch-connection 'fake-conn)
-          (clutch--executing-p nil)
-          (header-line-format " result header")
-          seen-header)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
-                ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
-                ((symbol-function 'clutch--spinner-start) #'ignore)
-                ((symbol-function 'redisplay) #'ignore)
-                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
-                ((symbol-function 'clutch--execute-select)
-                 (lambda (&rest _args)
-                   (setq seen-header header-line-format))))
-        (clutch--execute "SELECT 1" clutch-connection)
-        (should (equal seen-header " result header"))
-        (should (equal header-line-format " result header"))))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
   "Quit should keep the session when a backend interrupt succeeds."
