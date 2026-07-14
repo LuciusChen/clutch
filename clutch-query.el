@@ -68,7 +68,6 @@ Used to update the mode-line with a spinner during execution.")
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--activate-current-buffer-connection "clutch-connection" (conn params &optional product))
 (declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--spinner-start "clutch-connection" ())
 (declare-function clutch--update-mode-line "clutch-connection" ())
 (declare-function clutch--disconnect-on-kill "clutch-connection" ())
@@ -914,7 +913,7 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
                    (list :connection connection
                          :op "execute"
                          :phase phase
-                         :backend (clutch--backend-key-from-conn connection)
+                         :backend (and connection (clutch-db-backend-key connection))
                          :sql sql)
                    (when summary (list :summary summary))
                    (when elapsed (list :elapsed elapsed))
@@ -1019,7 +1018,7 @@ Returns the query result."
                   :connection connection
                   :op "cancel"
                   :phase "error"
-                  :backend (clutch--backend-key-from-conn connection)
+                  :backend (and connection (clutch-db-backend-key connection))
                   :summary summary))
                (message "Interrupt failed: %s"
                         (clutch--debug-workflow-message summary))
@@ -1029,7 +1028,7 @@ Returns the query result."
        :connection connection
        :op "interrupt"
        :phase (if interrupted "success" "disconnect")
-       :backend (clutch--backend-key-from-conn connection)
+       :backend (and connection (clutch-db-backend-key connection))
        :summary (if interrupted
                     "Interrupted running query without disconnecting"
                   "Interrupt recovery failed; connection abandoned")))
