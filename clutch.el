@@ -246,26 +246,5 @@ server-side statement timeout."
   :type 'natnum
   :group 'clutch)
 
-(defconst clutch-debug-buffer-name "*clutch-debug*"
-  "Name of the dedicated clutch debug buffer.")
-
-;;;; Buffer-local variables
-
-(defvar clutch-debug-mode nil
-  "Non-nil when Clutch debug capture is enabled.")
-
-;;;###autoload
-(define-minor-mode clutch-debug-mode
-  "Capture additional redacted troubleshooting data for clutch workflows.
-When enabled, clutch records a bounded recent-event trace per buffer and per
-connection.  JDBC requests also ask the agent for an optional debug payload,
-and captured output is appended to the dedicated `*clutch-debug*' buffer."
-  :global t
-  :group 'clutch
-  :lighter " ClutchDbg"
-  (when clutch-debug-mode
-    (clutch--clear-debug-capture)
-    (clutch--replay-problem-records-to-debug-buffer)))
-
 (provide 'clutch)
 ;;; clutch.el ends here

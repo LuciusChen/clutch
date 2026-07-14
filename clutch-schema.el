@@ -78,7 +78,6 @@ Functions receive CONN, TABLE, and KIND.")
   "Metadata cache variables invalidated when schema cache changes.")
 
 (defvar clutch-connection)
-(defvar clutch-debug-mode nil)
 (defvar clutch--oracle-i18n-warning-shown nil
   "Non-nil after showing the Oracle orai18n completion warning once.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)

@@ -163,7 +163,6 @@ ssh-like TRAMP directories."
                  (const :tag "Automatically use current TRAMP context" auto))
   :group 'clutch)
 (defvar clutch--dml-result)
-(defvar clutch-debug-mode nil)
 (defvar clutch--connection-render-state)
 (defvar clutch--execution-spinner-frame)
 (defvar clutch--spinner-timer nil

@@ -56,7 +56,6 @@ cleaned up in the pasted region only."
   :group 'clutch)
 
 ;; Forward declarations — variables defined in sibling workflow modules
-(defvar clutch-debug-mode nil)
 (defvar clutch-result-max-rows 500)
 (defvar clutch--query-buffer-local-p)
 (defvar clutch--query-mode-line-name)

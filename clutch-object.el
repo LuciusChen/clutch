@@ -32,7 +32,6 @@ When nil, the primary entrypoint includes all schema object types."
 
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
-(defvar clutch-debug-mode nil)
 (defvar-local clutch--describe-object-entry nil
   "Object entry currently displayed in a clutch describe buffer.")
 (defvar clutch--object-cache (make-hash-table :test 'eq)

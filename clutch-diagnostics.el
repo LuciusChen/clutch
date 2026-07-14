@@ -18,9 +18,23 @@ Only recorded while `clutch-debug-mode' is enabled."
   :type 'natnum
   :group 'clutch)
 
+(defconst clutch-debug-buffer-name "*clutch-debug*"
+  "Name of the dedicated clutch debug buffer.")
+
 (defvar clutch-connection)
-(defvar clutch-debug-mode nil)
-(defvar clutch-debug-buffer-name "*clutch-debug*")
+
+;;;###autoload (autoload 'clutch-debug-mode "clutch" nil t)
+(define-minor-mode clutch-debug-mode
+  "Capture additional redacted troubleshooting data for clutch workflows.
+When enabled, clutch records a bounded recent-event trace per buffer and per
+connection.  JDBC requests also ask the agent for an optional debug payload,
+and captured output is appended to the dedicated `*clutch-debug*' buffer."
+  :global t
+  :group 'clutch
+  :lighter " ClutchDbg"
+  (when clutch-debug-mode
+    (clutch--clear-debug-capture)
+    (clutch--replay-problem-records-to-debug-buffer)))
 
 (defvar clutch--diagnostics-connection-label-function nil)
 (defvar clutch--diagnostics-attached-buffer-function nil)

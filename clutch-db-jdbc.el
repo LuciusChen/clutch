@@ -114,10 +114,10 @@ should degrade to disconnect, not block the user.")
 A stuck disconnect should not block the user or kill the agent.")
 
 (defvar clutch-debug-mode nil
-  "Forward declaration; defined as a global minor mode in clutch.el.")
+  "Forward declaration; defined as a global minor mode in clutch-diagnostics.el.")
 
 (defvar clutch-debug-buffer-name "*clutch-debug*"
-  "Forward declaration; defined in clutch.el.")
+  "Forward declaration; defined in clutch-diagnostics.el.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 

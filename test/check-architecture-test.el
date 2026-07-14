@@ -7,10 +7,15 @@
 (require 'check-architecture)
 
 (ert-deftest clutch-architecture-diagnostics-standalone-load ()
-  "Loading diagnostics must not load the connection module."
+  "Diagnostics must own debug state without loading workflow modules."
+  (should-not (featurep 'clutch))
   (should-not (featurep 'clutch-connection))
   (require 'clutch-diagnostics)
-  (should-not (featurep 'clutch-connection)))
+  (should-not (featurep 'clutch))
+  (should-not (featurep 'clutch-connection))
+  (should (fboundp 'clutch-debug-mode))
+  (should (boundp 'clutch-debug-mode))
+  (should (equal clutch-debug-buffer-name "*clutch-debug*")))
 
 (ert-deftest clutch-architecture-reader-cases ()
   "Exercise dependency and source-reference reader cases."
@@ -213,7 +218,8 @@
            ("clutch-result" defvar-local t clutch--base-query)
            ("clutch-ui" defcustom t clutch-column-width-max
             clutch-column-padding)
-           ("clutch-diagnostics" defcustom t clutch-debug-event-limit))))
+           ("clutch-diagnostics" defcustom t clutch-debug-event-limit)
+           ("clutch-diagnostics" define-minor-mode nil clutch-debug-mode))))
     (dolist (owner owners)
       (pcase-let ((`(,module ,kind ,exclusive . ,symbols) owner))
         (dolist (symbol symbols)
@@ -250,6 +256,7 @@
                     autoloads)))
           (dolist (symbol
                    '(clutch-connect
+                     clutch-debug-mode
                      clutch-dispatch
                      clutch-edit-indirect
                      clutch-execute

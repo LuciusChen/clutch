@@ -50,7 +50,6 @@
 (eval-when-compile
   (require 'pg))
 
-(defvar clutch-debug-buffer-name "*clutch-debug*")
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it
 ;; special here so local test bindings remain dynamic even before the backend
 ;; requires mysql.el.
