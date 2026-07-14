@@ -101,6 +101,12 @@ result grids and connection header-line presentation; it is not a separate
 workflow entry point or result-state owner, so its same-layer helper edges are
 omitted from this overview.
 
+`clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug
+capture, the dedicated debug buffer, and buffer/connection-scoped problem
+records. Workflow modules call it directly for capture and error context.
+`clutch-connection.el` registers label and attached-buffer accessors after it
+defines them, so diagnostics has no reverse dependency on connection.
+
 ## Backend And Surface Model
 
 ```mermaid

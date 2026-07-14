@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-diagnostics)
 (require 'subr-x)
 
 (defvar clutch--schema-cache (make-hash-table :test 'equal)
@@ -69,8 +70,6 @@ Functions receive CONN, TABLE, and KIND.")
 (declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch--attached-buffer-for-connection "clutch-connection" (connection))
 (declare-function clutch--invalidate-object-warmup "clutch-object" (conn &optional key))
-(declare-function clutch--remember-debug-event "clutch-query" (&rest event))
-(declare-function clutch--remember-problem-record "clutch-query" (&rest args))
 (declare-function clutch--schedule-object-warmup "clutch-object" (conn))
 (declare-function clutch--refresh-schema-status-ui "clutch-connection" (conn))
 

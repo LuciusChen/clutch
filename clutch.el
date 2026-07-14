@@ -40,6 +40,7 @@
 ;;; Code:
 
 (require 'clutch-backend)
+(require 'clutch-diagnostics)
 (require 'clutch-connection)
 (require 'clutch-query)
 (require 'sql)

@@ -29,6 +29,7 @@
 ;;; Code:
 
 (require 'clutch-backend)
+(require 'clutch-diagnostics)
 (require 'clutch-schema)
 (require 'auth-source)
 (require 'cl-lib)
@@ -79,13 +80,8 @@
   "Seconds to wait for a provisional direct database connection.")
 
 ;; Forward declarations — sibling module functions
-(declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
-(declare-function clutch--forget-problem-record "clutch-query" (&optional buffer connection))
-(declare-function clutch--remember-debug-event "clutch-query" (&rest event))
-(declare-function clutch--remember-problem-record "clutch-query" (&rest args))
 (declare-function clutch--update-console-buffer-name "clutch-query" ())
 (declare-function clutch--refresh-result-status-line "clutch-ui" ())
-(declare-function clutch--debug-workflow-message "clutch-query" (message))
 (declare-function clutch--render-object-describe
                   "clutch-object" (conn entry params product))
 (declare-function clutch--build-connection-header-line "clutch-ui" ())
@@ -588,6 +584,10 @@ using the stored params.  Signals a user-error if not recoverable."
 (defun clutch--backend-key-from-conn (conn)
   "Return the registered backend key for live connection CONN, or nil."
   (and conn (clutch-db-backend-key conn)))
+
+(clutch--register-diagnostics-connection-accessors
+ #'clutch--connection-key
+ #'clutch--attached-buffer-for-connection)
 
 (defun clutch--normalize-backend-key (backend)
   "Return the registered backend key for BACKEND, including public aliases."

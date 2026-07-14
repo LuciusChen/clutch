@@ -256,6 +256,54 @@
                              "SELECT * FROM missing_table")))))
       (kill-buffer source))))
 
+(ert-deftest clutch-test-diagnostics-accessors-and-elapsed-format ()
+  "Registered accessors label connections and preserve elapsed formatting."
+  (let ((clutch-debug-mode t)
+        (clutch-debug-buffer-name " *diagnostics-elapsed*")
+        (clutch--diagnostics-connection-label-function nil)
+        (clutch--diagnostics-attached-buffer-function nil)
+        (clutch--problem-records-by-conn (make-hash-table :test 'eq))
+        (clutch--debug-events-by-conn (make-hash-table :test 'eq)))
+    (unwind-protect
+        (progn
+          (clutch--register-diagnostics-connection-accessors
+           (lambda (_connection) "demo-db") (lambda (_connection) nil))
+          (with-temp-buffer
+            (clutch--remember-debug-event :connection 'conn :op "query" :phase "done" :elapsed 0.042)
+            (clutch--remember-debug-event :connection 'conn :op "query" :phase "done" :elapsed 1.25))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "Connection: demo-db" text))
+            (should (string-match-p "Elapsed: 42ms" text))
+            (should (string-match-p "Elapsed: 1.250s" text))))
+      (when-let ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
+
+(ert-deftest clutch-test-diagnostics-historical-replay-uses-attached-buffer ()
+  "Connection-scoped history restores its attached buffer as Source."
+  (let ((clutch-debug-mode t)
+        (clutch-debug-buffer-name " *diagnostics-history*")
+        (clutch--diagnostics-connection-label-function nil)
+        (clutch--diagnostics-attached-buffer-function nil)
+        (clutch--problem-records-by-conn (make-hash-table :test 'eq))
+        (clutch--debug-events-by-conn (make-hash-table :test 'eq))
+        (source (generate-new-buffer " *diagnostics-source*")))
+    (unwind-protect
+        (progn
+          (clutch--register-diagnostics-connection-accessors
+           (lambda (_connection) "demo-db") (lambda (_connection) source))
+          (puthash 'conn '(:summary "historic") clutch--problem-records-by-conn)
+          (clutch--replay-problem-records-to-debug-buffer)
+          (should (string-match-p (regexp-quote (buffer-name source))
+                                  (clutch-test--debug-buffer-string))))
+      (kill-buffer source)
+      (when-let ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
+
+(ert-deftest clutch-test-diagnostics-error-details-use-backend-generic ()
+  "Problem records derive :backend from the backend contract."
+  (cl-letf (((symbol-function 'clutch-db-backend-key) (lambda (_connection) 'pg)))
+    (let ((details (clutch--make-buffer-query-error-details
+                    'conn "SELECT 1" '(clutch-db-error "boom"))))
+      (should (eq (plist-get details :backend) 'pg)))))
+
 (provide 'clutch-test-debug)
 
 ;;; clutch-test-debug.el ends here

@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'clutch-backend)
 (require 'clutch-connection)
+(require 'clutch-diagnostics)
 (require 'clutch-query)
 (require 'clutch-object)
 (require 'clutch-schema)
@@ -136,8 +137,6 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--column-border-position "clutch-ui" (cidx &optional widths nw))
 (declare-function clutch--column-info-message-string "clutch-ui" (info))
 (declare-function clutch--column-info-string "clutch-ui" (cidx))
-(declare-function clutch--debug-workflow-message "clutch-query" (message))
-(declare-function clutch--debug-sql-preview "clutch-query" (sql))
 (declare-function clutch--dwim-bounds-at-point "clutch-query" ())
 (declare-function clutch--center-column-in-window "clutch-ui" (col-idx))
 (declare-function clutch--ensure-point-visible-horizontally "clutch-ui" ())
@@ -155,12 +154,6 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (declare-function clutch--refresh-footer-line "clutch-ui" ())
 (declare-function clutch--schedule-column-width-refresh "clutch-ui" ())
 (declare-function clutch--sync-result-cursor-ui "clutch-ui" ())
-(declare-function clutch--remember-query-error
-                  "clutch-query"
-                  (buffer connection op sql err &optional context diag))
-(declare-function clutch--remember-execute-error
-                  "clutch-query"
-                  (buffer connection sql err &optional context))
 (declare-function clutch--status-separator "clutch-ui" ())
 (declare-function clutch-preview-execution-sql "clutch-query" ())
 

@@ -6,6 +6,12 @@
 (defvar clutch--architecture-skip-main t)
 (require 'check-architecture)
 
+(ert-deftest clutch-architecture-diagnostics-standalone-load ()
+  "Loading diagnostics must not load the connection module."
+  (should-not (featurep 'clutch-connection))
+  (require 'clutch-diagnostics)
+  (should-not (featurep 'clutch-connection)))
+
 (ert-deftest clutch-architecture-reader-cases ()
   "Exercise dependency and source-reference reader cases."
   (dolist (case '((nested ((progn (require 'clutch-query))) ("clutch-query"))

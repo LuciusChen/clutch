@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-diagnostics)
 (require 'seq)
 (require 'sql)
 (require 'subr-x)
@@ -61,12 +62,8 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--message-ident "clutch-ui" (value))
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--query-buffer-p "clutch-connection" ())
-(declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
 (declare-function clutch--remember-recoverable-metadata-warning "clutch-schema"
                   (connection op err &optional context))
-(declare-function clutch--remember-buffer-query-error-details "clutch-query"
-                  (buffer connection sql err))
-(declare-function clutch--remember-debug-event "clutch-query" (&rest event))
 (declare-function clutch--refresh-current-schema "clutch-schema" (&optional silent))
 (declare-function clutch--warn-completion-metadata-error-once "clutch-schema" (message-text))
 (declare-function clutch--warn-schema-cache-state "clutch-schema" (&optional conn))
