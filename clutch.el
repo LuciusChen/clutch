@@ -44,6 +44,11 @@
   :group 'comm
   :prefix "clutch-")
 
+(defcustom clutch-result-max-rows 500
+  "Maximum number of rows to display in result tables."
+  :type 'natnum
+  :group 'clutch)
+
 (require 'clutch-backend)
 (require 'clutch-diagnostics)
 (require 'clutch-connection)
@@ -205,11 +210,6 @@ Underlined to indicate clickable (RET to follow)."
     (((class color) (background light)) :foreground "#b42318" :weight semibold)
     (t :inherit error :weight bold))
   "Face for SQL execution error summaries."
-  :group 'clutch)
-
-(defcustom clutch-result-max-rows 500
-  "Maximum number of rows to display in result tables."
-  :type 'natnum
   :group 'clutch)
 
 (provide 'clutch)

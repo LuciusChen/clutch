@@ -55,7 +55,6 @@ window; an existing result window is reused at its current height."
                  (coding-system :tag "Other coding system"))
   :group 'clutch)
 
-(defvar clutch-result-max-rows)
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
 (defvar clutch--footer-base-string)

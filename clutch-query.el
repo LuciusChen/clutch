@@ -55,8 +55,11 @@ cleaned up in the pasted region only."
   :type 'boolean
   :group 'clutch)
 
+;; Direct workflow loads must not reverse-load the composition root.
+(defvar clutch-result-max-rows 500
+  "Direct-load fallback for the shared result row budget defined in clutch.el.")
+
 ;; Forward declarations — variables defined in sibling workflow modules
-(defvar clutch-result-max-rows 500)
 (defvar clutch--query-buffer-local-p)
 (defvar clutch--query-mode-line-name)
 

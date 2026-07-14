@@ -195,7 +195,8 @@
                                       (clutch--architecture-read-forms file))
                          collect (list module (car form) (cadr form)))))
         (owners
-         '(("clutch-backend" defcustom t clutch-connect-timeout-seconds
+         '(("clutch" defcustom nil clutch-result-max-rows)
+           ("clutch-backend" defcustom t clutch-connect-timeout-seconds
             clutch-read-idle-timeout-seconds clutch-query-timeout-seconds
             clutch-jdbc-rpc-timeout-seconds)
            ("clutch-connection" defcustom nil clutch-connection-alist
@@ -294,6 +295,7 @@
   (require 'clutch-object)
   (require 'clutch-result)
   (should-not (featurep 'clutch))
+  (should (= clutch-result-max-rows 500))
   (should (custom-variable-p 'clutch-sql-product))
   (should (eq clutch-sql-product 'mysql))
   (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
