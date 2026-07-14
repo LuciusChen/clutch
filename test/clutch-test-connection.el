@@ -2526,32 +2526,6 @@
           (should-not (buffer-local-value 'clutch-connection result)))
       (when (buffer-live-p result) (kill-buffer result)))))
 
-(ert-deftest clutch-test-reconnect-preserves-pending ()
-  "Reconnect preserves staged changes in result buffers."
-  (let ((result-buf (generate-new-buffer "*clutch-test-result*"))
-        (clutch-buf (generate-new-buffer "*clutch-test*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (clutch-result-mode)
-            (setq-local clutch--pending-deletes (list (vector 1)))
-            (setq-local clutch--pending-edits nil)
-            (setq-local clutch--pending-inserts nil))
-          (with-current-buffer clutch-buf
-            (cl-letf (((symbol-function 'clutch--build-conn)
-                       (lambda (_) 'fake-conn))
-                      ((symbol-function 'clutch-db-live-p)
-                       (lambda (_) t))
-                      ((symbol-function 'clutch--connection-key)
-                       (lambda (_) "fake"))
-                      ((symbol-function 'clutch--update-mode-line) #'ignore))
-              (setq-local clutch--connection-params '(:backend mysql))
-              (clutch--try-reconnect)))
-          (with-current-buffer result-buf
-            (should (equal clutch--pending-deletes (list (vector 1))))))
-      (kill-buffer result-buf)
-      (kill-buffer clutch-buf))))
-
 (ert-deftest clutch-test-try-reconnect-releases-old-ssh-transport ()
   "Reconnect should stop the old SSH tunnel after the new connection is ready."
   (let ((released nil))
@@ -2599,96 +2573,86 @@
       (should-not rebound)
       (should (equal released '(new-conn old-conn))))))
 
-(ert-deftest clutch-test-result-buffer-reconnects-using-inherited-context ()
-  "Result buffers should inherit reconnect params from their source buffer."
-  (let (result-buf built)
-    (unwind-protect
-        (with-temp-buffer
-          (let ((source-buf (current-buffer))
-                (result (make-clutch-db-result
-                         :connection 'old-conn
-                         :columns nil
-                         :rows nil)))
-            (setq-local clutch-connection 'old-conn
-                        clutch--connection-params '(:backend mysql :database "db")
-                        clutch--conn-sql-product 'mysql)
-            (cl-letf (((symbol-function 'clutch-db-live-p)
-                       (lambda (_conn) t))
-                      ((symbol-function 'clutch--connection-key)
-                       (lambda (conn) (symbol-name conn)))
-                      ((symbol-function 'clutch-result--display-dml) #'ignore)
-                      ((symbol-function 'clutch-result--show-buffer)
-                       (lambda (buf) (setq result-buf buf) buf)))
-              (clutch-result--display result "UPDATE demo SET x = 1" 0.1))
-            (with-current-buffer result-buf
-              (should (equal clutch--connection-params
-                             '(:backend mysql :database "db")))
-              (should (eq clutch--conn-sql-product 'mysql))
-              (cl-letf (((symbol-function 'clutch-db-live-p)
-                         (lambda (conn) (eq conn 'new-conn)))
-                        ((symbol-function 'clutch--build-conn)
-                         (lambda (params)
-                           (setq built params)
-                           'new-conn))
-                        ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
-                        ((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                        ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
-                        ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                        ((symbol-function 'clutch--refresh-result-status-line) #'ignore)
-                        ((symbol-function 'clutch--connection-key)
-                         (lambda (conn) (symbol-name conn)))
-                        ((symbol-function 'message) #'ignore))
-                (clutch--ensure-connection)
-                (should (eq clutch-connection 'new-conn))
-                (should (equal built '(:backend mysql :database "db")))))
-            (with-current-buffer source-buf
-              (should (eq clutch-connection 'new-conn)))))
-      (when (buffer-live-p result-buf)
-        (kill-buffer result-buf)))))
-
-(ert-deftest clutch-test-object-buffer-reconnects-using-inherited-context ()
-  "Object definition buffers should inherit reconnect params from their source buffer."
-  (let (object-buf built)
-    (unwind-protect
-        (with-temp-buffer
-          (let ((source-buf (current-buffer)))
-            (setq-local clutch-connection 'old-conn
-                        clutch--connection-params '(:backend mysql :database "db")
-                        clutch--conn-sql-product 'mysql)
-            (cl-letf (((symbol-function 'clutch-db-object-definition)
-                       (lambda (_conn _entry) "CREATE TABLE demo (id INT)"))
-                      ((symbol-function 'sql-mode) #'ignore)
-                      ((symbol-function 'sql-set-product) #'ignore)
-                      ((symbol-function 'font-lock-ensure) #'ignore)
-                      ((symbol-function 'pop-to-buffer)
-                       (lambda (buf &rest _args)
-                         (setq object-buf buf)
-                         buf)))
-              (clutch-object-show-ddl-or-source '(:name "demo" :type "TABLE")))
-            (with-current-buffer object-buf
-              (should (equal clutch--connection-params
-                             '(:backend mysql :database "db")))
-              (should (eq clutch--conn-sql-product 'mysql))
-              (cl-letf (((symbol-function 'clutch-db-live-p)
-                         (lambda (conn) (eq conn 'new-conn)))
-                        ((symbol-function 'clutch--build-conn)
-                         (lambda (params)
-                           (setq built params)
-                           'new-conn))
-                        ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
-                        ((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                        ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
-                        ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                        ((symbol-function 'clutch--connection-key)
-                         (lambda (conn) (symbol-name conn)))
-                        ((symbol-function 'message) #'ignore))
-                (clutch--ensure-connection)
-                (should (eq clutch-connection 'new-conn))
-                (should (equal built '(:backend mysql :database "db")))))
-            (with-current-buffer source-buf
-              (should (eq clutch-connection 'new-conn)))))
-      (when (buffer-live-p object-buf)
-        (kill-buffer object-buf)))))
+(ert-deftest clutch-test-derived-buffers-reconnect-using-inherited-context ()
+  "Derived buffers reconnect their logical session without losing local state."
+  (dolist (kind '(result object))
+    (ert-info ((format "derived buffer: %s" kind))
+      (let* ((old-conn (list 'connection))
+             (new-conn (list 'new-connection))
+             (params '(:backend mysql :database "db"))
+             (pending-deletes (list (vector 'delete)))
+             (pending-edits (list (cons '(0 . 0) 'edit)))
+             (pending-inserts (list (list (cons "name" "insert"))))
+             derived-buf
+             built)
+        (unwind-protect
+            (with-temp-buffer
+              (let ((source-buf (current-buffer)))
+                (setq-local clutch-connection old-conn
+                            clutch--connection-params params
+                            clutch--conn-sql-product 'mysql)
+                (cl-letf (((symbol-function 'clutch-db-live-p)
+                           (lambda (_conn) t))
+                          ((symbol-function 'clutch--connection-key)
+                           (lambda (_conn) "test"))
+                          ((symbol-function 'clutch-result--display-dml) #'ignore)
+                          ((symbol-function 'clutch-result--show-buffer)
+                           (lambda (buf) (setq derived-buf buf) buf))
+                          ((symbol-function 'clutch-db-object-definition)
+                           (lambda (_conn _entry)
+                             "CREATE TABLE demo (id INT)"))
+                          ((symbol-function 'sql-mode) #'ignore)
+                          ((symbol-function 'sql-set-product) #'ignore)
+                          ((symbol-function 'font-lock-ensure) #'ignore)
+                          ((symbol-function 'pop-to-buffer)
+                           (lambda (buf &rest _args)
+                             (setq derived-buf buf)
+                             buf)))
+                  (pcase kind
+                    ('result
+                     (clutch-result--display
+                      (make-clutch-db-result
+                       :connection old-conn :columns nil :rows nil)
+                      "UPDATE demo SET x = 1" 0.1))
+                    ('object
+                     (clutch-object-show-ddl-or-source
+                      '(:name "demo" :type "TABLE")))))
+                (with-current-buffer derived-buf
+                  (should (eq clutch-connection old-conn))
+                  (should (equal clutch--connection-params params))
+                  (should (eq clutch--conn-sql-product 'mysql))
+                  (when (eq kind 'result)
+                    (setq-local clutch--pending-deletes pending-deletes
+                                clutch--pending-edits pending-edits
+                                clutch--pending-inserts pending-inserts))
+                  (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                             (lambda (conn) (eq conn new-conn)))
+                            ((symbol-function 'clutch--build-conn)
+                             (lambda (reconnect-params)
+                               (setq built reconnect-params)
+                               new-conn))
+                            ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+                            ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                            ((symbol-function 'clutch--refresh-schema-status-ui)
+                             #'ignore)
+                            ((symbol-function 'clutch--refresh-transaction-ui)
+                             #'ignore)
+                            ((symbol-function 'clutch--refresh-result-status-line)
+                             #'ignore)
+                            ((symbol-function 'clutch--connection-key)
+                             (lambda (_conn) "test"))
+                            ((symbol-function 'message) #'ignore))
+                    (clutch--ensure-connection))
+                  (should (eq clutch-connection new-conn))
+                  (should (equal built params))
+                  (when (eq kind 'result)
+                    (should (eq clutch--pending-deletes pending-deletes))
+                    (should (eq clutch--pending-edits pending-edits))
+                    (should (eq clutch--pending-inserts pending-inserts))))
+                (with-current-buffer source-buf
+                  (should (eq clutch-connection new-conn)))))
+          (when (buffer-live-p derived-buf)
+            (kill-buffer derived-buf)))))))
 
 (ert-deftest clutch-test-connect-failure-preserves-old-live-connection ()
   "Interactive connect should not drop the old live session on failure."
