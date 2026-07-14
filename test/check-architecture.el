@@ -13,7 +13,7 @@
   (file-name-directory (directory-file-name (file-name-directory load-file-name)))
   "Repository root containing the Clutch Lisp modules.")
 
-(defconst clutch--architecture-cross-declaration-baseline 134
+(defconst clutch--architecture-cross-declaration-baseline 65
   "Maximum permitted number of cross-module Clutch declarations.")
 
 (defconst clutch--architecture-adapter-workflow-allowlist
@@ -136,6 +136,32 @@ Each entry is (SOURCE TARGET KIND SYMBOL), where KIND is `require' or
            when (eq (nth 2 dependency) 'declare-function)
            collect (list (nth 0 dependency) (nth 1 dependency) (nth 3 dependency))))
 
+(defun clutch--architecture-top-level-require-target (form)
+  "Return the Clutch module mandatorily loaded by top-level FORM."
+  (and (eq (car-safe form) 'require)
+       (null (nth 3 form))
+       (clutch--architecture-target-name (nth 1 form))))
+
+(defun clutch--architecture-top-level-requires (forms)
+  "Return Clutch modules mandatorily loaded by top-level FORMS."
+  (cl-loop for form in forms
+           for target = (clutch--architecture-top-level-require-target form)
+           when target collect target))
+
+(defun clutch--architecture-redundant-declarations (parsed)
+  "Return declarations already covered by prior top-level requires in PARSED."
+  (cl-loop
+   for (source . forms) in parsed nconc
+   (let (required redundant)
+     (dolist (form forms)
+       (if-let* ((target (clutch--architecture-top-level-require-target form)))
+           (cl-pushnew target required :test #'equal)
+         (when (eq (car-safe form) 'declare-function)
+           (when-let* ((target (clutch--architecture-target-name (nth 2 form))))
+             (when (member target required)
+               (push (list source target (nth 1 form)) redundant))))))
+     (nreverse redundant))))
+
 (defun clutch--architecture-calls (form)
   "Return function symbols actually called by unquoted FORM.
 Declaration forms and definition names are excluded."
@@ -254,6 +280,7 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
                                      (car entry) (cdr entry)))
                                   parsed))
          (stale (clutch--architecture-stale-declarations declarations parsed))
+         (redundant (clutch--architecture-redundant-declarations parsed))
          (cross (cl-remove-if (lambda (entry) (equal (nth 0 entry) (nth 1 entry)))
                               declarations))
          (unapproved (clutch--architecture-unapproved-adapter-edges dependencies))
@@ -291,6 +318,10 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
                                   dependencies))))
     (when stale
       (push (format "stale declarations: %S" stale) errors))
+    (when redundant
+      (push (format "declarations duplicated by top-level require: %S"
+                    redundant)
+            errors))
     (when (> (length cross) clutch--architecture-cross-declaration-baseline)
       (push (format "cross-module declarations: %d (maximum %d)"
                     (length cross) clutch--architecture-cross-declaration-baseline)

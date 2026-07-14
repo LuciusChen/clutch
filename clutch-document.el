@@ -31,12 +31,7 @@
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
 (declare-function clutch-disconnect "clutch-connection" ())
 (declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch-execute-buffer "clutch-query" ())
-(declare-function clutch-execute-dwim "clutch-query" (beg end))
-(declare-function clutch-execute-region "clutch-query" (beg end))
-(declare-function clutch--dwim-bounds-at-point "clutch-query" ())
 (declare-function clutch-jump "clutch-object" (&optional entry))
-(declare-function clutch-query-console "clutch-query" (target))
 (declare-function clutch-refresh-schema "clutch-connection" ())
 (declare-function clutch-switch-schema "clutch-connection" ())
 

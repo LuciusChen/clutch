@@ -71,6 +71,35 @@
                           (list decl) `(("source" ,form)))
                          (list decl)))))))
 
+(ert-deftest clutch-architecture-top-level-requires-cover-declarations ()
+  "A top-level require should make declarations to that owner redundant."
+  (let* ((forms '((require 'clutch-eager)
+                  (require 'clutch-optional nil t)
+                  (when enabled (require 'clutch-lazy))
+                  '(require 'clutch-quoted)
+                  (declare-function eager-fn "clutch-eager" ())
+                  (declare-function optional-fn "clutch-optional" ())
+                  (declare-function lazy-fn "clutch-lazy" ())
+                  (declare-function quoted-fn "clutch-quoted" ())
+                  (declare-function late-fn "clutch-late" ())
+                  (require 'clutch-late)
+                  (autoload 'autoload-fn "clutch-autoload")
+                  (declare-function autoload-fn "clutch-autoload" ())))
+         (reverse-edge
+          '((declare-function owner-fn "clutch-owner" ())))
+         (parsed `(("clutch-source" . ,forms)
+                   ("clutch-reverse" . ,reverse-edge)
+                   ("clutch-owner"
+                    (require 'clutch-reverse)
+                    (declare-function reverse-fn "clutch-reverse" ())))))
+    (should (equal (clutch--architecture-top-level-requires forms)
+                   '("clutch-eager" "clutch-late")))
+    (should
+     (equal
+      (clutch--architecture-redundant-declarations parsed)
+      '(("clutch-source" "clutch-eager" eager-fn)
+        ("clutch-owner" "clutch-reverse" reverse-fn))))))
+
 (ert-deftest clutch-architecture-schema-is-a-metadata-leaf ()
   "Schema may depend only on backend and diagnostics modules."
   (should-not (featurep 'clutch-connection))

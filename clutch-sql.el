@@ -41,8 +41,6 @@
 (defconst clutch--schema-inline-min-prefix-length 2
   "Minimum symbol prefix length before loading column hints synchronously.")
 
-(declare-function clutch--safe-completion-call "clutch-schema" (thunk))
-
 ;;;; SQL context, completion, eldoc, and xref
 
 (defun clutch--eldoc-column-extras (col)

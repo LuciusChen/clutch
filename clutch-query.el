@@ -72,31 +72,8 @@ cleaned up in the pasted region only."
 Used to update the mode-line with a spinner during execution.")
 
 ;; Forward declarations — functions from sibling modules
-(declare-function clutch--effective-sql-product "clutch-connection" (params))
 (declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))
 
-;; Forward declarations — functions from clutch-connection.el
-(declare-function clutch--cleanup-dead-connection "clutch-connection" (conn))
-(declare-function clutch--run-db-query "clutch-connection" (conn sql))
-(declare-function clutch--connection-alive-p "clutch-connection" (conn))
-(declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
-(declare-function clutch--activate-current-buffer-connection "clutch-connection" (conn params &optional product))
-(declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch--spinner-start "clutch-connection" ())
-(declare-function clutch--update-mode-line "clutch-connection"
-                  (&optional spinner-only))
-(declare-function clutch--update-console-buffer-name "clutch-connection" ())
-(declare-function clutch--disconnect-on-kill "clutch-connection" ())
-(declare-function clutch--build-conn "clutch-connection" (params))
-(declare-function clutch--saved-connection-params "clutch-connection" (name))
-(declare-function clutch--read-manual-connection-params "clutch-connection" (&optional sqlite-file))
-(declare-function clutch--read-saved-connection-choice "clutch-connection" (prompt names))
-(declare-function clutch--read-sqlite-file-params "clutch-connection" ())
-(declare-function clutch--normalize-sqlite-database-file "clutch-connection" (file))
-(declare-function clutch--backend-key-from-params "clutch-connection" (params))
-(declare-function clutch--backend-display-name-from-params "clutch-connection" (params))
-(declare-function clutch--prepare-connection-origin-params
-                  "clutch-connection" (params &optional source-default-directory))
 (declare-function clutch-result--display-error
                   "clutch-result"
                   (connection sql summary message &optional elapsed hint))
@@ -107,26 +84,13 @@ Used to update the mode-line with a spinner during execution.")
                   (connection sql result elapsed row-identity-prep
                               server-pageable result-context source-buffer))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
-(declare-function clutch-connect "clutch-connection" ())
-(declare-function clutch-commit "clutch-connection" ())
-(declare-function clutch-rollback "clutch-connection" ())
-(declare-function clutch-toggle-auto-commit "clutch-connection" ())
-(declare-function clutch-prepare-ssh-host "clutch-connection" (&optional ssh-host))
-(declare-function clutch-disconnect "clutch-connection" ())
-(declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
-(declare-function clutch--tx-dirty-p "clutch-connection" (conn))
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
-(declare-function clutch-refresh-schema "clutch-connection" ())
-(declare-function clutch-switch-schema "clutch-connection" ())
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
 
 ;; Forward declarations — functions from sibling workflow modules
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
-
-;; Forward declarations — functions from clutch-db
-(declare-function clutch-db-interrupt-query "clutch-backend" (conn))
 
 ;;;; Query console
 
