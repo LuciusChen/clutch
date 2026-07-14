@@ -56,9 +56,6 @@ cleaned up in the pasted region only."
   :group 'clutch)
 
 ;; Forward declarations — variables defined in sibling workflow modules
-(defvar clutch--last-query)
-(defvar clutch--last-result-buffer)
-(defvar clutch--base-query)
 (defvar clutch-debug-mode nil)
 (defvar clutch-result-max-rows 500)
 (defvar clutch--query-buffer-local-p)
@@ -67,6 +64,12 @@ cleaned up in the pasted region only."
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
 Used to update the mode-line with a spinner during execution.")
+
+(defvar-local clutch--last-query nil
+  "Last executed SQL query string.")
+
+(defvar-local clutch--last-result-buffer nil
+  "Latest result buffer produced from this query source buffer.")
 
 (defvar clutch--source-window nil
   "Window that initiated the current query execution.

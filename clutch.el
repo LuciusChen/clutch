@@ -254,12 +254,6 @@ server-side statement timeout."
 (defvar clutch-debug-mode nil
   "Non-nil when Clutch debug capture is enabled.")
 
-(defvar-local clutch--last-query nil
-  "Last executed SQL query string.")
-
-(defvar-local clutch--last-result-buffer nil
-  "Latest result buffer produced from this query source buffer.")
-
 ;;;###autoload
 (define-minor-mode clutch-debug-mode
   "Capture additional redacted troubleshooting data for clutch workflows.
@@ -272,9 +266,6 @@ and captured output is appended to the dedicated `*clutch-debug*' buffer."
   (when clutch-debug-mode
     (clutch--clear-debug-capture)
     (clutch--replay-problem-records-to-debug-buffer)))
-
-(defvar-local clutch--base-query nil
-  "The original unfiltered SQL query, used by WHERE filtering.")
 
 (provide 'clutch)
 ;;; clutch.el ends here

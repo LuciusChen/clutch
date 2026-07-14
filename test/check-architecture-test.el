@@ -198,6 +198,8 @@
             clutch-console-yank-cleanup)
            ("clutch-query" defvar t clutch--source-window
             clutch--executing-sql-start clutch--executing-sql-end)
+           ("clutch-query" defvar-local t clutch--last-query
+            clutch--last-result-buffer)
            ("clutch-schema" defcustom t clutch-schema-cache-install-batch-size
             clutch-schema-refresh-idle-delay-seconds)
            ("clutch-sql" defcustom t clutch-sql-completion-case-style)
@@ -208,6 +210,7 @@
             clutch-agent-context-max-result-rows
             clutch-agent-context-max-cell-width clutch-column-width-step
             clutch-csv-export-default-coding-system)
+           ("clutch-result" defvar-local t clutch--base-query)
            ("clutch-ui" defcustom t clutch-column-width-max
             clutch-column-padding)
            ("clutch-diagnostics" defcustom t clutch-debug-event-limit))))

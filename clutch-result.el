@@ -56,7 +56,8 @@ window; an existing result window is reused at its current height."
   :group 'clutch)
 
 (defvar clutch-result-max-rows)
-(defvar clutch--base-query)
+(defvar-local clutch--base-query nil
+  "The original unfiltered SQL query, used by WHERE filtering.")
 (defvar clutch--footer-base-string)
 (defvar clutch--footer-cursor-cache)
 (defvar clutch--footer-display-cache)
@@ -64,8 +65,6 @@ window; an existing result window is reused at its current height."
 (defvar clutch--footer-timing-cache)
 (defvar clutch--header-line-string)
 (defvar clutch--last-cell-position)
-(defvar clutch--last-query)
-(defvar clutch--last-result-buffer)
 (defvar clutch--pre-fullscreen-config)
 
 (defvar-local clutch--aggregate-summary nil

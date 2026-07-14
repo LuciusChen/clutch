@@ -21,7 +21,6 @@
 
 (defvar clutch--row-identity)
 (defvar clutch--filtered-rows)
-(defvar clutch--last-query)
 (defvar clutch--connection-params)
 (defvar clutch--active-edit-cell)
 (defvar clutch--result-column-defs)
