@@ -213,17 +213,6 @@ Underlined to indicate clickable (RET to follow)."
   "Face for SQL execution error summaries."
   :group 'clutch)
 
-(defcustom clutch-insert-validation-idle-delay 0.2
-  "Idle seconds before validating heavier insert fields such as JSON."
-  :type 'number
-  :group 'clutch)
-
-(defcustom clutch-console-directory
-  (expand-file-name "clutch" user-emacs-directory)
-  "Directory for persisting query console buffer content."
-  :type 'directory
-  :group 'clutch)
-
 (defcustom clutch-result-window-height 0.33
   "Height of the result window as a fraction of the frame height.
 A float between 0.0 and 1.0.  Only applies when creating a new result
@@ -295,44 +284,6 @@ server-side statement timeout."
   :type 'natnum
   :group 'clutch)
 
-(defcustom clutch-object-warmup-idle-delay-seconds 0.5
-  "Idle delay before warming non-table object metadata.
-A small non-zero delay keeps connect and initial UI painting responsive before
-background object discovery starts."
-  :type 'number
-  :group 'clutch)
-
-(defcustom clutch-schema-refresh-idle-delay-seconds 0.5
-  "Idle delay before automatic schema cache refresh after connect.
-A small non-zero delay keeps the first query responsive for native backends
-whose schema refresh runs on the foreground connection.  Manual schema
-refresh commands still start immediately."
-  :type 'number
-  :group 'clutch)
-
-(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM" "COLLECTION" "KEY")
-  "Object types preferred by clutch's primary object entrypoint.
-When nil, the primary entrypoint includes all schema object types."
-  :type '(repeat string)
-  :group 'clutch)
-
-(defcustom clutch-sql-completion-case-style 'preserve
-  "How SQL completion inserts keywords and identifiers.
-`preserve' keeps backend-provided identifier case and uppercase SQL keywords.
-`lower' inserts lowercase keywords and lowercases completion identifiers.
-`upper' inserts uppercase keywords and uppercases completion identifiers."
-  :type '(choice (const :tag "Preserve backend / default keyword case" preserve)
-                 (const :tag "Lowercase keywords and identifiers" lower)
-                 (const :tag "Uppercase keywords and identifiers" upper))
-  :group 'clutch)
-
-(defcustom clutch-schema-cache-install-batch-size 500
-  "Maximum number of schema entries to install per idle slice.
-Large schema snapshots are installed incrementally to keep Emacs responsive
-after async metadata refreshes."
-  :type 'natnum
-  :group 'clutch)
-
 (defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
   "Default coding system when exporting CSV files."
   :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
@@ -345,14 +296,6 @@ after async metadata refreshes."
   "Maximum number of recent debug events kept per buffer or connection.
 Only recorded while `clutch-debug-mode' is enabled."
   :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-console-yank-cleanup t
-  "When non-nil, clean whitespace in pasted text in query consoles.
-After `yank', `yank-pop', or `clipboard-yank' in a query console buffer,
-trailing whitespace, mixed indentation, and CRLF line endings are
-cleaned up in the pasted region only."
-  :type 'boolean
   :group 'clutch)
 
 (defconst clutch-debug-buffer-name "*clutch-debug*"

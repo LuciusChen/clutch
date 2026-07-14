@@ -13,6 +13,21 @@
 (require 'clutch-diagnostics)
 (require 'subr-x)
 
+(defcustom clutch-schema-refresh-idle-delay-seconds 0.5
+  "Idle delay before automatic schema cache refresh after connect.
+A small non-zero delay keeps the first query responsive for native backends
+whose schema refresh runs on the foreground connection.  Manual schema
+refresh commands still start immediately."
+  :type 'number
+  :group 'clutch)
+
+(defcustom clutch-schema-cache-install-batch-size 500
+  "Maximum number of schema entries to install per idle slice.
+Large schema snapshots are installed incrementally to keep Emacs responsive
+after async metadata refreshes."
+  :type 'natnum
+  :group 'clutch)
+
 (defvar clutch--schema-cache (make-hash-table :test 'eq)
   "Global schema cache keyed by connection object identity.")
 
@@ -64,8 +79,6 @@ Functions receive CONN, TABLE, and KIND.")
 
 (defvar clutch-connection)
 (defvar clutch-debug-mode nil)
-(defvar clutch-schema-cache-install-batch-size)
-(defvar clutch-schema-refresh-idle-delay-seconds)
 (defvar clutch--oracle-i18n-warning-shown nil
   "Non-nil after showing the Oracle orai18n completion warning once.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)

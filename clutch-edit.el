@@ -13,6 +13,11 @@
 (require 'clutch-schema)
 (require 'json)
 
+(defcustom clutch-insert-validation-idle-delay 0.2
+  "Idle seconds before validating heavier insert fields such as JSON."
+  :type 'number
+  :group 'clutch)
+
 (defvar clutch--row-identity)
 (defvar clutch--filtered-rows)
 (defvar clutch--last-query)
@@ -26,7 +31,6 @@
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
 (defvar clutch--row-start-positions)
-(defvar clutch-insert-validation-idle-delay)
 (defvar clutch-connection)
 (defvar clutch-record--result-buffer)
 (defvar clutch-record--row-idx)

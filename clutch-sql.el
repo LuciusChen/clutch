@@ -16,8 +16,17 @@
 (require 'clutch-backend)
 (require 'clutch-schema)
 
+(defcustom clutch-sql-completion-case-style 'preserve
+  "How SQL completion inserts keywords and identifiers.
+`preserve' keeps backend-provided identifier case and uppercase SQL keywords.
+`lower' inserts lowercase keywords and lowercases completion identifiers.
+`upper' inserts uppercase keywords and uppercases completion identifiers."
+  :type '(choice (const :tag "Preserve backend / default keyword case" preserve)
+                 (const :tag "Lowercase keywords and identifiers" lower)
+                 (const :tag "Uppercase keywords and identifiers" upper))
+  :group 'clutch)
+
 (defvar clutch-connection)
-(defvar clutch-sql-completion-case-style)
 (defvar clutch--sql-keywords)
 
 (defvar-local clutch--tables-in-buffer-cache nil

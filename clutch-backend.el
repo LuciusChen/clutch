@@ -208,9 +208,6 @@ AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   "Connections currently reserved by foreground Clutch commands.
 Values are nesting counts.")
 
-(defvar clutch-schema-refresh-idle-delay-seconds 0.5
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
 (defun clutch-db--foreground-busy-p (conn)
   "Return non-nil when CONN is reserved by foreground Clutch work."
   (and conn (gethash conn clutch-db--foreground-connections)))

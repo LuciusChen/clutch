@@ -17,6 +17,19 @@
 (require 'subr-x)
 (require 'transient)
 
+(defcustom clutch-object-warmup-idle-delay-seconds 0.5
+  "Idle delay before warming non-table object metadata.
+A small non-zero delay keeps connect and initial UI painting responsive before
+background object discovery starts."
+  :type 'number
+  :group 'clutch)
+
+(defcustom clutch-primary-object-types '("TABLE" "VIEW" "SYNONYM" "COLLECTION" "KEY")
+  "Object types preferred by clutch's primary object entrypoint.
+When nil, the primary entrypoint includes all schema object types."
+  :type '(repeat string)
+  :group 'clutch)
+
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
 (defvar clutch-debug-mode nil)
@@ -31,8 +44,6 @@ Each value is a plist with at least :entries and :fetched-at.")
   (make-hash-table :test 'eq :weakness 'key)
   "Warmup generations weakly keyed by connection object identity.")
 (defvar clutch-connection)
-(defvar clutch-object-warmup-idle-delay-seconds)
-(defvar clutch-primary-object-types)
 (defvar clutch-sql-product)
 
 (defvar embark-default-action-overrides)

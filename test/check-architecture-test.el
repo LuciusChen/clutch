@@ -149,29 +149,41 @@
      (equal (mapcar #'cadr (clutch--architecture-root-state-forms forms))
             '(option shared-state buffer-state package-mode nested-state)))))
 
-(ert-deftest clutch-architecture-connection-owns-session-context-state ()
-  "Connection configuration and buffer context must be defined by its owner."
-  (let ((parsed
+(ert-deftest clutch-architecture-workflow-state-has-one-definition-owner ()
+  "Workflow configuration and context state must have one definition owner."
+  (let ((definitions
          (cl-loop for file in (directory-files
                                clutch--architecture-repo t
                                "\\`clutch.*\\.el\\'")
-                  collect (cons (file-name-base file)
-                                (clutch--architecture-read-forms file)))))
-    (dolist (symbol '(clutch-connection-alist
-                      clutch-tramp-context-policy
-                      clutch-connection
-                      clutch--conn-sql-product
-                      clutch--connection-params))
-      (should
-       (equal
-        (cl-loop for (module . forms) in parsed
-                 when (cl-some
-                       (lambda (form)
-                         (and (memq (car form) '(defcustom defvar-local))
-                              (eq (cadr form) symbol)))
-                       (clutch--architecture-root-state-forms forms))
-                 collect module)
-        '("clutch-connection"))))))
+                  for module = (file-name-base file)
+                  nconc (cl-loop
+                         for form in (clutch--architecture-root-state-forms
+                                      (clutch--architecture-read-forms file))
+                         collect (list module (car form) (cadr form)))))
+        (owners
+         '(("clutch-connection" defcustom nil clutch-connection-alist
+            clutch-tramp-context-policy)
+           ("clutch-connection" defvar-local nil clutch-connection
+            clutch--conn-sql-product clutch--connection-params)
+           ("clutch-query" defcustom t clutch-console-directory
+            clutch-console-yank-cleanup)
+           ("clutch-schema" defcustom t clutch-schema-cache-install-batch-size
+            clutch-schema-refresh-idle-delay-seconds)
+           ("clutch-sql" defcustom t clutch-sql-completion-case-style)
+           ("clutch-edit" defcustom t clutch-insert-validation-idle-delay)
+           ("clutch-object" defcustom t clutch-object-warmup-idle-delay-seconds
+            clutch-primary-object-types))))
+    (dolist (owner owners)
+      (pcase-let ((`(,module ,kind ,exclusive . ,symbols) owner))
+        (dolist (symbol symbols)
+          (should
+           (equal
+            (cl-loop for (candidate candidate-kind candidate-symbol)
+                     in definitions
+                     when (and (eq candidate-symbol symbol)
+                               (or exclusive (eq candidate-kind kind)))
+                     collect (list candidate candidate-kind))
+            (list (list module kind)))))))))
 
 (ert-deftest clutch-architecture-public-autoloads-enter-through-root ()
   "Public workflow autoloads must assemble the package through `clutch'."
@@ -227,6 +239,8 @@
   "Direct workflow loads must not reverse-load the composition root."
   (should-not (featurep 'clutch))
   (require 'clutch-query)
+  (require 'clutch-edit)
+  (require 'clutch-object)
   (should-not (featurep 'clutch))
   (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
                     clutch-switch-schema))

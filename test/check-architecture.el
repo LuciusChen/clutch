@@ -41,7 +41,7 @@
 (defconst clutch--architecture-largest-scc-baseline 3
   "Maximum permitted strongly connected component size.")
 
-(defconst clutch--architecture-root-state-baseline 30
+(defconst clutch--architecture-root-state-baseline 22
   "Maximum mutable state definitions permitted in the composition root.")
 
 (defun clutch--architecture-root-state-forms (forms)

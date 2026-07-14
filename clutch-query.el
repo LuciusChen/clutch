@@ -39,6 +39,22 @@
 (require 'transient)
 (require 'xref)
 
+;;;; Configuration
+
+(defcustom clutch-console-directory
+  (expand-file-name "clutch" user-emacs-directory)
+  "Directory for persisting query console buffer content."
+  :type 'directory
+  :group 'clutch)
+
+(defcustom clutch-console-yank-cleanup t
+  "When non-nil, clean whitespace in pasted text in query consoles.
+After `yank', `yank-pop', or `clipboard-yank' in a query console buffer,
+trailing whitespace, mixed indentation, and CRLF line endings are
+cleaned up in the pasted region only."
+  :type 'boolean
+  :group 'clutch)
+
 ;; Forward declarations — variables defined in sibling workflow modules
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
@@ -46,11 +62,9 @@
 (defvar clutch--source-window)
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
-(defvar clutch-console-directory)
 (defvar clutch-debug-mode nil)
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
-(defvar clutch-console-yank-cleanup t)
 (defvar clutch--query-buffer-local-p)
 (defvar clutch--query-mode-line-name)
 
