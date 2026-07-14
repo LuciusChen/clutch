@@ -12,32 +12,6 @@
 
 ;;;; Object test helpers
 
-(defmacro clutch-test-object--with-browse-console (spec &rest body)
-  "Run BODY in a temporary object browse console.
-SPEC is (INITIAL CONN ESCAPE-FN).  INITIAL is inserted before BODY, CONN
-becomes `clutch-connection', and ESCAPE-FN, when non-nil, replaces
-`clutch-db-escape-identifier'."
-  (declare (indent 1) (debug ((form form form) body)))
-  (pcase-let ((`(,initial ,conn ,escape-fn) spec))
-    `(let ((console (generate-new-buffer " *clutch-test-object-browse*")))
-       (unwind-protect
-           (with-current-buffer console
-             (insert ,initial)
-             (setq-local clutch-connection ,conn)
-             (setq-local clutch--query-buffer-local-p t)
-             (cl-letf (((symbol-function 'derived-mode-p)
-                        (lambda (&rest modes) (memq 'clutch-mode modes)))
-                       ((symbol-function 'pop-to-buffer)
-                        (lambda (buf &rest _args)
-                          (set-buffer buf)
-                          buf))
-                       ,@(when escape-fn
-                           `(((symbol-function 'clutch-db-escape-identifier)
-                              ,escape-fn))))
-               ,@body))
-         (when (buffer-live-p console)
-           (kill-buffer console))))))
-
 (defmacro clutch-test-object--with-warmup-state (&rest body)
   "Run BODY with fresh object cache and warmup scheduler state."
   (declare (indent 0) (debug (body)))

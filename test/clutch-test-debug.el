@@ -275,7 +275,7 @@
             (should (string-match-p "Connection: demo-db" text))
             (should (string-match-p "Elapsed: 42ms" text))
             (should (string-match-p "Elapsed: 1.250s" text))))
-      (when-let ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
+      (when-let* ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
 
 (ert-deftest clutch-test-diagnostics-historical-replay-uses-attached-buffer ()
   "Connection-scoped history restores its attached buffer as Source."
@@ -295,7 +295,7 @@
           (should (string-match-p (regexp-quote (buffer-name source))
                                   (clutch-test--debug-buffer-string))))
       (kill-buffer source)
-      (when-let ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
+      (when-let* ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
 
 (ert-deftest clutch-test-diagnostics-error-details-use-backend-generic ()
   "Problem records derive :backend from the backend contract."
