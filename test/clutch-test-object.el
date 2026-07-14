@@ -15,9 +15,9 @@
 (defmacro clutch-test-object--with-warmup-state (&rest body)
   "Run BODY with fresh object cache and warmup scheduler state."
   (declare (indent 0) (debug (body)))
-  `(let ((clutch--object-cache (make-hash-table :test 'equal))
-         (clutch--object-warmup-timers (make-hash-table :test 'equal))
-         (clutch--object-warmup-generations (make-hash-table :test 'equal)))
+  `(let ((clutch--object-cache (make-hash-table :test 'eq))
+         (clutch--object-warmup-timers (make-hash-table :test 'eq))
+         (clutch--object-warmup-generations (make-hash-table :test 'eq)))
      ,@body))
 
 ;;;; Object — browse and actions
@@ -490,7 +490,7 @@ document connection."
       (let ((clutch-debug-mode t))
         (clutch--clear-debug-capture)
         (setq-local clutch-connection 'fake-conn)
-        (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+        (cl-letf (((symbol-function 'clutch-db-backend-key)
                    (lambda (_conn) 'oracle))
                   ((symbol-function 'clutch-db-object-definition)
                    (lambda (&rest _args)
@@ -520,12 +520,10 @@ document connection."
 
 (ert-deftest clutch-test-object-describe-table-propagates-column-detail-errors ()
   "Table describe should not hide column-detail failures behind list-columns."
-  (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
         (detail-calls 0)
         (list-columns-calls 0))
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "dev-key"))
-              ((symbol-function 'clutch-db-column-details)
+    (cl-letf (((symbol-function 'clutch-db-column-details)
                (lambda (_conn _table)
                  (cl-incf detail-calls)
                  (signal 'clutch-db-error '("column detail boom"))))
@@ -548,15 +546,16 @@ document connection."
 
 (ert-deftest clutch-test-render-object-describe-refreshes-table-metadata-cache ()
   "Describe rendering should reload table metadata instead of reusing stale fields."
-  (let ((clutch--schema-cache (make-hash-table :test 'equal))
-        (clutch--table-metadata-cache (make-hash-table :test 'equal))
-        (clutch--column-details-queue-cache (make-hash-table :test 'equal))
-        (clutch--column-details-active-cache (make-hash-table :test 'equal))
+  (let ((clutch--schema-cache (make-hash-table :test 'eq))
+        (clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--column-details-queue-cache (make-hash-table :test 'eq))
+        (clutch--column-details-active-cache (make-hash-table :test 'eq))
         (detail-calls 0))
-    (let ((schema (make-hash-table :test 'equal))
+    (let ((conn (list 'fake-conn))
+          (schema (make-hash-table :test 'equal))
           (metadata (make-hash-table :test 'equal)))
       (puthash "USERS" '("id" "old_col") schema)
-      (puthash "dev-key" schema clutch--schema-cache)
+      (puthash conn schema clutch--schema-cache)
       (puthash "USERS"
                '(:column-details ((:name "id" :type "int")
                                   (:name "old_col" :type "text"))
@@ -564,16 +563,14 @@ document connection."
                  :columns-status (:state failed :error "old columns"))
                metadata)
       (puthash '("APP" . "USERS") '(:comment "old comment") metadata)
-      (puthash "dev-key" metadata clutch--table-metadata-cache)
-      (puthash "dev-key" '("USERS" "ORDERS")
+      (puthash conn metadata clutch--table-metadata-cache)
+      (puthash conn '("USERS" "ORDERS")
                clutch--column-details-queue-cache)
-      (puthash "dev-key" (cons "USERS" 7)
+      (puthash conn (cons "USERS" 7)
                clutch--column-details-active-cache)
       (cl-letf (((symbol-function 'clutch--command-connection-context)
                  (lambda () (list :connection clutch-connection)))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key"))
-                ((symbol-function 'clutch--connection-alive-p)
+                ((symbol-function 'clutch-db-live-p)
                  (lambda (_conn) t))
                 ((symbol-function 'clutch--clear-connection-problem-capture)
                  (lambda (_conn) nil))
@@ -596,7 +593,7 @@ document connection."
                    buffer)))
         (unwind-protect
             (with-temp-buffer
-              (setq-local clutch-connection 'fake-conn)
+              (setq-local clutch-connection conn)
               (clutch-object-describe '(:name "USERS" :type "TABLE"))
               (with-current-buffer "*clutch describe: USERS*"
                 (let ((text (buffer-string)))
@@ -605,10 +602,10 @@ document connection."
           (when-let* ((buf (get-buffer "*clutch describe: USERS*")))
             (kill-buffer buf)))
         (should (= detail-calls 1))
-        (should-not (gethash "dev-key" clutch--column-details-active-cache))
-        (should (equal (gethash "dev-key" clutch--column-details-queue-cache)
+        (should-not (gethash conn clutch--column-details-active-cache))
+        (should (equal (gethash conn clutch--column-details-queue-cache)
                        '("ORDERS")))
-        (should-not (clutch--column-details-status 'fake-conn "USERS"))
+        (should-not (clutch--column-details-status conn "USERS"))
         (should (eq (gethash "USERS" schema 'missing) nil))))))
 
 (ert-deftest clutch-test-object-describe-collection-shows-fields-and-indexes ()
@@ -713,7 +710,7 @@ document connection."
   "Describe failures should record source-buffer problems and optional debug trace."
   (dolist (debug-p '(nil t))
     (ert-info ((format "debug: %s" debug-p))
-      (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
+      (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
             (details '(:backend jdbc
                        :summary "ORA-12592: TNS:bad packet"
                        :diag (:category "metadata"
@@ -725,9 +722,7 @@ document connection."
             (when debug-p
               (clutch--clear-debug-capture))
             (setq-local clutch-connection 'fake-conn)
-            (cl-letf (((symbol-function 'clutch--connection-key)
-                       (lambda (_conn) "dev-key"))
-                      ((symbol-function 'clutch--backend-key-from-conn)
+            (cl-letf (((symbol-function 'clutch-db-backend-key)
                        (lambda (_conn) 'oracle))
                       ((symbol-function 'clutch-db-error-details)
                        (lambda (_conn) details))
@@ -810,9 +805,10 @@ document connection."
 
 (ert-deftest clutch-test-object-read-annotates-mixed-object-types ()
   "Object reader should expose warmed non-table metadata in the flat picker."
-  (let ((clutch--object-cache (make-hash-table :test 'equal))
+  (let ((conn (list 'fake-conn))
+        (clutch--object-cache (make-hash-table :test 'eq))
         captured)
-    (puthash "fake-key"
+    (puthash conn
              (list :entries '((:name "ORDER_IDX" :type "INDEX"
                                :schema "APP" :source-schema "APP")
                               (:name "PROCESS_ORDER" :type "PROCEDURE"
@@ -822,9 +818,7 @@ document connection."
              clutch--object-cache)
     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch--warn-schema-cache-state) #'ignore)
-              ((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "fake-key"))
-              ((symbol-function 'clutch--connection-alive-p)
+              ((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch-db-list-table-entries)
                (lambda (_conn)
@@ -854,7 +848,7 @@ document connection."
                                :proc-ann (funcall annotation-fn "PROCESS_ORDER")))
                    "PROCESS_ORDER"))))
       (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn)
+        (setq-local clutch-connection conn)
         (should (equal (clutch-object-read "Object: ")
                        '(:name "PROCESS_ORDER" :type "PROCEDURE"
                          :schema "APP" :source-schema "APP" :status "VALID"))))
@@ -867,11 +861,9 @@ document connection."
 
 (ert-deftest clutch-test-object-cache-primes-table-entry-comments ()
   "Object cache storage should prime table comments carried by entries."
-  (let ((clutch--object-cache (make-hash-table :test 'equal))
-        (clutch--table-metadata-cache (make-hash-table :test 'equal)))
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "fake-key"))
-              ((symbol-function 'clutch-db-list-table-entries)
+  (let ((clutch--object-cache (make-hash-table :test 'eq))
+        (clutch--table-metadata-cache (make-hash-table :test 'eq)))
+    (cl-letf (((symbol-function 'clutch-db-list-table-entries)
                (lambda (_conn)
                  '((:name "ORDERS" :type "TABLE" :schema "APP"
                     :source-schema "APP" :comment "订单")
@@ -888,6 +880,27 @@ document connection."
                      "订单"))
       (should (clutch--table-comment-cached-p 'fake-conn "AUDIT_LOG"))
       (should-not (clutch--cached-table-comment 'fake-conn "AUDIT_LOG")))))
+
+(ert-deftest clutch-test-object-cache-lifecycle-isolated-by-connection-identity ()
+  "Schema invalidation should clear only the exact connection's object state."
+  (clutch-test-object--with-warmup-state
+    (let* ((conn-a (list :display-key "shared"))
+           (conn-b (list :display-key "shared"))
+           (entries-a '((:name "ORDERS" :type "TABLE")))
+           (entries-b '((:name "AUDIT_LOG" :type "TABLE"))))
+      (should (equal conn-a conn-b))
+      (should-not (eq conn-a conn-b))
+      (clutch--store-object-cache conn-a entries-a)
+      (clutch--store-object-cache conn-b entries-b)
+      (should (equal (clutch--object-cache-entries conn-a) entries-a))
+      (should (equal (clutch--object-cache-entries conn-b) entries-b))
+      (let ((clutch--schema-cache-updated-hook
+             '(clutch--handle-schema-cache-updated)))
+        (clutch--notify-schema-cache-updated conn-a 'invalidated))
+      (should-not (clutch--object-cache-entry conn-a))
+      (should (equal (clutch--object-cache-entries conn-b) entries-b))
+      (should (= (clutch--object-warmup-generation conn-a) 1))
+      (should (= (clutch--object-warmup-generation conn-b) 0)))))
 
 (ert-deftest clutch-test-jump-default-action-contract ()
   "Jump should resolve once and run the shared default action."
@@ -966,23 +979,23 @@ document connection."
 
 (ert-deftest clutch-test-jump-on-collection-at-point-in-mongodb-console-browses ()
   "Jump should treat MongoDB collections as primary browseable objects."
-  (let ((clutch--object-cache (make-hash-table :test 'equal)))
+  (let ((clutch--object-cache (make-hash-table :test 'eq)))
+    (puthash 'fake-mongodb-conn
+             (list :entries nil
+                   :loaded-categories (copy-sequence clutch--object-categories))
+             clutch--object-cache)
     (with-temp-buffer
       (clutch-mongodb-mode)
       (insert "db.users.find()")
       (search-backward "users")
       (setq-local clutch-connection 'fake-mongodb-conn)
       (let (read-args action-call)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+        (cl-letf (((symbol-function 'clutch-db-live-p)
                    (lambda (_conn) t))
-                  ((symbol-function 'clutch--connection-key)
-                   (lambda (_conn) "mongodb-test"))
                   ((symbol-function 'clutch-db-browseable-object-entries)
                    (lambda (_conn)
                      '((:name "users" :schema "app" :type "COLLECTION")
                        (:name "orders" :schema "app" :type "COLLECTION"))))
-                  ((symbol-function 'clutch--schedule-object-warmup)
-                   #'ignore)
                   ((symbol-function 'clutch--resolve-object-dwim)
                    (lambda (&rest _args)
                      (ert-fail "MongoDB collection at point should resolve directly")))
@@ -1243,7 +1256,7 @@ document connection."
   "Symbol resolution should prefer concrete schema objects over PUBLIC synonyms."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
-    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'thing-at-point)
                (lambda (&rest _) "ORDER_QUEUE"))
@@ -1260,16 +1273,15 @@ document connection."
 
 (ert-deftest clutch-test-object-entries-use-fast-partial-cache-on-first-open ()
   "Unified object entries should avoid synchronous full metadata scans."
-  (let ((clutch--object-cache (make-hash-table :test 'equal))
+  (let ((conn (list 'fake-conn))
+        (clutch--object-cache (make-hash-table :test 'eq))
         scheduled)
-    (puthash "fake-key"
+    (puthash conn
              (list :entries '((:name "PROCESS_ORDER" :type "PROCEDURE"
                                :schema "APP" :source-schema "APP"))
                    :loaded-categories '(procedures))
              clutch--object-cache)
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "fake-key"))
-              ((symbol-function 'clutch--connection-alive-p)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch--browseable-object-entries)
                (lambda (_conn)
@@ -1282,7 +1294,7 @@ document connection."
                (lambda (secs repeat fn)
                  (setq scheduled (list secs repeat fn))
                  'fake-timer)))
-      (should (equal (clutch--object-entries 'fake-conn)
+      (should (equal (clutch--object-entries conn)
                      '((:name "ORDERS" :type "TABLE"
                         :schema "APP" :source-schema "APP")
                        (:name "PROCESS_ORDER" :type "PROCEDURE"
@@ -1295,7 +1307,7 @@ document connection."
   (with-temp-buffer
     (let ((clutch-debug-mode t))
       (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+      (cl-letf (((symbol-function 'clutch-db-backend-key)
                  (lambda (_conn) 'oracle))
                 ((symbol-function 'clutch--warn-completion-metadata-error-once)
                  #'ignore)
@@ -1315,9 +1327,7 @@ document connection."
   "Warmup should still expose programming errors that are not db-runtime races."
   (clutch-test-object--with-warmup-state
    (let (timer-fn)
-     (cl-letf (((symbol-function 'clutch--object-cache-key)
-		(lambda (_conn) "fake-key"))
-               ((symbol-function 'clutch--connection-alive-p)
+     (cl-letf (((symbol-function 'clutch-db-live-p)
 		(lambda (_conn) t))
                ((symbol-function 'clutch--object-cache-loaded-categories)
 		(lambda (_conn) nil))
@@ -1344,11 +1354,9 @@ document connection."
      (with-temp-buffer
        (let ((clutch-debug-mode t))
          (setq-local clutch-connection 'fake-conn)
-         (cl-letf (((symbol-function 'clutch--object-cache-key)
-                    (lambda (_conn) "fake-key"))
-                   ((symbol-function 'clutch--backend-key-from-conn)
+         (cl-letf (((symbol-function 'clutch-db-backend-key)
                     (lambda (_conn) 'mysql))
-                   ((symbol-function 'clutch--connection-alive-p)
+                   ((symbol-function 'clutch-db-live-p)
                     (lambda (_conn) t))
                    ((symbol-function 'clutch--object-cache-loaded-categories)
                     (lambda (_conn) nil))
@@ -1484,7 +1492,7 @@ document connection."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch-browser-current-object '(:name "ORDER_QUEUE" :type "TABLE"))
-    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'thing-at-point)
                (lambda (&rest _) "ORDER_QUEUE_ARCHIVE"))
@@ -1502,7 +1510,7 @@ document connection."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local major-mode 'clutch-mode)
-    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch-object-at-point)
                (lambda () '(:name "orders" :type "TABLE")))
@@ -1514,7 +1522,7 @@ document connection."
     (setq-local clutch-connection 'fake-conn)
     (setq-local major-mode 'sql-mode)
     (setq-local clutch-browser-current-object '(:name "PROCESS_ORDER" :type "PROCEDURE"))
-    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch-object-at-point)
                (lambda () nil)))
@@ -1605,15 +1613,13 @@ document connection."
 
 (ert-deftest clutch-test-switch-schema-uses-selected-schema-and-refreshes ()
   "Schema switching should update params, clear caches, and refresh metadata."
-  (let ((conn 'fake-conn)
-        switched refresh-called message-text)
+  (let ((conn (list 'fake-conn))
+        switched cleared-conns refresh-quiet message-text)
     (with-temp-buffer
       (setq-local clutch-connection conn
                   clutch--connection-params '(:driver oracle :schema "SALES"))
       (cl-letf (((symbol-function 'clutch-db-list-schemas)
                  (lambda (_conn) '("SALES" "ANALYTICS")))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "user@host:1521/ORCL"))
                 ((symbol-function 'clutch-db-current-schema)
                  (lambda (_conn) "SALES"))
                 ((symbol-function 'completing-read)
@@ -1621,10 +1627,11 @@ document connection."
                 ((symbol-function 'clutch-db-set-current-schema)
                  (lambda (_conn schema) (setq switched schema) schema))
                 ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 (lambda (_conn &optional _key) (setq refresh-called 'cleared)))
+                 (lambda (actual-conn)
+                   (push actual-conn cleared-conns)))
                 ((symbol-function 'clutch--refresh-current-schema)
                  (lambda (&optional quiet)
-                   (setq refresh-called (list refresh-called quiet))
+                   (setq refresh-quiet quiet)
                    t))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
@@ -1632,7 +1639,8 @@ document connection."
         (clutch-switch-schema)
         (should (equal switched "ANALYTICS"))
         (should (equal clutch--connection-params '(:driver oracle :schema "ANALYTICS")))
-        (should (equal refresh-called '(cleared t)))
+        (should (equal cleared-conns (list conn)))
+        (should refresh-quiet)
         (should (equal message-text "Current schema: ANALYTICS"))))))
 
 (ert-deftest clutch-test-switch-schema-failure-populates-problem-record-and-debug-trace ()
@@ -1652,8 +1660,6 @@ document connection."
                     clutch--connection-params '(:driver oracle :schema "SALES"))
         (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
                    (lambda (_conn) 'oracle))
-                  ((symbol-function 'clutch--connection-key)
-                   (lambda (_conn) "user@host:1521/ORCL"))
                   ((symbol-function 'clutch-db-list-schemas)
                    (lambda (_conn) '("SALES" "ANALYTICS")))
                   ((symbol-function 'clutch-db-current-schema)
@@ -1684,17 +1690,12 @@ document connection."
 
 (ert-deftest clutch-test-switch-schema-updates-mysql-database-param ()
   "MySQL schema switching should persist the selected database in buffer params."
-  (let ((conn 'fake-conn)
-        switched cleared-keys)
+  (let ((conn (list 'fake-conn))
+        switched cleared-conns)
     (with-temp-buffer
       (setq-local clutch-connection conn
                   clutch--connection-params '(:backend mysql :database "sales"))
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn)
-                   (if (equal clutch--connection-params '(:backend mysql :database "sales"))
-                       "user@host:3306/sales"
-                     "user@host:3306/analytics")))
-                ((symbol-function 'clutch-db-list-schemas)
+      (cl-letf (((symbol-function 'clutch-db-list-schemas)
                  (lambda (_conn) '("sales" "analytics")))
                 ((symbol-function 'clutch-db-current-schema)
                  (lambda (_conn) "sales"))
@@ -1703,21 +1704,21 @@ document connection."
                 ((symbol-function 'clutch-db-set-current-schema)
                  (lambda (_conn schema) (setq switched schema) schema))
                 ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 (lambda (_conn &optional key)
-                   (push (or key "current") cleared-keys)))
+                 (lambda (actual-conn)
+                   (push actual-conn cleared-conns)))
                 ((symbol-function 'clutch--refresh-current-schema)
                  (lambda (&optional _quiet) t))
                 ((symbol-function 'message) (lambda (&rest _args) nil)))
         (clutch-switch-schema)
         (should (equal switched "analytics"))
         (should (equal clutch--connection-params '(:backend mysql :database "analytics")))
-        (should (equal cleared-keys '("current" "user@host:3306/sales")))))))
+        (should (equal cleared-conns (list conn)))))))
 
 (ert-deftest clutch-test-switch-schema-clickhouse-reconnects-to-selected-database ()
   "ClickHouse switching should reconnect with the selected database."
-  (let ((old-conn 'old-conn)
-        (new-conn 'new-conn)
-        built-params disconnected primed tx-cleared cleared-keys message-text)
+  (let ((old-conn (list 'old-conn))
+        (new-conn (list 'new-conn))
+        built-params disconnected primed tx-cleared cleared-conns message-text)
     (with-temp-buffer
       (setq-local clutch-connection old-conn
                   clutch--connection-params '(:backend clickhouse
@@ -1741,18 +1742,12 @@ document connection."
                  (lambda (conn) (setq disconnected conn)))
                 ((symbol-function 'clutch--prime-schema-cache)
                  (lambda (conn) (setq primed conn)))
-                ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
                 ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
                 ((symbol-function 'clutch--clear-tx-dirty)
                  (lambda (conn) (setq tx-cleared conn)))
                 ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 (lambda (_conn &optional key)
-                   (push (or key "current") cleared-keys)))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (conn)
-                   (if (eq conn old-conn)
-                       "default-key"
-                     "demo-key")))
+                 (lambda (actual-conn)
+                   (push actual-conn cleared-conns)))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (setq message-text (apply #'format fmt args)))))
@@ -1771,7 +1766,7 @@ document connection."
         (should (eq disconnected old-conn))
         (should (eq primed new-conn))
         (should (eq tx-cleared old-conn))
-        (should (equal cleared-keys '("current" "default-key")))
+        (should (equal cleared-conns (list new-conn old-conn)))
         (should (equal message-text "Current database: demo"))))))
 
 (provide 'clutch-test-object)

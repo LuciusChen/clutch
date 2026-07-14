@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'clutch-backend)
 (require 'clutch-diagnostics)
+(require 'clutch-schema)
 (require 'seq)
 (require 'sql)
 (require 'subr-x)
@@ -21,13 +22,14 @@
 (defvar clutch-debug-mode nil)
 (defvar-local clutch--describe-object-entry nil
   "Object entry currently displayed in a clutch describe buffer.")
-(defvar clutch--object-cache (make-hash-table :test 'equal)
-  "Object discovery cache keyed by connection key string.
+(defvar clutch--object-cache (make-hash-table :test 'eq)
+  "Object discovery cache keyed by connection object identity.
 Each value is a plist with at least :entries and :fetched-at.")
-(defvar clutch--object-warmup-timers (make-hash-table :test 'equal)
-  "Idle timers warming object discovery caches keyed by connection key string.")
-(defvar clutch--object-warmup-generations (make-hash-table :test 'equal)
-  "Warmup generations keyed by object-cache key string.")
+(defvar clutch--object-warmup-timers (make-hash-table :test 'eq)
+  "Idle timers warming object discovery caches keyed by connection identity.")
+(defvar clutch--object-warmup-generations
+  (make-hash-table :test 'eq :weakness 'key)
+  "Warmup generations weakly keyed by connection object identity.")
 (defvar clutch-connection)
 (defvar clutch-object-warmup-idle-delay-seconds)
 (defvar clutch-primary-object-types)
@@ -45,28 +47,18 @@ Each value is a plist with at least :entries and :fetched-at.")
   "Embark actions for clutch objects with explicit targets.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
-(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
-(declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
-(declare-function clutch--clear-table-metadata-caches "clutch-schema" (conn table))
-(declare-function clutch--cache-table-entry-comments "clutch-schema" (conn entries))
-(declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch--ensure-table-comment "clutch-schema" (conn table &optional schema))
 (declare-function clutch--icon-with-face "clutch-ui"
                   (name fallback face &rest icon-args))
 (declare-function clutch--json-display-mode "clutch-ui" ())
 (declare-function clutch--json-metadata-text "clutch-ui" (text))
 (declare-function clutch--key-hints "clutch-ui" (hints))
 (declare-function clutch--message-ident "clutch-ui" (value))
-(declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--query-buffer-p "clutch-connection" ())
-(declare-function clutch--remember-recoverable-metadata-warning "clutch-schema"
-                  (connection op err &optional context))
-(declare-function clutch--refresh-current-schema "clutch-schema" (&optional silent))
-(declare-function clutch--warn-completion-metadata-error-once "clutch-schema" (message-text))
-(declare-function clutch--warn-schema-cache-state "clutch-schema" (&optional conn))
+(declare-function clutch--refresh-current-schema
+                  "clutch-connection" (&optional quiet force-sync))
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
   "Return non-nil when ENTRY is permitted by ALLOWED-TYPES.
@@ -85,17 +77,12 @@ When ALLOWED-TYPES is nil, return ENTRIES unchanged."
        (clutch--object-type-allowed-p entry allowed-types))
      entries)))
 
-(defun clutch--object-cache-key (conn)
-  "Return the object-discovery cache key for CONN."
-  (or (clutch--connection-key conn)
-      (format "%S" conn)))
-
 (defun clutch--object-connection-alive-p (conn)
   "Return non-nil when CONN is usable for object metadata work.
 Recoverable database liveness-check failures are warned once and treated as
-temporarily unavailable."
+  temporarily unavailable."
   (condition-case err
-      (clutch--connection-alive-p conn)
+      (and conn (clutch-db-live-p conn))
     (clutch-db-error
      (clutch--remember-recoverable-metadata-warning
       conn "object-warmup" err '(:phase "liveness"))
@@ -154,9 +141,7 @@ minibuffer has been quit.")
 
 (defun clutch--object-cache-entry (conn)
   "Return cached object discovery metadata for CONN, or nil."
-  (and conn
-       (gethash (clutch--object-cache-key conn)
-                clutch--object-cache)))
+  (and conn (gethash conn clutch--object-cache)))
 
 (defun clutch--object-cache-entries (conn)
   "Return cached object entries for CONN, or nil."
@@ -190,7 +175,7 @@ minibuffer has been quit.")
 (defun clutch--store-object-cache (conn entries)
   "Store object ENTRIES for CONN and return ENTRIES."
   (clutch--cache-table-entry-comments conn entries)
-  (puthash (clutch--object-cache-key conn)
+  (puthash conn
            (list :entries entries
                  :loaded-categories (copy-sequence clutch--object-categories)
                  :fetched-at (float-time))
@@ -199,8 +184,7 @@ minibuffer has been quit.")
 
 (defun clutch--store-object-cache-type-entries (conn type entries)
   "Store per-type object ENTRIES for CONN and TYPE, returning ENTRIES."
-  (let* ((key (clutch--object-cache-key conn))
-         (cache (or (gethash key clutch--object-cache) (list)))
+  (let* ((cache (or (gethash conn clutch--object-cache) (list)))
          (loaded (copy-sequence (plist-get cache :loaded-categories)))
          (type (clutch--normalize-object-type type))
          (category (pcase type
@@ -214,7 +198,7 @@ minibuffer has been quit.")
       (clutch--cache-table-entry-comments conn browseable)
       (when category
         (cl-pushnew category loaded))
-      (puthash key
+      (puthash conn
                (list :entries (clutch--merge-object-entries
                                browseable
                                (cl-remove type (plist-get cache :entries)
@@ -276,32 +260,28 @@ minibuffer has been quit.")
     ('triggers "TRIGGER")
     (_ nil)))
 
-(defun clutch--cancel-object-warmup (conn &optional key)
-  "Cancel any pending object warmup timer for CONN or explicit KEY."
-  (let ((key (or key (clutch--object-cache-key conn))))
-    (when-let* ((timer (gethash key clutch--object-warmup-timers)))
-      (cancel-timer timer)
-      (remhash key clutch--object-warmup-timers))))
+(defun clutch--cancel-object-warmup (conn)
+  "Cancel any pending object warmup timer for CONN."
+  (when-let* ((timer (gethash conn clutch--object-warmup-timers)))
+    (cancel-timer timer)
+    (remhash conn clutch--object-warmup-timers)))
 
-(defun clutch--object-warmup-generation (conn &optional key)
-  "Return the current warmup generation for CONN or explicit KEY."
-  (gethash (or key (clutch--object-cache-key conn))
-           clutch--object-warmup-generations
-           0))
+(defun clutch--object-warmup-generation (conn)
+  "Return the current warmup generation for CONN."
+  (gethash conn clutch--object-warmup-generations 0))
 
-(defun clutch--invalidate-object-warmup (conn &optional key)
-  "Cancel pending warmup work and bump its generation for CONN or KEY."
-  (let ((key (or key (clutch--object-cache-key conn))))
-    (clutch--cancel-object-warmup conn key)
-    (puthash key
-             (1+ (clutch--object-warmup-generation conn key))
-             clutch--object-warmup-generations)))
+(defun clutch--invalidate-object-warmup (conn)
+  "Cancel pending warmup work and bump its generation for CONN."
+  (clutch--cancel-object-warmup conn)
+  (puthash conn
+           (1+ (clutch--object-warmup-generation conn))
+           clutch--object-warmup-generations))
 
-(defun clutch--object-warmup-current-p (conn key generation)
-  "Return non-nil when CONN still owns warmup KEY and GENERATION."
+(defun clutch--object-warmup-current-p (conn generation)
+  "Return non-nil when GENERATION is current for live CONN."
   (and conn
        (clutch--object-connection-alive-p conn)
-       (= generation (clutch--object-warmup-generation conn key))))
+       (= generation (clutch--object-warmup-generation conn))))
 
 (defun clutch--object-warmup-debug-event (conn phase backend category summary)
   "Record an object warmup debug event for CATEGORY and PHASE on CONN."
@@ -321,9 +301,10 @@ CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
    conn "stale-drop" backend category
    (format "Ignored stale %s warmup %s" category what)))
 
-(defun clutch--object-warmup-success (conn key generation backend category type entries)
-  "Handle successful warmup ENTRIES for CATEGORY, KEY, and BACKEND on CONN."
-  (if (clutch--object-warmup-current-p conn key generation)
+(defun clutch--object-warmup-success (conn generation backend category type entries)
+  "Handle successful warmup ENTRIES of TYPE for CATEGORY on CONN.
+GENERATION rejects stale work, and BACKEND labels diagnostics."
+  (if (clutch--object-warmup-current-p conn generation)
       (progn
         (clutch--object-warmup-debug-event
          conn "success" backend category
@@ -332,9 +313,10 @@ CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
         (clutch--schedule-object-warmup conn))
     (clutch--object-warmup-stale-debug-event conn backend category "result")))
 
-(defun clutch--object-warmup-error (conn key generation backend category message)
-  "Handle a warmup error MESSAGE for CATEGORY, KEY, and BACKEND on CONN."
-  (if (clutch--object-warmup-current-p conn key generation)
+(defun clutch--object-warmup-error (conn generation backend category message)
+  "Handle a warmup error MESSAGE for CATEGORY on CONN.
+GENERATION rejects stale work, and BACKEND labels diagnostics."
+  (if (clutch--object-warmup-current-p conn generation)
       (progn
         (clutch--object-warmup-debug-event
          conn "error" backend category
@@ -344,31 +326,30 @@ CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
 
 (defun clutch--schedule-object-warmup (conn)
   "Warm non-table object categories for CONN during idle time."
-  (let* ((key (clutch--object-cache-key conn))
-         (loaded (clutch--object-cache-loaded-categories conn))
+  (let* ((loaded (clutch--object-cache-loaded-categories conn))
          (next (seq-find (lambda (category)
                            (not (memq category loaded)))
                          clutch--object-categories))
-         (generation (clutch--object-warmup-generation conn key))
+         (generation (clutch--object-warmup-generation conn))
          (backend (when clutch-debug-mode
                     (condition-case nil
-                        (clutch--backend-key-from-conn conn)
+                        (clutch-db-backend-key conn)
                       (error nil)))))
     (cond
      ((or (not conn)
           (not (clutch--object-connection-alive-p conn))
           (null next))
       (clutch--cancel-object-warmup conn))
-     ((gethash key clutch--object-warmup-timers)
+     ((gethash conn clutch--object-warmup-timers)
       nil)
      (t
       (puthash
-       key
+       conn
        (run-with-idle-timer
-       clutch-object-warmup-idle-delay-seconds nil
+        clutch-object-warmup-idle-delay-seconds nil
         (lambda ()
-          (remhash key clutch--object-warmup-timers)
-          (when (clutch--object-warmup-current-p conn key generation)
+          (remhash conn clutch--object-warmup-timers)
+          (when (clutch--object-warmup-current-p conn generation)
             (condition-case err
                 (if (or (clutch-db-busy-p conn)
                         (clutch-db--foreground-busy-p conn))
@@ -381,10 +362,10 @@ CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
                                      conn next
                                      (lambda (entries)
                                        (clutch--object-warmup-success
-                                        conn key generation backend next type entries))
+                                        conn generation backend next type entries))
                                      (lambda (message)
                                        (clutch--object-warmup-error
-                                        conn key generation backend next message)))))
+                                        conn generation backend next message)))))
                                (when (and started clutch-debug-mode)
                                  (clutch--object-warmup-debug-event
                                   conn "submit" backend next
@@ -404,6 +385,18 @@ CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
                           (clutch--object-connection-alive-p conn))
                  (clutch--schedule-object-warmup conn)))))))
        clutch--object-warmup-timers)))))
+
+(defun clutch--handle-schema-cache-updated (conn state)
+  "Update object discovery state for CONN's schema cache STATE."
+  (pcase state
+    ('invalidated
+     (clutch--invalidate-object-warmup conn)
+     (remhash conn clutch--object-cache))
+    ('ready
+     (clutch--schedule-object-warmup conn))))
+
+(add-hook 'clutch--schema-cache-updated-hook
+          #'clutch--handle-schema-cache-updated)
 
 (defun clutch--partial-object-entries (conn)
   "Return a fast object snapshot for CONN.
@@ -1349,7 +1342,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
        :connection conn
        :op op
        :phase "error"
-       :backend (clutch--backend-key-from-conn conn)
+       :backend (clutch-db-backend-key conn)
        :summary summary
        :context (list :entry-name (plist-get entry :name)
                       :entry-type (plist-get entry :type))))))
@@ -1449,7 +1442,7 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
   (or (clutch-db-object-browse-query conn entry)
       (if (clutch-db-native-document-surface-p conn params)
           (user-error "Document backend %s does not provide object browse queries"
-                      (clutch--backend-key-from-conn conn))
+                      (clutch-db-backend-key conn))
         (format "SELECT * FROM %s;"
                 (clutch--object-sql-name conn entry)))))
 
@@ -1911,7 +1904,7 @@ When PREDICATE is non-nil, keep only action specs matching it."
 (defun clutch--embark-object-target ()
   "Return an Embark target for the clutch object at point."
   (when (or clutch--object-dispatch-entry
-            (clutch--connection-alive-p clutch-connection))
+            (clutch-db-live-p clutch-connection))
     (if clutch--object-dispatch-entry
         `(,(clutch--embark-target-type clutch--object-dispatch-entry)
           ,clutch--object-dispatch-entry)

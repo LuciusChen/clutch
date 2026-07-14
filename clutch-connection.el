@@ -488,13 +488,10 @@ Also remember PARAMS and PRODUCT."
   (clutch--refresh-transaction-ui conn)
   conn)
 
-(defun clutch--clear-reconnect-metadata-caches (old-conn new-conn old-key)
-  "Clear schema-scoped metadata when replacing OLD-CONN with NEW-CONN.
-OLD-KEY is OLD-CONN's key captured before the old connection is released.
-The old and new connections often share the same logical connection key, so
-stale `refreshing' schema state must not survive a successful reconnect."
-  (when old-key
-    (clutch--clear-connection-metadata-caches old-conn old-key))
+(defun clutch--clear-reconnect-metadata-caches (old-conn new-conn)
+  "Clear schema-scoped metadata when replacing OLD-CONN with NEW-CONN."
+  (when old-conn
+    (clutch--clear-connection-metadata-caches old-conn))
   (when new-conn
     (clutch--clear-connection-metadata-caches new-conn)))
 
@@ -515,7 +512,7 @@ Connection failures propagate to the calling command."
       (clutch--clear-tx-dirty old-conn)
       (clutch--release-connection-transport old-conn)
       (clutch--require-live-connection conn)
-      (clutch--clear-reconnect-metadata-caches old-conn conn nil)
+      (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--rebind-connection-buffers old-conn conn params product)
       (clutch--finalize-rebound-connection conn)
       (message "Reconnected to %s" (clutch--connection-key conn))
@@ -525,7 +522,6 @@ Connection failures propagate to the calling command."
   "Replace OLD-CONN with a new connection built from PARAMS.
 PRODUCT is the effective SQL product for the new logical session."
   (let* ((product (or product (clutch--effective-sql-product params)))
-         (old-key (clutch--connection-key old-conn))
          (new-conn (clutch--build-conn params)))
     (clutch--clear-tx-dirty old-conn)
     (unwind-protect
@@ -534,7 +530,7 @@ PRODUCT is the effective SQL product for the new logical session."
       (clutch--release-connection-transport old-conn))
     (clutch--require-live-connection new-conn)
     (clutch--rebind-connection-buffers old-conn new-conn params product)
-    (clutch--clear-reconnect-metadata-caches old-conn new-conn old-key)
+    (clutch--clear-reconnect-metadata-caches old-conn new-conn)
     (clutch--finalize-rebound-connection new-conn)))
 
 (defun clutch--ensure-connection ()
@@ -554,24 +550,77 @@ using the stored params.  Signals a user-error if not recoverable."
 (defun clutch--refresh-schema-status-ui (conn)
   "Refresh mode-line or status line in buffers attached to CONN."
   (when conn
-    (let ((key (clutch--connection-key conn)))
-      (dolist (buf (buffer-list))
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (when (and clutch-connection
-                       (string= (clutch--connection-key clutch-connection) key))
-              (cond
-               ((derived-mode-p 'clutch-describe-mode)
-                (when clutch--describe-object-entry
-                  (clutch--render-object-describe clutch-connection
-                                                 clutch--describe-object-entry
-                                                 clutch--connection-params
-                                                 clutch--conn-sql-product)))
-               ((derived-mode-p 'clutch-result-mode)
-                (clutch--refresh-result-status-line))
-               ((clutch--query-buffer-p)
-                (clutch--update-console-buffer-name)
-                (clutch--update-mode-line))))))))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (eq clutch-connection conn)
+            (cond
+             ((derived-mode-p 'clutch-describe-mode)
+              (when clutch--describe-object-entry
+                (clutch--render-object-describe clutch-connection
+                                               clutch--describe-object-entry
+                                               clutch--connection-params
+                                               clutch--conn-sql-product)))
+             ((derived-mode-p 'clutch-result-mode)
+              (clutch--refresh-result-status-line))
+             ((clutch--query-buffer-p)
+              (clutch--update-console-buffer-name)
+              (clutch--update-mode-line)))))))))
+
+(add-hook 'clutch--metadata-state-changed-hook
+          #'clutch--refresh-schema-status-ui)
+
+(defun clutch--refresh-current-schema (&optional quiet force-sync)
+  "Refresh schema for the current connection and report the outcome.
+When QUIET is non-nil, do not emit a minibuffer message.
+When FORCE-SYNC is non-nil, bypass any background refresh path.
+Returns non-nil on success, nil on failure."
+  (clutch--ensure-connection)
+  (let* ((conn clutch-connection)
+         (entry (clutch--schema-status-entry conn)))
+    (if (eq (plist-get entry :state) 'refreshing)
+        (progn
+          (unless quiet
+            (message "Schema refresh already in progress"))
+          nil)
+      (if (or force-sync
+              (clutch-db-eager-schema-refresh-p conn))
+          (let* ((ok (clutch--refresh-schema-cache conn))
+                 (entry (clutch--schema-status-entry conn))
+                 (tables (plist-get entry :tables))
+                 (err (plist-get entry :error)))
+            (unless quiet
+              (message (if ok
+                           (format "Schema refreshed%s"
+                                   (if tables (format " (%d tables)" tables) ""))
+                         (format "Schema refresh failed%s"
+                                 (if err (format ": %s" err) "")))))
+            ok)
+        (let ((started (clutch--refresh-schema-cache-async conn)))
+          (if started
+              (progn
+                (unless quiet
+                  (message "Schema refresh started in background"))
+                t)
+            (let* ((ok (clutch--refresh-schema-cache conn))
+                   (entry (clutch--schema-status-entry conn))
+                   (tables (plist-get entry :tables))
+                   (err (plist-get entry :error)))
+              (unless quiet
+                (message (if ok
+                             (format "Schema refreshed%s"
+                                     (if tables (format " (%d tables)" tables) ""))
+                           (format "Schema refresh failed%s"
+                                   (if err (format ": %s" err) "")))))
+              ok)))))))
+
+;;;###autoload
+(defun clutch-refresh-schema ()
+  "Refresh the schema cache for the current connection.
+Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
+executed outside clutch that would otherwise leave stale completions."
+  (interactive)
+  (clutch--refresh-current-schema nil t))
 
 (defun clutch--current-namespace-name (conn)
   "Return the current schema/database label for CONN, or nil."
@@ -2161,7 +2210,7 @@ params; see `clutch-connection-alist' for details."
       (when old-live-p
         (clutch--do-disconnect old-conn))
       (clutch--require-live-connection conn)
-      (clutch--clear-reconnect-metadata-caches old-conn conn nil)
+      (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
@@ -2214,8 +2263,7 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
   (clutch--mark-dml-results-connection-closed conn)
   (clutch--invalidate-derived-buffers conn)
   (clutch--clear-tx-dirty conn)
-  (when (clutch--backend-key-from-conn conn)
-    (clutch--clear-connection-metadata-caches conn)))
+  (clutch--clear-connection-metadata-caches conn))
 
 (defun clutch--cleanup-dead-connection (conn)
   "Release Clutch-owned state for already closed CONN."

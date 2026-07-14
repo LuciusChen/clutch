@@ -23,6 +23,10 @@
 
 ### Fixed
 
+- Isolated schema, table metadata, async refresh, and object warmup state by
+  live connection identity, so simultaneous connections with the same display
+  label no longer share caches or refresh each other's result buffers, and
+  retired connections are not retained by warmup freshness bookkeeping.
 - Rejected Oracle URLs configured through generic `:backend jdbc` before
   connection setup, with guidance to use the Oracle backend and its SQL dialect.
 - Prevented point-local DWIM execution from sending detached `--` divider

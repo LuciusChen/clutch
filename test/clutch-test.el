@@ -2348,6 +2348,24 @@
 
 ;;;; Schema cache — refresh and status
 
+(ert-deftest clutch-test-metadata-cache-uses-connection-identity ()
+  "Structurally equal connection tokens must keep distinct metadata state."
+  (clutch-test--with-isolated-metadata-caches
+   (let ((conn-a (list 'same-connection-shape))
+         (conn-b (list 'same-connection-shape)))
+     (should (equal conn-a conn-b))
+     (should-not (eq conn-a conn-b))
+     (clutch--set-table-metadata conn-a "users" :column-details '(id))
+     (should (equal (plist-get (clutch--table-metadata conn-a "users")
+                               :column-details)
+                    '(id)))
+     (should-not (clutch--table-metadata conn-b "users")))))
+
+(ert-deftest clutch-test-object-warmup-generations-do-not-own-connections ()
+  "Warmup freshness tracking must not keep retired connections alive."
+  (should (eq (hash-table-weakness clutch--object-warmup-generations)
+              'key)))
+
 (ert-deftest clutch-test-refresh-schema-cache-records-ready-status ()
   "Schema refresh entry points should record ready state and table count."
   (dolist (mode '(sync async))
@@ -2355,11 +2373,8 @@
       (clutch-test--with-isolated-metadata-caches
        (cl-letf (((symbol-function 'clutch-db-list-tables)
                   (lambda (_conn) '("users" "orders")))
-                 ((symbol-function 'clutch--connection-key)
-                  (lambda (_conn) "fake"))
                  ((symbol-function 'clutch-db-live-p)
                   (lambda (_conn) t))
-                 ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
                  ((symbol-function 'clutch-db-refresh-schema-async)
                   (lambda (_conn callback &optional _errback _idle-delay)
                     (funcall callback '("users" "orders"))
@@ -2367,7 +2382,7 @@
          (should (pcase mode
                    ('sync (clutch--refresh-schema-cache 'fake-conn))
                    ('async (clutch--refresh-schema-cache-async 'fake-conn))))
-         (let ((status (gethash "fake" clutch--schema-status-cache)))
+         (let ((status (gethash 'fake-conn clutch--schema-status-cache)))
            (should (eq (plist-get status :state) 'ready))
            (should (= (plist-get status :tables) 2))))))))
 
@@ -2378,17 +2393,10 @@
      (with-temp-buffer
        (let ((clutch-debug-mode t))
          (setq-local clutch-connection 'fake-conn)
-         (cl-letf (((symbol-function 'clutch--connection-key)
-                    (lambda (_conn) "fake"))
-                   ((symbol-function 'clutch-db-live-p)
+         (cl-letf (((symbol-function 'clutch-db-live-p)
                     (lambda (_conn) t))
-                   ((symbol-function 'clutch--connection-alive-p)
-                    (lambda (_conn) t))
-                   ((symbol-function 'clutch--backend-key-from-conn)
+                   ((symbol-function 'clutch-db-backend-key)
                     (lambda (_conn) 'mysql))
-                   ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
-                   ((symbol-function 'clutch--invalidate-object-warmup) #'ignore)
-                   ((symbol-function 'clutch--schedule-object-warmup) #'ignore)
                    ((symbol-function 'clutch-db-refresh-schema-async)
                     (lambda (_conn callback &optional _errback _idle-delay)
                       (if first-callback
@@ -2401,11 +2409,13 @@
            (should (clutch--refresh-schema-cache-async 'fake-conn))
            (should (clutch--refresh-schema-cache-async 'fake-conn))
            (funcall first-callback '("stale_users"))
-           (should-not (gethash "fake" clutch--schema-cache))
+           (should-not (gethash 'fake-conn clutch--schema-cache))
            (funcall second-callback '("users" "orders"))
-           (should (= (hash-table-count (gethash "fake" clutch--schema-cache))
+           (should (= (hash-table-count
+                       (gethash 'fake-conn clutch--schema-cache))
                       2))
-           (should (eq (plist-get (gethash "fake" clutch--schema-status-cache)
+           (should (eq (plist-get
+                        (gethash 'fake-conn clutch--schema-status-cache)
                                   :state)
                        'ready))
            (let ((text (clutch-test--debug-buffer-string)))
@@ -2420,13 +2430,8 @@
    (let ((alive t)
          errback
          problem)
-     (cl-letf (((symbol-function 'clutch--connection-key)
-                (lambda (_conn) "fake"))
-               ((symbol-function 'clutch--connection-alive-p)
+     (cl-letf (((symbol-function 'clutch-db-live-p)
                 (lambda (_conn) alive))
-               ((symbol-function 'clutch--backend-key-from-conn)
-                (lambda (_conn) 'mysql))
-               ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
                ((symbol-function 'clutch--remember-problem-record)
                 (lambda (&rest args) (setq problem args)))
                ((symbol-function 'clutch-db-refresh-schema-async)
@@ -2434,49 +2439,47 @@
                   (setq errback captured-errback)
                   t)))
        (should (clutch--refresh-schema-cache-async 'fake-conn))
-       (should (eq (plist-get (gethash "fake" clutch--schema-status-cache)
+       (should (eq (plist-get
+                    (gethash 'fake-conn clutch--schema-status-cache)
                               :state)
                    'refreshing))
        (setq alive nil)
        (funcall errback "Connection closed")
-       (let ((status (gethash "fake" clutch--schema-status-cache)))
+       (let ((status (gethash 'fake-conn clutch--schema-status-cache)))
          (should (eq (plist-get status :state) 'failed))
          (should (equal (plist-get status :error) "Connection closed")))
        (should problem)))))
 
 (ert-deftest clutch-test-console-buffer-name-reflects-schema-status ()
   "Console buffer names should expose schema status."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
+  (let ((clutch--schema-status-cache (make-hash-table :test 'eq)))
     (with-temp-buffer
       (clutch-mode)
       (setq-local clutch--console-name "dev"
                   clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "dev-key")))
-        (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
-        (clutch--update-console-buffer-name)
-        (should (equal (buffer-name) "*clutch: dev* [schema~]"))
-        (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
-        (clutch--update-console-buffer-name)
-        (should (equal (buffer-name) "*clutch: dev* [schema...]"))
-        (puthash "dev-key" '(:state ready :tables 42) clutch--schema-status-cache)
-        (clutch--update-console-buffer-name)
-        (should (equal (buffer-name) "*clutch: dev* [schema 42t]"))))))
+      (puthash 'fake-conn '(:state stale) clutch--schema-status-cache)
+      (clutch--update-console-buffer-name)
+      (should (equal (buffer-name) "*clutch: dev* [schema~]"))
+      (puthash 'fake-conn '(:state refreshing) clutch--schema-status-cache)
+      (clutch--update-console-buffer-name)
+      (should (equal (buffer-name) "*clutch: dev* [schema...]"))
+      (puthash 'fake-conn '(:state ready :tables 42)
+               clutch--schema-status-cache)
+      (clutch--update-console-buffer-name)
+      (should (equal (buffer-name) "*clutch: dev* [schema 42t]")))))
 
 (ert-deftest clutch-test-schema-status-header-line-segment ()
   "Schema states should produce the correct header-line segment text."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal)))
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "dev-key")))
-      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
-      (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
-                     (propertize "schema~" 'face 'warning)))
-      (puthash "dev-key" '(:state failed) clutch--schema-status-cache)
-      (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
-                     (propertize "schema!" 'face 'error)))
-      (puthash "dev-key" '(:state refreshing) clutch--schema-status-cache)
-      (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
-                     (propertize "schema…" 'face 'shadow))))))
+  (let ((clutch--schema-status-cache (make-hash-table :test 'eq)))
+    (puthash 'fake-conn '(:state stale) clutch--schema-status-cache)
+    (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
+                   (propertize "schema~" 'face 'warning)))
+    (puthash 'fake-conn '(:state failed) clutch--schema-status-cache)
+    (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
+                   (propertize "schema!" 'face 'error)))
+    (puthash 'fake-conn '(:state refreshing) clutch--schema-status-cache)
+    (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
+                   (propertize "schema…" 'face 'shadow)))))
 
 (ert-deftest clutch-test-refresh-current-schema-background-contract ()
   "Manual refresh should use background refresh and sync fallback for lazy backends."
@@ -2484,13 +2487,12 @@
                   (fallback nil t "Schema refreshed (2 tables)")))
     (pcase-let ((`(,label ,async-result ,expect-sync ,message-fragment) case))
       (ert-info ((format "case: %s" label))
-        (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+        (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
               seen-message
               sync-called
               async-called)
-          (cl-letf (((symbol-function 'clutch--connection-key)
-                     (lambda (_conn) "dev-key"))
-                    ((symbol-function 'clutch--ensure-connection) #'ignore)
+          (cl-letf (((symbol-function 'clutch-db-live-p)
+                     (lambda (_conn) t))
                     ((symbol-function 'clutch-db-eager-schema-refresh-p)
                      (lambda (_conn) nil))
                     ((symbol-function 'clutch--refresh-schema-cache-async)
@@ -2500,7 +2502,7 @@
                     ((symbol-function 'clutch--refresh-schema-cache)
                      (lambda (_conn)
                        (setq sync-called t)
-                       (puthash "dev-key" '(:state ready :tables 2)
+                       (puthash 'fake-conn '(:state ready :tables 2)
                                 clutch--schema-status-cache)
                        t))
                     ((symbol-function 'message)
@@ -2518,13 +2520,12 @@
 
 (ert-deftest clutch-test-refresh-schema-command-forces-sync-refresh-on-lazy-backends ()
   "Explicit schema refresh should bypass background refresh for lazy backends."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+  (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
         seen-message
         sync-called
         async-called)
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "dev-key"))
-              ((symbol-function 'clutch--ensure-connection) #'ignore)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch-db-eager-schema-refresh-p)
                (lambda (_conn) nil))
               ((symbol-function 'clutch--refresh-schema-cache-async)
@@ -2534,7 +2535,7 @@
               ((symbol-function 'clutch--refresh-schema-cache)
                (lambda (_conn)
                  (setq sync-called t)
-                 (puthash "dev-key" '(:state ready :tables 2)
+                 (puthash 'fake-conn '(:state ready :tables 2)
                           clutch--schema-status-cache)
                  t))
               ((symbol-function 'message)
@@ -2550,25 +2551,24 @@
 
 (ert-deftest clutch-test-describe-dwim-warns-when-schema-cache-is-stale ()
   "Object prompts should surface stale-schema recovery hints."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'equal))
+  (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
         hinted
         described)
-    (cl-letf (((symbol-function 'clutch--connection-key)
-               (lambda (_conn) "dev-key"))
+    (cl-letf (((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
               ((symbol-function 'clutch--object-entries)
                (lambda (_conn)
                  '((:name "users" :type "TABLE"))))
               ((symbol-function 'clutch--object-entry-reader)
                (lambda (_conn _prompt entries &rest _)
                  (car entries)))
-              ((symbol-function 'clutch--ensure-connection) #'ignore)
               ((symbol-function 'clutch-object-describe)
                (lambda (entry)
                  (setq described entry)))
               ((symbol-function 'message)
                (lambda (fmt &rest args)
                  (setq hinted (apply #'format fmt args)))))
-      (puthash "dev-key" '(:state stale) clutch--schema-status-cache)
+      (puthash 'fake-conn '(:state stale) clutch--schema-status-cache)
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
         (call-interactively #'clutch-describe-dwim))
@@ -2612,9 +2612,7 @@
    (let ((schema (make-hash-table :test 'equal))
          (calls (make-hash-table :test 'eq)))
      (puthash "users" nil schema)
-     (cl-letf (((symbol-function 'clutch--connection-key)
-		(lambda (_conn) "dev-key"))
-               ((symbol-function 'clutch-db-list-columns)
+     (cl-letf (((symbol-function 'clutch-db-list-columns)
 		(lambda (_conn _table)
                   (cl-incf (gethash 'columns calls 0))
                   (signal 'clutch-db-error '("column load failed"))))
@@ -2644,9 +2642,7 @@
   (clutch-test--with-isolated-metadata-caches
    (let ((calls (make-hash-table :test 'eq))
          warnings)
-     (cl-letf (((symbol-function 'clutch--connection-key)
-		(lambda (_conn) "dev-key"))
-               ((symbol-function 'clutch-db-table-comment)
+     (cl-letf (((symbol-function 'clutch-db-table-comment)
 		(lambda (_conn _table &optional _schema)
                   (cl-incf (gethash 'comment calls 0))
                   (if (= (gethash 'comment calls) 1)
@@ -2690,16 +2686,12 @@
         (clutch-test--with-isolated-metadata-caches
          (let ((alive t)
                callback)
-           (cl-letf (((symbol-function 'clutch--connection-key)
-                      (lambda (_conn) "dev-key"))
-                     ((symbol-function 'clutch--connection-alive-p)
+           (cl-letf (((symbol-function 'clutch-db-live-p)
                       (lambda (_conn) alive))
                      ((symbol-function 'clutch-db-column-details-async)
                       (lambda (_conn _table cb &optional _errback)
 			(setq callback cb)
-			t))
-                     ((symbol-function 'clutch--refresh-schema-status-ui)
-                      #'ignore))
+			t)))
              (clutch--ensure-column-details-async 'fake-conn "users")
              (pcase label
                ('stale-ticket
@@ -2722,9 +2714,7 @@
                  clutch--result-source-table "users"
                  clutch--result-columns '("id" "account_id"))
      (let (queued)
-       (cl-letf (((symbol-function 'clutch--connection-key)
-                  (lambda (_conn) "dev-key"))
-                 ((symbol-function 'clutch-db-foreign-keys)
+       (cl-letf (((symbol-function 'clutch-db-foreign-keys)
                   (lambda (&rest _)
                     (error "foreign keys should not load synchronously")))
                  ((symbol-function 'clutch--ensure-foreign-keys-async)
@@ -2741,16 +2731,12 @@
      (let ((clutch--table-metadata-updated-hook
             (list (lambda (conn table kind)
                     (setq notified (list conn table kind))))))
-       (cl-letf (((symbol-function 'clutch--connection-key)
-                  (lambda (_conn) "dev-key"))
-                 ((symbol-function 'clutch--connection-alive-p)
+       (cl-letf (((symbol-function 'clutch-db-live-p)
                   (lambda (_conn) t))
                  ((symbol-function 'clutch-db-foreign-keys-async)
                   (lambda (_conn _table cb &optional _errback)
                     (setq callback cb)
-                    t))
-                 ((symbol-function 'clutch--refresh-schema-status-ui)
-                  #'ignore))
+                    t)))
          (clutch--ensure-foreign-keys-async 'fake-conn "users")
          (funcall callback '(("account_id" :ref-table "accounts"
                               :ref-column "id")))
@@ -2764,14 +2750,10 @@
   "Backends without async foreign-key metadata should not be retried on each render."
   (clutch-test--with-isolated-metadata-caches
    (let ((calls 0))
-     (cl-letf (((symbol-function 'clutch--connection-key)
-                (lambda (_conn) "dev-key"))
-               ((symbol-function 'clutch-db-foreign-keys-async)
+     (cl-letf (((symbol-function 'clutch-db-foreign-keys-async)
                 (lambda (&rest _args)
                   (cl-incf calls)
-                  nil))
-               ((symbol-function 'clutch--refresh-schema-status-ui)
-                #'ignore))
+                  nil)))
        (clutch--ensure-foreign-keys-async 'fake-conn "users")
        (clutch--ensure-foreign-keys-async 'fake-conn "users")
        (should (= calls 1))
@@ -2780,33 +2762,33 @@
        (should-not (clutch--foreign-keys-status 'fake-conn "users"))))))
 
 (ert-deftest clutch-test-refresh-result-metadata-buffers-updates-only-matching-results ()
-  "Result metadata refresh should only touch matching live result buffers."
-  (let ((buf-a (generate-new-buffer " *clutch-result-a*"))
+  "Result metadata refresh should match connection identity, not its label."
+  (let ((conn-a (list 'same-connection-shape))
+        (conn-b (list 'same-connection-shape))
+        (buf-a (generate-new-buffer " *clutch-result-a*"))
         (buf-b (generate-new-buffer " *clutch-result-b*"))
         (details '((:name "id" :type "int"))))
     (unwind-protect
         (cl-letf (((symbol-function 'clutch--connection-key)
-                   (lambda (conn)
-                     (pcase conn
-                       ('conn-a "conn-a")
-                       ('conn-b "conn-b")
-                       (_ "other"))))
+                   (lambda (_conn) "same-label"))
                   ((symbol-function 'clutch--result-column-details)
                    (lambda (_conn _table _col-names)
                      details)))
+          (should (equal conn-a conn-b))
+          (should-not (eq conn-a conn-b))
           (with-current-buffer buf-a
             (clutch-result-mode)
-            (setq-local clutch-connection 'conn-a)
+            (setq-local clutch-connection conn-a)
             (setq-local clutch--result-columns '("id"))
             (setq-local clutch--result-source-table "users")
             (setq-local clutch--last-query "select * from users"))
           (with-current-buffer buf-b
             (clutch-result-mode)
-            (setq-local clutch-connection 'conn-b)
+            (setq-local clutch-connection conn-b)
             (setq-local clutch--result-columns '("id"))
-            (setq-local clutch--result-source-table "orders")
-            (setq-local clutch--last-query "select * from orders"))
-          (clutch--refresh-result-metadata-buffers 'conn-a "users")
+            (setq-local clutch--result-source-table "users")
+            (setq-local clutch--last-query "select * from users"))
+          (clutch--refresh-result-metadata-buffers conn-a "users")
           (with-current-buffer buf-a
             (should (equal clutch--result-column-details details)))
           (with-current-buffer buf-b
@@ -2822,34 +2804,32 @@
    (let ((buf (generate-new-buffer " *clutch-result-pending-insert*"))
          callback)
      (unwind-protect
-         (cl-letf (((symbol-function 'clutch--connection-key)
-                    (lambda (_conn) "dev-key"))
-                   ((symbol-function 'clutch--connection-alive-p)
-                    (lambda (_conn) t))
-                   ((symbol-function 'clutch-db-column-details-async)
-                    (lambda (_conn _table cb &optional _errback)
-                      (setq callback cb)
-                      t))
-                   ((symbol-function 'clutch--refresh-schema-status-ui)
-                    #'ignore))
-           (with-current-buffer buf
-             (clutch-test--init-result-state
-              (list :connection 'fake-conn
-                    :columns '("id" "name")
-                    :column-defs '((:name "id" :type-category numeric)
-                                   (:name "name" :type-category text))
-                    :rows nil
-                    :source-table "users"
-                    :pending-inserts '((("name" . "alice")))
-                    :column-widths [12 12]
-                    :render t))
-             (should-not (string-match-p "<generated>" (buffer-string))))
-           (should callback)
-           (funcall callback '((:name "id" :generated t)
-                               (:name "name")))
-           (with-current-buffer buf
-             (should (string-match-p "<generated>" (buffer-string)))
-             (should (string-match-p "alice" (buffer-string)))))
+         (let ((clutch--table-metadata-updated-hook
+                (list #'clutch--handle-table-metadata-updated)))
+           (cl-letf (((symbol-function 'clutch-db-live-p)
+                      (lambda (_conn) t))
+                     ((symbol-function 'clutch-db-column-details-async)
+                      (lambda (_conn _table cb &optional _errback)
+                        (setq callback cb)
+                        t)))
+             (with-current-buffer buf
+               (clutch-test--init-result-state
+                (list :connection 'fake-conn
+                      :columns '("id" "name")
+                      :column-defs '((:name "id" :type-category numeric)
+                                     (:name "name" :type-category text))
+                      :rows nil
+                      :source-table "users"
+                      :pending-inserts '((("name" . "alice")))
+                      :column-widths [12 12]
+                      :render t))
+               (should-not (string-match-p "<generated>" (buffer-string))))
+             (should callback)
+             (funcall callback '((:name "id" :generated t)
+                                 (:name "name")))
+             (with-current-buffer buf
+               (should (string-match-p "<generated>" (buffer-string)))
+               (should (string-match-p "alice" (buffer-string))))))
        (when (buffer-live-p buf)
          (kill-buffer buf))))))
 

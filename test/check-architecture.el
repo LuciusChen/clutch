@@ -13,7 +13,7 @@
   (file-name-directory (directory-file-name (file-name-directory load-file-name)))
   "Repository root containing the Clutch Lisp modules.")
 
-(defconst clutch--architecture-cross-declaration-baseline 168
+(defconst clutch--architecture-cross-declaration-baseline 150
   "Maximum permitted number of cross-module Clutch declarations.")
 
 (defconst clutch--architecture-adapter-workflow-allowlist
@@ -30,7 +30,12 @@
     "clutch-query" "clutch-result" "clutch-schema" "clutch-ui")
   "Modules which own user-facing workflows.")
 
-(defconst clutch--architecture-largest-scc-baseline 9
+(defconst clutch--architecture-foundation-allowlists
+  '(("clutch-schema" "clutch-backend" "clutch-diagnostics")
+    ("clutch-sql" "clutch-backend" "clutch-schema"))
+  "Allowed outbound Clutch dependencies for lower-layer modules.")
+
+(defconst clutch--architecture-largest-scc-baseline 7
   "Maximum permitted strongly connected component size.")
 
 (defun clutch--architecture-read-forms (file)
@@ -161,6 +166,15 @@ Declaration forms and definition names are excluded."
                                          (member (nth 1 entry) clutch--architecture-workflow-modules)))
                                   dependencies)))
 
+(defun clutch--architecture-foundation-boundary-violations (dependencies)
+  "Return lower-layer DEPENDENCIES outside their explicit allowlists."
+  (cl-loop for dependency in dependencies
+           for source = (nth 0 dependency)
+           for allowlist = (assoc source clutch--architecture-foundation-allowlists)
+           when (and allowlist
+                     (not (member (nth 1 dependency) (cdr allowlist))))
+           collect dependency))
+
 (defun clutch--architecture-adjacent-p (source target dependencies)
   "Return non-nil when DEPENDENCIES connects SOURCE to TARGET."
   (cl-some (lambda (dependency)
@@ -217,6 +231,8 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
          (cross (cl-remove-if (lambda (entry) (equal (nth 0 entry) (nth 1 entry)))
                               declarations))
          (unapproved (clutch--architecture-unapproved-adapter-edges dependencies))
+         (foundation-violations
+          (clutch--architecture-foundation-boundary-violations dependencies))
          (largest-scc (clutch--architecture-largest-scc modules dependencies))
          errors)
     (dolist (edge (sort (cl-delete-duplicates
@@ -253,6 +269,9 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
             errors))
     (when unapproved
       (push (format "unapproved adapter-to-workflow dependencies: %S" unapproved)
+            errors))
+    (when foundation-violations
+      (push (format "lower-layer boundary violations: %S" foundation-violations)
             errors))
     (if errors
         (progn

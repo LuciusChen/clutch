@@ -37,7 +37,7 @@
 (declare-function clutch--dwim-bounds-at-point "clutch-query" ())
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-query-console "clutch-query" (target))
-(declare-function clutch-refresh-schema "clutch-schema" ())
+(declare-function clutch-refresh-schema "clutch-connection" ())
 (declare-function clutch-switch-schema "clutch" ())
 
 (defgroup clutch-mongodb nil

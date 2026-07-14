@@ -25,6 +25,13 @@
   (setq clutch--diagnostics-connection-label-function label
         clutch--diagnostics-attached-buffer-function attached-buffer))
 
+(defun clutch--diagnostics-attached-buffer (connection)
+  "Return the buffer registered as attached to CONNECTION, or nil."
+  (when (and connection clutch--diagnostics-attached-buffer-function)
+    (condition-case nil
+        (funcall clutch--diagnostics-attached-buffer-function connection)
+      (error nil))))
+
 (defvar-local clutch--buffer-error-details nil
   "Current problem record scoped to this buffer.")
 
@@ -75,6 +82,28 @@
     (condition-case nil
         (funcall clutch--diagnostics-connection-label-function connection)
       (error nil))))
+
+(defun clutch--remember-recoverable-metadata-warning
+    (connection op err &optional context)
+  "Record a recoverable metadata warning for CONNECTION and operation OP.
+ERR is the original condition object.  Optional CONTEXT is attached to the
+debug event when `clutch-debug-mode' is enabled."
+  (when clutch-debug-mode
+    (let ((buffer (or (clutch--diagnostics-attached-buffer connection)
+                      (current-buffer)))
+          (summary (clutch--humanize-db-error (error-message-string err)))
+          (backend (and connection
+                        (condition-case nil
+                            (clutch-db-backend-key connection)
+                          (error nil)))))
+      (clutch--remember-debug-event
+       :buffer buffer
+       :connection connection
+       :op op
+       :phase "warning"
+       :backend backend
+       :summary summary
+       :context context))))
 
 (defun clutch--debug-format-label (key)
   "Return a human-readable label for KEY."
@@ -270,8 +299,7 @@ problem was already recorded."
                 (push entry records)))))))
     (maphash
      (lambda (connection problem)
-       (let ((entry (list :buffer (and clutch--diagnostics-attached-buffer-function
-                                      (funcall clutch--diagnostics-attached-buffer-function connection))
+       (let ((entry (list :buffer (clutch--diagnostics-attached-buffer connection)
                           :connection connection
                           :problem (copy-tree problem))))
          (unless (member entry seen)

@@ -176,14 +176,13 @@ missing table metadata."
 
 (defun clutch--refresh-result-metadata-buffers (conn table)
   "Refresh cached result column metadata for live result buffers on CONN/TABLE."
-  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+  (when conn
     (dolist (buf (buffer-list))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and (derived-mode-p 'clutch-result-mode)
-                     clutch-connection
+                     (eq clutch-connection conn)
                      clutch--result-columns
-                     (string= (clutch--connection-key clutch-connection) conn-key)
                      (equal clutch--result-source-table table))
             (setq-local clutch--result-column-details
                         (clutch--result-column-details
@@ -193,14 +192,13 @@ missing table metadata."
 
 (defun clutch--refresh-result-foreign-key-buffers (conn table)
   "Refresh cached foreign-key display metadata for result buffers on CONN/TABLE."
-  (when-let* ((conn-key (and conn (clutch--connection-key conn))))
+  (when conn
     (dolist (buf (buffer-list))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and (derived-mode-p 'clutch-result-mode)
-                     clutch-connection
+                     (eq clutch-connection conn)
                      clutch--result-columns
-                     (string= (clutch--connection-key clutch-connection) conn-key)
                      (equal clutch--result-source-table table))
             (setq-local clutch--fk-info
                         (clutch--foreign-key-column-info

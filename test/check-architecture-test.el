@@ -71,4 +71,21 @@
                           (list decl) `(("source" ,form)))
                          (list decl)))))))
 
+(ert-deftest clutch-architecture-schema-is-a-metadata-leaf ()
+  "Schema may depend only on backend and diagnostics modules."
+  (should-not (featurep 'clutch-connection))
+  (should-not (featurep 'clutch-object))
+  (require 'clutch-schema)
+  (should-not (featurep 'clutch-connection))
+  (should-not (featurep 'clutch-object))
+  (let ((dependencies '(("clutch-schema" "clutch-backend" require nil)
+                        ("clutch-schema" "clutch-diagnostics" require nil)
+                        ("clutch-schema" "clutch-connection"
+                         declare-function clutch--connection-key)
+                        ("clutch-object" "clutch-schema" require nil))))
+    (should (equal (clutch--architecture-foundation-boundary-violations
+                    dependencies)
+                   '(("clutch-schema" "clutch-connection"
+                      declare-function clutch--connection-key))))))
+
 ;;; check-architecture-test.el ends here

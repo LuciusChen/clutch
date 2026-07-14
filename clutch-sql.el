@@ -14,7 +14,6 @@
 (require 'subr-x)
 (require 'xref)
 (require 'clutch-backend)
-(require 'clutch-connection)
 (require 'clutch-schema)
 
 (defvar clutch-connection)
@@ -1450,7 +1449,7 @@ SQL keyword/function docs are shown even without a connection."
                  ((not (clutch-db-busy-p conn))))
        (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
      (when-let* ((conn clutch-connection)
-                 ((clutch--connection-alive-p conn))
+                 ((clutch-db-live-p conn))
                  ((not (clutch-db-busy-p conn))))
        (clutch--ensure-help-doc conn effective-sym))
      (clutch--eldoc-keyword-string effective-sym)))))
