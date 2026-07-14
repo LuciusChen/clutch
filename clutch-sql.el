@@ -1376,49 +1376,64 @@ when completion triggers during an in-flight query)."
       (completion-at-point)
     (indent-for-tab-command)))
 
+(defun clutch--eldoc-metadata-plan (schema sym qualified-table statement-tables sync-columns-p)
+  "Return pure metadata steps for documenting SYM from SCHEMA.
+Steps are (ACTION TABLE COLUMNS), selected using QUALIFIED-TABLE,
+STATEMENT-TABLES, and SYNC-COLUMNS-P."
+  (cond
+   ((not (eq (gethash sym schema 'missing) 'missing))
+    (let ((columns (clutch--cached-columns schema sym)))
+      (append (and sync-columns-p (not columns) `((queue-column ,sym)))
+              `((table-summary ,sym ,columns)))))
+   ((< (length sym) clutch--schema-inline-min-prefix-length) '((skip)))
+   (t
+    (let ((tables (or (and qualified-table (list qualified-table)) statement-tables)))
+      (if (or (null tables) (and (not qualified-table)
+                                 (> (length tables) clutch--schema-inline-table-limit)))
+          '((skip))
+        (mapcar (lambda (table)
+                  (if-let* ((columns (clutch--cached-columns schema table)))
+                      (list 'cached-column table columns)
+                    (list (if sync-columns-p 'sync-column 'skip) table)))
+                tables))))))
+
 (defun clutch--eldoc-schema-string (conn schema sym &optional qualified-table)
-  "Return an eldoc string for SYM via SCHEMA on CONN, or nil.
-Matches SYM as a table name first, then as a column in any visible table.
-When QUALIFIED-TABLE is non-nil, resolve field metadata against that table
-even if the current statement exceeds `clutch--schema-inline-table-limit'."
-  (let ((sync-columns-p (clutch-db-completion-sync-columns-p conn)))
-    (cond
-     ((not (eq (gethash sym schema 'missing) 'missing))
-      (let* ((cols    (clutch--cached-columns schema sym))
-             (_       (when (and sync-columns-p (not cols))
-                        (clutch--ensure-columns-async conn schema sym)))
-             (comment (clutch--cached-table-comment conn sym))
-             (_       (when (not (clutch--table-comment-cached-p conn sym))
-                        (clutch--ensure-table-comment-async conn sym)))
-             (n       (length cols)))
-        (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
-                (propertize sym 'face 'font-lock-type-face)
-                (when cols
-                  (propertize (format "  (%d col%s)" n (if (= n 1) "" "s"))
-                              'face 'shadow))
-                (when comment
-                  (propertize (format "  — %s" comment) 'face 'shadow)))))
-     ((>= (length sym) clutch--schema-inline-min-prefix-length)
-      (let ((tables (or (and qualified-table (list qualified-table))
-                        (clutch--tables-in-current-statement schema))))
-        (when (and tables
-                   (or qualified-table
-                       (<= (length tables) clutch--schema-inline-table-limit)))
-          (cl-loop for tbl in tables
-                   for cached-cols = (clutch--cached-columns schema tbl)
-                   for cols = (cond
-                               (cached-cols cached-cols)
-                               ((not sync-columns-p) nil)
-                               ((clutch-db-busy-p conn)
-                                (clutch--ensure-columns-async conn schema tbl)
-                                nil)
-                               (t
-                                (clutch--ensure-columns conn schema tbl)))
-                   for matched-col = (and cols
-                                          (clutch--identifier-match sym cols))
-                   when matched-col
-                   return (clutch--eldoc-column-string conn tbl matched-col)))))
-     (t nil))))
+  "Return an eldoc string for SYM via SCHEMA on CONN, or nil."
+  (let* ((sync-columns-p (clutch-db-completion-sync-columns-p conn))
+         (statement-tables
+          (and (eq (gethash sym schema 'missing) 'missing)
+               (>= (length sym) clutch--schema-inline-min-prefix-length)
+               (not qualified-table) (clutch--tables-in-current-statement schema))))
+    (cl-loop for (action table columns)
+             in (clutch--eldoc-metadata-plan
+                 schema sym qualified-table statement-tables sync-columns-p)
+             do (pcase action
+                  ('queue-column
+                   (clutch--ensure-columns-async conn schema table))
+                  ('table-summary
+                   (let ((comment (clutch--cached-table-comment conn table)))
+                     (unless (clutch--table-comment-cached-p conn table)
+                       (clutch--ensure-table-comment-async conn table))
+                     (cl-return
+                      (concat
+                       (propertize (format "[%s] " (clutch-db-database conn))
+                                   'face 'shadow)
+                       (propertize table 'face 'font-lock-type-face)
+                       (when columns
+                         (propertize
+                          (format "  (%d col%s)" (length columns)
+                                  (if (= (length columns) 1) "" "s"))
+                          'face 'shadow))
+                       (when comment
+                         (propertize (format "  — %s" comment) 'face 'shadow))))))
+                  ((or 'cached-column 'sync-column)
+                   (let* ((values (or columns
+                                      (clutch--ensure-columns conn schema table)))
+                          (match (and values
+                                      (clutch--identifier-match sym values))))
+                     (when match
+                       (cl-return
+                        (clutch--eldoc-column-string conn table match)))))))))
 
 (defun clutch--eldoc-effective-symbol-at-point (sym schema)
   "Return the effective eldoc symbol at point for raw SYM and SCHEMA.

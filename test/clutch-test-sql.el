@@ -1422,227 +1422,115 @@ ORDER BY id"
 
 ;;;; Eldoc — schema and column info
 
-(ert-deftest clutch-test-eldoc-schema-string-metadata-contract ()
-  "Eldoc schema strings should use metadata without blocking unsafe contexts."
-  (ert-info ("skips large statement scope")
-    (with-temp-buffer
-      (let ((schema (make-hash-table :test 'equal))
-            called)
-        (puthash "users" nil schema)
-        (cl-letf (((symbol-function 'clutch--tables-in-current-statement)
-                   (lambda (_schema) '("a" "b" "c" "d")))
-                  ((symbol-function 'clutch--ensure-columns)
-                   (lambda (&rest _args)
-                     (setq called t)
-                     nil)))
-          (should-not (clutch--eldoc-schema-string 'fake schema "id"))
-          (should-not called)))))
-  (dolist (case '((cached ("id" "name") nil)
-                  (sync nil "users")))
-    (pcase-let ((`(,label ,cached-columns ,expected-sync-table) case))
-      (ert-info ((format "current statement: %s" label))
-        (with-temp-buffer
-          (let ((schema (make-hash-table :test 'equal))
-                called)
-            (puthash "users" cached-columns schema)
-            (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
-                       (lambda (_conn) t))
-                      ((symbol-function 'clutch-db-busy-p)
-                       (lambda (_conn) nil))
-                      ((symbol-function 'clutch--tables-in-current-statement)
-                       (lambda (_schema) '("users")))
-                      ((symbol-function 'clutch--ensure-columns)
-                       (lambda (_conn _schema table)
-                         (setq called table)
-                         '("id" "name")))
-                      ((symbol-function 'clutch--ensure-columns-async)
-                       (lambda (&rest _args)
-                         (ert-fail "eldoc should not use async-only loading here")))
-                      ((symbol-function 'clutch--cached-table-comment)
-                       (lambda (&rest _args) nil))
-                      ((symbol-function 'clutch--table-comment-cached-p)
-                       (lambda (&rest _args) t))
-                      ((symbol-function 'clutch--ensure-table-comment-async)
-                       #'ignore)
-                      ((symbol-function 'clutch--eldoc-column-string)
-                       (lambda (_conn table col-name)
-                         (format "%s.%s bigint" table col-name))))
-              (should (equal (clutch--eldoc-schema-string 'fake schema "id")
-                             "users.id bigint"))
-              (should (equal called expected-sync-table))))))))
-  (ert-info ("busy connection queues async column warmup")
-    (with-temp-buffer
-      (let ((schema (make-hash-table :test 'equal))
-            async-called)
-        (puthash "users" nil schema)
-        (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch-db-busy-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch--tables-in-current-statement)
-                   (lambda (_schema) '("users")))
-                  ((symbol-function 'clutch--ensure-columns)
-                   (lambda (&rest _args)
-                     (signal 'clutch-db-error
-                             '("sync column load should not run while busy"))))
-                  ((symbol-function 'clutch--ensure-columns-async)
-                   (lambda (_conn _schema table)
-                     (setq async-called table)
-                     t)))
-          (should-not (clutch--eldoc-schema-string 'fake schema "id"))
-          (should (equal async-called "users"))))))
-  (ert-info ("sync disabled uses cached columns")
-    (let ((schema (make-hash-table :test 'equal)))
-      (puthash "APP_CONFIG" '("CONFIG_ID" "CONFIG_NAME") schema)
-      (cl-letf (((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 #'ignore)
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "ORCL")))
-        (should (string-match-p
-                 "APP_CONFIG"
-                 (clutch--eldoc-schema-string 'fake schema "APP_CONFIG")))
-        (should (string-match-p
-                 "2 cols"
-                 (clutch--eldoc-schema-string 'fake schema "APP_CONFIG"))))))
-  (ert-info ("cache miss queues background metadata")
-    (let ((schema (make-hash-table :test 'equal))
-          queued-columns queued-comments)
-      (puthash "users" nil schema)
-      (cl-letf (((symbol-function 'clutch--cached-table-comment)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--table-comment-cached-p)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (_conn _schema table)
-                   (push table queued-columns)
-                   t))
-                ((symbol-function 'clutch--ensure-table-comment-async)
-                 (lambda (_conn table)
-                   (push table queued-comments)
-                   t))
-                ((symbol-function 'clutch-db-database)
-                 (lambda (_conn) "appdb")))
-        (let ((doc (clutch--eldoc-schema-string 'fake schema "users")))
-          (should (stringp doc))
-          (should (equal queued-columns '("users")))
-          (should (equal queued-comments '("users"))))))))
-
-(ert-deftest clutch-test-eldoc-function-resolves-sql-context-contract ()
-  "Eldoc should resolve table and column context through the public entry."
+(ert-deftest clutch-test-eldoc-metadata-plan-contract ()
+  "Eldoc metadata policy should be a pure table of explicit steps."
   (dolist (case
-           (list
-            (list :label "schema qualifier"
-                  :sql "SELECT * FROM test.users;"
-                  :needle "test.users"
-                  :entries '(("users" . ("id")))
-                  :sync nil
-                  :matches '("users" "1 col"))
-            (list :label "uppercase column"
-                  :sql "SELECT ID FROM users;"
-                  :needle "ID"
-                  :entries '(("users" . ("id")))
-                  :sync nil
-                  :expected "users.id bigint")
-            (list :label "alias-qualified column in large join"
-                  :sql (concat
-                        "SELECT d.id\n"
-                        "FROM accounts a\n"
-                        "JOIN customers c ON c.account_id = a.id\n"
-                        "JOIN invoices i ON i.customer_id = c.id\n"
-                        "JOIN orders_large d ON d.invoice_id = i.id;")
-                  :needle "d.id"
-                  :offset 2
-                  :entries '(("accounts") ("customers")
-                             ("invoices") ("orders_large"))
-                  :sync t
-                  :tables '("accounts" "customers" "invoices" "orders_large")
-                  :aliases '(("a" . "accounts")
-                             ("c" . "customers")
-                             ("i" . "invoices")
-                             ("d" . "orders_large"))
-                  :ensure '(("orders_large" . ("id" "invoice_id")))
-                  :expected "orders_large.id bigint"
-                  :called "orders_large")
-            (list :label "multiline FROM column"
-                  :sql (concat
-                        "SELECT\n"
-                        "    case_code, operative_name\n"
-                        "FROM\n"
-                        "    section9_cases_wide\n"
-                        "ORDER BY id")
-                  :needle "case_code"
-                  :entries '(("section9_cases_wide"))
-                  :sync t
-                  :ensure '(("section9_cases_wide"
-                             . ("case_code" "operative_name")))
-                  :column-type "text"
-                  :expected "section9_cases_wide.case_code text"
-                  :called "section9_cases_wide")))
-    (ert-info ((format "case: %s" (plist-get case :label)))
-      (with-temp-buffer
-        (clutch-mode)
-        (insert (plist-get case :sql))
-        (goto-char (point-min))
-        (search-forward (plist-get case :needle))
-        (goto-char (+ (match-beginning 0) (or (plist-get case :offset) 0)))
-        (let ((schema (make-hash-table :test 'equal))
-              (orig-tables (symbol-function
-                            'clutch--tables-in-current-statement))
-              (orig-aliases (symbol-function
-                             'clutch--table-aliases-in-current-statement))
-              called)
-          (dolist (entry (plist-get case :entries))
+           '((table-cached "users" nil nil nil (("users" "id" "name"))
+                           ((table-summary "users" ("id" "name"))))
+             (table-warmup "users" nil nil t (("users"))
+                           ((queue-column "users") (table-summary "users" nil)))
+             (short "i" nil ("users") t (("users")) ((skip)))
+             (large "id" nil ("a" "b" "c" "d") t nil ((skip)))
+             (qualified "id" "users" ("a" "b" "c" "d") t (("users"))
+                        ((sync-column "users")))
+             (cached "ID" nil ("users") nil (("users" "id" "name"))
+                     ((cached-column "users" ("id" "name"))))
+             (sync "id" nil ("users") t (("users"))
+                   ((sync-column "users")))
+             (sync-disabled "id" nil ("users") nil (("users"))
+                            ((skip "users")))))
+    (pcase-let ((`(,label ,sym ,qualified ,tables ,sync ,entries ,expected) case))
+      (ert-info ((format "case: %s" label))
+        (let ((schema (make-hash-table :test 'equal)))
+          (dolist (entry entries)
             (puthash (car entry) (cdr entry) schema))
-          (setq-local clutch-connection 'fake-conn)
-          (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                     (lambda (&optional _conn) schema))
-                    ((symbol-function 'clutch-db-busy-p)
-                     (lambda (_conn) nil))
-                    ((symbol-function 'clutch-db-completion-sync-columns-p)
-                     (lambda (_conn) (plist-get case :sync)))
-                    ((symbol-function 'clutch--cached-columns)
-                     (lambda (_schema table) (gethash table schema)))
-                    ((symbol-function 'clutch--tables-in-current-statement)
-                     (lambda (schema)
-                       (or (plist-get case :tables)
-                           (funcall orig-tables schema))))
-                    ((symbol-function
-                      'clutch--table-aliases-in-current-statement)
-                     (lambda (schema)
-                       (or (plist-get case :aliases)
-                           (funcall orig-aliases schema))))
-                    ((symbol-function 'clutch--ensure-columns)
-                     (lambda (_conn _schema table)
-                       (setq called table)
-                       (cdr (assoc table (plist-get case :ensure)))))
-                    ((symbol-function 'clutch--cached-table-comment)
-                     (lambda (&rest _args) nil))
-                    ((symbol-function 'clutch--table-comment-cached-p)
-                     (lambda (&rest _args) t))
-                    ((symbol-function 'clutch--ensure-table-comment-async)
-                     #'ignore)
-                    ((symbol-function 'clutch-db-database)
-                     (lambda (_conn) "testdb"))
-                    ((symbol-function 'clutch--eldoc-column-string)
-                     (lambda (_conn table col-name)
-                       (format "%s.%s %s"
-                               table col-name
-                               (or (plist-get case :column-type)
-                                   "bigint")))))
-            (let ((eldoc (clutch--eldoc-function)))
-              (if-let* ((expected (plist-get case :expected)))
-                  (should (equal eldoc expected))
-                (progn
-                  (should (stringp eldoc))
-                  (dolist (pattern (plist-get case :matches))
-                    (should (string-match-p pattern eldoc)))))
-              (should (equal called (plist-get case :called))))))))))
+          (should (equal (clutch--eldoc-metadata-plan
+                          schema sym qualified tables sync)
+                         expected)))))))
+
+(ert-deftest clutch-test-eldoc-effect-and-public-entry-contract ()
+  "Eldoc should execute metadata plans through its real SQL entry."
+  (let (schema sync busy loads called ensure-error column-type comment
+               comment-cached queued-columns queued-comments)
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) schema))
+              ((symbol-function 'clutch-db-busy-p) (lambda (_conn) busy))
+              ((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-completion-sync-columns-p)
+               (lambda (_conn) sync))
+              ((symbol-function 'clutch--ensure-columns)
+               (lambda (_conn _schema table)
+                 (setq called table)
+                 (if ensure-error
+                     (signal 'clutch-db-error '("column load failed"))
+                   (cdr (assoc table loads)))))
+              ((symbol-function 'clutch--ensure-columns-async)
+               (lambda (_conn _schema table) (push table queued-columns)))
+              ((symbol-function 'clutch--cached-table-comment)
+               (lambda (&rest _args) comment))
+              ((symbol-function 'clutch--table-comment-cached-p)
+               (lambda (&rest _args) comment-cached))
+              ((symbol-function 'clutch--ensure-table-comment-async)
+               (lambda (_conn table) (push table queued-comments)))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "testdb"))
+              ((symbol-function 'clutch--eldoc-column-string)
+               (lambda (_conn table column)
+                 (format "%s.%s %s" table column (or column-type "bigint")))))
+      (setq schema (make-hash-table :test 'equal)
+            sync t comment-cached nil)
+      (puthash "users" nil schema)
+      (let ((doc (clutch--eldoc-schema-string 'fake schema "users")))
+        (should (string-match-p "users" doc))
+        (should (equal queued-columns '("users")))
+        (should (equal queued-comments '("users"))))
+      (dolist (case
+               (list
+                (list "SELECT * FROM test.users;" "test.users" 0
+                      '(("users" "id")) nil nil nil '("users" "1 col"))
+                (list "SELECT ID FROM users;" "ID" 0
+                      '(("users" "id")) nil nil "users.id bigint" nil)
+                (list (concat "SELECT d.id FROM accounts a JOIN customers c "
+                              "ON c.account_id=a.id JOIN invoices i ON "
+                              "i.customer_id=c.id JOIN orders_large d ON "
+                              "d.invoice_id=i.id")
+                      "d.id" 2
+                      '(("accounts") ("customers") ("invoices") ("orders_large"))
+                      t '(("orders_large" "id" "invoice_id"))
+                      "orders_large.id bigint" nil)
+                (list "SELECT\n case_code, operative_name\nFROM\n section9_cases_wide"
+                      "case_code" 0 '(("section9_cases_wide")) t
+                      '(("section9_cases_wide" "case_code" "operative_name"))
+                      "section9_cases_wide.case_code text" nil)))
+        (pcase-let ((`(,sql ,needle ,offset ,entries ,case-sync ,case-loads
+                            ,expected ,matches) case))
+          (setq schema (make-hash-table :test 'equal)
+                sync case-sync loads case-loads called nil busy nil
+                column-type (and (string-match-p "section9" sql) "text")
+                comment-cached t)
+          (dolist (entry entries)
+            (puthash (car entry) (cdr entry) schema))
+          (with-temp-buffer
+            (clutch-mode)
+            (insert sql)
+            (goto-char (point-min))
+            (search-forward needle)
+            (goto-char (+ (match-beginning 0) offset))
+            (setq-local clutch-connection 'fake)
+            (let ((doc (clutch--eldoc-function)))
+              (if expected
+                  (should (equal doc expected))
+                (dolist (pattern matches) (should (string-match-p pattern doc))))))))
+      (setq schema (make-hash-table :test 'equal) sync t busy t called nil)
+      (puthash "users" nil schema)
+      (with-temp-buffer
+        (insert "SELECT id FROM users")
+        (goto-char 8)
+        (setq-local clutch-connection 'fake)
+        (should-not (clutch--eldoc-function))
+        (should-not called))
+      (setq busy nil ensure-error t)
+      (should-error (clutch--eldoc-schema-string 'fake schema "id" "users")
+                    :type 'clutch-db-error))))
 
 ;;;; Xref — alias jump
 
