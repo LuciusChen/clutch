@@ -53,4 +53,20 @@
                    '(("clutch-redis" "clutch-query" require nil)
                      ("clutch-db-pg" "clutch-query" require nil))))))
 
+(ert-deftest clutch-architecture-quoted-reference-cases ()
+  "Distinguish quoted data from executable reference payloads."
+  (dolist (case `((quoted-data ,(read "'(target-fn metadata)") t)
+                  (quoted-eval ,(read "'(:eval (target-fn))") nil)
+                  (function-ref ,(read "#'target-fn") nil)
+                  (transient-vector ["x" "Run" target-fn] nil)
+                  (static-quasiquote ,(read "`(target-fn metadata)") t)
+                  (unquoted-quasiquote ,(read "`(,(target-fn))") nil)
+                  (nested-quasiquote ,(read "`(`,(target-fn))") t)))
+    (pcase-let ((`(,_ ,form ,stale-p) case)
+                (decl '("source" "clutch-target" target-fn)))
+      (should (eq stale-p
+                  (equal (clutch--architecture-stale-declarations
+                          (list decl) `(("source" ,form)))
+                         (list decl)))))))
+
 ;;; check-architecture-test.el ends here
