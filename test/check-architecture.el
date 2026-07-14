@@ -13,7 +13,7 @@
   (file-name-directory (directory-file-name (file-name-directory load-file-name)))
   "Repository root containing the Clutch Lisp modules.")
 
-(defconst clutch--architecture-cross-declaration-baseline 150
+(defconst clutch--architecture-cross-declaration-baseline 140
   "Maximum permitted number of cross-module Clutch declarations.")
 
 (defconst clutch--architecture-adapter-workflow-allowlist
@@ -32,10 +32,11 @@
 
 (defconst clutch--architecture-foundation-allowlists
   '(("clutch-schema" "clutch-backend" "clutch-diagnostics")
-    ("clutch-sql" "clutch-backend" "clutch-schema"))
+    ("clutch-sql" "clutch-backend" "clutch-schema")
+    ("clutch-ui" "clutch-backend" "clutch-schema"))
   "Allowed outbound Clutch dependencies for lower-layer modules.")
 
-(defconst clutch--architecture-largest-scc-baseline 7
+(defconst clutch--architecture-largest-scc-baseline 6
   "Maximum permitted strongly connected component size.")
 
 (defun clutch--architecture-read-forms (file)

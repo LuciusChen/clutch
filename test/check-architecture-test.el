@@ -88,4 +88,18 @@
                    '(("clutch-schema" "clutch-connection"
                       declare-function clutch--connection-key))))))
 
+(ert-deftest clutch-architecture-ui-is-a-rendering-leaf ()
+  "UI may render backend/schema data but must not depend on workflows."
+  (let ((dependencies
+         '(("clutch-ui" "clutch-backend" require nil)
+           ("clutch-ui" "clutch-schema"
+            declare-function clutch--cached-column-details)
+           ("clutch-ui" "clutch-connection"
+            declare-function clutch--connection-alive-p)
+           ("clutch-result" "clutch-ui" require nil))))
+    (should (equal (clutch--architecture-foundation-boundary-violations
+                    dependencies)
+                   '(("clutch-ui" "clutch-connection"
+                      declare-function clutch--connection-alive-p))))))
+
 ;;; check-architecture-test.el ends here

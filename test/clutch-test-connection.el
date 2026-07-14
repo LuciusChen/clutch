@@ -1610,46 +1610,31 @@
 
 ;;;; Connection — transaction and auto-commit
 
-(ert-deftest clutch-test-tx-header-line-and-update ()
-  "Tx header-line should distinguish auto, manual, and dirty states."
-  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq)))
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch-connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch-db-display-name)
-                 (lambda (_conn) "Oracle"))
-                ((symbol-function 'clutch--connection-display-key)
-                 (lambda (_conn) "scott@db"))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-manual-commit-supported-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-manual-commit-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--schema-status-header-line-segment)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--icon)
-                 (lambda (_spec &rest _fb) "[lock]")))
-        ;; Mode-line is now just the mode name.
-        (clutch--update-mode-line)
-        (should (equal mode-name "clutch"))
-        (should (equal header-line-format
-                       '((:eval (clutch--build-connection-header-line)))))
-        ;; Auto-commit.
-        (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
-                   (lambda (_conn) nil)))
-          (should (string-match-p
-                   "Tx: Auto"
-                   (clutch--tx-header-line-segment clutch-connection))))
-        ;; header-line-format is an (:eval ...) form; evaluate it to get content.
-        (let ((hl (clutch--build-connection-header-line)))
-          ;; Clean manual-commit: shows Tx: Manual (no asterisk).
-          (should (string-match-p "Tx: Manual" hl))
-          (should-not (string-match-p "Tx: Manual\\*" hl)))
-        ;; Dirty: header-line shows Tx: Manual*.
-        (puthash clutch-connection t clutch--tx-dirty-cache)
-        (should (string-match-p "Tx: Manual\\*"
-                                (clutch--build-connection-header-line)))))))
+(ert-deftest clutch-test-connection-header-follows-live-backend-state ()
+  "Header evaluation should observe an asynchronously closed connection."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-mode)
+          (clutch--bind-connection-context
+           conn '(:backend sqlite :database ":memory:") 'sqlite)
+          (clutch--update-mode-line)
+          (should (equal mode-name "clutch"))
+          (should (eq (caar header-line-format) :eval))
+          (should-not
+           (string-match-p
+            "DISCONNECTED"
+            (substring-no-properties
+             (eval (cadar header-line-format)))))
+          (clutch-db-disconnect conn)
+          (should
+           (string-match-p
+            "DISCONNECTED"
+            (substring-no-properties
+             (eval (cadar header-line-format))))))
+      (when (clutch-db-live-p conn)
+        (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-test-update-mode-line-shows-spinner-when-executing ()
   "Busy buffers should show the current spinner frame in `mode-name'."
@@ -1675,8 +1660,8 @@
           (let ((clutch--footer-base-string "Σ 1 of ? rows")
                 (clutch--query-elapsed elapsed)
                 (clutch--executing-p executing)
-                (clutch--spinner-timer t)
-                (clutch--spinner-index 2))
+                (clutch--execution-spinner-frame
+                 (and executing (aref clutch--spinner-frames 2))))
             (cl-letf (((symbol-function 'clutch--format-elapsed)
                        (lambda (_seconds) "42ms")))
               (clutch--refresh-footer-display)
@@ -1689,6 +1674,72 @@
                             executing))
                 (should (eq (not (null (string-match-p "42ms" footer)))
                             (and elapsed (not executing))))))))))))
+
+(ert-deftest clutch-test-transaction-refresh-updates-result-footer ()
+  "Transaction transitions should rebuild attached and current result footers."
+  (let ((conn (list 'fake-conn))
+        (params '(:backend pg))
+        (live t)
+        (manual nil)
+        (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        (owner (generate-new-buffer " *clutch-tx-owner*"))
+        (result (generate-new-buffer " *clutch-tx-result*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) live))
+                  ((symbol-function 'clutch-db-manual-commit-supported-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-manual-commit-p)
+                   (lambda (_conn) manual))
+                  ((symbol-function 'clutch-db-set-auto-commit)
+                   (lambda (_conn auto-commit)
+                     (setq manual (not auto-commit))))
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (_conn)
+                     (setq live nil))))
+          (with-current-buffer owner
+            (clutch-mode)
+            (clutch--bind-connection-context conn params 'pg))
+          (with-current-buffer result
+            (clutch-result-mode)
+            (clutch--bind-connection-context conn params 'pg)
+            (setq-local clutch--result-rows '((1))
+                        clutch--filtered-rows nil
+                        clutch--page-current 0
+                        clutch--page-total-rows 1
+                        clutch-result-max-rows 100)
+            (clutch--refresh-footer-line)
+            (should (string-match-p
+                     "Tx: Auto"
+                     (substring-no-properties clutch--footer-base-string))))
+          (with-current-buffer owner
+            (clutch-toggle-auto-commit))
+          (with-current-buffer result
+            (should (string-match-p
+                     "Tx: Manual\\'"
+                     (string-trim
+                      (substring-no-properties clutch--footer-base-string))))
+            (clutch-toggle-auto-commit)
+            (should (string-match-p
+                     "Tx: Auto"
+                     (substring-no-properties clutch--footer-base-string))))
+          (with-current-buffer owner
+            (clutch-toggle-auto-commit))
+          (clutch--set-tx-dirty conn)
+          (with-current-buffer result
+            (should (string-match-p
+                     "Tx: Manual\\*"
+                     (substring-no-properties clutch--footer-base-string)))
+            (clutch--clear-tx-dirty conn)
+            (clutch-disconnect)
+            (let ((footer (substring-no-properties
+                           (clutch--footer-mode-line-display))))
+              (should (string-match-p "DISCONNECTED" footer))
+              (should-not (string-match-p "Tx:" footer)))))
+      (when (buffer-live-p owner)
+        (kill-buffer owner))
+      (when (buffer-live-p result)
+        (kill-buffer result)))))
 
 (ert-deftest clutch-test-spinner-tick-stops-when-no-busy-buffers ()
   "Spinner timer should stop itself when no buffers are busy."
@@ -1831,11 +1882,14 @@
                              ((symbol-function 'clutch--update-mode-line)
                               #'ignore))
                      (clutch-disconnect))))
-                (should
-                 (string-match-p
-                  banner
-                  (with-current-buffer buf
-                    (substring-no-properties header-line-format)))))
+                (with-current-buffer buf
+                  (should
+                   (string-match-p
+                    banner (substring-no-properties header-line-format)))
+                  (clutch--refresh-result-status-line)
+                  (should
+                   (string-match-p
+                    banner (substring-no-properties header-line-format)))))
             (kill-buffer buf)))))))
 
 (ert-deftest clutch-test-toggle-auto-commit-contract ()
@@ -1850,7 +1904,7 @@
         (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
               (clutch-connection 'fake-conn)
               captured-auto-commit
-              mode-line-updated)
+              transaction-ui-refreshed)
           (when dirty
             (puthash clutch-connection t clutch--tx-dirty-cache))
           (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
@@ -1861,15 +1915,17 @@
                     ((symbol-function 'clutch-db-set-auto-commit)
                      (lambda (_conn value)
                        (setq captured-auto-commit value)))
-                    ((symbol-function 'clutch--update-mode-line)
-                     (lambda () (setq mode-line-updated t))))
+                    ((symbol-function 'clutch--refresh-transaction-ui)
+                     (lambda (conn)
+                       (setq transaction-ui-refreshed conn))))
             (if (eq expected 'error)
                 (should-error (clutch-toggle-auto-commit) :type 'user-error)
               (clutch-toggle-auto-commit)
               (should (eq captured-auto-commit expected))
-              (should mode-line-updated))
+              (should (eq transaction-ui-refreshed clutch-connection)))
             (when (eq expected 'error)
-              (should-not captured-auto-commit))
+              (should-not captured-auto-commit)
+              (should-not transaction-ui-refreshed))
             (should (eq (not (null (clutch--tx-dirty-p clutch-connection)))
                         dirty-after))))))))
 
@@ -1877,9 +1933,7 @@
   "SQLite should not advertise Clutch manual-commit controls."
   (require 'clutch-db-sqlite)
   (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/bookmarks.db")))
-    (should-not (clutch-db-manual-commit-supported-p conn))
-    (should-not (clutch--manual-commit-supported-p conn))
-    (should-not (clutch--tx-header-line-segment conn))))
+    (should-not (clutch-db-manual-commit-supported-p conn))))
 
 ;;;; Connection — display key and icons
 
@@ -1899,66 +1953,23 @@
     (should (equal (clutch--icon '(octicon . "missing") "fallback")
                    "fallback"))))
 
-(ert-deftest clutch-test-header-line-schema-segment-contract ()
-  "Connection header line should show effective schema or database context."
-  (dolist (case '((:label "mysql redundant schema"
-                   :display-name "MySQL"
-                   :display-key "user@host"
-                   :user "user"
-                   :database "sales"
-                   :schema "sales"
-                   :expected-key "user@host"
-                   :expected-schema "sales")
-                  (:label "clickhouse database fallback"
-                   :clickhouse t
-                   :display-name "ClickHouse"
-                   :display-key "default@127.0.0.1"
-                   :database "demo"
-                   :expected-key "default@127.0.0.1"
-                   :expected-schema "demo")
-                  (:label "oracle non-default schema"
-                   :display-name "Oracle"
-                   :display-key "scott@dbhost"
-                   :user "SCOTT"
-                   :database "ORCL"
-                   :schema "SALES"
-                   :expected-key "scott@dbhost"
-                   :expected-schema "SALES")))
-    (ert-info ((plist-get case :label))
-      (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch--connection-clickhouse-p)
-                   (lambda (_conn) (plist-get case :clickhouse)))
-                  ((symbol-function 'clutch--icon) (lambda (&rest _) "[schema]"))
-                  ((symbol-function 'clutch--db-backend-icon-for-key)
-                   (lambda (_key) nil))
-                  ((symbol-function 'clutch-db-display-name)
-                   (lambda (_conn) (plist-get case :display-name)))
-                  ((symbol-function 'clutch--connection-display-key)
-                   (lambda (_conn) (plist-get case :display-key)))
-                  ((symbol-function 'clutch-db-user)
-                   (lambda (_conn) (plist-get case :user)))
+(ert-deftest clutch-test-current-namespace-name-contract ()
+  "Connection policy should select schema, or ClickHouse database, as namespace."
+  (dolist (case '((mysql "sales" "sales" mysql)
+                  (clickhouse "demo" nil clickhouse)
+                  (oracle "ORCL" "SALES" oracle)))
+    (pcase-let ((`(,label ,database ,schema ,backend) case))
+      (ert-info ((symbol-name label))
+        (cl-letf (((symbol-function 'clutch-db-backend-key)
+                   (lambda (_conn) backend))
                   ((symbol-function 'clutch-db-database)
-                   (lambda (_conn) (plist-get case :database)))
+                   (lambda (_conn) database))
                   ((symbol-function 'clutch-db-current-schema)
-                   (lambda (_conn) (plist-get case :schema)))
-                  ((symbol-function 'clutch--schema-status-header-line-segment)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch--tx-header-line-segment)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch--header-line-indent) (lambda () "")))
-          (let ((line (clutch--build-connection-header-line)))
-            (should (string-match-p (regexp-quote
-                                     (plist-get case :expected-key))
-                                    line))
-            (should (string-match-p
-                     (format "\\[schema\\] %s"
-                             (regexp-quote
-                              (plist-get case :expected-schema)))
-                     line))
-            (should-not (string-match-p "Schema:" line))))))))
+                   (lambda (_conn) schema)))
+          (should (equal (clutch--current-namespace-name 'fake-conn)
+                         (if (eq backend 'clickhouse)
+                             database
+                           schema))))))))
 
 (ert-deftest clutch-test-mongodb-completion-uses-shell-and-collection-candidates ()
   "MongoDB completion should offer shell methods and cached collections."
@@ -2252,6 +2263,47 @@
       (should-not disconnected)
       (should clutch-connection)
       (should (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-disconnect-refreshes-derived-result-footer ()
+  "Disconnect should refresh result chrome without replacing its table header."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+        (params '(:backend sqlite :database ":memory:"))
+        (result (generate-new-buffer " *clutch-disconnect-result*")))
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-mode)
+          (clutch--bind-connection-context conn params 'sqlite)
+          (with-current-buffer result
+            (clutch-result-mode)
+            (clutch--bind-connection-context conn params 'sqlite)
+            (setq-local clutch--result-rows '((1))
+                        clutch--filtered-rows nil
+                        clutch--page-current 0
+                        clutch--page-total-rows 1
+                        clutch-result-max-rows 100
+                        header-line-format "TABLE")
+            (clutch--refresh-footer-line)
+            (should-not
+             (string-match-p
+              "DISCONNECTED"
+              (substring-no-properties
+               (clutch--footer-mode-line-display)))))
+          (with-current-buffer result
+            (clutch-disconnect))
+          (should-not (clutch-db-live-p conn))
+          (with-current-buffer result
+            (should-not clutch-connection)
+            (should (equal header-line-format "TABLE"))
+            (should
+             (string-match-p
+              "DISCONNECTED"
+              (substring-no-properties
+               (clutch--footer-mode-line-display))))))
+      (when (clutch-db-live-p conn)
+        (clutch-db-disconnect conn))
+      (when (buffer-live-p result)
+        (kill-buffer result)))))
 
 (ert-deftest clutch-test-do-disconnect-stops-ssh-tunnel ()
   "Disconnect should stop any SSH tunnel associated with the connection."

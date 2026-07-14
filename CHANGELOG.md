@@ -23,6 +23,11 @@
 
 ### Fixed
 
+- Kept connection chrome synchronized across transaction changes and
+  connection loss: headers detect asynchronously closed backends, attached
+  result footers update immediately without stale transaction state, failed
+  query interruption invalidates derived buffers, and DML outcome banners
+  remain intact.
 - Isolated schema, table metadata, async refresh, and object warmup state by
   live connection identity, so simultaneous connections with the same display
   label no longer share caches or refresh each other's result buffers, and

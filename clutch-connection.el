@@ -58,6 +58,8 @@
 (defvar clutch-tramp-context-policy 'ask)
 (defvar clutch--dml-result)
 (defvar clutch-debug-mode nil)
+(defvar clutch--connection-render-state)
+(defvar clutch--execution-spinner-frame)
 (defvar clutch--spinner-timer nil
   "Timer driving the mode-line spinner animation, or nil.")
 (defvar clutch--spinner-index 0
@@ -81,10 +83,12 @@
 
 ;; Forward declarations — sibling module functions
 (declare-function clutch--update-console-buffer-name "clutch-query" ())
-(declare-function clutch--refresh-result-status-line "clutch-ui" ())
+(declare-function clutch--refresh-result-status-line "clutch-ui"
+                  (&optional footer-only))
 (declare-function clutch--render-object-describe
                   "clutch-object" (conn entry params product))
-(declare-function clutch--build-connection-header-line "clutch-ui" ())
+(declare-function clutch--render-connection-header-line
+                  "clutch-ui" (state connected-p))
 (declare-function clutch--completion-backend-icon-prefix "clutch-ui" (key))
 
 ;;;; Connection identity
@@ -321,6 +325,46 @@ interactive readers inspect shared customization such as
   "Return non-nil when CONN supports Clutch transaction controls."
   (and conn (clutch-db-manual-commit-supported-p conn)))
 
+(defun clutch--make-connection-render-state (conn params)
+  "Build semantic presentation state from CONN and reconnect PARAMS.
+The returned plist contains no connection object, params, callback, or
+pre-rendered text."
+  (let* ((connected-p (and conn (clutch--connection-alive-p conn)))
+         (connection-backend-key
+          (and conn (clutch--backend-key-from-conn conn)))
+         (backend-key (or connection-backend-key
+                          (and params
+                               (clutch--backend-key-from-params params))))
+         (backend-label
+          (or (and connected-p connection-backend-key
+                   (clutch-db-display-name conn))
+              (and params
+                   (clutch--backend-display-name-from-params params)))))
+    (list :connected-p connected-p
+          :backend-key backend-key
+          :backend-label backend-label
+          :connection-label
+          (and connected-p connection-backend-key
+               (clutch--connection-display-key conn))
+          :namespace
+          (and connected-p connection-backend-key
+               (clutch--current-namespace-name conn))
+          :schema-state
+          (and connected-p
+               (plist-get (clutch--schema-status-entry conn) :state))
+          :transaction-state
+          (and connected-p
+               (clutch--manual-commit-supported-p conn)
+               (if (clutch-db-manual-commit-p conn)
+                   (if (clutch--tx-dirty-p conn) 'dirty 'manual)
+                 'auto)))))
+
+(defun clutch--refresh-connection-render-state ()
+  "Project current buffer connection state into semantic UI input."
+  (setq-local clutch--connection-render-state
+              (clutch--make-connection-render-state
+               clutch-connection clutch--connection-params)))
+
 (defun clutch--query-buffer-p ()
   "Return non-nil when the current buffer is a clutch query console."
   (bound-and-true-p clutch--query-buffer-local-p))
@@ -332,10 +376,14 @@ interactive readers inspect shared customization such as
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and clutch-connection
-                     (eq clutch-connection conn)
-                     (or (clutch--query-buffer-p)
-                         (derived-mode-p 'clutch-repl-mode)))
-            (clutch--update-mode-line)))))))
+                     (eq clutch-connection conn))
+            (cond
+             ((derived-mode-p 'clutch-result-mode)
+              (clutch--refresh-connection-render-state)
+              (clutch--refresh-result-status-line t))
+             ((or (clutch--query-buffer-p)
+                  (derived-mode-p 'clutch-repl-mode))
+              (clutch--update-mode-line)))))))))
 
 (defun clutch--set-tx-dirty (conn)
   "Mark CONN as having uncommitted DML."
@@ -445,7 +493,8 @@ Also store PARAMS and PRODUCT when present."
     (setq-local clutch--conn-sql-product
                 (or product
                     (and params (clutch--effective-sql-product params))
-                    clutch--conn-sql-product))))
+                    clutch--conn-sql-product)))
+  (clutch--refresh-connection-render-state))
 
 (defun clutch--attached-buffer-for-connection (connection)
   "Return one live buffer attached to CONNECTION, or nil."
@@ -554,6 +603,7 @@ using the stored params.  Signals a user-error if not recoverable."
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (eq clutch-connection conn)
+            (clutch--refresh-connection-render-state)
             (cond
              ((derived-mode-p 'clutch-describe-mode)
               (when clutch--describe-object-entry
@@ -764,7 +814,7 @@ executed outside clutch that would otherwise leave stale completions."
                  (buffer-local-value 'clutch--executing-p buf))
         (setq any-busy t)
         (with-current-buffer buf
-          (clutch--update-mode-line))))
+          (clutch--update-mode-line t))))
     (if any-busy
         (redisplay)
       (clutch--spinner-stop))))
@@ -774,28 +824,41 @@ executed outside clutch that would otherwise leave stale completions."
   (when clutch--spinner-timer
     (aref clutch--spinner-frames clutch--spinner-index)))
 
-(defun clutch--update-mode-line ()
-  "Update buffer-local execution UI with connection status."
+(defun clutch--update-mode-line (&optional spinner-only)
+  "Update buffer-local execution UI with connection status.
+When SPINNER-ONLY is non-nil, retain semantic connection state and update only
+the high-frequency execution indicator."
+  (unless spinner-only
+    (clutch--refresh-connection-render-state))
   (let* ((base (cond
                 ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
                 ((clutch--query-buffer-p)
                  (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
          (spinner (clutch--spinner-string)))
+    (setq-local clutch--execution-spinner-frame
+                (and clutch--executing-p spinner))
     (setq mode-name
-          (if (and clutch--executing-p spinner)
-              (concat base " " (propertize spinner 'face 'success))
+          (if clutch--execution-spinner-frame
+              (concat base " "
+                      (propertize clutch--execution-spinner-frame
+                                  'face 'success))
             base)))
   (when (derived-mode-p 'clutch-result-mode)
-    (when (fboundp 'clutch--refresh-footer-timing)
-      (clutch--refresh-footer-timing)))
+    (if spinner-only
+        (when (fboundp 'clutch--refresh-footer-timing)
+          (clutch--refresh-footer-timing))
+      (clutch--refresh-result-status-line t)))
   (when (or (clutch--query-buffer-p)
             (derived-mode-p 'clutch-repl-mode))
-    ;; Use :eval so line-number-display-width is recomputed on each redraw,
-    ;; keeping alignment correct when display-line-numbers-mode is toggled.
+    ;; Recompute liveness and line-number indentation on every redraw.
     (setq header-line-format
           (list (list :eval
-                      (list #'clutch--build-connection-header-line)))))
+                      (list
+                       #'clutch--render-connection-header-line
+                       'clutch--connection-render-state
+                       (list #'clutch--connection-alive-p
+                             'clutch-connection))))))
   (force-mode-line-update))
 
 (defun clutch--jdbc-connection-params-p (params)
@@ -2256,7 +2319,16 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
                (eq (buffer-local-value 'clutch-connection buf) conn))
       (with-current-buffer buf
         (setq-local clutch-connection nil)
-        (force-mode-line-update)))))
+        (cond
+         ((derived-mode-p 'clutch-result-mode)
+          (clutch--refresh-connection-render-state)
+          (clutch--refresh-result-status-line t))
+         ((or (clutch--query-buffer-p)
+              (derived-mode-p 'clutch-repl-mode))
+          (clutch--update-mode-line))
+         (t
+          (clutch--refresh-connection-render-state)
+          (force-mode-line-update)))))))
 
 (defun clutch--clear-connection-client-state (conn)
   "Clear Clutch-owned client state for CONN."
@@ -2347,9 +2419,7 @@ any open transaction according to its own semantics."
     (when (and manual-now (clutch--tx-dirty-p clutch-connection))
       (user-error "Cannot toggle: commit or roll back staged changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
-    (when manual-now
-      (clutch--clear-tx-dirty clutch-connection))
-    (clutch--update-mode-line)
+    (clutch--clear-tx-dirty clutch-connection)
     (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
 
 (provide 'clutch-connection)

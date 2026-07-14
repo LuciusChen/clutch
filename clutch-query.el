@@ -62,14 +62,15 @@ Used to update the mode-line with a spinner during execution.")
 
 ;; Forward declarations — functions from clutch-connection.el
 (declare-function clutch--ensure-clutch-loaded "clutch-connection" ())
-(declare-function clutch--clear-tx-dirty "clutch-connection" (conn))
+(declare-function clutch--cleanup-dead-connection "clutch-connection" (conn))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--activate-current-buffer-connection "clutch-connection" (conn params &optional product))
 (declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch--spinner-start "clutch-connection" ())
-(declare-function clutch--update-mode-line "clutch-connection" ())
+(declare-function clutch--update-mode-line "clutch-connection"
+                  (&optional spinner-only))
 (declare-function clutch--disconnect-on-kill "clutch-connection" ())
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--saved-connection-params "clutch-connection" (name))
@@ -994,11 +995,12 @@ Returns the query result."
 
 (defun clutch--abandon-query-connection (connection)
   "Drop CONNECTION after an unrecoverable query interruption."
-  (when (clutch--connection-alive-p connection)
-    (clutch-db-disconnect connection))
-  (clutch--clear-tx-dirty connection)
-  (when (eq connection clutch-connection)
-    (setq clutch-connection nil)))
+  (unwind-protect
+      (when (clutch--connection-alive-p connection)
+        (clutch-db-disconnect connection))
+    (clutch--cleanup-dead-connection connection)
+    (when (eq connection clutch-connection)
+      (setq clutch-connection nil))))
 
 (defun clutch--handle-query-quit (connection)
   "Convert a raw quit on CONNECTION into an interrupt or disconnect."

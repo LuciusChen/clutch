@@ -15,7 +15,6 @@
 (require 'clutch-backend)
 
 (defvar clutch--executing-p)
-(declare-function clutch--spinner-string "clutch-connection" ())
 
 (defvar clutch--aggregate-summary)
 (defvar clutch--active-edit-cell)
@@ -43,7 +42,6 @@
 (defvar clutch--conn-sql-product)
 (defvar clutch--column-displayer-version 0
   "Version counter for registered column display functions.")
-(defvar clutch--connection-params)
 (defvar clutch--dml-result)
 (defvar clutch--filter-pattern)
 (defvar clutch--fk-info)
@@ -61,6 +59,12 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Cached cursor position segment string for the footer.")
 (defvar-local clutch--footer-filters-cache nil
   "Cached filter/aggregate segment string for the footer.")
+(defvar-local clutch--connection-render-state nil
+  "Semantic connection state rendered by this buffer's UI.
+The connection workflow supplies a plist containing only display inputs; it
+must not contain a connection object, params, callbacks, or rendered text.")
+(defvar-local clutch--execution-spinner-frame nil
+  "Current execution spinner frame supplied by the connection workflow.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--header-sort-function nil
@@ -123,18 +127,8 @@ the header cell was rendered.")
 (defconst clutch--column-width-refresh-delay 0.08
   "Seconds before applying a throttled column-width redraw.")
 
-(declare-function clutch--backend-display-name-from-params
-                  "clutch-connection" (params))
-(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
-(declare-function clutch--backend-key-from-params "clutch-connection" (params))
 (declare-function clutch--cached-column-details "clutch-schema" (conn table))
-(declare-function clutch--connection-alive-p "clutch-connection" (conn))
-(declare-function clutch--connection-display-key "clutch-connection" (conn))
 (declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
-(declare-function clutch--current-namespace-name "clutch-connection" (conn))
-(declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
-(declare-function clutch--schema-status-header-line-segment "clutch-schema" (conn))
-(declare-function clutch--tx-dirty-p "clutch-connection" (conn))
 
 (defun clutch--result-display-rows ()
   "Return result rows selected by the current client filter state."
@@ -916,20 +910,16 @@ ICON-ARGS beyond :color are forwarded to the nerd-icons render function.")
         (concat icon " ")
       "")))
 
-(defun clutch--connection-backend-segment (&optional conn params)
-  "Return the shared backend segment for CONN or PARAMS, or nil.
+(defun clutch--backend-header-line-segment (backend-key backend-label)
+  "Return a header-line segment for BACKEND-KEY and BACKEND-LABEL, or nil.
 When nerd-icons is available, show only the icon; otherwise fall back
 to the display name (e.g. \"MySQL\")."
-  (let* ((icon (clutch--db-backend-icon-for-key
-                (or (and conn (clutch--backend-key-from-conn conn))
-                    (and params (clutch--backend-key-from-params params)))))
-         (name (or (and conn (clutch-db-display-name conn))
-                   (and params (clutch--backend-display-name-from-params params)))))
+  (let ((icon (clutch--db-backend-icon-for-key backend-key)))
     (cond
      ((and icon (not (string-empty-p icon))
            (clutch--nerd-icons-available-p))
       icon)
-     (name (propertize name 'face 'bold)))))
+     (backend-label (propertize backend-label 'face 'bold)))))
 
 (defun clutch--connection-state-icon (connected)
   "Return a connection state icon for CONNECTED."
@@ -937,43 +927,53 @@ to the display name (e.g. \"MySQL\")."
       (clutch--icon '(mdicon . "nf-md-database_check_outline") "⬢")
     (clutch--icon '(mdicon . "nf-md-database_off") "⨯")))
 
-(defun clutch--tx-header-line-segment (conn)
-  "Return a header-line segment for CONN transaction state, or nil.
-Shows Tx: Auto, Tx: Manual, or Tx: Manual* (dirty)."
-  (when (clutch--manual-commit-supported-p conn)
-    (let* ((state-face (if (clutch-db-manual-commit-p conn)
-                           (if (clutch--tx-dirty-p conn) 'error 'warning)
-                         'success))
+(defun clutch--transaction-header-line-segment (transaction-state)
+  "Return a header-line segment for semantic TRANSACTION-STATE, or nil.
+TRANSACTION-STATE is one of `auto', `manual', or `dirty'."
+  (when transaction-state
+    (let* ((state-face (pcase transaction-state
+                         ('auto 'success)
+                         ('manual 'warning)
+                         ('dirty 'error)))
            (icon (clutch--icon-with-face '(mdicon . "nf-md-database_lock")
                                          "⛁" state-face))
-           (label (if (clutch-db-manual-commit-p conn)
-                      (if (clutch--tx-dirty-p conn) "Tx: Manual*" "Tx: Manual")
-                    "Tx: Auto")))
+           (label (pcase transaction-state
+                    ('auto "Tx: Auto")
+                    ('manual "Tx: Manual")
+                    ('dirty "Tx: Manual*"))))
       (concat (unless (string-empty-p icon)
                 (concat icon " "))
               (propertize label 'face state-face)))))
 
-(defun clutch--current-schema-header-line-segment (conn)
-  "Return a header-line segment for CONN's current schema or database, or nil."
-  (when-let* ((schema (clutch--current-namespace-name conn)))
+(defun clutch--namespace-header-line-segment (namespace)
+  "Return a header-line segment for current NAMESPACE, or nil."
+  (when namespace
     (let ((icon (clutch--icon-with-face '(mdicon . "nf-md-sitemap_outline")
                                         "≣" 'header-line)))
       (if (string-empty-p icon)
-          schema
-        (format "%s %s" icon schema)))))
+          namespace
+        (format "%s %s" icon namespace)))))
+
+(defun clutch--schema-state-header-line-segment (schema-state)
+  "Return a header-line segment for semantic SCHEMA-STATE, or nil."
+  (pcase schema-state
+    ('refreshing (propertize "schema…" 'face 'shadow))
+    ('stale (propertize "schema~" 'face 'warning))
+    ('failed (propertize "schema!" 'face 'error))))
 
 (defun clutch--header-line-indent ()
   "Return leading spaces to align header-line text with the buffer text area.
 Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   (make-string (max 1 (line-number-display-width)) ?\s))
 
-(defun clutch--build-connection-header-line ()
-  "Build the header-line string for the current clutch buffer."
+(defun clutch--render-connection-header-line (state connected-p)
+  "Render a connection header-line from semantic STATE and CONNECTED-P."
   (let ((indent (clutch--header-line-indent)))
-    (if (not (clutch--connection-alive-p clutch-connection))
+    (if (not connected-p)
         (let* ((sep          (propertize "  •  " 'face 'shadow))
-               (backend      (clutch--connection-backend-segment
-                              clutch-connection clutch--connection-params))
+               (backend      (clutch--backend-header-line-segment
+                              (plist-get state :backend-key)
+                              (plist-get state :backend-label)))
                (disconnect   (propertize
                               (concat (clutch--connection-state-icon nil)
                                       " DISCONNECTED")
@@ -988,14 +988,20 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
                     disconnect)))
       (let* ((sep         (propertize "  •  " 'face 'shadow))
              (backend-sep (propertize "  ›  " 'face 'shadow))
-             (backend     (clutch--connection-backend-segment clutch-connection))
-             (key         (concat (clutch--connection-state-icon t)
-                                  " "
-                                  (clutch--connection-display-key clutch-connection)))
+             (backend     (clutch--backend-header-line-segment
+                           (plist-get state :backend-key)
+                           (plist-get state :backend-label)))
+             (connection-label (plist-get state :connection-label))
+             (key         (when connection-label
+                            (concat (clutch--connection-state-icon t)
+                                    " " connection-label)))
              (current-schema
-              (clutch--current-schema-header-line-segment clutch-connection))
-             (schema      (clutch--schema-status-header-line-segment clutch-connection))
-             (tx          (clutch--tx-header-line-segment clutch-connection))
+              (clutch--namespace-header-line-segment
+               (plist-get state :namespace)))
+             (schema      (clutch--schema-state-header-line-segment
+                           (plist-get state :schema-state)))
+             (tx          (clutch--transaction-header-line-segment
+                           (plist-get state :transaction-state)))
              (tail        (delq nil (list current-schema schema tx))))
         (concat indent
                 (cond
@@ -1014,7 +1020,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--disconnected-badge ()
   "Return a disconnected indicator string with warning face, or nil if connected."
-  (unless clutch-connection
+  (unless (plist-get clutch--connection-render-state :connected-p)
     (concat (clutch--icon-with-face '(mdicon . "nf-md-database_off") "⨯" 'warning)
             (propertize " DISCONNECTED" 'face 'warning))))
 
@@ -1721,7 +1727,8 @@ records one-row lookahead."
                    (clutch--footer-row-summary
                     row-count page-num page-size total-rows
                     page-offset page-has-more))
-           (clutch--tx-header-line-segment clutch-connection)
+           (clutch--transaction-header-line-segment
+            (plist-get clutch--connection-render-state :transaction-state))
            (clutch--footer-sort-part)
            (clutch--footer-mutation-capability-part)
            (clutch--footer-pending-part)))))
@@ -1731,8 +1738,8 @@ records one-row lookahead."
   (let ((hi 'font-lock-keyword-face))
     (when-let* ((payload (cond
                           (clutch--executing-p
-                           (and (clutch--spinner-string)
-                                (propertize (clutch--spinner-string)
+                           (and clutch--execution-spinner-frame
+                                (propertize clutch--execution-spinner-frame
                                             'face 'success)))
                           (clutch--query-elapsed
                            (propertize
@@ -2088,12 +2095,15 @@ RENDER-STATE contains render lookup tables for staged UI state."
     (setq mode-line-format '(:eval (clutch--footer-mode-line-display)))
     (clutch--refresh-footer-display)))
 
-(defun clutch--refresh-result-status-line ()
-  "Refresh the result buffer status line without rebuilding the table body."
+(defun clutch--refresh-result-status-line (&optional footer-only)
+  "Refresh result chrome without rebuilding the table body.
+When FOOTER-ONLY is non-nil, preserve the current table header exactly.
+DML result banners are semantic outcomes and are always preserved."
   (when (derived-mode-p 'clutch-result-mode)
     (clutch--refresh-footer-line)
-    (clutch--refresh-header-line)
-    (clutch--update-position-indicator)))
+    (unless (or footer-only clutch--dml-result)
+      (clutch--refresh-header-line)
+      (clutch--update-position-indicator))))
 
 (defun clutch--position-indicator-parts (ridx cidx)
   "Return a formatted mode-line position string for RIDX and CIDX."

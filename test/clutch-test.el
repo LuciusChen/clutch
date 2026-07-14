@@ -1406,10 +1406,7 @@
       (clutch-record--render)
       (should (eq clutch-connection 'fake-conn))
       (should (equal clutch--connection-params '(:backend mysql :host "db")))
-      (should (eq clutch--conn-sql-product 'mysql))
-      (let ((line (clutch--header-with-disconnect-badge
-                   clutch-record--header-base)))
-        (should-not (string-match-p "DISCONNECTED" line)))))
+      (should (eq clutch--conn-sql-product 'mysql))))
   (let ((result-buf (generate-new-buffer "*clutch-result*")))
     (kill-buffer result-buf)
     (with-temp-buffer
@@ -1788,21 +1785,21 @@
   "Footer should aggregate sort state and staged changes."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
+                clutch--connection-render-state
+                '(:connected-p t :transaction-state dirty)
                 clutch--order-by '("created_at" . "desc")
                 clutch--pending-edits '(a)
                 clutch--pending-deletes '(b)
                 clutch--pending-inserts '(c))
-    (cl-letf (((symbol-function 'clutch--tx-header-line-segment)
-               (lambda (_conn) "Tx: Manual*")))
-      (let ((footer (substring-no-properties
-                     (clutch--render-footer 10 0 500 100))))
-        (should (string-match-p "Tx: Manual\\*" footer))
-        (should (string-match-p "DESC\\[created_at\\]" footer))
-        (should (string-match-p "E-1 D-1 I-1" footer))
-        (should (string-match-p "C-c C-c" footer))
-        (should (string-match-p "C-c C-k" footer))
-        (should-not (string-match-p "commit:" footer))
-        (should-not (string-match-p "discard:" footer))))))
+    (let ((footer (substring-no-properties
+                   (clutch--render-footer 10 0 500 100))))
+      (should (string-match-p "Tx: Manual\\*" footer))
+      (should (string-match-p "DESC\\[created_at\\]" footer))
+      (should (string-match-p "E-1 D-1 I-1" footer))
+      (should (string-match-p "C-c C-c" footer))
+      (should (string-match-p "C-c C-k" footer))
+      (should-not (string-match-p "commit:" footer))
+      (should-not (string-match-p "discard:" footer)))))
 
 (ert-deftest clutch-test-render-footer-row-range-contract ()
   "Footer should show global row ranges and omit page-count segments."
@@ -2468,18 +2465,14 @@
       (clutch--update-console-buffer-name)
       (should (equal (buffer-name) "*clutch: dev* [schema 42t]")))))
 
-(ert-deftest clutch-test-schema-status-header-line-segment ()
+(ert-deftest clutch-test-schema-state-header-line-segment ()
   "Schema states should produce the correct header-line segment text."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'eq)))
-    (puthash 'fake-conn '(:state stale) clutch--schema-status-cache)
-    (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
-                   (propertize "schema~" 'face 'warning)))
-    (puthash 'fake-conn '(:state failed) clutch--schema-status-cache)
-    (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
-                   (propertize "schema!" 'face 'error)))
-    (puthash 'fake-conn '(:state refreshing) clutch--schema-status-cache)
-    (should (equal (clutch--schema-status-header-line-segment 'fake-conn)
-                   (propertize "schema…" 'face 'shadow)))))
+  (should (equal (clutch--schema-state-header-line-segment 'stale)
+                 (propertize "schema~" 'face 'warning)))
+  (should (equal (clutch--schema-state-header-line-segment 'failed)
+                 (propertize "schema!" 'face 'error)))
+  (should (equal (clutch--schema-state-header-line-segment 'refreshing)
+                 (propertize "schema…" 'face 'shadow))))
 
 (ert-deftest clutch-test-refresh-current-schema-background-contract ()
   "Manual refresh should use background refresh and sync fallback for lazy backends."
@@ -6478,7 +6471,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
-                ((symbol-function 'clutch--update-mode-line) (lambda () nil))
+                ((symbol-function 'clutch--update-mode-line)
+                 (lambda (&optional _spinner-only) nil))
                 ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                 ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
@@ -6551,7 +6545,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
-                ((symbol-function 'clutch--update-mode-line) (lambda () nil))
+                ((symbol-function 'clutch--update-mode-line)
+                 (lambda (&optional _spinner-only) nil))
                 ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
                 ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
@@ -6601,7 +6596,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (_source _conn _sql err &optional _elapsed _context _region)
                    (setq displayed-error (error-message-string err))))
                 ((symbol-function 'clutch--update-mode-line)
-                 (lambda ()
+                 (lambda (&optional _spinner-only)
                    (setq mode-line-updates (1+ mode-line-updates)))))
         (should-not (clutch--execute "SELECT SLEEP(60)" conn))
         (should (string-match-p "query timed out" displayed-error))
@@ -6611,62 +6606,84 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (> mode-line-updates 0))))))
 
 (ert-deftest clutch-test-handle-query-quit-remembers-interrupt-error-details-and-debug-event ()
-  "Interrupt RPC failures should store details and a cancel debug event."
+  "Interrupt RPC failures should record details and invalidate attached UI."
   (with-temp-buffer
-    (let* ((clutch-debug-mode t)
-           (clutch-connection 'fake-conn)
+    (let* ((conn (list 'fake-conn))
+           (clutch-debug-mode t)
+           (clutch-connection conn)
            (raw-message "Connection refused (host=db.example.com, port=3306)")
            (captured-message nil)
-           (disconnected nil))
-      (cl-letf (((symbol-function 'clutch-db-backend-key)
-                 (lambda (_conn) 'pg))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-interrupt-query)
-                 (lambda (_conn)
-                   (signal 'clutch-db-error (list raw-message))))
-                ((symbol-function 'clutch-db-disconnect)
-                 (lambda (_conn)
-                   (setq disconnected t)))
-                ((symbol-function 'message)
-                 (lambda (fmt &rest args)
-                   (setq captured-message (apply #'format fmt args)))))
-        (should-error (clutch--handle-query-quit clutch-connection)
-                      :type 'clutch-query-interrupted)
-        (let* ((summary (clutch--humanize-db-error raw-message))
-               (message-summary
-                (condition-case err
-                    (signal 'clutch-db-error (list raw-message))
-                  (clutch-db-error
-                   (clutch--humanize-db-error (error-message-string err)))))
-               (details clutch--buffer-error-details)
-               (diag (plist-get details :diag))
-               (context (plist-get diag :context))
-               (cancel-event
-                (cl-find-if
-                 (lambda (event)
-                   (and (equal (plist-get event :op) "cancel")
-                        (equal (plist-get event :phase) "error")))
-                 clutch--debug-events))
-               (interrupt-event
-                (cl-find-if
-                 (lambda (event)
-                   (and (equal (plist-get event :op) "interrupt")
-                        (equal (plist-get event :phase) "disconnect")))
-                 clutch--debug-events)))
-          (should disconnected)
-          (should details)
-          (should (eq (plist-get details :backend) 'pg))
-          (should (equal (plist-get details :summary) summary))
-          (should (equal (plist-get diag :raw-message) raw-message))
-          (should (plist-member context :sql))
-          (should-not (plist-get context :sql))
-          (should (equal captured-message
-                         (format "Interrupt failed: %s"
-                                 (clutch--debug-workflow-message message-summary))))
-          (should cancel-event)
-          (should (equal (plist-get cancel-event :summary) message-summary))
-          (should interrupt-event))))))
+           (disconnected nil)
+           (record (generate-new-buffer " *clutch-abandoned-record*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer record
+              (clutch-record-mode)
+              (setq-local clutch-connection conn
+                          clutch--connection-render-state
+                          '(:connected-p t)))
+            (cl-letf (((symbol-function 'clutch-db-backend-key)
+                       (lambda (_conn) 'pg))
+                      ((symbol-function 'clutch--connection-alive-p)
+                       (lambda (_conn) t))
+                      ((symbol-function 'clutch-db-interrupt-query)
+                       (lambda (_conn)
+                         (signal 'clutch-db-error (list raw-message))))
+                      ((symbol-function 'clutch-db-disconnect)
+                       (lambda (_conn)
+                         (setq disconnected t)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq captured-message (apply #'format fmt args)))))
+              (should-error (clutch--handle-query-quit clutch-connection)
+                            :type 'clutch-query-interrupted)
+              (let* ((summary (clutch--humanize-db-error raw-message))
+                     (message-summary
+                      (condition-case err
+                          (signal 'clutch-db-error (list raw-message))
+                        (clutch-db-error
+                         (clutch--humanize-db-error
+                          (error-message-string err)))))
+                     (details clutch--buffer-error-details)
+                     (diag (plist-get details :diag))
+                     (context (plist-get diag :context))
+                     (cancel-event
+                      (cl-find-if
+                       (lambda (event)
+                         (and (equal (plist-get event :op) "cancel")
+                              (equal (plist-get event :phase) "error")))
+                       clutch--debug-events))
+                     (interrupt-event
+                      (cl-find-if
+                       (lambda (event)
+                         (and (equal (plist-get event :op) "interrupt")
+                              (equal (plist-get event :phase) "disconnect")))
+                       clutch--debug-events)))
+                (should disconnected)
+                (should details)
+                (should (eq (plist-get details :backend) 'pg))
+                (should (equal (plist-get details :summary) summary))
+                (should (equal (plist-get diag :raw-message) raw-message))
+                (should (plist-member context :sql))
+                (should-not (plist-get context :sql))
+                (should
+                 (equal captured-message
+                        (format
+                         "Interrupt failed: %s"
+                         (clutch--debug-workflow-message message-summary))))
+                (should cancel-event)
+                (should (equal (plist-get cancel-event :summary)
+                               message-summary))
+                (should interrupt-event)
+                (with-current-buffer record
+                  (should-not clutch-connection)
+                  (should
+                   (string-match-p
+                    "DISCONNECTED"
+                    (substring-no-properties
+                     (clutch--header-with-disconnect-badge "Record"))))))))
+        (when (buffer-live-p record)
+          (kill-buffer record))))))
 
 (ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
   "Execute should run risky DML confirmation before dispatch."
@@ -6677,7 +6694,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
               ((symbol-function 'clutch--require-risky-dml-confirmation)
                (lambda (sql) (setq called sql)))
-              ((symbol-function 'clutch--update-mode-line) (lambda () nil))
+              ((symbol-function 'clutch--update-mode-line)
+               (lambda (&optional _spinner-only) nil))
               ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
               ((symbol-function 'clutch--execute-select) (lambda (&rest _args) 'ok)))
       (clutch--execute "UPDATE users SET x=1" clutch-connection)

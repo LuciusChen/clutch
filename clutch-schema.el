@@ -210,17 +210,6 @@ CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
   (and conn
        (gethash conn clutch--schema-status-cache)))
 
-(defun clutch--schema-status-header-line-segment (conn)
-  "Return a header-line segment for CONN schema status, or nil.
-Returns nil when the schema is ready (no noise for the happy path)."
-  (when-let* ((entry (clutch--schema-status-entry conn))
-              (state (plist-get entry :state)))
-    (pcase state
-      ('refreshing (propertize "schema…" 'face 'shadow))
-      ('stale      (propertize "schema~" 'face 'warning))
-      ('failed     (propertize "schema!" 'face 'error))
-      (_ nil))))
-
 (defun clutch--schema-cache-guidance (conn)
   "Return a recovery hint for CONN schema cache state, or nil."
   (when-let* ((entry (clutch--schema-status-entry conn))
