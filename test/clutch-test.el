@@ -1433,6 +1433,7 @@
         (let ((record-buf (current-buffer)))
           (with-current-buffer record-buf
             (clutch-record-mode)
+            (should (eq revert-buffer-function #'clutch-record--render))
             (setq-local clutch-record--result-buffer result-buf
                         clutch-record--row-idx 0
                         clutch-record--expanded-fields nil)
@@ -3825,7 +3826,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
        :pending-inserts '((("id" . "3") ("name" . "c")))
        :pending-edits (list (cons (cons (vector 1) 1) "a2"))
        :pending-deletes (list (vector 2)))
-    (let (executed)
+    (let (executed reverts)
+      (setq-local revert-buffer-function
+                  (lambda (ignore-auto noconfirm)
+                    (push (list ignore-auto noconfirm
+                                clutch--pending-edits clutch--pending-deletes
+                                clutch--pending-inserts clutch--marked-rows)
+                          reverts)))
       (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
                  (lambda () '(("INSERT INTO users (id, name) VALUES (?, ?)" . ("3" "c")))))
                 ((symbol-function 'clutch-result--build-update-statements)
@@ -3837,8 +3844,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn sql &optional params)
-                   (push (cons sql params) executed)))
-                ((symbol-function 'clutch--execute) #'ignore))
+                   (push (cons sql params) executed))))
         (clutch-result-commit)
         (should (= (length executed) 3))
         ;; executed is in reverse push order: last executed is at (nth 0 executed)
@@ -3847,7 +3853,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (string-prefix-p "UPDATE" (car (nth 1 executed))))
         (should (equal (cdr (nth 1 executed)) '("a2" 1)))
         (should (string-prefix-p "DELETE" (car (nth 0 executed))))
-        (should (equal (cdr (nth 0 executed)) '(2)))))))
+        (should (equal (cdr (nth 0 executed)) '(2)))
+        (should (equal reverts '((nil t nil nil nil nil))))))))
 
 ;;;; Edit — validation
 

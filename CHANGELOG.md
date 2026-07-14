@@ -23,6 +23,8 @@
 
 ### Fixed
 
+- Preserved the active `WHERE`-filtered result view after committing staged SQL
+  mutations by refreshing through the result buffer's normal rerun contract.
 - Kept connection chrome synchronized across transaction changes and
   connection loss: headers detect asynchronously closed backends, attached
   result footers update immediately without stale transaction state, failed

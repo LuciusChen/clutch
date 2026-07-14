@@ -3249,7 +3249,8 @@ previous window layout."
   \\[clutch-record-view-value]	View current field once
   \\[clutch-record-live-view-value]	Open live viewer that follows point
   \\[clutch-record-refresh]	Refresh"
-  (setq truncate-lines nil))
+  (setq truncate-lines nil)
+  (setq-local revert-buffer-function #'clutch-record--render))
 
 ;;;###autoload
 (defun clutch-result-open-record ()
@@ -3308,7 +3309,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
                            cell-props))
             "\n")))
 
-(defun clutch-record--render ()
+(defun clutch-record--render (&optional _ignore-auto _noconfirm)
   "Render the current row in the Record buffer."
   (unless (buffer-live-p clutch-record--result-buffer)
     (user-error "Result buffer no longer exists"))

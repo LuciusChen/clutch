@@ -45,7 +45,6 @@
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 
-(declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--format-value "clutch-ui" (value))
 (declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
 (declare-function clutch--json-value-to-string "clutch-ui" (value))
@@ -65,7 +64,6 @@
 (declare-function clutch--ensure-column-details "clutch-schema" (conn table &optional strict))
 (declare-function clutch--foreign-key-column-info "clutch-schema" (conn table col-names))
 (declare-function clutch--foreign-keys-cached-p "clutch-schema" (conn table))
-(declare-function clutch-record--render "clutch-result" ())
 (declare-function clutch--message-count "clutch-ui" (value))
 (declare-function clutch--message-keyword "clutch-ui" (value))
 (declare-function clutch--message-path "clutch-ui" (value))
@@ -346,7 +344,7 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
              (with-current-buffer return-buf
                (derived-mode-p 'clutch-record-mode)))
     (with-current-buffer return-buf
-      (clutch-record--render)
+      (revert-buffer t t)
       (goto-char (point-min))
       (when-let* ((match (text-property-search-forward
                           'clutch-col-idx cidx #'eq)))
@@ -1064,7 +1062,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
       (message "%s change%s committed"
                (clutch--message-count (length all-stmts))
                (if (= (length all-stmts) 1) "" "s"))
-      (clutch--execute clutch--last-query clutch-connection))))
+      (revert-buffer nil t))))
 
 ;;;; Delete rows
 
