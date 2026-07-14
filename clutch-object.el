@@ -702,12 +702,22 @@ allowed by ALLOWED-TYPES."
                           (derived-mode-p 'clutch-repl-mode)))))
       entry)))
 
-(defun clutch--symbol-has-local-completions-p (symbol entries)
-  "Return non-nil when SYMBOL prefix-matches any entry name in ENTRIES."
-  (let ((downcased (downcase symbol)))
-    (cl-loop for entry in entries
-             thereis (string-prefix-p downcased
-                                      (downcase (or (plist-get entry :name) ""))))))
+(defun clutch--object-resolution-plan (symbol local-entries &optional search-result)
+  "Return a pure plan for SYMBOL, LOCAL-ENTRIES, and SEARCH-RESULT."
+  (let ((downcased (and symbol (downcase symbol)))
+        (hits (plist-get search-result :hits)))
+    (cond
+     ((null symbol) (list 'read local-entries nil))
+     ((cl-loop for entry in local-entries
+               thereis (string-prefix-p
+                         downcased
+                         (downcase (or (plist-get entry :name) ""))))
+      (list 'read local-entries symbol))
+     ((not (plist-get search-result :attempted)) '(search))
+     ((= (length hits) 1) (list 'return (car hits)))
+     ((> (length hits) 1) (list 'read hits symbol))
+     (t (list 'missing (or (plist-get search-result :full-entries)
+                           local-entries))))))
 
 (defun clutch--on-demand-object-search (conn sym table-like-only allowed-types)
   "Search for objects matching SYM on CONN beyond the local cache.
@@ -729,10 +739,11 @@ Results are filtered by ALLOWED-TYPES and deduplicated."
                  (string-prefix-p downcased
                                   (downcase (or (plist-get e :name) ""))))
                full-entries)))))
-    (list :hits (clutch--filter-object-entries-by-types
-                  (clutch--merge-object-entries-by-name
-                   (append table-hits name-from-full))
-                  allowed-types)
+    (list :attempted t
+          :hits (clutch--filter-object-entries-by-types
+                 (clutch--merge-object-entries-by-name
+                  (append table-hits name-from-full))
+                 allowed-types)
           :full-entries full-entries)))
 
 (defun clutch--resolve-object-entry (prompt &optional table-like-only category allowed-types)
@@ -773,33 +784,27 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
                     (clutch--browseable-object-entries clutch-connection)
                   (clutch--object-entries clutch-connection))
                 allowed-types))
-              (cat (or category 'clutch-object)))
-         (cond
-          ((null sym)
+              (cat (or category 'clutch-object))
+              (plan (clutch--object-resolution-plan sym entries)))
+         (when (eq (car plan) 'search)
+           (setq plan
+                 (clutch--object-resolution-plan
+                  sym entries
+                  (if (clutch--object-connection-alive-p clutch-connection)
+                      (clutch--on-demand-object-search
+                       clutch-connection sym table-like-only allowed-types)
+                    '(:attempted t)))))
+         (pcase plan
+          (`(return ,entry) entry)
+          (`(read ,candidates ,initial)
            (clutch--object-entry-reader clutch-connection
-                                         (or prompt "Object: ") entries nil cat))
-          ((clutch--symbol-has-local-completions-p sym entries)
-           (clutch--object-entry-reader clutch-connection
-                                         (or prompt "Object: ") entries sym cat))
-          ((clutch--object-connection-alive-p clutch-connection)
-           (let* ((result (clutch--on-demand-object-search
-                           clutch-connection sym table-like-only allowed-types))
-                  (hits (plist-get result :hits))
-                  (full (plist-get result :full-entries)))
-             (cond
-              ((= (length hits) 1) (car hits))
-              ((> (length hits) 1)
-               (clutch--object-entry-reader clutch-connection prompt
-                                             hits sym cat))
-              (t
-               (message "No matching object found for: %s" sym)
-               (clutch--object-entry-reader clutch-connection
-                                             (or prompt "Object: ")
-                                             (or full entries) nil cat)))))
-          (t
+                                         (or prompt "Object: ")
+                                         candidates initial cat))
+          (`(missing ,candidates)
            (message "No matching object found for: %s" sym)
            (clutch--object-entry-reader clutch-connection
-                                         (or prompt "Object: ") entries nil cat)))))))))
+                                         (or prompt "Object: ")
+                                         candidates nil cat)))))))))
 
 (defun clutch--object-entry-label (entry)
   "Return a compact source/type label for object ENTRY."

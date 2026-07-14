@@ -1050,219 +1050,130 @@ document connection."
                        '(:name "ORDERS" :type "TABLE"))))
       (should (equal captured '((:name "ORDERS" :type "TABLE")))))))
 
-(ert-deftest clutch-test-symbol-has-local-completions-p ()
-  "Prefix helper should match case-insensitively."
+(ert-deftest clutch-test-object-resolution-plan-contract ()
+  "Object resolution policy should be a pure decision table."
+  (let* ((local '((:name "ORDERS" :type "TABLE")))
+         (single '((:name "REMOTE_ONLY" :type "TABLE")))
+         (multiple '((:name "AUDIT_LOG" :type "TABLE")
+                     (:name "AUDIT_TRAIL" :type "TABLE")))
+         (full '((:name "ORDERS" :type "TABLE")
+                 (:name "PROCESS_ORDER" :type "PROCEDURE"))))
+    (dolist
+        (case
+         (list
+          (list "no symbol" nil local nil (list 'read local nil))
+          (list "case-insensitive local prefix" "ord" local nil
+                (list 'read local "ord"))
+          (list "remote search required" "REMOTE" local nil '(search))
+          (list "single remote hit" "REMOTE" local
+                (list :attempted t :hits single)
+                (list 'return (car single)))
+          (list "multiple remote hits" "AUDIT" local
+                (list :attempted t :hits multiple)
+                (list 'read multiple "AUDIT"))
+          (list "no remote hit" "MISSING" local '(:attempted t)
+                (list 'missing local))
+          (list "refreshed fallback" "MISSING" local
+                (list :attempted t :full-entries full)
+                (list 'missing full))))
+      (pcase-let ((`(,label ,symbol ,entries ,search ,expected) case))
+        (ert-info ((format "case: %s" label))
+          (should (equal (clutch--object-resolution-plan
+                          symbol entries search)
+                         expected)))))))
+
+(ert-deftest clutch-test-on-demand-object-search-contract ()
+  "On-demand search should merge a permitted refresh only when needed."
+  (let ((remote '((:name "ORDERS" :type "TABLE")))
+        (refreshed '((:name "ORDERS" :type "TABLE")
+                     (:name "ORDER_PROC" :type "PROCEDURE")
+                     (:name "ORDER_TRIGGER" :type "TRIGGER")
+                     (:name "OTHER_PROC" :type "PROCEDURE")))
+        (refresh-count 0))
+    (cl-letf (((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn prefix)
+                 (should (equal prefix "ORDER"))
+                 remote))
+              ((symbol-function 'clutch--object-cache-complete-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--object-entries)
+               (lambda (_conn &optional refresh)
+                 (should refresh)
+                 (cl-incf refresh-count)
+                 refreshed)))
+      (let ((result (clutch--on-demand-object-search
+                     'fake-conn "ORDER" nil '("TABLE" "PROCEDURE"))))
+        (should (plist-get result :attempted))
+        (should (equal (plist-get result :hits)
+                       '((:name "ORDERS" :type "TABLE")
+                         (:name "ORDER_PROC" :type "PROCEDURE"))))
+        (should (equal (plist-get result :full-entries)
+                       '((:name "ORDERS" :type "TABLE")
+                         (:name "ORDER_PROC" :type "PROCEDURE")
+                         (:name "OTHER_PROC" :type "PROCEDURE")))))
+      (let ((result (clutch--on-demand-object-search
+                     'fake-conn "ORDER" t '("TABLE"))))
+        (should (equal (plist-get result :hits) remote))
+        (should-not (plist-get result :full-entries)))
+      (should (= refresh-count 1)))))
+
+(ert-deftest clutch-test-resolve-object-entry-effect-boundaries ()
+  "The real resolver should avoid remote I/O for local and dead paths."
   (let ((entries '((:name "ORDERS" :type "TABLE")
-                   (:name "ORDER_ITEMS" :type "TABLE"))))
-    (should (clutch--symbol-has-local-completions-p "ord" entries))
-    (should (clutch--symbol-has-local-completions-p "ORD" entries))
-    (should-not (clutch--symbol-has-local-completions-p "ZZZ" entries))))
+                   (:name "ORDER_ITEMS" :type "TABLE")))
+        object-alive reader-call remote-called messages)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) object-alive))
+              ((symbol-function 'clutch--object-entries)
+               (lambda (_conn &optional _refresh) entries))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (&rest _args) (setq remote-called t)))
+              ((symbol-function 'clutch--object-entry-reader)
+               (lambda (conn prompt candidates &optional initial category)
+                 (setq reader-call
+                       (list conn prompt candidates initial category))
+                 (car candidates)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (with-temp-buffer
+        (insert "ord")
+        (setq-local clutch-connection 'fake-conn)
+        (setq object-alive t)
+        (should (equal (clutch--resolve-object-entry "Describe: ")
+                       (car entries)))
+        (should (equal reader-call
+                       (list 'fake-conn "Describe: " entries "ord"
+                             'clutch-object)))
+        (should (equal clutch-browser-current-object (car entries)))
+        (should-not remote-called))
+      (setq object-alive nil reader-call nil messages nil)
+      (with-temp-buffer
+        (insert "MISSING")
+        (setq-local clutch-connection 'fake-conn)
+        (clutch--resolve-object-entry "Describe: ")
+        (should (equal (nth 3 reader-call) nil))
+        (should (string-match-p "MISSING" (car messages)))
+        (should-not remote-called)))))
 
-(ert-deftest clutch-test-resolve-entry-local-prefix-prefills-picker ()
-  "Local prefix matches should pre-fill the object picker."
-  (dolist (case '(("tables"
-                   "ORD"
-                   ((:name "ORDERS" :type "TABLE")
-                    (:name "ORDER_ITEMS" :type "TABLE"))
-                   (:name "ORDERS" :type "TABLE"))
-                  ("non-table objects"
-                   "GET_"
-                   ((:name "GET_ORDER" :type "FUNCTION")
-                    (:name "GET_CUSTOMER" :type "FUNCTION"))
-                   (:name "GET_ORDER" :type "FUNCTION"))))
-    (pcase-let ((`(,label ,symbol ,entries ,selected) case))
-      (ert-info ((format "case: %s" label))
-        (let (captured-initial)
-          (cl-letf (((symbol-function 'clutch--buffer-current-object)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--object-matches-at-point)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--ensure-connection) (lambda () t))
-                    ((symbol-function 'clutch--warn-schema-cache-state)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--object-connection-alive-p)
-                     (lambda (_) t))
-                    ((symbol-function 'thing-at-point)
-                     (lambda (&rest _) symbol))
-                    ((symbol-function 'clutch--object-entries)
-                     (lambda (_conn &optional _refresh) entries))
-                    ((symbol-function 'clutch--object-entry-reader)
-                     (lambda (_conn _prompt _entries &optional initial _cat)
-                       (setq captured-initial initial)
-                       selected)))
-            (with-temp-buffer
-              (setq-local clutch-connection 'fake-conn)
-              (clutch--resolve-object-entry "Describe: ")
-              (should (equal captured-initial symbol)))))))))
-
-(ert-deftest clutch-test-resolve-entry-remote-table-search-contract ()
-  "Remote table search should return direct hits or open the right picker."
-  (dolist (case '(("single hit"
-                   "RARE_TABLE"
-                   nil
-                   ((:name "RARE_TABLE" :type "TABLE"))
-                   (:name "RARE_TABLE" :type "TABLE")
-                   nil nil)
-                  ("multiple hits"
-                   "AUDIT"
-                   nil
-                   ((:name "AUDIT_LOG" :type "TABLE")
-                    (:name "AUDIT_TRAIL" :type "TABLE"))
-                   nil 2 nil)
-                  ("no hit"
-                   "preferential_price"
-                   ((:name "ORDERS" :type "TABLE"))
-                   nil
-                   nil nil message)))
-    (pcase-let ((`(,label ,symbol ,local-entries ,remote-entries
-                          ,direct-result ,picker-count ,expect-message)
-                 case))
-      (ert-info ((format "case: %s" label))
-        (let (captured-entries captured-initial messages)
-          (cl-letf (((symbol-function 'clutch--buffer-current-object)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--object-matches-at-point)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--ensure-connection) (lambda () t))
-                    ((symbol-function 'clutch--warn-schema-cache-state)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--object-connection-alive-p)
-                     (lambda (_) t))
-                    ((symbol-function 'thing-at-point)
-                     (lambda (&rest _) symbol))
-                    ((symbol-function 'clutch--object-entries)
-                     (lambda (_conn &optional _refresh) local-entries))
-                    ((symbol-function 'clutch-db-search-table-entries)
-                     (lambda (_conn _prefix) remote-entries))
-                    ((symbol-function 'clutch--object-cache-complete-p)
-                     (lambda (_) t))
-                    ((symbol-function 'message)
-                     (lambda (fmt &rest args)
-                       (push (apply #'format fmt args) messages)))
-                    ((symbol-function 'clutch--object-entry-reader)
-                     (lambda (_conn _prompt entries &optional initial _cat)
-                       (setq captured-entries entries
-                             captured-initial initial)
-                       (car entries))))
-            (with-temp-buffer
-              (setq-local clutch-connection 'fake-conn)
-              (let ((result (clutch--resolve-object-entry "Describe: ")))
-                (when direct-result
-                  (should (equal result direct-result))
-                  (should-not captured-entries))
-                (when picker-count
-                  (should (= (length captured-entries) picker-count)))
-                (when expect-message
-                  (should (null captured-initial))
-                  (should (cl-some
-                           (lambda (m) (string-match-p symbol m))
-                           messages)))))))))))
-
-(ert-deftest clutch-test-resolve-entry-remote-search-errors-surface ()
-  "Remote object search failures should reach the command error boundary."
-  (cl-letf (((symbol-function 'clutch--buffer-current-object)
-             (lambda (&rest _) nil))
-            ((symbol-function 'clutch--object-matches-at-point)
-             (lambda (&rest _) nil))
-            ((symbol-function 'clutch--ensure-connection) #'ignore)
-            ((symbol-function 'clutch--warn-schema-cache-state) #'ignore)
-            ((symbol-function 'clutch--object-connection-alive-p)
-             (lambda (_) t))
-            ((symbol-function 'thing-at-point)
-             (lambda (&rest _) "REMOTE_ONLY"))
+(ert-deftest clutch-test-resolve-object-entry-search-errors-surface ()
+  "Backend search failures should reach the real resolver's caller."
+  (cl-letf (((symbol-function 'clutch--connection-alive-p)
+             (lambda (_conn) t))
+            ((symbol-function 'clutch-db-live-p)
+             (lambda (_conn) t))
             ((symbol-function 'clutch--object-entries)
-             (lambda (&rest _) nil))
+             (lambda (&rest _args) nil))
             ((symbol-function 'clutch-db-search-table-entries)
-             (lambda (&rest _)
-               (signal 'clutch-db-error '("remote search failed"))))
-            ((symbol-function 'clutch--object-cache-complete-p)
-             (lambda (_) t))
-            ((symbol-function 'clutch--object-entry-reader)
-             (lambda (&rest _) nil)))
+             (lambda (&rest _args)
+               (signal 'clutch-db-error '("remote search failed")))))
     (with-temp-buffer
+      (insert "REMOTE_ONLY")
       (setq-local clutch-connection 'fake-conn)
       (should-error (clutch--resolve-object-entry "Describe: ")
                     :type 'clutch-db-error))))
-
-(ert-deftest clutch-test-resolve-entry-incomplete-cache-refresh-contract ()
-  "Incomplete object caches should sync-refresh non-table candidates."
-  (dolist (case '(("single refreshed procedure"
-                   "PROCESS_ORDER"
-                   nil
-                   ((:name "PROCESS_ORDER" :type "PROCEDURE"))
-                   (:name "PROCESS_ORDER" :type "PROCEDURE")
-                   nil)
-                  ("merged table and procedure hits"
-                   "ORDER"
-                   ((:name "ORDERS" :type "TABLE"))
-                   ((:name "ORDERS" :type "TABLE")
-                    (:name "ORDER_PROC" :type "PROCEDURE"))
-                   nil
-                   procedure)))
-    (pcase-let ((`(,label ,symbol ,remote-entries ,refresh-entries
-                          ,direct-result ,expect-picker)
-                 case))
-      (ert-info ((format "case: %s" label))
-        (let (captured-entries)
-          (cl-letf (((symbol-function 'clutch--buffer-current-object)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--object-matches-at-point)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--ensure-connection) (lambda () t))
-                    ((symbol-function 'clutch--warn-schema-cache-state)
-                     (lambda (&rest _) nil))
-                    ((symbol-function 'clutch--object-connection-alive-p)
-                     (lambda (_) t))
-                    ((symbol-function 'thing-at-point)
-                     (lambda (&rest _) symbol))
-                    ((symbol-function 'clutch--object-entries)
-                     (lambda (_conn &optional refresh)
-                       (and refresh refresh-entries)))
-                    ((symbol-function 'clutch-db-search-table-entries)
-                     (lambda (_conn _prefix) remote-entries))
-                    ((symbol-function 'clutch--object-cache-complete-p)
-                     (lambda (_) nil))
-                    ((symbol-function 'clutch--object-entry-reader)
-                     (lambda (_conn _prompt entries &optional _initial _cat)
-                       (setq captured-entries entries)
-                       (car entries))))
-            (with-temp-buffer
-              (setq-local clutch-connection 'fake-conn)
-              (let ((result (clutch--resolve-object-entry "Describe: ")))
-                (when direct-result
-                  (should (equal result direct-result)))
-                (when expect-picker
-                  (should (>= (length captured-entries) 2))
-                  (should (cl-some
-                           (lambda (e)
-                             (equal (plist-get e :type) "PROCEDURE"))
-                           captured-entries)))))))))))
-
-(ert-deftest clutch-test-resolve-entry-table-like-only-skips-non-table-refresh ()
-  "When table-like-only is set, on-demand search should not sync-refresh."
-  (let (refresh-called)
-    (cl-letf (((symbol-function 'clutch--buffer-current-object) (lambda (&rest _) nil))
-              ((symbol-function 'clutch--object-matches-at-point) (lambda (&rest _) nil))
-              ((symbol-function 'clutch--ensure-connection) (lambda () t))
-              ((symbol-function 'clutch--warn-schema-cache-state) (lambda (&rest _) nil))
-              ((symbol-function 'clutch--object-connection-alive-p) (lambda (_) t))
-              ((symbol-function 'thing-at-point) (lambda (&rest _) "UNKNOWN_TBL"))
-              ((symbol-function 'clutch--browseable-object-entries)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (_conn _prefix) nil))
-              ((symbol-function 'clutch--object-entries)
-               (lambda (_conn &optional refresh)
-                 (when refresh (setq refresh-called t))
-                 nil))
-              ((symbol-function 'clutch--object-cache-complete-p) (lambda (_) nil))
-              ((symbol-function 'message) (lambda (&rest _) nil))
-              ((symbol-function 'clutch--object-entry-reader)
-               (lambda (_conn _prompt _entries &optional _initial _cat) nil)))
-      (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn)
-        (clutch--resolve-object-entry "Table: " t)
-        (should-not refresh-called)))))
 
 (ert-deftest clutch-test-object-at-point-prefers-table-over-public-synonym ()
   "Symbol resolution should prefer concrete schema objects over PUBLIC synonyms."
