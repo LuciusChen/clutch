@@ -133,6 +133,9 @@ run_checkdoc() {
 }
 
 run_architecture() {
+  run_emacs --eval "(setq clutch--architecture-skip-main t)" \
+    -l ert -l check-architecture -l check-architecture-test \
+    --eval "(ert-run-tests-batch-and-exit t)"
   run_emacs -l check-architecture
 }
 
@@ -148,6 +151,7 @@ run_target() {
       run_byte_compile
       run_package_lint
       run_checkdoc
+      run_architecture
       ;;
     smoke)
       run_main_tests_matching "'(tag :smoke)"
