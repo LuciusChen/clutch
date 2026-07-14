@@ -213,7 +213,7 @@
            ("clutch-sql" defcustom t clutch-sql-completion-case-style)
            ("clutch-edit" defcustom t clutch-insert-validation-idle-delay)
            ("clutch-object" defcustom t clutch-object-warmup-idle-delay-seconds
-            clutch-primary-object-types)
+            clutch-primary-object-types clutch-sql-product)
            ("clutch-result" defcustom t clutch-result-window-height
             clutch-agent-context-max-result-rows
             clutch-agent-context-max-cell-width clutch-column-width-step
@@ -294,6 +294,8 @@
   (require 'clutch-object)
   (require 'clutch-result)
   (should-not (featurep 'clutch))
+  (should (custom-variable-p 'clutch-sql-product))
+  (should (eq clutch-sql-product 'mysql))
   (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
                     clutch-switch-schema))
     (should (fboundp symbol))))

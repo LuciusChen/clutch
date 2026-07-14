@@ -579,7 +579,7 @@ Connection profile plist keys:
 | `:database` | string | Database/schema name |
 | `:sid` | string | Oracle SID when using `@host:port:SID` style connections |
 | `:backend` | symbol | `mysql`, `pg`, `postgresql`, `sqlite`, `jdbc`, `clickhouse`, `oracle`, `sqlserver`, `snowflake`, `redshift`, `db2` |
-| `:sql-product` | symbol | SQL highlight product for `sql-mode` |
+| `:sql-product` | symbol | Override the backend-derived `sql-mode` product |
 | `:pass-entry` | string | Pass store suffix for password lookup |
 | `:ssh-host` | string | OpenSSH host alias from `~/.ssh/config` used for an automatic local tunnel |
 | `:ssh-tunnel` | symbol | `always` (default) or `direct-first`; the latter tries the direct route before falling back to `:ssh-host` |
@@ -610,7 +610,7 @@ Connection profile plist keys:
 
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
-| `clutch-sql-product` | `'mysql` | choice | SQL highlight mode: `mysql`, `postgres`, `mariadb`, etc. |
+| `clutch-sql-product` | `'mysql` | choice | Fallback highlight product for object definitions without connection metadata |
 | `clutch-connect-timeout-seconds` | `10` | natnum | Connection establishment timeout |
 | `clutch-read-idle-timeout-seconds` | `30` | natnum | Read idle timeout (MySQL, PG, JDBC) |
 | `clutch-query-timeout-seconds` | `30` | natnum | Server-side statement timeout (PG, JDBC) |

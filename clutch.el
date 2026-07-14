@@ -212,14 +212,5 @@ Underlined to indicate clickable (RET to follow)."
   :type 'natnum
   :group 'clutch)
 
-(defcustom clutch-sql-product 'mysql
-  "SQL product used for syntax highlighting.
-Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
-  :type '(choice (const :tag "MySQL" mysql)
-                 (const :tag "PostgreSQL" postgres)
-                 (const :tag "MariaDB" mariadb)
-                 (symbol :tag "Other"))
-  :group 'clutch)
-
 (provide 'clutch)
 ;;; clutch.el ends here

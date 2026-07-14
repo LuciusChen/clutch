@@ -74,7 +74,7 @@ NAME is a string used for `completing-read'.
 :surface selects a non-default surface for backends that expose more than one
 query language.  For MongoDB, omit it for the normal document/MongoDB Shell
 surface, or use \\='sql-interface for MongoDB SQL Interface JDBC endpoints.
-:sql-product overrides `clutch-sql-product' for this connection.
+:sql-product overrides the product derived from backend metadata.
 :auth-database / :auth-source set the MongoDB authentication database for
 native MongoDB URLs and the default auth database in structured
 MongoDB SQL Interface JDBC URLs.

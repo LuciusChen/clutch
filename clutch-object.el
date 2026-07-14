@@ -30,6 +30,16 @@ When nil, the primary entrypoint includes all schema object types."
   :type '(repeat string)
   :group 'clutch)
 
+(defcustom clutch-sql-product 'mysql
+  "Fallback SQL product for object definition buffers.
+Used when an object's connection metadata cannot identify a product.  The
+value must be a symbol recognized by `sql-mode', such as `mysql' or `postgres'."
+  :type '(choice (const :tag "MySQL" mysql)
+                 (const :tag "PostgreSQL" postgres)
+                 (const :tag "MariaDB" mariadb)
+                 (symbol :tag "Other"))
+  :group 'clutch)
+
 (defvar clutch--conn-sql-product)
 (defvar clutch--connection-params)
 (defvar-local clutch--describe-object-entry nil
@@ -43,7 +53,6 @@ Each value is a plist with at least :entries and :fetched-at.")
   (make-hash-table :test 'eq :weakness 'key)
   "Warmup generations weakly keyed by connection object identity.")
 (defvar clutch-connection)
-(defvar clutch-sql-product)
 
 (defvar embark-default-action-overrides)
 (defvar embark-target-finders)
