@@ -62,6 +62,7 @@ Targets:
   byte-compile   Byte-compile distributable clutch*.el files.
   package-lint   Run package-lint with clutch.el as package metadata source.
   checkdoc       Run checkdoc on distributable clutch*.el files.
+  architecture   Check Clutch module dependency boundaries.
   native-live    Run native backend/UI live tests against local containers.
 EOF
 }
@@ -129,6 +130,10 @@ run_checkdoc() {
       --eval "(dolist (file (directory-files default-directory t \"^clutch.*\\.el$\")) (checkdoc-file file))" \
       --eval "(dolist (name '(\"*Warnings*\" \"*warn*\")) (when-let ((buf (get-buffer name))) (with-current-buffer buf (goto-char (point-min)) (when (re-search-forward \"^Warning\" nil t) (princ (buffer-string)) (kill-emacs 1)))))"
   )
+}
+
+run_architecture() {
+  run_emacs -l check-architecture
 }
 
 run_native_live() {
@@ -202,6 +207,7 @@ run_target() {
     byte-compile) run_byte_compile ;;
     package-lint) run_package_lint ;;
     checkdoc) run_checkdoc ;;
+    architecture) run_architecture ;;
     native-live) run_native_live ;;
     -h|--help) usage ;;
     *)
