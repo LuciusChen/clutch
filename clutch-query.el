@@ -59,9 +59,6 @@ cleaned up in the pasted region only."
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
 (defvar clutch--base-query)
-(defvar clutch--source-window)
-(defvar clutch--executing-sql-start)
-(defvar clutch--executing-sql-end)
 (defvar clutch-debug-mode nil)
 (defvar clutch-result-max-rows 500)
 (defvar clutch--query-buffer-local-p)
@@ -70,6 +67,19 @@ cleaned up in the pasted region only."
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
 Used to update the mode-line with a spinner during execution.")
+
+(defvar clutch--source-window nil
+  "Window that initiated the current query execution.
+Dynamically bound by `clutch--execute' so result buffers open
+adjacent to the correct console window.")
+
+(defvar clutch--executing-sql-start nil
+  "Buffer position where the currently executing SQL begins, or nil.
+Dynamically bound by `clutch--execute-and-mark'.")
+
+(defvar clutch--executing-sql-end nil
+  "Buffer position where the currently executing SQL ends, or nil.
+Dynamically bound by `clutch--execute-and-mark'.")
 
 ;; Forward declarations — functions from sibling modules
 (declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))

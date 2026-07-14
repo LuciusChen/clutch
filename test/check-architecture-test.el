@@ -196,6 +196,8 @@
             clutch--conn-sql-product clutch--connection-params)
            ("clutch-query" defcustom t clutch-console-directory
             clutch-console-yank-cleanup)
+           ("clutch-query" defvar t clutch--source-window
+            clutch--executing-sql-start clutch--executing-sql-end)
            ("clutch-schema" defcustom t clutch-schema-cache-install-batch-size
             clutch-schema-refresh-idle-delay-seconds)
            ("clutch-sql" defcustom t clutch-sql-completion-case-style)

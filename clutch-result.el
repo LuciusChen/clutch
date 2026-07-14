@@ -67,7 +67,6 @@ window; an existing result window is reused at its current height."
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
 (defvar clutch--pre-fullscreen-config)
-(defvar clutch--source-window)
 
 (defvar-local clutch--aggregate-summary nil
   "Last aggregate summary plist for result footer, or nil.
