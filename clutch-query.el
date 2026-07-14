@@ -76,6 +76,7 @@ Used to update the mode-line with a spinner during execution.")
 (declare-function clutch--spinner-start "clutch-connection" ())
 (declare-function clutch--update-mode-line "clutch-connection"
                   (&optional spinner-only))
+(declare-function clutch--update-console-buffer-name "clutch-connection" ())
 (declare-function clutch--disconnect-on-kill "clutch-connection" ())
 (declare-function clutch--build-conn "clutch-connection" (params))
 (declare-function clutch--saved-connection-params "clutch-connection" (name))
@@ -113,7 +114,6 @@ Used to update the mode-line with a spinner during execution.")
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
 
 ;; Forward declarations — functions from sibling workflow modules
-(declare-function clutch--schema-status-entry "clutch-schema" (conn))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;; Forward declarations — functions from clutch-db
@@ -161,25 +161,6 @@ MODE-LINE-NAME is the base name shown while the buffer is idle."
   (add-hook 'kill-buffer-hook #'clutch--save-console nil t)
   (clutch--update-mode-line))
 
-(defun clutch--console-buffer-base-name (name)
-  "Return canonical buffer name for console NAME."
-  (format "*clutch: %s*" name))
-
-(defun clutch--console-buffer-name (&optional name conn)
-  "Return display buffer name for console NAME and schema state on CONN."
-  (let* ((console-name (or name clutch--console-name "?"))
-         (base (clutch--console-buffer-base-name console-name))
-         (entry (and conn (clutch--schema-status-entry conn)))
-         (state (plist-get entry :state))
-         (tables (plist-get entry :tables))
-         (suffix (pcase state
-                   ('refreshing " [schema...]")
-                   ('stale " [schema~]")
-                   ('failed " [schema!]")
-                   ('ready (format " [schema %dt]" (or tables 0)))
-                   (_ ""))))
-    (concat base suffix)))
-
 (defun clutch--console-buffer-storage-match-p (storage-name)
   "Return non-nil when the current console buffer matches STORAGE-NAME."
   (and storage-name
@@ -225,12 +206,6 @@ MODE-LINE-NAME is the base name shown while the buffer is idle."
   (let ((mode (clutch--query-console-major-mode params)))
     (unless (eq major-mode mode)
       (funcall mode))))
-
-(defun clutch--update-console-buffer-name ()
-  "Rename the current console buffer to reflect schema status."
-  (when clutch--console-name
-    (rename-buffer (clutch--console-buffer-name clutch--console-name clutch-connection)
-                   t)))
 
 (defconst clutch--console-url-secret-param-regexp
   (concat "\\([?&;]"
@@ -416,8 +391,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
                          (clutch--build-conn params))
                      (clutch--build-conn params)))
              (buf (or existing
-                      (generate-new-buffer
-                       (clutch--console-buffer-base-name name))))
+                      (generate-new-buffer " *clutch-console*")))
              (is-new (zerop (buffer-size buf))))
         (select-window (or (clutch--console-window-for buf) (selected-window)))
         (switch-to-buffer buf)

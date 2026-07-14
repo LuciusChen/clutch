@@ -82,11 +82,10 @@
   "Seconds to wait for a provisional direct database connection.")
 
 ;; Forward declarations — sibling module functions
-(declare-function clutch--update-console-buffer-name "clutch-query" ())
 (declare-function clutch--refresh-result-status-line "clutch-ui"
                   (&optional footer-only))
-(declare-function clutch--render-object-describe
-                  "clutch-object" (conn entry params product))
+(declare-function clutch--render-console-buffer-name
+                  "clutch-ui" (name schema-state table-count))
 (declare-function clutch--render-connection-header-line
                   "clutch-ui" (state connected-p))
 (declare-function clutch--completion-backend-icon-prefix "clutch-ui" (key))
@@ -376,6 +375,18 @@ pre-rendered text."
   "Return non-nil when the current buffer is a clutch query console."
   (bound-and-true-p clutch--query-buffer-local-p))
 
+(defun clutch--update-console-buffer-name ()
+  "Rename the current query console to reflect its schema state."
+  (when clutch--console-name
+    (let ((entry (and clutch-connection
+                      (clutch--schema-status-entry clutch-connection))))
+      (rename-buffer
+       (clutch--render-console-buffer-name
+        clutch--console-name
+        (plist-get entry :state)
+        (plist-get entry :tables))
+       t))))
+
 (defun clutch--refresh-transaction-ui (conn)
   "Refresh transaction indicators for buffers attached to CONN."
   (when conn
@@ -612,17 +623,13 @@ using the stored params.  Signals a user-error if not recoverable."
           (when (eq clutch-connection conn)
             (clutch--refresh-connection-render-state)
             (cond
-             ((derived-mode-p 'clutch-describe-mode)
-              (when clutch--describe-object-entry
-                (clutch--render-object-describe clutch-connection
-                                               clutch--describe-object-entry
-                                               clutch--connection-params
-                                               clutch--conn-sql-product)))
              ((derived-mode-p 'clutch-result-mode)
               (clutch--refresh-result-status-line))
              ((clutch--query-buffer-p)
               (clutch--update-console-buffer-name)
-              (clutch--update-mode-line)))))))))
+              (clutch--update-mode-line))
+             (revert-buffer-function
+              (revert-buffer t t)))))))))
 
 (add-hook 'clutch--metadata-state-changed-hook
           #'clutch--refresh-schema-status-ui)

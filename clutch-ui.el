@@ -961,6 +961,17 @@ TRANSACTION-STATE is one of `auto', `manual', or `dirty'."
     ('stale (propertize "schema~" 'face 'warning))
     ('failed (propertize "schema!" 'face 'error))))
 
+(defun clutch--render-console-buffer-name (name schema-state table-count)
+  "Render console NAME for SCHEMA-STATE and TABLE-COUNT."
+  (concat
+   (format "*clutch: %s*" name)
+   (pcase schema-state
+     ('refreshing " [schema...]")
+     ('stale " [schema~]")
+     ('failed " [schema!]")
+     ('ready (format " [schema %dt]" (or table-count 0)))
+     (_ ""))))
+
 (defun clutch--header-line-indent ()
   "Return leading spaces to align header-line text with the buffer text area.
 Accounts for the line-number gutter when `display-line-numbers-mode' is on."

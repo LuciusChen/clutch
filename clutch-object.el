@@ -1345,16 +1345,19 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
       (signal (car err) (cdr err)))))
 
 ;;;###autoload
-(defun clutch-describe-refresh (&optional _ignore-auto _noconfirm)
-  "Refresh the current describe buffer."
+(defun clutch-describe-refresh (&optional ignore-auto _noconfirm)
+  "Refresh the current describe buffer.
+When IGNORE-AUTO is non-nil, redraw from current metadata without invalidating
+or starting another schema refresh."
   (interactive)
   (unless clutch--describe-object-entry
     (user-error "No object is associated with this buffer"))
-  (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
+  (unless ignore-auto
+    (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
+    (clutch--refresh-object-describe-metadata clutch-connection
+                                             clutch--describe-object-entry))
   (clutch--with-object-error-capture
       (current-buffer) clutch-connection clutch--describe-object-entry "describe"
-    (clutch--refresh-object-describe-metadata clutch-connection
-                                             clutch--describe-object-entry)
     (clutch--render-object-describe clutch-connection
                                     clutch--describe-object-entry
                                     clutch--connection-params

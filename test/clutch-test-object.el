@@ -775,19 +775,31 @@ document connection."
       (kill-buffer source))))
 
 (ert-deftest clutch-test-describe-refresh-success-clears-stale-problem-records ()
-  "Refreshing a describe buffer should clear stale failure state on success."
+  "Manual and automatic describe refreshes should preserve their boundaries."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch--describe-object-entry '(:name "USERS" :type "TABLE")
                 clutch--buffer-error-details '(:summary "old"))
     (puthash 'fake-conn '(:summary "old") clutch--problem-records-by-conn)
-    (cl-letf (((symbol-function 'clutch--refresh-current-schema) #'ignore)
-              ((symbol-function 'clutch--refresh-object-describe-metadata)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'clutch--render-object-describe) #'ignore))
-      (clutch-describe-refresh)
-      (should-not clutch--buffer-error-details)
-      (should-not (gethash 'fake-conn clutch--problem-records-by-conn)))))
+    (let ((refreshes 0)
+          (invalidations 0)
+          (renders 0))
+      (cl-letf (((symbol-function 'clutch--refresh-current-schema)
+                 (lambda (&rest _) (cl-incf refreshes)))
+                ((symbol-function 'clutch--refresh-object-describe-metadata)
+                 (lambda (&rest _) (cl-incf invalidations)))
+                ((symbol-function 'clutch--render-object-describe)
+                 (lambda (&rest _) (cl-incf renders))))
+        (clutch-describe-refresh t t)
+        (should (= refreshes 0))
+        (should (= invalidations 0))
+        (should (= renders 1))
+        (clutch-describe-refresh)
+        (should (= refreshes 1))
+        (should (= invalidations 1))
+        (should (= renders 2))
+        (should-not clutch--buffer-error-details)
+        (should-not (gethash 'fake-conn clutch--problem-records-by-conn))))))
 
 (ert-deftest clutch-test-object-describe-propagates-related-object-errors ()
   "Describe rendering should not silently swallow related-object lookup failures."

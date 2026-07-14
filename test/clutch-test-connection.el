@@ -2408,26 +2408,37 @@
         (equal-but-distinct-conn (list 'same-fields))
         (target (generate-new-buffer " *clutch-schema-status-target*"))
         (other (generate-new-buffer " *clutch-schema-status-other*"))
-        refreshed)
+        (describe (generate-new-buffer " *clutch-schema-status-describe*"))
+        (clutch--schema-status-cache (make-hash-table :test 'eq))
+        reverted)
     (unwind-protect
         (progn
           (with-current-buffer target
             (setq-local clutch-connection conn
-                        clutch--query-buffer-local-p t))
+                        clutch--query-buffer-local-p t
+                        clutch--console-name "target"))
           (with-current-buffer other
             (setq-local clutch-connection equal-but-distinct-conn
-                        clutch--query-buffer-local-p t))
+                        clutch--query-buffer-local-p t
+                        clutch--console-name "other"))
+          (with-current-buffer describe
+            (setq-local clutch-connection conn
+                        revert-buffer-function
+                        (lambda (ignore-auto noconfirm)
+                          (setq reverted (list ignore-auto noconfirm)))))
+          (puthash conn '(:state ready :tables 7) clutch--schema-status-cache)
           (should (equal conn equal-but-distinct-conn))
           (should-not (eq conn equal-but-distinct-conn))
-          (cl-letf (((symbol-function 'clutch--connection-key)
-                     (lambda (_conn) "same-label"))
-                    ((symbol-function 'clutch--update-console-buffer-name)
-                     (lambda () (push (current-buffer) refreshed)))
+          (cl-letf (((symbol-function 'clutch--refresh-connection-render-state)
+                     #'ignore)
                     ((symbol-function 'clutch--update-mode-line) #'ignore))
             (clutch--refresh-schema-status-ui conn))
-          (should (equal refreshed (list target))))
+          (should (equal (buffer-name target) "*clutch: target* [schema 7t]"))
+          (should (equal (buffer-name other) " *clutch-schema-status-other*"))
+          (should (equal reverted '(t t))))
       (when (buffer-live-p target) (kill-buffer target))
-      (when (buffer-live-p other) (kill-buffer other)))))
+      (when (buffer-live-p other) (kill-buffer other))
+      (when (buffer-live-p describe) (kill-buffer describe)))))
 
 (ert-deftest clutch-test-kill-non-owner-buffers-does-not-disconnect ()
   "Killing indirect SQL or derived result buffers should not disconnect."
@@ -2963,7 +2974,7 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
 (ert-deftest clutch-test-query-console-does-not-create-buffer-on-connect-failure ()
   "Query console should not create a visible buffer before connect succeeds."
   (let* ((name "alpha")
-         (buffer-name (clutch--console-buffer-base-name name))
+         (buffers-before (buffer-list))
          (clutch-connection-alist
           '(("alpha" . (:backend mysql :database "app_a")))))
     (unwind-protect
@@ -2973,31 +2984,32 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                    (lambda (_params)
                      (user-error "Connection refused"))))
           (should-error (clutch-query-console name) :type 'user-error)
-          (should-not (get-buffer buffer-name)))
-      (when-let* ((buf (get-buffer buffer-name)))
-        (kill-buffer buf)))))
+          (should-not (cl-set-difference (buffer-list) buffers-before)))
+      (dolist (buffer (cl-set-difference (buffer-list) buffers-before))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest clutch-test-query-console-opens-ad-hoc-sqlite-file ()
   "Query console should open a SQL workspace for an ad hoc SQLite file."
   (let* ((db-file "/tmp/clutch-direct-console.db")
          (name (format "SQLite: %s" (abbreviate-file-name db-file)))
-         (buffer-name (clutch--console-buffer-base-name name))
          (params (list :backend 'sqlite :database db-file))
-         built)
+         built
+         opened)
     (unwind-protect
         (cl-letf (((symbol-function 'read-file-name)
                    (lambda (&rest _args) db-file)))
           (clutch-test--with-connect-build-stubs (built 'sqlite 'sqlite-conn)
             (clutch-query-sqlite-file db-file)
+            (setq opened (current-buffer))
             (should (equal built params))
             (should (eq clutch-connection 'sqlite-conn))
             (should (equal clutch--connection-params params))
             (should (eq clutch--conn-sql-product 'sqlite))
             (should (equal clutch--console-name name))
-            (should (equal clutch--console-ad-hoc-params params))
-            (should (eq (current-buffer) (get-buffer buffer-name)))))
-      (when-let* ((buf (get-buffer buffer-name)))
-        (kill-buffer buf)))))
+            (should (equal clutch--console-ad-hoc-params params))))
+      (when (buffer-live-p opened)
+        (kill-buffer opened)))))
 
 (ert-deftest clutch-test-query-console-mongodb-surfaces-use-registered-modes ()
   "MongoDB consoles should select editing mode from their backend surface."
@@ -3022,12 +3034,13 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
     (ert-info ((format "MongoDB query console surface: %s"
                        (plist-get case :label)))
       (let* ((name (plist-get case :name))
-             (buffer-name (clutch--console-buffer-base-name name))
              (params (plist-get case :params))
-             built)
+             built
+             opened)
         (unwind-protect
             (clutch-test--with-connect-build-stubs (built nil 'mongodb-conn)
               (clutch-query-console (list :name name :params params))
+              (setq opened (current-buffer))
               (should (equal built params))
               (should (eq major-mode (plist-get case :major-mode)))
               (should-not (derived-mode-p 'js-mode))
@@ -3045,21 +3058,22 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                               completion-at-point-functions))
                 (should-not (memq #'clutch-completion-at-point
                                   completion-at-point-functions))))
-          (when-let* ((buf (get-buffer buffer-name)))
-            (kill-buffer buf)))))))
+          (when (buffer-live-p opened)
+            (kill-buffer opened)))))))
 
 (ert-deftest clutch-test-query-console-redis-uses-redis-mode ()
   "Redis query consoles should use Redis command editing, not SQL mode."
   (let* ((name "redis-local")
-         (buffer-name (clutch--console-buffer-base-name name))
          (params '(:backend redis
                    :host "127.0.0.1"
                    :port 6379
                    :database 0))
-         built)
+         built
+         opened)
     (unwind-protect
         (clutch-test--with-connect-build-stubs (built nil 'redis-conn)
           (clutch-query-console (list :name name :params params))
+          (setq opened (current-buffer))
           (should (equal built params))
           (should (eq major-mode 'clutch-redis-mode))
           (should (derived-mode-p 'prog-mode))
@@ -3081,8 +3095,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
           (let* ((capf (clutch-redis-completion-at-point))
                  (candidates (clutch-test--completion-candidates capf)))
             (should (member "HGETALL" candidates))))
-      (when-let* ((buf (get-buffer buffer-name)))
-        (kill-buffer buf)))))
+      (when (buffer-live-p opened)
+        (kill-buffer opened)))))
 
 (ert-deftest clutch-test-redis-command-at-point-keeps-semicolon-as-input ()
   "Redis command execution should be line-oriented, not semicolon-delimited."
@@ -3130,9 +3144,6 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                    (console-choice (plist-get case :console-choice))
                    (backend-choice (plist-get case :backend-choice))
                    (params (plist-get case :params))
-                   (buffer-name
-                    (clutch--console-buffer-base-name
-                     (plist-get case :name)))
                    (product (plist-get case :product))
                    (conn (plist-get case :conn))
                    (default-port (plist-get case :default-port)))
@@ -3141,7 +3152,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                  '(("alpha" . (:backend mysql :database "app_a"))))
                 console-candidates
                 built
-                port-default)
+                port-default
+                opened)
             (unwind-protect
                 (cl-letf (((symbol-function 'completing-read)
                            (lambda (prompt collection &rest _args)
@@ -3173,16 +3185,16 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                            (lambda (&rest _args) "secret")))
                   (clutch-test--with-connect-build-stubs (built product conn)
                     (call-interactively #'clutch-query-console)
+                    (setq opened (current-buffer))
                     (should (member "alpha" console-candidates))
                     (should-not (member "New connection..." console-candidates))
                     (should-not (member "SQLite file..." console-candidates))
                     (when default-port
                       (should (= port-default default-port)))
                     (should (equal built params))
-                    (should (equal clutch--console-ad-hoc-params params))
-                    (should (eq (current-buffer) (get-buffer buffer-name)))))
-              (when-let* ((buf (get-buffer buffer-name)))
-                (kill-buffer buf)))))))))
+                    (should (equal clutch--console-ad-hoc-params params))))
+              (when (buffer-live-p opened)
+                (kill-buffer opened)))))))))
 
 (ert-deftest clutch-test-query-console-tramp-origin-contract ()
   "Query console connection origin should come from the command source buffer."
@@ -3221,13 +3233,13 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                          "/docker:vscode@f500f94f96e3:/workspace/"))))
     (ert-info ((plist-get case :label))
       (let* ((name "alpha")
-             (buffer-name (clutch--console-buffer-base-name name))
              (clutch-connection-alist
               `((,name . ,(plist-get case :connection))))
              (clutch-tramp-context-policy (plist-get case :policy))
              (default-directory (plist-get case :source))
              built
-             asked)
+             asked
+             opened)
         (unwind-protect
             (cl-letf (((symbol-function 'y-or-n-p)
                        (lambda (prompt)
@@ -3240,14 +3252,14 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
               (clutch-test--with-connect-build-stubs
                   (built 'postgres 'pg-conn)
                 (clutch-query-console name)
+                (setq opened (current-buffer))
                 (should (equal built (plist-get case :expected)))
-                (should (equal clutch--connection-params built))
-                (should (eq (current-buffer) (get-buffer buffer-name)))))
+                (should (equal clutch--connection-params built))))
           (if (plist-get case :prompt-match)
               (should asked)
             (should-not asked))
-          (when-let* ((buf (get-buffer buffer-name)))
-            (kill-buffer buf)))))))
+          (when (buffer-live-p opened)
+            (kill-buffer opened)))))))
 
 (ert-deftest clutch-test-connect-in-ad-hoc-sqlite-console-reuses-file-params ()
   "Ad hoc SQLite consoles should reconnect using their file params."
@@ -3398,11 +3410,10 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
 (ert-deftest clutch-test-open-query-console-keeps-same-name-identities-separate ()
   "Opening a same-name console should not overwrite a different identity."
   (let* ((name "same-name-identity")
-         (base-name (clutch--console-buffer-base-name name))
          (old-params '(:backend mysql :host "old.example" :database "app"))
          (new-params '(:backend mysql :host "new.example" :database "app"))
          (old-storage (clutch--console-persistence-name name old-params))
-         (old-buffer (get-buffer-create base-name))
+         (old-buffer (generate-new-buffer " *clutch-old-console*"))
          (clutch-console-directory (make-temp-file "clutch-console-" t))
          opened)
     (unwind-protect
@@ -3473,7 +3484,6 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
       (ert-info ((format "case: %s" label))
         (let* ((name "alpha")
                (dir (make-temp-file "clutch-console-" t))
-               (buffer-name (clutch--console-buffer-base-name name))
                (params '(:backend mysql
                          :host "db.internal"
                          :port 3306
@@ -3482,7 +3492,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                (storage-name (clutch--console-persistence-name name params))
                (clutch-console-directory dir)
                (clutch-connection-alist `((,name . ,params)))
-               built)
+               built
+               opened)
           (unwind-protect
               (progn
                 (with-temp-file (expand-file-name "alpha.sql" dir)
@@ -3493,11 +3504,12 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                 (clutch-test--with-connect-build-stubs
                     (built 'mysql 'conn)
                   (clutch-query-console name)
+                  (setq opened (current-buffer))
                   (should (equal built (append params '(:pass-entry "alpha"))))
                   (should (equal (buffer-string) expected))
                   (should-not (equal clutch--console-storage-name name))))
-            (when-let* ((buf (get-buffer buffer-name)))
-              (kill-buffer buf))
+            (when (buffer-live-p opened)
+              (kill-buffer opened))
             (delete-directory dir t)))))))
 
 (ert-deftest clutch-test-connect-outside-console-still-uses-generic-read-flow ()

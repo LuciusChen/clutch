@@ -102,6 +102,24 @@
                    '(("clutch-ui" "clutch-connection"
                       declare-function clutch--connection-alive-p))))))
 
+(ert-deftest clutch-architecture-connection-does-not-depend-on-presenters ()
+  "Connection lifecycle may publish UI data but not call workflow presenters."
+  (let ((dependencies
+         '(("clutch-connection" "clutch-backend" require nil)
+           ("clutch-connection" "clutch-schema" require nil)
+           ("clutch-connection" "clutch-ui"
+            declare-function clutch--render-connection-header-line)
+           ("clutch-connection" "clutch-query"
+            declare-function clutch--update-console-buffer-name)
+           ("clutch-connection" "clutch-object"
+            declare-function clutch--render-object-describe))))
+    (should
+     (equal (clutch--architecture-foundation-boundary-violations dependencies)
+            '(("clutch-connection" "clutch-query"
+               declare-function clutch--update-console-buffer-name)
+              ("clutch-connection" "clutch-object"
+               declare-function clutch--render-object-describe))))))
+
 (ert-deftest clutch-architecture-entrypoint-is-a-one-way-composition-root ()
   "Implementation modules must not depend back on the package entrypoint."
   (let ((dependencies
