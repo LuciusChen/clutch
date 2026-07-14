@@ -1316,8 +1316,9 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
                       (concat " " hints)
                     (format " %s  %s" icon hints)))
                 header-line-format
-                '(:eval (clutch--header-with-disconnect-badge
-                         clutch-describe--header-base))
+                (list :eval
+                      (list #'clutch--header-with-disconnect-badge
+                            'clutch-describe--header-base))
                 revert-buffer-function #'clutch-describe-refresh)
     (erase-buffer)
     (insert (clutch--object-describe-text conn entry params))

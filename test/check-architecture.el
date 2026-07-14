@@ -121,8 +121,7 @@ Declaration forms and definition names are excluded."
    ((vectorp form)
     (cl-loop for item across form nconc (clutch--architecture-calls item)))
    ((atom form) nil)
-   ((eq (car form) 'quote)
-    (clutch--architecture-quoted-code-data-calls (nth 1 form)))
+   ((eq (car form) 'quote) nil)
    ((and (symbolp (car form)) (string= (symbol-name (car form)) "`"))
     (clutch--architecture-quasiquote-calls (nth 1 form) 1))
    ((eq (car form) 'declare-function) nil)
@@ -130,15 +129,6 @@ Declaration forms and definition names are excluded."
     (cl-mapcan #'clutch--architecture-calls (cdddr form)))
    (t (append (clutch--architecture-calls (car form))
               (clutch--architecture-calls (cdr form))))))
-
-(defun clutch--architecture-quoted-code-data-calls (form)
-  "Return executable references embedded in quoted runtime FORM data."
-  (cond ((vectorp form)
-         (cl-loop for item across form nconc (clutch--architecture-quoted-code-data-calls item)))
-        ((atom form) nil)
-        ((eq (car form) :eval) (clutch--architecture-calls (nth 1 form)))
-        (t (append (clutch--architecture-quoted-code-data-calls (car form))
-                   (clutch--architecture-quoted-code-data-calls (cdr form))))))
 
 (defun clutch--architecture-quasiquote-calls (form depth)
   "Return executable references from quasiquoted FORM at DEPTH."

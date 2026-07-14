@@ -744,7 +744,9 @@ using the stored params.  Signals a user-error if not recoverable."
             (derived-mode-p 'clutch-repl-mode))
     ;; Use :eval so line-number-display-width is recomputed on each redraw,
     ;; keeping alignment correct when display-line-numbers-mode is toggled.
-    (setq header-line-format '((:eval (clutch--build-connection-header-line)))))
+    (setq header-line-format
+          (list (list :eval
+                      (list #'clutch--build-connection-header-line)))))
   (force-mode-line-update))
 
 (defun clutch--jdbc-connection-params-p (params)

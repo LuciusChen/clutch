@@ -3338,7 +3338,9 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
                 (propertize (format " Record: row %d/%d" (1+ ridx) (length rows))
                             'face 'clutch-header-face))
     (setq header-line-format
-          '(:eval (clutch--header-with-disconnect-badge clutch-record--header-base)))
+          (list :eval
+                (list #'clutch--header-with-disconnect-badge
+                      'clutch-record--header-base)))
     (let* ((row (nth ridx rows))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (cl-loop for name in col-names
