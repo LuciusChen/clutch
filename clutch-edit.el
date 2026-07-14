@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'clutch-backend)
 (require 'clutch-schema)
+(require 'clutch-ui)
 (require 'json)
 
 (defcustom clutch-insert-validation-idle-delay 0.2
@@ -45,29 +46,7 @@
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 
-(declare-function clutch--format-value "clutch-ui" (value))
-(declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
-(declare-function clutch--json-value-to-string "clutch-ui" (value))
-(declare-function clutch--json-like-string-p "clutch-ui" (value))
-(declare-function clutch--key-hints "clutch-ui" (hints))
-(declare-function clutch--null-display-string "clutch-ui" ())
-(declare-function clutch--result-source-table-or-user-error "clutch-ui" (op))
-(declare-function clutch--result-display-rows "clutch-ui" ())
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
-(declare-function clutch--string-pad "clutch-ui" (s width &optional pad-left numeric))
-(declare-function clutch--visible-columns "clutch-ui" ())
-(declare-function clutch--append-pending-insert-row "clutch-ui" (iidx))
-(declare-function clutch--refresh-footer-line "clutch-ui" ())
-(declare-function clutch--refresh-display "clutch-ui" ())
-(declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
-(declare-function clutch--message-count "clutch-ui" (value))
-(declare-function clutch--message-keyword "clutch-ui" (value))
-(declare-function clutch--message-path "clutch-ui" (value))
-(declare-function clutch--status-separator "clutch-ui" ())
-(declare-function clutch--cell-at-point "clutch-ui" ())
-(declare-function clutch--goto-cell "clutch-ui" (ridx cidx))
-(declare-function clutch--row-idx-at-line "clutch-ui" ())
-(declare-function clutch--selected-row-indices "clutch-ui" ())
 (defun clutch-edit--sql-surface-p ()
   "Return non-nil when SQL staged mutation is available in this result."
   (clutch-db-sql-surface-p clutch-connection clutch--connection-params))

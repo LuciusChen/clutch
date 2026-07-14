@@ -13,7 +13,7 @@
   (file-name-directory (directory-file-name (file-name-directory load-file-name)))
   "Repository root containing the Clutch Lisp modules.")
 
-(defconst clutch--architecture-cross-declaration-baseline 65
+(defconst clutch--architecture-cross-declaration-baseline 43
   "Maximum permitted number of cross-module Clutch declarations.")
 
 (defconst clutch--architecture-adapter-workflow-allowlist
