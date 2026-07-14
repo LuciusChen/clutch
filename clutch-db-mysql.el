@@ -96,12 +96,6 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
   :type 'number
   :group 'clutch)
 
-(defvar clutch-connect-timeout-seconds 10
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-read-idle-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
 (defvar clutch-db-mysql--connection-params
   (make-hash-table :test 'eq :weakness 'key)
   "Wire connection parameters keyed by MySQL connection objects.")

@@ -221,30 +221,5 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
                  (symbol :tag "Other"))
   :group 'clutch)
 
-(defcustom clutch-connect-timeout-seconds 10
-  "Timeout in seconds for establishing a database connection.
-Applies to networked backends.  SQLite ignores this setting."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-read-idle-timeout-seconds 30
-  "Idle timeout in seconds while waiting for query I/O.
-Applies to MySQL, PostgreSQL, and JDBC network I/O.  SQLite ignores this
-setting."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-query-timeout-seconds 30
-  "Timeout in seconds for database-side query execution.
-Currently applied by PostgreSQL and JDBC.  Native MySQL does not yet enforce a
-server-side statement timeout."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-jdbc-rpc-timeout-seconds 30
-  "Timeout in seconds for round-trips to the JDBC agent process."
-  :type 'natnum
-  :group 'clutch)
-
 (provide 'clutch)
 ;;; clutch.el ends here

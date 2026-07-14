@@ -34,12 +34,6 @@
 
 (defvar pg-connect-timeout)
 (defvar pg-read-timeout)
-(defvar clutch-connect-timeout-seconds 10
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-(defvar clutch-read-idle-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-(defvar clutch-query-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (declare-function pg-result "pg" (result what &rest arg))
 (declare-function pg-exec "pg" (con &rest args))

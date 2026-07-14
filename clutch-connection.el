@@ -149,7 +149,6 @@ Password resolution order:
                                     (:rpc-timeout natnum)
                                     (:tls boolean))))
   :group 'clutch)
-(defvar clutch-connect-timeout-seconds 10)
 (defcustom clutch-tramp-context-policy 'ask
   "How connection commands use the current TRAMP buffer context.
 When nil, Clutch never infers TRAMP transport from the current buffer.

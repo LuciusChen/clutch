@@ -195,7 +195,10 @@
                                       (clutch--architecture-read-forms file))
                          collect (list module (car form) (cadr form)))))
         (owners
-         '(("clutch-connection" defcustom nil clutch-connection-alist
+         '(("clutch-backend" defcustom t clutch-connect-timeout-seconds
+            clutch-read-idle-timeout-seconds clutch-query-timeout-seconds
+            clutch-jdbc-rpc-timeout-seconds)
+           ("clutch-connection" defcustom nil clutch-connection-alist
             clutch-tramp-context-policy)
            ("clutch-connection" defvar-local nil clutch-connection
             clutch--conn-sql-product clutch--connection-params)

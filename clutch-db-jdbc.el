@@ -92,18 +92,6 @@ Set this to nil to keep Oracle in auto-commit by default.  Per-connection
   :type 'boolean
   :group 'clutch-jdbc)
 
-(defvar clutch-connect-timeout-seconds 10
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-read-idle-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-query-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-jdbc-rpc-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
 (defvar clutch-jdbc-cancel-timeout-seconds 5
   "Seconds to wait for a cancel acknowledgement from the JDBC agent.
 Shorter than `clutch-jdbc-rpc-timeout-seconds' because a slow cancel
