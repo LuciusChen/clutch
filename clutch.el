@@ -39,6 +39,11 @@
 
 ;;; Code:
 
+(defgroup clutch nil
+  "Interactive database lens."
+  :group 'comm
+  :prefix "clutch-")
+
 (require 'clutch-backend)
 (require 'clutch-diagnostics)
 (require 'clutch-connection)
@@ -51,11 +56,6 @@
 (require 'clutch-result)
 
 ;;;; Customization
-
-(defgroup clutch nil
-  "Interactive database lens."
-  :group 'comm
-  :prefix "clutch-")
 
 (defface clutch-field-name-face
   '((((class color) (background light))
@@ -213,101 +213,6 @@ Underlined to indicate clickable (RET to follow)."
   "Face for SQL execution error summaries."
   :group 'clutch)
 
-(defcustom clutch-connection-alist nil
-  "Alist of saved database connections.
-Each entry has the form:
-  (NAME . (:host H :port P :user U [:password P] :database D
-           [:backend SYM] [:sql-product SYM]
-           [:profile-entry STR] [:pass-entry STR]
-           [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
-           [:tramp-default-directory TRAMP-DIRECTORY]
-           [:url STR] [:display-name STR] [:props ALIST]
-           [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
-           [:connect-timeout N] [:read-idle-timeout N]
-           [:query-timeout N] [:rpc-timeout N]))
-NAME is a string used for `completing-read'.
-:backend is required and names the backend symbol (\\='mysql, \\='pg,
-\\='sqlite, \\='mongodb, or a JDBC backend such as \\='oracle or
-\\='sqlserver).
-:surface selects a non-default surface for backends that expose more than one
-query language.  For MongoDB, omit it for the normal document/MongoDB Shell
-surface, or use \\='sql-interface for MongoDB SQL Interface JDBC endpoints.
-:sql-product overrides `clutch-sql-product' for this connection.
-:auth-database / :auth-source set the MongoDB authentication database for
-native MongoDB URLs and the default auth database in structured
-MongoDB SQL Interface JDBC URLs.
-:tls is a convenience shortcut for backend TLS defaults.  For MySQL,
-an explicit `:tls nil' forces plaintext and suppresses the automatic
-MySQL 8 TLS retry path; for PostgreSQL, `:tls t' maps to `:sslmode require'
-and `:tls nil' maps to `:sslmode disable'.
-:ssl-mode is currently MySQL-only; `disabled' is a compatibility spelling for
-the same explicit plaintext mode.  The older alias `off' is also accepted.
-:sslmode is PostgreSQL-only and follows the upstream naming.  Supported values
-are `disable', `prefer', `require', and `verify-full'.
-:ssh-host enables a local SSH tunnel using the named host from ~/.ssh/config.
-clutch starts `ssh -N -L ... SSH-HOST' automatically, so this currently
-requires structured `:host' / `:port' params and does not apply to `:url'
-based JDBC entries.
-:ssh-tunnel controls when that tunnel is used.  The default `always'
-preserves the explicit tunnel behavior; `direct-first' probes `:host' / `:port'
-briefly and skips the tunnel when the database endpoint is already reachable.
-:tramp-default-directory enables the same local forward from an ssh-like TRAMP
-directory such as /ssh:host:/path/ or /rpc:host:/path/.
-:profile-entry reads missing connection fields from an encrypted profile in
-pass or .authinfo/.authinfo.gpg.  For pass, use the normal first-line password
-and `key: value' fields such as `backend:', `host:', `port:', `user:',
-`database:', `ssh-host:', and `ssh-tunnel:'.  For .authinfo, the `machine'
-value is the profile id; use `db-host' for the real database host.  Profile
-fields are defaults: explicit fields in `clutch-connection-alist' override
-profile fields, including :backend, :host, :port, :user, :database, and
-transport keys.  Keeping non-sensitive hints such as :backend in this alist lets
-completion show backend icons without decrypting profiles for display.  If
-:backend is omitted here, the profile must provide it before connecting.
-
-Password resolution order:
-  1. :password — used as-is when present.
-  2. :profile-entry — uses the profile's first-line/`password' secret when no
-     explicit :password or :pass-entry is configured.
-  3. Pass store by connection name — when `auth-source-pass' is loaded,
-     clutch automatically looks up a pass entry whose name matches NAME
-     (the car of this alist entry).  The password is on the first line.
-     Use :pass-entry STR to override the entry name if it differs.
-  4. `auth-source-search' — searches ~/.authinfo / ~/.authinfo.gpg / pass
-     by :host, :user, and :port (standard auth-source matching)."
-  :type '(alist :key-type string
-                :value-type (plist :options
-                                   ((:host string)
-                                    (:port integer)
-                                    (:user string)
-                                    (:password string)
-                                    (:database string)
-                                    (:auth-database string)
-                                    (:auth-source string)
-                                    (:backend symbol)
-                                    (:sql-product symbol)
-                                    (:profile-entry string)
-                                    (:pass-entry string)
-                                    (:ssh-host string)
-                                    (:ssh-tunnel
-                                     (choice (const always)
-                                             (const direct-first)))
-                                    (:tramp-default-directory string)
-                                    (:url string)
-                                    (:display-name string)
-                                    (:props (alist :key-type string :value-type string))
-                                    (:ssl-mode (choice (const :tag "Disabled" disabled)
-                                                       (const :tag "Off (alias)" off)))
-                                    (:sslmode (choice (const :tag "Disable" disable)
-                                                      (const :tag "Prefer" prefer)
-                                                      (const :tag "Require" require)
-                                                      (const :tag "Verify Full" verify-full)))
-                                    (:connect-timeout natnum)
-                                    (:read-idle-timeout natnum)
-                                    (:query-timeout natnum)
-                                    (:rpc-timeout natnum)
-                                    (:tls boolean))))
-  :group 'clutch)
-
 (defcustom clutch-insert-validation-idle-delay 0.2
   "Idle seconds before validating heavier insert fields such as JSON."
   :type 'number
@@ -369,19 +274,6 @@ Must be a symbol recognized by `sql-mode' (e.g. mysql, postgres)."
   "Timeout in seconds for establishing a database connection.
 Applies to networked backends.  SQLite ignores this setting."
   :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-tramp-context-policy 'ask
-  "How connection commands use the current TRAMP buffer context.
-When nil, Clutch never infers TRAMP transport from the current buffer.
-When `ask', Clutch prompts before using the current TRAMP default directory.
-When `auto', Clutch uses the current TRAMP default directory without asking.
-This only applies when a connection has no explicit transport such as
-:ssh-host or :tramp-default-directory.  TRAMP transport currently supports
-ssh-like TRAMP directories."
-  :type '(choice (const :tag "Never infer TRAMP context" nil)
-                 (const :tag "Ask before using current TRAMP context" ask)
-                 (const :tag "Automatically use current TRAMP context" auto))
   :group 'clutch)
 
 (defcustom clutch-read-idle-timeout-seconds 30
@@ -468,9 +360,6 @@ cleaned up in the pasted region only."
 
 ;;;; Buffer-local variables
 
-(defvar-local clutch-connection nil
-  "Current database connection for this buffer.")
-
 (defvar clutch-debug-mode nil
   "Non-nil when Clutch debug capture is enabled.")
 
@@ -486,9 +375,6 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (defvar clutch--executing-sql-end nil
   "Buffer position where the currently executing SQL ends, or nil.
 Dynamically bound by `clutch--execute-and-mark'.")
-
-(defvar-local clutch--conn-sql-product nil
-  "SQL product for the current connection, or nil to use the default.")
 
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
@@ -511,11 +397,6 @@ and captured output is appended to the dedicated `*clutch-debug*' buffer."
 
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
-
-(defvar-local clutch--connection-params nil
-  "Params plist used to establish the current connection.
-Stored at connect time so the connection can be re-established
-automatically when it drops.")
 
 (provide 'clutch)
 ;;; clutch.el ends here

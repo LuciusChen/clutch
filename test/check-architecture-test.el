@@ -133,6 +133,46 @@
             '(("clutch-query" "clutch" declare-function clutch-mode)
               ("clutch-connection" "clutch" require nil))))))
 
+(ert-deftest clutch-architecture-composition-root-has-a-state-budget ()
+  "Mutable package state must keep moving from root to its workflow owner."
+  (let ((forms '((require 'clutch-query)
+                 (defgroup clutch nil "Package group.")
+                 (defcustom option nil "Option." :type 'boolean)
+                 (defvar shared-state nil "State.")
+                 (defvar-local buffer-state nil "Buffer state.")
+                 (define-minor-mode package-mode "Mode.")
+                 (progn (defvar nested-state nil "Nested state."))
+                 '(defvar quoted-state nil "Quoted data.")
+                 (defconst immutable-value 1 "Constant.")
+                 (defface package-face '((t :inherit default)) "Face."))))
+    (should
+     (equal (mapcar #'cadr (clutch--architecture-root-state-forms forms))
+            '(option shared-state buffer-state package-mode nested-state)))))
+
+(ert-deftest clutch-architecture-connection-owns-session-context-state ()
+  "Connection configuration and buffer context must be defined by its owner."
+  (let ((parsed
+         (cl-loop for file in (directory-files
+                               clutch--architecture-repo t
+                               "\\`clutch.*\\.el\\'")
+                  collect (cons (file-name-base file)
+                                (clutch--architecture-read-forms file)))))
+    (dolist (symbol '(clutch-connection-alist
+                      clutch-tramp-context-policy
+                      clutch-connection
+                      clutch--conn-sql-product
+                      clutch--connection-params))
+      (should
+       (equal
+        (cl-loop for (module . forms) in parsed
+                 when (cl-some
+                       (lambda (form)
+                         (and (memq (car form) '(defcustom defvar-local))
+                              (eq (cadr form) symbol)))
+                       (clutch--architecture-root-state-forms forms))
+                 collect module)
+        '("clutch-connection"))))))
+
 (ert-deftest clutch-architecture-public-autoloads-enter-through-root ()
   "Public workflow autoloads must assemble the package through `clutch'."
   (require 'loaddefs-gen)

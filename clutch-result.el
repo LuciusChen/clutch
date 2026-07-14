@@ -23,7 +23,6 @@
 (require 'subr-x)
 (require 'transient)
 
-(defvar clutch-connection)
 (defvar clutch-agent-context-max-cell-width)
 (defvar clutch-agent-context-max-result-rows)
 (defvar clutch-csv-export-default-coding-system)
@@ -31,8 +30,6 @@
 (defvar clutch-result-window-height)
 (defvar clutch-result-max-rows)
 (defvar clutch--base-query)
-(defvar clutch--conn-sql-product)
-(defvar clutch--connection-params)
 (defvar clutch--footer-base-string)
 (defvar clutch--footer-cursor-cache)
 (defvar clutch--footer-display-cache)

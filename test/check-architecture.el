@@ -41,6 +41,21 @@
 (defconst clutch--architecture-largest-scc-baseline 3
   "Maximum permitted strongly connected component size.")
 
+(defconst clutch--architecture-root-state-baseline 30
+  "Maximum mutable state definitions permitted in the composition root.")
+
+(defun clutch--architecture-root-state-forms (forms)
+  "Return mutable package-state definitions from root FORMS."
+  (let (state-forms)
+    (dolist (form forms)
+      (clutch--architecture-walk-dependencies
+       form
+       (lambda (candidate)
+         (when (memq (car candidate)
+                     '(defcustom defvar defvar-local define-minor-mode))
+           (push candidate state-forms)))))
+    (nreverse state-forms)))
+
 (defun clutch--architecture-read-forms (file)
   "Read every top-level form from FILE without evaluating it."
   (with-temp-buffer
@@ -248,6 +263,9 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
           (clutch--architecture-composition-root-inbound-violations
            dependencies))
          (largest-scc (clutch--architecture-largest-scc modules dependencies))
+         (root-state
+          (clutch--architecture-root-state-forms
+           (cdr (assoc "clutch" parsed))))
          errors)
     (dolist (edge (sort (cl-delete-duplicates
                           (mapcar (lambda (dependency)
@@ -281,6 +299,11 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
       (push (format "largest SCC: %d (maximum %d)"
                     largest-scc clutch--architecture-largest-scc-baseline)
             errors))
+    (when (> (length root-state) clutch--architecture-root-state-baseline)
+      (push (format "composition-root state definitions: %d (maximum %d)"
+                    (length root-state)
+                    clutch--architecture-root-state-baseline)
+            errors))
     (when unapproved
       (push (format "unapproved adapter-to-workflow dependencies: %S" unapproved)
             errors))
@@ -296,8 +319,9 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
           (dolist (error-message (nreverse errors))
             (princ (format "ARCHITECTURE ERROR: %s\n" error-message)))
           (kill-emacs 1))
-      (princ (format "Architecture OK: stale=0 cross-declarations=%d largest-scc=%d\n"
-                     (length cross) largest-scc)))))
+      (princ (format (concat "Architecture OK: stale=0 cross-declarations=%d "
+                             "largest-scc=%d root-state=%d\n")
+                     (length cross) largest-scc (length root-state))))))
 
 (unless (bound-and-true-p clutch--architecture-skip-main)
   (clutch--architecture-main))

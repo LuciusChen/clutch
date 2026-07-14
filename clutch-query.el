@@ -39,19 +39,15 @@
 (require 'transient)
 (require 'xref)
 
-;; Forward declarations — variables defined in clutch.el
-(defvar clutch-connection)
-(defvar clutch--conn-sql-product)
+;; Forward declarations — variables defined in sibling workflow modules
 (defvar clutch--last-query)
 (defvar clutch--last-result-buffer)
 (defvar clutch--base-query)
-(defvar clutch--connection-params)
 (defvar clutch--source-window)
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
 (defvar clutch-console-directory)
 (defvar clutch-debug-mode nil)
-(defvar clutch-connection-alist nil)
 (defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch-console-yank-cleanup t)

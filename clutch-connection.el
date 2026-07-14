@@ -43,19 +43,125 @@
 (defvar tramp-rpc-use-controlmaster)
 
 ;; Forward declarations — shared buffer-local variables
-(defvar clutch-connection)
+(defvar-local clutch-connection nil
+  "Current database connection for this buffer.")
 (defvar clutch--executing-p)
-(defvar clutch--conn-sql-product)
-(defvar clutch--connection-params)
+(defvar-local clutch--conn-sql-product nil
+  "SQL product for the current connection, or nil to use the default.")
+(defvar-local clutch--connection-params nil
+  "Params plist used to establish the current connection.
+Stored at connect time so the connection can be re-established
+automatically when it drops.")
 (defvar clutch--console-name)
 (defvar clutch--console-ad-hoc-params)
 (defvar clutch--describe-object-entry)
-(defvar clutch-connection-alist nil)
+(defcustom clutch-connection-alist nil
+  "Alist of saved database connections.
+Each entry has the form:
+  (NAME . (:host H :port P :user U [:password P] :database D
+           [:backend SYM] [:sql-product SYM]
+           [:profile-entry STR] [:pass-entry STR]
+           [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
+           [:tramp-default-directory TRAMP-DIRECTORY]
+           [:url STR] [:display-name STR] [:props ALIST]
+           [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
+           [:connect-timeout N] [:read-idle-timeout N]
+           [:query-timeout N] [:rpc-timeout N]))
+NAME is a string used for `completing-read'.
+:backend is required and names the backend symbol (\\='mysql, \\='pg,
+\\='sqlite, \\='mongodb, or a JDBC backend such as \\='oracle or
+\\='sqlserver).
+:surface selects a non-default surface for backends that expose more than one
+query language.  For MongoDB, omit it for the normal document/MongoDB Shell
+surface, or use \\='sql-interface for MongoDB SQL Interface JDBC endpoints.
+:sql-product overrides `clutch-sql-product' for this connection.
+:auth-database / :auth-source set the MongoDB authentication database for
+native MongoDB URLs and the default auth database in structured
+MongoDB SQL Interface JDBC URLs.
+:tls is a convenience shortcut for backend TLS defaults.  For MySQL,
+an explicit `:tls nil' forces plaintext and suppresses the automatic
+MySQL 8 TLS retry path; for PostgreSQL, `:tls t' maps to `:sslmode require'
+and `:tls nil' maps to `:sslmode disable'.
+:ssl-mode is currently MySQL-only; `disabled' is a compatibility spelling for
+the same explicit plaintext mode.  The older alias `off' is also accepted.
+:sslmode is PostgreSQL-only and follows the upstream naming.  Supported values
+are `disable', `prefer', `require', and `verify-full'.
+:ssh-host enables a local SSH tunnel using the named host from ~/.ssh/config.
+clutch starts `ssh -N -L ... SSH-HOST' automatically, so this currently
+requires structured `:host' / `:port' params and does not apply to `:url'
+based JDBC entries.
+:ssh-tunnel controls when that tunnel is used.  The default `always'
+preserves the explicit tunnel behavior; `direct-first' probes `:host' / `:port'
+briefly and skips the tunnel when the database endpoint is already reachable.
+:tramp-default-directory enables the same local forward from an ssh-like TRAMP
+directory such as /ssh:host:/path/ or /rpc:host:/path/.
+:profile-entry reads missing connection fields from an encrypted profile in
+pass or .authinfo/.authinfo.gpg.  For pass, use the normal first-line password
+and `key: value' fields such as `backend:', `host:', `port:', `user:',
+`database:', `ssh-host:', and `ssh-tunnel:'.  For .authinfo, the `machine'
+value is the profile id; use `db-host' for the real database host.  Profile
+fields are defaults: explicit fields in `clutch-connection-alist' override
+profile fields, including :backend, :host, :port, :user, :database, and
+transport keys.  Keeping non-sensitive hints such as :backend in this alist lets
+completion show backend icons without decrypting profiles for display.  If
+:backend is omitted here, the profile must provide it before connecting.
+
+Password resolution order:
+  1. :password — used as-is when present.
+  2. :profile-entry — uses the profile's first-line/`password' secret when no
+     explicit :password or :pass-entry is configured.
+  3. Pass store by connection name — when `auth-source-pass' is loaded,
+     clutch automatically looks up a pass entry whose name matches NAME
+     (the car of this alist entry).  The password is on the first line.
+     Use :pass-entry STR to override the entry name if it differs.
+  4. `auth-source-search' — searches ~/.authinfo / ~/.authinfo.gpg / pass
+     by :host, :user, and :port (standard auth-source matching)."
+  :type '(alist :key-type string
+                :value-type (plist :options
+                                   ((:host string)
+                                    (:port integer)
+                                    (:user string)
+                                    (:password string)
+                                    (:database string)
+                                    (:auth-database string)
+                                    (:auth-source string)
+                                    (:backend symbol)
+                                    (:sql-product symbol)
+                                    (:profile-entry string)
+                                    (:pass-entry string)
+                                    (:ssh-host string)
+                                    (:ssh-tunnel
+                                     (choice (const always)
+                                             (const direct-first)))
+                                    (:tramp-default-directory string)
+                                    (:url string)
+                                    (:display-name string)
+                                    (:props (alist :key-type string :value-type string))
+                                    (:ssl-mode (choice (const :tag "Disabled" disabled)
+                                                       (const :tag "Off (alias)" off)))
+                                    (:sslmode (choice (const :tag "Disable" disable)
+                                                      (const :tag "Prefer" prefer)
+                                                      (const :tag "Require" require)
+                                                      (const :tag "Verify Full" verify-full)))
+                                    (:connect-timeout natnum)
+                                    (:read-idle-timeout natnum)
+                                    (:query-timeout natnum)
+                                    (:rpc-timeout natnum)
+                                    (:tls boolean))))
+  :group 'clutch)
 (defvar clutch-connect-timeout-seconds 10)
-(defvar clutch-read-idle-timeout-seconds 30)
-(defvar clutch-query-timeout-seconds 30)
-(defvar clutch-jdbc-rpc-timeout-seconds 30)
-(defvar clutch-tramp-context-policy 'ask)
+(defcustom clutch-tramp-context-policy 'ask
+  "How connection commands use the current TRAMP buffer context.
+When nil, Clutch never infers TRAMP transport from the current buffer.
+When `ask', Clutch prompts before using the current TRAMP default directory.
+When `auto', Clutch uses the current TRAMP default directory without asking.
+This only applies when a connection has no explicit transport such as
+:ssh-host or :tramp-default-directory.  TRAMP transport currently supports
+ssh-like TRAMP directories."
+  :type '(choice (const :tag "Never infer TRAMP context" nil)
+                 (const :tag "Ask before using current TRAMP context" ask)
+                 (const :tag "Automatically use current TRAMP context" auto))
+  :group 'clutch)
 (defvar clutch--dml-result)
 (defvar clutch-debug-mode nil)
 (defvar clutch--connection-render-state)
