@@ -63,7 +63,6 @@ cleaned up in the pasted region only."
 (defvar clutch--executing-sql-start)
 (defvar clutch--executing-sql-end)
 (defvar clutch-debug-mode nil)
-(defvar clutch-result-window-height 0.33)
 (defvar clutch-result-max-rows 500)
 (defvar clutch--query-buffer-local-p)
 (defvar clutch--query-mode-line-name)

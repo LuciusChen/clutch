@@ -172,7 +172,14 @@
            ("clutch-sql" defcustom t clutch-sql-completion-case-style)
            ("clutch-edit" defcustom t clutch-insert-validation-idle-delay)
            ("clutch-object" defcustom t clutch-object-warmup-idle-delay-seconds
-            clutch-primary-object-types))))
+            clutch-primary-object-types)
+           ("clutch-result" defcustom t clutch-result-window-height
+            clutch-agent-context-max-result-rows
+            clutch-agent-context-max-cell-width clutch-column-width-step
+            clutch-csv-export-default-coding-system)
+           ("clutch-ui" defcustom t clutch-column-width-max
+            clutch-column-padding)
+           ("clutch-diagnostics" defcustom t clutch-debug-event-limit))))
     (dolist (owner owners)
       (pcase-let ((`(,module ,kind ,exclusive . ,symbols) owner))
         (dolist (symbol symbols)
@@ -241,6 +248,7 @@
   (require 'clutch-query)
   (require 'clutch-edit)
   (require 'clutch-object)
+  (require 'clutch-result)
   (should-not (featurep 'clutch))
   (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
                     clutch-switch-schema))

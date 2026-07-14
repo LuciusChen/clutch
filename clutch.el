@@ -213,40 +213,8 @@ Underlined to indicate clickable (RET to follow)."
   "Face for SQL execution error summaries."
   :group 'clutch)
 
-(defcustom clutch-result-window-height 0.33
-  "Height of the result window as a fraction of the frame height.
-A float between 0.0 and 1.0.  Only applies when creating a new result
-window; an existing result window is reused at its current height."
-  :type 'float
-  :group 'clutch)
-
 (defcustom clutch-result-max-rows 500
   "Maximum number of rows to display in result tables."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-agent-context-max-result-rows 20
-  "Maximum number of current result rows copied for external agent context."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-agent-context-max-cell-width 200
-  "Maximum width of a single copied cell in external agent context."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-column-width-max 30
-  "Maximum display width for a single column in the result table."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-column-width-step 2
-  "Step size for widening/narrowing columns with +/-."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-column-padding 1
-  "Number of padding spaces on each side of a cell."
   :type 'natnum
   :group 'clutch)
 
@@ -281,20 +249,6 @@ server-side statement timeout."
 
 (defcustom clutch-jdbc-rpc-timeout-seconds 30
   "Timeout in seconds for round-trips to the JDBC agent process."
-  :type 'natnum
-  :group 'clutch)
-
-(defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
-  "Default coding system when exporting CSV files."
-  :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
-                 (const :tag "UTF-8" utf-8)
-                 (const :tag "GBK" gbk)
-                 (coding-system :tag "Other coding system"))
-  :group 'clutch)
-
-(defcustom clutch-debug-event-limit 25
-  "Maximum number of recent debug events kept per buffer or connection.
-Only recorded while `clutch-debug-mode' is enabled."
   :type 'natnum
   :group 'clutch)
 

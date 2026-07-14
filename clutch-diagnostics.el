@@ -12,10 +12,15 @@
 (require 'clutch-backend)
 (require 'subr-x)
 
+(defcustom clutch-debug-event-limit 25
+  "Maximum number of recent debug events kept per buffer or connection.
+Only recorded while `clutch-debug-mode' is enabled."
+  :type 'natnum
+  :group 'clutch)
+
 (defvar clutch-connection)
 (defvar clutch-debug-mode nil)
 (defvar clutch-debug-buffer-name "*clutch-debug*")
-(defvar clutch-debug-event-limit 25)
 
 (defvar clutch--diagnostics-connection-label-function nil)
 (defvar clutch--diagnostics-attached-buffer-function nil)

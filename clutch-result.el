@@ -23,11 +23,38 @@
 (require 'subr-x)
 (require 'transient)
 
-(defvar clutch-agent-context-max-cell-width)
-(defvar clutch-agent-context-max-result-rows)
-(defvar clutch-csv-export-default-coding-system)
-(defvar clutch-column-width-step)
-(defvar clutch-result-window-height)
+;;;; Configuration
+
+(defcustom clutch-result-window-height 0.33
+  "Height of the result window as a fraction of the frame height.
+A float between 0.0 and 1.0.  Only applies when creating a new result
+window; an existing result window is reused at its current height."
+  :type 'float
+  :group 'clutch)
+
+(defcustom clutch-agent-context-max-result-rows 20
+  "Maximum number of current result rows copied for external agent context."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-agent-context-max-cell-width 200
+  "Maximum width of a single copied cell in external agent context."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-column-width-step 2
+  "Step size for widening/narrowing columns with +/-."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
+  "Default coding system when exporting CSV files."
+  :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
+                 (const :tag "UTF-8" utf-8)
+                 (const :tag "GBK" gbk)
+                 (coding-system :tag "Other coding system"))
+  :group 'clutch)
+
 (defvar clutch-result-max-rows)
 (defvar clutch--base-query)
 (defvar clutch--footer-base-string)

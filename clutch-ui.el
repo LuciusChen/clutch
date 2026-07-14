@@ -14,6 +14,16 @@
 (require 'subr-x)
 (require 'clutch-backend)
 
+(defcustom clutch-column-width-max 30
+  "Maximum display width for a single column in the result table."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-column-padding 1
+  "Number of padding spaces on each side of a cell."
+  :type 'natnum
+  :group 'clutch)
+
 (defvar clutch--executing-p)
 
 (defvar clutch--aggregate-summary)
@@ -111,8 +121,6 @@ the header cell was rendered.")
 (defvar clutch--refine-overlays)
 (defvar clutch--refine-callback)
 (defvar clutch--refine-saved-mode-line)
-(defvar clutch-column-padding)
-(defvar clutch-column-width-max)
 (defvar clutch-connection)
 (defvar clutch-describe--header-base)
 (defvar clutch-result-max-rows)
