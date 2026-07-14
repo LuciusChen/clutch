@@ -162,6 +162,44 @@ Each entry is (SOURCE TARGET KIND SYMBOL), where KIND is `require' or
                (push (list source target (nth 1 form)) redundant))))))
      (nreverse redundant))))
 
+(defun clutch--architecture-variable-definition-p (form)
+  "Return non-nil when top-level FORM really defines a variable.
+A bare `(defvar SYMBOL)' is only a compile-time declaration, not an owner."
+  (or (memq (car-safe form)
+            '(defvar-local defcustom defconst define-minor-mode))
+      (and (eq (car-safe form) 'defvar)
+           (> (length form) 2))))
+
+(defun clutch--architecture-variable-definition-owners (parsed)
+  "Return a hash table mapping variable symbols to owner modules in PARSED."
+  (let ((owners (make-hash-table :test #'eq)))
+    (dolist (entry parsed)
+      (dolist (form (cdr entry))
+        (when (clutch--architecture-variable-definition-p form)
+          (cl-pushnew (car entry) (gethash (nth 1 form) owners)
+                      :test #'equal))))
+    owners))
+
+(defun clutch--architecture-redundant-variable-declarations (parsed)
+  "Return bare `defvar' declarations covered by prior requires in PARSED.
+Each entry is (SOURCE OWNER SYMBOL).  Only real top-level definitions in an
+earlier mandatorily required owner cover a declaration."
+  (let ((owners (clutch--architecture-variable-definition-owners parsed)))
+    (cl-loop
+     for (source . forms) in parsed nconc
+     (let (required redundant)
+       (dolist (form forms)
+         (if-let* ((target (clutch--architecture-top-level-require-target form)))
+             (cl-pushnew target required :test #'equal)
+           (when (and (eq (car-safe form) 'defvar)
+                      (= (length form) 2))
+             (when-let* ((owner
+                          (cl-find-if
+                           (lambda (candidate) (member candidate required))
+                           (gethash (nth 1 form) owners))))
+               (push (list source owner (nth 1 form)) redundant)))))
+       (nreverse redundant)))))
+
 (defun clutch--architecture-calls (form)
   "Return function symbols actually called by unquoted FORM.
 Declaration forms and definition names are excluded."
@@ -281,6 +319,8 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
                                   parsed))
          (stale (clutch--architecture-stale-declarations declarations parsed))
          (redundant (clutch--architecture-redundant-declarations parsed))
+         (redundant-variable-declarations
+          (clutch--architecture-redundant-variable-declarations parsed))
          (cross (cl-remove-if (lambda (entry) (equal (nth 0 entry) (nth 1 entry)))
                               declarations))
          (unapproved (clutch--architecture-unapproved-adapter-edges dependencies))
@@ -321,6 +361,10 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
     (when redundant
       (push (format "declarations duplicated by top-level require: %S"
                     redundant)
+            errors))
+    (when redundant-variable-declarations
+      (push (format "variable declarations duplicated by top-level require: %S"
+                    redundant-variable-declarations)
             errors))
     (when (> (length cross) clutch--architecture-cross-declaration-baseline)
       (push (format "cross-module declarations: %d (maximum %d)"

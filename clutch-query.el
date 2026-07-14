@@ -60,10 +60,6 @@ cleaned up in the pasted region only."
 (defvar clutch-result-max-rows 500
   "Direct-load fallback for the shared result row budget defined in clutch.el.")
 
-;; Forward declarations — variables defined in sibling workflow modules
-(defvar clutch--query-buffer-local-p)
-(defvar clutch--query-mode-line-name)
-
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
 Used to update the mode-line with a spinner during execution.")

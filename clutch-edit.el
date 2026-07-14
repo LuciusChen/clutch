@@ -30,7 +30,6 @@
 (defvar clutch--result-source-table)
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
-(defvar clutch--row-start-positions)
 (defvar clutch-record--result-buffer)
 (defvar clutch-record--row-idx)
 

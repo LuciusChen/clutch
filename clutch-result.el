@@ -57,13 +57,6 @@ window; an existing result window is reused at its current height."
 
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
-(defvar clutch--footer-base-string)
-(defvar clutch--footer-cursor-cache)
-(defvar clutch--footer-display-cache)
-(defvar clutch--footer-filters-cache)
-(defvar clutch--footer-timing-cache)
-(defvar clutch--header-line-string)
-(defvar clutch--last-cell-position)
 (defvar clutch--pre-fullscreen-config)
 
 (defvar-local clutch--aggregate-summary nil
