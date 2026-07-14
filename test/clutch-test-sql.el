@@ -7,7 +7,8 @@
 ;;; Code:
 
 (eval-and-compile
-  (require 'clutch-test-common))
+  (require 'clutch-test-common)
+  (require 'clutch-db-sqlite))
 
 ;;;; SQL test helpers
 
@@ -1070,350 +1071,173 @@ ORDER BY id"
                        (error "CAPF boom"))))
             (should-error (funcall command) :type 'error)))))))
 
-(ert-deftest clutch-test-completion-at-point-keeps-short-prefix-table-only ()
-  "Non-keyword short prefixes should not load columns eagerly."
-  (with-temp-buffer
-    (insert "x")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          called)
-      (puthash "xaccounts" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
+(ert-deftest clutch-test-completion-capf-real-sqlite-workflow ()
+  "Exercise the installed SQL CAPFs against real SQLite metadata."
+  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+           (schema (make-hash-table :test 'equal)))
+      (unwind-protect
+          (progn
+            (dolist (ddl '("create table users (id integer, name text)"
+                           "create table posts (id integer, title text)"
+                           "create table orders (order_id integer, user_id integer)"
+                           "create table user_roles (id integer)"
+                           "create table xaccounts (id integer)"
+                           "create table APP_CONFIG (CONFIG_ID integer, CONFIG_NAME text)"))
+              (clutch-db-query conn ddl))
+            (dolist (table '("users" "posts" "orders" "user_roles"
+                             "xaccounts" "APP_CONFIG"))
+              (puthash table (clutch-db-list-columns conn table) schema))
+            (dolist (table '("orders" "xaccounts"))
+              (puthash table nil schema))
+            (puthash conn schema clutch--schema-cache)
+            (puthash conn '(:state ready) clutch--schema-status-cache)
+            (dolist (case
+                     '((short "x" nil preserve (:exact ("xaccounts")) nil)
+                       (from "select * from or" nil preserve
+                             (:exact ("orders")) nil)
+                       (qualified
+                        "select * from users u join posts p on u."
+                        nil preserve (:exact ("id" "name")) t)
+                       (keyword "sele from users" "sele" preserve
+                                (:members ("SELECT")) nil)
+                       (cache-miss
+                        "select ord from users join orders on users.id = orders.user_id"
+                        "ord" preserve (:members ("ORDER BY" "order_id")) nil)
+                       (lowercase "select con from APP_CONFIG" "con" lower
+                                  (:members ("concat" "constraint" "config_id" "config_name")
+                                   :absent ("CONFIG_ID" "CONFIG_NAME"))
+                                  nil)))
+              (pcase-let ((`(,label ,sql ,needle ,style ,expected ,company) case))
+                (ert-info ((format "case: %s" label))
+                  (with-temp-buffer
+                    (clutch-mode)
+                    (setq-local clutch-connection conn)
+                    (insert sql)
+                    (if needle
+                        (progn
+                          (goto-char (point-min))
+                          (search-forward needle))
+                      (goto-char (point-max)))
+                    (let* ((clutch-sql-completion-case-style style)
+                           (captured nil)
+                           (completion-in-region-function
+                            (lambda (start end collection &optional predicate)
+                              (setq captured
+                                    (all-completions
+                                     (buffer-substring-no-properties start end)
+                                     collection predicate))
+                              t)))
+                      (should (completion-at-point))
+                      (if-let* ((exact (plist-get expected :exact)))
+                          (should (equal captured exact))
+                        (dolist (candidate (plist-get expected :members))
+                          (should (member candidate captured))))
+                      (dolist (candidate (plist-get expected :absent))
+                        (should-not (member candidate captured)))
+                      (when company
+                        (should
+                         (eq (plist-get (nthcdr 3 (clutch-completion-at-point))
+                                        :company-prefix-length)
+                             t))))))))
+            (should-not (gethash "xaccounts" schema))
+            (should (equal (gethash "orders" schema) '("order_id" "user_id"))))
+        (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-test-completion-backend-source-effect-matrix ()
+  "Keep cached, direct-table, and direct-column completion sources distinct."
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((conn (make-clutch-jdbc-conn :driver 'oracle))
+           (schema (make-hash-table :test 'equal))
+           table-rpc-result table-rpc-prefixes column-rpc-calls)
+      (puthash conn schema clutch--schema-cache)
+      (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+                ((symbol-function 'clutch-db-complete-tables)
+                 (lambda (_conn prefix)
+                   (when (eq table-rpc-result 'forbidden)
+                     (ert-fail "ready cache hit must avoid table RPC"))
+                   (push prefix table-rpc-prefixes)
+                   table-rpc-result))
+                ((symbol-function 'clutch-db-complete-columns)
+                 (lambda (_conn table prefix)
+                   (push (cons table prefix) column-rpc-calls)
+                   (pcase table
+                     ("APP_CONFIG" '("CONFIG_ID" "CONFIG_NAME"))
+                     ("APP_LOG" '("PAYLOAD")))))
                 ((symbol-function 'clutch--ensure-columns)
                  (lambda (&rest _args)
-                   (setq called t)
-                   '("id"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "xaccounts" candidates))
-          (should-not called))))))
+                   (ert-fail "sync-disabled completion must not ensure columns"))))
+              (dolist (case
+                       '((ready-hit "select * from us" "USERS" ready forbidden
+                                    ("USERS") nil)
+                         (ready-miss "select * from or" "AUDIT_LOG" ready
+                                     ("ORDERS") ("ORDERS") "or")
+                         (stale-cache "select * from us" "USERS_OLD" stale
+                                      ("USERS_NEW")
+                                      ("USERS_NEW" "USERS_OLD") "us")))
+                (pcase-let ((`(,label ,sql ,cached-table ,state ,rpc-result
+                                      ,expected ,rpc-prefix) case))
+                  (ert-info ((format "case: %s" label))
+                    (clrhash schema)
+                    (puthash cached-table nil schema)
+                    (puthash conn (list :state state) clutch--schema-status-cache)
+                    (setq table-rpc-result rpc-result
+                          table-rpc-prefixes nil)
+                    (with-temp-buffer
+                      (clutch-mode)
+                      (setq-local clutch-connection conn)
+                      (insert sql)
+                      (goto-char (point-max))
+                      (let* ((capf (clutch-completion-at-point))
+                             (candidates (clutch-test--completion-candidates capf)))
+                        (should capf)
+                        (should (equal candidates expected))
+                        (if rpc-prefix
+                            (should (equal table-rpc-prefixes
+                                           (list rpc-prefix)))
+                          (should-not table-rpc-prefixes)))))))
+              (clrhash schema)
+              (puthash "APP_CONFIG" nil schema)
+              (puthash "APP_LOG" nil schema)
+              (puthash conn '(:state ready) clutch--schema-status-cache)
+              (setq table-rpc-result 'forbidden
+                    column-rpc-calls nil)
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (insert "select u.con from APP_CONFIG u join APP_LOG p on u.id = p.config_id")
+                (goto-char (point-min))
+                (search-forward "con")
+                (let* ((capf (clutch-completion-at-point))
+                       (candidates (clutch-test--completion-candidates capf)))
+                  (should capf)
+                  (dolist (candidate '("CONFIG_ID" "CONFIG_NAME"))
+                    (should (member candidate candidates)))
+                  (dolist (candidate '("PAYLOAD" "APP_CONFIG" "APP_LOG"))
+                    (should-not (member candidate candidates)))
+                  (should (equal column-rpc-calls
+                                 '(("APP_CONFIG" . "con"))))))))))
 
-(ert-deftest clutch-test-completion-at-point-uses-cached-columns-for-small-statement-scope ()
-  "Identifier completion should reuse cached columns and sync-load cache misses."
-  (with-temp-buffer
-    (insert "us")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          loaded)
-      (puthash "users" '("id" "name") schema)
-      (puthash "orders" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users" "orders")))
-                ((symbol-function 'clutch--ensure-columns)
-                 (lambda (_conn _schema table)
-                   (setq loaded table)
-                   '("order_id" "user_id")))
-                ((symbol-function 'clutch--ensure-columns-async)
-                 (lambda (&rest _args)
-                   (ert-fail "sync completion should not queue async column loads"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf "")))
-          (should capf)
-          (should (equal loaded "orders"))
-          (should (member "id" candidates))
-          (should (member "order_id" candidates))
-          (should-not (member "users" candidates))
-          (should-not (member "orders" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-qualified-table-for-cached-column-loading ()
-  "Qualified completion should only use cached columns for the referenced table."
-  (dolist (case '(("select * from users u join posts p on u." "u.")
-                  ("select users. from users" "users.")))
-    (pcase-let ((`(,sql ,marker) case))
+(ert-deftest clutch-test-completion-oracle-i18n-fails-soft-once ()
+  "Oracle i18n completion errors should warn once and remain non-fatal."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-db-sqlite-conn))
+          (clutch--oracle-i18n-warning-shown nil)
+          warned)
       (with-temp-buffer
         (clutch-mode)
-        (insert sql)
-        (goto-char (point-min))
-        (search-forward marker)
-        (let ((schema (make-hash-table :test 'equal))
-              (clutch-connection 'fake)
-              captured)
-          (puthash "users" '("id" "name") schema)
-          (puthash "posts" '("title" "body") schema)
-          (push (lambda ()
-                  (list (point) (point) '("generic") :exclusive 'no))
-                completion-at-point-functions)
-          (run-hooks 'corfu-mode-hook)
-          (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                     (lambda () schema))
-                    ((symbol-function 'clutch-db-busy-p)
-                     (lambda (_conn) nil))
-                    ((symbol-function 'clutch-db-completion-sync-columns-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch--ensure-columns-async)
-                     (lambda (&rest _args)
-                       (ert-fail "should not queue async loads when target is cached")))
-                    (completion-in-region-function
-                     (lambda (start end collection &optional predicate)
-                       (setq captured
-                             (all-completions
-                              (buffer-substring-no-properties start end)
-                              collection predicate))
-                       t)))
-            (let ((command (local-key-binding (kbd "TAB"))))
-              (let ((this-command command))
-                (call-interactively command)))
-            (should (equal captured '("id" "name")))
-            (should-not (member "generic" captured))
-            (should-not (member "title" captured))
-            (should (eq (plist-get (nthcdr 3 (clutch-completion-at-point))
-                                   :company-prefix-length)
-                        t))))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-ready-schema-table-candidates-before-direct-rpc ()
-  "Table completion should use ready schema matches before backend completion."
-  (with-temp-buffer
-    (insert "select * from us")
-    (goto-char (point-max))
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "USERS" nil schema)
-      (puthash "ORDERS" nil schema)
-      (puthash "USER_ROLES" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda (&optional _conn) schema))
-                ((symbol-function 'clutch--schema-status-entry)
-                 (lambda (_conn) '(:state ready)))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-complete-tables)
-                 (lambda (&rest _)
-                   (ert-fail "ready schema matches should avoid direct RPC"))))
-        (let* ((capf (clutch-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (equal (sort (copy-sequence candidates) #'string<)
-                         '("USERS" "USER_ROLES"))))))))
-
-(ert-deftest clutch-test-completion-at-point-falls-back-to-direct-rpc ()
-  "Table completion should query the backend when cached table names cannot answer."
-  (dolist (case '((no-schema nil "select * from app_" nil "app_"
-                             ("APP_EVENT_DATA" "APP_CONFIG")
-                             ("APP_EVENT_DATA" "APP_CONFIG"))
-                  (ready-miss ready "select * from or" "AUDIT_LOG" "or"
-                              ("ORDERS") ("ORDERS"))
-                  (stale-cache stale "select * from us" "USERS_OLD" "us"
-                               ("USERS_NEW") ("USERS_NEW"))))
-    (pcase-let ((`(,label ,state ,sql ,cached-table ,prefix ,rpc-result
-                          ,expected-members)
-                 case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (insert sql)
-          (goto-char (point-max))
-          (let ((schema (and cached-table (make-hash-table :test 'equal)))
-                (clutch-connection 'fake)
-                rpc-called)
-            (when cached-table
-              (puthash cached-table nil schema))
-            (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                       (lambda (&optional _conn) schema))
-                      ((symbol-function 'clutch--schema-status-entry)
-                       (lambda (_conn) (and state `(:state ,state))))
-                      ((symbol-function 'clutch-db-busy-p)
-                       (lambda (_conn) nil))
-                      ((symbol-function 'clutch-db-complete-tables)
-                       (lambda (_conn requested-prefix)
-                         (setq rpc-called t)
-                         (should (equal requested-prefix prefix))
-                         rpc-result)))
-              (let* ((capf (clutch-completion-at-point))
-                     (candidates (clutch-test--completion-candidates capf)))
-                (should capf)
-                (should rpc-called)
-                (dolist (expected expected-members)
-                  (should (member expected candidates)))))))))))
-
-(ert-deftest clutch-test-completion-at-point-prefers-table-candidates-in-from-context ()
-  "FROM/JOIN table completion should not be shadowed by SQL keyword completion."
-  (with-temp-buffer
-    (insert "select * from or")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          captured)
-      (puthash "ORDERS" nil schema)
-      (setq-local completion-at-point-functions nil)
-      (clutch--install-completion-capfs)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch--schema-status-entry)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) nil))
-                (completion-in-region-function
-                 (lambda (start end collection &optional predicate)
-                   (setq captured
-                         (list :input (buffer-substring-no-properties start end)
-                               :candidates (all-completions
-                                            (buffer-substring-no-properties start end)
-                                            collection predicate)))
-                   t)))
-        (should (completion-at-point))
-        (should (equal (plist-get captured :input) "or"))
-        (should (equal (plist-get captured :candidates) '("ORDERS")))))))
-
-(ert-deftest clutch-test-completion-at-point-defers-to-keywords-for-keyword-prefixes ()
-  "Statement-start keyword prefixes should not be shadowed by schema tables."
-  (with-temp-buffer
-    (insert "sele")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake))
-      (puthash "SELECT_LOG" nil schema)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil)))
-        (should-not (clutch-completion-at-point))
-        (let* ((capf (clutch-sql-keyword-completion-at-point))
-               (candidates (clutch-test--completion-candidates capf)))
-          (should capf)
-          (should (member "SELECT" candidates))
-          (should-not (member "SELECT_LOG" candidates)))))))
-
-(ert-deftest clutch-test-completion-at-point-chain-keeps-keywords-with-statement-context ()
-  "The installed CAPF chain should still offer keywords with statement tables."
-  (with-temp-buffer
-    (insert "sele from users")
-    (goto-char (point-min))
-    (search-forward "sele")
-    (let ((schema (make-hash-table :test 'equal))
-          (clutch-connection 'fake)
-          captured)
-      (puthash "users" '("id" "name") schema)
-      (setq-local completion-at-point-functions nil)
-      (clutch--install-completion-capfs)
-      (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                 (lambda () schema))
-                ((symbol-function 'clutch-db-busy-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-completion-sync-columns-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--tables-in-current-statement)
-                 (lambda (_schema) '("users")))
-                (completion-in-region-function
-                 (lambda (start end collection &optional predicate)
-                   (setq captured
-                         (all-completions
-                          (buffer-substring-no-properties start end)
-                          collection predicate))
-                   t)))
-        (should (completion-at-point))
-        (should (member "SELECT" captured))))))
-
-(ert-deftest clutch-test-completion-at-point-uses-direct-column-candidates-when-sync-loads-disabled ()
-  "Direct backend column completion should avoid synchronous ensure-columns."
-  (dolist (case
-           '(("table name"
-              "select con from APP_CONFIG"
-              ("APP_CONFIG")
-              ("APP_CONFIG")
-              ("CONFIG_ID" "CONFIG_NAME")
-              nil)
-             ("alias-qualified table"
-              "select u.con from APP_CONFIG u join APP_LOG p on u.id = p.config_id"
-              ("APP_CONFIG" "APP_LOG")
-              ("APP_CONFIG")
-              ("CONFIG_ID" "CONFIG_NAME")
-              ("PAYLOAD" "APP_CONFIG" "APP_LOG"))))
-    (pcase-let ((`(,label ,sql ,tables ,expected-seen ,members ,absent) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (insert sql)
-          (goto-char (point-min))
-          (search-forward "con")
-          (let ((schema (make-hash-table :test 'equal))
-                (clutch-connection 'fake)
-                seen)
-            (dolist (table tables)
-              (puthash table nil schema))
-            (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                       (lambda () schema))
-                      ((symbol-function 'clutch-db-busy-p)
-                       (lambda (_conn) nil))
-                      ((symbol-function 'clutch-db-completion-sync-columns-p)
-                       (lambda (_conn) nil))
-                      ((symbol-function 'clutch--ensure-columns)
-                       (lambda (&rest _args)
-                         (error "Should not synchronously load columns")))
-                      ((symbol-function 'clutch-db-complete-columns)
-                       (lambda (_conn table prefix)
-                         (push table seen)
-                         (should (equal prefix "con"))
-                         (pcase table
-                           ("APP_CONFIG" '("CONFIG_ID" "CONFIG_NAME"))
-                           ("APP_LOG" '("PAYLOAD"))
-                           (_ nil)))))
-              (let* ((capf (clutch-completion-at-point))
-                     (candidates (clutch-test--completion-candidates capf)))
-                (should capf)
-                (should (equal seen expected-seen))
-                (dolist (candidate members)
-                  (should (member candidate candidates)))
-                (dolist (candidate absent)
-                  (should-not (member candidate candidates)))))))))))
-
-(ert-deftest clutch-test-completion-at-point-lowercases-identifiers-when-configured ()
-  "Identifier completion should honor lowercase case style."
-  (let ((clutch-sql-completion-case-style 'lower))
-    (with-temp-buffer
-      (insert "select con from APP_CONFIG")
-      (goto-char (point-min))
-      (search-forward "con")
-      (let ((schema (make-hash-table :test 'equal))
-            (clutch-connection 'fake))
-        (puthash "APP_CONFIG" nil schema)
-        (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                   (lambda () schema))
-                  ((symbol-function 'clutch-db-busy-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch--tables-in-current-statement)
-                   (lambda (_schema) '("APP_CONFIG")))
-                  ((symbol-function 'clutch-db-completion-sync-columns-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch-db-complete-columns)
-                   (lambda (_conn table prefix)
-                     (should (equal table "APP_CONFIG"))
-                     (should (equal prefix "con"))
-                     '("CONFIG_ID" "CONFIG_NAME"))))
-          (let* ((capf (clutch-completion-at-point))
-                 (candidates (clutch-test--completion-candidates capf "")))
-            (should capf)
-            (should (member "config_id" candidates))
-            (should (member "config_name" candidates))
-            (should-not (member "app_config" candidates))
-            (should-not (member "APP_CONFIG" candidates))))))))
-
-(ert-deftest clutch-test-completion-at-point-swallows-oracle-i18n-completion-errors ()
-  "Oracle completion should fail soft when orai18n.jar is missing."
-  (let ((clutch--oracle-i18n-warning-shown nil)
-        warned)
-    (with-temp-buffer
-      (insert "select * from app_")
-      (goto-char (point-max))
-      (let ((clutch-connection 'fake))
-        (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                   (lambda () nil))
-                  ((symbol-function 'clutch-db-busy-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch-db-complete-tables)
+        (setq-local clutch-connection conn)
+        (insert "select * from app_")
+        (goto-char (point-max))
+        (cl-letf (((symbol-function 'clutch-db-complete-tables)
                    (lambda (_conn _prefix)
-                     (signal 'clutch-db-error
-                             '("Non supported character set (add orai18n.jar in your classpath): ZHS16GBK"))))
+                     (signal
+                      'clutch-db-error
+                      '("Non supported character set (add orai18n.jar in your classpath): ZHS16GBK"))))
                   ((symbol-function 'message)
-                   (lambda (fmt &rest args)
-                     (setq warned (apply #'format fmt args)))))
+                   (lambda (format-string &rest args)
+                     (setq warned (apply #'format format-string args)))))
           (should-not (clutch-completion-at-point))
           (should (string-match-p "orai18n.jar" warned))
           (setq warned nil)
