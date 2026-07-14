@@ -10,8 +10,10 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-connection)
 (require 'clutch-diagnostics)
 (require 'clutch-schema)
+(require 'clutch-ui)
 (require 'seq)
 (require 'sql)
 (require 'subr-x)
@@ -40,8 +42,6 @@ value must be a symbol recognized by `sql-mode', such as `mysql' or `postgres'."
                  (symbol :tag "Other"))
   :group 'clutch)
 
-(defvar clutch--conn-sql-product)
-(defvar clutch--connection-params)
 (defvar-local clutch--describe-object-entry nil
   "Object entry currently displayed in a clutch describe buffer.")
 (defvar clutch--object-cache (make-hash-table :test 'eq)
@@ -52,8 +52,6 @@ Each value is a plist with at least :entries and :fetched-at.")
 (defvar clutch--object-warmup-generations
   (make-hash-table :test 'eq :weakness 'key)
   "Warmup generations weakly keyed by connection object identity.")
-(defvar clutch-connection)
-
 (defvar embark-default-action-overrides)
 (defvar embark-target-finders)
 (defvar embark-keymap-alist)
@@ -64,21 +62,6 @@ Each value is a plist with at least :entries and :fetched-at.")
   "Embark actions for clutch objects.")
 (defvar clutch-embark-target-object-actions nil
   "Embark actions for clutch objects with explicit targets.")
-
-(declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
-(declare-function clutch--command-connection-context "clutch-connection" ())
-(declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
-(declare-function clutch--effective-sql-product "clutch-connection" (params))
-(declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch--icon-with-face "clutch-ui"
-                  (name fallback face &rest icon-args))
-(declare-function clutch--json-display-mode "clutch-ui" ())
-(declare-function clutch--json-metadata-text "clutch-ui" (text))
-(declare-function clutch--key-hints "clutch-ui" (hints))
-(declare-function clutch--message-ident "clutch-ui" (value))
-(declare-function clutch--query-buffer-p "clutch-connection" ())
-(declare-function clutch--refresh-current-schema
-                  "clutch-connection" (&optional quiet force-sync))
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
   "Return non-nil when ENTRY is permitted by ALLOWED-TYPES.

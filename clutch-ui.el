@@ -13,6 +13,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'clutch-backend)
+(require 'clutch-schema)
 
 (defcustom clutch-column-width-max 30
   "Maximum display width for a single column in the result table."
@@ -135,9 +136,6 @@ the header cell was rendered.")
 
 (defconst clutch--column-width-refresh-delay 0.08
   "Seconds before applying a throttled column-width redraw.")
-
-(declare-function clutch--cached-column-details "clutch-schema" (conn table))
-(declare-function clutch--ensure-column-details-async "clutch-schema" (conn table))
 
 (defun clutch--result-display-rows ()
   "Return result rows selected by the current client filter state."

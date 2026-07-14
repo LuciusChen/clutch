@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-connection)
 (require 'clutch-schema)
 (require 'clutch-ui)
 (require 'json)
@@ -21,7 +22,6 @@
 
 (defvar clutch--row-identity)
 (defvar clutch--filtered-rows)
-(defvar clutch--connection-params)
 (defvar clutch--active-edit-cell)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-column-details)
@@ -31,7 +31,6 @@
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
 (defvar clutch--row-start-positions)
-(defvar clutch-connection)
 (defvar clutch-record--result-buffer)
 (defvar clutch-record--row-idx)
 
@@ -45,7 +44,6 @@
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 
-(declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
 (defun clutch-edit--sql-surface-p ()
   "Return non-nil when SQL staged mutation is available in this result."
   (clutch-db-sql-surface-p clutch-connection clutch--connection-params))

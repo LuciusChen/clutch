@@ -31,6 +31,7 @@
 (require 'clutch-backend)
 (require 'clutch-diagnostics)
 (require 'clutch-schema)
+(require 'clutch-ui)
 (require 'auth-source)
 (require 'cl-lib)
 (require 'comint)
@@ -162,8 +163,6 @@ ssh-like TRAMP directories."
                  (const :tag "Automatically use current TRAMP context" auto))
   :group 'clutch)
 (defvar clutch--dml-result)
-(defvar clutch--connection-render-state)
-(defvar clutch--execution-spinner-frame)
 (defvar clutch--spinner-timer nil
   "Timer driving the mode-line spinner animation, or nil.")
 (defvar clutch--spinner-index 0
@@ -184,15 +183,6 @@ ssh-like TRAMP directories."
 
 (defconst clutch--ssh-direct-first-connect-timeout 0.5
   "Seconds to wait for a provisional direct database connection.")
-
-;; Forward declarations — sibling module functions
-(declare-function clutch--refresh-result-status-line "clutch-ui"
-                  (&optional footer-only))
-(declare-function clutch--render-console-buffer-name
-                  "clutch-ui" (name schema-state table-count))
-(declare-function clutch--render-connection-header-line
-                  "clutch-ui" (state connected-p))
-(declare-function clutch--completion-backend-icon-prefix "clutch-ui" (key))
 
 ;;;; Connection identity
 

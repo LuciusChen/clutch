@@ -17,23 +17,17 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-connection)
 (require 'clutch-query)
 (require 'clutch-schema)
 (require 'clutch-ui)
 (require 'subr-x)
 (require 'transient)
 
-(defvar clutch-connection)
-
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
-(declare-function clutch-connect "clutch-connection" ())
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
-(declare-function clutch-disconnect "clutch-connection" ())
-(declare-function clutch--ensure-connection "clutch-connection" ())
 (declare-function clutch-jump "clutch-object" (&optional entry))
-(declare-function clutch-refresh-schema "clutch-connection" ())
-(declare-function clutch-switch-schema "clutch-connection" ())
 
 (defgroup clutch-mongodb nil
   "Native MongoDB backend for clutch."

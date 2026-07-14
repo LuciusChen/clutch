@@ -31,6 +31,7 @@
 (require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-diagnostics)
+(require 'clutch-schema)
 (require 'clutch-sql)
 (require 'clutch-ui)
 (require 'cl-lib)
@@ -86,9 +87,6 @@ Dynamically bound by `clutch--execute-and-mark'.")
   "Buffer position where the currently executing SQL ends, or nil.
 Dynamically bound by `clutch--execute-and-mark'.")
 
-;; Forward declarations — functions from sibling modules
-(declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))
-
 (declare-function clutch-result--display-error
                   "clutch-result"
                   (connection sql summary message &optional elapsed hint))
@@ -103,9 +101,6 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
-
-;; Forward declarations — functions from sibling workflow modules
-(declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
 ;;;; Query console
 
