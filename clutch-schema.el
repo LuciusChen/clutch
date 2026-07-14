@@ -73,7 +73,6 @@ Functions receive CONN, TABLE, and KIND.")
 (declare-function clutch--remember-problem-record "clutch-query" (&rest args))
 (declare-function clutch--schedule-object-warmup "clutch-object" (conn))
 (declare-function clutch--refresh-schema-status-ui "clutch-connection" (conn))
-(declare-function clutch--run-db-query "clutch-connection" (conn sql))
 
 (defun clutch--metadata-debug-backend (conn)
   "Return CONN's backend key for debug metadata events, or nil."

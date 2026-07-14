@@ -52,7 +52,6 @@
 (declare-function clutch--result-display-rows "clutch-ui" ())
 (declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
 (declare-function clutch--string-pad "clutch-ui" (s width &optional pad-left numeric))
-(declare-function clutch--visible-column-names "clutch-ui" ())
 (declare-function clutch--visible-columns "clutch-ui" ())
 (declare-function clutch--append-pending-insert-row "clutch-ui" (iidx))
 (declare-function clutch--refresh-footer-line "clutch-ui" ())

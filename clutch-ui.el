@@ -123,7 +123,6 @@ the header cell was rendered.")
 (defconst clutch--column-width-refresh-delay 0.08
   "Seconds before applying a throttled column-width redraw.")
 
-(declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
 (declare-function clutch--backend-display-name-from-params
                   "clutch-connection" (params))
 (declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
@@ -136,7 +135,6 @@ the header cell was rendered.")
 (declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
 (declare-function clutch--schema-status-header-line-segment "clutch-schema" (conn))
 (declare-function clutch--tx-dirty-p "clutch-connection" (conn))
-(declare-function clutch--connection-key "clutch-connection" (conn))
 
 (defun clutch--result-display-rows ()
   "Return result rows selected by the current client filter state."
@@ -1162,51 +1160,6 @@ ACTIVE-CIDX identifies the highlighted column, if any."
       (define-key map [header-line mouse-1] command)
       (define-key map [mouse-1] command))
     map))
-
-(defun clutch--render-separator (visible-cols widths &optional position)
-  "Render a separator line for VISIBLE-COLS with WIDTHS.
-POSITION is `top', `middle', or `bottom' (default `middle')."
-  (let* ((padding clutch-column-padding)
-         (pos (or position 'middle))
-         (left  (pcase pos ('top "┌") ('bottom "└") (_ "├")))
-         (cross (pcase pos ('top "┬") ('bottom "┴") (_ "┼")))
-         (right (pcase pos ('top "┐") ('bottom "┘") (_ "┤")))
-         (parts nil))
-    (dolist (cidx visible-cols)
-      (push (concat cross (make-string (+ (aref widths cidx) (* 2 padding)) ?─))
-            parts))
-    ;; Replace the leading cross of the first column with the left edge.
-    (let ((line (concat (mapconcat #'identity (nreverse parts) "") right)))
-      (concat left (substring line 1)))))
-
-(defun clutch--render-header (visible-cols widths)
-  "Render the header row string for VISIBLE-COLS with WIDTHS.
-Each header cell body carries a `clutch-header-col' text property so
-column-local commands still work from padded whitespace."
-  (let ((padding clutch-column-padding)
-        (parts nil))
-    (dolist (cidx visible-cols)
-      (let* ((name (nth cidx clutch--result-columns))
-             (w (aref widths cidx))
-             (label (clutch--header-label name nil cidx))
-             (truncated (if (> (string-width label) w)
-                            (truncate-string-to-width label w)
-                          label))
-             (cell (clutch--center-display-string truncated w nil))
-             (face 'clutch-field-name-face)
-             (pad-str (make-string padding ?\s))
-             (body nil))
-        ;; Append base face so icon-specific face (e.g. pin color) is preserved.
-        (add-face-text-property 0 (length cell) face 'append cell)
-        (setq body (concat pad-str cell pad-str))
-        (add-text-properties 0 (length body)
-                             `(clutch-header-col ,cidx)
-                             body)
-        (push (concat (propertize "│" 'face 'clutch-border-face)
-                      body)
-              parts)))
-    (concat (mapconcat #'identity (nreverse parts) "")
-            (propertize "│" 'face 'clutch-border-face))))
 
 (defun clutch--cell-face (val edited cidx active-edit)
   "Return the display face for a cell with VAL at CIDX.

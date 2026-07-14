@@ -62,7 +62,6 @@ Each value is a plist with at least :entries and :fetched-at.")
 (declare-function clutch--connection-key "clutch-connection" (conn))
 (declare-function clutch--query-buffer-p "clutch-connection" ())
 (declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
-(declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
 (declare-function clutch--remember-recoverable-metadata-warning "clutch-schema"
                   (connection op err &optional context))
 (declare-function clutch--remember-buffer-query-error-details "clutch-query"
