@@ -13,7 +13,7 @@
   (file-name-directory (directory-file-name (file-name-directory load-file-name)))
   "Repository root containing the Clutch Lisp modules.")
 
-(defconst clutch--architecture-cross-declaration-baseline 140
+(defconst clutch--architecture-cross-declaration-baseline 137
   "Maximum permitted number of cross-module Clutch declarations.")
 
 (defconst clutch--architecture-adapter-workflow-allowlist
@@ -36,7 +36,7 @@
     ("clutch-ui" "clutch-backend" "clutch-schema"))
   "Allowed outbound Clutch dependencies for lower-layer modules.")
 
-(defconst clutch--architecture-largest-scc-baseline 6
+(defconst clutch--architecture-largest-scc-baseline 5
   "Maximum permitted strongly connected component size.")
 
 (defun clutch--architecture-read-forms (file)
@@ -176,6 +176,14 @@ Declaration forms and definition names are excluded."
                      (not (member (nth 1 dependency) (cdr allowlist))))
            collect dependency))
 
+(defun clutch--architecture-composition-root-inbound-violations (dependencies)
+  "Return implementation DEPENDENCIES that point back to `clutch'."
+  (cl-remove-if-not
+   (lambda (dependency)
+     (and (equal (nth 1 dependency) "clutch")
+          (not (equal (nth 0 dependency) "clutch"))))
+   dependencies))
+
 (defun clutch--architecture-adjacent-p (source target dependencies)
   "Return non-nil when DEPENDENCIES connects SOURCE to TARGET."
   (cl-some (lambda (dependency)
@@ -234,6 +242,9 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
          (unapproved (clutch--architecture-unapproved-adapter-edges dependencies))
          (foundation-violations
           (clutch--architecture-foundation-boundary-violations dependencies))
+         (composition-root-violations
+          (clutch--architecture-composition-root-inbound-violations
+           dependencies))
          (largest-scc (clutch--architecture-largest-scc modules dependencies))
          errors)
     (dolist (edge (sort (cl-delete-duplicates
@@ -273,6 +284,10 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
             errors))
     (when foundation-violations
       (push (format "lower-layer boundary violations: %S" foundation-violations)
+            errors))
+    (when composition-root-violations
+      (push (format "dependencies into composition root: %S"
+                    composition-root-violations)
             errors))
     (if errors
         (progn

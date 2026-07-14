@@ -1446,36 +1446,25 @@
     (should-not (string-match-p (regexp-quote clutch-debug-buffer-name)
                                 (cadr err)))))
 
-(ert-deftest clutch-test-readers-load-clutch-entrypoint ()
-  "Saved-connection readers should load `clutch' before checking profiles."
+(ert-deftest clutch-test-readers-do-not-require-clutch-entrypoint ()
+  "Saved-connection readers should consume assembled configuration directly."
   (dolist (case `((clutch--read-connection-params
                    (:backend mysql :database "app_a" :pass-entry "alpha"))
                   (clutch--read-query-console-target
                    "alpha")))
     (pcase-let ((`(,reader ,expected) case))
       (ert-info ((symbol-name reader))
-        (let ((clutch-connection-alist nil)
-              required
-              (orig-featurep (symbol-function 'featurep))
+        (let ((clutch-connection-alist
+               '(("alpha" . (:backend mysql :database "app_a"))))
               (orig-require (symbol-function 'require)))
-          (cl-letf (((symbol-function 'featurep)
-                     (lambda (feature &optional subfeature)
-                       (if (eq feature 'clutch)
-                           nil
-                         (funcall orig-featurep feature subfeature))))
-                    ((symbol-function 'require)
+          (cl-letf (((symbol-function 'require)
                      (lambda (feature &optional filename noerror)
                        (if (eq feature 'clutch)
-                           (progn
-                             (setq required t
-                                   clutch-connection-alist
-                                   '(("alpha" . (:backend mysql :database "app_a"))))
-                             t)
+                           (error "Reader attempted to load the composition root")
                          (funcall orig-require feature filename noerror))))
                     ((symbol-function 'completing-read)
                      (lambda (&rest _args) "alpha")))
-            (should (equal (funcall reader) expected))
-            (should required)))))))
+            (should (equal (funcall reader) expected))))))))
 
 (ert-deftest clutch-test-read-connection-params-no-match-prompts-manual-when-saved ()
   "No-match connect choices should collect temporary connection params."
@@ -3083,6 +3072,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                       #'clutch-describe-dwim))
           (should (eq (lookup-key clutch-redis-mode-map (kbd "C-c C-o"))
                       #'clutch-act-dwim))
+          (should (eq (lookup-key clutch-redis-mode-map (kbd "C-c ?"))
+                      #'clutch-dispatch))
           (should (memq #'clutch-redis-completion-at-point
                         completion-at-point-functions))
           (erase-buffer)
@@ -3519,6 +3510,128 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
         (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
           (clutch-connect)
           (should (equal built '(:backend mysql :database "manual_db"))))))))
+
+;;;; Schema and database switching
+
+(ert-deftest clutch-test-switch-schema-updates-session-and-buffer-context ()
+  "Schema switching should update backend state and attached buffer params."
+  (dolist (case '((oracle
+                   (:driver oracle :schema "SALES")
+                   ("SALES" "ANALYTICS") "SALES" "ANALYTICS"
+                   (:driver oracle :schema "ANALYTICS"))
+                  (mysql
+                   (:backend mysql :database "sales")
+                   ("sales" "analytics") "sales" "analytics"
+                   (:backend mysql :database "analytics"))))
+    (pcase-let ((`(,label ,params ,schemas ,current ,selected ,expected) case))
+      (ert-info ((format "backend: %s" label))
+        (let ((conn (list 'fake-conn label))
+              switched cleared-conns refresh-quiet message-text)
+          (with-temp-buffer
+            (setq-local clutch-connection conn
+                        clutch--connection-params (copy-sequence params))
+            (cl-letf (((symbol-function 'clutch-db-list-schemas)
+                       (lambda (_conn) schemas))
+                      ((symbol-function 'clutch-db-current-schema)
+                       (lambda (_conn) current))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _args) selected))
+                      ((symbol-function 'clutch-db-set-current-schema)
+                       (lambda (_conn schema)
+                         (setq switched schema)
+                         schema))
+                      ((symbol-function 'clutch--clear-connection-metadata-caches)
+                       (lambda (actual-conn)
+                         (push actual-conn cleared-conns)))
+                      ((symbol-function 'clutch--refresh-current-schema)
+                       (lambda (&optional quiet)
+                         (setq refresh-quiet quiet)
+                         t))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq message-text (apply #'format fmt args)))))
+              (clutch-switch-schema)
+              (should (equal switched selected))
+              (should (equal clutch--connection-params expected))
+              (should (equal cleared-conns (list conn)))
+              (should refresh-quiet)
+              (should (equal message-text
+                             (format "Current schema: %s" selected))))))))))
+
+(ert-deftest clutch-test-switch-schema-failure-populates-problem-record-and-debug-trace ()
+  "Schema-switch failures should feed the shared problem/debug workflow."
+  (let ((details '(:backend oracle
+                   :summary "ORA-12592: TNS:bad packet"
+                   :diag (:category "metadata"
+                          :op "set-current-schema"
+                          :conn-id 7
+                          :raw-message "ORA-12592: TNS:bad packet"
+                          :context (:generated-sql
+                                    "ALTER SESSION SET CURRENT_SCHEMA = \"ANALYTICS\"")))))
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (clutch--clear-debug-capture)
+        (setq-local clutch-connection 'fake-conn
+                    clutch--connection-params '(:driver oracle :schema "SALES"))
+        (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+                   (lambda (_conn) 'oracle))
+                  ((symbol-function 'clutch-db-list-schemas)
+                   (lambda (_conn) '("SALES" "ANALYTICS")))
+                  ((symbol-function 'clutch-db-current-schema)
+                   (lambda (_conn) "SALES"))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _args) "ANALYTICS"))
+                  ((symbol-function 'clutch-db-set-current-schema)
+                   (lambda (_conn _schema)
+                     (signal 'clutch-db-error
+                             (list "ORA-12592: TNS:bad packet" details)))))
+          (let ((error (should-error (clutch-switch-schema)
+                                     :type 'user-error)))
+            (should (string-match-p "ORA-12592" (cadr error)))
+            (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                    (cadr error))))
+          (should (equal (plist-get clutch--buffer-error-details :summary)
+                         "ORA-12592: TNS:bad packet"))
+          (should (eq (plist-get clutch--buffer-error-details :backend)
+                      'oracle))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "set-current-schema" text))
+            (should (string-match-p "Operation: schema-switch" text))
+            (should (string-match-p "Phase: error" text))
+            (should (string-match-p
+                     "ALTER SESSION SET CURRENT_SCHEMA" text))))))))
+
+(ert-deftest clutch-test-switch-schema-clickhouse-replaces-selected-database ()
+  "ClickHouse switching should delegate one replacement with selected params."
+  (let ((old-conn (list 'old-conn))
+        replacement)
+    (with-temp-buffer
+      (setq-local clutch-connection old-conn
+                  clutch--connection-params '(:backend clickhouse
+                                              :host "127.0.0.1"
+                                              :port 8123
+                                              :database "default"
+                                              :user "default"))
+      (cl-letf (((symbol-function 'clutch--list-clickhouse-databases)
+                 (lambda (_conn) '("default" "demo")))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _args) "demo"))
+                ((symbol-function 'clutch--replace-connection)
+                 (lambda (conn params product)
+                   (setq replacement (list conn params product))))
+                ((symbol-function 'message) #'ignore))
+        (clutch-switch-schema)
+        (should
+         (equal replacement
+                (list old-conn
+                      '(:backend clickhouse
+                        :host "127.0.0.1"
+                        :port 8123
+                        :database "demo"
+                        :user "default")
+                      nil)))))))
 
 (provide 'clutch-test-connection)
 

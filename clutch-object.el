@@ -47,6 +47,7 @@ Each value is a plist with at least :entries and :fetched-at.")
   "Embark actions for clutch objects with explicit targets.")
 
 (declare-function clutch--bind-connection-context "clutch-connection" (conn &optional params product))
+(declare-function clutch--command-connection-context "clutch-connection" ())
 (declare-function clutch--header-with-disconnect-badge "clutch-ui" (base))
 (declare-function clutch--effective-sql-product "clutch-connection" (params))
 (declare-function clutch--ensure-connection "clutch-connection" ())
@@ -649,21 +650,6 @@ TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
   (setq clutch-browser-current-object entry)
   entry)
 
-(defun clutch--command-context-buffer ()
-  "Return the active clutch buffer for the current command."
-  (if (and (minibufferp)
-           (window-live-p (minibuffer-selected-window)))
-      (window-buffer (minibuffer-selected-window))
-    (current-buffer)))
-
-(defun clutch--command-connection-context ()
-  "Return connection context for the current command."
-  (let ((buf (clutch--command-context-buffer)))
-    (list :buffer buf
-          :connection (buffer-local-value 'clutch-connection buf)
-          :params (buffer-local-value 'clutch--connection-params buf)
-          :product (buffer-local-value 'clutch--conn-sql-product buf))))
-
 (defun clutch-object-at-point ()
   "Return the uniquely identified object entry at point, or nil."
   (clutch--preferred-object-match (clutch--object-matches-at-point)))
@@ -693,7 +679,7 @@ objects."
   "Return the current object associated with the command context buffer.
 When TABLE-LIKE-ONLY is non-nil, only return table-like objects
 allowed by ALLOWED-TYPES."
-  (let* ((buf (clutch--command-context-buffer))
+  (let* ((buf (plist-get (clutch--command-connection-context) :buffer))
          (entry (and (buffer-live-p buf)
                      (buffer-local-value 'clutch-browser-current-object buf))))
     (when (and entry

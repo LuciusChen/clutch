@@ -5415,6 +5415,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-query-dispatches-route-x-to-dwim ()
   "SQL and MongoDB dispatch menus should share the DWIM execute route."
+  (should (eq (lookup-key clutch-mode-map (kbd "C-c ?"))
+              #'clutch-dispatch))
+  (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c ?"))
+              #'clutch-mongodb-dispatch))
   (dolist (prefix '(clutch-dispatch clutch-mongodb-dispatch))
     (ert-info ((format "prefix: %s" prefix))
       (let ((execute

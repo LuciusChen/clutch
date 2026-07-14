@@ -102,4 +102,76 @@
                    '(("clutch-ui" "clutch-connection"
                       declare-function clutch--connection-alive-p))))))
 
+(ert-deftest clutch-architecture-entrypoint-is-a-one-way-composition-root ()
+  "Implementation modules must not depend back on the package entrypoint."
+  (let ((dependencies
+         '(("clutch" "clutch-query" require nil)
+           ("clutch-query" "clutch" declare-function clutch-mode)
+           ("clutch-connection" "clutch" require nil)
+           ("clutch-result" "clutch-query" require nil))))
+    (should
+     (equal (clutch--architecture-composition-root-inbound-violations
+             dependencies)
+            '(("clutch-query" "clutch" declare-function clutch-mode)
+              ("clutch-connection" "clutch" require nil))))))
+
+(ert-deftest clutch-architecture-public-autoloads-enter-through-root ()
+  "Public workflow autoloads must assemble the package through `clutch'."
+  (require 'loaddefs-gen)
+  (let ((output (make-temp-file "clutch-loaddefs-" nil ".el"))
+        autoloads)
+    (unwind-protect
+        (progn
+          (let ((inhibit-message t))
+            (loaddefs-generate
+             (list clutch--architecture-repo) output nil nil nil t))
+          (with-temp-buffer
+            (insert-file-contents output)
+            (goto-char (point-min))
+            (while (re-search-forward
+                    (rx "(autoload '"
+                        (group (+ (or alnum "-")))
+                        (+ (any " \t\n"))
+                        "\"" (group (+ (not "\""))) "\"")
+                    nil t)
+              (push (cons (intern (match-string 1))
+                          (match-string 2))
+                    autoloads)))
+          (dolist (symbol
+                   '(clutch-connect
+                     clutch-dispatch
+                     clutch-edit-indirect
+                     clutch-execute
+                     clutch-execute-buffer
+                     clutch-execute-dwim
+                     clutch-execute-region
+                     clutch-indirect-abort
+                     clutch-indirect-execute
+                     clutch-mode
+                     clutch-preview-execution-sql
+                     clutch-query-console
+                     clutch-query-sqlite-file
+                     clutch-repl
+                     clutch-repl-mode
+                     clutch-repl-send-input
+                     clutch-switch-console
+                     clutch-switch-database
+                     clutch-switch-schema))
+            (let ((targets
+                   (cl-loop for (candidate . target) in autoloads
+                            when (eq candidate symbol)
+                            collect target)))
+              (should targets)
+              (should (equal (delete-dups targets) '("clutch"))))))
+      (delete-file output))))
+
+(ert-deftest clutch-architecture-workflow-modules-do-not-load-entrypoint ()
+  "Direct workflow loads must not reverse-load the composition root."
+  (should-not (featurep 'clutch))
+  (require 'clutch-query)
+  (should-not (featurep 'clutch))
+  (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
+                    clutch-switch-schema))
+    (should (fboundp symbol))))
+
 ;;; check-architecture-test.el ends here

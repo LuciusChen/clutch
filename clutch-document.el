@@ -38,7 +38,7 @@
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-query-console "clutch-query" (target))
 (declare-function clutch-refresh-schema "clutch-connection" ())
-(declare-function clutch-switch-schema "clutch" ())
+(declare-function clutch-switch-schema "clutch-connection" ())
 
 (defgroup clutch-mongodb nil
   "Native MongoDB backend for clutch."

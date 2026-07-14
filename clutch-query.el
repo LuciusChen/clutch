@@ -21,8 +21,8 @@
 
 ;;; Commentary:
 
-;; Query console, SQL literal conversion, pagination, query execution engine,
-;; and indirect edit buffers for clutch.
+;; SQL editing mode, query console, REPL, dispatch menu, SQL literal
+;; conversion, pagination, execution, and indirect edit buffers for clutch.
 ;;
 ;; This module is required by `clutch.el' — do not require `clutch' here.
 
@@ -31,7 +31,13 @@
 (require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-diagnostics)
+(require 'clutch-sql)
+(require 'clutch-ui)
 (require 'cl-lib)
+(require 'comint)
+(require 'sql)
+(require 'transient)
+(require 'xref)
 
 ;; Forward declarations — variables defined in clutch.el
 (defvar clutch-connection)
@@ -61,7 +67,6 @@ Used to update the mode-line with a spinner during execution.")
 (declare-function clutch--set-schema-status "clutch-schema" (conn state &optional table-count error-message))
 
 ;; Forward declarations — functions from clutch-connection.el
-(declare-function clutch--ensure-clutch-loaded "clutch-connection" ())
 (declare-function clutch--cleanup-dead-connection "clutch-connection" (conn))
 (declare-function clutch--run-db-query "clutch-connection" (conn sql))
 (declare-function clutch--connection-alive-p "clutch-connection" (conn))
@@ -96,21 +101,18 @@ Used to update the mode-line with a spinner during execution.")
 (declare-function clutch-commit "clutch-connection" ())
 (declare-function clutch-rollback "clutch-connection" ())
 (declare-function clutch-toggle-auto-commit "clutch-connection" ())
+(declare-function clutch-prepare-ssh-host "clutch-connection" (&optional ssh-host))
+(declare-function clutch-disconnect "clutch-connection" ())
+(declare-function clutch--manual-commit-supported-p "clutch-connection" (conn))
+(declare-function clutch--tx-dirty-p "clutch-connection" (conn))
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
 (declare-function clutch-refresh-schema "clutch-connection" ())
-(declare-function clutch-dispatch "clutch" ())
-(declare-function clutch-mode "clutch" ())
-(declare-function clutch-switch-schema "clutch" ())
+(declare-function clutch-switch-schema "clutch-connection" ())
+(declare-function clutch-copy-context-for-agent "clutch-result" ())
 
-;; Forward declarations — functions from clutch-ui / clutch-edit
-(declare-function clutch--mark-executed-sql-region "clutch-ui" (beg end))
-(declare-function clutch--mark-failed-sql-region "clutch-ui" (beg end &optional message))
-(declare-function clutch--clear-executed-sql-overlay "clutch-ui" (&rest _))
-(declare-function clutch--message-count "clutch-ui" (value))
-(declare-function clutch--message-keyword "clutch-ui" (value))
-(declare-function clutch--trim-sql-bounds "clutch-ui" (beg end))
+;; Forward declarations — functions from sibling workflow modules
 (declare-function clutch--schema-status-entry "clutch-schema" (conn))
 (declare-function clutch--refresh-schema-cache-async "clutch-schema" (conn))
 
@@ -353,7 +355,6 @@ console window; (3) nil, meaning use the selected window."
 
 (defun clutch--read-query-console-target ()
   "Read a saved connection name or an ad hoc connection target."
-  (clutch--ensure-clutch-loaded)
   (let* ((names (mapcar #'car clutch-connection-alist))
          (choice (if names
                      (clutch--read-query-console-choice names)
@@ -438,7 +439,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
         (clutch--activate-current-buffer-connection conn params product)
         (clutch--update-console-buffer-name)))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-query-sqlite-file "clutch" nil t)
 (defun clutch-query-sqlite-file (file)
   "Open a query console for SQLite database FILE."
   (interactive
@@ -451,7 +452,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
       (clutch--open-query-console
        name target-params target-params source-default-directory))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-query-console "clutch" nil t)
 (defun clutch-query-console (target)
   "Open or switch to a query console for TARGET.
 Creates a dedicated buffer *clutch: TARGET* with `clutch-mode' enabled
@@ -472,7 +473,7 @@ window rather than replacing the current window."
         (clutch--open-query-console
          name params params source-default-directory)))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-switch-console "clutch" nil t)
 (defun clutch-switch-console ()
   "Switch to an open clutch query console using `completing-read'."
   (interactive)
@@ -1149,7 +1150,7 @@ Return a plist with :message, :summary, and :display-summary."
           (setq buffer-read-only t))))
     (pop-to-buffer buf)))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-preview-execution-sql "clutch" nil t)
 (defun clutch-preview-execution-sql ()
   "Preview the execution payload for the current workflow."
   (interactive)
@@ -1311,7 +1312,7 @@ result buffer.  Stops and reports on the first error."
             (clutch-db-error
              (funcall signal-statement-error err last-spec)))))))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-execute-dwim "clutch" nil t)
 (defun clutch-execute-dwim (beg end)
   "Execute SQL from BEG to END using the most useful local boundary.
 With an active region, execute that region.  Otherwise, prefer the
@@ -1344,7 +1345,7 @@ Semicolon-delimited multi-statement ranges run sequentially."
         (clutch--execute-statements stmts)
       (clutch--execute-and-mark sql beg end))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-execute-region "clutch" nil t)
 (defun clutch-execute-region (beg end)
   "Execute SQL in the region from BEG to END.
 Semicolon-delimited multi-statement regions run sequentially."
@@ -1352,7 +1353,7 @@ Semicolon-delimited multi-statement regions run sequentially."
   (clutch--ensure-connection)
   (clutch--execute-sql-range beg end "region"))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-execute-buffer "clutch" nil t)
 (defun clutch-execute-buffer ()
   "Execute SQL in the current buffer.
 Semicolon-delimited multi-statement buffers run sequentially."
@@ -1368,7 +1369,7 @@ Returns the connection or nil."
            when (clutch--connection-alive-p conn)
            return conn))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-execute "clutch" nil t)
 (defun clutch-execute (sql)
   "Execute SQL from any buffer.
 With an active region, execute the region.  Otherwise execute the
@@ -1418,7 +1419,7 @@ Key bindings:
   \\[clutch-indirect-abort]	Abort and close"
   :lighter " Indirect")
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-indirect-execute "clutch" nil t)
 (defun clutch-indirect-execute ()
   "Execute the SQL in the indirect buffer, then close it."
   (interactive)
@@ -1438,7 +1439,7 @@ Key bindings:
     (with-current-buffer (window-buffer (selected-window))
       (clutch--execute sql conn))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-indirect-abort "clutch" nil t)
 (defun clutch-indirect-abort ()
   "Abort the indirect edit buffer."
   (interactive)
@@ -1457,7 +1458,7 @@ or the current line otherwise."
      (buffer-substring-no-properties
       (line-beginning-position) (line-end-position))))))
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-edit-indirect "clutch" nil t)
 (defun clutch-edit-indirect ()
   "Open an indirect `clutch-mode' buffer with SQL extracted from context.
 With an active region, use the region.  When point is inside a
@@ -1484,6 +1485,327 @@ to execute or \\[clutch-indirect-abort] to abort."
     (insert text)
     (goto-char (point-min))
     (message "Edit SQL, then C-c ' to execute, C-c C-k to abort")))
+
+;;;; REPL mode
+
+(defvar clutch-repl-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map comint-mode-map)
+    (define-key map (kbd "RET") #'clutch-repl-send-input)
+    (define-key map (kbd "<return>") #'clutch-repl-send-input)
+    (define-key map (kbd "C-c C-e") #'clutch-connect)
+    (define-key map (kbd "C-c C-m") #'clutch-commit)
+    (define-key map (kbd "C-c C-u") #'clutch-rollback)
+    (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
+    (define-key map (kbd "C-c C-j") #'clutch-jump)
+    (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
+    (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
+    (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
+    map)
+  "Keymap for `clutch-repl-mode'.")
+
+(defvar-local clutch-repl--pending-input ""
+  "Accumulated partial SQL input waiting for a semicolon.")
+
+;;;###autoload (autoload 'clutch-repl-mode "clutch" nil t)
+(define-derived-mode clutch-repl-mode comint-mode "clutch-repl"
+  "Major mode for database REPL.
+
+\\<clutch-repl-mode-map>
+  \\[clutch-connect]\tConnect to server
+  \\[clutch-jump]\tObject jump
+  \\[clutch-describe-dwim]\tDescribe object
+  \\[clutch-act-dwim]\tObject actions
+  \\[clutch-switch-schema]\tSwitch schema/database"
+  (setq comint-prompt-regexp "^db> \\|^    -> ")
+  (setq comint-input-sender #'clutch-repl--input-sender)
+  (clutch--install-completion-capfs)
+  (add-hook 'xref-backend-functions #'clutch--xref-backend nil t)
+  (add-hook 'kill-buffer-hook #'clutch--disconnect-on-kill nil t))
+
+(defun clutch-repl--prompt (&optional continuation)
+  "Return the REPL prompt string.
+When CONTINUATION is non-nil, return the continuation prompt."
+  (propertize (if continuation "    -> " "db> ")
+              'face 'minibuffer-prompt))
+
+(defun clutch-repl--input-start-position ()
+  "Return the best input-start position for the current REPL line."
+  (save-excursion
+    (beginning-of-line)
+    (if (looking-at comint-prompt-regexp)
+        (match-end 0)
+      (point))))
+
+(defun clutch-repl--ensure-process ()
+  "Ensure the current REPL buffer has a live dummy comint process."
+  (let ((proc (get-buffer-process (current-buffer))))
+    (if (and proc (process-live-p proc))
+        proc
+      (let ((mark-pos (and proc
+                           (markerp (process-mark proc))
+                           (marker-position (process-mark proc)))))
+        (when proc
+          (delete-process proc))
+        (setq proc (start-process "clutch-repl" (current-buffer) "cat"))
+        (set-process-query-on-exit-flag proc nil)
+        (set-marker (process-mark proc)
+                    (or mark-pos (clutch-repl--input-start-position))
+                    (current-buffer))
+        proc))))
+
+;;;###autoload (autoload 'clutch-repl-send-input "clutch" nil t)
+(defun clutch-repl-send-input ()
+  "Send REPL input, recreating the dummy comint process when needed."
+  (interactive)
+  (clutch-repl--ensure-process)
+  (comint-send-input))
+
+(defun clutch-repl--input-sender (_proc input)
+  "Process INPUT from comint.
+Accumulates input until a semicolon is found, then executes."
+  (let ((combined (concat clutch-repl--pending-input
+                          (unless (string-empty-p clutch-repl--pending-input) "\n")
+                          input)))
+    (if (string-match-p ";\\s-*$" combined)
+        (progn
+          (setq clutch-repl--pending-input "")
+          (clutch-repl--execute-and-print (string-trim combined)))
+      (setq clutch-repl--pending-input combined)
+      (clutch-repl--output (clutch-repl--prompt t)))))
+
+(defun clutch-repl--font-lock-output (text)
+  "Return TEXT with display faces preserved in a font-locked REPL buffer."
+  (let ((copy (copy-sequence text))
+        (pos 0)
+        next face)
+    (while (< pos (length copy))
+      (setq next (or (next-single-property-change pos 'face copy)
+                     (length copy))
+            face (get-text-property pos 'face copy))
+      (when face
+        (add-text-properties pos next `(font-lock-face ,face) copy))
+      (setq pos next))
+    copy))
+
+(defun clutch-repl--output (text)
+  "Insert TEXT into the REPL buffer at the process mark."
+  (let ((inhibit-read-only t)
+        (proc (clutch-repl--ensure-process)))
+    (goto-char (process-mark proc))
+    (insert (clutch-repl--font-lock-output text))
+    (set-marker (process-mark proc) (point))))
+
+(defun clutch-repl--format-dml-result (result elapsed)
+  "Format a DML RESULT with ELAPSED time as a string for the REPL."
+  (let ((msg (concat "\n"
+                     (clutch--message-keyword "Affected rows")
+                     ": "
+                     (clutch--message-count
+                      (or (clutch-db-result-affected-rows result) 0)))))
+    (when-let* ((id (clutch-db-result-last-insert-id result))
+                ((> id 0)))
+      (setq msg (concat msg
+                        ", "
+                        (clutch--message-keyword "Last insert ID")
+                        ": "
+                        (clutch--message-count id))))
+    (when-let* ((w (clutch-db-result-warnings result))
+                ((> w 0)))
+      (setq msg (concat msg
+                        ", "
+                        (clutch--message-keyword "Warnings")
+                        ": "
+                        (clutch--message-count w))))
+    (concat msg
+            " ("
+            (clutch--message-literal (format "%.3fs" elapsed))
+            ")\n\n"
+            (clutch-repl--prompt))))
+
+(defun clutch-repl--format-error (message)
+  "Format MESSAGE as a REPL error."
+  (concat "\n"
+          (propertize "ERROR" 'face 'error)
+          ": "
+          (propertize message 'face 'clutch-error-summary-face)
+          "\n\n"
+          (clutch-repl--prompt)))
+
+(defun clutch-repl--execute-and-print (sql)
+  "Execute SQL from the REPL and display the result."
+  (let ((repl-buffer (current-buffer))
+        (repl-window (selected-window)))
+    (cl-labels ((output (text)
+                  (when (buffer-live-p repl-buffer)
+                    (with-current-buffer repl-buffer
+                      (clutch-repl--output text)))))
+      (clutch--forget-problem-record repl-buffer clutch-connection)
+      (condition-case err
+          (progn
+            (clutch--ensure-connection)
+            (setq clutch--last-query sql)
+            (let* ((start (float-time))
+                   (result (clutch--run-db-query clutch-connection sql))
+                   (elapsed (- (float-time) start))
+                   (columns (clutch-db-result-columns result))
+                   (rows (clutch-db-result-rows result)))
+              (if columns
+                  (progn
+                    (unless (clutch-db-result-connection result)
+                      (setf (clutch-db-result-connection result)
+                            clutch-connection))
+                    (unwind-protect
+                        (clutch-result--display result sql elapsed)
+                      (when (window-live-p repl-window)
+                        (select-window repl-window)))
+                    (output
+                     (let ((row-count (length rows)))
+                       (concat "\n"
+                               (clutch--message-count row-count)
+                               " "
+                               (if (= row-count 1) "row" "rows")
+                               " shown in "
+                               (clutch--message-ident "result buffer")
+                               " in "
+                               (clutch--message-literal
+                                (format "%.3fs" elapsed))
+                               "\n\n"
+                               (clutch-repl--prompt)))))
+                (output (clutch-repl--format-dml-result result elapsed)))))
+        (quit
+         (condition-case nil
+             (clutch--handle-query-quit clutch-connection)
+           (clutch-query-interrupted
+            (output (clutch-repl--format-error "Query interrupted")))))
+        (error
+         (clutch--remember-buffer-query-error-details
+          repl-buffer clutch-connection sql err)
+         (output
+          (clutch-repl--format-error
+           (clutch--humanize-db-error (error-message-string err)))))))))
+
+;;;###autoload (autoload 'clutch-repl "clutch" nil t)
+(defun clutch-repl ()
+  "Start a database REPL buffer."
+  (interactive)
+  (let* ((buf-name "*clutch REPL*")
+         (buf (get-buffer-create buf-name)))
+    (unless (comint-check-proc buf)
+      (with-current-buffer buf
+        (unless (derived-mode-p 'clutch-repl-mode)
+          (clutch-repl-mode))
+        (clutch-repl--ensure-process)
+        (clutch-repl--output (clutch-repl--prompt))))
+    (pop-to-buffer buf '((display-buffer-at-bottom)))))
+
+;;;; Query editing major mode
+
+(defvar clutch-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map sql-mode-map)
+    (clutch--install-query-keybindings map)
+    (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
+    (define-key map (kbd "C-c <tab>") #'clutch-complete-at-point)
+    (define-key map (kbd "TAB") #'clutch-complete-qualified-or-indent)
+    (define-key map (kbd "<tab>") #'clutch-complete-qualified-or-indent)
+    map)
+  "Keymap for `clutch-mode'.")
+
+;;;###autoload (autoload 'clutch-mode "clutch" nil t)
+(define-derived-mode clutch-mode sql-mode "clutch"
+  "Major mode for editing and executing SQL queries.
+
+\\<clutch-mode-map>
+Key bindings:
+  \\[clutch-execute-dwim]	Execute region or statement/query at point
+  \\[clutch-execute-region]	Execute region
+  \\[clutch-execute-buffer]	Execute buffer
+  \\[clutch-connect]	Connect to server
+  \\[clutch-jump]	Object jump
+  \\[clutch-describe-dwim]	Describe object
+  \\[clutch-act-dwim]	Object actions
+  \\[clutch-switch-schema]	Switch schema/database
+  \\[clutch-complete-at-point]	Complete SQL identifier at point
+  \\[clutch-complete-qualified-or-indent]	Complete qualified column or indent
+  \\[clutch-preview-execution-sql]	Preview execution"
+  (clutch--query-mode-common-setup)
+  (clutch--install-completion-capfs)
+  (add-hook 'eldoc-documentation-functions
+            #'clutch--eldoc-function nil t)
+  (add-hook 'xref-backend-functions #'clutch--xref-backend nil t))
+
+;;;###autoload
+(add-to-list 'auto-mode-alist '("\\.mysql\\'" . clutch-mode))
+
+;;;; Transient dispatch menu
+
+(defun clutch--dispatch-transaction-controls-inapt-p ()
+  "Return non-nil when current connection has no transaction controls."
+  (not (and clutch-connection
+            (clutch--manual-commit-supported-p clutch-connection))))
+
+(transient-define-suffix clutch--dispatch-commit ()
+  "Transient suffix for `clutch-commit'."
+  :inapt-if #'clutch--dispatch-transaction-controls-inapt-p
+  (interactive)
+  (call-interactively #'clutch-commit))
+
+(transient-define-suffix clutch--dispatch-rollback ()
+  "Transient suffix for `clutch-rollback'."
+  :inapt-if #'clutch--dispatch-transaction-controls-inapt-p
+  (interactive)
+  (call-interactively #'clutch-rollback))
+
+(defun clutch--dispatch-auto-commit-description ()
+  "Return the transient description for the current auto-commit state."
+  (if (clutch--dispatch-transaction-controls-inapt-p)
+      (concat "Auto-commit "
+              (propertize "(unavailable)" 'face 'transient-inactive-value))
+    (concat "Auto-commit "
+            (clutch--transient-state-display
+             (if (clutch-db-manual-commit-p clutch-connection) 'manual 'auto)
+             '((manual . "manual") (auto . "auto"))))))
+
+(transient-define-suffix clutch--dispatch-toggle-auto-commit ()
+  "Transient suffix for `clutch-toggle-auto-commit' with a dynamic label."
+  :description #'clutch--dispatch-auto-commit-description
+  :inapt-if (lambda ()
+              (or (clutch--dispatch-transaction-controls-inapt-p)
+                  (and clutch-connection
+                       (clutch-db-manual-commit-p clutch-connection)
+                       (clutch--tx-dirty-p clutch-connection))))
+  (interactive)
+  (call-interactively #'clutch-toggle-auto-commit))
+
+;;;###autoload (autoload 'clutch-dispatch "clutch" nil t)
+(transient-define-prefix clutch-dispatch ()
+  "Main dispatch menu for clutch."
+  [:pad-keys t
+   ["Connection"
+    ("c" "Connect" clutch-connect)
+    ("q" "Query console" clutch-query-console)
+    ("f" "SQLite file" clutch-query-sqlite-file)
+    ("S" "Prepare SSH" clutch-prepare-ssh-host)
+    ("d" "Disconnect" clutch-disconnect)
+    ("m" "Commit" clutch--dispatch-commit)
+    ("u" "Rollback" clutch--dispatch-rollback)
+    ("a" clutch--dispatch-toggle-auto-commit)
+    ("R" "REPL" clutch-repl)]
+   ["Execute"
+    ("x" "DWIM" clutch-execute-dwim)
+    ("r" "Region" clutch-execute-region)
+    ("b" "Buffer" clutch-execute-buffer)
+    ("p" "Preview execution" clutch-preview-execution-sql)
+    ("k" "Copy agent context" clutch-copy-context-for-agent)]
+   ["Edit"
+    ("'" "Indirect edit" clutch-edit-indirect)]
+   ["Objects"
+    ("j" "Jump to object" clutch-jump)
+    ("D" "Describe object" clutch-describe-dwim)
+    ("o" "Object actions" clutch-act-dwim)
+    ("l" "Switch schema/db" clutch-switch-schema)
+    ("s" "Refresh schema" clutch-refresh-schema)]])
 
 (provide 'clutch-query)
 ;;; clutch-query.el ends here
