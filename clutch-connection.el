@@ -608,17 +608,6 @@ Also store PARAMS and PRODUCT when present."
                     clutch--conn-sql-product)))
   (clutch--refresh-connection-render-state))
 
-(defun clutch--attached-buffer-for-connection (connection)
-  "Return one live buffer attached to CONNECTION, or nil."
-  (when connection
-    (or (and (eq clutch-connection connection)
-             (current-buffer))
-        (cl-loop for buf in (buffer-list)
-                 when (and (buffer-live-p buf)
-                           (eq (buffer-local-value 'clutch-connection buf)
-                               connection))
-                 return buf))))
-
 (defun clutch--rebind-connection-buffers (old-conn new-conn params product)
   "Replace OLD-CONN with NEW-CONN across attached buffers using PARAMS and PRODUCT."
   (dolist (buf (buffer-list))
@@ -791,10 +780,6 @@ executed outside clutch that would otherwise leave stale completions."
 (defun clutch--backend-key-from-conn (conn)
   "Return the registered backend key for live connection CONN, or nil."
   (and conn (clutch-db-backend-key conn)))
-
-(clutch--register-diagnostics-connection-accessors
- #'clutch--connection-key
- #'clutch--attached-buffer-for-connection)
 
 (defun clutch--normalize-backend-key (backend)
   "Return the registered backend key for BACKEND, including public aliases."

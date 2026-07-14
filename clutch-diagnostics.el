@@ -36,26 +36,12 @@ and captured output is appended to the dedicated `*clutch-debug*' buffer."
     (clutch--clear-debug-capture)
     (clutch--replay-problem-records-to-debug-buffer)))
 
-(defvar clutch--diagnostics-connection-label-function nil)
-(defvar clutch--diagnostics-attached-buffer-function nil)
-
-(defun clutch--register-diagnostics-connection-accessors (label attached-buffer)
-  "Register connection LABEL and ATTACHED-BUFFER accessors for diagnostics."
-  (setq clutch--diagnostics-connection-label-function label
-        clutch--diagnostics-attached-buffer-function attached-buffer))
-
-(defun clutch--diagnostics-attached-buffer (connection)
-  "Return the buffer registered as attached to CONNECTION, or nil."
-  (when (and connection clutch--diagnostics-attached-buffer-function)
-    (condition-case nil
-        (funcall clutch--diagnostics-attached-buffer-function connection)
-      (error nil))))
-
 (defvar-local clutch--buffer-error-details nil
   "Current problem record scoped to this buffer.")
 
 (defvar clutch--problem-records-by-conn (make-hash-table :test 'eq :weakness 'key)
-  "Current problem records keyed by live connection object.")
+  "Problem provenance keyed by live connection object.
+Each value is a plist containing :buffer and :problem.")
 
 (defvar-local clutch--debug-events nil
   "Recent redacted debug events captured for this buffer.")
@@ -97,10 +83,26 @@ and captured output is appended to the dedicated `*clutch-debug*' buffer."
 
 (defun clutch--debug-buffer-connection-label (connection)
   "Return a human-readable connection label for CONNECTION."
-  (when (and connection clutch--diagnostics-connection-label-function)
-    (condition-case nil
-        (funcall clutch--diagnostics-connection-label-function connection)
-      (error nil))))
+  (when-let* ((backend (and connection
+                            (clutch-db-backend-key connection))))
+    (let* ((display-name (clutch-db-display-name connection))
+           (database (clutch-db-database connection))
+           (user (clutch-db-user connection))
+           (host (clutch-db-host connection))
+           (port (clutch-db-port connection))
+           (endpoint (or (and (stringp host)
+                              (not (string-empty-p host))
+                              host)
+                         display-name
+                         (symbol-name backend))))
+      (if (eq backend 'sqlite)
+          (format "sqlite:%s" (or database ""))
+        (concat (if (and (stringp user) (not (string-empty-p user)))
+                    (format "%s@" user)
+                  "")
+                endpoint
+                (if port (format ":%s" port) "")
+                (if database (format "/%s" database) ""))))))
 
 (defun clutch--remember-recoverable-metadata-warning
     (connection op err &optional context)
@@ -108,13 +110,9 @@ and captured output is appended to the dedicated `*clutch-debug*' buffer."
 ERR is the original condition object.  Optional CONTEXT is attached to the
 debug event when `clutch-debug-mode' is enabled."
   (when clutch-debug-mode
-    (let ((buffer (or (clutch--diagnostics-attached-buffer connection)
-                      (current-buffer)))
+    (let ((buffer (current-buffer))
           (summary (clutch--humanize-db-error (error-message-string err)))
-          (backend (and connection
-                        (condition-case nil
-                            (clutch-db-backend-key connection)
-                          (error nil)))))
+          (backend (and connection (clutch-db-backend-key connection))))
       (clutch--remember-debug-event
        :buffer buffer
        :connection connection
@@ -317,10 +315,11 @@ problem was already recorded."
                 (push entry seen)
                 (push entry records)))))))
     (maphash
-     (lambda (connection problem)
-       (let ((entry (list :buffer (clutch--diagnostics-attached-buffer connection)
+     (lambda (connection provenance)
+       (let ((entry (list :buffer (plist-get provenance :buffer)
                           :connection connection
-                          :problem (copy-tree problem))))
+                          :problem (copy-tree
+                                    (plist-get provenance :problem)))))
          (unless (member entry seen)
            (push entry seen)
            (push entry records))))
@@ -338,8 +337,8 @@ problem was already recorded."
 (defun clutch--remember-problem-record (&rest args)
   "Store the current problem record described by ARGS.
 Recognized keys are :buffer, :connection, and :problem.  Problem records are
-stored buffer-locally and, when CONNECTION is non-nil, in the shared
-connection-scoped registry."
+stored buffer-locally and, when CONNECTION is non-nil, with their source
+buffer in the shared connection-scoped registry."
   (let* ((buffer (or (plist-get args :buffer) (current-buffer)))
          (connection (plist-get args :connection))
          (problem (copy-tree (plist-get args :problem))))
@@ -348,7 +347,10 @@ connection-scoped registry."
         (setq-local clutch--buffer-error-details problem)))
     (when connection
       (if problem
-          (puthash connection problem clutch--problem-records-by-conn)
+          (puthash connection
+                   (list :buffer (and (buffer-live-p buffer) buffer)
+                         :problem problem)
+                   clutch--problem-records-by-conn)
         (remhash connection clutch--problem-records-by-conn)))
     (when problem
       (clutch--append-problem-record-to-debug-buffer buffer connection problem))
@@ -458,9 +460,7 @@ EXTRA-DIAG is merged into the diagnostic plist when non-nil."
     (unless details
       (setq details (list :summary (clutch--humanize-db-error message))))
     (when-let* ((backend (and connection
-                              (condition-case nil
-                                  (clutch-db-backend-key connection)
-                                (error nil)))))
+                              (clutch-db-backend-key connection))))
       (unless (plist-member details :backend)
         (setq details (plist-put details :backend backend))))
     (unless (plist-get details :summary)

@@ -2387,10 +2387,11 @@
 (ert-deftest clutch-test-refresh-schema-cache-async-callback-contract ()
   "Async schema refresh should ignore stale callbacks and trace callback phases."
   (clutch-test--with-isolated-metadata-caches
-   (let (first-callback second-callback)
+   (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
+         first-callback second-callback)
      (with-temp-buffer
        (let ((clutch-debug-mode t))
-         (setq-local clutch-connection 'fake-conn)
+         (setq-local clutch-connection conn)
          (cl-letf (((symbol-function 'clutch-db-live-p)
                     (lambda (_conn) t))
                    ((symbol-function 'clutch-db-backend-key)
@@ -2404,16 +2405,16 @@
                    ((symbol-function 'pop-to-buffer)
                     (lambda (buf &rest _args) buf)))
            (clutch--clear-debug-capture)
-           (should (clutch--refresh-schema-cache-async 'fake-conn))
-           (should (clutch--refresh-schema-cache-async 'fake-conn))
+           (should (clutch--refresh-schema-cache-async conn))
+           (should (clutch--refresh-schema-cache-async conn))
            (funcall first-callback '("stale_users"))
-           (should-not (gethash 'fake-conn clutch--schema-cache))
+           (should-not (gethash conn clutch--schema-cache))
            (funcall second-callback '("users" "orders"))
            (should (= (hash-table-count
-                       (gethash 'fake-conn clutch--schema-cache))
+                       (gethash conn clutch--schema-cache))
                       2))
            (should (eq (plist-get
-                        (gethash 'fake-conn clutch--schema-status-cache)
+                        (gethash conn clutch--schema-status-cache)
                                   :state)
                        'ready))
            (let ((text (clutch-test--debug-buffer-string)))
@@ -6160,9 +6161,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-execute-page-remembers-error-details-and-debug-event ()
   "Paging failures should populate `current-buffer' error details and trace."
   (with-temp-buffer
-    (let ((clutch-debug-mode t)
+    (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
+          (clutch-debug-mode t)
           (raw-message "Connection refused (host=db.example.com, port=3306)"))
-      (setq-local clutch-connection 'fake-conn
+      (setq-local clutch-connection conn
                   clutch--base-query "SELECT * FROM t"
                   clutch--result-server-pageable t
                   clutch-result-max-rows 100)
@@ -6313,9 +6315,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (pcase-let ((`(,stmts ,broken-sql ,statement-index) case))
       (with-temp-buffer
         (let ((clutch-debug-mode t)
+              (conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
               (raw-message "Connection refused (host=db.example.com, port=3306)")
               displayed)
-          (setq-local clutch-connection 'fake-conn)
+          (setq-local clutch-connection conn)
           (cl-letf (((symbol-function 'clutch-db-backend-key)
                      (lambda (_conn) 'mysql))
                     ((symbol-function 'clutch-result--display-error)
@@ -6619,7 +6622,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-handle-query-quit-remembers-interrupt-error-details-and-debug-event ()
   "Interrupt RPC failures should record details and invalidate attached UI."
   (with-temp-buffer
-    (let* ((conn (list 'fake-conn))
+    (let* ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
            (clutch-debug-mode t)
            (clutch-connection conn)
            (raw-message "Connection refused (host=db.example.com, port=3306)")

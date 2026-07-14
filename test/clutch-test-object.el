@@ -8,7 +8,8 @@
 
 (eval-and-compile
   (require 'clutch-test-common)
-  (require 'clutch-document))
+  (require 'clutch-document)
+  (require 'clutch-db-sqlite))
 
 ;;;; Object test helpers
 
@@ -480,7 +481,8 @@ document connection."
 
 (ert-deftest clutch-test-object-show-ddl-or-source-populates-problem-record-and-debug-trace ()
   "Definition/source failures should feed the shared problem/debug workflow."
-  (let ((details '(:backend jdbc
+  (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
+        (details '(:backend jdbc
                    :summary "ORA-04043: object does not exist"
                    :diag (:category "metadata"
                           :op "get-object-ddl"
@@ -489,7 +491,7 @@ document connection."
     (with-temp-buffer
       (let ((clutch-debug-mode t))
         (clutch--clear-debug-capture)
-        (setq-local clutch-connection 'fake-conn)
+        (setq-local clutch-connection conn)
         (cl-letf (((symbol-function 'clutch-db-backend-key)
                    (lambda (_conn) 'oracle))
                   ((symbol-function 'clutch-db-object-definition)
@@ -711,6 +713,7 @@ document connection."
   (dolist (debug-p '(nil t))
     (ert-info ((format "debug: %s" debug-p))
       (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+            (conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
             (details '(:backend jdbc
                        :summary "ORA-12592: TNS:bad packet"
                        :diag (:category "metadata"
@@ -721,7 +724,7 @@ document connection."
           (let ((clutch-debug-mode debug-p))
             (when debug-p
               (clutch--clear-debug-capture))
-            (setq-local clutch-connection 'fake-conn)
+            (setq-local clutch-connection conn)
             (cl-letf (((symbol-function 'clutch-db-backend-key)
                        (lambda (_conn) 'oracle))
                       ((symbol-function 'clutch-db-error-details)
@@ -759,7 +762,9 @@ document connection."
         (with-current-buffer source
           (setq-local clutch-connection 'fake-conn
                       clutch--buffer-error-details '(:summary "old"))
-          (puthash 'fake-conn '(:summary "old") clutch--problem-records-by-conn)
+          (puthash 'fake-conn
+                   '(:buffer nil :problem (:summary "old"))
+                   clutch--problem-records-by-conn)
           (cl-letf (((symbol-function 'clutch--remember-current-object) #'ignore)
                     ((symbol-function 'clutch--object-fqname)
                      (lambda (_entry) "USERS"))
@@ -780,7 +785,9 @@ document connection."
     (setq-local clutch-connection 'fake-conn
                 clutch--describe-object-entry '(:name "USERS" :type "TABLE")
                 clutch--buffer-error-details '(:summary "old"))
-    (puthash 'fake-conn '(:summary "old") clutch--problem-records-by-conn)
+    (puthash 'fake-conn
+             '(:buffer nil :problem (:summary "old"))
+             clutch--problem-records-by-conn)
     (let ((refreshes 0)
           (invalidations 0)
           (renders 0))
@@ -1227,9 +1234,10 @@ document connection."
 
 (ert-deftest clutch-test-safe-completion-call-records-debug-event-on-db-errors ()
   "Recoverable completion metadata errors should surface in the debug buffer."
-  (with-temp-buffer
-    (let ((clutch-debug-mode t))
-      (setq-local clutch-connection 'fake-conn)
+  (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db")))
+    (with-temp-buffer
+      (let ((clutch-debug-mode t))
+        (setq-local clutch-connection conn)
       (cl-letf (((symbol-function 'clutch-db-backend-key)
                  (lambda (_conn) 'oracle))
                 ((symbol-function 'clutch--warn-completion-metadata-error-once)
@@ -1244,7 +1252,7 @@ document connection."
         (let ((text (clutch-test--debug-buffer-string)))
           (should (string-match-p "Operation: completion" text))
           (should (string-match-p "Phase: warning" text))
-          (should (string-match-p "completion boom" text)))))))
+          (should (string-match-p "completion boom" text))))))))
 
 (ert-deftest clutch-test-object-warmup-propagates-non-db-errors ()
   "Warmup should still expose programming errors that are not db-runtime races."
@@ -1273,10 +1281,11 @@ document connection."
 (ert-deftest clutch-test-object-warmup-async-callback-contract ()
   "Async object warmup should store live results, ignore stale callbacks, and trace phases."
   (clutch-test-object--with-warmup-state
-   (let (timer-fn async-callback stored)
+   (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
+         timer-fn async-callback stored)
      (with-temp-buffer
        (let ((clutch-debug-mode t))
-         (setq-local clutch-connection 'fake-conn)
+         (setq-local clutch-connection conn)
          (cl-letf (((symbol-function 'clutch-db-backend-key)
                     (lambda (_conn) 'mysql))
                    ((symbol-function 'clutch-db-live-p)
@@ -1299,7 +1308,7 @@ document connection."
                    ((symbol-function 'pop-to-buffer)
                     (lambda (buf &rest _args) buf)))
            (clutch--clear-debug-capture)
-           (clutch--schedule-object-warmup 'fake-conn)
+           (clutch--schedule-object-warmup conn)
            (should timer-fn)
            (funcall timer-fn)
            (should async-callback)
@@ -1310,9 +1319,9 @@ document connection."
                           '((:name "ORDER_IDX" :type "INDEX"
 				   :schema "APP" :source-schema "APP"))))
            (setq stored nil)
-           (clutch--schedule-object-warmup 'fake-conn)
+           (clutch--schedule-object-warmup conn)
            (funcall timer-fn)
-           (clutch--invalidate-object-warmup 'fake-conn)
+           (clutch--invalidate-object-warmup conn)
            (funcall async-callback
                     '((:name "STALE_IDX" :type "INDEX"
 			     :schema "APP" :source-schema "APP")))
