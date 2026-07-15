@@ -134,7 +134,6 @@
 (defconst clutch-db-pg--oid-json 114)
 (defconst clutch-db-pg--oid-float4 700)
 (defconst clutch-db-pg--oid-float8 701)
-(defconst clutch-db-pg--oid-varchar 1043)
 (defconst clutch-db-pg--oid-date 1082)
 (defconst clutch-db-pg--oid-time 1083)
 (defconst clutch-db-pg--oid-timestamp 1114)

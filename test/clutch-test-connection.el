@@ -11,7 +11,6 @@
   (require 'clutch-document)
   (require 'clutch-redis))
 
-(defvar mysql-tls-verify-server)
 (defvar tramp-rpc-use-controlmaster)
 (defvar clutch-test-backend)
 (defvar clutch-test-host)
@@ -3574,9 +3573,7 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
         (clutch--clear-debug-capture)
         (setq-local clutch-connection 'fake-conn
                     clutch--connection-params '(:driver oracle :schema "SALES"))
-        (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
-                   (lambda (_conn) 'oracle))
-                  ((symbol-function 'clutch-db-list-schemas)
+        (cl-letf (((symbol-function 'clutch-db-list-schemas)
                    (lambda (_conn) '("SALES" "ANALYTICS")))
                   ((symbol-function 'clutch-db-current-schema)
                    (lambda (_conn) "SALES"))

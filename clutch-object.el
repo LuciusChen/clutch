@@ -1342,19 +1342,10 @@ When REFRESH is non-nil, bypass cached entries for TYPE."
 (defun clutch--remember-object-operation-error (buffer conn entry op err)
   "Remember object-operation ERR for BUFFER on CONN while targeting ENTRY.
 OP names the object workflow, such as \"describe\" or \"show-definition\"."
-  (let* ((msg (error-message-string err))
-         (summary (clutch--humanize-db-error msg)))
-    (clutch--remember-buffer-query-error-details buffer conn nil err)
-    (when clutch-debug-mode
-      (clutch--remember-debug-event
-       :buffer buffer
-       :connection conn
-       :op op
-       :phase "error"
-       :backend (clutch-db-backend-key conn)
-       :summary summary
-       :context (list :entry-name (plist-get entry :name)
-                      :entry-type (plist-get entry :type))))))
+  (clutch--remember-query-error
+   buffer conn op nil err
+   (list :entry-name (plist-get entry :name)
+         :entry-type (plist-get entry :type))))
 
 (defmacro clutch--with-object-error-capture (buffer conn entry op &rest body)
   "Execute BODY; on clutch-db-error, record to BUFFER/CONN/ENTRY/OP and re-signal."

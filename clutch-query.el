@@ -1051,18 +1051,9 @@ Returns the query result."
               (and (clutch--connection-alive-p connection)
                    (clutch-db-interrupt-query connection))
             (clutch-db-error
-             (let* ((msg (error-message-string err))
-                    (summary (clutch--humanize-db-error msg)))
-               (clutch--remember-buffer-query-error-details
-                source-buffer connection nil err)
-               (when clutch-debug-mode
-                 (clutch--remember-debug-event
-                  :buffer source-buffer
-                  :connection connection
-                  :op "cancel"
-                  :phase "error"
-                  :backend (and connection (clutch-db-backend-key connection))
-                  :summary summary))
+             (let ((summary
+                    (cdr (clutch--remember-query-error
+                          source-buffer connection "cancel" nil err))))
                (message "Interrupt failed: %s"
                         (clutch--debug-workflow-message summary))
                nil)))))
@@ -1726,11 +1717,10 @@ Accumulates input until a semicolon is found, then executes."
            (clutch-query-interrupted
             (output (clutch-repl--format-error "Query interrupted")))))
         (error
-         (clutch--remember-buffer-query-error-details
-          repl-buffer clutch-connection sql err)
-         (output
-          (clutch-repl--format-error
-           (clutch--humanize-db-error (error-message-string err)))))))))
+         (let ((summary
+                (cdr (clutch--remember-query-error
+                      repl-buffer clutch-connection "repl" sql err))))
+           (output (clutch-repl--format-error summary))))))))
 
 ;;;###autoload (autoload 'clutch-repl "clutch" nil t)
 (defun clutch-repl ()

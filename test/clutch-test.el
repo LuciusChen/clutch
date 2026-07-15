@@ -34,8 +34,6 @@
 
 ;;;; Test configuration
 
-(defvar mysql-tls-verify-server)
-
 (defvar clutch-column-displayers)
 
 (defvar clutch--result-source-table)
@@ -2708,17 +2706,6 @@
       (should (string-match-p "Schema cache is stale" hinted)))))
 
 ;;;; Schema cache — column details and metadata
-
-(ert-deftest clutch-test-edit-column-detail-propagates-metadata-errors ()
-  "Edit metadata lookup should not silently hide column-detail failures."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--result-source-table "shipping_incidents")
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
-               (lambda (&rest _args)
-                 (signal 'clutch-db-error '("column detail boom")))))
-      (should-error (clutch-result--column-detail (current-buffer) "severity")
-                    :type 'clutch-db-error))))
 
 (ert-deftest clutch-test-result-column-info-works-on-cell-padding ()
   "Column info should resolve from padded whitespace inside a data cell."
@@ -6415,6 +6402,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
           (clutch-debug-mode t)
           (raw-message "Connection refused (host=db.example.com, port=3306)"))
+      (clutch--clear-debug-capture)
       (setq-local clutch-connection conn
                   clutch--base-query "SELECT * FROM t"
                   clutch--result-server-pageable t
@@ -6437,7 +6425,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should-error (clutch-result--execute-page 0) :type 'user-error)
           (let* ((details clutch--buffer-error-details)
                  (diag (plist-get details :diag))
-                 (event (car clutch--debug-events)))
+                 (debug-text (clutch-test--debug-buffer-string)))
             (should details)
             (should (eq (plist-get details :backend) 'pg))
             (should (equal (plist-get details :summary)
@@ -6445,10 +6433,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (should (equal (plist-get diag :raw-message) raw-message))
             (should (equal (plist-get (plist-get diag :context) :sql)
                            "SELECT * FROM t"))
-            (should event)
-            (should (equal (plist-get event :phase) "error"))
-            (should (equal (plist-get event :summary)
-                           display-summary))))))))
+            (should (string-match-p "Phase: error" debug-text))
+            (should (string-match-p
+                     (regexp-quote display-summary) debug-text))))))))
 
 (ert-deftest clutch-test-execute-dml-skips-debug-backend-lookup-when-disabled ()
   "DML execution should not consult debug-only backend state when debug is off."
@@ -6639,6 +6626,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
               (raw-message "Connection refused (host=db.example.com, port=3306)")
               displayed)
+          (clutch--clear-debug-capture)
           (setq-local clutch-connection conn)
           (cl-letf (((symbol-function 'clutch-db-backend-key)
                      (lambda (_conn) 'mysql))
@@ -6673,16 +6661,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                    result-hint)))
               (let* ((details clutch--buffer-error-details)
                      (diag (plist-get details :diag))
-                     (event (car clutch--debug-events)))
+                     (debug-text (clutch-test--debug-buffer-string)))
                 (should details)
                 (should (eq (plist-get details :backend) 'mysql))
                 (should (equal (plist-get diag :raw-message) raw-message))
                 (should (equal (plist-get (plist-get diag :context) :sql)
                                broken-sql))
-                (should event)
-                (should (equal (plist-get event :phase) "error"))
-                (should (equal (plist-get event :summary)
-                               display-summary))))))))))
+                (should (string-match-p "Phase: error" debug-text))
+                (should (string-match-p
+                         (regexp-quote display-summary) debug-text))))))))))
 
 (ert-deftest clutch-test-abort-execution-error-renders-result-without-message ()
   "Single-statement execution errors should not duplicate details in messages."
@@ -6930,6 +6917,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (record (generate-new-buffer " *clutch-abandoned-record*")))
       (unwind-protect
           (progn
+            (clutch--clear-debug-capture)
             (with-current-buffer record
               (clutch-record-mode)
               (setq-local clutch-connection conn
@@ -6960,18 +6948,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (details clutch--buffer-error-details)
                      (diag (plist-get details :diag))
                      (context (plist-get diag :context))
-                     (cancel-event
-                      (cl-find-if
-                       (lambda (event)
-                         (and (equal (plist-get event :op) "cancel")
-                              (equal (plist-get event :phase) "error")))
-                       clutch--debug-events))
-                     (interrupt-event
-                      (cl-find-if
-                       (lambda (event)
-                         (and (equal (plist-get event :op) "interrupt")
-                              (equal (plist-get event :phase) "disconnect")))
-                       clutch--debug-events)))
+                     (debug-text (clutch-test--debug-buffer-string)))
                 (should disconnected)
                 (should details)
                 (should (eq (plist-get details :backend) 'pg))
@@ -6984,10 +6961,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         (format
                          "Interrupt failed: %s"
                          (clutch--debug-workflow-message message-summary))))
-                (should cancel-event)
-                (should (equal (plist-get cancel-event :summary)
-                               message-summary))
-                (should interrupt-event)
+                (dolist (expected
+                         `(,(concat "Operation: cancel\nPhase: error")
+                           ,(concat "Summary: " message-summary)
+                           "Operation: interrupt\nPhase: disconnect"))
+                  (should (string-match-p (regexp-quote expected) debug-text)))
                 (with-current-buffer record
                   (should-not clutch-connection)
                   (should

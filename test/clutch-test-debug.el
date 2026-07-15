@@ -127,16 +127,11 @@
           (should (string-match-p "get-columns" text)))))))
 
 (ert-deftest clutch-test-debug-buffer-appends-debug-trace-when-enabled ()
-  "Debug mode should append recent captured events to the debug buffer."
-  (let ((details '(:backend jdbc
-                   :summary "Query failed"
-                   :diag (:category "query"
-                          :op "execute"
-                          :raw-message "ORA-00942"))))
+  "Debug mode should append and bound trace without removing problems."
+  (let ((clutch-debug-event-limit 2))
     (with-temp-buffer
       (let ((clutch-debug-mode t))
         (clutch--clear-debug-capture)
-        (setq-local clutch--buffer-error-details details)
         (clutch--remember-debug-event
          :op "execute"
          :phase "error"
@@ -144,11 +139,19 @@
          :summary "Query failed"
          :sql "SELECT * FROM missing_table")
         (let ((text (clutch-test--debug-buffer-string)))
-          (should (string-match-p "Trace Event" text))
           (should (string-match-p "Operation: execute" text))
-          (should (string-match-p "Phase: error" text))
-          (should (string-match-p "Query failed" text))
-          (should (string-match-p "SELECT \\* FROM missing_table" text)))))))
+          (should (string-match-p "SELECT \\* FROM missing_table" text)))
+        (clutch--append-debug-buffer-entry "Historical Problems" "keep-history")
+        (clutch--remember-problem-record :problem '(:summary "keep-problem"))
+        (dolist (summary '("keep-trace-one" "keep-trace-two"))
+          (clutch--remember-debug-event :op "query" :summary summary))
+        (let ((text (clutch-test--debug-buffer-string)))
+          (should-not (string-match-p "Query failed" text))
+          (dolist (expected '("keep-history" "keep-problem"
+                              "keep-trace-one" "keep-trace-two"))
+            (should (string-match-p expected text))))
+        (with-current-buffer (get-buffer clutch-debug-buffer-name)
+          (should (= (how-many "^Trace Event$" (point-min) (point-max)) 2)))))))
 
 (ert-deftest clutch-test-run-db-query-success-clears-problems-across-connection-buffers ()
   "Successful queries should clear stale failure state for the whole connection."
@@ -182,8 +185,8 @@
       (kill-buffer source)
       (kill-buffer peer))))
 
-(ert-deftest clutch-test-debug-mode-enable-preserves-problems-and-resets-events ()
-  "Enabling debug mode should replay problems, keep records, and reset events."
+(ert-deftest clutch-test-debug-mode-enable-preserves-problems-and-resets-buffer ()
+  "Enabling debug mode should replay problems into a fresh debug buffer."
   (let ((conn 'fake-conn)
         (source (generate-new-buffer " *clutch-debug-capture*")))
     (unwind-protect
@@ -210,11 +213,12 @@
              :op "execute"
              :phase "error"
              :summary "boom")
-            (should clutch--debug-events)
             (should clutch--buffer-error-details)
+            (should (string-match-p "boom" (clutch-test--debug-buffer-string)))
             (clutch-debug-mode -1)
             (clutch-debug-mode 1)
-            (should-not clutch--debug-events)
+            (should-not (string-match-p
+                         "boom" (clutch-test--debug-buffer-string)))
             (should clutch--buffer-error-details)))
       (when clutch-debug-mode
         (clutch-debug-mode -1))
@@ -262,8 +266,7 @@
   (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/demo.db"))
         (clutch-debug-mode t)
         (clutch-debug-buffer-name " *diagnostics-elapsed*")
-        (clutch--problem-records-by-conn (make-hash-table :test 'eq))
-        (clutch--debug-events-by-conn (make-hash-table :test 'eq)))
+        (clutch--problem-records-by-conn (make-hash-table :test 'eq)))
     (unwind-protect
         (progn
           (with-temp-buffer
@@ -282,7 +285,6 @@
   (let ((clutch-debug-mode nil)
         (clutch-debug-buffer-name " *diagnostics-history*")
         (clutch--problem-records-by-conn (make-hash-table :test 'eq))
-        (clutch--debug-events-by-conn (make-hash-table :test 'eq))
         (source (generate-new-buffer " *diagnostics-source*")))
     (unwind-protect
         (progn

@@ -57,8 +57,6 @@
 (declare-function mysql-select-database "mysql" (conn database))
 (declare-function mysql-set-autocommit "mysql" (conn autocommit))
 (declare-function mysql-stmt-close "mysql" (stmt))
-(defvar mysql-tls-verify-server)
-
 ;;;; Type-category mapping
 
 (defconst clutch-db-mysql--type-category-alist

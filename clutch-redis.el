@@ -48,8 +48,6 @@
 (declare-function redis-conn-host "redis" (conn))
 (declare-function redis-conn-port "redis" (conn))
 
-(defvar clutch--query-mode-map)
-
 ;;;; Configuration
 
 (defcustom clutch-redis-key-discovery-limit 5000

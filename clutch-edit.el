@@ -139,15 +139,6 @@
     (clutch-result-edit--set-null-state nil)
     (setq-local clutch-result-edit--error-message nil)))
 
-(defun clutch-result--column-detail (result-buf col-name)
-  "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
-  (with-current-buffer result-buf
-    (when-let* ((table clutch--result-source-table)
-                (details (clutch--ensure-column-details clutch-connection table t)))
-      (cl-find-if (lambda (detail)
-                    (equal (plist-get detail :name) col-name))
-                  details))))
-
 (defun clutch-result--field-candidates-from-detail (detail)
   "Return completion candidates derived from column DETAIL, or nil."
   (let ((type (downcase (or (plist-get detail :type) ""))))

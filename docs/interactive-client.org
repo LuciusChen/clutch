@@ -452,7 +452,7 @@ Customize these through =M-x customize-group RET clutch RET=:
   - When that backend-specific cancel succeeds, the connection stays usable and you can run the next SQL immediately on the same session.
   - clutch only drops the connection when interrupt recovery fails, for example if cancel times out, the agent has exited, or the JDBC session is already dead.
   - Backends without explicit interrupt support still fall back to disconnect/reconnect semantics.
-- =M-x clutch-debug-mode= is the opt-in deep-debug workflow and is off by default.  When enabled, clutch records a bounded redacted trace of recent connect/query/interrupt/object/metadata events in =*clutch-debug*=, and JDBC also requests an additional redacted backend debug payload (currently stack trace + request context).  Turning the mode on starts a fresh capture window. Use =clutch-debug-event-limit= to change how many recent events are retained.
+- =M-x clutch-debug-mode= is the opt-in deep-debug workflow and is off by default.  When enabled, clutch records a redacted trace of recent connect/query/interrupt/object/metadata events in =*clutch-debug*=, and JDBC also requests an additional redacted backend debug payload (currently stack trace + request context).  Turning the mode on starts a fresh capture window. =clutch-debug-event-limit= bounds the total number of =Trace Event= entries in that buffer; problem records and historical problems are retained independently.
 - The supported troubleshooting workflow is:
   1. enable =M-x clutch-debug-mode=
   2. reproduce the failure

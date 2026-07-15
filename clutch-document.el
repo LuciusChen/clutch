@@ -68,12 +68,6 @@
     table)
   "Syntax table for `clutch-mongodb-mode'.")
 
-(defconst clutch-mongodb--function-keywords
-  '("aggregate" "countDocuments" "deleteOne" "distinct" "find" "findOne"
-    "getCollection" "insertMany" "insertOne" "replaceOne" "runCommand"
-    "updateOne")
-  "MongoDB shell function names highlighted in `clutch-mongodb-mode'.")
-
 (defconst clutch-mongodb--constructor-keywords
   '("ISODate" "ObjectId")
   "Supported MongoDB BSON constructor names highlighted in `clutch-mongodb-mode'.")

@@ -2454,19 +2454,12 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                     (clutch--refresh-current-schema t)
                     (message "Current schema: %s" schema))
                 (clutch-db-error
-                 (let* ((message (error-message-string err))
-                        (summary (clutch--humanize-db-error message)))
-                   (clutch--remember-buffer-query-error-details
-                    (current-buffer) conn nil err)
-                   (when clutch-debug-mode
-                     (clutch--remember-debug-event
-                      :connection conn
-                      :op "schema-switch"
-                      :phase "error"
-                      :backend (clutch--backend-key-from-conn conn)
-                      :summary summary
-                      :context (list :schema schema
-                                     :current-schema current)))
+                 (let ((summary
+                        (cdr
+                         (clutch--remember-query-error
+                          (current-buffer) conn "schema-switch" nil err
+                          (list :schema schema
+                                :current-schema current)))))
                    (user-error "%s"
                                (clutch--debug-workflow-message
                                 summary))))))))))))

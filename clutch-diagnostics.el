@@ -13,7 +13,7 @@
 (require 'subr-x)
 
 (defcustom clutch-debug-event-limit 25
-  "Maximum number of recent debug events kept per buffer or connection.
+  "Maximum number of recent trace events kept in the debug buffer.
 Only recorded while `clutch-debug-mode' is enabled."
   :type 'natnum
   :group 'clutch)
@@ -26,9 +26,9 @@ Only recorded while `clutch-debug-mode' is enabled."
 ;;;###autoload (autoload 'clutch-debug-mode "clutch" nil t)
 (define-minor-mode clutch-debug-mode
   "Capture additional redacted troubleshooting data for clutch workflows.
-When enabled, clutch records a bounded recent-event trace per buffer and per
-connection.  JDBC requests also ask the agent for an optional debug payload,
-and captured output is appended to the dedicated `*clutch-debug*' buffer."
+When enabled, clutch records a bounded recent-event trace in the dedicated
+`*clutch-debug*' buffer.  JDBC requests also ask the agent for an optional
+debug payload."
   :global t
   :group 'clutch
   :lighter " ClutchDbg"
@@ -42,12 +42,6 @@ and captured output is appended to the dedicated `*clutch-debug*' buffer."
 (defvar clutch--problem-records-by-conn (make-hash-table :test 'eq :weakness 'key)
   "Problem provenance keyed by live connection object.
 Each value is a plist containing :buffer and :problem.")
-
-(defvar-local clutch--debug-events nil
-  "Recent redacted debug events captured for this buffer.")
-
-(defvar clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key)
-  "Recent redacted debug events keyed by live connection object.")
 
 (defvar clutch--debug-buffer-mode-map
   (let ((map (make-sparse-keymap)))
@@ -213,19 +207,40 @@ Each section is a cons cell (TITLE . VALUE)."
              unless (memq key '(:generated-sql :sql))
              append (list key val))))
 
-(defun clutch--append-debug-buffer-entry (heading body)
-  "Append HEADING and BODY to the dedicated debug buffer."
+(defun clutch--trim-debug-buffer-events ()
+  "Delete trace entries beyond `clutch-debug-event-limit' from this buffer."
+  (let ((pos (point-min)) ranges)
+    (while (and (< pos (point-max))
+                (setq pos (text-property-any
+                           pos (point-max) 'clutch-debug-trace-event t)))
+      (let ((end (next-single-property-change
+                  pos 'clutch-debug-trace-event nil (point-max))))
+        (push (cons pos end) ranges)
+        (setq pos end)))
+    (dolist (range (nthcdr (max 0 clutch-debug-event-limit) ranges))
+      (delete-region (max (point-min) (- (car range) 2)) (cdr range)))))
+
+(defun clutch--append-debug-buffer-entry (heading body &optional trace-event)
+  "Append HEADING and BODY to the dedicated debug buffer.
+When TRACE-EVENT is non-nil, mark the entry and enforce the trace limit."
   (with-current-buffer (clutch--debug-buffer)
     (let ((inhibit-read-only t))
       (goto-char (point-max))
       (unless (bobp)
-        (insert "\n\n"))
-      (insert heading "\n")
-      (insert (make-string (length heading) ?-) "\n")
-      (when body
-        (insert body))
-      (unless (or (bobp) (eq (char-before) ?\n))
-        (insert "\n")))))
+        (let ((start (point)))
+          (insert "\n\n")
+          (remove-text-properties
+           start (point) '(clutch-debug-trace-event nil))))
+      (let ((start (point)))
+        (insert heading "\n")
+        (insert (make-string (length heading) ?-) "\n")
+        (when body
+          (insert body))
+        (unless (or (bobp) (eq (char-before) ?\n))
+          (insert "\n"))
+        (when trace-event
+          (put-text-property start (point) 'clutch-debug-trace-event t)
+          (clutch--trim-debug-buffer-events))))))
 
 (defun clutch--append-problem-record-to-debug-buffer (buffer connection problem)
   "Append PROBLEM for BUFFER and CONNECTION to the dedicated debug buffer."
@@ -288,15 +303,10 @@ Each section is a cons cell (TITLE . VALUE)."
               (clutch--debug-insert-sections
                `(("Context" . ,(plist-get event :context))))
               (string-trim-right (buffer-string)))))
-      (clutch--append-debug-buffer-entry "Trace Event" body))))
+      (clutch--append-debug-buffer-entry "Trace Event" body t))))
 
 (defun clutch--clear-debug-capture ()
-  "Forget captured debug events and reset the dedicated debug buffer."
-  (setq clutch--debug-events-by-conn (make-hash-table :test 'eq :weakness 'key))
-  (dolist (buf (buffer-list))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (setq-local clutch--debug-events nil))))
+  "Reset the dedicated debug buffer for a new capture window."
   (clutch--reset-debug-buffer))
 
 (defun clutch--replay-problem-records-to-debug-buffer ()
@@ -387,13 +397,8 @@ buffer in the shared connection-scoped registry."
      (replace-regexp-in-string "[\n\r\t ]+" " " (string-trim sql))
      160 0 nil "...")))
 
-(defun clutch--debug-trim-events (events)
-  "Return EVENTS truncated to `clutch-debug-event-limit'."
-  (let ((limit (max 1 clutch-debug-event-limit)))
-    (cl-subseq events 0 (min limit (length events)))))
-
 (defun clutch--normalize-debug-event (event)
-  "Return EVENT normalized for storage."
+  "Return EVENT normalized for display."
   (let ((normalized (copy-tree event)))
     (unless (plist-get normalized :time)
       (setq normalized
@@ -417,16 +422,6 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
            (normalized (clutch--normalize-debug-event event)))
       (cl-remf normalized :buffer)
       (cl-remf normalized :connection)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (setq-local clutch--debug-events
-                      (clutch--debug-trim-events
-                       (cons normalized clutch--debug-events)))))
-      (when conn
-        (puthash conn
-                 (clutch--debug-trim-events
-                  (cons normalized (gethash conn clutch--debug-events-by-conn)))
-                 clutch--debug-events-by-conn))
       (clutch--append-debug-event-to-buffer buffer conn normalized)
       normalized)))
 
