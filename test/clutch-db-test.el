@@ -468,7 +468,18 @@ authinfo, and PARAMS are explicit connection parameters."
         (should (equal captured-op "fetch"))
         (should (= (alist-get 'cursor-id captured-params) 9))
         (should (= captured-timeout 15))
-        (should (= (alist-get 'query-timeout-seconds captured-params) 10))))))
+        (should (= (alist-get 'query-timeout-seconds captured-params) 10)))))
+  (ert-info ("rejects an invalid fetch-size before RPC")
+    (let ((conn (make-clutch-jdbc-conn :params '(:rpc-timeout 9))))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc-on-conn)
+                 (lambda (&rest _args)
+                   (ert-fail "Invalid fetch-size reached the agent"))))
+        (dolist (clutch-jdbc-fetch-size '(0 10001 1.5))
+          (should-error (clutch-jdbc--fetch-all conn 9)
+                        :type 'user-error)
+          (should-error (clutch-jdbc--execute-rpc
+                         conn "execute" '((sql . "SELECT 1")))
+                        :type 'user-error))))))
 
 (ert-deftest clutch-db-test-jdbc-referencing-objects-maps-rpc-response ()
   "JDBC reverse-reference lookup should map RPC rows to object entries."
@@ -2656,25 +2667,36 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
   "Async JDBC RPC should call ERRBACK and clear state on timeout."
-  (let ((clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+  (let ((buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
+        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        (clutch-jdbc--response-queue nil)
         (clutch-jdbc-rpc-timeout-seconds 1)
         timeout-message
         timer-fn)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
-              ((symbol-function 'clutch-jdbc--send)
-               (lambda (_op _params) 77))
-              ((symbol-function 'run-at-time)
-               (lambda (_secs _repeat fn)
-                 (setq timer-fn fn)
-                 'fake-timer)))
-      (clutch-jdbc--rpc-async
-       "get-tables" '((conn-id . 1))
-       #'ignore
-       (lambda (message)
-         (setq timeout-message message)))
-      (funcall timer-fn)
-      (should (string-match-p "timeout waiting for async response" timeout-message))
-      (should-not (gethash 77 clutch-jdbc--async-callbacks)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                  ((symbol-function 'clutch-jdbc--send)
+                   (lambda (_op _params) 77))
+                  ((symbol-function 'process-buffer) (lambda (_proc) buf))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn)
+                     (setq timer-fn fn)
+                     'fake-timer)))
+          (clutch-jdbc--rpc-async
+           "get-tables" '((conn-id . 1))
+           #'ignore
+           (lambda (message)
+             (setq timeout-message message)))
+          (funcall timer-fn)
+          (should (string-match-p "timeout waiting for async response" timeout-message))
+          (should-not (gethash 77 clutch-jdbc--async-callbacks))
+          (should (gethash 77 clutch-jdbc--ignored-response-ids))
+          (clutch-jdbc--agent-filter 'fake-proc "{\"id\":77,\"ok\":true}\n")
+          (should-not clutch-jdbc--response-queue)
+          (should-not (gethash 77 clutch-jdbc--ignored-response-ids)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (ert-deftest clutch-db-test-jdbc-dispatch-async-response-remembers-conn-scoped-errors ()
   "Async JDBC failures should remember diagnostics and call ERRBACK."
@@ -2701,6 +2723,30 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                      '(conn-77 get-tables
                                (:id 77 :ok :json-false :error "metadata blew up"))))
       (should (equal errback-message "metadata blew up")))))
+
+(ert-deftest clutch-db-test-jdbc-dispatch-async-response-skips-disconnected-conn ()
+  "A deferred JDBC callback should not run after its connection disconnects."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver jdbc)))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         timer-fn
+         callback-called)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (puthash 77 (list :callback (lambda (_result)
+                                  (setq callback-called t))
+                      :conn conn
+                      :op 'get-tables)
+             clutch-jdbc--async-callbacks)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_secs _repeat fn &rest _args)
+                 (setq timer-fn fn)
+                 'fake-timer))
+              ((symbol-function 'clutch-jdbc--agent-live-p) (lambda () nil)))
+      (should (clutch-jdbc--dispatch-async-response
+               '(:id 77 :ok t :result (:tables nil))))
+      (clutch-db-disconnect conn)
+      (funcall timer-fn)
+      (should-not callback-called))))
 
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
@@ -5930,6 +5976,24 @@ It does so without touching the agent process."
              (should (string-match-p (regexp-quote clutch-debug-buffer-name)
                                      (cadr err))))))))))
 
+(ert-deftest clutch-db-test-jdbc-rpc-uses-connection-timeout-by-default ()
+  "Connection-scoped JDBC RPCs should inherit the connection RPC timeout."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+                                      :params '(:driver jdbc :rpc-timeout 0.25)))
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         captured-timeout)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 71))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (_id timeout &optional _op)
+                 (setq captured-timeout timeout)
+                 '(:ok t :result (:columns nil)))))
+      (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")))
+      (should (= captured-timeout 0.25))
+      (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")) 0.1)
+      (should (= captured-timeout 0.1)))))
+
 (ert-deftest clutch-db-test-jdbc-send-encodes-debug-and-boolean-values ()
   "JDBC requests should encode debug and false as JSON booleans."
   (let ((clutch-jdbc--next-request-id 0)
@@ -6040,7 +6104,8 @@ It does so without touching the agent process."
         (clutch-jdbc--agent-process 'fake-proc)
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
-        (clutch-jdbc--response-queue '((:id 99 :ok t)))
+        (clutch-jdbc--response-queue
+         '((:id 99 :ok t :result (:cancelled t :request-id 41))))
         captured-op captured-params)
     (puthash conn 41 clutch-jdbc--busy-request-ids)
     (cl-letf (((symbol-function 'clutch-jdbc--send)
@@ -6077,7 +6142,8 @@ It does so without touching the agent process."
       (should-not (clutch-db-interrupt-query conn))
       (should send-called)
       (should (eq clutch-jdbc--agent-process 'fake-proc))
-      (should-not deleted-proc)))
+      (should-not deleted-proc)
+      (should (gethash 99 clutch-jdbc--ignored-response-ids))))
   (let ((conn (make-clutch-jdbc-conn :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
@@ -6090,6 +6156,21 @@ It does so without touching the agent process."
       (should-not (clutch-db-interrupt-query conn))
       (should-not send-called)
       (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
+
+(ert-deftest clutch-db-test-jdbc-interrupt-requires-confirmed-request ()
+  "JDBC interrupt should reject unconfirmed or mismatched cancellation results."
+  (dolist (result `((:cancelled ,clutch-jdbc--json-false :request-id 41)
+                    (:cancelled t :request-id 42)
+                    nil))
+    (let ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver jdbc)))
+          (clutch-jdbc--agent-process 'fake-proc)
+          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+          (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+          (clutch-jdbc--response-queue `((:id 99 :ok t :result ,result))))
+      (puthash conn 41 clutch-jdbc--busy-request-ids)
+      (cl-letf (((symbol-function 'clutch-jdbc--send)
+                 (lambda (_op _params) 99)))
+        (should-not (clutch-db-interrupt-query conn))))))
 
 (ert-deftest clutch-db-test-jdbc-disconnect-cleans-state-contract ()
   "JDBC disconnect should clean local state without unsafe agent ownership changes."
@@ -6104,15 +6185,24 @@ It does so without touching the agent process."
     (ert-info ((format "case: %s" (plist-get case :label)))
       (let* ((conn (make-clutch-jdbc-conn :conn-id 7
                                           :params '(:driver jdbc :rpc-timeout 12)))
+             (other-conn (make-clutch-jdbc-conn :conn-id 8
+                                                :params '(:driver jdbc)))
              (clutch-jdbc-disconnect-timeout-seconds 0.1)
              (clutch-jdbc--agent-process (plist-get case :agent-process))
              (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
              (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
              (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
              (clutch-jdbc--response-queue nil)
              deleted-proc
-             send-called)
+             send-called
+             cancelled-timer)
         (puthash conn 41 clutch-jdbc--busy-request-ids)
+        (puthash 43 (list :conn conn :timer 'metadata-timer)
+                 clutch-jdbc--async-callbacks)
+        (puthash 44 (list :conn other-conn :timer 'other-timer)
+                 clutch-jdbc--async-callbacks)
         (puthash conn '(:summary "old error") clutch-jdbc--error-details-by-conn)
         (puthash 7 conn clutch-jdbc--connections-by-id)
         (cl-letf (((symbol-function 'clutch-jdbc--send)
@@ -6125,7 +6215,10 @@ It does so without touching the agent process."
                    (lambda (_proc _secs) nil))
                   ((symbol-function 'delete-process)
                    (lambda (proc)
-                     (setq deleted-proc proc))))
+                     (setq deleted-proc proc)))
+                  ((symbol-function 'cancel-timer)
+                   (lambda (timer)
+                     (setq cancelled-timer timer))))
           (clutch-db-disconnect conn)
           (if (plist-get case :expect-send)
               (should send-called)
@@ -6134,6 +6227,10 @@ It does so without touching the agent process."
                       (plist-get case :expect-agent-process)))
           (should-not deleted-proc)
           (should-not (gethash conn clutch-jdbc--busy-request-ids))
+          (should-not (gethash 43 clutch-jdbc--async-callbacks))
+          (should (gethash 44 clutch-jdbc--async-callbacks))
+          (should (eq cancelled-timer 'metadata-timer))
+          (should (gethash 43 clutch-jdbc--ignored-response-ids))
           (should-not (gethash conn clutch-jdbc--error-details-by-conn))
           (should-not (gethash 7 clutch-jdbc--connections-by-id)))))))
 
@@ -6163,6 +6260,44 @@ It does so without touching the agent process."
           (should-error (clutch-jdbc--recv-response 2 10.0)
                         :type 'clutch-db-error)
           (should-not clutch-jdbc--response-queue))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-db-test-jdbc-agent-filter-scans-fragments-incrementally ()
+  "JDBC response fragments should not rescan bytes seen by earlier filter calls."
+  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+        (clutch-jdbc--response-queue nil)
+        (fragments '("{\"id\":" "17,\"ok\":" "true}" "\n"))
+        scan-starts expected-starts record-scans)
+    (unwind-protect
+        (let ((original-search-forward (symbol-function 'search-forward)))
+          (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf))
+                    ((symbol-function 'search-forward)
+                     (lambda (string &rest args)
+                       (when (and record-scans
+                                  (eq (current-buffer) buf)
+                                  (equal string "\n"))
+                         (push (point) scan-starts))
+                       (apply original-search-forward string args)))
+                    ((symbol-function 'clutch-jdbc--dispatch-async-response)
+                     (lambda (_parsed) nil)))
+            (let ((next-start 1))
+              (setq record-scans t)
+              (dolist (fragment fragments)
+                (push next-start expected-starts)
+                (clutch-jdbc--agent-filter 'fake-proc fragment)
+                (setq next-start (+ next-start (length fragment))))
+              (push 1 expected-starts)
+              (setq record-scans nil))
+            (should (equal (nreverse scan-starts)
+                           (nreverse expected-starts)))
+            (clutch-jdbc--agent-filter
+             'fake-proc "{\"id\":18,\"ok\":true}\n{\"id\":")
+            (clutch-jdbc--agent-filter 'fake-proc "19,\"ok\":true}\n")
+            (should (equal clutch-jdbc--response-queue
+                           '((:id 17 :ok t) (:id 18 :ok t) (:id 19 :ok t))))
+            (with-current-buffer buf
+              (should (= (buffer-size) 0)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 

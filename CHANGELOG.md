@@ -23,6 +23,13 @@
 
 ### Fixed
 
+- Made fragmented JDBC responses scan incrementally instead of repeatedly from
+  the start of the process buffer, dropped late timeout responses and deferred
+  callbacks for disconnected sessions, required an exact cancel acknowledgement
+  before preserving a session, and bounded fetch batches to 1–10,000 rows.
+- Reused warm SQL statement analysis without rescanning the whole query buffer,
+  refreshed only the result footer after aggregation, and coalesced resize
+  bursts through the existing column-width timer.
 - Preserved the active `WHERE`-filtered result view after committing staged SQL
   mutations by refreshing through the result buffer's normal rerun contract.
 - Kept connection chrome synchronized across transaction changes and

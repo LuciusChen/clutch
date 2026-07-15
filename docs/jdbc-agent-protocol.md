@@ -166,7 +166,8 @@ Its success response returns:
 The cancelled `execute`/`fetch` request may still produce a late response after
 the client has already committed to the interrupt path.  The Elisp side tracks
 request ids explicitly so those late responses can be dropped instead of
-polluting the next request.
+polluting the next request.  The connection remains usable only when the cancel
+response reports `cancelled=true` for that exact request id.
 
 The current Elisp client closes cursor state implicitly by fetching until the
 agent replies with `done=true`; it does not issue a separate `close-cursor`
@@ -184,6 +185,10 @@ RPC.
 - `cursor-id`
 - `fetch-size`
 - `query-timeout-seconds`
+
+For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1
+through 10,000 and defaults to 500.  Invalid values are rejected before JDBC
+work or cursor advancement.
 
 ## Table metadata payload
 

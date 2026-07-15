@@ -2641,7 +2641,7 @@ Preserve cursor position, top visible row, and horizontal scroll."
           (unless (eq new-width
                       (buffer-local-value 'clutch--last-window-width buf))
             (with-current-buffer buf
-              (clutch--refresh-display))))))))
+              (clutch--schedule-column-width-refresh))))))))
 
 (defun clutch--enable-window-size-hook ()
   "Ensure `clutch--window-size-change' is installed once."

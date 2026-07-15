@@ -164,9 +164,10 @@
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
-(defun clutch--compute-tables-in-query-cache (schema)
-  "Return a fresh cache plist for table-name analysis on SCHEMA."
-  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+(defun clutch--compute-tables-in-query-cache (schema &optional bounds)
+  "Return a fresh cache plist for table-name analysis on SCHEMA.
+BOUNDS, when non-nil, is the already computed statement range."
+  (pcase-let* ((`(,beg . ,end) (or bounds (clutch--statement-bounds)))
                (tick (buffer-chars-modified-tick))
                (text (buffer-substring-no-properties beg end))
                (`(,found . ,aliases)
@@ -174,6 +175,8 @@
                (statement-tables (delete-dups found)))
     (list :schema schema
           :tick tick
+          :restriction-beg (point-min)
+          :restriction-end (point-max)
           :beg beg
           :end end
           :statement-tables statement-tables
@@ -183,17 +186,26 @@
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
-  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
-               (tick (buffer-chars-modified-tick))
-               (cached clutch--tables-in-query-cache))
+  (let* ((tick (buffer-chars-modified-tick))
+         (cached clutch--tables-in-query-cache)
+         (beg (and cached (plist-get cached :beg)))
+         (end (and cached (plist-get cached :end))))
     (if (and cached
              (eq (plist-get cached :schema) schema)
              (= (plist-get cached :tick) tick)
-             (= (plist-get cached :beg) beg)
-             (= (plist-get cached :end) end))
+             (eql (plist-get cached :restriction-beg) (point-min))
+             (eql (plist-get cached :restriction-end) (point-max))
+             (<= beg (point))
+             (or (< (point) end)
+                 (and (= (point) end)
+                      (or (= end (point-max))
+                          (eq (char-after) ?\;)))
+                 (and (= (point) (1+ end))
+                      (eq (char-before) ?\;))))
         cached
-      (setq clutch--tables-in-query-cache
-            (clutch--compute-tables-in-query-cache schema)))))
+      (let ((bounds (clutch--statement-bounds)))
+        (setq clutch--tables-in-query-cache
+              (clutch--compute-tables-in-query-cache schema bounds))))))
 
 (defun clutch--tables-in-current-statement (schema)
   "Return known table names mentioned in the current statement for SCHEMA."

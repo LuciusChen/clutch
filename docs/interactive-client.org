@@ -672,7 +672,8 @@ Customize these through =M-x customize-group RET clutch RET=:
 - =clutch-object-warmup-idle-delay-seconds= delays background object warmup after schema refresh.
 - =clutch-schema-cache-install-batch-size= controls how many schema entries are installed per idle batch.
 - =clutch-csv-export-default-coding-system= sets the default CSV encoding (UTF-8 with BOM by default for Excel compatibility).
-- =clutch-jdbc-fetch-size= controls JDBC cursor batch size.
+- =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through
+  10,000 rows (default 500).
 - =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.
 - =clutch-sql-completion-case-style= controls whether SQL completion preserves, lowercases, or uppercases inserted identifiers/keywords.
 - =clutch-agent-context-max-result-rows= controls how many current result rows

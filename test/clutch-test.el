@@ -912,6 +912,37 @@
           (should (= (aref clutch--column-widths 0) 10))
           (should (= (length scheduled) 2)))))))
 
+(ert-deftest clutch-test-window-size-changes-coalesce-redraws ()
+  "Repeated resize notifications should schedule one result redraw."
+  (let ((schedule-count 0)
+        (refresh-count 0))
+    (with-temp-buffer
+      (let ((buffer (current-buffer)))
+        (setq-local major-mode 'clutch-result-mode
+                    clutch--column-widths [10]
+                    clutch--last-window-width 80)
+        (cl-letf (((symbol-function 'window-list)
+                   (lambda (&rest _args) '(fake-window)))
+                  ((symbol-function 'window-buffer)
+                   (lambda (_window) buffer))
+                  ((symbol-function 'window-body-width)
+                   (lambda (_window) 100))
+                  ((symbol-function 'timerp)
+                   (lambda (timer)
+                     (and (consp timer) (eq (car timer) 'fake-timer))))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn &rest _args)
+                     (when (eq fn #'clutch--run-column-width-refresh)
+                       (cl-incf schedule-count))
+                     '(fake-timer)))
+                  ((symbol-function 'clutch--refresh-display)
+                   (lambda () (cl-incf refresh-count))))
+          (dotimes (_ 20)
+            (clutch--window-size-change nil))
+          (should (= schedule-count 1))
+          (should (= refresh-count 0))
+          (should (timerp clutch--column-width-refresh-timer)))))))
+
 (ert-deftest clutch-test-column-width-commands-skip-post-command-ui-refresh ()
   "Column width commands should not do cursor-only post-command UI work."
   (let ((footer-count 0)
@@ -4958,6 +4989,27 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   (should (string-match-p pattern summary)))
                 (dolist (pattern absent)
                   (should-not (string-match-p pattern summary)))))))))))
+
+(ert-deftest clutch-test-aggregate-refreshes-footer-without-redrawing-body ()
+  "Aggregate should update footer state without rebuilding the result body."
+  (clutch-test--with-result-state
+      (:columns '("id" "score")
+       :rows '((1 10) (2 20)))
+    (let ((footer-refreshes 0)
+          (body-refreshes 0)
+          kill-ring
+          kill-ring-yank-pointer)
+      (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
+                ((symbol-function 'clutch--cell-at-point)
+                 (lambda () '(1 1 20)))
+                ((symbol-function 'clutch--refresh-footer-line)
+                 (lambda () (cl-incf footer-refreshes)))
+                ((symbol-function 'clutch--refresh-display)
+                 (lambda () (cl-incf body-refreshes))))
+        (clutch-result-aggregate)
+        (should (= footer-refreshes 1))
+        (should (= body-refreshes 0))
+        (should (= (plist-get clutch--aggregate-summary :sum) 20))))))
 
 (ert-deftest clutch-test-aggregate-with-prefix-refines-region ()
   "Prefix-arg aggregate should use refined rectangle selection."

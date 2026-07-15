@@ -81,9 +81,12 @@ Examples:
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-fetch-size 500
-  "Number of rows fetched per batch from the agent."
-  :type 'natnum
+  "Number of rows fetched per batch from the agent, from 1 through 10000."
+  :type 'integer
   :group 'clutch-jdbc)
+
+(defconst clutch-jdbc--max-fetch-size 10000
+  "Maximum batch size accepted by the JDBC agent protocol.")
 
 (defcustom clutch-jdbc-oracle-manual-commit t
   "When non-nil, Oracle JDBC connections default to manual-commit mode.
@@ -224,6 +227,9 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defvar clutch-jdbc--response-queue nil
   "List of parsed synchronous JSON responses, oldest first.")
 
+(defvar-local clutch-jdbc--agent-scan-position nil
+  "Buffer position where the JDBC agent filter should resume line scanning.")
+
 (defvar clutch-jdbc--async-callbacks (make-hash-table :test 'eql)
   "Map of JDBC request ids to asynchronous callbacks.")
 
@@ -307,13 +313,21 @@ JAR defaults to `clutch-jdbc--agent-jar'."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
-(defun clutch-jdbc--clear-async-callbacks ()
-  "Cancel and clear all pending asynchronous JDBC callbacks."
-  (maphash (lambda (_id entry)
-             (when-let* ((timer (plist-get entry :timer)))
-               (cancel-timer timer)))
-           clutch-jdbc--async-callbacks)
-  (clrhash clutch-jdbc--async-callbacks))
+(defun clutch-jdbc--clear-async-callbacks (&optional conn)
+  "Cancel pending asynchronous JDBC callbacks.
+When CONN is non-nil, clear only callbacks for that connection and ignore their
+late responses.  Otherwise clear every callback."
+  (let (ids)
+    (maphash (lambda (id entry)
+               (when (or (null conn) (eq conn (plist-get entry :conn)))
+                 (when-let* ((timer (plist-get entry :timer)))
+                   (cancel-timer timer))
+                 (when conn
+                   (puthash id t clutch-jdbc--ignored-response-ids))
+                 (push id ids)))
+             clutch-jdbc--async-callbacks)
+    (dolist (id ids)
+      (remhash id clutch-jdbc--async-callbacks))))
 
 (defun clutch-jdbc--clear-request-state ()
   "Clear in-flight and ignored JDBC request bookkeeping."
@@ -336,18 +350,22 @@ Return non-nil when RESPONSE was consumed asynchronously."
         (run-at-time
          0 nil
          (lambda ()
-           (condition-case err
-              (if (eq t (plist-get response :ok))
-                  (when callback
-                    (funcall callback (plist-get response :result)))
-                (clutch-jdbc--remember-error-response conn op response)
-                (let ((message (clutch-jdbc--rpc-error-message op response)))
-                  (if errback
-                      (funcall errback message)
-                    (message "clutch-jdbc async error: %s" message))))
-             (error
-              (message "clutch-jdbc async callback failed: %s"
-                       (error-message-string err)))))))
+           (when (or (not (clutch-jdbc-conn-p conn))
+                     (eq conn
+                         (gethash (clutch-jdbc-conn-conn-id conn)
+                                  clutch-jdbc--connections-by-id)))
+             (condition-case err
+                 (if (eq t (plist-get response :ok))
+                     (when callback
+                       (funcall callback (plist-get response :result)))
+                   (clutch-jdbc--remember-error-response conn op response)
+                   (let ((message (clutch-jdbc--rpc-error-message op response)))
+                     (if errback
+                         (funcall errback message)
+                       (message "clutch-jdbc async error: %s" message))))
+               (error
+                (message "clutch-jdbc async callback failed: %s"
+                         (error-message-string err))))))))
       t)))
 
 (defun clutch-jdbc--agent-filter (proc string)
@@ -358,7 +376,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
         (goto-char (point-max))
         (insert string)
         ;; Collect complete lines into the response queue.
-        (goto-char (point-min))
+        (goto-char (min (or clutch-jdbc--agent-scan-position (point-min))
+                        (point-max)))
         (while (search-forward "\n" nil t)
           (let ((line (string-trim (buffer-substring (point-min) (point)))))
             (delete-region (point-min) (point))
@@ -383,7 +402,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
                      (t
                       (setq clutch-jdbc--response-queue
                             (nconc clutch-jdbc--response-queue
-                                   (list parsed)))))))))))))))
+                                   (list parsed)))))))))))
+        (setq clutch-jdbc--agent-scan-position (point-max))))))
 
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
@@ -594,6 +614,8 @@ Unlike `clutch-jdbc--recv-response', this never kills the agent process."
                  clutch-jdbc--agent-process
                  (not (process-live-p clutch-jdbc--agent-process)))
         (setq agent-exited t))
+      (when (and (not response) (not agent-exited))
+        (puthash id t clutch-jdbc--ignored-response-ids))
       (unless agent-exited
         response))))
 
@@ -604,7 +626,9 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
   (clutch-jdbc--ensure-agent)
   (let* ((conn (clutch-jdbc--conn-from-params params))
          (id (clutch-jdbc--send op params))
-         (response (clutch-jdbc--recv-response id timeout-seconds op)))
+         (timeout (or timeout-seconds
+                      (and conn (clutch-jdbc--conn-rpc-timeout conn))))
+         (response (clutch-jdbc--recv-response id timeout op)))
     (clutch-jdbc--response-result-or-signal conn op response)))
 
 (defun clutch-jdbc--rpc-error-message (op response)
@@ -690,6 +714,7 @@ diagnostics when non-nil.  Return the request id."
                    (let ((entry (gethash id clutch-jdbc--async-callbacks)))
                      (when entry
                        (remhash id clutch-jdbc--async-callbacks)
+                       (puthash id t clutch-jdbc--ignored-response-ids)
                        (when-let* ((timeout-errback (plist-get entry :errback)))
                          (funcall timeout-errback
                                   (format "clutch-jdbc-agent: timeout waiting for async response to request %d"
@@ -980,6 +1005,7 @@ Returns a `clutch-jdbc-conn'."
 (cl-defmethod clutch-db-disconnect ((conn clutch-jdbc-conn))
   "Disconnect JDBC CONN, releasing it in the agent."
   (remhash conn clutch-jdbc--busy-request-ids)
+  (clutch-jdbc--clear-async-callbacks conn)
   (remhash conn clutch-jdbc--error-details-by-conn)
   (remhash (clutch-jdbc-conn-conn-id conn) clutch-jdbc--connections-by-id)
   (when (clutch-jdbc--agent-live-p)
@@ -1196,17 +1222,26 @@ This is allowed in the hot path."
 
 ;;;; Query methods
 
+(defun clutch-jdbc--effective-fetch-size ()
+  "Return the validated JDBC fetch batch size."
+  (unless (and (integerp clutch-jdbc-fetch-size)
+               (<= 1 clutch-jdbc-fetch-size clutch-jdbc--max-fetch-size))
+    (user-error "JDBC fetch size must be between 1 and %d"
+                clutch-jdbc--max-fetch-size))
+  clutch-jdbc-fetch-size)
+
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
         (effective-qt (clutch-jdbc--conn-effective-query-timeout conn))
+        (fetch-size (clutch-jdbc--effective-fetch-size))
         batches done)
     (while (not done)
       (let ((result (clutch-jdbc--rpc-on-conn
                      conn
                      "fetch"
                      `((cursor-id  . ,cursor-id)
-                       (fetch-size . ,clutch-jdbc-fetch-size)
+                       (fetch-size . ,fetch-size)
                        ,@(when effective-qt
                            `((query-timeout-seconds . ,effective-qt))))
                      rpc-timeout)))
@@ -1354,13 +1389,14 @@ Clob plists become their :preview string."
       (condition-case err
           (let* ((rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
                  (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
+                 (fetch-size (clutch-jdbc--effective-fetch-size))
                  (result (clutch-jdbc--rpc-on-conn
                           conn
                           op
                           (append
                            `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                            payload
-                           `((fetch-size . ,clutch-jdbc-fetch-size))
+                           `((fetch-size . ,fetch-size))
                            (when effective-qt
                              `((query-timeout-seconds . ,effective-qt))))
                           rpc-timeout)))
@@ -1388,7 +1424,10 @@ Clob plists become their :preview string."
                                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))))
            (response (clutch-jdbc--recv-response-nonfatal
                       id clutch-jdbc-cancel-timeout-seconds)))
-      (and response (eq t (plist-get response :ok))))))
+      (when (eq t (plist-get response :ok))
+        (let ((result (plist-get response :result)))
+          (and (eq t (plist-get result :cancelled))
+               (eql request-id (plist-get result :request-id))))))))
 
 (defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
   "Build Oracle ROWNUM-based pagination SQL for CONN.

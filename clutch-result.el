@@ -2154,7 +2154,7 @@ Without region: use current cell."
                       :min (plist-get stats :min)
                       :max (plist-get stats :max)
                       :count (plist-get stats :count)))
-    (clutch--refresh-display)
+    (clutch--refresh-footer-line)
     (kill-new summary)))
 
 ;;;###autoload

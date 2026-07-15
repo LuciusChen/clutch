@@ -442,6 +442,47 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
       (should (equal (clutch--tables-in-query schema) '("logs")))
       (should-not (eq clutch--tables-in-query-cache second-cache)))))
 
+(ert-deftest clutch-test-tables-in-query-cache-hit-skips-statement-rescan ()
+  "A warm statement cache should not rescan unchanged SQL text."
+  (with-temp-buffer
+    (insert "SELECT * FROM users WHERE active = 1")
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "users" t schema)
+      (goto-char (point-min))
+      (should (equal (clutch--tables-in-query schema) '("users")))
+      (search-forward "active")
+      (cl-letf (((symbol-function 'clutch--statement-bounds)
+                 (lambda ()
+                   (ert-fail "Warm cache hit rescanned statement bounds"))))
+        (should (equal (clutch--tables-in-query schema) '("users")))))))
+
+(ert-deftest clutch-test-tables-in-query-cache-respects-buffer-restriction ()
+  "A warm statement cache should not cross a changed buffer restriction."
+  (with-temp-buffer
+    (insert "SELECT * FROM users JOIN logs ON users.id = logs.user_id")
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "users" t schema)
+      (puthash "logs" t schema)
+      (goto-char (point-min))
+      (should (equal (clutch--tables-in-query schema) '("users" "logs")))
+      (search-forward "JOIN")
+      (narrow-to-region (match-beginning 0) (point-max))
+      (should (equal (clutch--tables-in-query schema) '("logs")))
+      (widen)
+      (should (equal (clutch--tables-in-query schema) '("users" "logs"))))))
+
+(ert-deftest clutch-test-tables-in-query-cache-does-not-cross-blank-line ()
+  "A cached statement should end before its blank-line separator."
+  (with-temp-buffer
+    (insert "SELECT * FROM users\n\nSELECT * FROM logs")
+    (let ((schema (make-hash-table :test 'equal)))
+      (puthash "users" t schema)
+      (puthash "logs" t schema)
+      (goto-char (point-min))
+      (should (equal (clutch--tables-in-query schema) '("users")))
+      (goto-char (plist-get clutch--tables-in-query-cache :end))
+      (should (equal (clutch--tables-in-query schema) '("logs"))))))
+
 (ert-deftest clutch-test-table-scan-does-not-consume-join-as-previous-table-alias ()
   "JOIN should not be consumed as the previous table's optional alias.
 Otherwise the scanner skips past the JOIN token and misses the joined table."
