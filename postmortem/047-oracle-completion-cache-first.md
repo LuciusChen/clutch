@@ -1,5 +1,7 @@
 # 047 — Oracle table completion: cache-first + cursor-drain helper
 
+_Architecture update: JDBC no longer reads UI schema caches or relies on upward declarations; the current adapter depends only on the backend contract and standard libraries, as summarized in 133._
+
 ## Background
 
 After 046 introduced cursor-based streaming for Oracle `get-tables`, two

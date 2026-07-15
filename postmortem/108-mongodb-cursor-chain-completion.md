@@ -1,5 +1,7 @@
 # MongoDB Cursor Chain Completion
 
+_Updated by 111: collection profiles now analyze nested document paths, resolving the nested-field limitation recorded here._
+
 Clutch now completes MongoDB cursor helper chains after `find(...)` and
 `aggregate(...)` in native MongoDB query buffers.
 

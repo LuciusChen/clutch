@@ -1,5 +1,7 @@
 # 053 — Org Babel Saved Connections Must Resolve Backend Before Connect
 
+_Ownership moved to the separate `ob-clutch` repository by 073; this record remains the rationale for saved-connection resolution._
+
 ## Background
 
 `ob-clutch` supports two ways to execute a generic `#+begin_src clutch` block:

@@ -87,7 +87,7 @@ execution, and type mapping.
 
 `clutch-query.el` is query-console workflow, not the SQL layer. SQL-specific
 analysis and completion live in `clutch-sql.el` and are installed by
-`clutch-mode`, whose major-mode definition remains in `clutch.el`. Document
+`clutch-mode`, whose major-mode definition lives in `clutch-query.el`. Document
 query-buffer behavior is selected through backend registry metadata.
 `clutch-document.el` currently provides `clutch-mongodb-mode` for MongoDB and
 reuses the shared query workflow for execution. Future document backends should
@@ -104,8 +104,9 @@ omitted from this overview.
 `clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug
 capture, the dedicated debug buffer, and buffer/connection-scoped problem
 records. Workflow modules call it directly for capture and error context.
-`clutch-connection.el` registers label and attached-buffer accessors after it
-defines them, so diagnostics has no reverse dependency on connection.
+Problem records retain their source-buffer provenance, and diagnostics derives
+redacted labels through the generic backend contract, so it has no reverse
+dependency on connection.
 
 ## Backend And Surface Model
 

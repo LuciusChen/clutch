@@ -216,22 +216,16 @@ PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`,
 `require`, and `verify-full`.  `:tls t` and `:tls nil` remain convenience
 shorthands for `require` and `disable`.
 
-When `:sslmode require` or `:sslmode verify-full` is used, certificate and
-hostname verification are enabled by default through `pg-tls-verify-server`.
-When `:sslmode prefer` is used, clutch attempts TLS first and falls back to
-plaintext if the server declines SSL or GnuTLS is unavailable.
-
-Relevant variables:
-
-- `pg-tls-trustfiles`
-- `pg-tls-verify-server`
-- `pg-tls-keylist`
+`:sslmode require` encrypts the connection without requesting certificate or
+hostname verification from `pg-el`.  `:sslmode verify-full` enables both
+certificate and hostname verification.  With `:sslmode prefer`, clutch
+attempts TLS first and falls back to plaintext if the server declines SSL or
+GnuTLS is unavailable.
 
 ### Convenience API
 
 - `with-pg-connection`
 - `with-pg-transaction`
-- `pg-ping`
 - `pg-escape-identifier`
 - `pg-escape-literal`
 
@@ -326,7 +320,7 @@ Relevant variables:
 ### Parameterized DML
 
 - clutch preview buffers still show fully rendered SQL text for readability
-- Native MySQL/PostgreSQL/SQLite staged `INSERT` / `UPDATE` / `DELETE` execute
+- Native MySQL/PostgreSQL/SQLite and JDBC staged `INSERT` / `UPDATE` / `DELETE` execute
   through backend parameter binding instead of literal SQL interpolation
 - Staged `UPDATE` / `DELETE` use row identity metadata rather than requiring a
   primary key in every table: primary keys are preferred, non-null unique keys
@@ -335,8 +329,7 @@ Relevant variables:
 - Physical row locators such as PostgreSQL `ctid` and SQLite `rowid` identify
   the current row version only.  They may change after `UPDATE`, and result
   refresh ordering remains defined only by the query's explicit `ORDER BY`
-- JDBC currently keeps its literal-SQL fallback until the sidecar grows a
-  prepared-execute operation
+- JDBC sends bound values through the sidecar's `execute-params` operation
 
 ### UI Layer
 

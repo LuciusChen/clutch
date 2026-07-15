@@ -95,6 +95,7 @@ Connection lifecycle:
 
 - `connect`
 - `disconnect`
+- `ping`
 - `commit`
 - `rollback`
 - `set-auto-commit`
@@ -104,7 +105,9 @@ Execution and cursor flow:
 
 - `cancel`
 - `execute`
+- `execute-params`
 - `fetch`
+- `close-cursor`
 
 Schema and object metadata:
 
@@ -151,7 +154,8 @@ The connect response returns:
 
 - `conn-id`
 
-That `conn-id` is then used in all subsequent operations.
+Connection-scoped operations use that `conn-id`.  Cursor operations use the
+`cursor-id` returned by execution, while `ping` checks the agent process itself.
 
 `cancel` accepts:
 
@@ -180,11 +184,19 @@ RPC.
 - `fetch-size`
 - `query-timeout-seconds`
 
+`execute-params` accepts the same fields plus:
+
+- `values`, an array of values bound to the statement placeholders
+
 `fetch` accepts:
 
 - `cursor-id`
 - `fetch-size`
 - `query-timeout-seconds`
+
+`close-cursor` accepts:
+
+- `cursor-id`
 
 For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1
 through 10,000 and defaults to 500.  Invalid values are rejected before JDBC

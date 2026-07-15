@@ -162,7 +162,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - While `clutch` is still pre-1.0, bump patch for bug-fix-only releases and bump minor for new backends, substantial user-visible features, configuration/API breaks, or backend contract breaks. Breaking changes before 1.0 are recorded under the next minor version.
 - Feature-branch changelog sections that summarize changes relative to `origin/main` must include a `Breaking Changes` section only when there are real upgrade/configuration/API breaks. When present, place it before `Added`; do not add an empty section or write `None` just to document the absence of breaking changes.
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
-- Optimize documentation for the rendered reader, not source-width aesthetics. Do not rewrap unchanged Markdown/Org prose or lists just to fit a column; rendered documents already wrap naturally.
+- Keep each semantic Markdown/Org paragraph on one source line; rendered documents already wrap naturally, so source-width wrapping only obscures paragraph boundaries.
 - When documentation feels hard to read, improve the information structure: use a table, shorter bullets, a clearer heading, or a focused rewrite. Avoid changes whose only effect is different source line breaks.
 - `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
 - Do not assume a release asset is immutable just because the version string is unchanged. If the jar bytes change, update `clutch-jdbc-agent-sha256` immediately.

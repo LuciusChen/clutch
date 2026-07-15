@@ -1,5 +1,7 @@
 # 008 — PK-Based Staging for Pending Mutations
 
+_Superseded by the general row-identity model recorded in 089 and 127, which also supports verified unique keys and physical row locators where safe._
+
 ## Background
 
 `clutch--pending-deletes` originally stored ridx integers — the loop counter from the render pass in `clutch--insert-data-rows`. `clutch--pending-edits` used `(ridx . cidx)` pairs as alist keys. At commit time, both SQL builders did `(nth ridx clutch--result-rows)` to recover the row.

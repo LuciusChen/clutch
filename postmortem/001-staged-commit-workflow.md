@@ -1,5 +1,7 @@
 # 001 — Staged Commit Workflow for Insert and Delete
 
+_Superseded in part: pending mutations now use the general row-identity model recorded in 089 and 127, not render indexes or a primary-key-only identity._
+
 ## Background
 
 Edit-cell had a two-step workflow from the start: stage the change

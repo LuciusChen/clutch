@@ -101,7 +101,7 @@ page; the footer marks this scope as =page=.  Use =C= to jump to a different
 visible column first, or click its header to cycle that column.  The cycle is
 unsorted, ascending, descending, then unsorted again.  Header icons appear after
 column names and use the original-size nerd-icons sort glyphs; when nerd-icons
-is unavailable, the sort marker is omitted.
+is unavailable, text arrows preserve the sort marker.
 
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
 result transient as the exact staged SQL batch.
@@ -353,9 +353,9 @@ field.
 #+end_src
 
 The confirmation preview always shows fully rendered SQL text.  Native MySQL,
-PostgreSQL, and SQLite backends still execute staged DML through parameterized
-prepared/bound values under the hood; JDBC keeps the current literal-SQL
-fallback until the sidecar grows a dedicated prepared-execute op.
+PostgreSQL, SQLite, and JDBC backends execute staged DML through parameterized
+prepared/bound values under the hood; only the preview renders readable SQL
+literals.
 
 * REPL Mode
 
@@ -475,8 +475,8 @@ C-c C-o                     ;; Show object actions for the current object, or pr
 The main navigation path is object-centric rather than tree-centric.  =C-c C-j=
 is the single conceptual object entrypoint.  It resolves an object at point
 when possible; otherwise it opens a flat annotated object picker.  By default
-the primary set is =TABLE= / =VIEW= / =SYNONYM=, configurable via
-=clutch-primary-object-types=.  The picker
+the primary set is =TABLE= / =VIEW= / =SYNONYM= / =COLLECTION= / =KEY=,
+configurable via =clutch-primary-object-types=.  The picker
 returns quickly with schema snapshot objects and any already-warmed metadata,
 then keeps warming slower categories such as indexes, sequences, and routines
 in the background after schema refreshes.  Once an object is resolved, =RET=
@@ -527,6 +527,8 @@ introspection.
 Default actions only depend on the object type:
 
 - tables / views / synonyms: insert =SELECT *= into a query console
+- collections: browse documents through the native MongoDB query surface
+- keys: browse the value through the native Redis command surface
 - procedures / functions / triggers: show source
 - indexes / sequences: show DDL
 

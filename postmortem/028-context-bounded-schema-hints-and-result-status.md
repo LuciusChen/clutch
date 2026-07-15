@@ -1,5 +1,7 @@
 # Context-Bounded Schema Hints and Unified Result Status
 
+_The deferred schema-staleness chrome is now implemented: attached buffers expose loading and stale schema states in their rendered connection status._
+
 ## Background
 
 Two small but persistent UX problems remained after the earlier completion and

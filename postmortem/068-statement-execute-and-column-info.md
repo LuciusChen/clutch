@@ -1,5 +1,7 @@
 # 068 — Statement-Scoped Execute and Inline Column Info
 
+_Updated by 130: the separate `clutch-execute-statement-at-point` command was removed after statement execution converged on the main DWIM entry; column-info behavior remains current._
+
 ## Context
 
 Two friction points remained in the main `clutch` workflows:

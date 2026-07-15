@@ -1,5 +1,7 @@
 # 029 — MySQL 5.6 and MariaDB Compatibility Boundary
 
+_Continued by 032, which records the validated MariaDB TLS and authentication matrix._
+
 ## Background
 
 The README had drifted into a conservative but increasingly inaccurate summary:

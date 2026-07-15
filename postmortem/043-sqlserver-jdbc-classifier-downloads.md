@@ -1,5 +1,7 @@
 # 043 - SQL Server JDBC classifier downloads
 
+_Updated: the downloader now supports general four-part Maven coordinates, and ClickHouse and MongoDB use classifier-bearing artifacts; the SQL Server coordinate described here remains valid._
+
 ## Background
 
 `clutch-jdbc-install-driver 'sqlserver` relied on the generic Maven download

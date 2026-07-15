@@ -1,5 +1,7 @@
 # 054 — Object-Centric Workflow without a Second Provider Layer
 
+_Module names have changed: the backend facade is now `clutch-backend.el` and object workflow lives in `clutch-object.el`; the single-facade decision remains current._
+
 ## Background
 
 clutch originally accumulated several metadata entry points:

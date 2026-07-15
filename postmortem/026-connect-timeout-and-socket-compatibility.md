@@ -1,5 +1,7 @@
 # 026 — Connect Timeout Default and Socket Compatibility
 
+_Updated by 031: native PostgreSQL now applies `statement_timeout`; transaction-control statements intentionally bypass that query wrapper._
+
 ## Background
 
 The timeout unification work in `025-timeout-unification.md` split timeout

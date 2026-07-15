@@ -1,5 +1,7 @@
 # 104 - Backend query-mode facet
 
+_Superseded in part by 113: Redis received a dedicated bounded key/value surface without first introducing the speculative neutral catalog proposed here._
+
 ## What changed
 
 Clutch now lets backend registry metadata choose a query-console major mode.

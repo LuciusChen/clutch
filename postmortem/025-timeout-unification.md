@@ -1,5 +1,7 @@
 # 025 — Timeout Unification
 
+_Updated by 031: native PostgreSQL now applies `statement_timeout`; transaction-control statements intentionally bypass that query wrapper._
+
 ## Background
 
 Timeout handling had grown independently in three places:

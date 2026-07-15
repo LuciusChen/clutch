@@ -1,5 +1,7 @@
 # 019 — BLOB Placeholder Shown for Short Strings in BLOB-Type Columns
 
+_Erratum: current MySQL prepared binary values and PostgreSQL `bytea` values are represented as binary strings, so `stringp` no longer distinguishes text from binary data; rendering uses backend type categories and structured-text detection._
+
 ## Background
 
 MySQL's wire protocol includes column type metadata. Columns of type `BLOB`,

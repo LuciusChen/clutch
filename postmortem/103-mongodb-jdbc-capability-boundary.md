@@ -1,5 +1,7 @@
 # 103 -- Native MongoDB and SQL Interface Boundary
 
+_Updated by 113: Redis now has its own basic key/value backend and does not share the MongoDB document contract._
+
 ## Context
 
 MongoDB has two practical surfaces that look similar from connection metadata
