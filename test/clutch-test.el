@@ -1393,24 +1393,6 @@
            'fake-conn sql result 0 prep t context (current-buffer))
           (with-current-buffer result-name
             (should (equal clutch--result-source-table "orders")))))))
-  (let ((result-name "*clutch-test-result*")
-        (result (make-clutch-db-result
-                 :columns '((:name "id" :type-category numeric))
-                 :rows '((1)))))
-    (clutch-test--with-result-buffer (result-name)
-      (clutch-result--display-select
-       'fake-conn "SELECT * FROM users" result 0
-       '(:sql "SELECT * FROM users"
-         :table "users"
-         :identity-status error
-         :identity-error-message "metadata failed")
-       t nil (current-buffer))
-      (with-current-buffer result-name
-        (should (equal clutch--result-rows '((1))))
-        (should (equal clutch--result-source-table "users"))
-        (should (equal clutch--row-identity-status 'error))
-        (should (equal clutch--row-identity-error-message
-                       "metadata failed")))))
   (let* ((source-win (selected-window))
          (result-win (split-window-right))
          (result-name "*clutch-window-display-result*")
@@ -1449,6 +1431,77 @@
         (delete-window result-win))
       (when-let* ((buf (get-buffer result-name)))
         (kill-buffer buf)))))
+
+(ert-deftest clutch-test-execute-select-scopes-row-identity-problem-details ()
+  "A successful result should retain only its identity metadata diagnostics."
+  (let* ((result-name "*clutch-row-identity-problem*")
+         (debug-name " *clutch-row-identity-debug*")
+         (other (generate-new-buffer " *clutch-other-problem-owner*"))
+         (clutch-debug-mode nil)
+         (clutch-debug-buffer-name debug-name)
+         (clutch--problem-records-by-conn (make-hash-table :test 'eq))
+         (conn (make-clutch-jdbc-conn :conn-id 7
+                                      :params '(:driver oracle)))
+         (result (make-clutch-db-result
+                  :connection conn
+                  :columns '((:name "id" :type-category numeric))
+                  :rows '((1))))
+         (details '(:backend oracle
+                    :summary "ORA-12592: TNS:bad packet"
+                    :diag (:category "metadata"
+                           :op "get-columns"
+                           :sql-state "66000"
+                           :vendor-code 12592
+                           :context (:table "USERS"))))
+         (identity-error
+          (list 'clutch-db-error "ORA-12592: TNS:bad packet" details)))
+    (unwind-protect
+        (clutch-test--with-result-buffer (result-name)
+          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn sql _page-num _page-size
+                                    &optional _order-by _page-offset)
+                       sql))
+                    ((symbol-function 'clutch-db-row-identity-candidates)
+                     (lambda (&rest _args)
+                       (signal (car identity-error) (cdr identity-error))))
+                    ((symbol-function 'clutch-db-query)
+                     (lambda (_conn _sql) result)))
+            (clutch-test--execute-and-present
+             "SELECT * FROM users" conn))
+          (with-current-buffer result-name
+            (let ((diag (plist-get clutch--buffer-error-details :diag)))
+              (should (equal (plist-get diag :op) "get-columns"))
+              (should (equal (plist-get diag :sql-state) "66000"))
+              (should (= (plist-get diag :vendor-code) 12592))
+              (should (equal (plist-get (plist-get diag :context) :table)
+                             "USERS"))))
+          (let ((clutch-debug-mode t))
+            (clutch--clear-debug-capture)
+            (clutch--replay-problem-records-to-debug-buffer))
+          (should (string-match-p "Operation: get-columns"
+                                  (clutch-test--debug-buffer-string)))
+          (let ((other-problem '(:summary "other buffer failure")))
+            (clutch--remember-problem-record
+             :buffer other :connection conn :problem other-problem)
+            (clutch-result--display-select
+             conn "SELECT * FROM users" result 0
+             '(:sql "SELECT * FROM users"
+               :table "users"
+               :identity-status unsupported)
+             t nil (current-buffer))
+            (with-current-buffer result-name
+              (should-not clutch--buffer-error-details))
+            (let ((entry (gethash conn clutch--problem-records-by-conn)))
+              (should (eq (plist-get entry :buffer) other))
+              (should (equal (plist-get entry :problem) other-problem)))
+            (with-current-buffer other
+              (should (equal clutch--buffer-error-details other-problem)))
+            (clutch--forget-problem-record nil conn)
+            (should-not (gethash conn clutch--problem-records-by-conn))))
+      (when-let* ((buffer (get-buffer debug-name)))
+        (kill-buffer buffer))
+      (when (buffer-live-p other)
+        (kill-buffer other)))))
 
 (ert-deftest clutch-test-init-result-state-clears-stale-result-flags ()
   "Result initialization should not keep stale source or DML metadata."
@@ -2060,14 +2113,11 @@
     (should (eq called-buffer result))
     (should (equal called-args '(1 "name")))))
 
-(ert-deftest clutch-test-render-footer-warns-when-row-identity-disabled ()
-  "Footer should explain why edit/delete are disabled without row identity."
-  (dolist (case '((missing nil nil
-                           "row identity missing" "users")
-                  (metadata-error error "metadata failed"
-                                  "row identity error: metadata failed"
-                                  "row identity missing")))
-    (pcase-let ((`(,label ,status ,message ,expected ,unexpected) case))
+(ert-deftest clutch-test-render-footer-warns-without-leaking-row-identity-errors ()
+  "Footer should flag disabled editing without displaying backend errors."
+  (dolist (case '((missing nil nil)
+                  (metadata-error error "ORA-12592: TNS:bad packet")))
+    (pcase-let ((`(,label ,status ,message) case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-result-state
             (:columns '("id" "name")
@@ -2075,11 +2125,19 @@
              :last-query "SELECT * FROM users"
              :row-identity-status status
              :row-identity-error-message message)
-          (let ((footer (substring-no-properties
-                         (clutch--render-footer 10 0 500 100))))
-            (should (string-match-p expected footer))
-            (should-not (string-match-p unexpected footer))
-            (should (string-match-p "E/D off" footer))))))))
+          (let* ((capability (clutch--footer-mutation-capability-part))
+                 (text (substring-no-properties capability))
+                 (help (get-text-property 0 'help-echo capability)))
+            (should (string-match-p "row editing unavailable" text))
+            (should (string-match-p "E/D off" text))
+            (should-not (string-prefix-p "row editing unavailable" text))
+            (should-not (string-match-p "ORA-12592\\|row identity error" text))
+            (should (stringp help))
+            (should-not (string-match-p "ORA-12592" help))
+            (when (eq status 'error)
+              (should (string-match-p "clutch-debug-mode" help)))
+            (should (eq (get-text-property 0 'face capability)
+                        'font-lock-warning-face))))))))
 
 ;;;; Filter
 
@@ -3259,7 +3317,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (let ((err (should-error (clutch-result-edit-cell)
                                        :type 'user-error)))
                 (should (string-match-p (regexp-quote expected)
-                                        (error-message-string err))))
+                                        (error-message-string err)))
+                (when (eq status 'error)
+                  (should (string-match-p
+                           (regexp-quote clutch-debug-buffer-name)
+                           (error-message-string err)))))
               (should-not (get-buffer "*clutch-edit: [0].name*")))))))))
 
 (ert-deftest clutch-test-edit-cell-shows-temporal-now-hint ()
@@ -6032,11 +6094,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (equal (clutch-result--collect-all-export-rows) '((1))))
           (should ensured)
           (should (eq captured-conn 'new-conn)))))))
-
-(defun clutch-test--execute-and-present (sql connection &optional context)
-  "Execute SQL on CONNECTION and present its result using CONTEXT."
-  (clutch--present-statement-outcome
-   sql connection (clutch--execute-statement sql connection t context)))
 
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary-key identity should be ready before the first result render."

@@ -1712,24 +1712,15 @@ Returns a list of propertized strings (may be empty)."
   (when (and clutch--result-columns
              clutch--result-source-table)
     (unless clutch--row-identity
-      (let* ((warn-icon 'font-lock-warning-face)
-             (warn-text '(:inherit font-lock-warning-face :weight normal))
-             (error-message (and (eq clutch--row-identity-status 'error)
-                                 clutch--row-identity-error-message))
-             (warning (if error-message
-                          (format "row identity error: %s"
-                                  (truncate-string-to-width
-                                   (string-trim error-message)
-                                   80 nil nil "…"))
-                        "row identity missing")))
-        (concat (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warn-icon)
-                (propertize warning
-                            'face warn-text
-                            'help-echo
-                            (and error-message
-                                 (format "Row identity metadata failed: %s"
-                                         error-message)))
-                (propertize " E/D off" 'face warn-text))))))
+      (let ((warning-face 'font-lock-warning-face)
+            (help (if (eq clutch--row-identity-status 'error)
+                      "Row identity metadata failed; enable clutch-debug-mode for diagnostics"
+                    "No safe row identity is available for editing")))
+        (propertize
+         (concat
+          (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warning-face)
+          (propertize "row editing unavailable E/D off" 'face warning-face))
+         'help-echo help)))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size total-rows
                                             &optional page-offset page-has-more)

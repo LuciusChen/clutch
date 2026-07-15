@@ -18,6 +18,11 @@
 
 ;;;; Test helpers
 
+(defun clutch-test--execute-and-present (sql connection &optional context)
+  "Execute SQL on CONNECTION and present its result using CONTEXT."
+  (clutch--present-statement-outcome
+   sql connection (clutch--execute-statement sql connection t context)))
+
 (defun clutch-test--debug-buffer-string ()
   "Return the current dedicated clutch debug buffer contents."
   (let ((buf (get-buffer clutch-debug-buffer-name)))

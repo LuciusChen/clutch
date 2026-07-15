@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'clutch-backend)
 (require 'clutch-connection)
+(require 'clutch-diagnostics)
 (require 'clutch-schema)
 (require 'clutch-ui)
 (require 'json)
@@ -797,8 +798,9 @@ Refresh the affected row and footer in place when possible."
       (when (eq clutch--row-identity-status 'error)
         (user-error "Cannot %s: row identity metadata failed for table %s: %s"
                     op table
-                    (or clutch--row-identity-error-message
-                        "unknown error")))
+                    (clutch--debug-workflow-message
+                     (or clutch--row-identity-error-message
+                         "unknown error"))))
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
 

@@ -367,12 +367,17 @@ buffer in the shared connection-scoped registry."
     problem))
 
 (defun clutch--forget-problem-record (&optional buffer connection)
-  "Forget the current problem record for BUFFER and CONNECTION."
+  "Forget the current problem record for BUFFER and CONNECTION.
+When BUFFER is non-nil, remove the connection record only when BUFFER owns it.
+A nil BUFFER explicitly clears the connection-scoped record."
   (when (and buffer (buffer-live-p buffer))
     (with-current-buffer buffer
       (setq-local clutch--buffer-error-details nil)))
   (when connection
-    (remhash connection clutch--problem-records-by-conn)))
+    (let ((record (gethash connection clutch--problem-records-by-conn)))
+      (when (or (not buffer)
+                (eq (plist-get record :buffer) buffer))
+        (remhash connection clutch--problem-records-by-conn)))))
 
 (defun clutch--forget-problem-records-for-connection (connection)
   "Forget problem records for CONNECTION across all attached buffers."

@@ -528,6 +528,11 @@ are produced by the query execution layer."
              connection sql raw-columns rows elapsed
              row-identity-prep 0 has-more
              server-pageable server-rewritable source-table))
+      (if-let* ((identity-error
+                 (plist-get row-identity-prep :identity-error)))
+        (clutch--remember-buffer-query-error-details
+         buf connection sql identity-error)
+        (clutch--forget-problem-record buf connection))
       (clutch--load-fk-info))
     (when (buffer-live-p source-buffer)
       (with-current-buffer source-buffer
