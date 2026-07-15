@@ -2728,33 +2728,25 @@
 (ert-deftest clutch-test-metadata-sync-failures-are-memoized ()
   "Repeated sync metadata failures should not reissue the same failing RPC."
   (clutch-test--with-isolated-metadata-caches
-   (let ((schema (make-hash-table :test 'equal))
-         (calls (make-hash-table :test 'eq)))
+   (let ((schema (make-hash-table :test 'equal)) (column-calls 0)
+         (detail-calls 0))
      (puthash "users" nil schema)
      (cl-letf (((symbol-function 'clutch-db-list-columns)
 		(lambda (_conn _table)
-                  (cl-incf (gethash 'columns calls 0))
+                  (cl-incf column-calls)
                   (signal 'clutch-db-error '("column load failed"))))
                ((symbol-function 'clutch-db-column-details)
 		(lambda (_conn _table)
-                  (cl-incf (gethash 'details calls 0))
+                  (cl-incf detail-calls)
                   (signal 'clutch-db-error '("detail load failed")))))
-       (dolist (case `((columns
-			,(lambda ()
-                           (clutch--ensure-columns 'fake-conn schema "users"))
-			,(lambda ()
-                           (clutch--columns-status 'fake-conn "users")))
-                       (details
-			,(lambda ()
-                           (clutch--ensure-column-details 'fake-conn "users"))
-			,(lambda ()
-                           (clutch--column-details-status 'fake-conn "users")))))
-         (pcase-let ((`(,label ,load ,status) case))
-           (ert-info ((format "case: %s" label))
-             (should-not (funcall load))
-             (should-not (funcall load))
-             (should (= (gethash label calls) 1))
-             (should (eq (plist-get (funcall status) :state) 'failed)))))))))
+       (dotimes (_ 2)
+         (should-not (clutch--ensure-columns 'fake-conn schema "users"))
+         (should-not (clutch--ensure-column-details 'fake-conn "users")))
+       (should (= column-calls detail-calls 1))
+       (dolist (property '(:columns-status :column-details-status))
+         (should (eq (plist-get (clutch--metadata-status
+                                 'fake-conn "users" property) :state)
+                     'failed)))))))
 
 (ert-deftest clutch-test-transient-metadata-errors-are-not-cached ()
   "Transient metadata failures should stay observable and retryable."
@@ -2796,33 +2788,41 @@
                       '(("symbol help" (:symbol "abs"))
                         ("table comment" (:table "orders" :schema nil)))))))))
 
-(ert-deftest clutch-test-column-details-async-ignores-invalid-callbacks ()
-  "Async detail callbacks should not cache stale or dead-connection results."
-  (dolist (case '((stale-ticket stale_col)
-                  (dead-connection dead_col)))
-    (pcase-let ((`(,label ,column) case))
-      (ert-info ((format "case: %s" label))
-        (clutch-test--with-isolated-metadata-caches
-         (let ((alive t)
-               callback)
-           (cl-letf (((symbol-function 'clutch-db-live-p)
-                      (lambda (_conn) alive))
-                     ((symbol-function 'clutch-db-column-details-async)
-                      (lambda (_conn _table cb &optional _errback)
-			(setq callback cb)
-			t)))
-             (clutch--ensure-column-details-async 'fake-conn "users")
-             (pcase label
-               ('stale-ticket
-		(clutch--set-column-details-status
-                 'fake-conn "users" 'loading nil
-                 (clutch--begin-metadata-ticket)))
-               ('dead-connection
-		(setq alive nil)))
-             (funcall callback (list (list :name (symbol-name column)
-                                           :type "int")))
-            (should-not
-              (clutch--cached-column-details 'fake-conn "users")))))))))
+(ert-deftest clutch-test-column-details-async-callback-lifecycle ()
+  "Async details should reject invalid callbacks and retain empty results."
+  (dolist (case '(stale-ticket cleared-active dead-connection empty-result))
+    (clutch-test--with-isolated-metadata-caches
+     (let ((alive t) callback (calls 0))
+       (cl-letf (((symbol-function 'clutch-db-live-p)
+                  (lambda (_conn) alive))
+                 ((symbol-function 'clutch-db-column-details-async)
+                  (lambda (_conn _table cb &optional _errback)
+                    (cl-incf calls)
+                    (setq callback cb)
+                    t)))
+         (clutch--ensure-column-details-async 'fake-conn "users")
+         (pcase case
+           ((or 'stale-ticket 'cleared-active)
+            (clutch--ensure-column-details-async 'fake-conn "orders")
+            (if (eq case 'stale-ticket)
+                (clutch--set-metadata-status
+                 'fake-conn "users" :column-details-status 'loading nil
+                 (clutch--begin-metadata-ticket))
+              (clutch--clear-table-metadata-caches 'fake-conn "users")))
+           ('dead-connection (setq alive nil)))
+         (funcall callback
+                  (unless (eq case 'empty-result)
+                    '((:name "ignored" :type "int"))))
+         (if (eq case 'empty-result)
+             (progn
+               (should (clutch--column-details-cached-p 'fake-conn "users"))
+               (should-not (clutch--cached-column-details 'fake-conn "users"))
+               (clutch--ensure-column-details-async 'fake-conn "users")
+               (should (= calls 1)))
+           (should-not (clutch--column-details-cached-p 'fake-conn "users")))
+         (when (memq case '(stale-ticket cleared-active))
+           (should (equal (car (clutch--column-details-active 'fake-conn))
+                          "orders"))))))))
 
 (ert-deftest clutch-test-load-fk-info-is-cache-first-and-async ()
   "Result FK display metadata should not synchronously hit the backend."
@@ -2849,6 +2849,7 @@
    (let (callback notified)
      (let ((clutch--table-metadata-updated-hook
             (list (lambda (conn table kind)
+                    (should-not (clutch--metadata-status conn table :foreign-keys-status))
                     (setq notified (list conn table kind))))))
        (cl-letf (((symbol-function 'clutch-db-live-p)
                   (lambda (_conn) t))
@@ -2863,7 +2864,7 @@
                         '(("account_id" :ref-table "accounts"
                            :ref-column "id"))))
          (should (equal notified '(fake-conn "users" foreign-keys)))
-         (should-not (clutch--foreign-keys-status 'fake-conn "users")))))))
+         (should-not (clutch--metadata-status 'fake-conn "users" :foreign-keys-status)))))))
 
 (ert-deftest clutch-test-foreign-keys-async-unsupported-caches-empty-result ()
   "Backends without async foreign-key metadata should not be retried on each render."
@@ -2878,7 +2879,7 @@
        (should (= calls 1))
        (should (clutch--foreign-keys-cached-p 'fake-conn "users"))
        (should-not (clutch--cached-foreign-keys 'fake-conn "users"))
-       (should-not (clutch--foreign-keys-status 'fake-conn "users"))))))
+       (should-not (clutch--metadata-status 'fake-conn "users" :foreign-keys-status))))))
 
 (ert-deftest clutch-test-refresh-result-metadata-buffers-updates-only-matching-results ()
   "Result metadata refresh should match connection identity, not its label."

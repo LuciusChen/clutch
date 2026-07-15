@@ -619,7 +619,7 @@ document connection."
         (should-not (gethash conn clutch--column-details-active-cache))
         (should (equal (gethash conn clutch--column-details-queue-cache)
                        '("ORDERS")))
-        (should-not (clutch--column-details-status conn "USERS"))
+        (should-not (clutch--metadata-status conn "USERS" :column-details-status))
         (should (eq (gethash "USERS" schema 'missing) nil))))))
 
 (ert-deftest clutch-test-object-describe-collection-shows-fields-and-indexes ()
