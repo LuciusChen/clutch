@@ -2,8 +2,7 @@
 
 * Support Levels
 
-Clutch separates database support by the surface it can honestly expose, not
-only by whether a connection can be opened.
+Clutch separates database support by the surface it can honestly expose, not only by whether a connection can be opened.
 
 | Level | Meaning | Examples |
 |-------+---------+----------|
@@ -17,51 +16,22 @@ only by whether a connection can be opened.
 
 * MongoDB Boundary
 
-=mongodb= is the normal MongoDB backend.  It connects to ordinary =mongod=
-deployments through the external =mongodb.el= native client and evaluates
-supported MongoDB Shell / MQL helper commands.  Normal MongoDB connections do
-not require Java or a JDBC driver jar.  Protocol capabilities and connection
-option semantics are documented in the =mongodb.el= repository; Clutch should not
-duplicate that driver-level behavior in its own adapter.
+=mongodb= is the normal MongoDB backend.  It connects to ordinary =mongod= deployments through the external =mongodb.el= native client and evaluates supported MongoDB Shell / MQL helper commands.  Normal MongoDB connections do not require Java or a JDBC driver jar.  Protocol capabilities and connection option semantics are documented in the =mongodb.el= repository; Clutch should not duplicate that driver-level behavior in its own adapter.
 
-MongoDB SQL Interface is not another backend.  It is the optional
-=:surface sql-interface= mode of =mongodb= and should be used only for Atlas or
-self-managed deployments that actually expose that SQL Interface endpoint.
-That surface requires the JDBC sidecar and MongoDB JDBC driver jar.
+MongoDB SQL Interface is not another backend.  It is the optional =:surface sql-interface= mode of =mongodb= and should be used only for Atlas or self-managed deployments that actually expose that SQL Interface endpoint. That surface requires the JDBC sidecar and MongoDB JDBC driver jar.
 
 * DuckDB Boundary
 
-DuckDB belongs with SQL-first databases, not with document/basic support.  Its
-data model, query language, metadata, and mutation behavior are close to the
-core clutch SQL workflow.  The current integration is through the generic JDBC
-backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC
-driver, so the entry point is less polished than first-class native/manual
-backends.
+DuckDB belongs with SQL-first databases, not with document/basic support.  Its data model, query language, metadata, and mutation behavior are close to the core clutch SQL workflow.  The current integration is through the generic JDBC backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC driver, so the entry point is less polished than first-class native/manual backends.
 
 * Redis And Similar Systems
 
-Redis is not a MongoDB-like document backend for clutch purposes.  It is a
-key/value and data-structure server with command-oriented workflows, different
-metadata, different result shapes, and no table/collection row identity model.
+Redis is not a MongoDB-like document backend for clutch purposes.  It is a key/value and data-structure server with command-oriented workflows, different metadata, different result shapes, and no table/collection row identity model.
 
-Redis support uses the separate =redis= backend and the external =redis.el=
-native RESP client.  Clutch owns the command query buffer, key browsing,
-type-aware value display, TTL metadata, and result-grid mapping.  The protocol
-package owns RESP encoding/decoding, TCP connection lifecycle, AUTH, SELECT, and
-Redis error responses.
+Redis support uses the separate =redis= backend and the external =redis.el= native RESP client.  Clutch owns the command query buffer, key browsing, type-aware value display, TTL metadata, and result-grid mapping.  The protocol package owns RESP encoding/decoding, TCP connection lifecycle, AUTH, SELECT, and Redis error responses.
 
-Redis support is intentionally basic.  It does not expose SQL row editing,
-joins, row identity, transaction workflow, pub/sub loops, cluster management, or
-stream consumer workflows.
+Redis support is intentionally basic.  It does not expose SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows.
 
-Key discovery collects at most =clutch-redis-key-discovery-limit= unique keys
-(default 5000) and performs at most eight SCAN batches per operation.  Generated
-hash/list/set/zset/stream browse commands request at most
-=clutch-redis-browse-limit= elements (default 200).  The object picker keeps
-completion local to its bounded snapshot; type an exact key and submit it to
-perform one remote existence check beyond that snapshot.  Use explicit Redis
-scan/range commands for broader discovery.
+Key discovery collects at most =clutch-redis-key-discovery-limit= unique keys (default 5000) and performs at most eight SCAN batches per operation.  Generated hash/list/set/zset/stream browse commands request at most =clutch-redis-browse-limit= elements (default 200).  The object picker keeps completion local to its bounded snapshot; type an exact key and submit it to perform one remote existence check beyond that snapshot.  Use explicit Redis scan/range commands for broader discovery.
 
-Bounded generated hash browsing uses =HRANDFIELD= and therefore requires Redis
-6.2 or newer.  Manual =SCAN=-family commands remain available; when Redis
-returns an empty nonterminal batch, Clutch displays its continuation cursor.
+Bounded generated hash browsing uses =HRANDFIELD= and therefore requires Redis 6.2 or newer.  Manual =SCAN=-family commands remain available; when Redis returns an empty nonterminal batch, Clutch displays its continuation cursor.

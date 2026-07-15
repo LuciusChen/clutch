@@ -20,15 +20,7 @@
 | =C-c TAB=   | Invoke SQL identifier completion explicitly, including empty column positions |
 | =C-c ?=     | Transient menu             |
 
-Standard editing integrations still apply in =clutch-mode=: xref lookup uses
-=M-.= through the buffer-local xref backend for SQL alias navigation, so =M-.=
-on =u= or =u.name= jumps to the alias definition in the current statement.
-Schema-qualified table names such as =schema.table= are not treated as aliases;
-use =C-c C-d= or =C-c C-j= for object lookup and table description.  CAPF
-completion handles SQL identifiers, including empty column positions such as
-=select | from users=.  =TAB= completes columns after a table or alias dot,
-then falls back to indentation elsewhere; other completion stays on normal CAPF
-keys such as =M-TAB= inherited from Emacs.
+Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-.= through the buffer-local xref backend for SQL alias navigation, so =M-.= on =u= or =u.name= jumps to the alias definition in the current statement. Schema-qualified table names such as =schema.table= are not treated as aliases; use =C-c C-d= or =C-c C-j= for object lookup and table description.  CAPF completion handles SQL identifiers, including empty column positions such as =select | from users=.  =TAB= completes columns after a table or alias dot, then falls back to indentation elsewhere; other completion stays on normal CAPF keys such as =M-TAB= inherited from Emacs.
 
 * Result Browser (clutch-result-mode) Key Bindings
 
@@ -68,52 +60,15 @@ keys such as =M-TAB= inherited from Emacs.
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
 
-Tip: =c= supports both regular region and rectangular selection (=C-x SPC=).
-Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly.
-Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-view*=,
-which follows point until you press =f= to freeze it or =q= to close it.
-Tip: short JSON/XML cells render inline with lightweight token faces; long
-values show a raw prefix with an ellipsis and can be opened with =v=.
-Tip: the result-buffer status line uses compact staged-change tokens:
-=E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts.
-When a query result is not updateable because no row identity was detected,
-the same line shows =row identity missing= and =E/D off=; =C-c '= also errors
-immediately instead of opening an edit buffer that cannot be committed.
-Editable result buffers choose row identity in this order: primary key,
-non-null unique key, then backend row locator when available.  Row locator
-support is backend-specific: PostgreSQL tables can use =ctid=, SQLite rowid
-tables can use =rowid=, and Oracle JDBC tables can use =ROWID=.  Physical row
-locators may change after UPDATE, so refresh order is still controlled only by
-the SQL query; use an explicit =ORDER BY= when row order matters.
-Aggregate or grouped result sets, such as =SELECT count(1) ...=, do not receive
-hidden row-identity columns and remain read-only for row mutation commands.
-Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column
-header visible; busy state temporarily replaces the elapsed-time segment in the
-footer with a spinner instead of replacing the table header with the query-console
-connection header.
-Sort and paging refreshes also keep manually adjusted column widths when the
-result columns are unchanged.
+Tip: =c= supports both regular region and rectangular selection (=C-x SPC=). Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly. Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-view*=, which follows point until you press =f= to freeze it or =q= to close it. Tip: short JSON/XML cells render inline with lightweight token faces; long values show a raw prefix with an ellipsis and can be opened with =v=. Tip: the result-buffer status line uses compact staged-change tokens: =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts. When a query result is not updateable because no row identity was detected, the same line shows =row identity missing= and =E/D off=; =C-c '= also errors immediately instead of opening an edit buffer that cannot be committed. Editable result buffers choose row identity in this order: primary key, non-null unique key, then backend row locator when available.  Row locator support is backend-specific: PostgreSQL tables can use =ctid=, SQLite rowid tables can use =rowid=, and Oracle JDBC tables can use =ROWID=.  Physical row locators may change after UPDATE, so refresh order is still controlled only by the SQL query; use an explicit =ORDER BY= when row order matters. Aggregate or grouped result sets, such as =SELECT count(1) ...=, do not receive hidden row-identity columns and remain read-only for row mutation commands. Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column header visible; busy state temporarily replaces the elapsed-time segment in the footer with a spinner instead of replacing the table header with the query-console connection header. Sort and paging refreshes also keep manually adjusted column widths when the result columns are unchanged.
 
-Tip: Press =s= to cycle sort state for the result column at point.  Simple table
-results use server-side SQL =ORDER BY=.  UNION, grouped, derived, and other
-results that Clutch cannot safely rewrite use a client-side sort of the current
-page; the footer marks this scope as =page=.  Use =C= to jump to a different
-visible column first, or click its header to cycle that column.  The cycle is
-unsorted, ascending, descending, then unsorted again.  Header icons appear after
-column names and use the original-size nerd-icons sort glyphs; when nerd-icons
-is unavailable, text arrows preserve the sort marker.
+Tip: Press =s= to cycle sort state for the result column at point.  Simple table results use server-side SQL =ORDER BY=.  UNION, grouped, derived, and other results that Clutch cannot safely rewrite use a client-side sort of the current page; the footer marks this scope as =page=.  Use =C= to jump to a different visible column first, or click its header to cycle that column.  The cycle is unsorted, ascending, descending, then unsorted again.  Header icons appear after column names and use the original-size nerd-icons sort glyphs; when nerd-icons is unavailable, text arrows preserve the sort marker.
 
-Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the
-result transient as the exact staged SQL batch.
-Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result
-queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong
-real table name.
+Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the result transient as the exact staged SQL batch. Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong real table name.
 
 ** Edit Buffer Keys
 
-Single-cell edit buffers use the same staged-mutation vocabulary as result
-buffers: =C-c C-c= stages the edited value, and the result buffer's
-=C-c C-c= commits all pending row changes.
+Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: =C-c C-c= stages the edited value, and the result buffer's =C-c C-c= commits all pending row changes.
 
 | Key               | Action                                         |
 |-------------------+------------------------------------------------|
@@ -124,20 +79,14 @@ buffers: =C-c C-c= stages the edited value, and the result buffer's
 | =C-c C-c=         | Stage edited value                             |
 | =C-c C-k=         | Cancel                                         |
 
-Database =NULL= displays as =<null>= in result cells and edit buffers.  In an
-edit buffer, =C-c C-n= sets an explicit =NULL= state; an empty buffer remains an
-empty string, and typing =NULL= stages the literal text =NULL=.
+Database =NULL= displays as =<null>= in result cells and edit buffers.  In an edit buffer, =C-c C-n= sets an explicit =NULL= state; an empty buffer remains an empty string, and typing =NULL= stages the literal text =NULL=.
 
 #+CAPTION: Result browser with staged markers, sort state, and query timing.
 [[file:screenshots/result-browser-basic.png]]
 
 ** Per-column displayers
 
-Result buffers can replace the visible text for a specific table/column pair
-without changing the raw cell value.  The displayer receives the raw Elisp
-value stored in =clutch-full-value= and may return a propertized string.  A
-=nil= return falls back to the default renderer.  Truncation, padding, cell
-faces, and the value viewers (=v= / =V=) still use the normal clutch pipeline.
+Result buffers can replace the visible text for a specific table/column pair without changing the raw cell value.  The displayer receives the raw Elisp value stored in =clutch-full-value= and may return a propertized string.  A =nil= return falls back to the default renderer.  Truncation, padding, cell faces, and the value viewers (=v= / =V=) still use the normal clutch pipeline.
 
 #+begin_src emacs-lisp
 ;; Define ordinary functions for reusable business display rules.
@@ -153,24 +102,13 @@ faces, and the value viewers (=v= / =V=) still use the normal clutch pipeline.
    table "status" #'my-clutch-status-displayer))
 #+end_src
 
-Table and column names are matched case-insensitively.  Use
-=clutch-unregister-column-displayer= to remove one registration.  Use the
-registration functions or Customize for runtime changes so existing result
-buffers invalidate cached cell displays.
+Table and column names are matched case-insensitively.  Use =clutch-unregister-column-displayer= to remove one registration.  Use the registration functions or Customize for runtime changes so existing result buffers invalidate cached cell displays.
 
-Keep displayers pure and cheap: they run on the result rendering path, though
-rendered cell strings are cached while the result state is unchanged.  A
-displayer should not query the database, read files, start processes, mutate
-Clutch state, or schedule asynchronous work.  Return =nil= for values the
-function does not handle so the default renderer can display them normally.
-If a generic rule depends on SQL type, schema metadata, or backend-specific
-state, prefer Clutch's built-in renderer or schema/cache layer over a column
-displayer.
+Keep displayers pure and cheap: they run on the result rendering path, though rendered cell strings are cached while the result state is unchanged.  A displayer should not query the database, read files, start processes, mutate Clutch state, or schedule asynchronous work.  Return =nil= for values the function does not handle so the default renderer can display them normally. If a generic rule depends on SQL type, schema metadata, or backend-specific state, prefer Clutch's built-in renderer or schema/cache layer over a column displayer.
 
 ** Insert Buffer Keys
 
-The insert buffer is intentionally form-like: =TAB= moves between fields,
-while completion stays on Emacs' completion keys.
+The insert buffer is intentionally form-like: =TAB= moves between fields, while completion stays on Emacs' completion keys.
 
 | Key                  | Action                                          |
 |----------------------+-------------------------------------------------|
@@ -183,41 +121,20 @@ while completion stays on Emacs' completion keys.
 | =C-c C-c=            | Stage new row / update staged insert            |
 | =C-c C-k=            | Cancel                                          |
 
-Insert buffers show every field by default, including generated/defaulted ones.
-Field labels are read-only, aligned to a shared value column, and may show tags
-such as =generated=, =default=..., =enum=, =bool=, =json=, and =required=.  The
-active field line is highlighted.  Insert buffers also validate locally as you
-type: obvious enum / bool / json / numeric / date-time mistakes are shown inline
-on the current field before staging.
+Insert buffers show every field by default, including generated/defaulted ones. Field labels are read-only, aligned to a shared value column, and may show tags such as =generated=, =default=..., =enum=, =bool=, =json=, and =required=.  The active field line is highlighted.  Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
 
-=C-c C-y= imports delimited text directly into the form.  A single imported row
-prefills the current insert buffer; multiple rows are staged immediately as
-pending inserts.  Header-based imports map by column name; otherwise clutch maps
-positionally using the fields currently visible in the insert form.
+=C-c C-y= imports delimited text directly into the form.  A single imported row prefills the current insert buffer; multiple rows are staged immediately as pending inserts.  Header-based imports map by column name; otherwise clutch maps positionally using the fields currently visible in the insert form.
 
-JSON fields still support direct editing in the insert buffer, but =C-c '= opens
-an on-demand child editor for more comfortable multi-line editing.  Saving that
-child editor writes compact JSON back into the insert form, so the primary flow
-remains result buffer -> insert buffer.
+JSON fields still support direct editing in the insert buffer, but =C-c '= opens an on-demand child editor for more comfortable multi-line editing.  Saving that child editor writes compact JSON back into the insert form, so the primary flow remains result buffer -> insert buffer.
 
 #+CAPTION: Insert buffer with aligned labels, inline metadata tags, and the value column focused.
 [[file:screenshots/insert-buffer-basic.png]]
 
 ** Visual Refine Mode (=c -r= / =C-u A=)
 
-The copy transient (=c=) shows =Refine selection (No|Yes)= on =-r=.  With an
-active region, enabling refinement before choosing a format lets you interactively
-exclude rows or columns before the copy is performed.  The mode-line at the
-bottom of the result buffer is replaced with a color-coded hint for the
-duration of the session.  The refine switch can be toggled before a region is
-active; choosing a copy format with refinement still requires a region and
-reports that clearly.
+The copy transient (=c=) shows =Refine selection (No|Yes)= on =-r=.  With an active region, enabling refinement before choosing a format lets you interactively exclude rows or columns before the copy is performed.  The mode-line at the bottom of the result buffer is replaced with a color-coded hint for the duration of the session.  The refine switch can be toggled before a region is active; choosing a copy format with refinement still requires a region and reports that clearly.
 
-The region can be set with =C-x SPC= (rectangle mark), a normal mark
-(=C-SPC=), or mouse selection — all three are accepted.  Regardless of
-how the region was set, clutch resolves the start and end cells and
-expands the selection into a full rectangle covering all rows and
-columns in that range.
+The region can be set with =C-x SPC= (rectangle mark), a normal mark (=C-SPC=), or mouse selection — all three are accepted.  Regardless of how the region was set, clutch resolves the start and end cells and expands the selection into a full rectangle covering all rows and columns in that range.
 
 Typical flow:
 
@@ -251,9 +168,7 @@ Typical flow:
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |
 
-The Record transient labels =RET= from the field at point: =Follow FK=,
-=Expand=, =Collapse=, or =Show value=.  It is inapt when point is not on a
-field.
+The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=, =Collapse=, or =Show value=.  It is inapt when point is not on a field.
 
 * Describe View (clutch-describe-mode) Key Bindings
 
@@ -352,10 +267,7 @@ field.
                                edited rows show =E= in the left marker column and =E-<n>= in the status line
 #+end_src
 
-The confirmation preview always shows fully rendered SQL text.  Native MySQL,
-PostgreSQL, SQLite, and JDBC backends execute staged DML through parameterized
-prepared/bound values under the hood; only the preview renders readable SQL
-literals.
+The confirmation preview always shows fully rendered SQL text.  Native MySQL, PostgreSQL, SQLite, and JDBC backends execute staged DML through parameterized prepared/bound values under the hood; only the preview renders readable SQL literals.
 
 * REPL Mode
 
@@ -385,77 +297,37 @@ Useful =M-x= entry points outside the main keymaps:
 - =clutch-object-show-ddl-or-source= — show object DDL/source directly
 - =clutch-describe-dwim= / =clutch-act-dwim= — resolve objects and choose describe, browse, or backend-specific actions
 - =clutch-result-copy-pending-sql= / =clutch-result-save-pending-sql= — export the exact staged DML batch
-- =clutch-copy-context-for-agent= — copy the current SQL, connection context,
-  referenced table metadata, and the visible columns from the latest matching
-  result sample as Markdown for an external agent; also available as =k= in the
-  main and result transients
+- =clutch-copy-context-for-agent= — copy the current SQL, connection context, referenced table metadata, and the visible columns from the latest matching result sample as Markdown for an external agent; also available as =k= in the main and result transients
 
 * External Agent Context
 
-=clutch-copy-context-for-agent= is the lightweight handoff point for ChatGPT, Claude, DeepSeek, or another external assistant.  It copies Markdown to the kill ring
-from the current clutch buffer:
+=clutch-copy-context-for-agent= is the lightweight handoff point for ChatGPT, Claude, DeepSeek, or another external assistant.  It copies Markdown to the kill ring from the current clutch buffer:
 
 - in =clutch-mode=, the active region or current DWIM SQL statement
-- in =clutch-result-mode=, the effective result query, including an active
-  SQL =WHERE= filter
+- in =clutch-result-mode=, the effective result query, including an active SQL =WHERE= filter
 - connection/backend/schema information
-- referenced table metadata from the existing object describe path, including
-  comments, columns, primary-key/foreign-key tags, and any warmed related object
-  metadata such as indexes
-- a bounded sample from the current result buffer, or from the latest result
-  buffer produced by the query console when its SQL still matches; hidden row
-  identity columns are omitted
+- referenced table metadata from the existing object describe path, including comments, columns, primary-key/foreign-key tags, and any warmed related object metadata such as indexes
+- a bounded sample from the current result buffer, or from the latest result buffer produced by the query console when its SQL still matches; hidden row identity columns are omitted
 
-The command does not run the SQL being copied.  It only uses clutch metadata
-APIs and rows already present in a matching result buffer.  Metadata lookup
-errors are written into the copied Markdown instead of being hidden, so the
-external agent can see which context is missing.
+The command does not run the SQL being copied.  It only uses clutch metadata APIs and rows already present in a matching result buffer.  Metadata lookup errors are written into the copied Markdown instead of being hidden, so the external agent can see which context is missing.
 
 * Query Console
 
-=clutch-query-console= opens a dedicated buffer =*clutch: NAME*=, enables
-=clutch-mode=, and connects automatically.  The picker lists saved
-connections; pressing RET with no matching connection starts a temporary connection
-flow.  SQLite is part of that flow and reads a database file instead of
-host/user credentials.  =clutch-query-sqlite-file= jumps straight to the
-SQLite-file shortcut.  Repeated calls with the same saved connection or
-temporary connection switch to the existing buffer rather than creating a new
-one.  Connection happens before the buffer is shown: if the initial connect or
-a reconnect of an existing disconnected console fails, clutch raises the error
-without leaving a visible disconnected console buffer behind.
+=clutch-query-console= opens a dedicated buffer =*clutch: NAME*=, enables =clutch-mode=, and connects automatically.  The picker lists saved connections; pressing RET with no matching connection starts a temporary connection flow.  SQLite is part of that flow and reads a database file instead of host/user credentials.  =clutch-query-sqlite-file= jumps straight to the SQLite-file shortcut.  Repeated calls with the same saved connection or temporary connection switch to the existing buffer rather than creating a new one.  Connection happens before the buffer is shown: if the initial connect or a reconnect of an existing disconnected console fails, clutch raises the error without leaving a visible disconnected console buffer behind.
 
-Inside a query console, =C-c C-e= reconnects only that console's current
-connection.  For saved consoles, if the saved connection entry was removed from
-=clutch-connection-alist=, clutch raises a clear error instead of silently
-reconnecting to some other database.  For ad hoc consoles, reconnect uses the
-original temporary parameters; SQLite reuses the original file path.  To move to
-a different saved or temporary connection, call =clutch-query-console= again;
-press RET with no matching connection to create another temporary connection.
+Inside a query console, =C-c C-e= reconnects only that console's current connection.  For saved consoles, if the saved connection entry was removed from =clutch-connection-alist=, clutch raises a clear error instead of silently reconnecting to some other database.  For ad hoc consoles, reconnect uses the original temporary parameters; SQLite reuses the original file path.  To move to a different saved or temporary connection, call =clutch-query-console= again; press RET with no matching connection to create another temporary connection.
 
-In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps the generic connect
-picker: select a saved connection, or press RET with no matching connection to
-enter temporary params.  For SQLite files, use the query-console path instead
-of opening the database file itself as an editor buffer.
+In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps the generic connect picker: select a saved connection, or press RET with no matching connection to enter temporary params.  For SQLite files, use the query-console path instead of opening the database file itself as an editor buffer.
 
-=clutch-switch-console= lists all open console buffers via =completing-read= for
-fast switching between active connections.
+=clutch-switch-console= lists all open console buffers via =completing-read= for fast switching between active connections.
 
 ** Paste whitespace cleanup
 
-Text pasted into a query console is automatically cleaned: trailing
-whitespace, mixed tabs/spaces, and CRLF line endings are fixed in the
-pasted region only — existing SQL in the buffer is not touched.
-Disable with =(setq clutch-console-yank-cleanup nil)=.
+Text pasted into a query console is automatically cleaned: trailing whitespace, mixed tabs/spaces, and CRLF line endings are fixed in the pasted region only — existing SQL in the buffer is not touched. Disable with =(setq clutch-console-yank-cleanup nil)=.
 
 ** Console persistence
 
-Buffer content is automatically saved to =clutch-console-directory=
-(default: =~/.emacs.d/clutch/=) and restored the next time the same
-connection is opened.  clutch saves console SQL under a hash of the connection
-identity, not the saved connection name.  Renaming a saved connection reuses
-the open console buffer and keeps the same saved SQL.  If no identity-keyed file
-exists yet, clutch reads the old alias-keyed file as a migration fallback.
-Content is saved when the buffer is killed or when Emacs exits.
+Buffer content is automatically saved to =clutch-console-directory= (default: =~/.emacs.d/clutch/=) and restored the next time the same connection is opened.  clutch saves console SQL under a hash of the connection identity, not the saved connection name.  Renaming a saved connection reuses the open console buffer and keeps the same saved SQL.  If no identity-keyed file exists yet, clutch reads the old alias-keyed file as a migration fallback. Content is saved when the buffer is killed or when Emacs exits.
 
 Suggested global bindings:
 
@@ -472,57 +344,24 @@ C-c C-d                     ;; Describe object at point, or prompt
 C-c C-o                     ;; Show object actions for the current object, or prompt
 #+end_src
 
-The main navigation path is object-centric rather than tree-centric.  =C-c C-j=
-is the single conceptual object entrypoint.  It resolves an object at point
-when possible; otherwise it opens a flat annotated object picker.  By default
-the primary set is =TABLE= / =VIEW= / =SYNONYM= / =COLLECTION= / =KEY=,
-configurable via =clutch-primary-object-types=.  The picker
-returns quickly with schema snapshot objects and any already-warmed metadata,
-then keeps warming slower categories such as indexes, sequences, and routines
-in the background after schema refreshes.  Once an object is resolved, =RET=
-runs the object's default action.  In query consoles and the REPL, when point
-is already on a table-like object, =C-c C-j= opens the picker prefilled with
-that name instead of inserting browse SQL immediately; =RET= stays the explicit
-browse trigger.
+The main navigation path is object-centric rather than tree-centric.  =C-c C-j= is the single conceptual object entrypoint.  It resolves an object at point when possible; otherwise it opens a flat annotated object picker.  By default the primary set is =TABLE= / =VIEW= / =SYNONYM= / =COLLECTION= / =KEY=, configurable via =clutch-primary-object-types=.  The picker returns quickly with schema snapshot objects and any already-warmed metadata, then keeps warming slower categories such as indexes, sequences, and routines in the background after schema refreshes.  Once an object is resolved, =RET= runs the object's default action.  In query consoles and the REPL, when point is already on a table-like object, =C-c C-j= opens the picker prefilled with that name instead of inserting browse SQL immediately; =RET= stays the explicit browse trigger.
 
-=C-c C-d= is a describe-focused wrapper over the same resolution logic.  It resolves
-the object at point when possible; otherwise it prompts with the same flat
-picker.  It opens the shared describe buffer for the target object.  That
-buffer is only a view over the same object model; it does not define a second
-action universe.
+=C-c C-d= is a describe-focused wrapper over the same resolution logic.  It resolves the object at point when possible; otherwise it prompts with the same flat picker.  It opens the shared describe buffer for the target object.  That buffer is only a view over the same object model; it does not define a second action universe.
 
-=C-c C-o= is the direct “show me actions” wrapper over the same object model.
-It resolves the object at point when possible; otherwise it prompts, then opens
-the shared action UI.  The action set is
-intentionally small and shared across Embark and Transient:
+=C-c C-o= is the direct “show me actions” wrapper over the same object model. It resolves the object at point when possible; otherwise it prompts, then opens the shared action UI.  The action set is intentionally small and shared across Embark and Transient:
 
 #+CAPTION: Object describe buffer with action hints and column metadata.
 [[file:screenshots/object-describe-basic.png]]
 
 - =d=: describe object
 - =s=: show DDL / source
-- =j=: jump to the target object for objects with explicit target metadata
-  such as indexes, triggers, and synonyms
+- =j=: jump to the target object for objects with explicit target metadata such as indexes, triggers, and synonyms
 - =n=: copy object name
 - =f=: copy fully-qualified object name
 
-=C-c C-l= switches the current schema/database on the active connection and
-refreshes metadata for the new context.  Oracle/JDBC connections can switch
-business schemas such as =sales= and =analytics= within one connection,
-PostgreSQL-style wire connections use =SET search_path TO ...=, and MySQL
-connections map schema switching to =USE database=.  ClickHouse is handled
-separately: it has databases rather than runtime schemas, so =C-c C-l=
-prompts with =SHOW DATABASES= and reconnects to the selected =:database=
-instead of attempting session-level schema switching.  Generic
-=:backend jdbc= connections only support runtime schema switching when clutch
-has an explicit implementation for that driver/backend; custom JDBC URLs such
-as KingbaseES do not gain schema switching automatically.
+=C-c C-l= switches the current schema/database on the active connection and refreshes metadata for the new context.  Oracle/JDBC connections can switch business schemas such as =sales= and =analytics= within one connection, PostgreSQL-style wire connections use =SET search_path TO ...=, and MySQL connections map schema switching to =USE database=.  ClickHouse is handled separately: it has databases rather than runtime schemas, so =C-c C-l= prompts with =SHOW DATABASES= and reconnects to the selected =:database= instead of attempting session-level schema switching.  Generic =:backend jdbc= connections only support runtime schema switching when clutch has an explicit implementation for that driver/backend; custom JDBC URLs such as KingbaseES do not gain schema switching automatically.
 
-For JDBC backends, [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]]
-now isolates foreground SQL from metadata traffic by keeping separate primary
-and metadata JDBC sessions under one logical clutch connection.  This avoids
-Oracle-style contention between user queries and background schema/object
-introspection.
+For JDBC backends, [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] now isolates foreground SQL from metadata traffic by keeping separate primary and metadata JDBC sessions under one logical clutch connection.  This avoids Oracle-style contention between user queries and background schema/object introspection.
 
 Default actions only depend on the object type:
 
@@ -532,20 +371,13 @@ Default actions only depend on the object type:
 - procedures / functions / triggers: show source
 - indexes / sequences: show DDL
 
-For JDBC/Oracle connections, =C-c C-j= shows annotated object candidates in the
-minibuffer.  The object name remains the primary candidate text; source/type is
-shown as a gray annotation on the right (for example =PUBLIC/synonym= or
-=APP/synonym=).  When duplicate names need disambiguation, the target owner is
-appended as extra detail.
+For JDBC/Oracle connections, =C-c C-j= shows annotated object candidates in the minibuffer.  The object name remains the primary candidate text; source/type is shown as a gray annotation on the right (for example =PUBLIC/synonym= or =APP/synonym=).  When duplicate names need disambiguation, the target owner is appended as extra detail.
 
-If you use [[https://github.com/oantolin/orderless][orderless]], annotation search works naturally here:
-=&public=, =&synonym=, =&view=, etc.
+If you use [[https://github.com/oantolin/orderless][orderless]], annotation search works naturally here: =&public=, =&synonym=, =&view=, etc.
 
 * Embark Integration (optional)
 
-If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers a =clutch-object= target type so objects
-can be acted on with the same shared action set used by the native =transient=
-fallback:
+If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers a =clutch-object= target type so objects can be acted on with the same shared action set used by the native =transient= fallback:
 
 | Key | Action |
 |-----+--------|
@@ -566,16 +398,9 @@ Objects are recognised as targets in four contexts:
 - *=completing-read= minibuffer* — current candidate in =C-c C-j= / =C-c C-d= / =C-c C-o=
 - *describe / definition buffers* — the object currently shown in that buffer
 
-Without Embark, =C-c C-o= opens a =transient= menu with the same object-driven
-actions from the current SQL, REPL, minibuffer, describe buffer, or definition
-buffer context.  Object-specific actions are marked unavailable in the
-transient when the current object type cannot support them.
+Without Embark, =C-c C-o= opens a =transient= menu with the same object-driven actions from the current SQL, REPL, minibuffer, describe buffer, or definition buffer context.  Object-specific actions are marked unavailable in the transient when the current object type cannot support them.
 
-Embark only exposes secondary object actions.  Default actions such as
-=C-c C-j= itself and table-like row browsing stay on =RET= rather than being
-duplicated in the Embark menu.  Actions that depend on object capabilities, such
-as =jump target=, only appear for objects that actually carry explicit target
-metadata.
+Embark only exposes secondary object actions.  Default actions such as =C-c C-j= itself and table-like row browsing stay on =RET= rather than being duplicated in the Embark menu.  Actions that depend on object capabilities, such as =jump target=, only appear for objects that actually carry explicit target metadata.
 
 * Transient Menus
 
@@ -583,27 +408,13 @@ Requires the =transient= package (built-in since Emacs 28.1).
 
 Press =C-c ?= to open the transient menu.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, and =Refresh schema=.
 
-Finite state is displayed as parenthesized choices, with the active choice
-highlighted.  For example, the connection menu shows
-=Auto-commit (manual|auto)=, and the result menu shows current filter, sort,
-copy-refinement, and layout states.
+Finite state is displayed as parenthesized choices, with the active choice highlighted.  For example, the connection menu shows =Auto-commit (manual|auto)=, and the result menu shows current filter, sort, copy-refinement, and layout states.
 
-The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=,
-=Commit=, =Rollback=, =Auto-commit=, and =REPL=.  =Prepare SSH= opens an
-interactive OpenSSH setup session for host-key confirmation or key passphrase
-entry before retrying the normal non-interactive connect path.
+The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=, =Commit=, =Rollback=, =Auto-commit=, and =REPL=.  =Prepare SSH= opens an interactive OpenSSH setup session for host-key confirmation or key passphrase entry before retrying the normal non-interactive connect path.
 
-In the result buffer, the *Staged* heading includes the current pending count.
-Its copy/save actions and the mutation group's commit/discard actions are inapt
-when no changes are staged.  The unified staged-commit workflow uses =i= to
-stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending
-change at point, and =C-c C-c= to commit all pending changes
-(INSERT → UPDATE → DELETE) in a single confirmation.
+In the result buffer, the *Staged* heading includes the current pending count. Its copy/save actions and the mutation group's commit/discard actions are inapt when no changes are staged.  The unified staged-commit workflow uses =i= to stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending change at point, and =C-c C-c= to commit all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
-The result and record transients also expose an *Inspect* group: =v= opens the
-static cell viewer, while =V= opens the live viewer that follows point.  Once
-the live viewer is open, use =f= to freeze/unfreeze it, =g= to force a refresh,
-and =q= to close it.
+The result and record transients also expose an *Inspect* group: =v= opens the static cell viewer, while =V= opens the live viewer that follows point.  Once the live viewer is open, use =f= to freeze/unfreeze it, =g= to force a refresh, and =q= to close it.
 
 * Faces
 
@@ -635,38 +446,20 @@ Customize these through =M-x customize-group RET clutch RET=:
 - PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
 - JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
 - During long-running queries, press =C-g= to interrupt.
-  - On JDBC backends, clutch first sends a protocol-level =cancel= for the
-    running statement.
-  - On native MySQL, clutch opens a helper connection, issues =KILL QUERY= for
-    the original connection id, drains the interrupted response, and keeps the
-    same session usable.
-  - On native PostgreSQL, clutch sends a protocol-level =CancelRequest=, drains
-    the main socket back to =ReadyForQuery=, and keeps the same session usable.
-  - When that backend-specific cancel succeeds, the connection stays usable and
-    you can run the next SQL immediately on the same session.
-  - clutch only drops the connection when interrupt recovery fails, for example
-    if cancel times out, the agent has exited, or the JDBC session is already
-    dead.
-  - Backends without explicit interrupt support still fall back to
-    disconnect/reconnect semantics.
-- =M-x clutch-debug-mode= is the opt-in deep-debug workflow and is off by
-  default.  When enabled, clutch records a bounded redacted trace of recent
-  connect/query/interrupt/object/metadata events in =*clutch-debug*=, and JDBC
-  also requests an additional redacted backend debug payload (currently stack
-  trace + request context).  Turning the mode on starts a fresh capture window.
-  Use =clutch-debug-event-limit= to change how many recent events are retained.
+  - On JDBC backends, clutch first sends a protocol-level =cancel= for the running statement.
+  - On native MySQL, clutch opens a helper connection, issues =KILL QUERY= for the original connection id, drains the interrupted response, and keeps the same session usable.
+  - On native PostgreSQL, clutch sends a protocol-level =CancelRequest=, drains the main socket back to =ReadyForQuery=, and keeps the same session usable.
+  - When that backend-specific cancel succeeds, the connection stays usable and you can run the next SQL immediately on the same session.
+  - clutch only drops the connection when interrupt recovery fails, for example if cancel times out, the agent has exited, or the JDBC session is already dead.
+  - Backends without explicit interrupt support still fall back to disconnect/reconnect semantics.
+- =M-x clutch-debug-mode= is the opt-in deep-debug workflow and is off by default.  When enabled, clutch records a bounded redacted trace of recent connect/query/interrupt/object/metadata events in =*clutch-debug*=, and JDBC also requests an additional redacted backend debug payload (currently stack trace + request context).  Turning the mode on starts a fresh capture window. Use =clutch-debug-event-limit= to change how many recent events are retained.
 - The supported troubleshooting workflow is:
   1. enable =M-x clutch-debug-mode=
   2. reproduce the failure
   3. inspect =*clutch-debug*=
-- =*clutch-debug*= is the sole supported troubleshooting surface.  It is a
-  single session log, not a per-buffer report command, and it should be read
-  instead of raw stderr buffers.
-- When the failing path involved hidden/internal SQL, the same debug buffer
-  also shows generated SQL together with the related JDBC agent stderr tail and
-  backend debug payload.
-- High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed
-  confirmation (=YES=) before execution.
+- =*clutch-debug*= is the sole supported troubleshooting surface.  It is a single session log, not a per-buffer report command, and it should be read instead of raw stderr buffers.
+- When the failing path involved hidden/internal SQL, the same debug buffer also shows generated SQL together with the related JDBC agent stderr tail and backend debug payload.
+- High-risk DML (=UPDATE/DELETE= without top-level =WHERE=) requires typed confirmation (=YES=) before execution.
 
 ** Additional Customization
 
@@ -674,11 +467,8 @@ Customize these through =M-x customize-group RET clutch RET=:
 - =clutch-object-warmup-idle-delay-seconds= delays background object warmup after schema refresh.
 - =clutch-schema-cache-install-batch-size= controls how many schema entries are installed per idle batch.
 - =clutch-csv-export-default-coding-system= sets the default CSV encoding (UTF-8 with BOM by default for Excel compatibility).
-- =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through
-  10,000 rows (default 500).
+- =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through 10,000 rows (default 500).
 - =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.
 - =clutch-sql-completion-case-style= controls whether SQL completion preserves, lowercases, or uppercases inserted identifiers/keywords.
-- =clutch-agent-context-max-result-rows= controls how many current result rows
-  are copied by =clutch-copy-context-for-agent=.
-- =clutch-agent-context-max-cell-width= controls per-cell truncation in copied
-  external-agent context.
+- =clutch-agent-context-max-result-rows= controls how many current result rows are copied by =clutch-copy-context-for-agent=.
+- =clutch-agent-context-max-cell-width= controls per-cell truncation in copied external-agent context.

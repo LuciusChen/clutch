@@ -4,8 +4,7 @@
 
 `clutch` currently has one strong capability and one clear gap:
 
-- It already humanizes database errors well at the user-facing layer via
-  `clutch--humanize-db-error`.
+- It already humanizes database errors well at the user-facing layer via `clutch--humanize-db-error`.
 - It does not yet have a first-class diagnostics model for troubleshooting.
 
 Today, most failures eventually collapse into a single message string:
@@ -14,8 +13,7 @@ Today, most failures eventually collapse into a single message string:
 - JDBC agent responses carry only `{"ok":false,"error":"..."}`
 - Elisp may further humanize, trim, or wrap that string before surfacing it
 
-This keeps the default UX compact, but it also flattens the information needed
-to debug real failures:
+This keeps the default UX compact, but it also flattens the information needed to debug real failures:
 
 - connection/auth/TLS/driver/classpath failures
 - lazy-connect drivers that fail on first `execute`
@@ -23,8 +21,7 @@ to debug real failures:
 - JDBC-side request timeouts vs true session death
 - internal generated SQL that the user did not type directly
 
-The current JDBC stderr buffer (`*clutch-jdbc-agent-stderr*`) is useful but too
-implicit to serve as the primary troubleshooting workflow.
+The current JDBC stderr buffer (`*clutch-jdbc-agent-stderr*`) is useful but too implicit to serve as the primary troubleshooting workflow.
 
 ## Problem
 
@@ -57,15 +54,13 @@ The default surfaced error remains short and actionable.
 - inline error banner
 - REPL/query-console visible message
 
-This layer should continue to use `clutch--humanize-db-error` and related UI
-cleanup rules.
+This layer should continue to use `clutch--humanize-db-error` and related UI cleanup rules.
 
 ### 2. Structured diagnostics
 
 Introduce a separate diagnostics payload for request-level failures.
 
-This payload is not the default user message.  It is a structured record used by
-the troubleshooting UI and by tests.
+This payload is not the default user message.  It is a structured record used by the troubleshooting UI and by tests.
 
 The model should cover at least:
 
@@ -78,27 +73,20 @@ The model should cover at least:
 - SQLState when available
 - vendor error code when available
 - cause chain
-- whether the failure happened during connect / execute / fetch / cancel /
-  metadata
+- whether the failure happened during connect / execute / fetch / cancel / metadata
 - raw database error text before UI humanization
 - generated SQL when the failing operation was not user-authored SQL
 
-Protocol shape is intentionally deferred here.  The important constraint is
-semantic separation: summary is for humans by default; diagnostics are for
-inspection.
+Protocol shape is intentionally deferred here.  The important constraint is semantic separation: summary is for humans by default; diagnostics are for inspection.
 
 ### 3. Runtime logs
 
 Keep runtime logs separate from request diagnostics.
 
-- JDBC agent stderr remains the right place for lifecycle/runtime logging:
-  startup, driver loading, process exit, overload, unexpected boundary
-  exceptions.
-- It should not be the only place where a user can retrieve request-level debug
-  information.
+- JDBC agent stderr remains the right place for lifecycle/runtime logging: startup, driver loading, process exit, overload, unexpected boundary exceptions.
+- It should not be the only place where a user can retrieve request-level debug information.
 
-The user-facing UI workflow for this model is specified in
-[066](066-single-debug-buffer-workflow.md).
+The user-facing UI workflow for this model is specified in [066](066-single-debug-buffer-workflow.md).
 
 ## Generated SQL Visibility
 
@@ -111,16 +99,13 @@ This includes SQL produced by:
 - schema refreshes
 - dialect-specific rewritten statements where relevant
 
-This is a separate requirement from richer error text.  A user must be able to
-see what `clutch` actually sent, even when the query was not typed by hand.
+This is a separate requirement from richer error text.  A user must be able to see what `clutch` actually sent, even when the query was not typed by hand.
 
-The design target is similar to `psql -E` / `ECHO_HIDDEN`: generated SQL should
-be inspectable without requiring ad-hoc instrumentation.
+The design target is similar to `psql -E` / `ECHO_HIDDEN`: generated SQL should be inspectable without requiring ad-hoc instrumentation.
 
 ## Troubleshooting Workflow
 
-Add one explicit troubleshooting path instead of relying on hidden buffers and
-tribal knowledge.
+Add one explicit troubleshooting path instead of relying on hidden buffers and tribal knowledge.
 
 The intended workflow is:
 
@@ -133,8 +118,7 @@ The intended workflow is:
    - generated SQL when relevant
    - related JDBC stderr tail when relevant
 
-This section describes the diagnostics model, but the user-facing UI workflow is
-now superseded by [066](066-single-debug-buffer-workflow.md).
+This section describes the diagnostics model, but the user-facing UI workflow is now superseded by [066](066-single-debug-buffer-workflow.md).
 
 ## Error Categories
 
@@ -156,9 +140,7 @@ Initial categories:
 - `protocol`
 - `internal`
 
-The categories do not need perfect vendor-specific precision on day one.  They
-do need enough stability that the UI and docs can guide users to the right next
-step.
+The categories do not need perfect vendor-specific precision on day one.  They do need enough stability that the UI and docs can guide users to the right next step.
 
 ## Redaction Rules
 
@@ -189,13 +171,11 @@ Redaction is part of the contract, not a later polish pass.
 
 - Humanization stays in the UI layer.
 - The details view belongs in `clutch`, not in backend libraries.
-- The generic backend interface should expose diagnostics without forcing every
-  backend to invent a separate UI.
+- The generic backend interface should expose diagnostics without forcing every backend to invent a separate UI.
 
 ### JDBC agent
 
-- Request-level diagnostics should be captured at the process boundary, not via
-  scattered try/catch blocks inside handler logic.
+- Request-level diagnostics should be captured at the process boundary, not via scattered try/catch blocks inside handler logic.
 - The protocol should not regress to stack traces in the normal `error` field.
 - Unexpected process/runtime failures should still be logged to stderr.
 

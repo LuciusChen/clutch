@@ -2,9 +2,7 @@
 
 ## Context
 
-`clutch` result buffers currently rebuild the table body with
-`clutch--render-result` and `clutch--refresh-display`, both of which erase the
-buffer and insert every row again.
+`clutch` result buffers currently rebuild the table body with `clutch--render-result` and `clutch--refresh-display`, both of which erase the buffer and insert every row again.
 
 That model is correct but expensive in three ways:
 
@@ -12,21 +10,16 @@ That model is correct but expensive in three ways:
 - point / window-start preservation logic becomes central and fragile
 - async metadata enrichment has no cheap way to refresh only the part that changed
 
-This is the same general display class as `ghostel`: keep one real Emacs
-buffer with searchable text and data-bearing text properties, but make redraw
-work narrower and more explicit.
+This is the same general display class as `ghostel`: keep one real Emacs buffer with searchable text and data-bearing text properties, but make redraw work narrower and more explicit.
 
 Two existing clutch decisions constrain the design:
 
-- `059-single-page-result-layout.md` already chose one searchable buffer over
-  virtual column paging
-- `022-cursor-scroll-preservation-on-refresh.md` already showed that full
-  redraw is a correctness hotspot, not only a performance cost
+- `059-single-page-result-layout.md` already chose one searchable buffer over virtual column paging
+- `022-cursor-scroll-preservation-on-refresh.md` already showed that full redraw is a correctness hotspot, not only a performance cost
 
 ## Proposed Decision
 
-Keep the current full render path as the authoritative fallback, but add a
-small incremental redraw layer in `clutch-ui.el`.
+Keep the current full render path as the authoritative fallback, but add a small incremental redraw layer in `clutch-ui.el`.
 
 The first slice should support four refresh scopes:
 
@@ -35,9 +28,7 @@ The first slice should support four refresh scopes:
 - header-line rebuild
 - mode-line/footer rebuild
 
-Do not add a native module, hidden off-screen columns, or a second display
-model.  The result buffer should remain a normal Emacs buffer whose visible
-text matches what search, region operations, and export logic expect.
+Do not add a native module, hidden off-screen columns, or a second display model.  The result buffer should remain a normal Emacs buffer whose visible text matches what search, region operations, and export logic expect.
 
 ## Why This Level
 
@@ -63,12 +54,9 @@ The minimal useful change is narrower mutation of the existing buffer.
 These rules should remain true:
 
 - The result buffer is the canonical searchable text surface
-- Cell semantics stay on text properties such as `clutch-row-idx`,
-  `clutch-col-idx`, and `clutch-full-value`
-- Overlays remain ephemeral visuals only, such as row highlight and SQL error
-  markers
-- Full redraw remains available and is used whenever shape-level assumptions
-  change
+- Cell semantics stay on text properties such as `clutch-row-idx`, `clutch-col-idx`, and `clutch-full-value`
+- Overlays remain ephemeral visuals only, such as row highlight and SQL error markers
+- Full redraw remains available and is used whenever shape-level assumptions change
 
 ### New Redraw Helpers
 
@@ -81,10 +69,7 @@ Add narrow helpers in `clutch-ui.el` instead of widening `clutch--refresh-displa
 - `clutch--reindex-row-start-positions-from`
 - `clutch--refresh-rows`
 
-The important constraint is that row-local redraw should reuse the existing row
-renderer, not invent a second rendering path.  `clutch--render-row`,
-`clutch--render-cell`, and the current render-state helpers should stay the one
-source of truth for row text and properties.
+The important constraint is that row-local redraw should reuse the existing row renderer, not invent a second rendering path.  `clutch--render-row`, `clutch--render-cell`, and the current render-state helpers should stay the one source of truth for row text and properties.
 
 ### Row Replacement Model
 
@@ -95,9 +80,7 @@ The first implementation should be simple:
 3. Recompute `clutch--row-start-positions` from the changed row forward.
 4. Restore point in logical row/column terms.
 
-Do not switch to marker-per-row storage in the first slice.  A vector of line
-starts already exists and is easy to reason about.  Reindexing from the changed
-row is simpler than introducing a permanent marker graph.
+Do not switch to marker-per-row storage in the first slice.  A vector of line starts already exists and is easy to reason about.  Reindexing from the changed row is simpler than introducing a permanent marker graph.
 
 ### Dirty Scopes
 
@@ -137,13 +120,9 @@ Footer-only redraw should handle:
 
 ### Scheduling
 
-Do not copy `ghostel`'s timer-based redraw loop directly.  `clutch` is not a
-streaming terminal.
+Do not copy `ghostel`'s timer-based redraw loop directly.  `clutch` is not a streaming terminal.
 
-The initial implementation should stay synchronous per command and per async
-callback.  If resize storms or async metadata callbacks later show visible
-churn, add a very small coalescing layer such as `clutch--request-refresh`
-around the new helpers.
+The initial implementation should stay synchronous per command and per async callback.  If resize storms or async metadata callbacks later show visible churn, add a very small coalescing layer such as `clutch--request-refresh` around the new helpers.
 
 That gives clutch the useful part of the `ghostel` lesson:
 
@@ -165,8 +144,7 @@ Own the incremental redraw machinery:
 
 Own command-level invalidation choices:
 
-- commands that currently call `clutch--refresh-display` after row-local state
-  changes should switch to targeted row refresh
+- commands that currently call `clutch--refresh-display` after row-local state changes should switch to targeted row refresh
 - navigation-only commands should continue to avoid body redraw
 - header highlight logic can keep rebuilding the header line independently
 
@@ -175,30 +153,25 @@ Own command-level invalidation choices:
 Own async metadata-triggered refresh calls:
 
 - result metadata enrichment should request the narrowest possible refresh
-- if metadata only affects info lookups and not visible text, do not redraw the
-  body at all
+- if metadata only affects info lookups and not visible text, do not redraw the body at all
 
 ## Rejected Alternatives
 
 ### Native module rendering
 
-Rejected.  `clutch` is not bottlenecked by VT parsing or keystroke echo.
-Bringing in a native module would raise complexity at the wrong layer.
+Rejected.  `clutch` is not bottlenecked by VT parsing or keystroke echo. Bringing in a native module would raise complexity at the wrong layer.
 
 ### Hide off-screen columns instead of rendering one real table
 
-Rejected by the existing single-page layout decision.  Search and motion must
-continue to operate on real visible buffer text.
+Rejected by the existing single-page layout decision.  Search and motion must continue to operate on real visible buffer text.
 
 ### Whole-buffer diffing after every command
 
-Rejected as unnecessary complexity.  The command layer already knows whether a
-change is row-local, header-local, footer-local, or global.
+Rejected as unnecessary complexity.  The command layer already knows whether a change is row-local, header-local, footer-local, or global.
 
 ### Marker-per-row anchors in the first slice
 
-Rejected for now.  They add bookkeeping pressure to every render path.  The
-existing vector plus incremental reindexing is the simpler starting point.
+Rejected for now.  They add bookkeeping pressure to every render path.  The existing vector plus incremental reindexing is the simpler starting point.
 
 ## Implementation Plan
 
@@ -226,8 +199,7 @@ This proves whether line replacement plus row-start reindexing is stable.
 
 Extend row-local redraw to pending insert ghost rows and commit/discard flows.
 
-At this point the common mutation workflows should avoid full-body redraw in
-steady state.
+At this point the common mutation workflows should avoid full-body redraw in steady state.
 
 ### Phase 4
 
@@ -249,23 +221,15 @@ Add focused tests for:
 - full redraw still occurs for width/page/filter/order changes
 - header-only and footer-only refresh do not rebuild the table body
 
-The benchmark suite should also gain a UI-focused render benchmark.  Current
-benchmarks measure backend query cost, not result-buffer redraw cost.
+The benchmark suite should also gain a UI-focused render benchmark.  Current benchmarks measure backend query cost, not result-buffer redraw cost.
 
 ## Review Focus For Claude
 
 Please review these specific design choices:
 
-1. Is "replace one line, then reindex row starts from that row forward" the
-   right first implementation, or is there a stronger reason to introduce row
-   markers immediately?
-2. Is it correct to keep window-width changes on the full-redraw path in the
-   first slice?
-3. Which current commands in `clutch.el` are the best initial adopters for
-   row-local redraw, and are any apparently row-local commands actually shape
-   changes in disguise?
-4. Should metadata enrichment trigger any body redraw at all, or should it stay
-   cache-only unless the rendered text actually depends on metadata?
+1. Is "replace one line, then reindex row starts from that row forward" the right first implementation, or is there a stronger reason to introduce row markers immediately?
+2. Is it correct to keep window-width changes on the full-redraw path in the first slice?
+3. Which current commands in `clutch.el` are the best initial adopters for row-local redraw, and are any apparently row-local commands actually shape changes in disguise?
+4. Should metadata enrichment trigger any body redraw at all, or should it stay cache-only unless the rendered text actually depends on metadata?
 
-The main goal is not maximum cleverness.  The goal is to reduce redraw scope
-without weakening the one-buffer, search-friendly result model.
+The main goal is not maximum cleverness.  The goal is to reduce redraw scope without weakening the one-buffer, search-friendly result model.

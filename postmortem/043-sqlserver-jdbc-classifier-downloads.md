@@ -4,8 +4,7 @@ _Updated: the downloader now supports general four-part Maven coordinates, and C
 
 ## Background
 
-`clutch-jdbc-install-driver 'sqlserver` relied on the generic Maven download
-path builder in `clutch-db-jdbc.el`.
+`clutch-jdbc-install-driver 'sqlserver` relied on the generic Maven download path builder in `clutch-db-jdbc.el`.
 
 That builder assumes coordinates of the form:
 
@@ -15,13 +14,11 @@ and then downloads:
 
 - `artifact-version.jar`
 
-This works for most JDBC drivers in the project, but Microsoft's SQL Server
-driver is published with a JRE classifier in the version string, for example:
+This works for most JDBC drivers in the project, but Microsoft's SQL Server driver is published with a JRE classifier in the version string, for example:
 
 - `mssql-jdbc-13.4.0.jre11.jar`
 
-The previous SQL Server entry used `12.6.0` without the classifier, which made
-the generated Maven Central URL return `404`.
+The previous SQL Server entry used `12.6.0` without the classifier, which made the generated Maven Central URL return `404`.
 
 ## Decision
 
@@ -43,8 +40,6 @@ The only thing that needed to change was the source coordinate.
 
 ## Alternative not chosen
 
-Add a more general artifact model with separate `:version`, `:classifier`, and
-custom filename templating.
+Add a more general artifact model with separate `:version`, `:classifier`, and custom filename templating.
 
-That would be more flexible, but it is unnecessary for the current supported
-driver matrix.  One corrected coordinate is cheaper and easier to reason about.
+That would be more flexible, but it is unnecessary for the current supported driver matrix.  One corrected coordinate is cheaper and easier to reason about.

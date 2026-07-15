@@ -5,16 +5,9 @@
 
 * Overview
 
-An Emacs database client with an interactive data browsing UI.
-Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite
-through Emacs built-in =sqlite-*= functions, MongoDB through the external
-=mongodb.el= native client, Redis through the external =redis.el= native
-client, plus Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB,
-and generic JDBC URLs through a
-lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
+An Emacs database client with an interactive data browsing UI. Supports MySQL and PostgreSQL through pure Elisp protocol packages, SQLite through Emacs built-in =sqlite-*= functions, MongoDB through the external =mongodb.el= native client, Redis through the external =redis.el= native client, plus Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and generic JDBC URLs through a lightweight JVM sidecar ([[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]], Java 17+).
 
-Architecture diagrams and module ownership are in [[file:docs/architecture.md][docs/architecture.md]]; stable product scope and acceptance requirements are in [[file:PRD.md][PRD.md]].
-For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
+Architecture diagrams and module ownership are in [[file:docs/architecture.md][docs/architecture.md]]; stable product scope and acceptance requirements are in [[file:PRD.md][PRD.md]]. For Org-Babel integration, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 #+CAPTION: Query console with result pane, value viewer, and footer status.
 [[file:docs/screenshots/clutch-overview.png]]
@@ -42,8 +35,7 @@ See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-
 - MySQL and PostgreSQL use pure Elisp protocol implementations
 - SQLite uses Emacs 29.1+ built-in =sqlite-*= functions
 - MongoDB and Redis use the external pure Elisp =mongodb.el= and =redis.el= protocol clients
-- For native backend protocol, TLS, timeout, and connection examples, see
-  [[file:docs/native-backends.md][docs/native-backends.md]]
+- For native backend protocol, TLS, timeout, and connection examples, see [[file:docs/native-backends.md][docs/native-backends.md]]
 
 ** Interactive UI
 
@@ -55,8 +47,7 @@ See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-
 - Connection feedback: per-connection consoles, persisted console contents, auto-reconnect, explicit schema-refresh states, transaction status, and a dedicated debug buffer
 - Stateful transient feedback: active auto-commit, filters, sort, copy refinement, result layout, staged mutation count, and Record field action are shown directly in their menus
 - Inspection and extension: JSON/XML/BLOB value viewers, live cell viewer, per-column display overrides, and context export for external assistants
-- REPL mode built on =comint-mode=, with =SELECT= results shown in the standard
-  result browser instead of expanded inline in REPL history
+- REPL mode built on =comint-mode=, with =SELECT= results shown in the standard result browser instead of expanded inline in REPL history
 
 Row identity support for staged =UPDATE= / =DELETE=:
 
@@ -68,13 +59,7 @@ Row identity support for staged =UPDATE= / =DELETE=:
 | Oracle JDBC | non-null unique keys, then =ROWID= for confirmed base tables |
 | Other JDBC backends | non-null unique keys only |
 
-Joined, grouped, derived, or otherwise ambiguous result sets remain read-only
-for staged =UPDATE= / =DELETE= unless clutch can identify a single source table
-and inject or read a matching row identity.
-Schema-qualified JDBC sources keep that schema for identity lookup and for the
-eventual staged =UPDATE= / =DELETE= target.
-Oracle views and synonyms, including dictionary relations such as =USER_TABLES=,
-remain read-only and skip row-identity metadata probes.
+Joined, grouped, derived, or otherwise ambiguous result sets remain read-only for staged =UPDATE= / =DELETE= unless clutch can identify a single source table and inject or read a matching row identity. Schema-qualified JDBC sources keep that schema for identity lookup and for the eventual staged =UPDATE= / =DELETE= target. Oracle views and synonyms, including dictionary relations such as =USER_TABLES=, remain read-only and skip row-identity metadata probes.
 
 * Documentation
 
@@ -90,21 +75,14 @@ remain read-only and skip row-identity metadata probes.
 
 - Emacs 29.1+
 - MySQL 5.6+ / 8.x, PostgreSQL 12+, or SQLite 3 (via Emacs built-in)
-- MariaDB 10.11 has been live-validated through the native =mysql= backend;
-  TLS with =mysql_native_password= has also been live-validated; other
-  MariaDB versions are expected to be broadly compatible but are not yet part
-  of the regular test matrix
+- MariaDB 10.11 has been live-validated through the native =mysql= backend; TLS with =mysql_native_password= has also been live-validated; other MariaDB versions are expected to be broadly compatible but are not yet part of the regular test matrix
 - Java 17+ for the JDBC backend (Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB)
 
-For MySQL-family servers, core functionality (connect/query/object workflow,
-editing, prepared statements, and clutch UI workflows) is expected to work on
-MySQL 5.6+ and on compatible MariaDB releases.  Some newer server-side
-features remain version-specific:
+For MySQL-family servers, core functionality (connect/query/object workflow, editing, prepared statements, and clutch UI workflows) is expected to work on MySQL 5.6+ and on compatible MariaDB releases.  Some newer server-side features remain version-specific:
 
 - MySQL 5.6 does not provide a native JSON column type
 - MariaDB exposes =JSON= as an alias over text with =json_valid(...)= checks
-- MariaDB 10.11 TLS has been validated with =mysql_native_password=; the older
-  =mysql_old_password= plugin is not supported by the native client
+- MariaDB 10.11 TLS has been validated with =mysql_native_password=; the older =mysql_old_password= plugin is not supported by the native client
 - newer auth plugins and TLS combinations vary by server family/version
 
 * Installation
@@ -115,9 +93,7 @@ Install =clutch= from MELPA or another package archive:
 (package-install 'clutch)
 #+end_src
 
-Protocol packages are optional and backend-specific.  =clutch= does not install
-every database protocol package up front, because many users only use one
-backend.  Install the protocol package for each backend you configure:
+Protocol packages are optional and backend-specific.  =clutch= does not install every database protocol package up front, because many users only use one backend.  Install the protocol package for each backend you configure:
 
 | Backend | Extra Emacs package |
 |---------+---------------------|
@@ -128,21 +104,11 @@ backend.  Install the protocol package for each backend you configure:
 | =:backend sqlite= | none; Emacs 29.1+ built-in SQLite support |
 | =:backend jdbc= / Oracle / SQL Server / ClickHouse / DB2 / DuckDB | none; uses the bundled JDBC adapter |
 
-If a configured backend's protocol package is missing, =clutch= reports the
-missing package when connecting.  Install that package with your package manager,
-ensure it is on =load-path=, then retry the connection; restarting Emacs is the
-safest way to clear stale autoload or native-compile state after installation.
+If a configured backend's protocol package is missing, =clutch= reports the missing package when connecting.  Install that package with your package manager, ensure it is on =load-path=, then retry the connection; restarting Emacs is the safest way to clear stale autoload or native-compile state after installation.
 
-JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+
-and =clutch-jdbc-agent.jar=.  Individual JDBC databases may also need driver
-jars.  The current development version pins JDBC agent 0.2.9 and verifies the
-published jar before starting it.  JDBC staged mutations use prepared values,
-and an idle-timed-out metadata session is recovered without replacing the
-foreground session.
-For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
+JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=.  Individual JDBC databases may also need driver jars.  The current development version pins JDBC agent 0.2.9 and verifies the published jar before starting it.  JDBC staged mutations use prepared values, and an idle-timed-out metadata session is recovered without replacing the foreground session. For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
-For source checkouts, add =clutch= and any native protocol backend checkout you
-use to =load-path= explicitly:
+For source checkouts, add =clutch= and any native protocol backend checkout you use to =load-path= explicitly:
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/clutch")
@@ -155,20 +121,13 @@ use to =load-path= explicitly:
 
 * Upgrading From Pre-Split Checkouts
 
-This release separates protocol and Org-Babel packages from the main
-=clutch= package.  If you are upgrading from an older checkout that bundled
-everything in one repository, this is a breaking packaging change:
+This release separates protocol and Org-Babel packages from the main =clutch= package.  If you are upgrading from an older checkout that bundled everything in one repository, this is a breaking packaging change:
 
-- [[https://github.com/LuciusChen/mysql.el][mysql.el]] is no longer bundled in this repository.  Install it separately for
-  =:backend mysql=.
-- [[https://github.com/emarsden/pg-el][pg.el]] is no longer bundled in this repository.  Install it separately for
-  =:backend pg=.
-- [[https://github.com/LuciusChen/mongodb.el][mongodb.el]] is no longer bundled in this repository.  Install it separately for
-  =:backend mongodb=.
-- [[https://github.com/LuciusChen/redis.el][redis.el]] is a lazy optional protocol package.  Install it separately for
-  =:backend redis=.
-- [[https://github.com/LuciusChen/ob-clutch][ob-clutch.el]] is no longer bundled; install =ob-clutch= separately for
-  Org-Babel source blocks.
+- [[https://github.com/LuciusChen/mysql.el][mysql.el]] is no longer bundled in this repository.  Install it separately for =:backend mysql=.
+- [[https://github.com/emarsden/pg-el][pg.el]] is no longer bundled in this repository.  Install it separately for =:backend pg=.
+- [[https://github.com/LuciusChen/mongodb.el][mongodb.el]] is no longer bundled in this repository.  Install it separately for =:backend mongodb=.
+- [[https://github.com/LuciusChen/redis.el][redis.el]] is a lazy optional protocol package.  Install it separately for =:backend redis=.
+- [[https://github.com/LuciusChen/ob-clutch][ob-clutch.el]] is no longer bundled; install =ob-clutch= separately for Org-Babel source blocks.
 - Saved connections must specify =:backend= explicitly.
 
 * Interactive Client
@@ -212,34 +171,16 @@ everything in one repository, this is a breaking packaging change:
                           :database "/path/to/my.db"))))
 #+end_src
 
-- Every entry must resolve to a backend (=mysql=, =pg=, =sqlite=, =mongodb=,
-  =redis=, or a JDBC driver symbol such as =oracle=).  Prefer keeping
-  =:backend= in =clutch-connection-alist= so completion can show backend icons;
-  if it is omitted, an encrypted =:profile-entry= must provide =backend=.
-- SQLite is local and file-based: only =:database= is required; use =":memory:"=
-  for a transient database.  Do not combine SQLite with =:ssh-host=,
-  =:ssh-tunnel=, or =:tramp-default-directory=.
-- =:password= is optional for network backends; see [[*Password Management][Password Management]] for
-  auth-source integration.
-- =:profile-entry= can load missing connection fields from encrypted =pass= or
-  =.authinfo.gpg= profiles when host/user/database metadata should not live in
-  Emacs init files.
-- Network backends accept =:connect-timeout= and =:read-idle-timeout=.
-  PostgreSQL and JDBC also accept =:query-timeout=; JDBC additionally accepts
-  =:rpc-timeout=.
-- TLS can be enabled with =:tls t=.  For explicit plaintext, prefer
-  =:ssl-mode disabled= on MySQL and =:sslmode disable= on PostgreSQL.
-- =:ssh-host= and =:tramp-default-directory= both create local forwards for
-  structured =:host= / =:port= endpoints.  =:ssh-host= uses a =~/.ssh/config=
-  host alias, while =:tramp-default-directory= derives the origin from an
-  ssh-like or container TRAMP directory.
-- Query-console SQL is saved by connection identity rather than saved connection
-  name, so renaming a saved connection keeps the same console SQL.
+- Every entry must resolve to a backend (=mysql=, =pg=, =sqlite=, =mongodb=, =redis=, or a JDBC driver symbol such as =oracle=).  Prefer keeping =:backend= in =clutch-connection-alist= so completion can show backend icons; if it is omitted, an encrypted =:profile-entry= must provide =backend=.
+- SQLite is local and file-based: only =:database= is required; use =":memory:"= for a transient database.  Do not combine SQLite with =:ssh-host=, =:ssh-tunnel=, or =:tramp-default-directory=.
+- =:password= is optional for network backends; see [[*Password Management][Password Management]] for auth-source integration.
+- =:profile-entry= can load missing connection fields from encrypted =pass= or =.authinfo.gpg= profiles when host/user/database metadata should not live in Emacs init files.
+- Network backends accept =:connect-timeout= and =:read-idle-timeout=. PostgreSQL and JDBC also accept =:query-timeout=; JDBC additionally accepts =:rpc-timeout=.
+- TLS can be enabled with =:tls t=.  For explicit plaintext, prefer =:ssl-mode disabled= on MySQL and =:sslmode disable= on PostgreSQL.
+- =:ssh-host= and =:tramp-default-directory= both create local forwards for structured =:host= / =:port= endpoints.  =:ssh-host= uses a =~/.ssh/config= host alias, while =:tramp-default-directory= derives the origin from an ssh-like or container TRAMP directory.
+- Query-console SQL is saved by connection identity rather than saved connection name, so renaming a saved connection keeps the same console SQL.
 
-JDBC-backed databases use their clutch driver/dialect symbol as =:backend=, such
-as =oracle=; =:backend= does not merely select the Java driver.  Reserve
-=:backend jdbc= for databases without a dedicated clutch backend.  See
-[[file:docs/jdbc-backend.org][docs/jdbc-backend.org]] for supported databases and setup.
+JDBC-backed databases use their clutch driver/dialect symbol as =:backend=, such as =oracle=; =:backend= does not merely select the Java driver.  Reserve =:backend jdbc= for databases without a dedicated clutch backend.  See [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]] for supported databases and setup.
 
 *** 2. Open a query console
 
@@ -252,14 +193,7 @@ M-x clutch-query-sqlite-file ;; Shortcut: select a SQLite file → opens a conne
                              ;;         or SQLite[my.db]
 #+end_src
 
-Repeated calls with the same name switch to the existing buffer instead of
-opening a new one.  Use =clutch-switch-console= to jump between open consoles.
-=clutch-query-console= lists saved connections; pressing RET with no matching
-connection starts a temporary connection flow and opens a query console for it.
-SQLite is part of that flow and asks for a database file instead of host/user
-credentials.  =clutch-query-sqlite-file= is the direct shortcut for local
-SQLite files.  If no saved connections are configured, =clutch-query-console=
-starts the temporary connection flow immediately.
+Repeated calls with the same name switch to the existing buffer instead of opening a new one.  Use =clutch-switch-console= to jump between open consoles. =clutch-query-console= lists saved connections; pressing RET with no matching connection starts a temporary connection flow and opens a query console for it. SQLite is part of that flow and asks for a database file instead of host/user credentials.  =clutch-query-sqlite-file= is the direct shortcut for local SQLite files.  If no saved connections are configured, =clutch-query-console= starts the temporary connection flow immediately.
 
 *** 3. Write and execute SQL
 
@@ -267,36 +201,26 @@ starts the temporary connection flow immediately.
 SELECT * FROM users LIMIT 10;
 #+end_src
 
-Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs;
-otherwise the statement at point runs.  Select a region first when exact
-execution boundaries matter.  Results appear in a split result buffer below.
+Press =C-c C-c= to execute.  If a region is selected, the selected SQL runs; otherwise the statement at point runs.  Select a region first when exact execution boundaries matter.  Results appear in a split result buffer below.
 
 *** 4. Control transactions
 
-For native MySQL and PostgreSQL, and for JDBC connections that run in
-manual-commit mode, clutch uses the same transaction keys:
+For native MySQL and PostgreSQL, and for JDBC connections that run in manual-commit mode, clutch uses the same transaction keys:
 
 - =C-c C-a= toggles auto-commit when supported
 - =C-c C-m= commits
 - =C-c C-u= rolls back
 
-SQLite does not expose these transaction controls; its console header omits the
-=Tx= segment.
+SQLite does not expose these transaction controls; its console header omits the =Tx= segment.
 
-Native MySQL maps =C-c C-a= to the server session's autocommit flag directly.
-Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does
-not send =BEGIN= immediately, the first foreground statement opens the
-transaction lazily, and transactional DDL also counts as uncommitted work, so
-toggle/disconnect stays blocked until you commit or roll back.
+Native MySQL maps =C-c C-a= to the server session's autocommit flag directly. Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does not send =BEGIN= immediately, the first foreground statement opens the transaction lazily, and transactional DDL also counts as uncommitted work, so toggle/disconnect stays blocked until you commit or roll back.
 
 ** Password Management
 
-Connection entries may include =:password=, but auth-source is preferred.  When
-=:password= is omitted, clutch resolves credentials through:
+Connection entries may include =:password=, but auth-source is preferred.  When =:password= is omitted, clutch resolves credentials through:
 
 - an explicit =:profile-entry= whose profile contains a password/secret
-- pass entries via =auth-source-pass=, matching the connection name suffix or
-  an explicit =:pass-entry=
+- pass entries via =auth-source-pass=, matching the connection name suffix or an explicit =:pass-entry=
 - standard =auth-source-search= by =:host=, =:user=, and =:port=
 - an interactive =read-passwd= prompt as the final fallback
 
@@ -313,18 +237,11 @@ Connection entries may include =:password=, but auth-source is preferred.  When
 pass insert mysql/dev-mysql   ;; or just: pass insert dev-mysql
 #+end_src
 
-For JDBC connections (including Org-Babel blocks), an explicit =:pass-entry=
-that resolves to no password now fails fast in Emacs instead of sending a null
-password to the driver.  If you use =pass=, make sure =auth-source-pass= is
-enabled first.
+For JDBC connections (including Org-Babel blocks), an explicit =:pass-entry= that resolves to no password now fails fast in Emacs instead of sending a null password to the driver.  If you use =pass=, make sure =auth-source-pass= is enabled first.
 
 *** Encrypted connection profiles
 
-If host/IP addresses, usernames, database names, or tunnel metadata should not
-live in your Emacs configuration, use =:profile-entry=.  The profile is read
-before normal connection canonicalization, so Clutch-level fields such as
-=:ssh-host=, =:ssh-tunnel=, and =:tramp-default-directory= work the same way as
-if they had been written directly in =clutch-connection-alist=.
+If host/IP addresses, usernames, database names, or tunnel metadata should not live in your Emacs configuration, use =:profile-entry=.  The profile is read before normal connection canonicalization, so Clutch-level fields such as =:ssh-host=, =:ssh-tunnel=, and =:tramp-default-directory= work the same way as if they had been written directly in =clutch-connection-alist=.
 
 #+begin_src emacs-lisp
 (setq clutch-connection-alist
@@ -332,16 +249,9 @@ if they had been written directly in =clutch-connection-alist=.
         ("prod-reporting" . (:backend mysql :profile-entry "mysql/reporting"))))
 #+end_src
 
-Clutch treats profile fields as defaults.  Explicit keywords in
-=clutch-connection-alist= override values from =pass= or =.authinfo.gpg=,
-including =:backend=, =:host=, =:port=, =:user=, =:database=, =:ssh-host=, and
-=:ssh-tunnel=.  Keeping non-sensitive hints such as =:backend= in the alist lets
-Clutch show backend icons in completion without decrypting encrypted profiles
-just to render the candidate list.  If =:backend= is omitted, Clutch will still
-read it from the profile when connecting.
+Clutch treats profile fields as defaults.  Explicit keywords in =clutch-connection-alist= override values from =pass= or =.authinfo.gpg=, including =:backend=, =:host=, =:port=, =:user=, =:database=, =:ssh-host=, and =:ssh-tunnel=.  Keeping non-sensitive hints such as =:backend= in the alist lets Clutch show backend icons in completion without decrypting encrypted profiles just to render the candidate list.  If =:backend= is omitted, Clutch will still read it from the profile when connecting.
 
-With =pass=, the first line remains the password and the remaining lines use
-the standard =key: value= convention:
+With =pass=, the first line remains the password and the remaining lines use the standard =key: value= convention:
 
 #+begin_src text
 db-password-here
@@ -362,8 +272,7 @@ Create or edit the entry with:
 pass edit mysql/prod
 #+end_src
 
-With =.authinfo.gpg=, use the =machine= field as the logical profile id.  Since
-auth-source maps =machine= to =:host=, put the real database host in =db-host=:
+With =.authinfo.gpg=, use the =machine= field as the logical profile id.  Since auth-source maps =machine= to =:host=, put the real database host in =db-host=:
 
 #+begin_src text
 machine mysql/prod login app_user password db-password-here \
@@ -371,17 +280,14 @@ machine mysql/prod login app_user password db-password-here \
   ssh-host arch ssh-tunnel direct-first
 #+end_src
 
-Explicit fields are useful for variants such as a read-only database while still
-keeping the host and password encrypted:
+Explicit fields are useful for variants such as a read-only database while still keeping the host and password encrypted:
 
 #+begin_src emacs-lisp
 ("prod-mysql-ro" . (:backend mysql :profile-entry "mysql/prod"
                     :database "app_readonly"))
 #+end_src
 
-=:pass-entry= keeps its existing meaning: it is only a password source.  Use
-=:profile-entry= when the encrypted entry should provide full connection
-metadata.
+=:pass-entry= keeps its existing meaning: it is only a password source.  Use =:profile-entry= when the encrypted entry should provide full connection metadata.
 
 See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][auth-source manual]] for supported credential stores.
 
@@ -396,25 +302,13 @@ For bastion-style access, add =:ssh-host= to a saved network connection:
                :ssh-host "bastion-prod"))
 #+end_src
 
-Clutch opens a local SSH forward through your normal OpenSSH configuration.
-Use =M-x clutch-prepare-ssh-host=, or =S= from =C-c ?=, when the first SSH use
-needs host-key confirmation or a key passphrase.  The batch tunnel itself uses
-non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure
-=AddKeysToAgent= when needed.
+Clutch opens a local SSH forward through your normal OpenSSH configuration. Use =M-x clutch-prepare-ssh-host=, or =S= from =C-c ?=, when the first SSH use needs host-key confirmation or a key passphrase.  The batch tunnel itself uses non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure =AddKeysToAgent= when needed.
 
-Add =:ssh-tunnel direct-first= when the same profile should try a direct
-connection before falling back to SSH.  SSH forwarding applies to structured
-=:host= / =:port= entries; opaque =:url= profiles, including JDBC and MongoDB
-URLs, still need manual tunnels or backend-level transport support.
-Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
+Add =:ssh-tunnel direct-first= when the same profile should try a direct connection before falling back to SSH.  SSH forwarding applies to structured =:host= / =:port= entries; opaque =:url= profiles, including JDBC and MongoDB URLs, still need manual tunnels or backend-level transport support. Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** TRAMP-aware Connection Origin
 
-Opening a TRAMP buffer does not globally change clutch.  TRAMP is considered
-only when a connection is created, and the chosen origin is stored for later
-reconnect, completion, refresh, and query execution.  Configure
-=:tramp-default-directory= when a profile should always use a remote-machine or
-container endpoint:
+Opening a TRAMP buffer does not globally change clutch.  TRAMP is considered only when a connection is created, and the chosen origin is stored for later reconnect, completion, refresh, and query execution.  Configure =:tramp-default-directory= when a profile should always use a remote-machine or container endpoint:
 
 #+begin_src emacs-lisp
 ("remote-pg" . (:backend pg
@@ -423,21 +317,17 @@ container endpoint:
                  :tramp-default-directory "/ssh:devbox:/workspace/"))
 #+end_src
 
-Without =:ssh-host= or =:tramp-default-directory=, commands invoked from a
-TRAMP buffer can infer that buffer's remote context.
-=clutch-tramp-context-policy= controls this:
+Without =:ssh-host= or =:tramp-default-directory=, commands invoked from a TRAMP buffer can infer that buffer's remote context. =clutch-tramp-context-policy= controls this:
 
 - =nil=: never infer TRAMP context
 - =ask= (default): ask before using the current TRAMP context
 - =auto=: use the current TRAMP context without asking
 
-Supported origin types, container relay requirements, and forwarding limits are
-documented in [[file:docs/native-backends.md][docs/native-backends.md]].
+Supported origin types, container relay requirements, and forwarding limits are documented in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** Working with SQL files
 
-You can also open any =.sql= file, enable =clutch-mode=, and connect
-manually — the query console is not required.
+You can also open any =.sql= file, enable =clutch-mode=, and connect manually — the query console is not required.
 
 #+begin_src text
 1. Open a .sql file
@@ -447,23 +337,9 @@ manually — the query console is not required.
 4. C-c C-c                 — execute region, or the current statement/query at point
 #+end_src
 
-In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps that generic
-connect flow: select a saved connection, or press RET with no matching
-connection to enter temporary params.  For SQLite files, prefer
-=M-x clutch-query-sqlite-file=, or =M-x clutch-query-console= followed by RET
-with no matching connection and backend =sqlite=; both open a connected SQL
-console rather than using the database file buffer as the editor.  In
-query-console buffers, =C-c C-e=
-reconnects the connection already associated with that console, without
-reopening the global connection picker.
-To switch to another saved or temporary connection, use =M-x clutch-query-console=.
+In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps that generic connect flow: select a saved connection, or press RET with no matching connection to enter temporary params.  For SQLite files, prefer =M-x clutch-query-sqlite-file=, or =M-x clutch-query-console= followed by RET with no matching connection and backend =sqlite=; both open a connected SQL console rather than using the database file buffer as the editor.  In query-console buffers, =C-c C-e= reconnects the connection already associated with that console, without reopening the global connection picker. To switch to another saved or temporary connection, use =M-x clutch-query-console=.
 
-For deeper troubleshooting, enable =M-x clutch-debug-mode=, reproduce the
-failure, then inspect =*clutch-debug*=.  Enabling the mode starts a fresh
-capture window and creates that dedicated buffer automatically.  It is the only
-supported debug UI, and it shows problem records, generated/internal SQL when
-relevant, recent redacted debug events, and JDBC stderr/debug payload when
-available.
+For deeper troubleshooting, enable =M-x clutch-debug-mode=, reproduce the failure, then inspect =*clutch-debug*=.  Enabling the mode starts a fresh capture window and creates that dedicated buffer automatically.  It is the only supported debug UI, and it shows problem records, generated/internal SQL when relevant, recent redacted debug events, and JDBC stderr/debug payload when available.
 
 To activate =clutch-mode= automatically for =.sql= files, add to your config:
 
@@ -480,60 +356,29 @@ Detailed key bindings, result-browser workflows, object navigation, Embark integ
 Common entry points:
 
 - =C-c C-c= executes the region or statement at point
-- Standard completion completes SQL identifiers at point, including empty
-  column positions; =C-c TAB= invokes it explicitly
-- =M-.= jumps SQL aliases to their statement definition; object lookup uses
-  =C-c C-d= / =C-c C-j=
+- Standard completion completes SQL identifiers at point, including empty column positions; =C-c TAB= invokes it explicitly
+- =M-.= jumps SQL aliases to their statement definition; object lookup uses =C-c C-d= / =C-c C-j=
 - =C-c ?= opens the transient menu
-- Stateful transient entries highlight their current choice; unavailable actions
-  stay visible but inapt when their surrounding context is still useful
+- Stateful transient entries highlight their current choice; unavailable actions stay visible but inapt when their surrounding context is still useful
 - =C-c C-j= starts the object workflow
 - =RET= opens record view from a result row
-- Pressing =s= cycles sorting for the result column at point; simple table
-  results use server-side =ORDER BY=, while UNION, grouped, derived, and other
-  non-rewritable results sort the current page locally.  Use =C= to jump to
-  another visible column first, or click a result header to cycle it
+- Pressing =s= cycles sorting for the result column at point; simple table results use server-side =ORDER BY=, while UNION, grouped, derived, and other non-rewritable results sort the current page locally.  Use =C= to jump to another visible column first, or click a result header to cycle it
 - =i=, =d=, and =C-c C-c= stage and commit row changes in result buffers
-- =C-c '= edits the current result cell or record-view field; JSON columns and
-  text values containing JSON objects or arrays open in a JSON editor, and
-  =C-c C-c= stages or =C-c C-k= cancels the edit directly when that JSON editor
-  opened automatically.  In ordinary edit buffers, =C-c C-n= stages database
-  =NULL=
-- =C-c C-k= discards the staged change at point from a result cell or
-  record-view field
-- =M-x clutch-copy-context-for-agent= copies SQL, table metadata, and the latest
-  matching visible result sample as Markdown for an external agent; the same
-  command is available as =k= in the main and result transients.  Table metadata
-  reuses the existing object describe path.
+- =C-c '= edits the current result cell or record-view field; JSON columns and text values containing JSON objects or arrays open in a JSON editor, and =C-c C-c= stages or =C-c C-k= cancels the edit directly when that JSON editor opened automatically.  In ordinary edit buffers, =C-c C-n= stages database =NULL=
+- =C-c C-k= discards the staged change at point from a result cell or record-view field
+- =M-x clutch-copy-context-for-agent= copies SQL, table metadata, and the latest matching visible result sample as Markdown for an external agent; the same command is available as =k= in the main and result transients.  Table metadata reuses the existing object describe path.
 
 ** MongoDB Backend
 
-MongoDB is basic native document support through =mongodb.el=: ordinary MongoDB
-deployments, supported MongoDB Shell / MQL helper commands, and shared
-object/result workflows.  It is not a full =mongosh= JavaScript runtime.
-MongoDB SQL Interface stays on the same =mongodb= backend as
-=:surface sql-interface= and requires the JDBC sidecar plus MongoDB JDBC driver
-jar.  See [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
+MongoDB is basic native document support through =mongodb.el=: ordinary MongoDB deployments, supported MongoDB Shell / MQL helper commands, and shared object/result workflows.  It is not a full =mongosh= JavaScript runtime. MongoDB SQL Interface stays on the same =mongodb= backend as =:surface sql-interface= and requires the JDBC sidecar plus MongoDB JDBC driver jar.  See [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
 
 ** Redis Backend
 
-Redis is basic key/value support through =redis.el=.  It connects to ordinary
-Redis TCP endpoints, uses line-oriented =clutch-redis-mode= command buffers,
-and maps key browsing/type-aware reads into the shared Clutch grid.  Redis
-support is intentionally basic: no SQL row editing, joins, row identity,
-transaction workflow, pub/sub loops, cluster management, or stream consumer
-workflows.  Generated discovery and collection-browse operations are bounded;
-use explicit scan/range commands for larger traversals.  See
-[[file:docs/backend-support.org][docs/backend-support.org]] and
-[[file:docs/native-backends.md][docs/native-backends.md]] for support boundaries.
+Redis is basic key/value support through =redis.el=.  It connects to ordinary Redis TCP endpoints, uses line-oriented =clutch-redis-mode= command buffers, and maps key browsing/type-aware reads into the shared Clutch grid.  Redis support is intentionally basic: no SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows.  Generated discovery and collection-browse operations are bounded; use explicit scan/range commands for larger traversals.  See [[file:docs/backend-support.org][docs/backend-support.org]] and [[file:docs/native-backends.md][docs/native-backends.md]] for support boundaries.
 
 ** JDBC Backend
 
-JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse,
-MongoDB SQL Interface, DuckDB, and generic JDBC URLs through the
-[[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] sidecar.  For setup, driver installation, connection
-examples, backend-specific notes, and transaction behavior, see
-[[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
+JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, MongoDB SQL Interface, DuckDB, and generic JDBC URLs through the [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] sidecar.  For setup, driver installation, connection examples, backend-specific notes, and transaction behavior, see [[file:docs/jdbc-backend.org][docs/jdbc-backend.org]].
 
 For the sidecar wire protocol and agent internals, see [[file:docs/jdbc-agent-protocol.md][docs/jdbc-agent-protocol.md]].
 
@@ -547,8 +392,7 @@ Timeouts can be configured globally or per connection, and long-running queries 
 
 * Native Backend Usage
 
-For =mysql=, =pg=, and SQLite connection examples, TLS notes, timeout
-behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backends.md]].
+For =mysql=, =pg=, and SQLite connection examples, TLS notes, timeout behavior, and helper APIs, see [[file:docs/native-backends.md][docs/native-backends.md]].
 
 * Testing
 
@@ -560,10 +404,7 @@ The non-live CI gate used by GitHub Actions can be run locally:
 ./test/run-ci.sh all
 #+end_src
 
-Focused local runs can start with tagged smoke coverage, or pass any ERT
-selector to =main= or =db=.  =main= defaults to the historical
-=clutch-test= gate; it can also load a colon-separated module list for focused
-runs:
+Focused local runs can start with tagged smoke coverage, or pass any ERT selector to =main= or =db=.  =main= defaults to the historical =clutch-test= gate; it can also load a colon-separated module list for focused runs:
 
 #+begin_src sh
 ./test/run-ci.sh smoke
@@ -571,13 +412,9 @@ CLUTCH_TEST_MODULES=clutch-test-sql ./test/run-ci.sh main
 CLUTCH_TEST_SELECTOR='"^clutch-test-completion-"' ./test/run-ci.sh main
 #+end_src
 
-Backend targets such as =db-jdbc=, =db-mysql=, =db-pg=, =db-mongodb=,
-=db-redis=, and =db-sqlite= remain available.
+Backend targets such as =db-jdbc=, =db-mysql=, =db-pg=, =db-mongodb=, =db-redis=, and =db-sqlite= remain available.
 
-Default ERT runs intentionally skip live tests when database credentials are not
-set.  Treat those runs as unit/regression coverage, not proof that real
-database workflows still work.  External protocol packages and the Org-Babel
-bridge live in separate repositories and carry their own focused test suites.
+Default ERT runs intentionally skip live tests when database credentials are not set.  Treat those runs as unit/regression coverage, not proof that real database workflows still work.  External protocol packages and the Org-Babel bridge live in separate repositories and carry their own focused test suites.
 
 ** Native live tests
 
@@ -585,23 +422,11 @@ bridge live in separate repositories and carry their own focused test suites.
 ./test/run-ci.sh native-live
 #+end_src
 
-The native live runner starts or reuses local containers and covers MySQL,
-PostgreSQL, ordinary MongoDB native protocol, and Redis native protocol
-connections against real databases.  Other JDBC live suites remain
-environment-driven and are skipped by default.  MongoDB SQL Interface JDBC live
-tests require a SQL Interface endpoint; ordinary MongoDB work uses the default
-=mongodb= document surface.
-Contributor release gates are
-listed in =AGENTS.md= §Pre-Commit Checklist.
+The native live runner starts or reuses local containers and covers MySQL, PostgreSQL, ordinary MongoDB native protocol, and Redis native protocol connections against real databases.  Other JDBC live suites remain environment-driven and are skipped by default.  MongoDB SQL Interface JDBC live tests require a SQL Interface endpoint; ordinary MongoDB work uses the default =mongodb= document surface. Contributor release gates are listed in =AGENTS.md= §Pre-Commit Checklist.
 
 * Roadmap
 
-- AST-based SQL rewriting is deferred, not planned as a near-term feature.
-  The current top-level clause scanner, direct LIMIT/OFFSET pagination, and
-  conservative result capability checks cover known WHERE/filter/count/
-  pagination cases without making derived-table wrapping the default escape
-  hatch.  Revisit a full parser only if concrete rewrite bugs or optimization
-  features justify the added complexity.
+- AST-based SQL rewriting is deferred, not planned as a near-term feature. The current top-level clause scanner, direct LIMIT/OFFSET pagination, and conservative result capability checks cover known WHERE/filter/count/ pagination cases without making derived-table wrapping the default escape hatch.  Revisit a full parser only if concrete rewrite bugs or optimization features justify the added complexity.
 
 * License
 
