@@ -247,8 +247,8 @@
                      (lambda (_conn) nil))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
-            (catch 'clutch--execution-aborted
-              (clutch--execute-select "SELECT * FROM missing_table" 'fake-conn))
+            (clutch-test--execute-and-present
+             "SELECT * FROM missing_table" 'fake-conn)
             (let* ((details clutch--buffer-error-details)
                    (diag (plist-get details :diag)))
               (should details)

@@ -242,7 +242,7 @@
 (ert-deftest clutch-test-repl-execute-and-print-ensures-connection ()
   "REPL should use the shared reconnect path before querying."
   (with-temp-buffer
-    (let (ensured
+    (let (ensured confirmed
           captured-conn
           output)
       (setq-local clutch-connection 'stale-conn)
@@ -254,10 +254,13 @@
                  (lambda (conn _sql)
                    (setq captured-conn conn)
                    (make-clutch-db-result :affected-rows 3)))
+                ((symbol-function 'clutch--require-risky-dml-confirmation)
+                 (lambda (sql) (setq confirmed sql)))
                 ((symbol-function 'clutch-repl--output)
                  (lambda (text) (setq output text))))
         (clutch-repl--execute-and-print "UPDATE t SET x = 1;")
         (should ensured)
+        (should (equal confirmed "UPDATE t SET x = 1;"))
         (should (eq captured-conn 'new-conn))
         (should (string-match-p "Affected rows" output))
         (should (eq (clutch-test-console--face-at-match "Affected rows" output)
@@ -267,8 +270,8 @@
         (should (eq (clutch-test-console--face-at-match "db>" output)
                     'minibuffer-prompt))))))
 
-(ert-deftest clutch-test-repl-execute-and-print-select-result ()
-  "REPL should show SELECT rows in a result buffer and print a summary."
+(ert-deftest clutch-test-repl-execute-and-print-returning-result ()
+  "REPL should show DML RETURNING rows in a result buffer."
   (with-temp-buffer
     (let ((clutch-connection 'fake-conn)
           (repl-buffer (current-buffer))
@@ -278,13 +281,17 @@
       (unwind-protect
           (cl-letf (((symbol-function 'clutch--connection-alive-p)
                      (lambda (_conn) t))
+                    ((symbol-function 'clutch-result--check-pending-changes)
+                     #'ignore)
+                    ((symbol-function 'clutch-db-result-query-p)
+                     (lambda (_conn _sql) nil))
                     ((symbol-function 'clutch-db-query)
                      (lambda (_conn _sql)
                        (make-clutch-db-result
                         :columns '((:name "id"))
                         :rows '((1)))))
-                    ((symbol-function 'clutch-result--display)
-                     (lambda (result sql elapsed)
+                    ((symbol-function 'clutch-result--display-select)
+                     (lambda (_conn sql result elapsed &rest _args)
                        (setq displayed (list result sql elapsed))
                        (set-buffer (get-buffer-create result-buffer-name))
                        'result-buffer))
@@ -292,9 +299,11 @@
                      (lambda (text)
                        (should (eq (current-buffer) repl-buffer))
                        (setq output text))))
-            (clutch-repl--execute-and-print "SELECT 1;")
+            (clutch-repl--execute-and-print
+             "INSERT INTO demo VALUES (1) RETURNING id;")
             (should displayed)
-            (should (equal (nth 1 displayed) "SELECT 1;"))
+            (should (equal (nth 1 displayed)
+                           "INSERT INTO demo VALUES (1) RETURNING id;"))
             (should (string-match-p "1 row" output))
             (should (string-match-p "result buffer" output))
             (should (string-match-p "db> $" output))

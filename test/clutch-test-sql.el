@@ -337,7 +337,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  (lambda (_conn sql)
                    (push (list sql (overlayp clutch--executed-sql-overlay))
                          starts)
-                   'ok))
+                   (make-clutch-db-result :affected-rows 1)))
                 ((symbol-function 'clutch--mark-executed-sql-region)
                  (lambda (beg end)
                    (push (string-trim
@@ -365,16 +365,26 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
 
 (ert-deftest clutch-test-execute-statements-marks-final-select ()
   "A final SELECT in a statement batch should keep its source bounds."
-  (let (final-select)
-    (cl-letf (((symbol-function 'clutch--run-db-query) (lambda (&rest _) 'ok))
-              ((symbol-function 'clutch--execute-and-mark)
-               (lambda (sql beg end &optional _conn)
-                 (setq final-select (list sql beg end))))
-              ((symbol-function 'message) #'ignore))
-      (clutch--execute-statements
-       '(("UPDATE demo SET seen = 1 WHERE id = 1" 1 25)
-         ("SELECT * FROM demo" 27 45))))
-    (should (equal final-select '("SELECT * FROM demo" 27 45)))))
+  (with-temp-buffer
+    (let ((clutch-connection 'fake-conn)
+          calls final-select final-mark)
+      (cl-letf (((symbol-function 'clutch--execute-statement)
+                 (lambda (sql _conn present-result-p &optional _context)
+                   (push (list sql present-result-p) calls)
+                   (list :result-query-p (string-prefix-p "SELECT" sql))))
+                ((symbol-function 'clutch--present-statement-outcome)
+                 (lambda (sql _conn _outcome) (setq final-select sql)))
+                ((symbol-function 'clutch--mark-executed-sql-region)
+                 (lambda (beg end) (setq final-mark (list beg end))))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-statements
+         '(("UPDATE demo SET seen = 1 WHERE id = 1" 1 25)
+           ("SELECT * FROM demo" 27 45))))
+      (should (equal (nreverse calls)
+                     '(("UPDATE demo SET seen = 1 WHERE id = 1" nil)
+                       ("SELECT * FROM demo" t))))
+      (should (equal final-select "SELECT * FROM demo"))
+      (should (equal final-mark '(27 45))))))
 
 ;;;; SQL parsing — table and alias extraction
 

@@ -6032,6 +6032,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should ensured)
           (should (eq captured-conn 'new-conn)))))))
 
+(defun clutch-test--execute-and-present (sql connection &optional context)
+  "Execute SQL on CONNECTION and present its result using CONTEXT."
+  (clutch--present-statement-outcome
+   sql connection (clutch--execute-statement sql connection t context)))
+
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary-key identity should be ready before the first result render."
   (let ((clutch--source-window (selected-window))
@@ -6056,7 +6061,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (clutch-test--with-result-buffer
           (result-name (lambda (&rest _args)
                          (setq captured-identity clutch--row-identity)))
-        (clutch--execute-select "SELECT * FROM users" 'fake-conn)
+        (clutch-test--execute-and-present "SELECT * FROM users" 'fake-conn)
         (should (eq (plist-get captured-identity :kind) 'primary-key))
         (should (equal (plist-get captured-identity :source-indices) '(0)))
         (with-current-buffer result-name
@@ -6083,7 +6088,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   :columns '((:name "id"))
                   :rows '((1) (2) (3))))))
       (clutch-test--with-result-buffer (result-name)
-        (clutch--execute-select "SELECT id FROM users" 'fake-conn)
+        (clutch-test--execute-and-present "SELECT id FROM users" 'fake-conn)
         (should (= captured-page-size 3))
         (should (= captured-offset 0))
         (with-current-buffer result-name
@@ -6125,7 +6130,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         :columns columns
                         :rows rows))))
             (clutch-test--with-result-buffer (result-name)
-              (clutch--execute-select sql 'fake-conn)
+              (clutch-test--execute-and-present sql 'fake-conn)
               (should (equal captured-sql sql))
               (with-current-buffer result-name
                 (should-not clutch--result-server-pageable)
@@ -6153,7 +6158,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   :columns '((:name "dup") (:name "dup"))
                   :rows '((1 "a"))))))
       (clutch-test--with-result-buffer (result-name)
-        (clutch--execute-select sql 'fake-conn)
+        (clutch-test--execute-and-present sql 'fake-conn)
         (should (equal captured-build-sql sql))
         (with-current-buffer result-name
           (should clutch--result-server-pageable)
@@ -6183,7 +6188,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   :columns '((:name "id") (:name "name"))
                   :rows '((2 "bob"))))))
       (clutch-test--with-result-buffer (result-name)
-        (clutch--execute-select sql 'fake-conn result-context)
+        (clutch-test--execute-and-present sql 'fake-conn result-context)
         (should (string-match-p "`id` AS `clutch__rid_0`"
                                 captured-base-sql))))))
 
@@ -6208,7 +6213,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                             :columns '((:name "id"))
                             :rows '((1))))))
                 (clutch-test--with-result-buffer (result-name)
-                  (clutch--execute-select "SELECT id FROM users" 'fake-conn)
+                  (clutch-test--execute-and-present
+                   "SELECT id FROM users" 'fake-conn)
                   (should (eq clutch--last-result-buffer
                               (get-buffer result-name))))))))
       (when (buffer-live-p source)
@@ -6453,8 +6459,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 ((symbol-function 'clutch-result--display)
                  (lambda (result sql _elapsed)
                    (setq rendered (list result sql)))))
-        (should (clutch--execute-dml "UPDATE demo SET enabled = 1" 'fake-conn))
-        (should (equal (cadr rendered) "UPDATE demo SET enabled = 1"))
+        (should (clutch-test--execute-and-present
+                 "UPDATE demo SET enabled = 1 WHERE id = 1" 'fake-conn))
+        (should (equal (cadr rendered)
+                       "UPDATE demo SET enabled = 1 WHERE id = 1"))
         (should (= (clutch-db-result-affected-rows (car rendered)) 1))))))
 
 (ert-deftest clutch-test-result-sql-commands-use-effective-filtered-query ()
@@ -6638,7 +6646,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (lambda (_conn sql)
                        (if (equal sql broken-sql)
                            (signal 'clutch-db-error (list raw-message))
-                         'ok))))
+                         (make-clutch-db-result :affected-rows 1)))))
             (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
                    (result-summary (plist-get display-parts :summary))
                    (result-hint (plist-get display-parts :hint))
@@ -6671,7 +6679,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 (should (string-match-p
                          (regexp-quote display-summary) debug-text))))))))))
 
-(ert-deftest clutch-test-abort-execution-error-renders-result-without-message ()
+(ert-deftest clutch-test-execution-error-renders-result-without-message ()
   "Single-statement execution errors should not duplicate details in messages."
   (with-temp-buffer
     (insert "SELECT * FROM missing_users")
@@ -6690,9 +6698,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                    (push (apply #'format fmt args) messages))))
         (let ((clutch--executing-sql-start (point-min))
               (clutch--executing-sql-end (point-max)))
-          (catch 'clutch--execution-aborted
-            (clutch--abort-execution-on-db-error
-             (current-buffer) 'fake-conn "SELECT * FROM missing_users" err 0.012)))
+          (clutch--present-statement-outcome
+           "SELECT * FROM missing_users" 'fake-conn
+           (list :error err :elapsed 0.012 :source-buffer (current-buffer))))
         (should displayed)
         (should (equal (car displayed) "SELECT * FROM missing_users"))
         (should-not messages)
@@ -6781,55 +6789,51 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                     'clutch-executed-sql-marker-face))))
     (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
 
-(ert-deftest clutch-test-execute-quit-disconnects-and-clears-connection ()
-  "Quit should abandon the connection when no backend interrupt is available."
+(ert-deftest clutch-test-execute-quit-distinguishes-confirmation-from-query ()
+  "Only a quit during the database call should abandon the connection."
   (with-temp-buffer
     (let ((buf (current-buffer))
           (disconnected nil)
+          confirmation-quit
+          phase
+          spinner-started
           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
           (clutch-connection 'fake-conn)
           (clutch--executing-p nil))
       (puthash clutch-connection t clutch--tx-dirty-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
+                ((symbol-function 'clutch--spinner-start)
+                 (lambda () (setq spinner-started t)))
                 ((symbol-function 'clutch--update-mode-line)
                  (lambda (&optional _spinner-only) nil))
-                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
-                ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
+                ((symbol-function 'clutch--confirm-query-execution)
+                 (lambda (_sql)
+                   (when (eq phase 'confirm) (signal 'quit nil))))
+                ((symbol-function 'clutch-db-result-query-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'clutch--prepare-row-identity-query)
+                 (lambda (&rest _args)
+                   (should spinner-started)
+                   (signal 'quit nil)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+                ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) nil))
                 ((symbol-function 'clutch-db-disconnect)
                  (lambda (_conn) (setq disconnected t))))
+        (setq phase 'confirm)
+        (condition-case nil
+            (clutch--execute "SELECT 1" clutch-connection)
+          (quit (setq confirmation-quit t)))
+        (should confirmation-quit)
+        (should-not disconnected)
+        (should (eq clutch-connection 'fake-conn))
+        (setq phase 'query)
         (should-error (clutch--execute "SELECT 1" clutch-connection)
                       :type 'user-error)
         (should disconnected)
         (with-current-buffer buf
           (should-not clutch-connection))
         (should-not (gethash 'fake-conn clutch--tx-dirty-cache))
-        (should-not clutch--executing-p)))))
-
-(ert-deftest clutch-test-execute-starts-spinner-when-query-begins ()
-  "Executing a query should start the global spinner."
-  (with-temp-buffer
-    (let ((clutch-connection 'fake-conn)
-          (clutch--executing-p nil)
-          spinner-started
-          execute-saw-spinner)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
-                ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
-                ((symbol-function 'clutch--spinner-start)
-                 (lambda () (setq spinner-started t)))
-                ((symbol-function 'clutch--update-mode-line) #'ignore)
-                ((symbol-function 'redisplay) #'ignore)
-                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
-                ((symbol-function 'clutch--execute-select)
-                 (lambda (&rest _args)
-                   (setq execute-saw-spinner spinner-started))))
-        (clutch--execute "SELECT 1" clutch-connection)
-        (should spinner-started)
-        (should execute-saw-spinner)
         (should-not clutch--executing-p)))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
@@ -6844,11 +6848,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (clutch--executing-p nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
                 ((symbol-function 'clutch--update-mode-line)
                  (lambda (&optional _spinner-only) nil))
-                ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
-                ((symbol-function 'clutch--execute-select) (lambda (&rest _args) (signal 'quit nil)))
+                ((symbol-function 'clutch--execute-statement)
+                 (lambda (_sql connection &rest _args)
+                   (clutch--handle-query-quit connection)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
                 ((symbol-function 'clutch-db-interrupt-query)
                  (lambda (_conn)
@@ -6976,43 +6980,21 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (when (buffer-live-p record)
           (kill-buffer record))))))
 
-(ert-deftest clutch-test-execute-runs-risky-dml-confirmation ()
-  "Execute should run risky DML confirmation before dispatch."
-  (let ((called nil)
-        (clutch-connection 'fake-conn))
-    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
-              ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-              ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
-              ((symbol-function 'clutch--require-risky-dml-confirmation)
-               (lambda (sql) (setq called sql)))
-              ((symbol-function 'clutch--update-mode-line)
-               (lambda (&optional _spinner-only) nil))
-              ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
-              ((symbol-function 'clutch--execute-select) (lambda (&rest _args) 'ok)))
-      (clutch--execute "UPDATE users SET x=1" clutch-connection)
-      (should (equal called "UPDATE users SET x=1")))))
-
 (ert-deftest clutch-test-execute-uses-backend-result-query-p ()
   "Execute should let the backend classify non-SQL result-set queries."
-  (let ((clutch-connection 'document-conn)
-        captured)
-    (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
-              ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-              ((symbol-function 'clutch-db-sql-destructive-p) (lambda (_sql) nil))
-              ((symbol-function 'clutch--require-risky-dml-confirmation) #'ignore)
-              ((symbol-function 'clutch--spinner-start) #'ignore)
-              ((symbol-function 'clutch--update-mode-line) #'ignore)
+  (let (captured outcome)
+    (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
               ((symbol-function 'clutch-db-result-query-p)
                (lambda (conn sql)
                  (setq captured (list conn sql))
                  t))
-              ((symbol-function 'clutch--execute-select)
-               (lambda (_sql _conn &optional _result-context) 'ok))
-              ((symbol-function 'clutch--execute-dml)
-               (lambda (&rest _args)
-                 (ert-fail "Document result query should not use DML path"))))
-      (clutch--execute "db.users.find()" clutch-connection)
-      (should (equal captured '(document-conn "db.users.find()"))))))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (&rest _) (make-clutch-db-result))))
+      (setq outcome
+            (clutch--execute-statement
+             "db.users.find()" 'document-conn nil))
+      (should (equal captured '(document-conn "db.users.find()")))
+      (should (plist-get outcome :result-query-p)))))
 
 (ert-deftest clutch-test-execute-from-arbitrary-buffer-uses-live-connection ()
   "`clutch-execute' should execute with a connection found in another buffer."
@@ -7027,19 +7009,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
                       ((symbol-function 'clutch--connection-alive-p)
                        (lambda (conn) (eq conn 'fake-conn)))
-                      ((symbol-function 'clutch--try-reconnect) (lambda () nil))
-                      ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                      ((symbol-function 'clutch-db-sql-destructive-p)
-                       (lambda (_sql) nil))
-                      ((symbol-function 'clutch--require-risky-dml-confirmation)
-                       #'ignore)
-                      ((symbol-function 'clutch--spinner-start) #'ignore)
-                      ((symbol-function 'clutch--update-mode-line) #'ignore)
-                      ((symbol-function 'clutch-db-sql-select-query-p) (lambda (_sql) t))
-                      ((symbol-function 'clutch--execute-select)
-                       (lambda (_sql conn &optional _result-context)
-                         (setq captured-conn conn)
-                         'ok))
+                      ((symbol-function 'clutch--execute)
+                       (lambda (_sql conn &optional _context)
+                         (setq captured-conn conn)))
                       ((symbol-function 'clutch--mark-executed-sql-region)
                        #'ignore))
               (clutch-execute "SELECT 1")
