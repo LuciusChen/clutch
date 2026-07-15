@@ -171,6 +171,27 @@
       (clutch--json-value-to-string value)
     (clutch--format-value value)))
 
+(defun clutch-result--writable-source-column (cidx op)
+  "Return the writable source column at CIDX, or signal for OP.
+Real query results carry an explicit `:source-column' key, including nil when
+the SELECT projection cannot be proven writable."
+  (let* ((column-def (nth cidx clutch--result-column-defs))
+         (display-name (nth cidx clutch--result-columns))
+         (source-known-p (plist-member column-def :source-column))
+         (source-column (plist-get column-def :source-column)))
+    (when (plist-get column-def :hidden)
+      (user-error "Cannot %s: hidden result column %s is not writable"
+                  op display-name))
+    (cond
+     ((and source-known-p source-column)
+      source-column)
+     (source-known-p
+      (user-error "Cannot %s: result column %s is not a direct source column"
+                  op display-name))
+     (t
+      (user-error "Cannot %s: writable source for result column %s is unknown"
+                  op display-name)))))
+
 (defun clutch-result--field-metadata-tags (col-def detail)
   "Return short metadata tags for COL-DEF and DETAIL."
   (let* ((type-category (plist-get col-def :type-category))
@@ -548,8 +569,11 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                               (user-error "No row at point")))
              (original (nth cidx display-row))
              (col-name (nth cidx clutch--result-columns))
+             (source-column
+              (clutch-result--writable-source-column cidx op))
              (col-def (nth cidx clutch--result-column-defs))
-             (detail (clutch-result--column-detail (current-buffer) col-name))
+             (detail (clutch-result--column-detail
+                      (current-buffer) source-column))
              (original-state
               (cons (null original)
                     (if (null original)
@@ -856,11 +880,10 @@ the parameter list."
        param-values
        param-types))))
 
-(defun clutch-result--build-update-stmt (table identity-vec edits col-names row-identity)
+(defun clutch-result--build-update-stmt (table identity-vec edits _col-names row-identity)
   "Build an UPDATE statement spec for TABLE.
 IDENTITY-VEC is the row identity vector, EDITS is a list of
-\(cidx . value), COL-NAMES are column names, and ROW-IDENTITY describes the
-WHERE predicate."
+\(cidx . value), and ROW-IDENTITY describes the WHERE predicate."
   (let ((conn clutch-connection))
     (let ((set-parts nil)
           (set-params nil)
@@ -868,7 +891,8 @@ WHERE predicate."
                        conn row-identity identity-vec)))
       (dolist (edit edits)
         (let* ((cidx (car edit))
-               (col-name (nth cidx col-names)))
+               (col-name (clutch-result--writable-source-column
+                          cidx "build UPDATE")))
           (push (format "%s = ?"
                         (clutch-db-escape-identifier conn col-name))
                 set-parts)
@@ -985,6 +1009,47 @@ an affected row count other than one."
        (user-error "%s" (clutch--humanize-db-error
                          (error-message-string err)))))))
 
+(defun clutch-result--rollback-mutation-batch (original-error)
+  "Roll back a failed staged batch and re-signal ORIGINAL-ERROR."
+  (let (rollback-error)
+    (condition-case err
+        (progn
+          (clutch-db-rollback clutch-connection)
+          (clutch--clear-tx-dirty clutch-connection)
+          (clutch--mark-dml-results-rolled-back clutch-connection))
+      (error
+       (setq rollback-error err)))
+    (if rollback-error
+        (user-error "Staged batch failed (%s); rollback also failed (%s)"
+                    (error-message-string original-error)
+                    (error-message-string rollback-error))
+      (signal (car original-error) (cdr original-error)))))
+
+(defun clutch-result--execute-mutation-batch
+    (insert-stmts update-stmts delete-stmts)
+  "Execute INSERT-STMTS, UPDATE-STMTS, and DELETE-STMTS atomically."
+  (let* ((all-stmts (append insert-stmts update-stmts delete-stmts))
+         (multi-statement-p (> (length all-stmts) 1)))
+    (when multi-statement-p
+      (unless (clutch-db-manual-commit-p clutch-connection)
+        (user-error
+         "Cannot execute multiple staged statements in autocommit mode; disable autocommit first"))
+      (when (clutch--tx-dirty-p clutch-connection)
+        (user-error
+         "Cannot execute a staged batch inside a dirty transaction; commit or roll back first")))
+    (condition-case err
+        (progn
+          (dolist (stmt insert-stmts)
+            (clutch-result--execute-mutation-stmt stmt))
+          (dolist (stmt update-stmts)
+            (clutch-result--execute-mutation-stmt stmt t))
+          (dolist (stmt delete-stmts)
+            (clutch-result--execute-mutation-stmt stmt t)))
+      ((error quit)
+       (if multi-statement-p
+           (clutch-result--rollback-mutation-batch err)
+         (signal (car err) (cdr err)))))))
+
 ;;;###autoload
 (defun clutch-result-commit ()
   "Commit all staged row mutations: INSERT, UPDATE, DELETE.
@@ -1013,12 +1078,8 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
                                (length all-stmts)
                                (if (= (length all-stmts) 1) "" "s")
                                sql-text))
-      (dolist (stmt insert-stmts)
-        (clutch-result--execute-mutation-stmt stmt))
-      (dolist (stmt update-stmts)
-        (clutch-result--execute-mutation-stmt stmt t))
-      (dolist (stmt delete-stmts)
-        (clutch-result--execute-mutation-stmt stmt t))
+      (clutch-result--execute-mutation-batch
+       insert-stmts update-stmts delete-stmts)
       (setq clutch--pending-edits nil
             clutch--pending-deletes nil
             clutch--pending-inserts nil

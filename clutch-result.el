@@ -2668,7 +2668,9 @@ to preserve the existing copy/export UPDATE behavior."
                    collect (cons (plist-get detail :name) detail)))
          (invalid (cl-loop for cidx in col-indices
                            for col-name = (nth cidx clutch--result-columns)
-                           for detail = (cdr (assoc col-name detail-map))
+                           for source-column =
+                           (clutch-result--writable-source-column cidx op)
+                           for detail = (cdr (assoc source-column detail-map))
                            unless (and detail (not (plist-get detail :generated)))
                            collect col-name)))
     (when invalid

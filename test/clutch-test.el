@@ -798,9 +798,11 @@
   "Qualified source tokens should remain the target of staged mutations."
   (let ((clutch-connection
          (make-clutch-jdbc-conn :params '(:driver oracle)))
+        (clutch--result-columns '("ID" "STATUS"))
         (clutch--result-column-defs
-         '((:name "ID" :backend-type "NUMBER")
-           (:name "STATUS" :backend-type "VARCHAR2")))
+         '((:name "ID" :backend-type "NUMBER" :source-column "ID")
+           (:name "STATUS" :backend-type "VARCHAR2"
+            :source-column "STATUS")))
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "REPORTS" :source-token "APP.reports"
                     :columns ("ID") :indices (0) :source-indices (0))))
@@ -830,6 +832,62 @@
     (should (equal (plist-get row-identity :indices) '(2)))
     (should (equal (plist-get row-identity :source-indices) '(0)))
     (should (equal (plist-get row-identity :source-token) "APP.users"))))
+
+(ert-deftest clutch-test-row-identity-uses-verified-trailing-injected-column ()
+  "A user projection matching the hidden alias must not become row identity."
+  (let* ((prep (list :table "users"
+                     :candidate (list :kind 'primary-key
+                                      :name "PRIMARY"
+                                      :columns '("id"))
+                     :hidden-aliases '("clutch__rid_0")
+                     :writable-projection '("manager_id" "id")
+                     :augmented t))
+         (columns (clutch--apply-row-identity-column-metadata
+                   '((:name "clutch__rid_0")
+                     (:name "id")
+                     (:name "clutch__rid_0"))
+                   prep))
+         (row-identity (clutch--finalize-row-identity prep columns)))
+    (should-not (plist-get (nth 0 columns) :hidden))
+    (should (plist-get (nth 2 columns) :hidden))
+    (should (equal (plist-get row-identity :indices) '(2)))
+    (should (equal (clutch-db-row-identity-values
+                    '(99 7 42) row-identity)
+                   [42]))))
+
+(ert-deftest clutch-test-writable-projection-requires-direct-source-columns ()
+  "Computed and uncertain projections must stay read-only."
+  (should (eq (clutch--writable-select-projection "SELECT * FROM products")
+              'star))
+  (should (eq (clutch--writable-select-projection "SELECT p.* FROM products p")
+              'star))
+  (should (equal (clutch--writable-select-projection
+                  "SELECT p.price, id FROM products p")
+                 '("price" "id")))
+  (should (equal (clutch--writable-select-projection
+                  "SELECT price AS retail_price FROM products")
+                 '("price")))
+  (should (equal (clutch--writable-select-projection
+                  "SELECT price * 1.2 AS price, id FROM products")
+                 '(nil "id")))
+  (should (equal (clutch--writable-select-projection
+                  "SELECT price retail_price FROM products")
+                 '(nil)))
+  (let* ((prep '(:hidden-aliases ("clutch__rid_0")
+                 :writable-projection (nil "id")))
+         (defs (clutch--apply-row-identity-column-metadata
+                '((:name "price") (:name "id") (:name "clutch__rid_0"))
+                prep))
+         (clutch--base-query "SELECT price * 1.2 AS price, id FROM products")
+         (clutch--result-columns '("price" "id" "clutch__rid_0"))
+         (clutch--result-column-defs defs))
+    (should (plist-member (nth 0 defs) :source-column))
+    (should-not (plist-get (nth 0 defs) :source-column))
+    (should (equal (plist-get (nth 1 defs) :source-column) "id"))
+    (should-error (clutch-result--writable-source-column 0 "edit cell")
+                  :type 'user-error)
+    (should (equal (clutch-result--writable-source-column 1 "edit cell")
+                   "id"))))
 
 (ert-deftest clutch-test-render-result-includes-all-columns ()
   "Wide tables should keep later columns searchable and reachable by TAB."
@@ -1363,8 +1421,9 @@
   "Edited rows should show an E marker in the left prefix."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "name")
-                clutch--result-column-defs '((:name "id" :type-category numeric)
-                                             (:name "name" :type-category text))
+                clutch--result-column-defs
+                '((:name "id" :type-category numeric :source-column "id")
+                  (:name "name" :type-category text :source-column "name"))
                 clutch--result-rows '((1 "before"))
                 clutch--filtered-rows nil
                 clutch-result-max-rows 100
@@ -3838,6 +3897,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) nil))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn sql &optional params)
                    (push (cons sql params) executed))))
@@ -3851,6 +3912,55 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (string-prefix-p "DELETE" (car (nth 0 executed))))
         (should (equal (cdr (nth 0 executed)) '(2)))
         (should (equal reverts '((nil t nil nil nil nil))))))))
+
+(ert-deftest clutch-test-commit-rolls-back-whole-batch-on-second-failure ()
+  "A failed later statement must roll back earlier staged mutations."
+  (clutch-test--with-result-state
+      (:pending-inserts '(first second))
+    (let (executed rolled-back cleared reverted)
+      (setq-local revert-buffer-function
+                  (lambda (&rest _args) (setq reverted t)))
+      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '(("INSERT first") ("INSERT second"))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) nil))
+                ((symbol-function 'clutch-db-rollback)
+                 (lambda (_) (setq rolled-back t)))
+                ((symbol-function 'clutch--clear-tx-dirty)
+                 (lambda (_) (setq cleared t)))
+                ((symbol-function 'clutch--mark-dml-results-rolled-back) #'ignore)
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql &optional _params)
+                   (push sql executed)
+                   (when (= (length executed) 2)
+                     (signal 'clutch-db-error '("second failed"))))))
+        (should-error (clutch-result-commit) :type 'user-error)
+        (should (equal (nreverse executed) '("INSERT first" "INSERT second")))
+        (should rolled-back)
+        (should cleared)
+        (should (equal clutch--pending-inserts '(first second)))
+        (should-not reverted)))))
+
+(ert-deftest clutch-test-commit-rejects-multi-statement-autocommit-batch ()
+  "Autocommit must not expose a staged batch to partial success."
+  (clutch-test--with-result-state
+      (:pending-inserts '(first second))
+    (let (executed)
+      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '(("INSERT first") ("INSERT second"))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (&rest _args) (setq executed t))))
+        (let ((err (should-error (clutch-result-commit) :type 'user-error)))
+          (should (string-match-p "autocommit" (error-message-string err))))
+        (should-not executed)
+        (should (equal clutch--pending-inserts '(first second)))))))
 
 ;;;; Edit — validation
 
@@ -4072,7 +4182,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-result-mode)
           (setq-local clutch--result-columns '("name")
                       clutch--connection-params '(:backend mysql)
-                      clutch--result-column-defs '((:name "name" :type-category text))
+                      clutch--result-column-defs
+                      '((:name "name" :type-category text
+                         :source-column "name"))
                       clutch--result-rows '(("before"))
                       clutch--last-query "SELECT * FROM users"
                       clutch--result-source-table "users"
@@ -4405,8 +4517,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (setq-local clutch-connection 'fake-conn
                 clutch--result-source-table "users"
                 clutch--result-columns '("id" "name")
-                clutch--result-column-defs '((:name "id" :type-category numeric)
-                                             (:name "name" :type-category text))
+                clutch--result-column-defs
+                '((:name "id" :type-category numeric :source-column "id")
+                  (:name "name" :type-category text :source-column "name"))
                 clutch--result-rows '((999 "current-page-only"))
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0)))
@@ -4612,9 +4725,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (setq-local clutch-connection 'fake-conn
                         clutch--result-source-table "users"
                         clutch--result-columns '("id" "name" "status")
-                        clutch--result-column-defs '((:name "id" :type-category numeric)
-                                                     (:name "name" :type-category text)
-                                                     (:name "status" :type-category text))
+                        clutch--result-column-defs
+                        '((:name "id" :type-category numeric
+                           :source-column "id")
+                          (:name "name" :type-category text
+                           :source-column "name")
+                          (:name "status" :type-category text
+                           :source-column "status"))
                         clutch--row-identity (clutch-test--primary-row-identity
                                               "users" '("id") '(0))
                         clutch--result-rows '((1 "a" "new")
@@ -4698,7 +4815,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn
                     clutch--result-columns (plist-get case :columns)
-                    clutch--result-column-defs (plist-get case :defs)
+                    clutch--result-column-defs
+                    (cl-mapcar
+                     (lambda (name definition)
+                       (plist-put (copy-sequence definition)
+                                  :source-column name))
+                     (plist-get case :columns)
+                     (plist-get case :defs))
                     clutch--result-source-table "users"
                     clutch--row-identity (clutch-test--primary-row-identity
                                           "users" '("id") '(0)))
@@ -6010,6 +6133,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (setq-local clutch-connection 'fake-conn
                   clutch--result-source-table "users"
                   clutch--result-columns '("id" "name" "note")
+                  clutch--result-column-defs
+                  '((:name "id" :source-column "id")
+                    (:name "name" :source-column "name")
+                    (:name "note" :source-column "note"))
                   clutch--row-identity
                   (clutch-test--primary-row-identity "users" '("id") '(0))
                   clutch--pending-inserts

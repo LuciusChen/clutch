@@ -142,9 +142,16 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
   (let* ((columns (if (plist-member spec :columns)
                       (plist-get spec :columns)
                     '("id" "name")))
-         (column-defs (if (plist-member spec :column-defs)
-                          (plist-get spec :column-defs)
-                        (mapcar (lambda (name) (list :name name)) columns)))
+         (raw-column-defs (if (plist-member spec :column-defs)
+                              (plist-get spec :column-defs)
+                            (mapcar (lambda (name) (list :name name)) columns)))
+         (column-defs
+          (cl-mapcar
+           (lambda (name definition)
+             (if (plist-member definition :source-column)
+                 definition
+               (plist-put (copy-sequence definition) :source-column name)))
+           columns raw-column-defs))
          (rows (if (plist-member spec :rows)
                    (plist-get spec :rows)
                  '((1 "alice") (2 "bob"))))

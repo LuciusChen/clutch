@@ -445,6 +445,60 @@ window rather than replacing the current window."
   (cl-loop for i below count
            collect (format "%s%d" clutch--row-identity-hidden-prefix i)))
 
+(defconst clutch--source-column-identifier-pattern
+  "\\(?:[[:alpha:]_$][[:alnum:]_$]*\\|`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\)"
+  "Conservative SQL identifier pattern accepted for writable projections.")
+
+(defun clutch--select-list-items (sql)
+  "Return outer SELECT list items from SQL, or nil when unavailable."
+  (let* ((sql (clutch-db-sql-normalize sql))
+         (case-fold-search t)
+         (from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+    (when (and from-pos (string-match "\\`\\s-*SELECT\\b" sql))
+      (let ((start (match-end 0))
+            items)
+        (clutch-db-sql-scan-code
+         sql start from-pos
+         (lambda (pos ch depth)
+           (when (and (zerop depth) (= ch ?,))
+             (push (string-trim (substring sql start pos)) items)
+             (setq start (1+ pos)))
+           nil))
+        (nreverse
+         (cons (string-trim (substring sql start from-pos)) items))))))
+
+(defun clutch--direct-projection-source-column (projection)
+  "Return source column for direct identifier PROJECTION, or nil.
+An explicit AS alias is accepted because the source identifier remains
+unambiguous.  Expressions and implicit aliases intentionally fail closed."
+  (let* ((ident clutch--source-column-identifier-pattern)
+         (qualified (concat ident "\\(?:\\s-*\\.\\s-*" ident "\\)*"))
+         (case-fold-search t)
+         source)
+    (when (or (string-match (concat "\\`\\(" qualified "\\)\\s-*\\'")
+                            projection)
+              (string-match (concat "\\`\\(" qualified
+                                    "\\)\\s-+AS\\s-+" ident "\\s-*\\'")
+                            projection))
+      (setq source (match-string 1 projection))
+      (when (string-match (concat "\\(" ident "\\)\\s-*\\'") source)
+        (clutch-db-sql--unquote-identifier (match-string 1 source))))))
+
+(defun clutch--writable-select-projection (sql)
+  "Describe columns in SQL that are provably direct source projections.
+Return `star' for a sole * or qualified .* projection.  Otherwise return one
+source column name or nil per SELECT item.  Return `none' when the outer SELECT
+list cannot be established."
+  (if-let* ((items (clutch--select-list-items sql)))
+      (let* ((ident clutch--source-column-identifier-pattern)
+             (qualified (concat ident "\\(?:\\s-*\\.\\s-*" ident "\\)*"))
+             (star-pattern (concat "\\`\\(?:" qualified "\\s-*\\.\\s-*\\)?\\*\\s-*\\'")))
+        (if (and (= (length items) 1)
+                 (string-match-p star-pattern (car items)))
+            'star
+          (mapcar #'clutch--direct-projection-source-column items)))
+    'none))
+
 (defun clutch--row-identity-key-expressions (conn candidate)
   "Return SELECT expressions for key CANDIDATE on CONN."
   (mapcar (lambda (column)
@@ -661,6 +715,8 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
             :candidate candidate
             :candidates candidates
             :hidden-aliases (and augment-p aliases)
+            :writable-projection
+            (clutch--writable-select-projection analysis-sql)
             :augmented (and augment-p t)
             :identity-status identity-status
             :identity-error-message
@@ -680,12 +736,26 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
             (push idx indices)
           (throw 'missing nil))))))
 
+(defun clutch--row-identity-hidden-indices (columns aliases)
+  "Return verified trailing indices for hidden ALIASES in COLUMNS.
+Injected row identity expressions are appended to the SELECT list.  Requiring
+the same aliases at the exact trailing positions avoids confusing a user's
+same-named projection with Clutch's hidden values."
+  (let* ((column-names (clutch-db-result-column-names columns))
+         (count (length aliases))
+         (start (- (length column-names) count)))
+    (when (and (>= start 0)
+               (cl-loop for alias in aliases
+                        for idx from start
+                        always (string= alias (nth idx column-names))))
+      (number-sequence start (1- (length column-names))))))
+
 (defun clutch--finalize-row-identity (prep columns)
   "Return finalized row identity metadata for PREP and result COLUMNS."
   (when-let* ((candidate (plist-get prep :candidate)))
     (let* ((aliases (plist-get prep :hidden-aliases))
            (indices (if aliases
-                        (clutch--row-identity-column-indices columns aliases)
+                        (clutch--row-identity-hidden-indices columns aliases)
                       (clutch--row-identity-column-indices
                        columns (plist-get candidate :columns))))
            (source-indices
@@ -704,17 +774,34 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
          candidate)))))
 
 (defun clutch--apply-row-identity-column-metadata (columns prep)
-  "Return COLUMNS with hidden identity aliases from PREP marked hidden."
-  (let ((aliases (plist-get prep :hidden-aliases)))
-    (if (not aliases)
-        columns
-      (mapcar
-       (lambda (column)
-         (let ((name (plist-get column :name)))
-           (if (member name aliases)
-               (plist-put (copy-sequence column) :hidden t)
-             column)))
-       columns))))
+  "Return COLUMNS with identity and writable projection metadata from PREP."
+  (let* ((aliases (plist-get prep :hidden-aliases))
+         (hidden-indices (and aliases
+                              (clutch--row-identity-hidden-indices
+                               columns aliases)))
+         (projection-present-p (plist-member prep :writable-projection))
+         (projection (plist-get prep :writable-projection))
+         (visible-count (- (length columns) (length hidden-indices)))
+         (projection-aligned-p
+          (or (eq projection 'star)
+              (and (listp projection)
+                   (= (length projection) visible-count)))))
+    (cl-loop for column in columns
+             for idx from 0
+             for copy = (copy-sequence column)
+             for hidden-p = (memq idx hidden-indices)
+             do (when hidden-p
+                  (setq copy (plist-put copy :hidden t)))
+             when projection-present-p
+             do (setq copy
+                      (plist-put
+                       copy :source-column
+                       (and (not hidden-p)
+                            projection-aligned-p
+                            (if (eq projection 'star)
+                                (plist-get copy :name)
+                              (nth idx projection)))))
+             collect copy)))
 
 ;;;; SQL pagination helpers
 
