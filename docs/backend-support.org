@@ -53,3 +53,13 @@ Redis error responses.
 Redis support is intentionally basic.  It does not expose SQL row editing,
 joins, row identity, transaction workflow, pub/sub loops, cluster management, or
 stream consumer workflows.
+
+Key discovery collects at most =clutch-redis-key-discovery-limit= unique keys
+(default 5000) per operation.  Generated hash/list/set/zset/stream browse
+commands request at most =clutch-redis-browse-limit= elements (default 200).
+Use a narrower completion prefix or issue explicit Redis scan/range commands
+when more data is needed.
+
+Bounded generated hash browsing uses =HRANDFIELD= and therefore requires Redis
+6.2 or newer.  Manual =SCAN=-family commands remain available; when Redis
+returns an empty nonterminal batch, Clutch displays its continuation cursor.

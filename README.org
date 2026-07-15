@@ -135,7 +135,7 @@ safest way to clear stale autoload or native-compile state after installation.
 
 JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+
 and =clutch-jdbc-agent.jar=.  Individual JDBC databases may also need driver
-jars.  Clutch 0.2.4 pins JDBC agent 0.2.8 and verifies the published jar before
+jars.  Clutch 0.3.0 pins JDBC agent 0.2.9 and verifies the published jar before
 starting it.  JDBC staged mutations use prepared values, and an idle-timed-out
 metadata session is recovered without replacing the foreground session.
 For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
@@ -521,7 +521,9 @@ Redis TCP endpoints, uses line-oriented =clutch-redis-mode= command buffers,
 and maps key browsing/type-aware reads into the shared Clutch grid.  Redis
 support is intentionally basic: no SQL row editing, joins, row identity,
 transaction workflow, pub/sub loops, cluster management, or stream consumer
-workflows.  See [[file:docs/backend-support.org][docs/backend-support.org]] and
+workflows.  Generated discovery and collection-browse operations are bounded;
+use explicit scan/range commands for larger traversals.  See
+[[file:docs/backend-support.org][docs/backend-support.org]] and
 [[file:docs/native-backends.md][docs/native-backends.md]] for support boundaries.
 
 ** JDBC Backend

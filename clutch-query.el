@@ -1173,7 +1173,8 @@ Return a plist with :message, :summary, and :display-summary."
 (defun clutch--statement-delimited-buffer-p ()
   "Return non-nil when the current buffer has a top-level semicolon."
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (consp (clutch-db-sql-statement-breaks text))))
+    (consp (clutch-db-sql-statement-breaks
+            text (eq clutch--conn-sql-product 'postgres)))))
 
 (defun clutch--preview-sql-buffer (sql)
   "Display SQL in the *clutch-preview* buffer."
@@ -1218,7 +1219,7 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (bounds (clutch-db-sql-semicolon-statement-bounds-at-offset
-                  text offset t)))
+                  text offset t (eq clutch--conn-sql-product 'postgres))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
@@ -1250,7 +1251,8 @@ also split on blank lines."
   "Split SQL into `(STATEMENT BEG END)' specs on unquoted semicolons.
 BEG and END are buffer positions when BASE-POSITION is non-nil.  Semicolons
 inside single-quoted strings, -- line comments, and /* */ block comments are
-skipped."
+skipped.  PostgreSQL dollar-quoted bodies are skipped when the current SQL
+product is `postgres'."
   (let ((stmts nil)
         (start 0)
         (len (length sql)))
@@ -1271,7 +1273,8 @@ skipped."
                            (and base-position (+ base-position tbeg))
                            (and base-position (+ base-position tend)))
                      stmts)))))
-      (dolist (break (clutch-db-sql-statement-breaks sql))
+      (dolist (break (clutch-db-sql-statement-breaks
+                      sql (eq clutch--conn-sql-product 'postgres)))
         (emit break)
         (setq start (1+ break)))
       (emit len))

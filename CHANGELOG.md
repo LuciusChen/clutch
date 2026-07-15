@@ -23,6 +23,24 @@
 
 ### Fixed
 
+- Made staged SQL mutations fail closed: hidden row-identity columns are
+  verified at their injected trailing positions, computed or uncertain
+  projections are read-only, and multi-statement batches cannot partially
+  commit through autocommit or an already-dirty manual transaction.
+- Updated the JDBC agent pin to 0.2.9.  The agent now poisons connections whose
+  timed-out driver work does not stop, serializes each metadata session,
+  redacts embedded JDBC URL credentials, validates exact protocol integers,
+  bounds large response cells, and avoids an unconditional liveness round trip
+  before every query.  Disconnected logical connections no longer report live
+  merely because the shared JVM is still running.
+- Bounded native MongoDB find results and Redis key discovery/generated
+  collection browsing.  MongoDB endpoint labels now use the protocol client's
+  normalized public metadata, and MongoDB/Redis object paths consistently
+  translate protocol failures to `clutch-db-error`.  Strictly bounded generated
+  Redis hash browsing uses `HRANDFIELD` and requires Redis 6.2 or newer.
+- Kept PostgreSQL dollar-quoted function bodies intact during statement
+  selection, and stopped a permanently failing object-metadata category from
+  retrying forever or starving later warmup categories.
 - Made fragmented JDBC responses scan incrementally instead of repeatedly from
   the start of the process buffer, dropped late timeout responses and deferred
   callbacks for disconnected sessions, required an exact cancel acknowledgement

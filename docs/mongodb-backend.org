@@ -75,12 +75,14 @@ Interface JDBC driver and stores it as
                          :pass-entry "atlas-sql"))))
 #+end_src
 
-Structured params connect to =host:port= through =mongodb.el=.  =:url= accepts
-=mongodb://...= and =mongodb+srv://...= for the native document surface.  Common
-native params such as =:tls=, =:auth-database=, =:user=, =:password=,
-=:pass-entry=, =:app-name=, read/write concern, read preference, timeouts,
-SOCKS5 proxy settings, and other =mongodb.el=-supported options are passed
-through to =mongodb.el=.
+Structured params connect to one =host:port= through =mongodb.el=.  The native
+document surface accepts a single-host =mongodb://...= URL and the structured
+=:host=, =:port=, =:database=, =:user=, =:password=, =:pass-entry=,
+=:auth-database=, =:auth-mechanism=, =:tls=, and =:tls-verify= parameters.
+=mongodb+srv://=, seed discovery, SOCKS proxies, connection pools, sessions,
+transactions, and read/write concern routing are not supported by the native
+client.  Use the JDBC SQL Interface surface when its driver provides a required
+deployment feature.
 
 Use =:password= only when the password is already available in memory.  For
 saved connections, prefer =:pass-entry= and let Clutch resolve it through
@@ -90,9 +92,9 @@ Unauthenticated local MongoDB connections do not need =:user=, =:password=, or
 
 SSH tunnels and TRAMP forwarding work with structured =:host= / =:port=
 MongoDB params because those transports only rewrite the TCP endpoint before
-calling =mongodb.el=.  Clutch does not rewrite opaque =mongodb://= or
-=mongodb+srv://= URLs for SSH/TRAMP; URL parsing, SRV, TLS, and effective
-database semantics remain owned by =mongodb.el=.
+calling =mongodb.el=.  Clutch does not rewrite opaque =mongodb://= URLs for
+SSH/TRAMP; URL parsing, TLS, and effective database semantics remain owned by
+=mongodb.el=.
 
 ** Query Buffers
 
@@ -122,6 +124,11 @@ Collection-method completion also offers lightweight templates such as
 query builder.  They are not MongoDB server-enforced schemas or an exhaustive
 field catalog; long-tail operators can still be typed manually when the backend
 helper parser and =mongodb.el= command layer support the query shape.
+
+Native =find()= results are bounded by =clutch-mongodb-find-result-limit=
+(default 1000).  A smaller explicit =.limit(N)= is honored; zero, negative, or
+larger limits are rejected before sending the command.  Narrow the filter or
+use =skip()= with a bounded =limit()= when exploring a large collection.
 
 Supported helper families include:
 

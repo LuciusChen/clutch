@@ -2418,6 +2418,25 @@
   (should (eq (hash-table-weakness clutch--object-warmup-generations)
               'key)))
 
+(ert-deftest clutch-test-object-warmup-error-advances-past-failed-category ()
+  "A permanent category error should not retry forever or starve later work."
+  (let ((clutch--object-cache (make-hash-table :test 'eq))
+        (conn 'warmup-conn)
+        scheduled)
+    (cl-letf (((symbol-function 'clutch--object-warmup-current-p)
+               (lambda (_conn _generation) t))
+              ((symbol-function 'clutch--object-warmup-debug-event) #'ignore)
+              ((symbol-function 'clutch--browseable-object-entries)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--cache-table-entry-comments) #'ignore)
+              ((symbol-function 'clutch--schedule-object-warmup)
+               (lambda (_conn) (setq scheduled t))))
+      (clutch--object-warmup-error
+       conn 3 'postgres 'indexes "permission denied")
+      (should (memq 'indexes
+                    (clutch--object-cache-loaded-categories conn)))
+      (should scheduled))))
+
 (ert-deftest clutch-test-refresh-schema-cache-records-ready-status ()
   "Schema refresh entry points should record ready state and table count."
   (dolist (mode '(sync async))
@@ -6390,6 +6409,54 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-preview-execution-sql)
         (should (equal captured
                        "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
+
+(ert-deftest clutch-test-statement-breaks-ignore-postgresql-dollar-quotes ()
+  "Dollar-quoted function bodies should remain one executable statement."
+  (dolist (case '(("$$" . "PERFORM 1; PERFORM 2;")
+                  ("$body$" . "SELECT ';'; RETURN;")))
+    (let* ((delimiter (car case))
+           (body (cdr case))
+           (sql (format (concat "CREATE FUNCTION f() RETURNS void AS %s%s%s "
+                                "LANGUAGE plpgsql; SELECT 2;")
+                        delimiter body delimiter))
+           (body-open (string-search delimiter sql))
+           (body-close (+ (string-search delimiter sql
+                                          (+ body-open (length delimiter)))
+                          (length delimiter)))
+           (breaks (clutch-db-sql-statement-breaks sql t)))
+      (ert-info ((format "delimiter: %s" delimiter))
+        (should (= (length breaks) 2))
+        (should (cl-every (lambda (offset) (>= offset body-close)) breaks)))))
+  (should (= (length (clutch-db-sql-statement-breaks
+                      "SELECT $1; SELECT 2;" t))
+             2))
+  (should (= (length (clutch-db-sql-statement-breaks
+                      "SELECT $tag$; SELECT 2;"))
+             2))
+  (should (= (length (clutch-db-sql-statement-breaks
+                      "SELECT foo$tag$; SELECT 2;" t))
+             2))
+  (string-match "needle" "needle")
+  (let ((saved-match-data (match-data)))
+    (clutch-db-sql-statement-breaks
+     (concat "SELECT " (mapconcat #'identity
+                                  (make-list 4000 "$1") ",") ";")
+     t)
+    (should (equal (match-data) saved-match-data))))
+
+(ert-deftest clutch-test-postgresql-statement-bounds-enable-dollar-quotes ()
+  "Query bounds should enable dollar quotes only for PostgreSQL products."
+  (let ((sql (concat "CREATE FUNCTION f() RETURNS void AS $$"
+                     "PERFORM 1; PERFORM 2;"
+                     "$$ LANGUAGE plpgsql; SELECT 2;")))
+    (with-temp-buffer
+      (insert sql)
+      (search-backward "PERFORM 1")
+      (let ((clutch--conn-sql-product 'postgres))
+        (pcase-let ((`(,beg . ,end) (clutch--statement-bounds-at-point)))
+          (should (equal (string-trim
+                          (buffer-substring-no-properties beg end))
+                         (substring sql 0 (string-search "; SELECT" sql)))))))))
 
 (ert-deftest clutch-test-execute-params-fallback-renders-sql-before-query ()
   "Fallback parameter execution should render SQL via escape helpers."

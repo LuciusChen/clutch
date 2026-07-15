@@ -324,6 +324,11 @@ GENERATION rejects stale work, and BACKEND labels diagnostics."
         (clutch--object-warmup-debug-event
          conn "error" backend category
          (or message (format "%s warmup failed" category)))
+        (when-let* ((type (clutch--object-category-type category)))
+          ;; Mark the failed category attempted so a permanent permission or
+          ;; capability error cannot starve every category behind it.  Schema
+          ;; invalidation clears the cache and permits a later retry.
+          (clutch--store-object-cache-type-entries conn type nil))
         (clutch--schedule-object-warmup conn))
     (clutch--object-warmup-stale-debug-event conn backend category "error")))
 
@@ -386,6 +391,8 @@ GENERATION rejects stale work, and BACKEND labels diagnostics."
                 (error-message-string err))
                (when (and conn
                           (clutch--object-connection-alive-p conn))
+                 (when-let* ((type (clutch--object-category-type next)))
+                   (clutch--store-object-cache-type-entries conn type nil))
                  (clutch--schedule-object-warmup conn)))))))
        clutch--object-warmup-timers)))))
 

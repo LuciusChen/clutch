@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.8"
+(defcustom clutch-jdbc-agent-version "0.2.9"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "257ebc4d6b56989afdf9072295122ba88c2c1567baba948602b08886a3b23fe4"
+  "a31821998d6973fe007fdb5cbba6a6c868adbd4fb562ce69a4b37f211a88b233"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1026,6 +1026,9 @@ pass `process-live-p' briefly; the identity check closes that window."
   (and (clutch-jdbc-conn-p conn)
        clutch-jdbc--agent-process
        (eq (clutch-jdbc-conn-process conn) clutch-jdbc--agent-process)
+       (eq conn
+           (gethash (clutch-jdbc-conn-conn-id conn)
+                    clutch-jdbc--connections-by-id))
        (process-live-p (clutch-jdbc-conn-process conn))))
 
 (cl-defmethod clutch-db-backend-key ((conn clutch-jdbc-conn))

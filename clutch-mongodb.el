@@ -58,6 +58,9 @@
 (declare-function mongodb-find "mongodb" (client database collection filter &optional projection limit skip sort options))
 (declare-function mongodb-find-command "mongodb" (collection filter &optional projection limit skip sort options))
 (declare-function mongodb-insert "mongodb" (client database collection documents))
+(declare-function mongodb-connection-host "mongodb" (conn))
+(declare-function mongodb-connection-port "mongodb" (conn))
+(declare-function mongodb-connection-username "mongodb" (conn))
 (declare-function mongodb-list-collection-docs "mongodb" (client database &optional filter options))
 (declare-function mongodb-list-collections "mongodb" (client database &optional filter options))
 (declare-function mongodb-list-indexes "mongodb" (client database collection))
@@ -70,6 +73,13 @@
 
 (defcustom clutch-mongodb-schema-sample-size 20
   "Number of MongoDB documents to sample for collection field metadata."
+  :type 'integer
+  :group 'clutch)
+
+(defcustom clutch-mongodb-find-result-limit 1000
+  "Maximum documents returned by a native MongoDB `find' helper.
+An explicit `.limit(N)' must also fit this bound.  This keeps the synchronous
+Emacs result contract from materializing an unbounded collection."
   :type 'integer
   :group 'clutch)
 
@@ -142,6 +152,9 @@
     mongodb-find
     mongodb-find-command
     mongodb-insert
+    mongodb-connection-host
+    mongodb-connection-port
+    mongodb-connection-username
     mongodb-list-collection-docs
     mongodb-list-collections
     mongodb-list-indexes
@@ -735,17 +748,30 @@ chain options."
   (unless (<= (length args) 2)
     (signal 'clutch-db-error
             (list "find() expects optional filter and projection documents")))
-  (list (if (car args)
-            (clutch-mongodb--mql-document-arg (car args) "find" 1)
-          (mongodb-document nil))
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 1 args) "find" 2)
-        (if single 1 (cdr (assoc "limit" chain)))
-        (unless single (cdr (assoc "skip" chain)))
-        (unless single (cdr (assoc "sort" chain)))
-        (unless single
-          (clutch-mongodb--options-from-chain
-           chain '("maxTimeMS" "allowDiskUse")))))
+  (unless (and (integerp clutch-mongodb-find-result-limit)
+               (> clutch-mongodb-find-result-limit 0))
+    (user-error "MongoDB find result limit must be a positive integer"))
+  (let ((requested-limit (cdr (assoc "limit" chain))))
+    (when (and requested-limit
+               (or (not (integerp requested-limit))
+                   (< requested-limit 1)
+                   (> requested-limit clutch-mongodb-find-result-limit)))
+      (signal 'clutch-db-error
+              (list (format "MongoDB find limit must be between 1 and %d"
+                            clutch-mongodb-find-result-limit))))
+    (list (if (car args)
+              (clutch-mongodb--mql-document-arg (car args) "find" 1)
+            (mongodb-document nil))
+          (clutch-mongodb--mql-optional-document-arg
+           (nth 1 args) "find" 2)
+          (if single
+              1
+            (or requested-limit clutch-mongodb-find-result-limit))
+          (unless single (cdr (assoc "skip" chain)))
+          (unless single (cdr (assoc "sort" chain)))
+          (unless single
+            (clutch-mongodb--options-from-chain
+             chain '("maxTimeMS" "allowDiskUse"))))))
 
 (defun clutch-mongodb--find-command (collection args chain &optional single)
   "Return a MongoDB find command for COLLECTION from ARGS, CHAIN, and SINGLE."
@@ -1779,23 +1805,24 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 
 (cl-defmethod clutch-db-collection-profile ((conn clutch-mongodb-conn) collection)
   "Return MongoDB schema profile metadata for COLLECTION on CONN as JSON."
-  (let* ((docs (clutch-mongodb--sample-documents conn collection))
-         (sample-size (length docs))
-         (stats (clutch-mongodb--profile-stats-for-docs docs))
-         (indexes (clutch-mongodb--collection-index-documents conn collection)))
-    (clutch-mongodb--json-encode-text
-     `(("collection" . ,collection)
-       ("database" . ,(clutch-mongodb-conn-database conn))
-       ("sampleSize" . ,sample-size)
-       ("sampleLimit" . ,(clutch-mongodb--schema-sample-limit))
-       ("fields" . ,(vconcat
-                      (mapcar
-                       (lambda (stat)
-                         (clutch-mongodb--profile-field-json
-                          stat sample-size))
-                       stats)))
-       ("indexes" . ,(vconcat
-                       (mapcar #'clutch-mongodb--index-json indexes)))))))
+  (clutch-mongodb--with-mongodb-errors
+    (let* ((docs (clutch-mongodb--sample-documents conn collection))
+           (sample-size (length docs))
+           (stats (clutch-mongodb--profile-stats-for-docs docs))
+           (indexes (clutch-mongodb--collection-index-documents conn collection)))
+      (clutch-mongodb--json-encode-text
+       `(("collection" . ,collection)
+         ("database" . ,(clutch-mongodb-conn-database conn))
+         ("sampleSize" . ,sample-size)
+         ("sampleLimit" . ,(clutch-mongodb--schema-sample-limit))
+         ("fields" . ,(vconcat
+                        (mapcar
+                         (lambda (stat)
+                           (clutch-mongodb--profile-field-json
+                            stat sample-size))
+                         stats)))
+         ("indexes" . ,(vconcat
+                         (mapcar #'clutch-mongodb--index-json indexes))))))))
 
 (defun clutch-mongodb--collection-index-insight (conn collection)
   "Return MongoDB index insight for COLLECTION on CONN.
@@ -1828,17 +1855,18 @@ The returned text is JSON metadata."
 (cl-defmethod clutch-db-object-action-metadata
   ((conn clutch-mongodb-conn) entry action-id)
   "Return MongoDB metadata text for collection ACTION-ID on ENTRY using CONN."
-  (when (clutch-db-object-action-supported-p conn entry action-id)
-    (let ((collection (plist-get entry :name)))
-      (pcase action-id
-        ('index-insight
-         (clutch-mongodb--collection-index-insight conn collection))
-        ('explain-sample
-         (clutch-mongodb--collection-explain-sample conn collection))
-        ('show-validation
-         (clutch-mongodb--collection-validation conn collection))
-        ('show-stats
-         (clutch-mongodb--collection-stats conn collection))))))
+  (clutch-mongodb--with-mongodb-errors
+    (when (clutch-db-object-action-supported-p conn entry action-id)
+      (let ((collection (plist-get entry :name)))
+        (pcase action-id
+          ('index-insight
+           (clutch-mongodb--collection-index-insight conn collection))
+          ('explain-sample
+           (clutch-mongodb--collection-explain-sample conn collection))
+          ('show-validation
+           (clutch-mongodb--collection-validation conn collection))
+          ('show-stats
+           (clutch-mongodb--collection-stats conn collection)))))))
 
 (cl-defmethod clutch-db-document-mutation-supported-p
   ((_conn clutch-mongodb-conn) action)
@@ -1871,34 +1899,37 @@ of top-level field names for field-scoped snippets."
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-mongodb-conn) category)
   "Return MongoDB object entries in CATEGORY for CONN."
-  (pcase category
-    ('indexes
-     (cl-loop for collection in (clutch-db-list-tables conn)
-              append
-              (mapcar (lambda (document)
-                        (clutch-mongodb--index-entry conn collection document))
-                      (clutch-mongodb--collection-index-documents
-                       conn collection))))
-    (_ nil)))
+  (clutch-mongodb--with-mongodb-errors
+    (pcase category
+      ('indexes
+       (cl-loop for collection in (clutch-db-list-tables conn)
+                append
+                (mapcar (lambda (document)
+                          (clutch-mongodb--index-entry conn collection document))
+                        (clutch-mongodb--collection-index-documents
+                         conn collection))))
+      (_ nil))))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-mongodb-conn) entry)
   "Return MongoDB object details for ENTRY on CONN."
-  (pcase (upcase (or (plist-get entry :type) ""))
-    ("INDEX"
-     (when-let* ((document (clutch-mongodb--index-document conn entry))
-                 (key (clutch-mongodb--document-value document "key")))
-       (clutch-mongodb--index-key-details key)))))
+  (clutch-mongodb--with-mongodb-errors
+    (pcase (upcase (or (plist-get entry :type) ""))
+      ("INDEX"
+       (when-let* ((document (clutch-mongodb--index-document conn entry))
+                   (key (clutch-mongodb--document-value document "key")))
+         (clutch-mongodb--index-key-details key))))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-mongodb-conn) entry)
   "Return MongoDB object metadata for ENTRY on CONN as JSON."
-  (pcase (upcase (or (plist-get entry :type) ""))
-    ("COLLECTION"
-     (clutch-mongodb--json-encode-text
-      (list (clutch-mongodb--collection-info
-             conn (plist-get entry :name)))))
-    ("INDEX"
-     (when-let* ((document (clutch-mongodb--index-document conn entry)))
-       (clutch-mongodb--json-encode-text document)))))
+  (clutch-mongodb--with-mongodb-errors
+    (pcase (upcase (or (plist-get entry :type) ""))
+      ("COLLECTION"
+       (clutch-mongodb--json-encode-text
+        (list (clutch-mongodb--collection-info
+               conn (plist-get entry :name)))))
+      ("INDEX"
+       (when-let* ((document (clutch-mongodb--index-document conn entry)))
+         (clutch-mongodb--json-encode-text document))))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-mongodb-conn) _table
                                        &optional _schema)
@@ -1927,16 +1958,16 @@ of top-level field names for field-scoped snippets."
   (clutch-mongodb-conn-busy conn))
 
 (cl-defmethod clutch-db-user ((conn clutch-mongodb-conn))
-  "Return the configured MongoDB user for CONN, if any."
-  (plist-get (clutch-mongodb-conn-params conn) :user))
+  "Return the effective MongoDB user for CONN, if any."
+  (mongodb-connection-username (clutch-mongodb-conn-client conn)))
 
 (cl-defmethod clutch-db-host ((conn clutch-mongodb-conn))
-  "Return the configured MongoDB host for CONN, if any."
-  (plist-get (clutch-mongodb-conn-params conn) :host))
+  "Return the effective MongoDB host for CONN, if any."
+  (mongodb-connection-host (clutch-mongodb-conn-client conn)))
 
 (cl-defmethod clutch-db-port ((conn clutch-mongodb-conn))
-  "Return the configured MongoDB port for CONN, if any."
-  (plist-get (clutch-mongodb-conn-params conn) :port))
+  "Return the effective MongoDB port for CONN, if any."
+  (mongodb-connection-port (clutch-mongodb-conn-client conn)))
 
 (cl-defmethod clutch-db-database ((conn clutch-mongodb-conn))
   "Return the current MongoDB database for CONN."
