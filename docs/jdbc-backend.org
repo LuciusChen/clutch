@@ -50,6 +50,8 @@ Driver jars are stored in =~/.emacs.d/clutch-jdbc/drivers/= (configurable via =c
 
 The agent jar itself is verified against the configured SHA-256 before startup. This catches the common case where a local =clutch-jdbc-agent-<version>.jar= exists but does not actually match the jar you intend clutch to launch. Running =clutch-jdbc-ensure-agent= also removes stale versioned =clutch-jdbc-agent-*.jar= files from the same directory.
 
+If an idle timeout, laptop sleep, or network interruption destroys a primary JDBC session, the in-flight command reports its original error and is not replayed because the server-side outcome may be unknown. Clutch retires that session immediately while keeping the console's reconnect parameters; the next command automatically creates a new session instead of sending the obsolete connection id again. Any uncommitted manual transaction is cleared and reported as having an unknown outcome.
+
 If you intentionally use a locally built jar, set =clutch-jdbc-agent-sha256= to =nil= to disable verification.  That is the escape hatch for custom development builds.
 
 Oracle installs now also pull =orai18n.jar= automatically, which is required for CJK database character sets such as =ZHS16GBK=.  If you install drivers while the shared JDBC agent is already running, clutch will restart that agent on the next JDBC use; reconnecting is enough, you do not need to restart Emacs.

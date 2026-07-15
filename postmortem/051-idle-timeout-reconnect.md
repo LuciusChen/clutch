@@ -1,5 +1,7 @@
 # 051 — Idle-Timeout Reconnect (`clutch-jdbc-agent` v0.1.9)
 
+> Superseded for foreground primary-session loss by [155 — JDBC primary-session invalidation](155-jdbc-primary-session-invalidation.md); the per-query `isValid` probe described here was later removed from the hot path.
+
 ## Background
 
 Users reported two symptoms when a JDBC connection was left idle long enough for a firewall or the Oracle server's `IDLE_TIME` profile to silently drop it:

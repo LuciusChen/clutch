@@ -200,10 +200,14 @@ There are three distinct failure classes:
    - The agent stays up and Elisp surfaces the database error normally.
    - The response may also include a structured `diag` object with fields such as category, request id, connection id, exception class, SQLState, cause chain, and redacted request context.
 
-2. The agent is running but a request times out or the underlying JDBC session wedges.
-   - Elisp reports this as a connection-loss error and clears the local agent state.
+2. The shared agent stays up but handling a fatal foreground failure removes one logical JDBC connection.
+   - The error response includes `diag.connection-invalidated=true`, and Elisp retires only the matching local `conn-id` while preserving the original diagnostics and console reconnect context.
+   - The failed SQL is never replayed because its transaction outcome may be unknown. The next user command creates a new session and executes once.
 
-3. The agent exits before replying.
+3. A request times out at the outer RPC boundary or the shared agent becomes unresponsive.
+   - Elisp stops the wedged process and treats every connection owned by that process as dead.
+
+4. The agent exits before replying.
    - Elisp reads agent stderr and reports the startup failure directly.
    - If stderr contains `UnsupportedClassVersionError`, clutch reports that the configured Java runtime is too old for the current jar.
 
@@ -214,6 +218,8 @@ The short `error` string and the optional `diag` payload serve different roles:
 - `error`: concise default summary suitable for normal user-facing display
 - `diag`: richer request diagnostics for troubleshooting UI / logs / tests
 - `debug`: opt-in verbose debugging payload; may include redacted request context and a redacted stack trace, but is omitted unless the client sent `params.debug=true`
+
+`diag.connection-invalidated` is a lifecycle fact, not a retry hint. It is present only as JSON `true` when an error response references a logical connection the agent no longer owns, including a later request after the original invalidation response was ignored; clients must not infer the same state from JDBC exception classes, SQLState values, vendor codes, or error text.
 
 stderr remains for process/runtime logging and should not be treated as the primary source of request-level diagnostics.
 

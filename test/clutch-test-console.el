@@ -270,6 +270,31 @@
         (should (eq (clutch-test-console--face-at-match "db>" output)
                     'minibuffer-prompt))))))
 
+(ert-deftest clutch-test-repl-dead-query-retains-reconnect-anchor ()
+  "REPL errors should retire a dead session without dropping its anchor."
+  (with-temp-buffer
+    (let ((conn (list 'dead-connection))
+          preserved
+          output)
+      (setq-local clutch-connection conn)
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--execute-statement)
+                 (lambda (&rest _args)
+                   (list :error '(clutch-db-error "socket lost"))))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_connection) nil))
+                ((symbol-function 'clutch--remember-execute-error)
+                 (lambda (&rest _args) '("socket lost" . "socket lost")))
+                ((symbol-function 'clutch--preserve-dead-connection-for-reconnect)
+                 (lambda (connection) (setq preserved connection)))
+                ((symbol-function 'clutch-db-clear-error-details) #'ignore)
+                ((symbol-function 'clutch-repl--output)
+                 (lambda (text) (setq output text))))
+        (clutch-repl--execute-and-print "SELECT once")
+        (should (eq preserved conn))
+        (should (eq clutch-connection conn))
+        (should (string-match-p "socket lost" output))))))
+
 (ert-deftest clutch-test-repl-execute-and-print-returning-result ()
   "REPL should show DML RETURNING rows in a result buffer."
   (with-temp-buffer

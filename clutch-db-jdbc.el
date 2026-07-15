@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.10"
+(defcustom clutch-jdbc-agent-version "0.2.11"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "fb4942a97237bbd4f34f3ee1503a645782d357d56cefb1a6b8527df440fc0065"
+  "8a07178a793032b064d3510990740155076f648fa8c184c49e42ca67275ee972"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -353,6 +353,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
                      (when callback
                        (funcall callback (plist-get response :result)))
                    (clutch-jdbc--remember-error-response conn op response)
+                   (when (clutch-jdbc--connection-invalidated-p response)
+                     (clutch-jdbc--retire-invalidated-connection conn))
                    (let ((message (clutch-jdbc--rpc-error-message op response)))
                      (if errback
                          (funcall errback message)
@@ -656,12 +658,31 @@ When CONN is nil, return the details snapshot for the current failure."
       (puthash conn details clutch-jdbc--error-details-by-conn))
     details))
 
+(defun clutch-jdbc--connection-invalidated-p (response)
+  "Return non-nil when RESPONSE says its logical connection was invalidated."
+  (eq t (plist-get (plist-get response :diag) :connection-invalidated)))
+
+(defun clutch-jdbc--retire-invalidated-connection (conn)
+  "Retire invalidated JDBC CONN from local live-request state.
+The agent has already removed the logical connection, so do not send a
+disconnect request.  Preserve connection-scoped diagnostics for the caller."
+  (when (and (clutch-jdbc-conn-p conn)
+             (eq conn
+                 (gethash (clutch-jdbc-conn-conn-id conn)
+                          clutch-jdbc--connections-by-id)))
+    (remhash conn clutch-jdbc--busy-request-ids)
+    (clutch-jdbc--clear-async-callbacks conn)
+    (remhash (clutch-jdbc-conn-conn-id conn)
+             clutch-jdbc--connections-by-id)))
+
 (defun clutch-jdbc--response-result-or-signal (conn op response)
   "Return RESPONSE's result or signal `clutch-db-error' for OP.
 When CONN is non-nil, remember structured diagnostics on the connection."
   (if (eq t (plist-get response :ok))
       (plist-get response :result)
     (let ((details (clutch-jdbc--remember-error-response conn op response)))
+      (when (clutch-jdbc--connection-invalidated-p response)
+        (clutch-jdbc--retire-invalidated-connection conn))
       (signal 'clutch-db-error
               (if details
                   (list (clutch-jdbc--rpc-error-message op response) details)

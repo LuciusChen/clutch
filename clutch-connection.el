@@ -2560,6 +2560,28 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
   (clutch--forget-problem-record nil conn)
   (clutch--release-connection-transport conn))
 
+(defun clutch--preserve-dead-connection-for-reconnect (conn)
+  "Release dead CONN state while preserving attached reconnect anchors.
+The backend has already closed CONN.  Keep buffer bindings and reconnect
+parameters so the next command can replace the logical session."
+  (clutch--mark-dml-results-connection-closed conn)
+  (clutch--clear-tx-dirty conn)
+  (clutch--clear-connection-metadata-caches conn)
+  (clutch--release-connection-transport conn)
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (eq (buffer-local-value 'clutch-connection buffer) conn))
+      (with-current-buffer buffer
+        (clutch--refresh-connection-render-state)
+        (cond
+         ((derived-mode-p 'clutch-result-mode)
+          (clutch--refresh-result-status-line t))
+         ((or (clutch--query-buffer-p)
+              (derived-mode-p 'clutch-repl-mode))
+          (clutch--update-mode-line))
+         (t
+          (force-mode-line-update)))))))
+
 (defun clutch--do-disconnect (conn)
   "Perform full disconnect sequence for CONN.
 Marks DML results, invalidates derived buffers, clears transaction

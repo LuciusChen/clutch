@@ -6715,6 +6715,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        (clutch--humanize-db-error (error-message-string err)))))
                    (signaled (should-error (clutch--execute-statements stmts)
                                            :type 'user-error)))
+              (should (eq clutch-connection conn))
               (should (equal (cadr signaled)
                              (format "Statement %d failed: %s"
                                      statement-index
@@ -6848,7 +6849,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
 
 (ert-deftest clutch-test-execute-quit-distinguishes-confirmation-from-query ()
-  "Only a quit during the database call should abandon the connection."
+  "Only a quit during the database call should retire the connection."
   (with-temp-buffer
     (let ((buf (current-buffer))
           (disconnected nil)
@@ -6886,11 +6887,14 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should-not disconnected)
         (should (eq clutch-connection 'fake-conn))
         (setq phase 'query)
-        (should-error (clutch--execute "SELECT 1" clutch-connection)
-                      :type 'user-error)
+        (let ((error (should-error
+                      (clutch--execute "SELECT 1" clutch-connection)
+                      :type 'user-error)))
+          (should (equal (cadr error)
+                         clutch--transaction-outcome-unknown-message)))
         (should disconnected)
         (with-current-buffer buf
-          (should-not clutch-connection))
+          (should (eq clutch-connection 'fake-conn)))
         (should-not (gethash 'fake-conn clutch--tx-dirty-cache))
         (should-not clutch--executing-p)))))
 
@@ -6926,14 +6930,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (eq clutch-connection conn)))
         (should-not clutch--executing-p)))))
 
-(ert-deftest clutch-test-execute-db-error-abandons-dead-connection ()
-  "Query errors should clear connection state when the backend closed it."
+(ert-deftest clutch-test-execute-db-error-preserves-dead-reconnect-anchor ()
+  "Query errors should retain a dead connection for the next reconnect."
   (with-temp-buffer
     (let* ((conn 'fake-conn)
            (clutch-connection conn)
            (clutch--tx-dirty-cache (make-hash-table :test 'eq))
            (clutch--executing-p nil)
            (displayed-error nil)
+           (error-context nil)
+           (preserved nil)
+           (details-cleared nil)
+           (executions 0)
            (mode-line-updates 0))
       (puthash conn t clutch--tx-dirty-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
@@ -6953,22 +6961,122 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (lambda (_conn) nil))
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (&rest _args)
+                   (setq executions (1+ executions))
                    (signal 'clutch-db-error '("query timed out"))))
                 ((symbol-function 'clutch--show-execution-error)
-                 (lambda (_source _conn _sql err &optional _elapsed _context _region)
-                   (setq displayed-error (error-message-string err))))
+                 (lambda (_source _conn _sql err &optional _elapsed context _region)
+                   (setq displayed-error (error-message-string err)
+                         error-context context)))
+                ((symbol-function 'clutch--preserve-dead-connection-for-reconnect)
+                 (lambda (connection)
+                   (setq preserved connection)))
+                ((symbol-function 'clutch-db-clear-error-details)
+                 (lambda (connection)
+                   (setq details-cleared connection)))
                 ((symbol-function 'clutch--update-mode-line)
                  (lambda (&optional _spinner-only)
                    (setq mode-line-updates (1+ mode-line-updates)))))
         (should-not (clutch--execute "SELECT SLEEP(60)" conn))
+        (should (= executions 1))
         (should (string-match-p "query timed out" displayed-error))
-        (should-not clutch-connection)
-        (should-not (gethash conn clutch--tx-dirty-cache))
+        (should (eq (plist-get error-context :transaction-outcome) 'unknown))
+        (should (eq clutch-connection conn))
+        (should (eq preserved conn))
+        (should (eq details-cleared conn))
         (should-not clutch--executing-p)
         (should (> mode-line-updates 0))))))
 
+(ert-deftest clutch-test-dead-query-reconnects-on-next-command-without-replay ()
+  "A dead query should preserve its session anchor until the next command."
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((old-conn (list 'old-connection))
+           (new-conn (list 'new-connection))
+           (params '(:backend oracle :database "ORCL"))
+           (source (generate-new-buffer " *clutch-reconnect-source*"))
+           (attached (generate-new-buffer " *clutch-reconnect-attached*"))
+           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--problem-records-by-conn (make-hash-table :test 'eq))
+           (clutch--schema-cache-updated-hook
+            '(clutch--handle-schema-cache-updated))
+           (clutch--metadata-state-changed-hook
+            '(clutch--refresh-schema-status-ui))
+           (old-live t)
+           allow-revert
+           (builds 0)
+           (reverts 0)
+           executions)
+      (unwind-protect
+          (progn
+            (dolist (buffer (list source attached))
+              (with-current-buffer buffer
+                (setq-local clutch-connection old-conn
+                            clutch--connection-params params
+                            clutch--conn-sql-product 'oracle)))
+            (with-current-buffer source
+              (setq-local clutch--query-buffer-local-p t))
+            (with-current-buffer attached
+              (setq-local revert-buffer-function
+                          (lambda (&rest _args)
+                            (unless allow-revert
+                              (ert-fail "Dead-session cleanup must not revert"))
+                            (cl-incf reverts))))
+            (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                       (lambda (connection)
+                         (if (eq connection old-conn)
+                             old-live
+                           (eq connection new-conn))))
+                      ((symbol-function 'clutch--build-conn)
+                       (lambda (reconnect-params)
+                         (should (equal reconnect-params params))
+                         (cl-incf builds)
+                         new-conn))
+                      ((symbol-function 'clutch--execute-statement)
+                       (lambda (sql connection &rest _args)
+                         (push (list sql connection) executions)
+                         (if (eq connection old-conn)
+                             (progn
+                               (setq old-live nil)
+                               (list :error '(clutch-db-error "socket lost")
+                                     :source-buffer source))
+                           (list :result (make-clutch-db-result :affected-rows 1)
+                                 :result-query-p nil
+                                 :source-buffer source))))
+                      ((symbol-function 'clutch--show-execution-error)
+                       (lambda (&rest _args) '(:summary "socket lost")))
+                      ((symbol-function 'clutch-result--display) #'ignore)
+                      ((symbol-function 'clutch-db-clear-error-details) #'ignore)
+                      ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                      ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                      ((symbol-function 'clutch--refresh-connection-render-state)
+                       #'ignore)
+                      ((symbol-function 'clutch--spinner-start) #'ignore)
+                      ((symbol-function 'clutch--update-mode-line) #'ignore)
+                      ((symbol-function 'redisplay) #'ignore)
+                      ((symbol-function 'clutch--connection-key)
+                       (lambda (_connection) "oracle@test"))
+                      ((symbol-function 'message) #'ignore))
+              (with-current-buffer source
+                (should-not (clutch--execute "SELECT once"))
+                (should (= (length executions) 1))
+                (should (= builds 0))
+                (should (= reverts 0))
+                (should (eq clutch-connection old-conn))
+                (setq allow-revert t)
+                (should (clutch--execute "SELECT next"))))
+            (should (= builds 1))
+            (should (= reverts 1))
+            (should (equal (nreverse executions)
+                           `(("SELECT once" ,old-conn)
+                             ("SELECT next" ,new-conn))))
+            (dolist (buffer (list source attached))
+              (should (eq (buffer-local-value 'clutch-connection buffer)
+                          new-conn))))
+        (dolist (buffer (list source attached))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
 (ert-deftest clutch-test-handle-query-quit-remembers-interrupt-error-details-and-debug-event ()
-  "Interrupt RPC failures should record details and invalidate attached UI."
+  "Interrupt RPC failures should record details and retain reconnect anchors."
   (with-temp-buffer
     (let* ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
            (clutch-debug-mode t)
@@ -6976,6 +7084,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (raw-message "Connection refused (host=db.example.com, port=3306)")
            (captured-message nil)
            (disconnected nil)
+           (live t)
            (record (generate-new-buffer " *clutch-abandoned-record*")))
       (unwind-protect
           (progn
@@ -6986,15 +7095,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                           clutch--connection-render-state
                           '(:connected-p t)))
             (cl-letf (((symbol-function 'clutch-db-backend-key)
-                       (lambda (_conn) 'pg))
+                      (lambda (_conn) 'pg))
                       ((symbol-function 'clutch--connection-alive-p)
-                       (lambda (_conn) t))
+                       (lambda (_conn) live))
                       ((symbol-function 'clutch-db-interrupt-query)
                        (lambda (_conn)
                          (signal 'clutch-db-error (list raw-message))))
                       ((symbol-function 'clutch-db-disconnect)
                        (lambda (_conn)
-                         (setq disconnected t)))
+                         (setq disconnected t
+                               live nil)))
                       ((symbol-function 'message)
                        (lambda (fmt &rest args)
                          (setq captured-message (apply #'format fmt args)))))
@@ -7029,7 +7139,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                            "Operation: interrupt\nPhase: disconnect"))
                   (should (string-match-p (regexp-quote expected) debug-text)))
                 (with-current-buffer record
-                  (should-not clutch-connection)
+                  (should (eq clutch-connection conn))
                   (should
                    (string-match-p
                     "DISCONNECTED"

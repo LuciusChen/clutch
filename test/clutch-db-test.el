@@ -6307,6 +6307,92 @@ It does so without touching the agent process."
            (should (string-match-p "hidden_table"
                                    (plist-get context :generated-sql)))))))))
 
+(ert-deftest clutch-db-test-jdbc-invalidated-error-retires-only-target-handle ()
+  "An authoritative invalidation marker should retire only its JDBC handle."
+  (let* ((conn (make-clutch-jdbc-conn
+                :process 'fake-proc :conn-id 7 :params '(:driver oracle)))
+         (other (make-clutch-jdbc-conn
+                 :process 'fake-proc :conn-id 8 :params '(:driver oracle)))
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+         (diag '(:category "query"
+                 :op "execute"
+                 :request-id 88
+                 :conn-id 7
+                 :connection-invalidated t
+                 :exception-class "java.sql.SQLRecoverableException"
+                 :sql-state "08000"
+                 :vendor-code 17410
+                 :raw-message "No more data to read from socket"))
+         cancelled)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (puthash 8 other clutch-jdbc--connections-by-id)
+    (puthash conn 88 clutch-jdbc--busy-request-ids)
+    (puthash other 89 clutch-jdbc--busy-request-ids)
+    (puthash 90 (list :conn conn :timer 'target-timer)
+             clutch-jdbc--async-callbacks)
+    (puthash 91 (list :conn other :timer 'other-timer)
+             clutch-jdbc--async-callbacks)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'cancel-timer)
+               (lambda (timer) (push timer cancelled)))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (&rest _args)
+                 (ert-fail "Invalidated connection must not send disconnect"))))
+      (let ((err
+             (should-error
+              (clutch-jdbc--response-result-or-signal
+               conn "execute"
+               `(:ok ,clutch-jdbc--json-false
+                 :error "No more data to read from socket"
+                 :diag ,diag))
+              :type 'clutch-db-error)))
+        (should (string-match-p "No more data" (cadr err))))
+      (should-not (clutch-db-live-p conn))
+      (should (clutch-db-live-p other))
+      (should-not (gethash 7 clutch-jdbc--connections-by-id))
+      (should (eq (gethash 8 clutch-jdbc--connections-by-id) other))
+      (should-not (gethash conn clutch-jdbc--busy-request-ids))
+      (should (= (gethash other clutch-jdbc--busy-request-ids) 89))
+      (should-not (gethash 90 clutch-jdbc--async-callbacks))
+      (should (gethash 91 clutch-jdbc--async-callbacks))
+      (should (gethash 90 clutch-jdbc--ignored-response-ids))
+      (should (equal cancelled '(target-timer)))
+      (let* ((details (clutch-db-error-details conn))
+             (stored-diag (plist-get details :diag)))
+        (should (equal (plist-get stored-diag :raw-message)
+                       "No more data to read from socket"))
+        (should (eq (plist-get stored-diag :connection-invalidated) t)))
+      (should (eq clutch-jdbc--agent-process 'fake-proc)))))
+
+(ert-deftest clutch-db-test-jdbc-does-not-infer-invalidation-from-exception ()
+  "Clutch should require the protocol marker instead of classifying errors."
+  (let* ((conn (make-clutch-jdbc-conn
+                :process 'fake-proc :conn-id 7 :params '(:driver oracle)))
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t)))
+      (should-error
+       (clutch-jdbc--response-result-or-signal
+        conn "execute"
+        `(:ok ,clutch-jdbc--json-false
+          :error "No more data to read from socket"
+          :diag (:category "query"
+                 :op "execute"
+                 :conn-id 7
+                 :exception-class "java.sql.SQLRecoverableException"
+                 :sql-state "08000"
+                 :vendor-code 17410)))
+       :type 'clutch-db-error)
+      (should (clutch-db-live-p conn))
+      (should (eq (gethash 7 clutch-jdbc--connections-by-id) conn)))))
+
 (ert-deftest clutch-db-test-jdbc-interrupt-query-contract ()
   "JDBC interrupt should cancel only busy requests and preserve agent ownership."
   (let ((conn (make-clutch-jdbc-conn :conn-id 7
