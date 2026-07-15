@@ -122,14 +122,17 @@ A stuck disconnect should not block the user or kill the agent.")
     ;; ojdbc8 (19c driver) is the safest default across Oracle 11g/12c/19c.
     (oracle    . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
                   :filename "ojdbc8.jar"
-                  :class "oracle.jdbc.OracleDriver"))
+                  :class "oracle.jdbc.OracleDriver"
+                  :companions (oracle-i18n)))
     (oracle-8  . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
                   :filename "ojdbc8.jar"
-                  :class "oracle.jdbc.OracleDriver"))
+                  :class "oracle.jdbc.OracleDriver"
+                  :companions (oracle-i18n)))
     ;; ojdbc11 remains available for users who explicitly want the newer line.
     (oracle-11 . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
                   :filename "ojdbc11.jar"
-                  :class "oracle.jdbc.OracleDriver"))
+                  :class "oracle.jdbc.OracleDriver"
+                  :companions (oracle-i18n)))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
                     :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
@@ -140,7 +143,8 @@ A stuck disconnect should not block the user or kill the agent.")
                   :class "com.amazon.redshift.jdbc.Driver"))
     (clickhouse . (:maven "com.clickhouse:clickhouse-jdbc:0.9.8:all"
                    :filename "clickhouse-jdbc.jar"
-                   :class "com.clickhouse.jdbc.ClickHouseDriver"))
+                   :class "com.clickhouse.jdbc.ClickHouseDriver"
+                   :companions (slf4j-api slf4j-nop)))
     (duckdb     . (:maven "org.duckdb:duckdb_jdbc:1.5.3.0"
                   :filename "duckdb_jdbc.jar"
                   :class "org.duckdb.DuckDBDriver"))
@@ -153,12 +157,6 @@ A stuck disconnect should not block the user or kill the agent.")
                    :filename "slf4j-nop.jar")))
   "Known JDBC driver sources.
 All entries support auto-download via `clutch-jdbc-install-driver'.")
-
-;;;; Drivers that default to JDBC backend
-
-(defconst clutch-jdbc--jdbc-drivers
-  '(jdbc oracle sqlserver db2 snowflake redshift clickhouse)
-  "Backend/driver symbols that are routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-metadata
   '((jdbc       . (:display-name "JDBC"
@@ -194,13 +192,6 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
                   :support-level basic
                   :data-model relational)))
   "User-facing metadata for JDBC-backed concrete drivers.")
-
-(defconst clutch-jdbc--driver-companions
-  '((oracle oracle-i18n)
-    (oracle-8 oracle-i18n)
-    (oracle-11 oracle-i18n)
-    (clickhouse slf4j-api slf4j-nop))
-  "Optional companion driver artifacts to install alongside a primary driver.")
 
 (defconst clutch-jdbc--oracle-driver-filenames
   '("ojdbc8.jar" "ojdbc11.jar")
@@ -765,31 +756,32 @@ or :sid (Oracle SID-style connection)."
       (and (not (eq driver 'mongodb))
            (plist-get params :url))
       (let ((host     (or (plist-get params :host) "localhost"))
-            (port     (plist-get params :port))
+            (port     (or (plist-get params :port)
+                          (clutch-backend-default-port driver)))
             (database (plist-get params :database))
             (sid      (plist-get params :sid)))
         (pcase driver
           ('oracle
            (if sid
                (format "jdbc:oracle:thin:@%s:%d:%s"
-                       host (or port 1521) sid)
+                       host port sid)
              (format "jdbc:oracle:thin:@//%s:%d/%s"
-                     host (or port 1521) database)))
+                     host port database)))
           ('sqlserver
            (format "jdbc:sqlserver://%s:%d;databaseName=%s"
-                   host (or port 1433) database))
+                   host port database))
           ('db2
            (format "jdbc:db2://%s:%d/%s"
-                   host (or port 50000) database))
+                   host port database))
           ('snowflake
            (format "jdbc:snowflake://%s.snowflakecomputing.com/?db=%s"
                    host database))
           ('redshift
            (format "jdbc:redshift://%s:%d/%s"
-                   host (or port 5439) database))
+                   host port database))
           ('clickhouse
            (format "jdbc:clickhouse://%s:%d/%s"
-                   host (or port 8123) database))
+                   host port database))
           ('mongodb
            (clutch-jdbc--sql-interface-url params))
           (_
@@ -989,18 +981,17 @@ Returns a `clutch-jdbc-conn'."
 ;; inside clutch-db-jdbc-connect without requiring a redundant :driver key
 ;; in the user's params plist (:backend is stripped by clutch--build-conn
 ;; before the connect-fn is called).
-(dolist (driver clutch-jdbc--jdbc-drivers)
-  (unless (alist-get driver clutch-backend--registry)
-    (let ((drv driver))
+(dolist (entry clutch-jdbc--driver-metadata)
+  (let ((driver (car entry)))
+    (unless (alist-get driver clutch-backend--registry)
       (add-to-list
        'clutch-backend--registry
-       (cons drv
-             (append (copy-sequence
-                      (alist-get drv clutch-jdbc--driver-metadata))
+       (cons driver
+             (append (cdr entry)
                      (list :require 'clutch-db-jdbc
                            :connect-fn
                            (lambda (p)
-                             (clutch-db-jdbc-connect drv p)))))
+                             (clutch-db-jdbc-connect driver p)))))
        t))))
 
 ;;;; Lifecycle methods
@@ -1600,6 +1591,12 @@ when a catalog is supplied."
     (append (when catalog `((catalog . ,catalog)))
             (when schema `((schema . ,schema))))))
 
+(defun clutch-jdbc--table-metadata-params (conn table)
+  "Return JDBC metadata params for TABLE on CONN."
+  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+    (table . ,table)
+    ,@(clutch-jdbc--metadata-scope-params conn)))
+
 (defun clutch-jdbc--visible-schemas (conn schemas)
   "Normalize visible SCHEMAS for CONN."
   (let* ((current (clutch-jdbc--conn-schema conn))
@@ -1727,9 +1724,7 @@ the metadata request."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (table . ,table)
-       ,@(clutch-jdbc--metadata-scope-params conn))
+     (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
          (funcall callback (plist-get result :columns))))
@@ -1744,9 +1739,7 @@ the metadata request."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (table . ,table)
-       ,@(clutch-jdbc--metadata-scope-params conn))
+     (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
          (funcall callback
@@ -1757,24 +1750,24 @@ the metadata request."
      conn)
     t))
 
+(defun clutch-jdbc--foreign-keys-from-result (result)
+  "Return normalized foreign keys from JDBC metadata RESULT."
+  (mapcar (lambda (fk)
+            (cons (plist-get fk :fk-column)
+                  (list :ref-table (plist-get fk :pk-table)
+                        :ref-column (plist-get fk :pk-column))))
+          (plist-get result :foreign-keys)))
+
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback
                                             &optional errback)
   "Fetch foreign-key info for TABLE on JDBC CONN asynchronously."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-foreign-keys"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (table . ,table)
-       ,@(clutch-jdbc--metadata-scope-params conn))
+     (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
-         (funcall callback
-                  (mapcar
-                   (lambda (fk)
-                     (cons (plist-get fk :fk-column)
-                           (list :ref-table (plist-get fk :pk-table)
-                                 :ref-column (plist-get fk :pk-column))))
-                   (plist-get result :foreign-keys)))))
+         (funcall callback (clutch-jdbc--foreign-keys-from-result result))))
      errback
      rpc-timeout
      conn)
@@ -1784,9 +1777,7 @@ the metadata request."
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
   (let* ((result  (clutch-jdbc--rpc
                    "get-columns"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     (table   . ,table)
-                     ,@(clutch-jdbc--metadata-scope-params conn)))))
+                   (clutch-jdbc--table-metadata-params conn table))))
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
@@ -1851,10 +1842,8 @@ the metadata request."
      ((eq driver 'oracle)
       (let* ((result (clutch-jdbc--rpc
                       "search-columns"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                        (table   . ,table)
-                        (prefix  . ,prefix)
-                        ,@(clutch-jdbc--metadata-scope-params conn)))))
+                      (append (clutch-jdbc--table-metadata-params conn table)
+                              `((prefix . ,prefix))))))
         (mapcar (lambda (col) (plist-get col :name))
                 (plist-get result :columns)))))))
 
@@ -1987,9 +1976,7 @@ the metadata request."
   "Return primary key columns for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   "get-primary-keys"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
+                  (clutch-jdbc--table-metadata-params conn table))))
     (plist-get result :primary-keys)))
 
 (defun clutch-jdbc--index-column-name (column)
@@ -2067,22 +2054,14 @@ the metadata request."
   "Return foreign key info for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   "get-foreign-keys"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
-    (mapcar (lambda (fk)
-              (cons (plist-get fk :fk-column)
-                    (list :ref-table  (plist-get fk :pk-table)
-                          :ref-column (plist-get fk :pk-column))))
-            (plist-get result :foreign-keys))))
+                  (clutch-jdbc--table-metadata-params conn table))))
+    (clutch-jdbc--foreign-keys-from-result result)))
 
 (cl-defmethod clutch-db-referencing-objects ((conn clutch-jdbc-conn) table)
   "Return objects that reference TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   "get-referencing-objects"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
+                  (clutch-jdbc--table-metadata-params conn table))))
     (mapcar (lambda (entry)
               (list :name (plist-get entry :name)
                     :type "TABLE"
@@ -2097,9 +2076,7 @@ the metadata request."
          (fks     (clutch-db-foreign-keys conn table))
          (result  (clutch-jdbc--rpc
                    "get-columns"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     (table   . ,table)
-                     ,@(clutch-jdbc--metadata-scope-params conn))))
+                   (clutch-jdbc--table-metadata-params conn table)))
          (cols    (plist-get result :columns)))
     (mapcar (lambda (col)
               (let ((name (plist-get col :name)))
@@ -2194,7 +2171,7 @@ Fetches from GitHub Releases."
   (let* ((spec       (alist-get driver clutch-jdbc--driver-sources))
          (filename   (plist-get spec :filename))
          (dest       (expand-file-name filename (clutch-jdbc--drivers-dir)))
-         (companions (alist-get driver clutch-jdbc--driver-companions)))
+         (companions (plist-get spec :companions)))
     (make-directory (clutch-jdbc--drivers-dir) t)
     (cond
      ((file-exists-p dest)

@@ -2811,7 +2811,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  :schema "default" :source-schema "default")))))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-column-details-omit-catalog ()
-  "ClickHouse column metadata RPCs should omit catalog from metadata calls."
+  "ClickHouse column metadata should map foreign keys without adding scope."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
                                                :database "default")))
@@ -2821,18 +2821,22 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (push (cons op params) calls)
                  (pcase op
                    ("get-primary-keys" '(:primary-keys ("id")))
-                   ("get-foreign-keys" '(:foreign-keys nil))
+                   ("get-foreign-keys"
+                    '(:foreign-keys ((:fk-column "user_id"
+                                      :pk-table "users" :pk-column "id"))))
                    ("get-columns" `(:columns ((:name "id" :type "UInt64"
                                                :nullable ,clutch-jdbc--json-false)
-                                              (:name "name" :type "String"
+                                              (:name "user_id" :type "UInt64"
                                                :nullable t))))
                    (_ (ert-fail (format "unexpected op: %s" op)))))))
       (should
        (equal (clutch-db-column-details conn "events")
               '((:name "id" :type "UInt64" :nullable nil
                  :primary-key t :foreign-key nil :comment nil)
-                (:name "name" :type "String" :nullable t
-                 :primary-key nil :foreign-key nil :comment nil))))
+                (:name "user_id" :type "UInt64" :nullable t
+                 :primary-key nil
+                 :foreign-key (:ref-table "users" :ref-column "id")
+                 :comment nil))))
       (dolist (call calls)
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
@@ -3164,16 +3168,6 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (pcase-let ((`(,driver ,params ,expected) case))
       (should (equal (clutch-jdbc--build-url driver params) expected)))))
 
-(ert-deftest clutch-db-test-jdbc-display-names-for-registered-drivers ()
-  "Registered JDBC connections should expose backend keys and display names."
-  (dolist (case '((redshift nil "Redshift")
-                  (clickhouse clickhouse "ClickHouse")))
-    (pcase-let* ((`(,driver ,expected-key ,expected-name) case)
-                 (conn (make-clutch-jdbc-conn :params `(:driver ,driver))))
-      (when expected-key
-        (should (eq (clutch-db-backend-key conn) expected-key)))
-      (should (equal (clutch-db-display-name conn) expected-name)))))
-
 (ert-deftest clutch-db-test-jdbc-oracle-keyword-probe-keeps-default-sql-product ()
   "Oracle identifier rendering should not change the global SQL dialect."
   (let ((default-product (default-value 'sql-product))
@@ -3454,6 +3448,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (clutch-backend-jdbc-transport-p 'jdbc '(:backend jdbc)))
     (should (clutch-backend-jdbc-transport-p
              'clickhouse '(:backend clickhouse)))
+    (should (eq (clutch-db-backend-key
+                 (make-clutch-jdbc-conn :params '(:driver clickhouse)))
+                'clickhouse))
     (should (equal (clutch--backend-display-name-from-params
                     '(:backend jdbc :display-name "KingbaseES"))
                    "KingbaseES"))
