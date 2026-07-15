@@ -879,6 +879,16 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
   "Signal unsupported runtime auto-commit toggling for this backend."
   (user-error "Manual commit is not supported by this connection"))
 
+(cl-defgeneric clutch-db-call-with-atomic-batch (conn function)
+  "Call zero-argument FUNCTION as one atomic mutation batch on CONN.
+Backends implementing this for autocommit connections must commit every
+mutation together or roll all of them back when FUNCTION signals.")
+
+(cl-defmethod clutch-db-call-with-atomic-batch ((_conn t) _function)
+  "Reject atomic batches on backends without an autocommit batch boundary."
+  (user-error
+   "Cannot execute multiple staged statements in autocommit mode; disable autocommit first"))
+
 (cl-defgeneric clutch-db-schema-transaction-effect (conn sql)
   "Return dirty-cache effect for successful schema SQL on CONN.
 SQL is known to affect schema metadata.  Return `dirty' when the SQL leaves
@@ -1218,6 +1228,16 @@ Derived from `clutch-db-list-tables'."
 Derived from `clutch-db-complete-tables'."
   (mapcar (lambda (name) (list :name name :type "TABLE"))
           (or (clutch-db-complete-tables conn prefix) '())))
+
+(cl-defgeneric clutch-db-find-table-entry (conn name)
+  "Return the exact table-like entry named NAME on CONN, or nil.")
+
+(cl-defmethod clutch-db-find-table-entry ((conn t) name)
+  "Find NAME exactly in the table-entry search results for CONN."
+  (cl-find-if
+   (lambda (entry)
+     (string= name (or (plist-get entry :name) "")))
+   (clutch-db-search-table-entries conn name)))
 
 (cl-defgeneric clutch-db-browseable-object-entries (conn)
   "Return the base browseable object entry list for CONN.

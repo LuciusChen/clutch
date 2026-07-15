@@ -418,6 +418,19 @@ authinfo, and PARAMS are explicit connection parameters."
                      '(("SCAN" "0" ("COUNT" 1000))
                        ("SCAN" "7" ("COUNT" 1000))))))))
 
+(ert-deftest clutch-db-test-redis-browseable-snapshot-scans-once ()
+  "Redis object discovery should not duplicate its initial bounded SCAN."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command cursor &rest args)
+                 (push (list command cursor args) calls)
+                 '("0" ("alpha")))))
+      (should
+       (equal (clutch-db-browseable-object-entries conn)
+              '((:name "alpha" :schema "0" :type "KEY"))))
+      (should (equal calls '(("SCAN" "0" ("COUNT" 1000))))))))
+
 (ert-deftest clutch-db-test-redis-scan-keys-is-bounded-and-deduplicated ()
   "Redis discovery should stop at its cap and ignore repeated SCAN keys."
   (let ((conn (make-clutch-redis-conn :client 'redis-client))
@@ -433,6 +446,72 @@ authinfo, and PARAMS are explicit connection parameters."
               ((symbol-function 'message) #'ignore))
       (should (equal (clutch-db-list-tables conn) '("alpha" "beta")))
       (should (equal (nreverse calls) '("0" "7"))))))
+
+(ert-deftest clutch-db-test-redis-scan-keys-bounds-empty-batches ()
+  "Sparse prefix discovery should stop at its SCAN round-trip budget."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client))
+        (clutch-redis--key-discovery-max-scan-batches 2)
+        calls
+        notice)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command cursor &rest _args)
+                 (pcase command
+                   ("SCAN"
+                    (push cursor calls)
+                    (pcase cursor
+                      ("0" '("7" nil))
+                      ("7" '("9" nil))
+                      (_ (ert-fail "Discovery exceeded its SCAN budget"))))
+                   (_ (ert-fail "Unexpected Redis command")))))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (should-not (clutch-db-search-table-entries conn "rare:"))
+      (should (equal (nreverse calls) '("0" "7")))
+      (should (string-match-p "stopped after 2 SCAN batches" notice)))))
+
+(ert-deftest clutch-db-test-redis-find-exact-key-without-scan ()
+  "Exact Redis key lookup should not depend on bounded SCAN coverage."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (push (cons command args) calls)
+                 (pcase command
+                   ("EXISTS" 1)
+                   (_ (ert-fail "Exact lookup unexpectedly scanned keys"))))))
+      (should
+       (equal (clutch-db-find-table-entry conn "remote:key")
+              '(:name "remote:key" :schema "0" :type "KEY")))
+      (should (equal calls '(("EXISTS" "remote:key")))))))
+
+(ert-deftest clutch-db-test-redis-find-missing-key-uses-one-command ()
+  "Missing exact Redis keys should return nil after one EXISTS command."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (push (cons command args) calls)
+                 0)))
+      (should-not (clutch-db-find-table-entry conn "missing:key"))
+      (should (equal calls '(("EXISTS" "missing:key")))))))
+
+(ert-deftest clutch-db-test-redis-prefix-search-keeps-sibling-keys ()
+  "Redis prefix search should not collapse to an existing exact key."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (push (cons command args) calls)
+                 (pcase command
+                   ("SCAN" '("0" ("cache" "cache:1")))
+                   (_ (ert-fail "Prefix search used a non-SCAN command"))))))
+      (should
+       (equal (clutch-db-search-table-entries conn "cache")
+              '((:name "cache" :schema "0" :type "KEY")
+                (:name "cache:1" :schema "0" :type "KEY"))))
+      (should
+       (equal calls '(("SCAN" "0" "MATCH" "cache*" "COUNT" 1000)))))))
 
 (ert-deftest clutch-db-test-redis-key-entry-metadata-includes-value-type ()
   "Redis key metadata should include the value type for annotations."
@@ -1749,6 +1828,18 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (= (clutch-db-port conn) 27018))
       (should (equal (clutch-db-user conn) "reporter")))))
 
+(ert-deftest clutch-db-test-mongodb-endpoint-metadata-supports-older-client-api ()
+  "Optional endpoint accessors should fall back to configured parameters."
+  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'mongodb-client)))
+    (setf (clutch-mongodb-conn-params conn)
+          '(:host "legacy.internal" :port 27019 :user "legacy-user"))
+    (cl-letf (((symbol-function 'mongodb-connection-host) nil)
+              ((symbol-function 'mongodb-connection-port) nil)
+              ((symbol-function 'mongodb-connection-username) nil))
+      (should (equal (clutch-db-host conn) "legacy.internal"))
+      (should (= (clutch-db-port conn) 27019))
+      (should (equal (clutch-db-user conn) "legacy-user")))))
+
 (ert-deftest clutch-db-test-mongodb-object-browse-query-uses-helper-syntax ()
   "Native MongoDB should provide object browsing syntax from the adapter."
   (let ((conn (clutch-db-test--make-mongodb-conn)))
@@ -1767,7 +1858,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (eq feature 'mongodb)))
               ((symbol-function 'fboundp)
                (lambda (symbol)
-                 (not (eq symbol 'mongodb-connection-host))))
+                 (not (eq symbol 'mongodb-find-command))))
               ((symbol-function 'locate-library)
                (lambda (library)
                  (and (equal library "mongodb") "/tmp/mongodb.el")))
@@ -1779,7 +1870,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                :type 'clutch-db-error)))
         (should (string-match-p "requires current mongodb.el public API"
                                 (error-message-string err)))
-        (should (string-match-p "mongodb-connection-host"
+        (should (string-match-p "mongodb-find-command"
                                 (error-message-string err))))
       (should-not loaded))))
 
@@ -3082,6 +3173,14 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (when expected-key
         (should (eq (clutch-db-backend-key conn) expected-key)))
       (should (equal (clutch-db-display-name conn) expected-name)))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-keyword-probe-keeps-default-sql-product ()
+  "Oracle identifier rendering should not change the global SQL dialect."
+  (let ((default-product (default-value 'sql-product))
+        (clutch-jdbc--oracle-display-keyword-cache
+         (make-hash-table :test 'equal)))
+    (should (clutch-jdbc--oracle-display-keyword-p "SELECT"))
+    (should (eq (default-value 'sql-product) default-product))))
 
 ;;;; Unit tests — ClickHouse driver support
 

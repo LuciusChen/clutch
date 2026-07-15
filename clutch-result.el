@@ -2663,14 +2663,11 @@ to preserve the existing copy/export UPDATE behavior."
   (let* ((details (or (clutch--ensure-column-details clutch-connection table t)
                       (user-error "Cannot %s: source column metadata is unavailable"
                                   op)))
-         (detail-map
-          (cl-loop for detail in details
-                   collect (cons (plist-get detail :name) detail)))
          (invalid (cl-loop for cidx in col-indices
                            for col-name = (nth cidx clutch--result-columns)
-                           for source-column =
-                           (clutch-result--writable-source-column cidx op)
-                           for detail = (cdr (assoc source-column detail-map))
+                           for detail =
+                           (clutch-result--writable-source-detail
+                            table cidx op details)
                            unless (and detail (not (plist-get detail :generated)))
                            collect col-name)))
     (when invalid

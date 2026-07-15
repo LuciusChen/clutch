@@ -1176,19 +1176,23 @@ Return a plist with :message, :summary, and :display-summary."
     (consp (clutch-db-sql-statement-breaks
             text (eq clutch--conn-sql-product 'postgres)))))
 
-(defun clutch--preview-sql-buffer (sql)
-  "Display SQL in the *clutch-preview* buffer."
+(defun clutch--preview-sql-buffer (sql &optional product)
+  "Display SQL in the *clutch-preview* buffer using SQL PRODUCT."
   (let ((buf (get-buffer-create "*clutch-preview*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
+        (unless (derived-mode-p 'sql-mode)
+          (sql-mode))
+        (when (and product
+                   (assq product sql-product-alist)
+                   (not (and (local-variable-p 'sql-product)
+                             (eq sql-product product))))
+          (make-local-variable 'sql-product)
+          (sql-set-product product))
         (erase-buffer)
         (insert sql)
         (goto-char (point-min))
-        (if (derived-mode-p 'sql-mode)
-            (setq buffer-read-only t)
-          (when (fboundp 'sql-mode)
-            (sql-mode))
-          (setq buffer-read-only t))))
+        (setq buffer-read-only t)))
     (pop-to-buffer buf)))
 
 ;;;###autoload (autoload 'clutch-preview-execution-sql "clutch" nil t)
@@ -1207,7 +1211,8 @@ Return a plist with :message, :summary, and :display-summary."
              (string-trim (buffer-substring-no-properties beg end)))))))
     (when (or (null sql) (string-empty-p sql))
       (user-error "No SQL to preview"))
-    (clutch--preview-sql-buffer sql)))
+    (clutch--preview-sql-buffer
+     sql (or clutch--conn-sql-product sql-product))))
 
 ;;;; Interactive commands
 

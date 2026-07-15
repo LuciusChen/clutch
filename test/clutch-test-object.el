@@ -431,21 +431,34 @@ document connection."
 
 (ert-deftest clutch-test-object-show-ddl-or-source-derives-oracle-sql-product-from-backend ()
   "Object definition buffers should use Oracle font-lock when backend is oracle."
-  (let (captured-product)
-    (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-              ((symbol-function 'clutch-db-object-definition)
-               (lambda (_conn _entry) "CREATE TABLE demo_tasks (id NUMBER)"))
-              ((symbol-function 'sql-mode) #'ignore)
-              ((symbol-function 'sql-set-product)
-               (lambda (product) (setq captured-product product)))
-              ((symbol-function 'font-lock-ensure) #'ignore)
-              ((symbol-function 'pop-to-buffer) (lambda (&rest _args) nil)))
-      (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn)
-        (setq-local clutch--connection-params '(:backend oracle))
-        (setq-local clutch--conn-sql-product nil)
-        (clutch-object-show-ddl-or-source '(:name "DEMO_TASKS" :type "TABLE"))))
-    (should (eq captured-product 'oracle))))
+  (let ((default-product (default-value 'sql-product))
+        object-buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                  ((symbol-function 'clutch-db-object-definition)
+                   (lambda (_conn _entry)
+                     "SELECT NVL(name, 0) FROM DUAL"))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args)
+                     (setq object-buffer buf)
+                     buf)))
+          (with-temp-buffer
+            (setq-local clutch-connection 'fake-conn)
+            (setq-local clutch--connection-params '(:backend oracle))
+            (setq-local clutch--conn-sql-product nil)
+            (clutch-object-show-ddl-or-source
+             '(:name "DEMO_TASKS" :type "TABLE")))
+          (with-current-buffer object-buffer
+            (should (local-variable-p 'sql-product))
+            (should (eq sql-product 'oracle))
+            (should (equal mode-name "SQL[Oracle]"))
+            (goto-char (point-min))
+            (search-forward "NVL")
+            (should (eq (get-text-property (match-beginning 0) 'face)
+                        'font-lock-builtin-face)))
+          (should (eq (default-value 'sql-product) default-product)))
+      (when (buffer-live-p object-buffer)
+        (kill-buffer object-buffer)))))
 
 (ert-deftest clutch-test-object-show-ddl-or-source-pretty-prints-mongodb-json ()
   "MongoDB object definition buffers should display formatted JSON metadata."
@@ -1232,6 +1245,34 @@ document connection."
       (when scheduled
         (should (equal (car scheduled) clutch-object-warmup-idle-delay-seconds))))))
 
+(ert-deftest clutch-test-object-entries-refresh-uses-browseable-contract ()
+  "Full refresh should preserve backend-specific browseable snapshot bounds."
+  (let ((browseable-calls 0)
+        categories
+        stored)
+    (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
+               (lambda (_conn)
+                 (cl-incf browseable-calls)
+                 '((:name "cache:1" :type "KEY"))))
+              ((symbol-function 'clutch-db-list-table-entries)
+               (lambda (&rest _)
+                 (ert-fail "refresh bypassed browseable object contract")))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (&rest _)
+                 (ert-fail "refresh repeated empty-prefix object search")))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (_conn category)
+                 (push category categories)
+                 nil))
+              ((symbol-function 'clutch--store-object-cache)
+               (lambda (_conn entries)
+                 (setq stored entries))))
+      (should (equal (clutch--object-entries 'fake-conn t)
+                     '((:name "cache:1" :type "KEY"))))
+      (should (= browseable-calls 1))
+      (should (equal (nreverse categories) clutch--object-categories))
+      (should (equal stored '((:name "cache:1" :type "KEY")))))))
+
 (ert-deftest clutch-test-safe-completion-call-records-debug-event-on-db-errors ()
   "Recoverable completion metadata errors should surface in the debug buffer."
   (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db")))
@@ -1361,6 +1402,30 @@ document connection."
                        :identity "OID:1")))
       (should (= (length captured) 2))
       (should-not (equal (car captured) (cadr captured))))))
+
+(ert-deftest clutch-test-object-entry-reader-resolves-exact-key-value-input ()
+  "Key-value readers should validate an exact key beyond their snapshot once."
+  (let (searched)
+    (cl-letf (((symbol-function 'clutch-db-backend-key)
+               (lambda (_conn) 'redis))
+              ((symbol-function 'clutch-backend-data-model)
+               (lambda (_backend) 'key-value))
+              ((symbol-function 'clutch-db-find-table-entry)
+               (lambda (_conn name)
+                 (push name searched)
+                 '(:name "cache:9000" :type "KEY" :schema "0")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection _predicate require-match &rest _args)
+                 (should-not require-match)
+                 (should (member "cache:1" (funcall collection "cache:" nil t)))
+                 (should-not searched)
+                 "cache:9000")))
+      (should
+       (equal
+        (clutch--object-entry-reader
+         'fake-conn "Object: " '((:name "cache:1" :type "KEY" :schema "0")))
+        '(:name "cache:9000" :type "KEY" :schema "0")))
+      (should (equal searched '("cache:9000"))))))
 
 (ert-deftest clutch-test-object-entry-reader-affixation-enriches-bounded-metadata ()
   "Object reader affixation should enrich a bounded candidate batch."
@@ -1500,6 +1565,41 @@ document connection."
        :run (lambda (&rest _)
               (setq resolved clutch--object-dispatch-entry)))
       (should (null resolved)))))
+
+(ert-deftest clutch-test-embark-resolves-exact-key-value-input ()
+  "Embark should resolve a free exact key instead of falling back to point."
+  (let ((clutch--object-completion-entry-map
+         (make-hash-table :test 'equal))
+        (entry '(:name "remote:key" :type "KEY" :schema "0"))
+        resolved
+        looked-up)
+    (puthash :clutch-resolver
+             (lambda (name)
+               (setq looked-up (list 'redis-conn name))
+               entry)
+             clutch--object-completion-entry-map)
+    (clutch--embark-with-resolved-entry
+     :target "remote:key"
+     :run (lambda (&rest _)
+            (setq resolved clutch--object-dispatch-entry)))
+    (should (equal looked-up '(redis-conn "remote:key")))
+    (should (equal resolved entry))
+    (should-not clutch--object-completion-entry-map)))
+
+(ert-deftest clutch-test-embark-rejects-missing-key-value-input ()
+  "Embark should reject a free key that its session resolver cannot find."
+  (let ((clutch--object-completion-entry-map
+         (make-hash-table :test 'equal))
+        ran)
+    (puthash :clutch-resolver (lambda (_name) nil)
+             clutch--object-completion-entry-map)
+    (should-error
+     (clutch--embark-with-resolved-entry
+      :target "missing:key"
+      :run (lambda (&rest _) (setq ran t)))
+     :type 'user-error)
+    (should-not ran)
+    (should-not clutch--object-completion-entry-map)))
 
 (ert-deftest clutch-test-resolve-object-entry-prefers-dispatch-entry ()
   "Resolution should prefer dispatch entry over point matches."

@@ -64,6 +64,12 @@ lists.  Stop before those lists can grow without bound."
   :type 'integer
   :group 'clutch)
 
+(defconst clutch-redis--key-scan-count 1000
+  "COUNT hint used by Redis key discovery SCAN calls.")
+
+(defconst clutch-redis--key-discovery-max-scan-batches 8
+  "Maximum SCAN round trips performed by one Redis key discovery call.")
+
 ;;;; redis.el API boundary
 
 (defconst clutch-redis--required-redis-functions
@@ -425,7 +431,7 @@ lists.  Stop before those lists can grow without bound."
   (or (clutch-db-database conn) "0"))
 
 (defun clutch-redis--scan-keys (conn &optional pattern)
-  "Return keys from Redis CONN matching PATTERN, up to the discovery limit.
+  "Return keys from Redis CONN matching PATTERN within discovery budgets.
 Duplicate keys permitted by Redis `SCAN' are removed while preserving their
 first-seen order."
   (unless (and (integerp clutch-redis-key-discovery-limit)
@@ -436,32 +442,45 @@ first-seen order."
         (seen (make-hash-table :test 'equal))
         keys
         (key-count 0)
+        (scan-batches 0)
         truncated)
     (while (and (not truncated)
-                (progn
-                  (pcase-let* ((response
-                                (if pattern
-                                    (redis-command client "SCAN" cursor "MATCH"
-                                                   pattern "COUNT" 1000)
-                                  (redis-command client "SCAN" cursor "COUNT" 1000)))
-                               (`(,next-cursor ,batch) response))
-                    (setq cursor (clutch-redis--string-value next-cursor))
-                    (dolist (raw-key batch)
-                      (let ((key (clutch-redis--string-value raw-key)))
-                        (unless (gethash key seen)
-                          (if (< key-count clutch-redis-key-discovery-limit)
-                              (progn
-                                (puthash key t seen)
-                                (push key keys)
-                                (setq key-count (1+ key-count)))
-                            (setq truncated t)))))
-                    (when (and (not (string= cursor "0"))
-                               (>= key-count clutch-redis-key-discovery-limit))
-                      (setq truncated t)))
-                  (not (string= cursor "0")))))
-    (when truncated
-      (message "Redis key discovery stopped at %d keys; narrow the prefix to see more"
-               clutch-redis-key-discovery-limit))
+                (< scan-batches clutch-redis--key-discovery-max-scan-batches)
+                (or (= scan-batches 0) (not (string= cursor "0"))))
+      (pcase-let* ((response
+                    (if pattern
+                        (redis-command
+                         client "SCAN" cursor "MATCH" pattern "COUNT"
+                         clutch-redis--key-scan-count)
+                      (redis-command
+                       client "SCAN" cursor "COUNT"
+                       clutch-redis--key-scan-count)))
+                   (`(,next-cursor ,batch) response))
+        (setq scan-batches (1+ scan-batches)
+              cursor (clutch-redis--string-value next-cursor))
+        (dolist (raw-key batch)
+          (let ((key (clutch-redis--string-value raw-key)))
+            (unless (gethash key seen)
+              (if (< key-count clutch-redis-key-discovery-limit)
+                  (progn
+                    (puthash key t seen)
+                    (push key keys)
+                    (setq key-count (1+ key-count)))
+                (setq truncated 'key-limit)))))
+        (when (and (not (string= cursor "0"))
+                   (>= key-count clutch-redis-key-discovery-limit))
+          (setq truncated 'key-limit))))
+    (when (and (not truncated) (not (string= cursor "0")))
+      (setq truncated 'scan-budget))
+    (pcase truncated
+      ('key-limit
+       (message
+        "Redis key discovery stopped at %d keys; type an exact key or use SCAN for more"
+        clutch-redis-key-discovery-limit))
+      ('scan-budget
+       (message
+        "Redis key discovery stopped after %d SCAN batches; type an exact key or use SCAN"
+        scan-batches)))
     (nreverse keys)))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-redis-conn))
@@ -482,15 +501,28 @@ first-seen order."
               (clutch-redis--key-entry conn key))
             (clutch-redis--scan-keys conn))))
 
+(cl-defmethod clutch-db-browseable-object-entries ((conn clutch-redis-conn))
+  "Return one bounded Redis key snapshot for CONN."
+  (clutch-db-list-table-entries conn))
+
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-redis-conn) prefix)
   "Return Redis key entries for CONN matching PREFIX."
-  (let ((pattern (if (string-empty-p prefix)
-                     "*"
-                   (concat prefix "*"))))
-    (clutch-redis--with-redis-errors
+  (clutch-redis--with-redis-errors
+    (let ((keys
+           (clutch-redis--scan-keys
+            conn
+            (if (string-empty-p prefix) "*" (concat prefix "*")))))
       (mapcar (lambda (key)
                 (clutch-redis--key-entry conn key))
-              (clutch-redis--scan-keys conn pattern)))))
+              keys))))
+
+(cl-defmethod clutch-db-find-table-entry ((conn clutch-redis-conn) name)
+  "Return the Redis key entry exactly matching NAME on CONN."
+  (clutch-redis--with-redis-errors
+    (when (= (redis-command (clutch-redis-conn-client conn)
+                            "EXISTS" name)
+             1)
+      (clutch-redis--key-entry conn name))))
 
 (cl-defmethod clutch-db-complete-tables ((conn clutch-redis-conn) prefix)
   "Return Redis key names for CONN matching PREFIX."

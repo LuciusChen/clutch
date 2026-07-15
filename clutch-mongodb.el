@@ -152,9 +152,6 @@ Emacs result contract from materializing an unbounded collection."
     mongodb-find
     mongodb-find-command
     mongodb-insert
-    mongodb-connection-host
-    mongodb-connection-port
-    mongodb-connection-username
     mongodb-list-collection-docs
     mongodb-list-collections
     mongodb-list-indexes
@@ -1959,15 +1956,21 @@ of top-level field names for field-scoped snippets."
 
 (cl-defmethod clutch-db-user ((conn clutch-mongodb-conn))
   "Return the effective MongoDB user for CONN, if any."
-  (mongodb-connection-username (clutch-mongodb-conn-client conn)))
+  (if (fboundp 'mongodb-connection-username)
+      (mongodb-connection-username (clutch-mongodb-conn-client conn))
+    (plist-get (clutch-mongodb-conn-params conn) :user)))
 
 (cl-defmethod clutch-db-host ((conn clutch-mongodb-conn))
   "Return the effective MongoDB host for CONN, if any."
-  (mongodb-connection-host (clutch-mongodb-conn-client conn)))
+  (if (fboundp 'mongodb-connection-host)
+      (mongodb-connection-host (clutch-mongodb-conn-client conn))
+    (plist-get (clutch-mongodb-conn-params conn) :host)))
 
 (cl-defmethod clutch-db-port ((conn clutch-mongodb-conn))
   "Return the effective MongoDB port for CONN, if any."
-  (mongodb-connection-port (clutch-mongodb-conn-client conn)))
+  (if (fboundp 'mongodb-connection-port)
+      (mongodb-connection-port (clutch-mongodb-conn-client conn))
+    (plist-get (clutch-mongodb-conn-params conn) :port)))
 
 (cl-defmethod clutch-db-database ((conn clutch-mongodb-conn))
   "Return the current MongoDB database for CONN."

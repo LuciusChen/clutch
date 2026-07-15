@@ -189,8 +189,39 @@ the SELECT projection cannot be proven writable."
       (user-error "Cannot %s: result column %s is not a direct source column"
                   op display-name))
      (t
-      (user-error "Cannot %s: writable source for result column %s is unknown"
+     (user-error "Cannot %s: writable source for result column %s is unknown"
                   op display-name)))))
+
+(defun clutch-result--writable-source-detail (table cidx op &optional details)
+  "Return canonical source-column metadata for CIDX in TABLE during OP.
+An exact metadata name wins.  Otherwise, accept a single case-insensitive
+match so unquoted identifiers can be reconciled with backend canonical case.
+Return nil when no metadata column matches, and reject ambiguous matches."
+  (let* ((source-column (clutch-result--writable-source-column cidx op))
+         (details
+          (or details
+              (clutch--ensure-column-details clutch-connection table t)
+              (user-error "Cannot %s: source column metadata is unavailable"
+                          op)))
+         (exact
+          (cl-find-if
+           (lambda (detail)
+             (string= (or (plist-get detail :name) "") source-column))
+           details)))
+    (or exact
+        (let ((matches
+               (cl-remove-if-not
+                (lambda (detail)
+                  (string-equal-ignore-case
+                   (or (plist-get detail :name) "") source-column))
+                details)))
+          (pcase matches
+            ('nil nil)
+            (`(,match) match)
+            (_
+             (user-error
+              "Cannot %s: source column %s is ambiguous in table metadata"
+              op source-column)))))))
 
 (defun clutch-result--field-metadata-tags (col-def detail)
   "Return short metadata tags for COL-DEF and DETAIL."
@@ -569,11 +600,13 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                               (user-error "No row at point")))
              (original (nth cidx display-row))
              (col-name (nth cidx clutch--result-columns))
-             (source-column
-              (clutch-result--writable-source-column cidx op))
              (col-def (nth cidx clutch--result-column-defs))
-             (detail (clutch-result--column-detail
-                      (current-buffer) source-column))
+             (detail
+              (or (clutch-result--writable-source-detail table cidx op)
+                  (user-error
+                   "Cannot %s: source column %s is missing from table metadata"
+                   op (clutch-result--writable-source-column cidx op))))
+             (source-column (plist-get detail :name))
              (original-state
               (cons (null original)
                     (if (null original)
@@ -593,6 +626,9 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                                :hscroll (window-hscroll win))))
              (edit-buf (get-buffer-create
                         (format "*clutch-edit: [%d].%s*" ridx col-name))))
+        (when (plist-get detail :generated)
+          (user-error "Cannot %s: source column %s is generated"
+                      op source-column))
         (with-current-buffer edit-buf
           (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
@@ -891,8 +927,16 @@ IDENTITY-VEC is the row identity vector, EDITS is a list of
                        conn row-identity identity-vec)))
       (dolist (edit edits)
         (let* ((cidx (car edit))
-               (col-name (clutch-result--writable-source-column
-                          cidx "build UPDATE")))
+               (op "build UPDATE")
+               (detail
+                (or (clutch-result--writable-source-detail table cidx op)
+                    (user-error
+                     "Cannot %s: source column %s is missing from table metadata"
+                     op (clutch-result--writable-source-column cidx op))))
+               (col-name (plist-get detail :name)))
+          (when (plist-get detail :generated)
+            (user-error "Cannot %s: source column %s is generated"
+                        op col-name))
           (push (format "%s = ?"
                         (clutch-db-escape-identifier conn col-name))
                 set-parts)
@@ -1030,25 +1074,27 @@ an affected row count other than one."
   "Execute INSERT-STMTS, UPDATE-STMTS, and DELETE-STMTS atomically."
   (let* ((all-stmts (append insert-stmts update-stmts delete-stmts))
          (multi-statement-p (> (length all-stmts) 1)))
-    (when multi-statement-p
-      (unless (clutch-db-manual-commit-p clutch-connection)
-        (user-error
-         "Cannot execute multiple staged statements in autocommit mode; disable autocommit first"))
-      (when (clutch--tx-dirty-p clutch-connection)
-        (user-error
-         "Cannot execute a staged batch inside a dirty transaction; commit or roll back first")))
-    (condition-case err
-        (progn
-          (dolist (stmt insert-stmts)
-            (clutch-result--execute-mutation-stmt stmt))
-          (dolist (stmt update-stmts)
-            (clutch-result--execute-mutation-stmt stmt t))
-          (dolist (stmt delete-stmts)
-            (clutch-result--execute-mutation-stmt stmt t)))
-      ((error quit)
-       (if multi-statement-p
-           (clutch-result--rollback-mutation-batch err)
-         (signal (car err) (cdr err)))))))
+    (cl-labels
+        ((execute-all ()
+           (dolist (stmt insert-stmts)
+             (clutch-result--execute-mutation-stmt stmt))
+           (dolist (stmt update-stmts)
+             (clutch-result--execute-mutation-stmt stmt t))
+           (dolist (stmt delete-stmts)
+             (clutch-result--execute-mutation-stmt stmt t))))
+      (cond
+       ((not multi-statement-p)
+        (execute-all))
+       ((not (clutch-db-manual-commit-p clutch-connection))
+        (clutch-db-call-with-atomic-batch clutch-connection #'execute-all))
+       (t
+        (when (clutch--tx-dirty-p clutch-connection)
+          (user-error
+           "Cannot execute a staged batch inside a dirty transaction; commit or roll back first"))
+        (condition-case err
+            (execute-all)
+          ((error quit)
+           (clutch-result--rollback-mutation-batch err))))))))
 
 ;;;###autoload
 (defun clutch-result-commit ()

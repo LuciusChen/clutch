@@ -173,11 +173,13 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
     (sqlserver  . (:display-name "SQL Server"
                   :default-port 1433
                   :support-level core
-                  :data-model relational))
+                  :data-model relational
+                  :sql-product ms))
     (db2        . (:display-name "DB2"
                   :default-port 50000
                   :support-level basic
-                  :data-model relational))
+                  :data-model relational
+                  :sql-product db2))
     (snowflake  . (:display-name "Snowflake"
                   :default-port 443
                   :support-level basic
@@ -185,7 +187,8 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
     (redshift   . (:display-name "Redshift"
                   :default-port 5439
                   :support-level basic
-                  :data-model relational))
+                  :data-model relational
+                  :sql-product postgres))
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
                   :support-level basic
@@ -1547,6 +1550,7 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
         (let ((keywordp
                (with-temp-buffer
                  (sql-mode)
+                 (make-local-variable 'sql-product)
                  (sql-set-product 'oracle)
                  (insert name)
                  (font-lock-ensure)

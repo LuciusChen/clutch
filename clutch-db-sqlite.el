@@ -37,8 +37,11 @@
 (declare-function sqlite-available-p "sqlite" ())
 (declare-function sqlite-open        "sqlite" (file))
 (declare-function sqlite-close       "sqlite" (db))
+(declare-function sqlite-commit      "sqlite" (db))
 (declare-function sqlite-execute     "sqlite" (db query &optional values))
 (declare-function sqlite-select      "sqlite" (db query &optional values return-type))
+(declare-function sqlite-rollback    "sqlite" (db))
+(declare-function sqlite-transaction "sqlite" (db))
 (declare-function sqlitep            "sqlite" (object))
 
 ;;;; Connection struct
@@ -162,6 +165,28 @@ Return a `clutch-db-result'."
             (clutch-db-sqlite--run-dml
              handle sql (clutch-db-param-values params))))
       (setf (clutch-db-sqlite-conn-busy conn) nil))))
+
+(cl-defmethod clutch-db-call-with-atomic-batch
+  ((conn clutch-db-sqlite-conn) function)
+  "Call FUNCTION inside a SQLite transaction on CONN."
+  (let ((handle (clutch-db-sqlite-conn-handle conn)))
+    (clutch-db--translate-library-error sqlite-error
+      (sqlite-transaction handle))
+    (condition-case original-error
+        (prog1 (funcall function)
+          (clutch-db--translate-library-error sqlite-error
+            (sqlite-commit handle)))
+      ((error quit)
+       (let (rollback-error)
+         (condition-case err
+             (clutch-db--translate-library-error sqlite-error
+               (sqlite-rollback handle))
+           (error (setq rollback-error err)))
+         (if rollback-error
+             (user-error "SQLite batch failed (%s); rollback also failed (%s)"
+                         (error-message-string original-error)
+                         (error-message-string rollback-error))
+           (signal (car original-error) (cdr original-error))))))))
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)
                                           base-sql page-num page-size

@@ -120,7 +120,8 @@ Recoverable database liveness-check failures are warned once and treated as
 Maps candidate strings to entry plists.  Replaced at the start of
 each `clutch--object-entry-reader' call so that Embark action
 hooks can resolve a target string back to an entry after the
-minibuffer has been quit.")
+minibuffer has been quit.  Key-value sessions also store their
+exact resolver under the internal `:clutch-resolver' key.")
 
 (defun clutch--object-entry-key (entry)
   "Return a stable identity key for object ENTRY."
@@ -428,8 +429,7 @@ When REFRESH is non-nil, bypass any cached discovery snapshot."
        (apply
         #'clutch--merge-object-entries
         (append
-         (list (clutch-db-list-table-entries conn)
-               (clutch-db-search-table-entries conn ""))
+         (list (clutch-db-browseable-object-entries conn))
          (mapcar (lambda (category)
                    (clutch-db-list-objects conn category))
                  clutch--object-categories))))
@@ -547,6 +547,9 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
          (entry-map (make-hash-table :test 'equal))
          (duplicate-counts (make-hash-table :test 'equal))
          (metadata-map (make-hash-table :test 'equal))
+         (key-value-p
+          (eq (clutch-backend-data-model (clutch-db-backend-key conn))
+              'key-value))
          candidates)
     (dolist (entry sorted)
       (puthash (plist-get entry :name)
@@ -599,12 +602,19 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
                         (cycle-sort-function . identity))
                     (complete-with-action action (candidate-list) str pred))))
       (setq clutch--object-completion-entry-map entry-map)
+      (when key-value-p
+        (puthash :clutch-resolver
+                 (lambda (name)
+                   (clutch-db-find-table-entry conn name))
+                 entry-map))
       (let ((choice
              (completing-read
               prompt
               #'complete
-              nil t initial-input)))
+              nil (not key-value-p) initial-input)))
         (or (gethash choice entry-map)
+            (and key-value-p
+                 (clutch-db-find-table-entry conn choice))
             (user-error "Unknown clutch object: %s" choice))))))
 
 (defun clutch--synonym-entry-p (entry)
@@ -971,8 +981,7 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
       (let ((inhibit-read-only t))
         (if (clutch-db-native-document-surface-p conn params)
             (clutch--json-display-mode)
-          (sql-mode)
-          (sql-set-product product))
+          (sql-mode))
         (clutch--bind-connection-context conn params product)
         (setq-local clutch-browser-current-object entry)
         (clutch--use-object-action-keymap)
@@ -1930,11 +1939,19 @@ the result to `clutch--object-dispatch-entry' so that action commands
 see the minibuffer candidate rather than the object at point.
 Clears the map after resolution to prevent stale cross-session matches."
   (let* ((map clutch--object-completion-entry-map)
-         (clutch--object-dispatch-entry
-          (when (and (stringp target) map)
-            (gethash target map))))
-    (setq clutch--object-completion-entry-map nil)
-    (when run (apply run rest))))
+         (resolver (and map (gethash :clutch-resolver map)))
+         (entry (and (stringp target) map (gethash target map))))
+    (unwind-protect
+        (progn
+          (when (and (not entry)
+                     (stringp target)
+                     resolver)
+            (setq entry
+                  (or (funcall resolver target)
+                      (user-error "Unknown clutch object: %s" target))))
+          (let ((clutch--object-dispatch-entry entry))
+            (when run (apply run rest))))
+      (setq clutch--object-completion-entry-map nil))))
 
 (defun clutch--embark-actions-keymap (&optional include-jump-target)
   "Return a keymap of clutch object actions for Embark.

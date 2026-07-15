@@ -20,13 +20,22 @@
   uses `clutch-switch-schema`; dedicated admin/index helpers, database
   aggregation, multi-document mutations, cursor `batchSize` / `comment`, and
   numeric/timestamp constructor aliases were removed.
+- Generated Redis hash Browse now requires Redis 6.2 or newer because bounded
+  sampling uses `HRANDFIELD`.  On older servers, issue `HSCAN` or `HGETALL`
+  manually instead.
 
 ### Fixed
 
 - Made staged SQL mutations fail closed: hidden row-identity columns are
   verified at their injected trailing positions, computed or uncertain
-  projections are read-only, and multi-statement batches cannot partially
-  commit through autocommit or an already-dirty manual transaction.
+  projections are read-only, writable identifiers are reconciled with
+  canonical backend metadata, and multi-statement batches cannot partially
+  commit.  SQLite batches use a real transaction; unsupported autocommit and
+  already-dirty manual transactions fail before execution.
+- Kept SQL dialect state local to each console, object definition, and preview
+  buffer.  Connection binding and rebinding now select or reset the product
+  deterministically, including Oracle, SQL Server, DB2, and Redshift mappings,
+  without changing the user's global `sql-product` default.
 - Updated the JDBC agent pin to 0.2.9.  The agent now poisons connections whose
   timed-out driver work does not stop, serializes each metadata session,
   redacts embedded JDBC URL credentials, validates exact protocol integers,
@@ -34,10 +43,11 @@
   before every query.  Disconnected logical connections no longer report live
   merely because the shared JVM is still running.
 - Bounded native MongoDB find results and Redis key discovery/generated
-  collection browsing.  MongoDB endpoint labels now use the protocol client's
-  normalized public metadata, and MongoDB/Redis object paths consistently
-  translate protocol failures to `clutch-db-error`.  Strictly bounded generated
-  Redis hash browsing uses `HRANDFIELD` and requires Redis 6.2 or newer.
+  collection browsing.  Redis discovery now has both key-count and SCAN-batch
+  limits, with exact key lookup beyond the initial object snapshot.  MongoDB
+  endpoint labels use public client metadata when available
+  while remaining compatible with older clients, and MongoDB/Redis object paths
+  consistently translate protocol failures to `clutch-db-error`.
 - Kept PostgreSQL dollar-quoted function bodies intact during statement
   selection, and stopped a permanently failing object-metadata category from
   retrying forever or starving later warmup categories.

@@ -806,14 +806,78 @@
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "REPORTS" :source-token "APP.reports"
                     :columns ("ID") :indices (0) :source-indices (0))))
-    (pcase-let ((`(,update-sql . ,_)
-                 (clutch-result--build-update-stmt
-                  "REPORTS" [7] '((1 . "ready")) '("ID" "STATUS") identity))
-                (`(,delete-sql . ,_)
-                 (clutch-result--build-delete-stmt-for-identity
-                  "REPORTS" [7] identity)))
-      (should (string-prefix-p "UPDATE APP.reports SET" update-sql))
-      (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql)))))
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table &optional _strict)
+                 '((:name "ID" :backend-type "NUMBER")
+                   (:name "STATUS" :backend-type "VARCHAR2")))))
+      (pcase-let ((`(,update-sql . ,_)
+                   (clutch-result--build-update-stmt
+                    "REPORTS" [7] '((1 . "ready")) '("ID" "STATUS") identity))
+                  (`(,delete-sql . ,_)
+                   (clutch-result--build-delete-stmt-for-identity
+                    "REPORTS" [7] identity)))
+        (should (string-prefix-p "UPDATE APP.reports SET" update-sql))
+        (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql))))))
+
+(ert-deftest clutch-test-update-canonicalizes-source-column-case ()
+  "Mutation SQL should quote the backend's canonical column spelling."
+  (let ((clutch-connection
+         (make-clutch-jdbc-conn :params '(:driver oracle)))
+        (clutch--result-columns '("name"))
+        (clutch--result-column-defs
+         '((:name "name" :source-column "name")))
+        (identity '(:kind primary-key :name "PRIMARY"
+                    :table "USERS" :columns ("ID") :indices (1))))
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table &optional _strict)
+                 '((:name "NAME" :backend-type "VARCHAR2")))))
+      (pcase-let ((`(,sql . ,_)
+                   (clutch-result--build-update-stmt
+                    "USERS" [7] '((0 . "Ada")) '("name") identity)))
+        (should (string-search "SET \"NAME\" = ?" sql))))))
+
+(ert-deftest clutch-test-update-uses-canonical-source-behind-alias ()
+  "Mutation SQL should not quote a display alias or raw identifier casing."
+  (let ((clutch-connection
+         (make-clutch-jdbc-conn :params '(:driver jdbc)))
+        (clutch--result-columns '("display_name"))
+        (clutch--result-column-defs
+         '((:name "display_name" :source-column "NAME")))
+        (identity '(:kind primary-key :name "PRIMARY"
+                    :table "users" :columns ("id") :indices (1))))
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table &optional _strict)
+                 '((:name "name" :backend-type "text")))))
+      (pcase-let ((`(,sql . ,_)
+                   (clutch-result--build-update-stmt
+                    "users" [7] '((0 . "Ada")) '("display_name") identity)))
+        (should (string-search "SET \"name\" = ?" sql))
+        (should-not (string-search "display_name" sql))
+        (should-not (string-search "\"NAME\"" sql))))))
+
+(ert-deftest clutch-test-source-column-metadata-match-is-safe ()
+  "Canonical source lookup should prefer exact names and reject ambiguity."
+  (let ((clutch-connection 'fake-conn)
+        (clutch--result-columns '("display"))
+        (clutch--result-column-defs '((:source-column "Foo"))))
+    (should
+     (equal (plist-get
+             (clutch-result--writable-source-detail
+              "items" 0 "test" '((:name "foo") (:name "Foo")))
+             :name)
+            "Foo"))
+    (setq clutch--result-column-defs '((:source-column "FOO")))
+    (should-error
+     (clutch-result--writable-source-detail
+      "items" 0 "test" '((:name "foo") (:name "Foo")))
+     :type 'user-error)
+    (setq clutch--result-column-defs '((:source-column "name")))
+    (should
+     (equal (plist-get
+             (clutch-result--writable-source-detail
+              "items" 0 "test" '((:name "NAME")))
+             :name)
+            "NAME"))))
 
 (ert-deftest clutch-test-row-identity-finalize-separates-hidden-and-source-pk ()
   "Hidden locator indices and visible source PK indices should stay distinct."
@@ -3981,6 +4045,39 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should-not executed)
         (should (equal clutch--pending-inserts '(first second)))))))
 
+(ert-deftest clutch-test-commit-sqlite-autocommit-batch-is-atomic ()
+  "SQLite should commit or roll back a staged multi-row batch as a unit."
+  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+    (unwind-protect
+        (progn
+          (clutch-db-init-connection conn)
+          (clutch-db-query
+           conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
+          (with-temp-buffer
+            (setq-local clutch-connection conn)
+            (clutch-result--execute-mutation-batch
+             '(("INSERT INTO demo (id, name) VALUES (?, ?)" 1 "a")
+               ("INSERT INTO demo (id, name) VALUES (?, ?)" 2 "b"))
+             nil nil))
+          (should
+           (equal (clutch-db-result-rows
+                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
+                  '((1 "a") (2 "b"))))
+          (with-temp-buffer
+            (setq-local clutch-connection conn)
+            (should-error
+             (clutch-result--execute-mutation-batch
+              '(("INSERT INTO demo (id, name) VALUES (?, ?)" 3 "c")
+                ("INSERT INTO demo (id, name) VALUES (?, ?)" 1 "duplicate"))
+              nil nil)
+             :type 'user-error))
+          (should
+           (equal (clutch-db-result-rows
+                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
+                  '((1 "a") (2 "b")))))
+      (clutch-db-disconnect conn))))
+
 ;;;; Edit — validation
 
 (ert-deftest clutch-test-insert-local-validation-updates-inline-error ()
@@ -4169,7 +4266,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (clutch--goto-cell 1 4)
             (set-window-hscroll (selected-window) 40)
             (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (&rest _) nil))
+                       (lambda (&rest _)
+                         '((:name "id") (:name "name") (:name "city")
+                           (:name "note") (:name "flag"))))
                       ((symbol-function 'window-body-width)
                        (lambda (&rest _) 40)))
               (clutch-result-edit-cell))
@@ -4216,7 +4315,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                    clutch-full-value "before")))
           (goto-char (point-min))
           (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                     (lambda (&rest _) nil))
+                     (lambda (&rest _) '((:name "name"))))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args)
                        (setq edit-buf buf)
@@ -6165,12 +6264,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   clutch--pending-deletes
                   (list (vector 2)))
       (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
+                ((symbol-function 'clutch--ensure-column-details)
+                 (lambda (&rest _)
+                   '((:name "id") (:name "name") (:name "note"))))
                 ((symbol-function 'clutch-db-escape-identifier)
                  (lambda (_conn name) (format "`%s`" name)))
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'clutch--preview-sql-buffer)
-                 (lambda (sql) (setq captured sql))))
+                 (lambda (sql &optional _product) (setq captured sql))))
         (clutch-preview-execution-sql)
         (should (equal captured
                        (mapconcat #'identity
@@ -6385,7 +6487,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (lambda (sql &optional conn)
                        (setq captured (list sql conn))))
                     ((symbol-function 'clutch--preview-sql-buffer)
-                     (lambda (sql)
+                     (lambda (sql &optional _product)
                        (setq captured sql))))
             (pcase command
               ('rerun
@@ -6405,10 +6507,33 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (search-forward "third")
     (let (captured)
       (cl-letf (((symbol-function 'clutch--preview-sql-buffer)
-                 (lambda (sql) (setq captured sql))))
+                 (lambda (sql &optional _product) (setq captured sql))))
         (clutch-preview-execution-sql)
         (should (equal captured
                        "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
+
+(ert-deftest clutch-test-preview-sql-buffer-uses-local-connection-product ()
+  "SQL previews should use their source dialect without changing the default."
+  (let ((default-product (default-value 'sql-product))
+        preview-buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer)
+                   (lambda (buf &rest _args)
+                     (setq preview-buffer buf)
+                     buf)))
+          (clutch--preview-sql-buffer
+           "SELECT NVL(name, 0) FROM DUAL" 'oracle)
+          (with-current-buffer preview-buffer
+            (font-lock-ensure)
+            (should (local-variable-p 'sql-product))
+            (should (eq sql-product 'oracle))
+            (goto-char (point-min))
+            (search-forward "NVL")
+            (should (eq (get-text-property (match-beginning 0) 'face)
+                        'font-lock-builtin-face)))
+          (should (eq (default-value 'sql-product) default-product)))
+      (when (buffer-live-p preview-buffer)
+        (kill-buffer preview-buffer)))))
 
 (ert-deftest clutch-test-statement-breaks-ignore-postgresql-dollar-quotes ()
   "Dollar-quoted function bodies should remain one executable statement."

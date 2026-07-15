@@ -55,10 +55,12 @@ joins, row identity, transaction workflow, pub/sub loops, cluster management, or
 stream consumer workflows.
 
 Key discovery collects at most =clutch-redis-key-discovery-limit= unique keys
-(default 5000) per operation.  Generated hash/list/set/zset/stream browse
-commands request at most =clutch-redis-browse-limit= elements (default 200).
-Use a narrower completion prefix or issue explicit Redis scan/range commands
-when more data is needed.
+(default 5000) and performs at most eight SCAN batches per operation.  Generated
+hash/list/set/zset/stream browse commands request at most
+=clutch-redis-browse-limit= elements (default 200).  The object picker keeps
+completion local to its bounded snapshot; type an exact key and submit it to
+perform one remote existence check beyond that snapshot.  Use explicit Redis
+scan/range commands for broader discovery.
 
 Bounded generated hash browsing uses =HRANDFIELD= and therefore requires Redis
 6.2 or newer.  Manual =SCAN=-family commands remain available; when Redis
