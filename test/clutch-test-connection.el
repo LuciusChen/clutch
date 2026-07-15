@@ -1367,40 +1367,31 @@
     (pcase-let ((`(,params ,expected) case))
       (should (eq (clutch--effective-sql-product params) expected)))))
 
-(ert-deftest clutch-test-bind-connection-context-syncs-sql-font-lock-product ()
-  "A SQL query buffer should highlight the dialect of its bound connection."
+(ert-deftest clutch-test-bind-connection-context-syncs-local-sql-product ()
+  "Connection rebinding should rebuild local SQL dialect state."
   (let ((default-product (default-value 'sql-product)))
     (with-temp-buffer
       (clutch-mode)
+      (font-lock-mode 1)
       (insert "SELECT NVL(name, 0) FROM DUAL;")
       (font-lock-ensure)
       (goto-char (point-min))
       (search-forward "NVL")
-      (should-not (get-text-property (match-beginning 0) 'face))
-      (clutch--bind-connection-context nil '(:backend oracle) 'oracle)
-      (font-lock-ensure)
-      (should (local-variable-p 'sql-product))
-      (should (eq sql-product 'oracle))
-      (should (equal mode-name "clutch"))
-      (should (get-text-property (match-beginning 0) 'face)))
+      (let ((nvl-pos (match-beginning 0)))
+        (should-not (get-text-property nvl-pos 'face))
+        (clutch--bind-connection-context nil '(:backend oracle) 'oracle)
+        (font-lock-ensure)
+        (should (local-variable-p 'sql-product))
+        (should (eq sql-product 'oracle))
+        (should (equal mode-name "clutch"))
+        (should (get-text-property nvl-pos 'face))
+        (clutch--bind-connection-context nil '(:backend jdbc))
+        (font-lock-ensure)
+        (should-not clutch--conn-sql-product)
+        (should (eq sql-product default-product))
+        (should (equal mode-name "clutch"))
+        (should-not (get-text-property nvl-pos 'face))))
     (should (eq (default-value 'sql-product) default-product))))
-
-(ert-deftest clutch-test-bind-connection-context-clears-stale-sql-product ()
-  "Rebinding to generic JDBC should not retain the previous SQL dialect."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "SELECT NVL(name, 0) FROM DUAL;")
-    (clutch--bind-connection-context nil '(:backend oracle) 'oracle)
-    (should (eq clutch--conn-sql-product 'oracle))
-    (should (eq sql-product 'oracle))
-    (clutch--bind-connection-context nil '(:backend jdbc))
-    (font-lock-ensure)
-    (should-not clutch--conn-sql-product)
-    (should (eq sql-product (default-value 'sql-product)))
-    (should (equal mode-name "clutch"))
-    (goto-char (point-min))
-    (search-forward "NVL")
-    (should-not (get-text-property (match-beginning 0) 'face))))
 
 (ert-deftest clutch-test-build-conn-errors-without-backend ()
   "Building a connection should fail fast when :backend is missing."
@@ -1734,10 +1725,10 @@
                      (setq live nil))))
           (with-current-buffer owner
             (clutch-mode)
-            (clutch--bind-connection-context conn params 'pg))
+            (clutch--bind-connection-context conn params 'postgres))
           (with-current-buffer result
             (clutch-result-mode)
-            (clutch--bind-connection-context conn params 'pg)
+            (clutch--bind-connection-context conn params 'postgres)
             (setq-local clutch--result-rows '((1))
                         clutch--filtered-rows nil
                         clutch--page-current 0
@@ -2675,7 +2666,6 @@
                            (lambda (_conn _entry)
                              "CREATE TABLE demo (id INT)"))
                           ((symbol-function 'sql-mode) #'ignore)
-                          ((symbol-function 'sql-set-product) #'ignore)
                           ((symbol-function 'font-lock-ensure) #'ignore)
                           ((symbol-function 'pop-to-buffer)
                            (lambda (buf &rest _args)
@@ -3436,6 +3426,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
             (clutch--open-query-console name new-params new-params)
             (setq opened (current-buffer)))
           (should-not (eq opened old-buffer))
+          ;; Global font lock skips buffers hidden during mode initialization.
+          (should-not (string-prefix-p " " (buffer-name opened)))
           (with-current-buffer old-buffer
             (should (eq clutch-connection 'old-conn))
             (should (equal clutch--connection-params old-params))))

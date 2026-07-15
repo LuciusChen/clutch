@@ -370,7 +370,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
                          (clutch--build-conn params))
                      (clutch--build-conn params)))
              (buf (or existing
-                      (generate-new-buffer " *clutch-console*")))
+                      (generate-new-buffer "*clutch-console*")))
              (is-new (zerop (buffer-size buf))))
         (select-window (or (clutch--console-window-for buf) (selected-window)))
         (switch-to-buffer buf)
@@ -1184,10 +1184,9 @@ Return a plist with :message, :summary, and :display-summary."
         (unless (derived-mode-p 'sql-mode)
           (sql-mode))
         (when (and product
-                   (assq product sql-product-alist)
                    (not (and (local-variable-p 'sql-product)
                              (eq sql-product product))))
-          (make-local-variable 'sql-product)
+          (setq-local sql-product product)
           (sql-set-product product))
         (erase-buffer)
         (insert sql)

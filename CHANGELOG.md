@@ -32,10 +32,11 @@
   canonical backend metadata, and multi-statement batches cannot partially
   commit.  SQLite batches use a real transaction; unsupported autocommit and
   already-dirty manual transactions fail before execution.
-- Kept SQL dialect state local to each console, object definition, and preview
-  buffer.  Connection binding and rebinding now select or reset the product
-  deterministically, including Oracle, SQL Server, DB2, and Redshift mappings,
-  without changing the user's global `sql-product` default.
+- Kept SQL highlighting enabled when query consoles are created, with dialect
+  state local to each console, object definition, and preview buffer.
+  Connection binding and rebinding select or reset the product deterministically,
+  including Oracle, SQL Server, DB2, and Redshift mappings, without changing the
+  user's global `sql-product` default.
 - Updated the JDBC agent pin to 0.2.9.  The agent now poisons connections whose
   timed-out driver work does not stop, serializes each metadata session,
   redacts embedded JDBC URL credentials, validates exact protocol integers,

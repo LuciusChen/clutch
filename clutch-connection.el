@@ -43,7 +43,6 @@
 (declare-function sql-set-product "sql" (product))
 (declare-function tramp-rpc-controlmaster-options "tramp-rpc" (vec))
 (defvar sql-product)
-(defvar sql-product-alist)
 (defvar tramp-rpc-use-controlmaster)
 
 ;; Forward declarations — shared buffer-local variables
@@ -611,11 +610,7 @@ Also store PARAMS and PRODUCT when present."
   (let ((display-product
          (or clutch--conn-sql-product
              (and params (default-value 'sql-product)))))
-    (when (and display-product
-               (derived-mode-p 'sql-mode)
-               (fboundp 'sql-set-product)
-               (boundp 'sql-product-alist)
-               (assq display-product sql-product-alist))
+    (when (and display-product (derived-mode-p 'sql-mode))
       ;; `sql-mode' starts with the ANSI product before a query console has a
       ;; connection.  Synchronize it after binding so dialect font-lock and
       ;; syntax tables follow the effective backend product.
@@ -623,9 +618,7 @@ Also store PARAMS and PRODUCT when present."
                    (eq sql-product display-product))
         (let ((query-buffer-p (clutch--query-buffer-p))
               (query-mode-name mode-name))
-          ;; `sql-set-product' uses `setq', so localize the product first and
-          ;; retain Clutch's mode-line label in query buffers.
-          (make-local-variable 'sql-product)
+          (setq-local sql-product display-product)
           (sql-set-product display-product)
           (when query-buffer-p
             (setq mode-name query-mode-name))))))
