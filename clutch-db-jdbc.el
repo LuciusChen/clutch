@@ -667,7 +667,7 @@ When CONN is nil, return the details snapshot for the current failure."
     details))
 
 (defun clutch-jdbc--connection-invalidated-p (response)
-  "Return non-nil when RESPONSE says its logical connection was invalidated."
+  "Return non-nil if RESPONSE has an invalidated logical connection."
   (eq t (plist-get (plist-get response :diag) :connection-invalidated)))
 
 (defun clutch-jdbc--retire-invalidated-connection (conn)
