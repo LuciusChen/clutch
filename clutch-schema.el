@@ -94,9 +94,7 @@ Functions receive CONN, TABLE, and KIND.")
 (defun clutch--metadata-debug-backend (conn)
   "Return CONN's backend key for debug metadata events, or nil."
   (when clutch-debug-mode
-    (condition-case nil
-        (clutch-db-backend-key conn)
-      (error nil))))
+    (clutch-db-backend-key conn)))
 
 (defun clutch--metadata-debug-event (conn op phase backend summary &optional context)
   "Record a metadata debug event.
@@ -518,7 +516,7 @@ Only loads table names (fast).  Column info is loaded lazily."
              conn "schema-refresh" "success"
              (clutch--metadata-debug-backend conn)
              (format "Loaded %d tables" (length table-names)))))
-      (error
+      (clutch-db-error
        (clutch--remember-schema-refresh-error
         conn (error-message-string err) (clutch--metadata-debug-backend conn))
        nil))))

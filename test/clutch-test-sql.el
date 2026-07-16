@@ -1124,7 +1124,7 @@ ORDER BY id"
 
 (ert-deftest clutch-test-completion-capf-real-sqlite-workflow ()
   "Exercise the installed SQL CAPFs against real SQLite metadata."
-  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-test--with-isolated-metadata-caches
     (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
            (schema (make-hash-table :test 'equal)))

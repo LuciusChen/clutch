@@ -2270,16 +2270,13 @@ When QUIET is non-nil, suppress informational fallback messages."
   ;; Readability matters more than preserving numeric character references in
   ;; the transient viewer buffer; keep the raw XML value unchanged elsewhere.
   (clutch--decode-xml-char-refs-in-buffer)
-  (cond ((fboundp 'nxml-mode) (nxml-mode))
-        ((fboundp 'xml-mode) (xml-mode))
-        (t (special-mode)))
+  (nxml-mode)
   (setq-local header-line-format
               (format " XML%s%d bytes"
                       (clutch--status-separator)
                       (string-bytes val)))
   ;; Force fontification so XML is highlighted immediately in popup buffers.
-  (when (fboundp 'font-lock-ensure)
-    (font-lock-ensure (point-min) (point-max)))
+  (font-lock-ensure (point-min) (point-max))
   (when (fboundp 'jit-lock-fontify-now)
     (jit-lock-fontify-now (point-min) (point-max))))
 
@@ -2644,8 +2641,7 @@ PARENT-WIDTH and BOTTOM delimit the usable parent-frame area."
                     cursor-type nil)
         ;; Viewer setup changes major mode, so reinstall this local cleanup.
         (add-hook 'kill-buffer-hook #'clutch--close-cell-preview nil t)
-        (when (fboundp 'font-lock-ensure)
-          (font-lock-ensure (point-min) (point-max))))
+        (font-lock-ensure (point-min) (point-max)))
       (let ((window (frame-root-window frame)))
         (set-window-buffer window buffer)
         (set-window-point window (point-min)))

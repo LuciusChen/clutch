@@ -341,9 +341,7 @@ GENERATION rejects stale work, and BACKEND labels diagnostics."
                          clutch--object-categories))
          (generation (clutch--object-warmup-generation conn))
          (backend (when clutch-debug-mode
-                    (condition-case nil
-                        (clutch-db-backend-key conn)
-                      (error nil)))))
+                    (clutch-db-backend-key conn))))
     (cond
      ((or (not conn)
           (not (clutch--object-connection-alive-p conn))

@@ -2712,6 +2712,15 @@
            (should (eq (plist-get status :state) 'ready))
            (should (= (plist-get status :tables) 2))))))))
 
+(ert-deftest clutch-test-refresh-schema-cache-propagates-programmer-errors ()
+  "Synchronous schema refresh should not hide non-database failures."
+  (clutch-test--with-isolated-metadata-caches
+   (cl-letf (((symbol-function 'clutch-db-list-tables)
+              (lambda (_conn)
+                (signal 'wrong-type-argument '(integerp broken-state)))))
+     (should-error (clutch--refresh-schema-cache 'fake-conn)
+                   :type 'wrong-type-argument))))
+
 (ert-deftest clutch-test-refresh-schema-cache-async-callback-contract ()
   "Async schema refresh should ignore stale callbacks and trace callback phases."
   (clutch-test--with-isolated-metadata-caches
@@ -3475,7 +3484,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-edit-cell-json-sub-editor-contract ()
   "JSON cells should open the JSON sub-editor with serialized JSON text."
-  (skip-unless (fboundp 'json-serialize))
   (let ((object (make-hash-table :test 'equal)))
     (puthash "test" t object)
     (puthash "data" (vector 1 2) object)
@@ -3521,7 +3529,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-edit-cell-json-looking-text-opens-json-sub-editor ()
   "Text cells containing JSON objects should still use the JSON editor."
-  (skip-unless (fboundp 'json-serialize))
   (clutch-test--with-open-edit-cell buf result-buf
       (:columns '("payload")
        :column-defs '((:name "payload" :type-category text))
@@ -3541,7 +3548,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-edit-cell-auto-json-closes-edit-flow ()
   "Auto-opened JSON editors should close the parent edit flow."
-  (skip-unless (fboundp 'json-serialize))
   (dolist (case '(cancel finish))
     (ert-info ((format "case: %s" case))
       (clutch-test--with-auto-json-edit-cell json-buf parent-buf result-buf
@@ -4232,7 +4238,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-commit-sqlite-autocommit-batch-is-atomic ()
   "SQLite should commit or roll back a staged multi-row batch as a unit."
-  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
     (unwind-protect
         (progn
@@ -6101,7 +6107,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-result-filter-page-count-export-real-sqlite-workflow ()
   "Public result commands preserve one filtered SQLite workflow end to end."
-  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
          (source (generate-new-buffer " *clutch-result-workflow-source*"))
          (clutch-result-max-rows 2)

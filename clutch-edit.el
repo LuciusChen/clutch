@@ -1460,9 +1460,7 @@ All field types use the same delay so feedback timing is consistent."
   (if (string-empty-p value)
       ""
     (condition-case nil
-        (if (fboundp 'json-serialize)
-            (clutch--json-serialize-text (json-parse-string value))
-          value)
+        (clutch--json-serialize-text (json-parse-string value))
       (error (user-error "Field %s expects valid JSON" field-name)))))
 
 (defun clutch-result-insert--json-editor-mode ()
@@ -1470,10 +1468,8 @@ All field types use the same delay so feedback timing is consistent."
   (cond
    ((clutch--json-ts-mode-available-p)
     (json-ts-mode))
-   ((fboundp 'js-mode)
-    (js-mode))
    (t
-    (text-mode))))
+    (js-mode))))
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.
@@ -1491,8 +1487,7 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
             (json-pretty-print-buffer))
         (error nil))
       (clutch-result-insert--json-editor-mode)
-      (when (fboundp 'font-lock-ensure)
-        (font-lock-ensure (point-min) (point-max)))
+      (font-lock-ensure (point-min) (point-max))
       (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
         (define-key map (kbd "C-c C-c") finish-fn)
         (define-key map (kbd "C-c C-k") cancel-fn)

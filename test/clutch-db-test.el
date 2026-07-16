@@ -42,6 +42,7 @@
 (require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-db-jdbc)
+(require 'clutch-db-sqlite)
 (require 'clutch-mongodb)
 (require 'clutch-redis)
 (require 'redis)
@@ -1338,9 +1339,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-rowid-"
     (clutch-db-query conn "CREATE TABLE demo (name TEXT)")
     (let ((candidate (car (clutch-db-row-identity-candidates conn "demo"))))
@@ -1351,9 +1350,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-sqlite-foreign-keys-async ()
   "SQLite foreign-key metadata should remain available through async dispatch."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-fk-"
     (clutch-db-query conn "CREATE TABLE accounts (id INTEGER PRIMARY KEY)")
     (clutch-db-query
@@ -1374,9 +1371,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-sqlite-memory-does-not-create-file ()
   "SQLite :memory: profiles should open an in-memory database."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (let* ((dir (make-temp-file "clutch-sqlite-memory-" t))
          (default-directory (file-name-as-directory dir))
          conn)
@@ -1392,9 +1387,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 (ert-deftest clutch-db-test-sqlite-returning-yields-result-rows ()
   :tags '(:smoke)
   "SQLite DML with RETURNING should produce columns and rows."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-returning-"
     (clutch-db-query conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
     (let ((result (clutch-db-query
@@ -1873,18 +1866,6 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (= (clutch-db-port conn) 27018))
       (should (equal (clutch-db-user conn) "reporter")))))
 
-(ert-deftest clutch-db-test-mongodb-endpoint-metadata-supports-older-client-api ()
-  "Optional endpoint accessors should fall back to configured parameters."
-  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'mongodb-client)))
-    (setf (clutch-mongodb-conn-params conn)
-          '(:host "legacy.internal" :port 27019 :user "legacy-user"))
-    (cl-letf (((symbol-function 'mongodb-connection-host) nil)
-              ((symbol-function 'mongodb-connection-port) nil)
-              ((symbol-function 'mongodb-connection-username) nil))
-      (should (equal (clutch-db-host conn) "legacy.internal"))
-      (should (= (clutch-db-port conn) 27019))
-      (should (equal (clutch-db-user conn) "legacy-user")))))
-
 (ert-deftest clutch-db-test-mongodb-object-browse-query-uses-helper-syntax ()
   "Native MongoDB should provide object browsing syntax from the adapter."
   (let ((conn (clutch-db-test--make-mongodb-conn)))
@@ -1903,7 +1884,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (eq feature 'mongodb)))
               ((symbol-function 'fboundp)
                (lambda (symbol)
-                 (not (eq symbol 'mongodb-find-command))))
+                 (not (eq symbol 'mongodb-connection-host))))
               ((symbol-function 'locate-library)
                (lambda (library)
                  (and (equal library "mongodb") "/tmp/mongodb.el")))
@@ -1915,7 +1896,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                :type 'clutch-db-error)))
         (should (string-match-p "requires current mongodb.el public API"
                                 (error-message-string err)))
-        (should (string-match-p "mongodb-find-command"
+        (should (string-match-p "mongodb-connection-host"
                                 (error-message-string err))))
       (should-not loaded))))
 
@@ -3999,6 +3980,20 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (equal (clutch-db-database conn) "pgdb"))
     (should (eq (clutch-db-backend-key conn) 'pg))
     (should (equal (clutch-db-display-name conn) "PostgreSQL"))))
+
+(ert-deftest clutch-db-test-adapter-disconnect-errors-surface ()
+  "Native and JDBC adapter disconnect failures should remain visible."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t)))
+    (dolist (case `((,(make-mysql-conn :host "localhost") mysql-disconnect mysql-error)
+                    (,(clutch-db-test--make-pgcon :host "localhost") pg-disconnect pg-error)
+                    (,(make-clutch-db-sqlite-conn :handle 'sqlite-handle) sqlite-close sqlite-error)
+                    (,(make-clutch-jdbc-conn :conn-id 7) clutch-jdbc--send wrong-type-argument)))
+      (pcase-let ((`(,conn ,disconnect-function ,error-type) case))
+        (cl-letf (((symbol-function disconnect-function)
+                   (lambda (&rest _args) (signal error-type '("close failed")))))
+          (should-error (clutch-db-disconnect conn) :type error-type))))))
 
 (ert-deftest clutch-db-test-pg-primary-keys-use-compatible-int2vector-ordering ()
   "PostgreSQL primary keys should preserve compatible int2vector order."

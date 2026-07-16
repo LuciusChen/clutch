@@ -484,8 +484,7 @@ When CONN is non-nil, include backend type metadata from its type cache."
   "Connect to DBNAME as USER using CONNECT-ARGS and SSLMODE."
   (pcase sslmode
     ('prefer
-     (if (and (fboundp 'gnutls-available-p)
-              (gnutls-available-p))
+     (if (gnutls-available-p)
          (condition-case err
              (apply #'pg-connect-plist
                     dbname user
@@ -790,9 +789,7 @@ FKS is an alist of (column-name . fk-plist)."
 (cl-defmethod clutch-db-disconnect ((conn pgcon))
   "Disconnect PostgreSQL CONN."
   (clutch-db-pg--set-manual-commit-enabled conn nil)
-  (condition-case nil
-      (pg-disconnect conn)
-    (pg-error nil)))
+  (pg-disconnect conn))
 
 (cl-defmethod clutch-db-live-p ((conn pgcon))
   "Return non-nil if PostgreSQL CONN is live."

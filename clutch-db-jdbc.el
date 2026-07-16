@@ -721,15 +721,13 @@ When CONN is non-nil, remember structured diagnostics on the connection."
          response)
     (puthash conn id clutch-jdbc--busy-request-ids)
     (unwind-protect
-        (condition-case err
+        (condition-case nil
             (progn
               (setq response (clutch-jdbc--recv-response id timeout-seconds op))
               (clutch-jdbc--response-result-or-signal conn op response))
           (quit
            (setq clear-request-id nil)
-           (signal 'quit nil))
-          (clutch-db-error
-           (signal (car err) (cdr err))))
+           (signal 'quit nil)))
       (when (and clear-request-id
                  (eql (gethash conn clutch-jdbc--busy-request-ids) id))
         (remhash conn clutch-jdbc--busy-request-ids)))))
@@ -1053,13 +1051,11 @@ Returns a `clutch-jdbc-conn'."
   (remhash conn clutch-jdbc--error-details-by-conn)
   (remhash (clutch-jdbc-conn-conn-id conn) clutch-jdbc--connections-by-id)
   (when (clutch-jdbc--agent-live-p)
-    (condition-case nil
-        (let ((id (clutch-jdbc--send
-                   "disconnect"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
-          (clutch-jdbc--recv-response-nonfatal
-           id clutch-jdbc-disconnect-timeout-seconds))
-      (error nil))))
+    (let ((id (clutch-jdbc--send
+               "disconnect"
+               `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
+      (clutch-jdbc--recv-response-nonfatal
+       id clutch-jdbc-disconnect-timeout-seconds))))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-jdbc-conn))
   "Return non-nil if the agent process is running and CONN belongs to it.
@@ -1433,22 +1429,20 @@ Clob plists become their :preview string."
   "Execute JDBC RPC OP with PAYLOAD on CONN and return a database result."
   (setf (clutch-jdbc-conn-busy conn) t)
   (unwind-protect
-      (condition-case err
-          (let* ((rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
-                 (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
-                 (fetch-size (clutch-jdbc--effective-fetch-size))
-                 (result (clutch-jdbc--rpc-on-conn
-                          conn
-                          op
-                          (append
-                           `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-                           payload
-                           `((fetch-size . ,fetch-size))
-                           (when effective-qt
-                             `((query-timeout-seconds . ,effective-qt))))
-                          rpc-timeout)))
-            (clutch-jdbc--rpc-result conn result))
-        (clutch-db-error (signal (car err) (cdr err))))
+      (let* ((rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
+             (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
+             (fetch-size (clutch-jdbc--effective-fetch-size))
+             (result (clutch-jdbc--rpc-on-conn
+                      conn
+                      op
+                      (append
+                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                       payload
+                       `((fetch-size . ,fetch-size))
+                       (when effective-qt
+                         `((query-timeout-seconds . ,effective-qt))))
+                      rpc-timeout)))
+        (clutch-jdbc--rpc-result conn result))
     (setf (clutch-jdbc-conn-busy conn) nil)))
 
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)

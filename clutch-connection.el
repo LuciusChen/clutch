@@ -956,8 +956,7 @@ the high-frequency execution indicator."
             base)))
   (when (derived-mode-p 'clutch-result-mode)
     (if spinner-only
-        (when (fboundp 'clutch--refresh-footer-timing)
-          (clutch--refresh-footer-timing))
+        (clutch--refresh-footer-timing)
       (clutch--refresh-result-status-line t)))
   (when (or (clutch--query-buffer-p)
             (derived-mode-p 'clutch-repl-mode))

@@ -310,9 +310,7 @@ Return nil when TEXT has no Syntax section."
 
 (cl-defmethod clutch-db-disconnect ((conn mysql-conn))
   "Disconnect MySQL CONN."
-  (condition-case nil
-      (mysql-disconnect conn)
-    (mysql-error nil)))
+  (mysql-disconnect conn))
 
 (cl-defmethod clutch-db-live-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is live."

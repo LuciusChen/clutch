@@ -59,7 +59,7 @@
   "Connect to SQLite using PARAMS plist.
 PARAMS keys: :database (file path or \":memory:\", required).
 Use \":memory:\" for a transient in-memory database."
-  (unless (and (fboundp 'sqlite-available-p) (sqlite-available-p))
+  (unless (sqlite-available-p)
     (signal 'clutch-db-error (list "SQLite requires Emacs 29.1+")))
   (let ((db (plist-get params :database)))
     (unless db
@@ -75,16 +75,13 @@ Use \":memory:\" for a transient in-memory database."
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-db-sqlite-conn))
   "Disconnect SQLite CONN."
-  (condition-case nil
-      (sqlite-close (clutch-db-sqlite-conn-handle conn))
-    (sqlite-error nil))
+  (sqlite-close (clutch-db-sqlite-conn-handle conn))
   (setf (clutch-db-sqlite-conn-closed conn) t))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-db-sqlite-conn))
   "Return non-nil if SQLite CONN is live."
   (and conn
        (not (clutch-db-sqlite-conn-closed conn))
-       (fboundp 'sqlitep)
        (sqlitep (clutch-db-sqlite-conn-handle conn))))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-sqlite-conn))

@@ -269,20 +269,17 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
   (cond
    ((null val)
     "null")
-   ((and (stringp val)
-         (fboundp 'json-serialize)
-         (fboundp 'json-parse-string))
+   ((stringp val)
     (condition-case nil
         (clutch--json-normalize-text val)
       (error (clutch--json-serialize-text val))))
    ((clutch--json-false-value-p val)
     "false")
-   ((and (fboundp 'json-serialize)
-         (or (numberp val)
-             (eq val t)
-             (hash-table-p val)
-             (vectorp val)
-             (listp val)))
+   ((or (numberp val)
+        (eq val t)
+        (hash-table-p val)
+        (vectorp val)
+        (listp val))
     (condition-case nil
         (clutch--json-serialize-text
          (if (clutch--json-false-value-p val) :false val))
@@ -292,8 +289,7 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
 (defun clutch--json-ts-mode-available-p ()
   "Return non-nil when `json-ts-mode' can be enabled now."
   (and (fboundp 'json-ts-mode)
-       (or (not (fboundp 'treesit-language-available-p))
-           (treesit-language-available-p 'json))))
+       (treesit-language-available-p 'json)))
 
 (defun clutch--json-display-mode ()
   "Enable the best available JSON display mode in the current buffer."
@@ -302,10 +298,8 @@ hash-tables and vectors (JSON from MySQL/PG) → JSON string."
     (json-ts-mode))
    ((fboundp 'json-mode)
     (json-mode))
-   ((fboundp 'js-mode)
-    (js-mode))
    (t
-    (special-mode))))
+    (js-mode))))
 
 (defun clutch--json-metadata-text (text)
   "Return TEXT pretty-printed as JSON metadata."
@@ -404,9 +398,7 @@ before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil."
 
 (defun clutch--pixel-metric-signature ()
   "Return the current graphical font metric signature, or nil."
-  (when (and (fboundp 'default-font-width)
-             (fboundp 'string-pixel-width)
-             (display-graphic-p))
+  (when (display-graphic-p)
     (let* ((cell-width (default-font-width))
            (samples '("m" "i" "W" "中" "あ" "한" "m中あ한"))
            (pixel-widths (mapcar #'string-pixel-width samples)))
@@ -831,12 +823,9 @@ installed, the family is unsupported, or the renderer returns nil/empty."
 (defun clutch--header-sort-indicator-glyph (spec fallback)
   "Return sort indicator SPEC/FALLBACK snapped to integral cell width."
   (let* ((graphical (display-graphic-p))
-         (cell-width (and graphical
-                          (fboundp 'default-font-width)
-                          (default-font-width)))
+         (cell-width (and graphical (default-font-width)))
          (metric (and cell-width
                       (> cell-width 0)
-                      (fboundp 'string-pixel-width)
                       (list cell-width
                             (frame-parameter nil 'font)
                             face-remapping-alist)))
@@ -2029,8 +2018,6 @@ The header-line should track body hscroll exactly."
           ""
         (if (and (> hs 0)
                  clutch--column-pixel-widths
-                 (fboundp 'default-font-width)
-                 (fboundp 'string-pixel-width)
                  (display-graphic-p))
             (clutch--pixel-crop-left str (* hs (default-font-width)))
           (truncate-string-to-width str width hs))))))
