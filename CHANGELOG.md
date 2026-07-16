@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.
 - Rejected Oracle URLs configured through generic `:backend jdbc` before
   connection setup, with guidance to use the Oracle backend and its SQL dialect.
 - Prevented point-local DWIM execution from sending detached `--` divider

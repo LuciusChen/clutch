@@ -1056,6 +1056,39 @@ authinfo, and PARAMS are explicit connection parameters."
       (should-error (clutch-db-column-details conn "orders")
                     :type 'clutch-db-error))))
 
+(ert-deftest clutch-db-test-pg-query-io-inhibits-throw-on-input ()
+  "PostgreSQL query paths should finish responses inside `while-no-input'."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        observed)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (context _sql)
+                 (push throw-on-input observed)
+                 (make-pgresult :connection context :status "SELECT 1")))
+              ((symbol-function 'pg-exec-prepared)
+               (lambda (context _sql _arguments &rest _options)
+                 (push throw-on-input observed)
+                 (make-pgresult :connection context :status "SELECT 1"))))
+      (let ((throw-on-input 'completion-input))
+        (clutch-db-query conn "SELECT 1")
+        (clutch-db-execute-params conn "SELECT ?" '(1))))
+    (should (equal observed '(nil nil)))))
+
+(ert-deftest clutch-db-test-pg-foreign-keys-reject-malformed-response ()
+  "PostgreSQL foreign-key metadata should reject contaminated result rows."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        observed)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (context _sql)
+                 (setq observed throw-on-input)
+                 (make-pgresult :connection context
+                                :tuples '((90000556 "attname"))))))
+      (let ((throw-on-input 'completion-input))
+        (should-error (clutch-db-foreign-keys conn "task")
+                      :type 'clutch-db-error)))
+    (should-not observed)))
+
 (defun clutch-db-test--assert-row-identity-skips-lower-priority
     (conn table pk-columns unique-fn locator-fn locator-value)
   "Assert CONN row identity stops after PK-COLUMNS for TABLE.
