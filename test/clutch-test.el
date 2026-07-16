@@ -7075,6 +7075,125 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (when (buffer-live-p buffer)
             (kill-buffer buffer)))))))
 
+(ert-deftest clutch-test-execute-retries-only-safe-clean-preflight-failures ()
+  "Retry once only when JDBC proves execution did not start and tx is clean."
+  (dolist (case '((auto nil nil 2 1 new-conn nil)
+                  (manual-clean t nil 2 1 new-conn nil)
+                  (manual-dirty t t 1 0 old-conn clutch-db-execution-not-started)
+                  (ambiguous-first-failure nil nil 1 0 old-conn clutch-db-error)
+                  (second-failure nil nil 2 1 new-conn clutch-db-error)))
+    (pcase-let ((`(,label ,manual ,dirty ,expected-runs ,expected-reconnects
+                         ,expected-connection ,expected-error)
+                 case))
+      (with-temp-buffer
+        (let ((clutch-connection 'old-conn)
+              (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+              (old-live t)
+              (runs 0)
+              (confirmations 0)
+              (reconnects 0)
+              (clutch-db--foreground-connections
+               (make-hash-table :test 'eq)))
+          (when dirty
+            (puthash 'old-conn t clutch--tx-dirty-cache))
+          (cl-letf (((symbol-function 'clutch--confirm-query-execution)
+                     (lambda (_sql) (cl-incf confirmations)))
+                    ((symbol-function 'clutch-db-result-query-p)
+                     (lambda (&rest _args) nil))
+                    ((symbol-function 'clutch-db-manual-commit-p)
+                     (lambda (_conn) manual))
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn)
+                       (if (eq conn 'old-conn) old-live t)))
+                    ((symbol-function 'clutch--run-db-query)
+                     (lambda (conn _sql)
+                       (should (clutch-db--foreground-busy-p conn))
+                       (cl-incf runs)
+                       (cond
+                        ((eq conn 'old-conn)
+                         (setq old-live nil)
+                         (signal (if (eq label 'ambiguous-first-failure)
+                                     'clutch-db-error
+                                   'clutch-db-execution-not-started)
+                                 '("idle validation failed")))
+                        ((eq label 'second-failure)
+                         (signal 'clutch-db-error '("second attempt failed")))
+                        (t
+                         (make-clutch-db-result :affected-rows 1)))))
+                    ((symbol-function 'clutch--try-reconnect)
+                     (lambda ()
+                       (cl-incf reconnects)
+                       (setq clutch-connection 'new-conn)
+                       t)))
+            (let ((outcome
+                   (clutch--execute-statement
+                    "SELECT side_effect_free" 'old-conn nil)))
+              (ert-info ((format "case: %s" label))
+                (should (= runs expected-runs))
+                (should (= confirmations 1))
+                (should (= reconnects expected-reconnects))
+                (should (eq (plist-get outcome :connection)
+                            expected-connection))
+                (should (eq (car-safe (plist-get outcome :error))
+                            expected-error))))))))))
+
+(ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
+  "A physical reconnect should not reuse the old connection's identity plan."
+  (with-temp-buffer
+    (let ((clutch-connection 'old-conn)
+          (old-live t)
+          executions prepared-connections)
+      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
+                ((symbol-function 'clutch-db-result-query-p)
+                 (lambda (&rest _args) t))
+                ((symbol-function 'clutch-db-query-result-context)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'clutch--prepare-row-identity-query)
+                 (lambda (connection _sql)
+                   (push connection prepared-connections)
+                   '(:sql "fresh-plan")))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (connection)
+                   (if (eq connection 'old-conn) old-live t)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (connection sql)
+                   (push (list connection sql) executions)
+                   (if (eq connection 'old-conn)
+                       (progn
+                         (setq old-live nil)
+                         (signal 'clutch-db-execution-not-started
+                                 '("idle validation failed")))
+                     (make-clutch-db-result :columns ["id"] :rows '((1))))))
+                ((symbol-function 'clutch--try-reconnect)
+                 (lambda ()
+                   (setq clutch-connection 'new-conn)
+                   t)))
+        (let ((outcome
+               (clutch--execute-statement
+                "SELECT * FROM items" 'old-conn t
+                '(:row-identity-prep (:sql "stale-plan")
+                  :server-pageable nil))))
+          (should (eq (plist-get outcome :connection) 'new-conn))
+          (should (equal (nreverse executions)
+                         '((old-conn "stale-plan")
+                           (new-conn "fresh-plan"))))
+          (should (equal prepared-connections '(new-conn))))))))
+
+(ert-deftest clutch-test-present-outcome-uses-executing-connection ()
+  "Presentation should use the connection that produced the outcome."
+  (let ((result (make-clutch-db-result :columns ["id"] :rows '((1))))
+        displayed-connection)
+    (cl-letf (((symbol-function 'clutch-result--display-select)
+               (lambda (connection &rest _args)
+                 (setq displayed-connection connection))))
+      (clutch--present-statement-outcome
+       "SELECT 1" 'old-conn
+       (list :connection 'new-conn
+             :result result
+             :result-query-p t
+             :source-buffer (current-buffer)))
+      (should (eq displayed-connection 'new-conn)))))
+
 (ert-deftest clutch-test-handle-query-quit-remembers-interrupt-error-details-and-debug-event ()
   "Interrupt RPC failures should record details and retain reconnect anchors."
   (with-temp-buffer

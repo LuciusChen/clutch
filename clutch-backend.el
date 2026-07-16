@@ -66,6 +66,9 @@ server-side statement timeout."
 ;;;; Error types
 
 (define-error 'clutch-db-error "Database error")
+(define-error 'clutch-db-execution-not-started
+  "Database operation did not start"
+  'clutch-db-error)
 (define-error 'clutch-query-interrupted "Query interrupted" 'user-error)
 
 (defconst clutch--db-error-hints

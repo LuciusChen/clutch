@@ -124,8 +124,11 @@ Not every backend implements every metadata operation.  On the Elisp side, unsup
 - `connect-timeout-seconds`
 - `network-timeout-seconds`
 - `auto-commit`
+- `validate-after-idle-seconds`
 
 `auto-commit=false` is how clutch requests manual-commit mode for the primary session.  The metadata session stays read-only/autocommit-oriented.
+
+`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables primary-session idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp.
 
 The connect response returns:
 
@@ -193,21 +196,25 @@ Generic JDBC rows contain:
 
 ## Error semantics
 
-There are three distinct failure classes:
+There are five distinct failure classes:
 
 1. A normal request-level database error.
    - Examples: SQL syntax error, object-not-found, cancelled statement.
    - The agent stays up and Elisp surfaces the database error normally.
    - The response may also include a structured `diag` object with fields such as category, request id, connection id, exception class, SQLState, cause chain, and redacted request context.
 
-2. The shared agent stays up but handling a fatal foreground failure removes one logical JDBC connection.
+2. An idle preflight proves the primary connection invalid before statement creation.
+   - The response includes both `diag.connection-invalidated=true` and `diag.execution-not-started=true`.
+   - The second marker means this request never invoked statement execution. A client may reconnect and issue the command once only when its own transaction and batch state allow it.
+
+3. The shared agent stays up but a foreground failure after preflight removes one logical JDBC connection.
    - The error response includes `diag.connection-invalidated=true`, and Elisp retires only the matching local `conn-id` while preserving the original diagnostics and console reconnect context.
    - The failed SQL is never replayed because its transaction outcome may be unknown. The next user command creates a new session and executes once.
 
-3. A request times out at the outer RPC boundary or the shared agent becomes unresponsive.
+4. A request times out at the outer RPC boundary or the shared agent becomes unresponsive.
    - Elisp stops the wedged process and treats every connection owned by that process as dead.
 
-4. The agent exits before replying.
+5. The agent exits before replying.
    - Elisp reads agent stderr and reports the startup failure directly.
    - If stderr contains `UnsupportedClassVersionError`, clutch reports that the configured Java runtime is too old for the current jar.
 
@@ -220,6 +227,8 @@ The short `error` string and the optional `diag` payload serve different roles:
 - `debug`: opt-in verbose debugging payload; may include redacted request context and a redacted stack trace, but is omitted unless the client sent `params.debug=true`
 
 `diag.connection-invalidated` is a lifecycle fact, not a retry hint. It is present only as JSON `true` when an error response references a logical connection the agent no longer owns, including a later request after the original invalidation response was ignored; clients must not infer the same state from JDBC exception classes, SQLState values, vendor codes, or error text.
+
+`diag.execution-not-started` is a narrower execution fact and is present only together with authoritative invalidation during the idle preflight phase. The phase ends before `createStatement` or `prepareStatement`, because preparation itself may contact the server. Neither marker is inferred from exception text, vendor codes, SQLState, or a successful liveness check followed by a later failure.
 
 stderr remains for process/runtime logging and should not be treated as the primary source of request-level diagnostics.
 

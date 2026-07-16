@@ -106,7 +106,7 @@ Protocol packages are optional and backend-specific.  =clutch= does not install 
 
 If a configured backend's protocol package is missing, =clutch= reports the missing package when connecting.  Install that package with your package manager, ensure it is on =load-path=, then retry the connection; restarting Emacs is the safest way to clear stale autoload or native-compile state after installation.
 
-JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=. Individual JDBC databases may also need driver jars. The current development version pins JDBC agent 0.2.11 and verifies the published jar before starting it. JDBC staged mutations use prepared values. Idle-timeout and Oracle =ORA-12592= metadata failures recover without replacing the foreground session, while a failed retry or schema restore is invalidated rather than reused. If a fatal foreground failure removes the primary JDBC session, Clutch reports that original failure without replaying the SQL and automatically reconnects the preserved console on the next command. For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
+JDBC support ships inside =clutch= itself, but the runtime still needs Java 17+ and =clutch-jdbc-agent.jar=. Individual JDBC databases may also need driver jars. The current development version pins JDBC agent 0.2.12 and verifies the published jar before starting it. JDBC staged mutations use prepared values. Idle-timeout and Oracle =ORA-12592= metadata failures recover without replacing the foreground session, while a failed retry or schema restore is invalidated rather than reused. After a JDBC primary session has been idle for five minutes, the agent validates it immediately before statement creation. If that check proves the session dead before execution starts, the query-console, REPL, or batch-statement workflow reconnects and executes the statement once in auto-commit or a clean manual-commit session; a dirty manual transaction stops with the transaction-outcome warning. Failures discovered after statement preparation or execution are never replayed, and the next command reconnects the preserved console. For Org-Babel support, install the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.
 
 For source checkouts, add =clutch= and any native protocol backend checkout you use to =load-path= explicitly:
 
@@ -143,7 +143,8 @@ This release separates protocol and Org-Babel packages from the main =clutch= pa
 (setq clutch-connect-timeout-seconds 10
       clutch-read-idle-timeout-seconds 30
       clutch-query-timeout-seconds 20
-      clutch-jdbc-rpc-timeout-seconds 15)
+      clutch-jdbc-rpc-timeout-seconds 15
+      clutch-jdbc-validate-after-idle-seconds 300)
 
 (setq clutch-connection-alist
       '(("dev-mysql"  . (:backend mysql
@@ -176,6 +177,7 @@ This release separates protocol and Org-Babel packages from the main =clutch= pa
 - =:password= is optional for network backends; see [[*Password Management][Password Management]] for auth-source integration.
 - =:profile-entry= can load missing connection fields from encrypted =pass= or =.authinfo.gpg= profiles when host/user/database metadata should not live in Emacs init files.
 - Network backends accept =:connect-timeout= and =:read-idle-timeout=. PostgreSQL and JDBC also accept =:query-timeout=; JDBC additionally accepts =:rpc-timeout=.
+- =clutch-jdbc-validate-after-idle-seconds= is a global JDBC safety threshold, not a saved-connection timeout. It defaults to 300 seconds; set it to =nil= or 0 to disable the pre-execution validation and retain next-command-only recovery.
 - TLS can be enabled with =:tls t=.  For explicit plaintext, prefer =:ssl-mode disabled= on MySQL and =:sslmode disable= on PostgreSQL.
 - =:ssh-host= and =:tramp-default-directory= both create local forwards for structured =:host= / =:port= endpoints.  =:ssh-host= uses a =~/.ssh/config= host alias, while =:tramp-default-directory= derives the origin from an ssh-like or container TRAMP directory.
 - Query-console SQL is saved by connection identity rather than saved connection name, so renaming a saved connection keeps the same console SQL.

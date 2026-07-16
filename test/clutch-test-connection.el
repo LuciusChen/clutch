@@ -2591,7 +2591,7 @@
 
 (ert-deftest clutch-test-try-reconnect-releases-old-ssh-transport ()
   "Reconnect should stop the old SSH tunnel after the new connection is ready."
-  (let ((released nil))
+  (let (released cleared)
     (with-temp-buffer
       (setq-local clutch-connection 'old-conn
                   clutch--connection-params '(:backend pg
@@ -2604,6 +2604,8 @@
                 ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
                 ((symbol-function 'clutch--release-connection-transport)
                  (lambda (conn) (setq released conn)))
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 (lambda (conn) (setq cleared conn)))
                 ((symbol-function 'clutch--rebind-connection-buffers) #'ignore)
                 ((symbol-function 'clutch--finalize-rebound-connection)
                  (lambda (_conn) 'done))
@@ -2613,7 +2615,8 @@
                  (lambda (conn) (eq conn 'new-conn)))
                 ((symbol-function 'message) #'ignore))
         (should (clutch--try-reconnect))
-        (should (eq released 'old-conn))))))
+        (should (eq released 'old-conn))
+        (should (eq cleared 'old-conn))))))
 
 (ert-deftest clutch-test-replace-connection-rejects-dead-candidate-once ()
   "Replacement should not retry or bind a candidate lost during teardown."

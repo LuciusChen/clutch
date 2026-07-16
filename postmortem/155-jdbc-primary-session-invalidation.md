@@ -1,5 +1,7 @@
 # 155 — JDBC primary-session invalidation
 
+> Superseded for failures proven before statement creation by [156 — JDBC idle preflight and bounded replay](156-jdbc-idle-preflight-and-bounded-replay.md). Failures with an unknown execution outcome still follow this record.
+
 ## Context
 
 The shared JDBC agent can remain healthy after Oracle or the network destroys one server session. Agent 0.2.9 correctly began poisoning unsafe primary sessions, but its error response did not communicate that lifecycle mutation. Clutch therefore kept the old `conn-id` in its local live map and every later command sent an id the agent had already removed.

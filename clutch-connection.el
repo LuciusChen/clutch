@@ -678,6 +678,7 @@ Connection failures propagate to the calling command."
       (clutch--clear-tx-dirty old-conn)
       (clutch--release-connection-transport old-conn)
       (clutch--require-live-connection conn)
+      (clutch--clear-connection-problem-capture old-conn)
       (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--rebind-connection-buffers old-conn conn params product)
       (clutch--finalize-rebound-connection conn)

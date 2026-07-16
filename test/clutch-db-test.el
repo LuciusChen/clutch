@@ -628,6 +628,7 @@ authinfo, and PARAMS are explicit connection parameters."
   "JDBC connect should keep explicit and default timeout phases separate."
   (ert-info ("explicit timeouts")
     (let ((clutch-jdbc-oracle-manual-commit t)
+          (clutch-jdbc-validate-after-idle-seconds 123)
           captured-op captured-params captured-timeout)
       (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                 ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
@@ -655,6 +656,8 @@ authinfo, and PARAMS are explicit connection parameters."
                       clutch-jdbc--json-false))
           (should (= (alist-get 'connect-timeout-seconds captured-params) 7))
           (should (= (alist-get 'network-timeout-seconds captured-params) 23))
+          (should (= (alist-get 'validate-after-idle-seconds captured-params)
+                     123))
           (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 41))
           (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
   (ert-info ("default timeouts")
@@ -687,7 +690,16 @@ authinfo, and PARAMS are explicit connection parameters."
         (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout)
                    20))
         (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                   41))))))
+                   41)))))
+  (ert-info ("invalid idle validation intervals")
+    (dolist (value '(-1 1.5 "300"))
+      (let ((clutch-jdbc-validate-after-idle-seconds value))
+        (should-error
+         (clutch-db-jdbc-connect
+          'oracle
+          '(:host "db" :port 1521 :database "svc"
+            :user "scott" :password "tiger"))
+         :type 'user-error)))))
 
 (ert-deftest clutch-db-test-jdbc-connect-autocommit-contract ()
   "JDBC connect should send the expected default auto-commit flag."
@@ -6368,6 +6380,45 @@ It does so without touching the agent process."
                        "No more data to read from socket"))
         (should (eq (plist-get stored-diag :connection-invalidated) t)))
       (should (eq clutch-jdbc--agent-process 'fake-proc)))))
+
+(ert-deftest clutch-db-test-jdbc-safe-retry-condition-requires-exact-protocol-facts ()
+  "Only a pre-execution query invalidation should signal the retry condition."
+  (dolist (case '(("execute" "execute" "query" 7 t t clutch-db-execution-not-started)
+                  ("execute-params" "execute-params" "query" 7 t t clutch-db-execution-not-started)
+                  ("execute" "execute" "query" 8 t t clutch-db-error)
+                  ("execute" "execute" "query" 7 t nil clutch-db-error)
+                  ("execute" "fetch" "query" 7 t t clutch-db-error)
+                  ("execute" "execute" "metadata" 7 t t clutch-db-error)
+                  ("fetch" "fetch" "fetch" 7 t t clutch-db-error)
+                  ("execute" "execute" "query" 7 nil t clutch-db-error)))
+    (pcase-let ((`(,op ,diag-op ,category ,diag-conn-id
+                        ,invalidated ,not-started ,expected)
+                 case))
+      (let* ((conn (make-clutch-jdbc-conn
+                    :process 'fake-proc :conn-id 7 :params '(:driver oracle)))
+             (clutch-jdbc--agent-process 'fake-proc)
+             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+             (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+             (diag `(:category ,category
+                     :op ,diag-op
+                     :conn-id ,diag-conn-id
+                     :connection-invalidated ,invalidated
+                     :execution-not-started ,not-started)))
+        (puthash 7 conn clutch-jdbc--connections-by-id)
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t)))
+          (let ((err
+                 (should-error
+                  (clutch-jdbc--response-result-or-signal
+                   conn op
+                   `(:ok ,clutch-jdbc--json-false
+                     :error "idle validation failed"
+                     :diag ,diag))
+                  :type 'clutch-db-error)))
+            (ert-info ((format "case: %S" case))
+              (should (eq (car err) expected)))))))))
 
 (ert-deftest clutch-db-test-jdbc-does-not-infer-invalidation-from-exception ()
   "Clutch should require the protocol marker instead of classifying errors."

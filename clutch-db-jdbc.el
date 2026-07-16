@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.11"
+(defcustom clutch-jdbc-agent-version "0.2.12"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "8a07178a793032b064d3510990740155076f648fa8c184c49e42ca67275ee972"
+  "e83d54b8c8bd866e8e9ae60ca3d98cb47c140f5b2e547ad19eaa0af1a4094fd4"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -83,6 +83,14 @@ Examples:
 (defcustom clutch-jdbc-fetch-size 500
   "Number of rows fetched per batch from the agent, from 1 through 10000."
   :type 'integer
+  :group 'clutch-jdbc)
+
+(defcustom clutch-jdbc-validate-after-idle-seconds 300
+  "Validate a JDBC primary session before executing after this idle period.
+The agent validates immediately before statement creation.  When that check
+proves the session dead, Clutch may reconnect and execute once on a clean
+transaction.  Set this to nil or 0 to disable idle validation."
+  :type '(choice (const :tag "Disable" nil) natnum)
   :group 'clutch-jdbc)
 
 (defconst clutch-jdbc--max-fetch-size 10000
@@ -680,10 +688,22 @@ disconnect request.  Preserve connection-scoped diagnostics for the caller."
 When CONN is non-nil, remember structured diagnostics on the connection."
   (if (eq t (plist-get response :ok))
       (plist-get response :result)
-    (let ((details (clutch-jdbc--remember-error-response conn op response)))
+    (let* ((details (clutch-jdbc--remember-error-response conn op response))
+           (diag (plist-get response :diag))
+           (execution-not-started
+            (and (clutch-jdbc-conn-p conn)
+                 (eql (clutch-jdbc-conn-conn-id conn)
+                      (plist-get diag :conn-id))
+                 (member op '("execute" "execute-params"))
+                 (equal (plist-get diag :category) "query")
+                 (equal (plist-get diag :op) op)
+                 (eq t (plist-get diag :connection-invalidated))
+                 (eq t (plist-get diag :execution-not-started)))))
       (when (clutch-jdbc--connection-invalidated-p response)
         (clutch-jdbc--retire-invalidated-connection conn))
-      (signal 'clutch-db-error
+      (signal (if execution-not-started
+                  'clutch-db-execution-not-started
+                'clutch-db-error)
               (if details
                   (list (clutch-jdbc--rpc-error-message op response) details)
                 (list (clutch-jdbc--rpc-error-message op response)))))))
@@ -954,6 +974,11 @@ Returns a `clutch-jdbc-conn'."
 
 (defun clutch-db-jdbc-connect--internal (driver params)
   "Connect to JDBC DRIVER using PARAMS after driver dispatch is resolved."
+  (unless (or (null clutch-jdbc-validate-after-idle-seconds)
+              (and (integerp clutch-jdbc-validate-after-idle-seconds)
+                   (>= clutch-jdbc-validate-after-idle-seconds 0)))
+    (user-error
+     "JDBC idle validation interval must be nil or a non-negative integer"))
   (clutch-jdbc--setup-prerequisites driver)
   (clutch-jdbc--ensure-agent)
   (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
@@ -978,6 +1003,10 @@ Returns a `clutch-jdbc-conn'."
                       (connect-timeout-seconds . ,connect-timeout)
                       ,@(when read-idle-timeout
                           `((network-timeout-seconds . ,read-idle-timeout)))
+                      ,@(when (and (integerp clutch-jdbc-validate-after-idle-seconds)
+                                   (> clutch-jdbc-validate-after-idle-seconds 0))
+                          `((validate-after-idle-seconds
+                             . ,clutch-jdbc-validate-after-idle-seconds)))
                       ,@(when props `((props . ,props))))
                     rpc-timeout)))
     (let* ((conn-params (plist-put normalized-params :driver driver))

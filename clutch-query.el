@@ -949,15 +949,13 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
                    (when elapsed (list :elapsed elapsed))
                    (when context (list :context context))))))
 
-(defun clutch--execute-statement
+(defun clutch--execute-statement-attempt
     (sql connection present-result-p &optional result-context)
-  "Execute one SQL statement on CONNECTION and return an outcome plist.
+  "Attempt one SQL statement on CONNECTION and return an outcome plist.
 When PRESENT-RESULT-P is non-nil, prepare result queries for pagination and
 row identity.  RESULT-CONTEXT carries verified metadata for generated SQL.
 Database failures are returned under :error.  Query-phase quits recover the
 connection and signal `clutch-query-interrupted'."
-  (clutch--confirm-query-execution sql)
-  (setq clutch--last-query sql)
   (condition-case nil
       (let* ((result-query-p (clutch-db-result-query-p connection sql))
              (prepare-result-p (and result-query-p present-result-p))
@@ -1001,6 +999,7 @@ connection and signal `clutch-query-interrupted'."
               (unless result-query-p
                 (clutch--note-schema-affecting-query sql connection))
               (list :result result
+                    :connection connection
                     :elapsed elapsed
                     :result-query-p result-query-p
                     :row-identity-prep row-identity-prep
@@ -1009,9 +1008,42 @@ connection and signal `clutch-query-interrupted'."
                     :source-buffer source-buffer))
           (clutch-db-error
            (list :error err
+                 :connection connection
                  :elapsed (- (float-time) start)
                  :source-buffer source-buffer))))
     (quit (clutch--handle-query-quit connection))))
+
+(defun clutch--execute-statement
+    (sql connection present-result-p &optional result-context no-idle-retry-p)
+  "Execute one SQL statement on CONNECTION and return an outcome plist.
+When PRESENT-RESULT-P is non-nil, prepare result queries for pagination and
+row identity.  RESULT-CONTEXT carries verified metadata for generated SQL.
+NO-IDLE-RETRY-P prevents reconnecting after a proven pre-execution failure,
+as required after a preceding statement in the same batch."
+  (clutch--confirm-query-execution sql)
+  (setq clutch--last-query sql)
+  (let* ((manual-dirty-p
+          (and (clutch--tx-dirty-p connection)
+               (clutch-db-manual-commit-p connection)))
+         (outcome
+          (clutch-db-with-foreground-connection connection
+            (clutch--execute-statement-attempt
+             sql connection present-result-p result-context))))
+    (if (and (not no-idle-retry-p)
+             (not manual-dirty-p)
+             (eq connection clutch-connection)
+             (not (clutch--connection-alive-p connection))
+             (eq (car-safe (plist-get outcome :error))
+                 'clutch-db-execution-not-started)
+             (clutch--try-reconnect))
+        (let ((new-connection clutch-connection)
+              (retry-context (copy-sequence result-context)))
+          (when retry-context
+            (cl-remf retry-context :row-identity-prep))
+          (clutch-db-with-foreground-connection new-connection
+            (clutch--execute-statement-attempt
+             sql new-connection present-result-p retry-context)))
+      outcome)))
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
@@ -1097,6 +1129,7 @@ connection and signal `clutch-query-interrupted'."
 
 (defun clutch--present-statement-outcome (sql connection outcome)
   "Present OUTCOME for SQL on CONNECTION and return its result, or nil."
+  (setq connection (or (plist-get outcome :connection) connection))
   (if-let* ((err (plist-get outcome :error)))
       (let* ((connection-lost (not (clutch--connection-alive-p connection)))
              (context (and connection-lost
@@ -1132,9 +1165,10 @@ Prompts for confirmation on destructive operations."
     (clutch--ensure-connection))
   (let ((connection (or conn clutch-connection)))
     (clutch--with-query-activity connection
-      (clutch--present-statement-outcome
-       sql connection
-       (clutch--execute-statement sql connection t result-context)))))
+      (let ((outcome
+             (clutch--execute-statement sql connection t result-context)))
+        (clutch--present-statement-outcome
+         sql connection outcome)))))
 
 
 (defun clutch--show-execution-error
@@ -1338,9 +1372,11 @@ result buffer.  Stops and reports on the first error."
                 (clutch--clear-executed-sql-overlay)
                 (redisplay t)))
             (setq outcome
-                  (clutch--execute-statement stmt clutch-connection final-p))
+                  (clutch--execute-statement
+                   stmt clutch-connection final-p nil (> done 0)))
             (if-let* ((err (plist-get outcome :error)))
-                (let* ((connection clutch-connection)
+                (let* ((connection (or (plist-get outcome :connection)
+                                       clutch-connection))
                        (connection-lost
                         (not (clutch--connection-alive-p connection)))
                        (context
@@ -1709,7 +1745,8 @@ Accumulates input until a semicolon is found, then executes."
                        sql clutch-connection t))
                      (elapsed (plist-get outcome :elapsed)))
                 (if-let* ((db-error (plist-get outcome :error)))
-                    (let* ((connection clutch-connection)
+                    (let* ((connection (or (plist-get outcome :connection)
+                                           clutch-connection))
                            (connection-lost
                             (not (clutch--connection-alive-p connection)))
                            (context
