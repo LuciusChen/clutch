@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- **Result-cell preview overhaul:** Removed the `V` live-view commands, their bottom-window viewer, and freeze/refresh/quit controls.  `v` remains the explicit full value viewer; optional automatic child-frame previews are now controlled by `clutch-cell-preview-style`, appear only for visibly truncated cells, fit tightly to their formatted content, follow window resizing, use a theme-relative contrasting surface, and silently stay disabled on unsupported displays.
 - Removed the public `clutch-execute-query-at-point` and `clutch-execute-statement-at-point` commands.  Use `clutch-execute-dwim`, `clutch-execute-region`, or `clutch-execute-buffer`; select a region first when exact execution boundaries matter.
 - Removed the table-specific `clutch-describe-table`, `clutch-describe-table-at-point`, and `clutch-browse-table` commands.  Use `clutch-describe-dwim` or `clutch-act-dwim`.
 - Removed the standalone `clutch-result-insert-mode` entry point and its public map/hook.  Open insert forms with `clutch-result-insert-row` from a result.

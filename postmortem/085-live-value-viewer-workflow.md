@@ -1,5 +1,10 @@
 #+title: Live Value Viewer Workflow
 #+date: 2026-04-08
+#+status: superseded 2026-07-16
+
+* Status
+
+This decision is retained as history but no longer describes the current workflow.  The uppercase =V= command, bottom-window live viewer, dedicated buffer, freeze state, and =f= / =g= / =q= controls were removed.  =v= remains the explicit full viewer for scrolling, copying, and pinned inspection.  Users who want follow-point browsing can set =clutch-cell-preview-style= to =child-frame=; this optional automatic preview appears only for visibly truncated cells, is off by default, and silently remains absent when child frames are unsupported.
 
 * Context
 

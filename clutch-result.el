@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-diagnostics)
@@ -30,6 +31,24 @@
 A float between 0.0 and 1.0.  Only applies when creating a new result
 window; an existing result window is reused at its current height."
   :type 'float
+  :group 'clutch)
+
+(defcustom clutch-cell-preview-style nil
+  "Automatic preview style for the cell at point.
+Nil disables automatic previews.  `child-frame' shows a non-focusable child
+frame while point is on a visibly truncated result or record cell.  Unsupported
+displays silently leave previews disabled; `v' remains available as the
+full value viewer."
+  :type '(choice (const :tag "Disabled" nil)
+                 (const :tag "Child frame" child-frame))
+  :group 'clutch)
+
+(defcustom clutch-cell-preview-max-size '(0.65 . 0.45)
+  "Maximum child-frame cell preview size relative to its parent frame.
+The car is the maximum width fraction and the cdr is the maximum height
+fraction.  Values must be greater than zero and no greater than one."
+  :type '(cons (float :tag "Width fraction")
+               (float :tag "Height fraction"))
   :group 'clutch)
 
 (defcustom clutch-agent-context-max-result-rows 20
@@ -129,15 +148,11 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 (defvar-local clutch--refine-saved-mode-line nil
   "Saved `mode-line-format' to restore after refine mode exits.")
 
-(defvar-local clutch--live-view-buffer nil
-  "Live value viewer buffer attached to the current source buffer, or nil.")
+(defvar clutch--cell-preview-state nil
+  "Active child-frame cell preview state, or nil.")
 
-(defvar-local clutch--live-view-source-buffer nil
-  "Source buffer followed by the current live value viewer.")
-(defvar-local clutch--live-view-frozen nil
-  "Non-nil when the live value viewer is frozen.")
-(defvar-local clutch--live-view-source-cell-id nil
-  "Last source cell identity rendered by a live value viewer.")
+(defvar-local clutch--cell-preview-timer nil
+  "Idle timer waiting to render the cell preview in this buffer.")
 
 (defvar-local clutch-record--result-buffer nil
   "Reference to the parent result buffer for record display.")
@@ -930,7 +945,6 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "k" #'clutch-copy-context-for-agent)
     (define-key map "v" #'clutch-result-view-value)
-    (define-key map "V" #'clutch-result-live-view-value)
     (define-key map "|" #'clutch-result-shell-command-on-cell)
     (define-key map "?" #'clutch-result-column-info)
     (define-key map "W" #'clutch-result-apply-filter)
@@ -988,7 +1002,6 @@ Copy:
   \\[clutch-preview-execution-sql]	Preview execution
 Inspect:
   \\[clutch-result-view-value]	View current cell once
-  \\[clutch-result-live-view-value]	Open live viewer that follows point
 Edit:
   \\[clutch-result-edit-cell]	Edit / re-edit at point
   \\[clutch-result-commit]	Commit staged changes
@@ -1008,8 +1021,11 @@ Edit:
   (setq-local clutch--header-sort-function #'clutch-result--sort-by-column-index)
   (add-hook 'post-command-hook
             #'clutch--sync-result-cursor-ui nil t)
+  (add-hook 'post-command-hook #'clutch--schedule-cell-preview nil t)
   (add-hook 'kill-buffer-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
+  (add-hook 'kill-buffer-hook #'clutch--cleanup-cell-preview nil t)
+  (add-hook 'change-major-mode-hook #'clutch--cleanup-cell-preview nil t)
   (clutch--enable-window-size-hook))
 
 ;;;###autoload
@@ -2395,189 +2411,413 @@ blob type with non-text value → binary string; otherwise plain text."
       (user-error "No JSON value at point"))
     (clutch--view-in-buffer content (or buffer-name "*clutch-value*") setup)))
 
-(defvar clutch--live-view-follow-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map "f" #'clutch--live-view-toggle-freeze)
-    (define-key map "g" #'clutch--live-view-refresh)
-    (define-key map "q" #'clutch--live-view-quit)
-    map)
-  "Keymap for `clutch--live-view-follow-mode'.")
+(defun clutch--cell-preview-context ()
+  "Return the cell preview context at point, or nil."
+  (when (or (derived-mode-p 'clutch-result-mode)
+            (derived-mode-p 'clutch-record-mode))
+    (when-let* (((get-text-property (point) 'clutch-cell-truncated))
+                (cell (clutch--cell-at-point)))
+      (pcase-let* ((`(,ridx ,cidx ,value) cell)
+                   (column-defs
+                    (if (derived-mode-p 'clutch-result-mode)
+                        clutch--result-column-defs
+                      (and (buffer-live-p clutch-record--result-buffer)
+                           (buffer-local-value
+                            'clutch--result-column-defs
+                            clutch-record--result-buffer))))
+                   (column-def (nth cidx column-defs)))
+        (list :row-index ridx
+              :column-index cidx
+              :cell-id (list (buffer-chars-modified-tick) ridx cidx)
+              :value value
+              :column-def column-def)))))
 
-(define-minor-mode clutch--live-view-follow-mode
-  "Minor mode for a clutch live-follow value viewer."
-  :init-value nil
-  :lighter " LiveView"
-  :keymap clutch--live-view-follow-mode-map)
+(defun clutch--cell-preview-supported-p (window)
+  "Return non-nil when WINDOW can host a child-frame preview."
+  (and (window-live-p window)
+       (display-graphic-p (window-frame window))))
 
-(defun clutch--live-view-current-context ()
-  "Return the current live-view source context, or nil when none is available."
-  (cond
-   ((derived-mode-p 'clutch-result-mode)
-    (when-let* ((ridx (get-text-property (point) 'clutch-row-idx))
-                (cidx (get-text-property (point) 'clutch-col-idx)))
-      (list :source-buffer (current-buffer)
-            :source-kind 'result
-            :cell-id (list 'result (buffer-chars-modified-tick) ridx cidx)
-            :ridx ridx
-            :cidx cidx
-            :row-count (length (clutch--result-display-rows))
-            :table clutch--result-source-table
-            :column (nth cidx clutch--result-columns)
-            :col-def (nth cidx clutch--result-column-defs)
-            :value (get-text-property (point) 'clutch-full-value))))
-   ((derived-mode-p 'clutch-record-mode)
-    (when-let* ((result-buf clutch-record--result-buffer)
-                ((buffer-live-p result-buf))
-                (ridx (get-text-property (point) 'clutch-row-idx))
-                (cidx (get-text-property (point) 'clutch-col-idx)))
-      (list :source-buffer (current-buffer)
-            :source-kind 'record
-            :cell-id (list 'record (buffer-chars-modified-tick) ridx cidx)
-            :ridx ridx
-            :cidx cidx
-            :row-count (with-current-buffer result-buf
-                         (length (clutch--result-display-rows)))
-            :table (with-current-buffer result-buf clutch--result-source-table)
-            :column (with-current-buffer result-buf
-                      (nth cidx clutch--result-columns))
-            :col-def (with-current-buffer result-buf
-                       (nth cidx clutch--result-column-defs))
-            :value (get-text-property (point) 'clutch-full-value))))))
+(defun clutch--cell-preview-size-limits (parent preview)
+  "Return fit limits for PREVIEW relative to PARENT.
+The result is suitable for function `fit-frame-to-buffer'."
+  (let* ((configured-width (car-safe clutch-cell-preview-max-size))
+         (configured-height (cdr-safe clutch-cell-preview-max-size))
+         (width-ratio (if (and (numberp configured-width)
+                               (> configured-width 0)
+                               (<= configured-width 1))
+                          configured-width
+                        0.65))
+         (height-ratio (if (and (numberp configured-height)
+                                (> configured-height 0)
+                                (<= configured-height 1))
+                           configured-height
+                         0.45))
+         (max-width (max 1 (floor (/ (* (frame-text-width parent) width-ratio)
+                                     (max 1 (frame-char-width preview))))))
+         (max-height
+          (max 1 (floor (/ (* (frame-text-height parent) height-ratio)
+                           (max 1 (window-default-line-height
+                                   (frame-root-window preview))))))))
+    (list max-height 1 max-width 1)))
 
-(defun clutch--live-view-header (kind context frozen)
-  "Return live viewer header for KIND using CONTEXT and FROZEN state."
-  (let* ((table (plist-get context :table))
-         (column (or (plist-get context :column) "?"))
-         (label (if table (format "%s.%s" table column) column))
-         (ridx (plist-get context :ridx))
-         (cidx (plist-get context :cidx))
-         (row-count (or (plist-get context :row-count) 0)))
-    (string-join
-     (list (format " %s" kind)
-           (if frozen "FROZEN" "FOLLOW")
-           label
-           (format "R%d/%d C%d" (1+ ridx) row-count (1+ cidx))
-           (clutch--key-hints '(("f" "Toggle freeze")
-                                ("g" "Refresh")
-                                ("q" "Quit"))))
-     (clutch--status-separator))))
+(defun clutch--cell-preview-layout-signature (parent preview)
+  "Return the geometry inputs controlling PREVIEW under PARENT."
+  (list (frame-text-width parent)
+        (frame-text-height parent)
+        (frame-char-width preview)
+        (window-default-line-height (frame-root-window preview))
+        (copy-tree clutch-cell-preview-max-size)))
 
-(defun clutch--live-view-detach-source (source-buf &optional viewer-buf)
-  "Detach live viewer state from SOURCE-BUF.
-When VIEWER-BUF is non-nil, only detach if SOURCE-BUF points at VIEWER-BUF."
-  (when (buffer-live-p source-buf)
-    (with-current-buffer source-buf
-      (when (or (null viewer-buf)
-                (eq clutch--live-view-buffer viewer-buf))
-        (setq-local clutch--live-view-buffer nil)
-        (remove-hook 'post-command-hook #'clutch--live-view-source-post-command t)
-        (remove-hook 'kill-buffer-hook #'clutch--live-view-source-killed t)
-        (remove-hook 'change-major-mode-hook #'clutch--live-view-source-killed t)))))
+(defun clutch--cell-preview-colors (parent)
+  "Return distinct theme-relative background, foreground, and border colors.
+PARENT supplies the active frame's default face colors."
+  (let* ((raw-background (face-background 'default parent t))
+         (background
+          (if (and (stringp raw-background)
+                   (color-name-to-rgb raw-background))
+              raw-background
+            (if (eq (frame-parameter parent 'background-mode) 'dark)
+                "#202020"
+              "#ffffff")))
+         (raw-foreground (face-foreground 'default parent t))
+         (dark (color-dark-p (color-name-to-rgb background))))
+    (list (if dark
+              (color-lighten-name background 10)
+            (color-darken-name background 6))
+          (if (and (stringp raw-foreground)
+                   (color-name-to-rgb raw-foreground))
+              raw-foreground
+            (if dark "#f2f2f2" "#202020"))
+          (if dark
+              (color-lighten-name background 32)
+            (color-darken-name background 28)))))
 
-(defun clutch--live-view-buffer-killed ()
-  "Clean up source-buffer hooks when the live viewer is killed."
-  (let ((viewer (current-buffer))
-        (source clutch--live-view-source-buffer))
-    (setq-local clutch--live-view-source-buffer nil)
-    (clutch--live-view-detach-source source viewer)))
+(defun clutch--make-cell-preview-frame (buffer parent)
+  "Create a hidden child frame showing BUFFER under PARENT.
+Return nil when the current graphical display cannot create one."
+  (pcase-let* ((window-min-height 1)
+               (window-min-width 1)
+               (`(,background ,foreground ,border)
+                (clutch--cell-preview-colors parent))
+               (parameters
+                `((name . "clutch-cell-preview")
+                  (title . "Clutch cell preview")
+                  (parent-frame . ,parent)
+                  (minibuffer . ,(minibuffer-window parent))
+                  (visibility . nil)
+                  (fullscreen . nil)
+                  (no-accept-focus . t)
+                  (no-focus-on-map . t)
+                  (no-other-frame . t)
+                  (skip-taskbar . t)
+                  (unsplittable . t)
+                  (undecorated . t)
+                  (menu-bar-lines . 0)
+                  (tool-bar-lines . 0)
+                  (tab-bar-lines . 0)
+                  (line-spacing . 0)
+                  (vertical-scroll-bars . nil)
+                  (horizontal-scroll-bars . nil)
+                  (left-fringe . 0)
+                  (right-fringe . 0)
+                  (border-width . 1)
+                  (border-color . ,border)
+                  (internal-border-width . 0)
+                  (child-frame-border-width . 1)
+                  (child-frame-border-color . ,border)
+                  (fit-frame-to-buffer-margins . (0 0 0 0))
+                  (cursor-type . nil)
+                  (no-special-glyphs . t)
+                  (width . 1)
+                  (height . 1)
+                  (desktop-dont-save . t)
+                  (background-color . ,background)
+                  (foreground-color . ,foreground)))
+               (frame nil))
+    (when-let* ((font (frame-parameter parent 'font)))
+      (push `(font . ,font) parameters))
+    (condition-case nil
+        (progn
+          (setq frame (let ((after-make-frame-functions nil))
+                        (with-current-buffer buffer
+                          (make-frame parameters))))
+          (let ((window (frame-root-window frame)))
+            (set-window-buffer window buffer)
+            (set-window-parameter window 'mode-line-format 'none)
+            (set-window-parameter window 'header-line-format 'none)
+            (set-window-parameter window 'no-other-window t)
+            (set-window-dedicated-p window t))
+          frame)
+      (error
+       (when (frame-live-p frame)
+         (ignore-errors (delete-frame frame t)))
+       nil))))
 
-(defun clutch--live-view-source-killed ()
-  "Dispose of any live viewer attached to the current source buffer."
-  (when (buffer-live-p clutch--live-view-buffer)
-    (let ((viewer clutch--live-view-buffer))
-      (setq-local clutch--live-view-buffer nil)
-      (when (buffer-live-p viewer)
-        (with-current-buffer viewer
-          (setq-local clutch--live-view-source-buffer nil))
-        (kill-buffer viewer))))
-  (remove-hook 'post-command-hook #'clutch--live-view-source-post-command t)
-  (remove-hook 'kill-buffer-hook #'clutch--live-view-source-killed t)
-  (remove-hook 'change-major-mode-hook #'clutch--live-view-source-killed t))
+(defun clutch--fit-cell-preview-frame (frame)
+  "Fit child FRAME to its content within the configured maximum size."
+  (pcase-let* ((parent (frame-parent frame))
+               (`(,max-height ,min-height ,max-width ,min-width)
+                (clutch--cell-preview-size-limits parent frame))
+               (frame-resize-pixelwise t)
+               (window-min-height 1)
+               (window-min-width 1))
+    (fit-frame-to-buffer frame max-height min-height max-width min-width)))
 
-(defun clutch--render-live-view (viewer-buf context &optional force)
-  "Render CONTEXT into VIEWER-BUF.
-When FORCE is non-nil, refresh even if the source cell has not changed."
-  (with-current-buffer viewer-buf
-    (let ((frozen clutch--live-view-frozen)
-          (source (plist-get context :source-buffer))
-          (cell-id (plist-get context :cell-id)))
-      (unless (and (not force)
-                   (equal cell-id clutch--live-view-source-cell-id))
-        (pcase-let* ((`(:kind ,kind :content ,content :setup ,setup)
-                      (clutch--view-spec (plist-get context :value)
-                                         (plist-get context :col-def)
-                                         t)))
-          (clutch--render-view-buffer viewer-buf content setup)
-          (setq-local clutch--live-view-source-buffer source)
-          (setq-local clutch--live-view-source-cell-id cell-id)
-          (setq-local clutch--live-view-frozen frozen)
-          (setq-local header-line-format
-                      (clutch--live-view-header kind context frozen))
-          (clutch--live-view-follow-mode 1))))))
+(defun clutch--cell-preview-coordinates
+    (point-x point-y line-height preview-width preview-height parent-width bottom)
+  "Return child-frame coordinates near POINT-X and POINT-Y.
+LINE-HEIGHT, PREVIEW-WIDTH, and PREVIEW-HEIGHT describe the line and preview.
+PARENT-WIDTH and BOTTOM delimit the usable parent-frame area."
+  (let* ((gap 6)
+         (below (+ point-y line-height gap))
+         (above (- point-y preview-height gap))
+         (x (min (max gap point-x)
+                 (max gap (- parent-width preview-width gap))))
+         (y (if (<= (+ below preview-height gap) bottom)
+                below
+              (max gap above))))
+    (cons x y)))
 
-(defun clutch--live-view-source-post-command ()
-  "Refresh the attached live viewer after point movement in a source buffer."
-  (if (not (buffer-live-p clutch--live-view-buffer))
-      (clutch--live-view-detach-source (current-buffer))
-    (let ((viewer clutch--live-view-buffer)
-          (context (clutch--live-view-current-context)))
-      (with-current-buffer viewer
-        (unless clutch--live-view-frozen
-          (when context
-            (clutch--render-live-view viewer context)))))))
+(defun clutch--position-cell-preview-frame (frame source-window)
+  "Place child FRAME next to point in SOURCE-WINDOW without covering its line."
+  (when-let* ((position (posn-at-point nil source-window))
+              (xy (posn-x-y position)))
+    (let* ((parent (window-frame source-window))
+           (edges (window-inside-pixel-edges source-window))
+           (line-height (window-default-line-height source-window))
+           (point-x (+ (nth 0 edges) (or (car xy) 0)))
+           (point-y (+ (nth 1 edges) (or (cdr xy) 0)))
+           (preview-width (frame-pixel-width frame))
+           (preview-height (frame-pixel-height frame))
+           (parent-width (frame-pixel-width parent))
+           (minibuffer (minibuffer-window parent))
+           (bottom (if (window-live-p minibuffer)
+                       (window-pixel-top minibuffer)
+                     (frame-pixel-height parent)))
+           (coordinates
+            (clutch--cell-preview-coordinates
+             point-x point-y line-height preview-width preview-height
+             parent-width bottom)))
+      (set-frame-position frame (car coordinates) (cdr coordinates)))))
 
-(defun clutch--live-view-refresh ()
-  "Refresh the current clutch live viewer from its source point."
-  (interactive)
-  (unless (buffer-live-p clutch--live-view-source-buffer)
-    (user-error "Live viewer source buffer is no longer available"))
-  (when-let* ((context (with-current-buffer clutch--live-view-source-buffer
-                         (clutch--live-view-current-context))))
-    (clutch--render-live-view (current-buffer) context t)
-    (message "Live viewer refreshed")))
+(defun clutch--cancel-cell-preview-timer ()
+  "Cancel the pending cell preview render in the current buffer."
+  (when clutch--cell-preview-timer
+    (cancel-timer clutch--cell-preview-timer)
+    (setq clutch--cell-preview-timer nil)))
 
-(defun clutch--live-view-toggle-freeze ()
-  "Toggle live viewer tracking of source-buffer point."
-  (interactive)
-  (setq-local clutch--live-view-frozen (not clutch--live-view-frozen))
-  (setq-local header-line-format
-              (replace-regexp-in-string
-               (if clutch--live-view-frozen "FOLLOW" "FROZEN")
-               (if clutch--live-view-frozen "FROZEN" "FOLLOW")
-               (format "%s" header-line-format)
-               t t))
-  (unless clutch--live-view-frozen
-    (clutch--live-view-refresh))
-  (message "Live viewer %s"
-           (if clutch--live-view-frozen "frozen" "following point")))
+(defun clutch--close-cell-preview ()
+  "Close the active child-frame cell preview and remove its global hook."
+  (let* ((state clutch--cell-preview-state)
+         (source (plist-get state :source-buffer))
+         (buffer (plist-get state :buffer))
+         (frame (plist-get state :frame)))
+    (setq clutch--cell-preview-state nil)
+    (remove-hook 'post-command-hook #'clutch--cell-preview-lifecycle-post-command)
+    (remove-hook 'window-size-change-functions
+                 #'clutch--cell-preview-window-size-change)
+    (when (buffer-live-p source)
+      (with-current-buffer source
+        (clutch--cancel-cell-preview-timer)))
+    (when (frame-live-p frame)
+      (ignore-errors (delete-frame frame t)))
+    (when (and (buffer-live-p buffer)
+               (not (eq buffer (current-buffer))))
+      (kill-buffer buffer))))
 
-(defun clutch--live-view-quit ()
-  "Close the current clutch live viewer."
-  (interactive)
-  (kill-buffer (current-buffer)))
+(defun clutch--render-cell-preview (context)
+  "Render cell preview CONTEXT into the active child frame."
+  (let* ((state clutch--cell-preview-state)
+         (buffer (plist-get state :buffer))
+         (frame (plist-get state :frame)))
+    (pcase-let* ((`(:kind ,_kind :content ,content :setup ,setup)
+                  (clutch--view-spec (plist-get context :value)
+                                     (plist-get context :column-def)
+                                     t)))
+      (clutch--render-view-buffer buffer content setup)
+      (with-current-buffer buffer
+        (setq-local mode-line-format nil
+                    header-line-format nil
+                    truncate-lines nil
+                    word-wrap t
+                    display-line-numbers nil
+                    cursor-type nil)
+        ;; Viewer setup changes major mode, so reinstall this local cleanup.
+        (add-hook 'kill-buffer-hook #'clutch--close-cell-preview nil t)
+        (when (fboundp 'font-lock-ensure)
+          (font-lock-ensure (point-min) (point-max))))
+      (let ((window (frame-root-window frame)))
+        (set-window-buffer window buffer)
+        (set-window-point window (point-min)))
+      (clutch--fit-cell-preview-frame frame)
+      (clutch--position-cell-preview-frame
+       frame (plist-get state :source-window))
+      (setf (plist-get clutch--cell-preview-state :cell-id)
+            (plist-get context :cell-id)
+            (plist-get clutch--cell-preview-state :layout-signature)
+            (clutch--cell-preview-layout-signature (frame-parent frame) frame))
+      (make-frame-visible frame))))
 
-(defun clutch--open-live-view ()
-  "Open or refresh a live-follow viewer for the current clutch cell."
+(defun clutch--cell-preview-source-valid-p (source source-window)
+  "Return non-nil when SOURCE in SOURCE-WINDOW should keep its preview."
+  (and (buffer-live-p source)
+       (window-live-p source-window)
+       (eq source-window (selected-window))
+       (eq source (window-buffer source-window))
+       (with-current-buffer source
+         (and (eq clutch-cell-preview-style 'child-frame)
+              (or (derived-mode-p 'clutch-result-mode)
+                  (derived-mode-p 'clutch-record-mode))))))
+
+(defun clutch--cell-preview-lifecycle-post-command ()
+  "Close the active cell preview after leaving its source window."
+  (let* ((state clutch--cell-preview-state)
+         (source (plist-get state :source-buffer))
+         (source-window (plist-get state :source-window))
+         (buffer (plist-get state :buffer))
+         (frame (plist-get state :frame)))
+    (unless (and (clutch--cell-preview-source-valid-p source source-window)
+                 (buffer-live-p buffer)
+                 (frame-live-p frame))
+      (clutch--close-cell-preview))))
+
+(defun clutch--cell-preview-window-size-change (changed-frame)
+  "Reschedule the active preview when CHANGED-FRAME is its parent."
+  (let* ((state clutch--cell-preview-state)
+         (source (plist-get state :source-buffer))
+         (source-window (plist-get state :source-window)))
+    (cond
+     ((and state (not (window-live-p source-window)))
+      (clutch--close-cell-preview))
+     ((and state
+           (eq changed-frame (window-frame source-window)))
+      (with-current-buffer source
+        (clutch--cancel-cell-preview-timer)
+        (setq clutch--cell-preview-timer
+              (run-with-idle-timer
+               0.1 nil
+               (lambda (buffer)
+                 (when (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (setq clutch--cell-preview-timer nil)
+                     (clutch--schedule-cell-preview))))
+               source)))))))
+
+(defun clutch--open-cell-preview (source source-window context)
+  "Open a child-frame preview for CONTEXT from SOURCE in SOURCE-WINDOW."
+  (let* ((buffer (get-buffer-create " *clutch-cell-preview*"))
+         (frame (clutch--make-cell-preview-frame
+                 buffer (window-frame source-window)))
+         success)
+    (if (not frame)
+        (progn
+          (kill-buffer buffer)
+          nil)
+      (unwind-protect
+          (progn
+            (setq clutch--cell-preview-state
+                  (list :source-buffer source
+                        :source-window source-window
+                        :buffer buffer
+                        :frame frame
+                        :cell-id nil))
+            (add-hook 'post-command-hook
+                      #'clutch--cell-preview-lifecycle-post-command)
+            (add-hook 'window-size-change-functions
+                      #'clutch--cell-preview-window-size-change)
+            (clutch--render-cell-preview context)
+            (setq success t))
+        (unless success
+          (clutch--close-cell-preview)))
+      success)))
+
+(defun clutch--show-scheduled-cell-preview
+    (source source-window row-index column-index)
+  "Render SOURCE's scheduled cell in SOURCE-WINDOW.
+ROW-INDEX and COLUMN-INDEX reject a stale idle callback after point moves."
+  (when (buffer-live-p source)
+    (with-current-buffer source
+      (setq clutch--cell-preview-timer nil)
+      (when (and (clutch--cell-preview-source-valid-p source source-window)
+                 (clutch--cell-preview-supported-p source-window))
+        (when-let* ((context (clutch--cell-preview-context))
+                    ((= row-index (plist-get context :row-index)))
+                    ((= column-index (plist-get context :column-index))))
+          (condition-case err
+              (let ((state clutch--cell-preview-state))
+                (if (and (eq source (plist-get state :source-buffer))
+                         (eq source-window (plist-get state :source-window))
+                         (buffer-live-p (plist-get state :buffer))
+                         (frame-live-p (plist-get state :frame)))
+                    (clutch--render-cell-preview context)
+                  (clutch--close-cell-preview)
+                  (clutch--open-cell-preview source source-window context)))
+            (quit
+             (clutch--close-cell-preview)
+             (signal (car err) (cdr err)))
+            (error (clutch--close-cell-preview))))))))
+
+(defun clutch--schedule-cell-preview ()
+  "Coalesce automatic preview updates for the cell at point."
   (let* ((source (current-buffer))
-         (context (or (clutch--live-view-current-context)
-                      (user-error "No cell at point")))
-         (viewer (get-buffer-create "*clutch-live-view*")))
-    (with-current-buffer viewer
-      (when (and (buffer-live-p clutch--live-view-source-buffer)
-                 (not (eq clutch--live-view-source-buffer source)))
-        (clutch--live-view-detach-source clutch--live-view-source-buffer viewer))
-      (add-hook 'kill-buffer-hook #'clutch--live-view-buffer-killed nil t))
-    (setq-local clutch--live-view-buffer viewer)
-    (add-hook 'post-command-hook #'clutch--live-view-source-post-command nil t)
-    (add-hook 'kill-buffer-hook #'clutch--live-view-source-killed nil t)
-    (add-hook 'change-major-mode-hook #'clutch--live-view-source-killed nil t)
-    (with-current-buffer viewer
-      (setq-local clutch--live-view-frozen nil)
-      (setq-local clutch--live-view-source-buffer source))
-    (clutch--render-live-view viewer context t)
-    (display-buffer viewer '(display-buffer-at-bottom . ((window-height . 0.33))))
-    viewer))
+         (source-window (selected-window))
+         (available
+          (and (eq clutch-cell-preview-style 'child-frame)
+               (clutch--cell-preview-supported-p source-window)))
+         (context (and available (clutch--cell-preview-context))))
+    (cond
+     ((not available)
+      (clutch--cancel-cell-preview-timer)
+      (when (eq source (plist-get clutch--cell-preview-state :source-buffer))
+        (clutch--close-cell-preview)))
+     ((not context)
+      (clutch--cancel-cell-preview-timer)
+      (when (eq source (plist-get clutch--cell-preview-state :source-buffer))
+        (when-let* ((frame (plist-get clutch--cell-preview-state :frame))
+                    ((frame-live-p frame)))
+          (make-frame-invisible frame))))
+     (t
+      (let* ((state clutch--cell-preview-state)
+             (same-source
+              (and (eq source (plist-get state :source-buffer))
+                   (eq source-window (plist-get state :source-window))))
+             (same-cell
+              (and same-source
+                   (equal (plist-get context :cell-id)
+                          (plist-get state :cell-id)))))
+        (unless (or (null state) same-source)
+          (clutch--close-cell-preview)
+          (setq state nil))
+        (clutch--cancel-cell-preview-timer)
+        (if (and same-cell
+                 (buffer-live-p (plist-get state :buffer))
+                 (frame-live-p (plist-get state :frame)))
+            (condition-case nil
+                (let* ((frame (plist-get state :frame))
+                       (layout (clutch--cell-preview-layout-signature
+                                (frame-parent frame) frame)))
+                  (unless (equal layout (plist-get state :layout-signature))
+                    (clutch--fit-cell-preview-frame frame)
+                    (setf (plist-get clutch--cell-preview-state
+                                     :layout-signature)
+                          layout))
+                  (clutch--position-cell-preview-frame frame source-window)
+                  (make-frame-visible frame))
+              (error (clutch--close-cell-preview)))
+          ;; A short fixed idle delay collapses rapid navigation into one render.
+          (setq clutch--cell-preview-timer
+                (run-with-idle-timer
+                 0.08 nil #'clutch--show-scheduled-cell-preview
+                 source source-window
+                 (plist-get context :row-index)
+                 (plist-get context :column-index)))))))))
+
+(defun clutch--cleanup-cell-preview ()
+  "Cancel this buffer's pending preview and close one it owns."
+  (clutch--cancel-cell-preview-timer)
+  (when (eq (current-buffer)
+            (plist-get clutch--cell-preview-state :source-buffer))
+    (clutch--close-cell-preview)))
 
 ;;;###autoload
 (defun clutch-result-view-value ()
@@ -2587,12 +2827,6 @@ Selects JSON, XML, or binary string view based on column type and content."
   (pcase-let ((`(,_ridx ,cidx ,val) (or (clutch--cell-at-point)
                                          (user-error "No cell at point"))))
     (clutch--dispatch-view val (nth cidx clutch--result-column-defs))))
-
-;;;###autoload
-(defun clutch-result-live-view-value ()
-  "Open a live-follow viewer for the result cell at point."
-  (interactive)
-  (clutch--open-live-view))
 
 ;;;###autoload
 (defun clutch-result-shell-command-on-cell (command)
@@ -3225,7 +3459,6 @@ previous window layout."
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
     (define-key map "v" #'clutch-record-view-value)
-    (define-key map "V" #'clutch-record-live-view-value)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
     (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
     (define-key map "I" #'clutch-clone-row-to-insert)
@@ -3245,10 +3478,12 @@ previous window layout."
   \\[clutch-result-edit-cell]	Edit / re-edit field
   \\[clutch-result-discard-pending-at-point]	Discard staged field or row change
   \\[clutch-record-view-value]	View current field once
-  \\[clutch-record-live-view-value]	Open live viewer that follows point
   \\[clutch-record-refresh]	Refresh"
   (setq truncate-lines nil)
-  (setq-local revert-buffer-function #'clutch-record--render))
+  (setq-local revert-buffer-function #'clutch-record--render)
+  (add-hook 'post-command-hook #'clutch--schedule-cell-preview nil t)
+  (add-hook 'kill-buffer-hook #'clutch--cleanup-cell-preview nil t)
+  (add-hook 'change-major-mode-hook #'clutch--cleanup-cell-preview nil t))
 
 ;;;###autoload
 (defun clutch-result-open-record ()
@@ -3288,6 +3523,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (display (if (and long-p (not expanded-p) (> (length formatted) 80))
                       (concat (substring formatted 0 80) "…")
                     formatted))
+         (truncated (and long-p (not expanded-p) (> (length formatted) 80)))
          (face (cond (edited 'clutch-modified-face)
                      ((null val) 'clutch-null-face)
                      (fk 'clutch-fk-face)
@@ -3295,6 +3531,8 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (cell-props (list 'clutch-row-idx ridx
                            'clutch-col-idx cidx
                            'clutch-full-value display-val)))
+    (when truncated
+      (setq cell-props (nconc cell-props '(clutch-cell-truncated t))))
     (insert (apply #'propertize
                    (clutch--string-pad name max-name-w)
                    (append (list 'face 'clutch-field-name-face)
@@ -3467,12 +3705,6 @@ Selects JSON, XML, or binary string view based on column type and content."
     (clutch--dispatch-view val col-def)))
 
 ;;;###autoload
-(defun clutch-record-live-view-value ()
-  "Open a live-follow viewer for the record field at point."
-  (interactive)
-  (clutch--open-live-view))
-
-;;;###autoload
 (defun clutch-record-refresh ()
   "Refresh the Record buffer."
   (interactive)
@@ -3537,8 +3769,7 @@ Selects JSON, XML, or binary string view based on column type and content."
      :description clutch-result--fullscreen-transient-description)]]
   [ :pad-keys t
    ["Inspect"
-    ("v" "View value" clutch-result-view-value)
-    ("V" "Live view (follow point)" clutch-result-live-view-value)]
+    ("v" "Full value" clutch-result-view-value)]
    ["Copy / Export"
     ("c" "Copy…" clutch-result-copy-dispatch)
     ("k" "Copy agent context" clutch-copy-context-for-agent)
@@ -3554,8 +3785,7 @@ Selects JSON, XML, or binary string view based on column type and content."
      :description clutch-record--field-action-description
      :inapt-if-not clutch-record--field-action-context)]
    ["Inspect"
-    ("v" "View value" clutch-record-view-value)
-    ("V" "Live view (follow point)" clutch-record-live-view-value)]
+    ("v" "Full value" clutch-record-view-value)]
    ["Mutate"
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point

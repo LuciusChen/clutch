@@ -53,14 +53,13 @@ Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / aligned Org table / INSERT / UPDATE; =-r= controls refinement) |
 | =k=            | Copy SQL, table metadata, and bounded result sample for an external agent |
-| =v=            | View cell value (JSON / XML / BLOB preview — auto-detected) |
-| =V=            | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
+| =v=            | Open the full cell value (JSON / XML / BLOB — auto-detected) |
 | =|=            | Pipe the current cell through a shell command |
 | =e=            | Export all rows (CSV / INSERT / UPDATE copy/file) |
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
 
-Tip: =c= supports both regular region and rectangular selection (=C-x SPC=). Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly. Tip: =v= keeps a static snapshot of the current cell; =V= opens =*clutch-live-view*=, which follows point until you press =f= to freeze it or =q= to close it. Tip: short JSON/XML cells render inline with lightweight token faces; long values show a raw prefix with an ellipsis and can be opened with =v=. Tip: the result-buffer status line uses compact staged-change tokens: =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts. When a query result is not updateable because no safe row identity is available, the same line shows =row editing unavailable= and =E/D off= without placing raw backend errors in the footer; =C-c '= and delete commands still report a precise metadata failure with debug-buffer guidance when discovery failed. Editable result buffers choose row identity in this order: primary key, non-null unique key, then backend row locator when available. Row locator support is backend-specific: PostgreSQL tables can use =ctid=, SQLite rowid tables can use =rowid=, and Oracle JDBC tables can use =ROWID=. Physical row locators may change after UPDATE, so refresh order is still controlled only by the SQL query; use an explicit =ORDER BY= when row order matters. Aggregate or grouped result sets, such as =SELECT count(1) ...=, do not receive hidden row-identity columns and remain read-only for row mutation commands. Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column header visible; busy state temporarily replaces the elapsed-time segment in the footer with a spinner instead of replacing the table header with the query-console connection header. Sort and paging refreshes also keep manually adjusted column widths when the result columns are unchanged.
+Tip: =c= supports both regular region and rectangular selection (=C-x SPC=). Tip: use =A= after =C-x SPC= to aggregate selected numeric cells quickly. Tip: =v= opens the full current value in a normal buffer. Set =clutch-cell-preview-style= to =child-frame= for an automatic formatted preview that follows point only when the visible cell is truncated and grows up to =clutch-cell-preview-max-size=; fully displayed cells do not open a preview, the preview uses a theme-relative contrasting background and border, and unsupported displays silently do nothing. Tip: short JSON/XML cells render inline with lightweight token faces; long values show a raw prefix with an ellipsis and can be opened with =v=. Tip: the result-buffer status line uses compact staged-change tokens: =E-<n>= for pending edits, =D-<n>= for pending deletions, and =I-<n>= for pending inserts. When a query result is not updateable because no safe row identity is available, the same line shows =row editing unavailable= and =E/D off= without placing raw backend errors in the footer; =C-c '= and delete commands still report a precise metadata failure with debug-buffer guidance when discovery failed. Editable result buffers choose row identity in this order: primary key, non-null unique key, then backend row locator when available. Row locator support is backend-specific: PostgreSQL tables can use =ctid=, SQLite rowid tables can use =rowid=, and Oracle JDBC tables can use =ROWID=. Physical row locators may change after UPDATE, so refresh order is still controlled only by the SQL query; use an explicit =ORDER BY= when row order matters. Aggregate or grouped result sets, such as =SELECT count(1) ...=, do not receive hidden row-identity columns and remain read-only for row mutation commands. Tip: SQL-backed result refreshes (=g=, =W=, sort, paging) keep the column header visible; busy state temporarily replaces the elapsed-time segment in the footer with a spinner instead of replacing the table header with the query-console connection header. Sort and paging refreshes also keep manually adjusted column widths when the result columns are unchanged.
 
 Tip: Press =s= to cycle sort state for the result column at point.  Simple table results use server-side SQL =ORDER BY=.  UNION, grouped, derived, and other results that Clutch cannot safely rewrite use a client-side sort of the current page; the footer marks this scope as =page=.  Use =C= to jump to a different visible column first, or click its header to cycle that column.  The cycle is unsorted, ascending, descending, then unsorted again.  Header icons appear after column names and use the original-size nerd-icons sort glyphs; when nerd-icons is unavailable, text arrows preserve the sort marker.
 
@@ -86,7 +85,7 @@ Database =NULL= displays as =<null>= in result cells and edit buffers.  In an ed
 
 ** Per-column displayers
 
-Result buffers can replace the visible text for a specific table/column pair without changing the raw cell value.  The displayer receives the raw Elisp value stored in =clutch-full-value= and may return a propertized string.  A =nil= return falls back to the default renderer.  Truncation, padding, cell faces, and the value viewers (=v= / =V=) still use the normal clutch pipeline.
+Result buffers can replace the visible text for a specific table/column pair without changing the raw cell value.  The displayer receives the raw Elisp value stored in =clutch-full-value= and may return a propertized string.  A =nil= return falls back to the default renderer.  Truncation, padding, cell faces, the full viewer (=v=), and optional automatic child-frame previews still use the normal clutch pipeline.
 
 #+begin_src emacs-lisp
 ;; Define ordinary functions for reusable business display rules.
@@ -162,8 +161,7 @@ Typical flow:
 | =C-c '=     | Edit / re-edit current field  |
 | =C-c C-k=   | Discard staged change at field |
 | =I=         | Clone current record into a prefilled insert form (without PK values) |
-| =v=         | View field value (JSON / XML / BLOB preview) |
-| =V=         | Open live value viewer (follows point; =f= freeze, =g= refresh, =q= quit) |
+| =v=         | Open the full field value (JSON / XML / BLOB) |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |
@@ -414,7 +412,7 @@ The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=, =C
 
 In the result buffer, the *Staged* heading includes the current pending count. Its copy/save actions and the mutation group's commit/discard actions are inapt when no changes are staged.  The unified staged-commit workflow uses =i= to stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending change at point, and =C-c C-c= to commit all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
-The result and record transients also expose an *Inspect* group: =v= opens the static cell viewer, while =V= opens the live viewer that follows point.  Once the live viewer is open, use =f= to freeze/unfreeze it, =g= to force a refresh, and =q= to close it.
+The result and record transients expose an *Inspect* group in which =v= opens the full value in a normal buffer.  Automatic child-frame previews are a display preference rather than a transient action: set =clutch-cell-preview-style= to =child-frame= to follow a truncated result or collapsed Record cell without moving focus.
 
 * Faces
 
@@ -463,6 +461,8 @@ Customize these through =M-x customize-group RET clutch RET=:
 
 ** Additional Customization
 
+- =clutch-cell-preview-style= enables automatic child-frame previews when the result or Record cell at point is visibly truncated; it defaults to =nil=.
+- =clutch-cell-preview-max-size= bounds the preview relative to its parent frame (default width 65%, height 45%).
 - =clutch-column-displayers= controls the per-table/per-column result displayer registry.
 - =clutch-object-warmup-idle-delay-seconds= delays background object warmup after schema refresh.
 - =clutch-schema-cache-install-batch-size= controls how many schema entries are installed per idle batch.

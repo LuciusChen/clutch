@@ -2136,8 +2136,9 @@
             (should-not (string-match-p "ORA-12592" help))
             (when (eq status 'error)
               (should (string-match-p "clutch-debug-mode" help)))
-            (should (eq (get-text-property 0 'face capability)
-                        'font-lock-warning-face))))))))
+            (should (equal (get-text-property 0 'face capability)
+                           '(:inherit font-lock-warning-face
+                             :weight normal)))))))))
 
 ;;;; Filter
 
@@ -2386,6 +2387,7 @@
   (let ((s (clutch--cell-display-content
             "{\"a\":1,\"b\":\"x\"}" 20 '(:name "payload" :type-category json) nil)))
     (should (equal (substring-no-properties s) "{\"a\":1,\"b\":\"x\"}"))
+    (should-not (get-text-property 0 'clutch-cell-truncated s))
     (should (eq (get-text-property 0 'face s) 'shadow))
     (should (eq (get-text-property 1 'face s) (clutch--json-key-face)))
     (should-not (eq (get-text-property 1 'face s) 'clutch-field-name-face))
@@ -2403,6 +2405,7 @@
           (when prefix
             (should (string-prefix-p prefix s)))
           (should (string-suffix-p "…" s))
+          (should (get-text-property 0 'clutch-cell-truncated s))
           (should-not (string-match-p placeholder s))
           (should-not (get-text-property 0 'face s))))))
   (let ((s (clutch--cell-display-content
@@ -2410,6 +2413,7 @@
             40 '(:name "payload" :type-category text) nil)))
     (should (equal (substring-no-properties s)
                    "<root attr=\"x\"><a>1</a></root>"))
+    (should-not (get-text-property 0 'clutch-cell-truncated s))
     (should (eq (get-text-property 0 'face s) 'shadow))
     (should (eq (get-text-property 1 'face s) 'font-lock-function-name-face))
     (should (eq (get-text-property 6 'face s) (clutch--json-key-face)))
@@ -2431,72 +2435,203 @@
         (should (string-match-p "done" cell))
         (should (= (get-text-property 2 'clutch-full-value cell) 2))))))
 
-;;;; Rendering — live value viewer
+;;;; Rendering — automatic child-frame cell preview
 
-(ert-deftest clutch-test-live-view-lifecycle ()
-  "Live viewer should follow point, freeze, and detach cleanly."
-  (cl-labels
-      ((run (name body)
-         (let ((source (generate-new-buffer name))
-               viewer)
-           (unwind-protect
-               (progn
-                 (with-current-buffer source
-                   (clutch-test--init-result-state
-                    '(:source-table "cases"
-                      :column-defs ((:name "id" :type-category numeric)
-                                    (:name "name" :type-category text))
-                      :column-widths [2 5]))
-                   (clutch--refresh-display)
-                   (goto-char (point-min))
-                   (when-let* ((match
-                                (text-property-search-forward
-                                 'clutch-col-idx 1 #'eq)))
-                     (goto-char (prop-match-beginning match)))
-                   (cl-letf (((symbol-function 'display-buffer)
-                              (lambda (buf &rest _args)
-                                (setq viewer buf)
-                                buf)))
-                     (clutch-result-live-view-value)))
-                 (funcall body source viewer))
-             (when (buffer-live-p viewer)
-               (kill-buffer viewer))
-             (when (buffer-live-p source)
-               (kill-buffer source))))))
-    (run " *clutch-live-source*"
-         (lambda (source viewer)
-           (should (buffer-live-p viewer))
-           (with-current-buffer viewer
-             (should (string-match-p "alice" (buffer-string))))
-           (with-current-buffer source
-             (clutch-result-down-cell)
-             (run-hooks 'post-command-hook))
-           (with-current-buffer viewer
-             (should (string-match-p "bob" (buffer-string))))))
-    (run " *clutch-live-freeze*"
-         (lambda (source viewer)
-           (with-current-buffer viewer
-             (clutch--live-view-toggle-freeze))
-           (with-current-buffer source
-             (clutch-result-down-cell)
-             (run-hooks 'post-command-hook))
-           (with-current-buffer viewer
-             (should (string-match-p "alice" (buffer-string)))
-             (clutch--live-view-toggle-freeze)
-             (should (string-match-p "bob" (buffer-string))))))
-    (run " *clutch-live-quit*"
-         (lambda (source viewer)
-           (with-current-buffer source
-             (should (eq clutch--live-view-buffer viewer))
-             (should (memq #'clutch--live-view-source-post-command
-                           post-command-hook)))
-           (with-current-buffer viewer
-             (clutch--live-view-quit))
-           (should-not (buffer-live-p viewer))
-           (with-current-buffer source
-             (should-not clutch--live-view-buffer)
-             (should-not (memq #'clutch--live-view-source-post-command
-                               post-command-hook)))))))
+(ert-deftest clutch-test-cell-preview-is-opt-in-and-keeps-full-viewers ()
+  "Automatic previews should default off without replacing the v viewers."
+  (should-not (default-value 'clutch-cell-preview-style))
+  (should (eq (lookup-key clutch-result-mode-map (kbd "v"))
+              #'clutch-result-view-value))
+  (should (eq (lookup-key clutch-record-mode-map (kbd "v"))
+              #'clutch-record-view-value))
+  (should-not (lookup-key clutch-result-mode-map (kbd "V")))
+  (should-not (lookup-key clutch-record-mode-map (kbd "V")))
+  (let ((clutch-cell-preview-style 'child-frame)
+        (clutch--cell-preview-state nil))
+    (with-temp-buffer
+      (clutch-result-mode)
+      (cl-letf (((symbol-function 'clutch--cell-preview-supported-p)
+                 (lambda (_window) nil))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _args)
+                   (ert-fail "Unsupported displays must not schedule previews"))))
+        (clutch--schedule-cell-preview)
+        (should-not clutch--cell-preview-timer)
+        (should-not clutch--cell-preview-state)))))
+
+(ert-deftest clutch-test-cell-preview-coalesces-rapid-navigation ()
+  "Rapid cell movement should render only the final scheduled cell."
+  (let ((source (generate-new-buffer " *clutch-preview-source*"))
+        (clutch-cell-preview-style 'child-frame)
+        (clutch--cell-preview-state nil)
+        scheduled cancelled rendered
+        (sequence 0))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) source)
+          (with-current-buffer source
+            (clutch-test--init-result-state
+             '(:source-table "cases"
+               :column-defs ((:name "id" :type-category numeric)
+                             (:name "name" :type-category text))
+               :column-widths [2 5]
+               :rows ((1 "alice-long-value") (2 "bob-long-value"))))
+            (clutch--refresh-display)
+            (goto-char (point-min)))
+          (cl-letf (((symbol-function 'clutch--cell-preview-supported-p)
+                     (lambda (_window) t))
+                    ((symbol-function 'run-with-idle-timer)
+                     (lambda (_seconds _repeat function &rest args)
+                       (let ((token (list 'timer (cl-incf sequence))))
+                         (setq scheduled (list token function args))
+                         token)))
+                    ((symbol-function 'cancel-timer)
+                     (lambda (timer) (push timer cancelled)))
+                    ((symbol-function 'clutch--open-cell-preview)
+                     (lambda (_source _window context)
+                       (push (plist-get context :value) rendered)
+                       t)))
+            (with-current-buffer source
+              (when-let* ((match (text-property-search-forward
+                                  'clutch-col-idx 0 #'eq)))
+                (goto-char (prop-match-beginning match)))
+              (clutch--schedule-cell-preview)
+              (should-not clutch--cell-preview-timer)
+              (goto-char (point-min))
+              (when-let* ((match (text-property-search-forward
+                                  'clutch-col-idx 1 #'eq)))
+                (goto-char (prop-match-beginning match)))
+              (clutch--schedule-cell-preview)
+              (let ((first-timer clutch--cell-preview-timer))
+                (clutch-result-down-cell)
+                (clutch--schedule-cell-preview)
+                (should (member first-timer cancelled)))
+              (apply (nth 1 scheduled) (nth 2 scheduled))
+              (should (equal rendered '("bob-long-value")))
+              (should-not clutch--cell-preview-timer))))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest clutch-test-cell-preview-cleans-up-nonlocal-exits-and-buffer-kills ()
+  "Preview creation and external buffer kills should not leak global state."
+  (let ((source (current-buffer))
+        (source-window (selected-window))
+        (clutch--cell-preview-state nil)
+        deleted)
+    (cl-letf (((symbol-function 'clutch--make-cell-preview-frame)
+               (lambda (_buffer _parent) 'preview-frame))
+              ((symbol-function 'frame-live-p)
+               (lambda (frame) (eq frame 'preview-frame)))
+              ((symbol-function 'delete-frame)
+               (lambda (_frame &optional _force) (setq deleted t)))
+              ((symbol-function 'clutch--render-cell-preview)
+               (lambda (_context) (signal 'quit nil))))
+      (let (quit-seen)
+        (condition-case nil
+            (clutch--open-cell-preview source source-window '(:value "x"))
+          (quit (setq quit-seen t)))
+        (should quit-seen))
+      (should deleted)
+      (should-not clutch--cell-preview-state)
+      (should-not (get-buffer " *clutch-cell-preview*"))
+      (should-not (memq #'clutch--cell-preview-lifecycle-post-command
+                        (default-value 'post-command-hook)))
+      (should-not (memq #'clutch--cell-preview-window-size-change
+                        window-size-change-functions)))
+    (setq deleted nil)
+    (cl-letf (((symbol-function 'clutch--make-cell-preview-frame)
+               (lambda (_buffer _parent) 'preview-frame))
+              ((symbol-function 'frame-live-p)
+               (lambda (frame) (eq frame 'preview-frame)))
+              ((symbol-function 'delete-frame)
+               (lambda (_frame &optional _force) (setq deleted t)))
+              ((symbol-function 'clutch--render-cell-preview)
+               (lambda (_context)
+                 (with-current-buffer " *clutch-cell-preview*"
+                   (add-hook 'kill-buffer-hook
+                             #'clutch--close-cell-preview nil t)))))
+      (should (clutch--open-cell-preview
+               source source-window '(:cell-id (1 0 0) :value "x")))
+      (kill-buffer " *clutch-cell-preview*")
+      (should deleted)
+      (should-not clutch--cell-preview-state)
+      (should-not (memq #'clutch--cell-preview-lifecycle-post-command
+                        (default-value 'post-command-hook)))
+      (should-not (memq #'clutch--cell-preview-window-size-change
+                        window-size-change-functions)))))
+
+(ert-deftest clutch-test-cell-preview-size-and-position-are-bounded ()
+  "Cell previews should be distinct, bounded, and above the minibuffer."
+  (pcase-let* ((frame (selected-frame))
+               (base (face-background 'default frame t))
+               (`(,background ,_foreground ,border)
+                (clutch--cell-preview-colors frame)))
+    (should-not (equal background base))
+    (should-not (equal border background)))
+  (let* ((clutch-cell-preview-max-size '(0.5 . 0.25))
+         (frame (selected-frame))
+         (limits (clutch--cell-preview-size-limits frame frame)))
+    (should (= (nth 1 limits) 1))
+    (should (= (nth 3 limits) 1))
+    (should (= (nth 0 limits)
+               (max 1 (floor (/ (* (frame-text-height frame) 0.25)
+                                  (window-default-line-height
+                                   (frame-root-window frame)))))))
+    (should (= (nth 2 limits)
+               (max 1 (floor (/ (* (frame-text-width frame) 0.5)
+                                  (frame-char-width frame)))))))
+  (dolist (case '((20 150 20 300 200 1000 760 (20 . 176))
+                  (1000 750 20 300 200 1000 760 (694 . 544))))
+    (pcase-let ((`(,x ,y ,line-height ,width ,height
+                      ,parent-width ,bottom ,expected)
+                 case))
+      (should (equal (clutch--cell-preview-coordinates
+                      x y line-height width height parent-width bottom)
+                     expected)))))
+
+(ert-deftest clutch-test-cell-preview-allows-one-line-frame-height ()
+  "Preview fitting should override the global four-line window minimum."
+  (let (call)
+    (cl-letf (((symbol-function 'frame-parent)
+               (lambda (_frame) 'parent))
+              ((symbol-function 'clutch--cell-preview-size-limits)
+               (lambda (_parent _frame) '(12 1 80 1)))
+              ((symbol-function 'fit-frame-to-buffer)
+               (lambda (&rest args)
+                 (setq call (list args window-min-height window-min-width)))))
+      (clutch--fit-cell-preview-frame 'preview))
+    (should (equal call '((preview 12 1 80 1) 1 1)))))
+
+(ert-deftest clutch-test-cell-preview-window-resize-reschedules-preview ()
+  "Parent resize should coalesce through the existing preview scheduler."
+  (let* ((source (current-buffer))
+         (source-window 'source-window)
+         (clutch--cell-preview-state
+          (list :source-buffer source
+                :source-window source-window))
+         (clutch--cell-preview-timer 'old-timer)
+         cancelled scheduled refreshed)
+    (cl-letf (((symbol-function 'window-live-p) (lambda (_window) t))
+              ((symbol-function 'window-frame) (lambda (_window) 'parent))
+              ((symbol-function 'cancel-timer)
+               (lambda (timer) (setq cancelled timer)))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (delay repeat function &rest args)
+                 (setq scheduled (list delay repeat function args))
+                 'new-timer)))
+      (clutch--cell-preview-window-size-change 'other)
+      (should-not scheduled)
+      (clutch--cell-preview-window-size-change 'parent))
+    (should (eq cancelled 'old-timer))
+    (should (eq clutch--cell-preview-timer 'new-timer))
+    (pcase-let ((`(,delay ,repeat ,function ,args) scheduled))
+      (should (= delay 0.1))
+      (should-not repeat)
+      (cl-letf (((symbol-function 'clutch--schedule-cell-preview)
+                 (lambda () (setq refreshed (current-buffer)))))
+        (apply function args)))
+    (should (eq refreshed source))
+    (should-not clutch--cell-preview-timer)))
 
 ;;;; Shell command on cell
 

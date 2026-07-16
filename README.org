@@ -46,7 +46,7 @@ See [[file:docs/backend-support.org][docs/backend-support.org]] for the support-
 - SQL intelligence: scoped table/column completion, Eldoc, object lookup, MySQL =HELP= lookup, and cache-first metadata loading that avoids blocking point motion
 - Connection feedback: per-connection consoles, persisted console contents, auto-reconnect, explicit schema-refresh states, transaction status, and a dedicated debug buffer
 - Stateful transient feedback: active auto-commit, filters, sort, copy refinement, result layout, staged mutation count, and Record field action are shown directly in their menus
-- Inspection and extension: JSON/XML/BLOB value viewers, live cell viewer, per-column display overrides, and context export for external assistants
+- Inspection and extension: full JSON/XML/BLOB value viewers, an optional automatic child-frame preview for truncated cells, per-column display overrides, and context export for external assistants
 - REPL mode built on =comint-mode=, with =SELECT= results shown in the standard result browser instead of expanded inline in REPL history
 
 Row identity support for staged =UPDATE= / =DELETE=:

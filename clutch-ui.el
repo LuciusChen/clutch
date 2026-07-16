@@ -1230,19 +1230,24 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
          (formatted (or custom placeholder s))
          (truncated (if (or custom placeholder)
                         (> (string-width formatted) w)
-                      value-truncated)))
-    (cond
-     ((and json-cell (not truncated))
-      (clutch--json-display-highlight formatted))
-     ((and xml-cell
-           (not truncated)
-           (<= (length formatted) clutch--xml-cell-highlight-max-chars))
-      (clutch--xml-display-highlight formatted))
-     (truncated
-      (if (and (not custom) (not placeholder))
-          formatted
-        (clutch--truncate-display-string formatted w)))
-     (t formatted))))
+                      value-truncated))
+         (incomplete (or value-truncated truncated)))
+    (let ((result
+           (cond
+            ((and json-cell (not truncated))
+             (clutch--json-display-highlight formatted))
+            ((and xml-cell
+                  (not truncated)
+                  (<= (length formatted) clutch--xml-cell-highlight-max-chars))
+             (clutch--xml-display-highlight formatted))
+            (truncated
+             (if (and (not custom) (not placeholder))
+                 formatted
+               (clutch--truncate-display-string formatted w)))
+            (t formatted))))
+      (if incomplete
+          (propertize result 'clutch-cell-truncated t)
+        result))))
 
 (defun clutch--pending-insert-placeholders ()
   "Return placeholder sentinels aligned with `clutch--result-columns'."
@@ -1479,6 +1484,8 @@ are precomputed row/cell state from RENDER-STATE."
                            clutch-col-idx ,cidx
                            clutch-full-value ,(if edited (cdr edited) val))
                          body)
+    (when (get-text-property 0 'clutch-cell-truncated content)
+      (put-text-property 0 (length body) 'clutch-cell-truncated t body))
     (concat (propertize "│" 'face 'clutch-border-face)
             body)))
 
@@ -1712,7 +1719,7 @@ Returns a list of propertized strings (may be empty)."
   (when (and clutch--result-columns
              clutch--result-source-table)
     (unless clutch--row-identity
-      (let ((warning-face 'font-lock-warning-face)
+      (let ((warning-face '(:inherit font-lock-warning-face :weight normal))
             (help (if (eq clutch--row-identity-status 'error)
                       "Row identity metadata failed; enable clutch-debug-mode for diagnostics"
                     "No safe row identity is available for editing")))
