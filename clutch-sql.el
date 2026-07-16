@@ -1389,9 +1389,9 @@ when completion triggers during an in-flight query)."
     (indent-for-tab-command)))
 
 (defun clutch--eldoc-metadata-plan (schema sym qualified-table statement-tables sync-columns-p)
-  "Return pure metadata steps for documenting SYM from SCHEMA.
-Steps are (ACTION TABLE COLUMNS), selected using QUALIFIED-TABLE,
-STATEMENT-TABLES, and SYNC-COLUMNS-P."
+  "Return a pure metadata plan for documenting SYM from SCHEMA.
+The plan contains (ACTION TABLE COLUMNS) entries selected using
+QUALIFIED-TABLE, STATEMENT-TABLES, and SYNC-COLUMNS-P."
   (cond
    ((not (eq (gethash sym schema 'missing) 'missing))
     (let ((columns (clutch--cached-columns schema sym)))
