@@ -225,16 +225,30 @@ wait_redis() {
   return 1
 }
 
+pgsql_el_dir="${PGSQL_EL_DIR:-}"
+if [[ -z "$pgsql_el_dir" ]]; then
+  for candidate in \
+    "$HOME/repos/pgsql.el" \
+    "$repo/../pgsql.el" \
+    "$HOME/.emacs.d/straight/repos/pgsql.el"; do
+    if [[ -d "$candidate" ]]; then
+      pgsql_el_dir="$candidate"
+      break
+    fi
+  done
+fi
+[[ -d "$pgsql_el_dir" ]] \
+  || die "pgsql.el checkout not found; set PGSQL_EL_DIR to the LuciusChen/pgsql.el checkout"
+
 emacs_load_args=(
   --batch -Q
   -L "$repo/../mongodb.el"
   -L "$repo/../redis.el"
   -L "$repo/../mysql.el"
-  -L "$repo/../pg-el"
+  -L "$pgsql_el_dir"
   -L "$repo"
   -L "$repo/test"
   -L "$HOME/.emacs.d/straight/repos/mysql.el"
-  -L "$HOME/.emacs.d/straight/repos/pg-el"
   --eval "(setq load-prefer-newer t)"
 )
 

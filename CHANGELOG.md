@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Native PostgreSQL now requires [`pgsql.el`](https://github.com/LuciusChen/pgsql.el) instead of `pg.el` / `pg-el`. Install the new protocol package and ensure its checkout is on `load-path` before using `:backend pg`.
 - **Result-cell preview overhaul:** Removed the `V` live-view commands, their bottom-window viewer, and freeze/refresh/quit controls.  `v` remains the explicit full value viewer; optional automatic child-frame previews are now controlled by `clutch-cell-preview-style`, appear only for visibly truncated cells, fit tightly to their formatted content, follow window resizing, use a theme-relative contrasting surface, and silently stay disabled on unsupported displays.
 - Removed the public `clutch-execute-query-at-point` and `clutch-execute-statement-at-point` commands.  Use `clutch-execute-dwim`, `clutch-execute-region`, or `clutch-execute-buffer`; select a region first when exact execution boundaries matter.
 - Removed the table-specific `clutch-describe-table`, `clutch-describe-table-at-point`, and `clutch-browse-table` commands.  Use `clutch-describe-dwim` or `clutch-act-dwim`.
@@ -13,9 +14,13 @@
 - Reduced the native MongoDB console to common reads, generated single-document mutations, `runCommand`, and `ObjectId` / `ISODate`.  Database switching now uses `clutch-switch-schema`; dedicated admin/index helpers, database aggregation, multi-document mutations, cursor `batchSize` / `comment`, and numeric/timestamp constructor aliases were removed.
 - Generated Redis hash Browse now requires Redis 6.2 or newer because bounded sampling uses `HRANDFIELD`.  On older servers, issue `HSCAN` or `HGETALL` manually instead.
 
+### Changed
+
+- Replaced PostgreSQL protocol workarounds in the Clutch adapter with `pgsql.el` public APIs for connections, prepared values, result metadata, transaction status, errors, escaping, and cancellation; protocol framing, authentication, TLS, type decoding, and synchronization now stay in the protocol package.
+
 ### Fixed
 
-- Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.
+- Kept native PostgreSQL responses synchronized through completion input, server errors, and cancellation so later queries and metadata can reuse the connection safely.
 - Made staged SQL mutations fail closed: hidden row-identity columns are verified at their injected trailing positions, computed or uncertain projections are read-only, writable identifiers are reconciled with canonical backend metadata, and multi-statement batches cannot partially commit.  SQLite batches use a real transaction; unsupported autocommit and already-dirty manual transactions fail before execution.
 - Kept SQL highlighting enabled when query consoles are created, with dialect state local to each console, object definition, and preview buffer. Connection binding and rebinding select or reset the product deterministically, including Oracle, SQL Server, DB2, and Redshift mappings, without changing the user's global `sql-product` default.
 - Updated the JDBC agent pin to 0.2.13. The agent now poisons connections whose timed-out driver work does not stop, serializes each metadata session, redacts embedded JDBC URL credentials, validates exact protocol integers, bounds large response cells, and avoids an unconditional liveness round trip before every query. It also recognizes Oracle `ORA-12592` as a fatal JDBC connection failure, replaces only an affected metadata session, limits recovery to one retry, and invalidates any replacement whose schema cannot be restored. Fatal primary-session responses explicitly invalidate only their local JDBC handle. After a configurable idle interval, the agent validates the primary session before statement creation; only a query-console, REPL, or batch statement proven not to have started may reconnect and run once in auto-commit or a clean manual transaction. Dirty manual transactions, partially completed batches, staged mutations, and failures after statement preparation or execution are never replayed. Manual-commit connection setup now fails rather than silently continuing in auto-commit when a driver lacks that capability. Metadata recovery treats an unsupported `Connection.isValid` probe as unavailable while still replacing sessions after concrete connection failures.
@@ -32,6 +37,7 @@
 - Removed hidden connection-construction retries and broad capability fallbacks, so backend failures reach the normal command error boundary with their original cause.
 - Stopped hiding native and JDBC disconnect failures or non-database errors during synchronous schema refresh; transport cleanup still runs at the owning connection boundary.
 - Replaced PostgreSQL primary-key ordering through `array_position(int2vector, smallint)` with explicit array subscripts over `pg_index.indkey`, restoring row identity and result editing on GaussDB in PostgreSQL compatibility mode while preserving composite-key order.
+- Sorted numeric result columns by exact decimal and exponent magnitude, including arbitrarily large values and deterministic infinity/NaN ordering, without lossy float conversion.
 
 ## 0.2.4 - 2026-07-10
 

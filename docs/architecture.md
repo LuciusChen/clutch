@@ -44,7 +44,7 @@ flowchart TB
   subgraph External["External protocol/runtime packages"]
     direction LR
     MySQLExt["mysql.el"]
-    PGExt["pg-el"]
+    PGExt["pgsql.el"]
     SQLiteExt["Emacs sqlite-*"]
     MongoExt["mongodb.el"]
     RedisExt["redis.el"]

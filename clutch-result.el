@@ -1118,6 +1118,68 @@ Triggers a COUNT(*) query if total rows are not yet known."
 
 ;;;; Sort
 
+(defun clutch-result--numeric-sort-key (value)
+  "Return an exact sortable numeric key for VALUE, or nil.
+Decimal and exponent strings retain all digits; PostgreSQL infinities and NaN
+follow the server's total ordering."
+  (let ((text (cond
+               ((stringp value) (string-trim value))
+               ((numberp value) (number-to-string value)))))
+    (when text
+      (cond
+       ((or (string= text "NaN")
+            (string-match-p
+             "\\`[+-]?[0-9.]+[eE][+-]?NaN\\'" text))
+        (vector 3 0 0 ""))
+       ((or (member text '("-Infinity" "Infinity" "+Infinity"))
+            (string-match-p
+             "\\`[+-]?[0-9.]+[eE][+-]?INF\\'" text))
+        (vector (if (string-prefix-p "-" text) 0 2) 0 0 ""))
+       ((string-match
+         "\\`\\([+-]?\\)\\(?:\\([0-9]+\\)\\(?:\\.\\([0-9]*\\)\\)?\\|\\.\\([0-9]+\\)\\)\\(?:[eE]\\([+-]?[0-9]+\\)\\)?\\'"
+         text)
+        (let* ((negative (string= (match-string 1 text) "-"))
+               (integer (or (match-string 2 text) ""))
+               (fraction (or (match-string 3 text)
+                             (match-string 4 text)
+                             ""))
+               (exponent (string-to-number (or (match-string 5 text) "0")))
+               (combined (concat integer fraction))
+               (leading (progn (string-match "\\`0*" combined)
+                               (match-end 0))))
+          (if (= leading (length combined))
+              (vector 1 0 0 "")
+            (vector 1 (if negative -1 1)
+                    (+ (- (length integer) leading) exponent)
+                    (replace-regexp-in-string
+                     "0+\\'" "" (substring combined leading))))))))))
+
+(defun clutch-result--numeric-absolute-less-p (left right)
+  "Return non-nil when finite numeric key LEFT is below RIGHT in magnitude."
+  (let ((left-magnitude (aref left 2))
+        (right-magnitude (aref right 2))
+        (left-digits (aref left 3))
+        (right-digits (aref right 3)))
+    (cond
+     ((< left-magnitude right-magnitude) t)
+     ((> left-magnitude right-magnitude) nil)
+     (t (string< left-digits right-digits)))))
+
+(defun clutch-result--numeric-key-less-p (left right)
+  "Return non-nil when exact numeric key LEFT sorts before RIGHT."
+  (let ((left-class (aref left 0))
+        (right-class (aref right 0)))
+    (cond
+     ((< left-class right-class) t)
+     ((> left-class right-class) nil)
+     ((/= left-class 1) nil)
+     ((< (aref left 1) (aref right 1)) t)
+     ((> (aref left 1) (aref right 1)) nil)
+     ((zerop (aref left 1)) nil)
+     ((< (aref left 1) 0)
+      (clutch-result--numeric-absolute-less-p right left))
+     (t (clutch-result--numeric-absolute-less-p left right)))))
+
 (defun clutch-result--client-filter-rows (rows input)
   "Return ROWS whose visible values contain INPUT."
   (let ((pattern (downcase input))
@@ -1143,11 +1205,18 @@ the selected column when result labels are not unique."
                  (equal (nth cidx clutch--result-columns) col-name)
                  (memq cidx (clutch--visible-columns)))
       (user-error "Column %s not found" col-name))
-    (let ((entries
+    (let* ((numeric-column-p
+            (eq (plist-get (nth cidx clutch--result-column-defs)
+                           :type-category)
+                'numeric))
+           (entries
            (cl-loop for row in clutch--local-sort-original-rows
                     for value = (and (< cidx (length row)) (elt row cidx))
+                    for numeric-key = (and numeric-column-p
+                                           (clutch-result--numeric-sort-key value))
                     collect (cond
                              ((null value) (vector 0 nil row))
+                             (numeric-key (vector 1 numeric-key row))
                              ((numberp value) (vector 1 value row))
                              (t (vector 2 (clutch--format-value value) row))))))
       (cl-labels
@@ -1159,7 +1228,16 @@ the selected column when result labels are not unique."
                ((< left-rank right-rank) t)
                ((> left-rank right-rank) nil)
                ((zerop left-rank) nil)
-               ((= left-rank 1) (< (aref left 1) (aref right 1)))
+               ((= left-rank 1)
+                (let ((left-key (aref left 1))
+                      (right-key (aref right 1)))
+                  (if (and (vectorp left-key) (vectorp right-key))
+                      (clutch-result--numeric-key-less-p left-key right-key)
+                    (cond
+                     ((and (numberp left-key) (numberp right-key))
+                      (< left-key right-key))
+                     ((vectorp left-key) t)
+                     (t nil)))))
                (t (string-collate-lessp
                    (aref left 1) (aref right 1)))))))
         (setq entries

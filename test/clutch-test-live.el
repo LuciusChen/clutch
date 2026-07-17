@@ -164,10 +164,10 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
              table '((id int primary) (name string))))
            (index-sql
             (format "CREATE INDEX %s ON %s (name)" index table)))
-      (let ((clutch--object-cache (make-hash-table :test 'equal))
-            (clutch--object-warmup-timers (make-hash-table :test 'equal))
-            (clutch--object-warmup-generations (make-hash-table :test 'equal))
-            (clutch--table-metadata-cache (make-hash-table :test 'equal)))
+      (let ((clutch--object-cache (make-hash-table :test 'eq))
+            (clutch--object-warmup-timers (make-hash-table :test 'eq))
+            (clutch--object-warmup-generations (make-hash-table :test 'eq))
+            (clutch--table-metadata-cache (make-hash-table :test 'eq)))
         (unwind-protect
             (progn
               (clutch-db-query conn drop-sql)
