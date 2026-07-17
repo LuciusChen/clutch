@@ -17,28 +17,17 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-connection)
 (require 'clutch-query)
 (require 'clutch-schema)
 (require 'clutch-ui)
 (require 'subr-x)
 (require 'transient)
 
-(defvar clutch-connection)
-
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
-(declare-function clutch-connect "clutch-connection" ())
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
-(declare-function clutch-disconnect "clutch-connection" ())
-(declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch-execute-buffer "clutch-query" ())
-(declare-function clutch-execute-dwim "clutch-query" (beg end))
-(declare-function clutch-execute-region "clutch-query" ())
-(declare-function clutch--dwim-bounds-at-point "clutch-query" ())
 (declare-function clutch-jump "clutch-object" (&optional entry))
-(declare-function clutch-query-console "clutch-query" (target))
-(declare-function clutch-refresh-schema "clutch-schema" ())
-(declare-function clutch-switch-schema "clutch" ())
 
 (defgroup clutch-mongodb nil
   "Native MongoDB backend for clutch."
@@ -78,12 +67,6 @@
     (modify-syntax-entry ?\n "> b" table)
     table)
   "Syntax table for `clutch-mongodb-mode'.")
-
-(defconst clutch-mongodb--function-keywords
-  '("aggregate" "countDocuments" "deleteOne" "distinct" "find" "findOne"
-    "getCollection" "insertMany" "insertOne" "replaceOne" "runCommand"
-    "updateOne")
-  "MongoDB shell function names highlighted in `clutch-mongodb-mode'.")
 
 (defconst clutch-mongodb--constructor-keywords
   '("ISODate" "ObjectId")

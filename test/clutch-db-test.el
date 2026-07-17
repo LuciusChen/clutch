@@ -42,6 +42,7 @@
 (require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-db-jdbc)
+(require 'clutch-db-sqlite)
 (require 'clutch-mongodb)
 (require 'clutch-redis)
 (require 'redis)
@@ -50,7 +51,6 @@
 (eval-when-compile
   (require 'pg))
 
-(defvar clutch-debug-buffer-name "*clutch-debug*")
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it
 ;; special here so local test bindings remain dynamic even before the backend
 ;; requires mysql.el.
@@ -355,6 +355,10 @@ authinfo, and PARAMS are explicit connection parameters."
                     (mapcar (lambda (text)
                               (encode-coding-string text 'utf-8 t))
                             '("name" "Ada" "tier" "pro")))
+                   (`("HRANDFIELD" "user:1" "2" "WITHVALUES")
+                    (mapcar (lambda (text)
+                              (encode-coding-string text 'utf-8 t))
+                            '("name" "Ada" "tier" "pro")))
                    (`("ZRANGE" "leaders" "0" "-1")
                     (mapcar (lambda (text)
                               (encode-coding-string text 'utf-8 t))
@@ -370,6 +374,9 @@ authinfo, and PARAMS are explicit connection parameters."
                       ("ZRANGE leaders 0 -1"
                        ("index" "value")
                        ((0 "ada") (1 "grace")))
+                      ("HRANDFIELD user:1 2 WITHVALUES"
+                       ("field" "value")
+                       (("name" "Ada") ("tier" "pro")))
                       ("ZRANGE leaders 0 -1 WITHSCORES"
                        ("member" "score")
                        (("ada" "10") ("grace" "8")))))
@@ -381,6 +388,18 @@ authinfo, and PARAMS are explicit connection parameters."
                              expected-columns))
               (should (equal (clutch-db-result-rows result)
                              expected-rows)))))))))
+
+(ert-deftest clutch-db-test-redis-empty-scan-preserves-continuation-cursor ()
+  "An empty nonterminal SCAN batch should still expose its next cursor."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client)))
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (&rest _args) '("7" nil))))
+      (let ((result (clutch-db-query conn "SSCAN user:1 0 COUNT 25")))
+        (should (equal (clutch-db-result-column-names
+                        (clutch-db-result-columns result))
+                       '("cursor" "value")))
+        (should (equal (clutch-db-result-rows result)
+                       '(("7" nil))))))))
 
 (ert-deftest clutch-db-test-redis-scan-keys-iterates-cursors ()
   "Redis key discovery should use SCAN until cursor returns to zero."
@@ -399,6 +418,101 @@ authinfo, and PARAMS are explicit connection parameters."
       (should (equal (nreverse calls)
                      '(("SCAN" "0" ("COUNT" 1000))
                        ("SCAN" "7" ("COUNT" 1000))))))))
+
+(ert-deftest clutch-db-test-redis-browseable-snapshot-scans-once ()
+  "Redis object discovery should not duplicate its initial bounded SCAN."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command cursor &rest args)
+                 (push (list command cursor args) calls)
+                 '("0" ("alpha")))))
+      (should
+       (equal (clutch-db-browseable-object-entries conn)
+              '((:name "alpha" :schema "0" :type "KEY"))))
+      (should (equal calls '(("SCAN" "0" ("COUNT" 1000))))))))
+
+(ert-deftest clutch-db-test-redis-scan-keys-is-bounded-and-deduplicated ()
+  "Redis discovery should stop at its cap and ignore repeated SCAN keys."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client))
+        (clutch-redis-key-discovery-limit 2)
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client _command cursor &rest _args)
+                 (push cursor calls)
+                 (pcase cursor
+                   ("0" (list "7" '("alpha" "alpha")))
+                   ("7" (list "9" '("beta" "gamma")))
+                   (_ (ert-fail "Discovery continued past its configured cap")))))
+              ((symbol-function 'message) #'ignore))
+      (should (equal (clutch-db-list-tables conn) '("alpha" "beta")))
+      (should (equal (nreverse calls) '("0" "7"))))))
+
+(ert-deftest clutch-db-test-redis-scan-keys-bounds-empty-batches ()
+  "Sparse prefix discovery should stop at its SCAN round-trip budget."
+  (let ((conn (make-clutch-redis-conn :client 'redis-client))
+        (clutch-redis--key-discovery-max-scan-batches 2)
+        calls
+        notice)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command cursor &rest _args)
+                 (pcase command
+                   ("SCAN"
+                    (push cursor calls)
+                    (pcase cursor
+                      ("0" '("7" nil))
+                      ("7" '("9" nil))
+                      (_ (ert-fail "Discovery exceeded its SCAN budget"))))
+                   (_ (ert-fail "Unexpected Redis command")))))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (should-not (clutch-db-search-table-entries conn "rare:"))
+      (should (equal (nreverse calls) '("0" "7")))
+      (should (string-match-p "stopped after 2 SCAN batches" notice)))))
+
+(ert-deftest clutch-db-test-redis-find-exact-key-without-scan ()
+  "Exact Redis key lookup should not depend on bounded SCAN coverage."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (push (cons command args) calls)
+                 (pcase command
+                   ("EXISTS" 1)
+                   (_ (ert-fail "Exact lookup unexpectedly scanned keys"))))))
+      (should
+       (equal (clutch-db-find-table-entry conn "remote:key")
+              '(:name "remote:key" :schema "0" :type "KEY")))
+      (should (equal calls '(("EXISTS" "remote:key")))))))
+
+(ert-deftest clutch-db-test-redis-find-missing-key-uses-one-command ()
+  "Missing exact Redis keys should return nil after one EXISTS command."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (push (cons command args) calls)
+                 0)))
+      (should-not (clutch-db-find-table-entry conn "missing:key"))
+      (should (equal calls '(("EXISTS" "missing:key")))))))
+
+(ert-deftest clutch-db-test-redis-prefix-search-keeps-sibling-keys ()
+  "Redis prefix search should not collapse to an existing exact key."
+  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+        calls)
+    (cl-letf (((symbol-function 'redis-command)
+               (lambda (_client command &rest args)
+                 (push (cons command args) calls)
+                 (pcase command
+                   ("SCAN" '("0" ("cache" "cache:1")))
+                   (_ (ert-fail "Prefix search used a non-SCAN command"))))))
+      (should
+       (equal (clutch-db-search-table-entries conn "cache")
+              '((:name "cache" :schema "0" :type "KEY")
+                (:name "cache:1" :schema "0" :type "KEY"))))
+      (should
+       (equal calls '(("SCAN" "0" "MATCH" "cache*" "COUNT" 1000)))))))
 
 (ert-deftest clutch-db-test-redis-key-entry-metadata-includes-value-type ()
   "Redis key metadata should include the value type for annotations."
@@ -429,15 +543,21 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (ert-deftest clutch-db-test-redis-object-browse-query-is-type-aware ()
   "Redis key browsing should choose a read command from the key type."
-  (let ((conn (make-clutch-redis-conn :client 'redis-client)))
-    (cl-letf (((symbol-function 'redis-command)
-               (lambda (_client command key)
-                 (should (equal command "TYPE"))
-                 (should (equal key "user:1"))
-                 (encode-coding-string "hash" 'utf-8 t))))
-      (should (equal (clutch-db-object-browse-query
-                      conn '(:name "user:1" :type "KEY"))
-                     "HGETALL \"user:1\"")))))
+  (let ((conn (make-clutch-redis-conn :client 'redis-client))
+        (clutch-redis-browse-limit 25))
+    (dolist (case '(("hash" . "HRANDFIELD \"user:1\" 25 WITHVALUES")
+                    ("list" . "LRANGE \"user:1\" 0 24")
+                    ("set" . "SRANDMEMBER \"user:1\" 25")
+                    ("zset" . "ZRANGE \"user:1\" 0 24 WITHSCORES")
+                    ("stream" . "XRANGE \"user:1\" - + COUNT 25")))
+      (cl-letf (((symbol-function 'redis-command)
+                 (lambda (_client command key)
+                   (should (equal command "TYPE"))
+                   (should (equal key "user:1"))
+                   (encode-coding-string (car case) 'utf-8 t))))
+        (should (equal (clutch-db-object-browse-query
+                        conn '(:name "user:1" :type "KEY"))
+                       (cdr case)))))))
 
 (ert-deftest clutch-db-test-jdbc-fetch-all-contract ()
   "JDBC fetch-all should preserve rows and map RPC/query timeouts."
@@ -469,7 +589,18 @@ authinfo, and PARAMS are explicit connection parameters."
         (should (equal captured-op "fetch"))
         (should (= (alist-get 'cursor-id captured-params) 9))
         (should (= captured-timeout 15))
-        (should (= (alist-get 'query-timeout-seconds captured-params) 10))))))
+        (should (= (alist-get 'query-timeout-seconds captured-params) 10)))))
+  (ert-info ("rejects an invalid fetch-size before RPC")
+    (let ((conn (make-clutch-jdbc-conn :params '(:rpc-timeout 9))))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc-on-conn)
+                 (lambda (&rest _args)
+                   (ert-fail "Invalid fetch-size reached the agent"))))
+        (dolist (clutch-jdbc-fetch-size '(0 10001 1.5))
+          (should-error (clutch-jdbc--fetch-all conn 9)
+                        :type 'user-error)
+          (should-error (clutch-jdbc--execute-rpc
+                         conn "execute" '((sql . "SELECT 1")))
+                        :type 'user-error))))))
 
 (ert-deftest clutch-db-test-jdbc-referencing-objects-maps-rpc-response ()
   "JDBC reverse-reference lookup should map RPC rows to object entries."
@@ -498,6 +629,7 @@ authinfo, and PARAMS are explicit connection parameters."
   "JDBC connect should keep explicit and default timeout phases separate."
   (ert-info ("explicit timeouts")
     (let ((clutch-jdbc-oracle-manual-commit t)
+          (clutch-jdbc-validate-after-idle-seconds 123)
           captured-op captured-params captured-timeout)
       (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                 ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
@@ -525,6 +657,8 @@ authinfo, and PARAMS are explicit connection parameters."
                       clutch-jdbc--json-false))
           (should (= (alist-get 'connect-timeout-seconds captured-params) 7))
           (should (= (alist-get 'network-timeout-seconds captured-params) 23))
+          (should (= (alist-get 'validate-after-idle-seconds captured-params)
+                     123))
           (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 41))
           (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
   (ert-info ("default timeouts")
@@ -557,7 +691,16 @@ authinfo, and PARAMS are explicit connection parameters."
         (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout)
                    20))
         (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                   41))))))
+                   41)))))
+  (ert-info ("invalid idle validation intervals")
+    (dolist (value '(-1 1.5 "300"))
+      (let ((clutch-jdbc-validate-after-idle-seconds value))
+        (should-error
+         (clutch-db-jdbc-connect
+          'oracle
+          '(:host "db" :port 1521 :database "svc"
+            :user "scott" :password "tiger"))
+         :type 'user-error)))))
 
 (ert-deftest clutch-db-test-jdbc-connect-autocommit-contract ()
   "JDBC connect should send the expected default auto-commit flag."
@@ -1196,9 +1339,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-rowid-"
     (clutch-db-query conn "CREATE TABLE demo (name TEXT)")
     (let ((candidate (car (clutch-db-row-identity-candidates conn "demo"))))
@@ -1209,9 +1350,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-sqlite-foreign-keys-async ()
   "SQLite foreign-key metadata should remain available through async dispatch."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-fk-"
     (clutch-db-query conn "CREATE TABLE accounts (id INTEGER PRIMARY KEY)")
     (clutch-db-query
@@ -1232,9 +1371,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-sqlite-memory-does-not-create-file ()
   "SQLite :memory: profiles should open an in-memory database."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (let* ((dir (make-temp-file "clutch-sqlite-memory-" t))
          (default-directory (file-name-as-directory dir))
          conn)
@@ -1250,9 +1387,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 (ert-deftest clutch-db-test-sqlite-returning-yields-result-rows ()
   :tags '(:smoke)
   "SQLite DML with RETURNING should produce columns and rows."
-  (skip-unless (require 'clutch-db-sqlite nil t))
-  (skip-unless (and (fboundp 'sqlite-available-p)
-                    (sqlite-available-p)))
+  (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-returning-"
     (clutch-db-query conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
     (let ((result (clutch-db-query
@@ -1718,6 +1853,19 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
    :closed nil
    :busy nil))
 
+(ert-deftest clutch-db-test-mongodb-endpoint-metadata-uses-effective-client-state ()
+  "URL connections should expose normalized endpoint metadata from mongodb.el."
+  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'mongodb-client)))
+    (cl-letf (((symbol-function 'mongodb-connection-host)
+               (lambda (_client) "db.internal"))
+              ((symbol-function 'mongodb-connection-port)
+               (lambda (_client) 27018))
+              ((symbol-function 'mongodb-connection-username)
+               (lambda (_client) "reporter")))
+      (should (equal (clutch-db-host conn) "db.internal"))
+      (should (= (clutch-db-port conn) 27018))
+      (should (equal (clutch-db-user conn) "reporter")))))
+
 (ert-deftest clutch-db-test-mongodb-object-browse-query-uses-helper-syntax ()
   "Native MongoDB should provide object browsing syntax from the adapter."
   (let ((conn (clutch-db-test--make-mongodb-conn)))
@@ -1736,7 +1884,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (eq feature 'mongodb)))
               ((symbol-function 'fboundp)
                (lambda (symbol)
-                 (not (eq symbol 'mongodb-connect))))
+                 (not (eq symbol 'mongodb-connection-host))))
               ((symbol-function 'locate-library)
                (lambda (library)
                  (and (equal library "mongodb") "/tmp/mongodb.el")))
@@ -1748,7 +1896,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                :type 'clutch-db-error)))
         (should (string-match-p "requires current mongodb.el public API"
                                 (error-message-string err)))
-        (should (string-match-p "mongodb-connect"
+        (should (string-match-p "mongodb-connection-host"
                                 (error-message-string err))))
       (should-not loaded))))
 
@@ -1962,6 +2110,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                   :query "db.users.find({active: true}, {name: 1}).limit(20)"
                   :return '((("_id" . "a") ("name" . "Ann")))
                   :limit 20)
+            (list :label "implicit bounded limit"
+                  :query "db.users.find({active: true}, {name: 1})"
+                  :limit 1000)
             (list :label "cursor options"
                   :query (concat
                           "db.users.find({active: true}, {name: 1})"
@@ -2013,6 +2164,17 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                   (should (equal (cdr (assoc (car option) options))
                                  (cdr option)))))
             (should-not options)))))))
+
+(ert-deftest clutch-db-test-mongodb-find-limit-is-bounded ()
+  "Native MongoDB find should reject unbounded and oversized limits."
+  (let ((clutch-mongodb-find-result-limit 50))
+    (dolist (query '("db.users.find({}).limit(0)"
+                     "db.users.find({}).limit(51)"))
+      (should-error
+       (clutch-mongodb--eval
+        (clutch-db-test--make-mongodb-conn "app" 'client)
+        query)
+       :type 'clutch-db-error))))
 
 (ert-deftest clutch-db-test-mongodb-eval-validation-contract ()
   "Native MongoDB helper parsing should reject unsupported or invalid inputs."
@@ -2350,6 +2512,42 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
               (should (equal (cadr err)
                              (format "%s failed" operation))))))))))
 
+(ert-deftest clutch-db-test-mongodb-public-object-paths-translate-client-errors ()
+  "Every public MongoDB object path should expose `clutch-db-error'."
+  (let ((conn (clutch-db-test--make-mongodb-conn)))
+    (dolist (case '((list-objects mongodb-list-indexes)
+                    (object-details mongodb-list-indexes)
+                    (object-action mongodb-aggregate)
+                    (collection-profile mongodb-list-indexes)))
+      (pcase-let ((`(,operation ,failing-api) case))
+        (ert-info ((symbol-name operation))
+          (cl-letf (((symbol-function 'mongodb-list-collections)
+                     (lambda (&rest _args) '("users")))
+                    ((symbol-function 'mongodb-find)
+                     (lambda (&rest _args) nil))
+                    ((symbol-function failing-api)
+                     (lambda (&rest _args)
+                       (signal 'mongodb-error
+                               (list (format "%s failed" operation))))))
+            (let ((err
+                   (should-error
+                    (pcase operation
+                      ('list-objects
+                       (clutch-db-list-objects conn 'indexes))
+                      ('object-details
+                       (clutch-db-object-details
+                        conn '(:name "users_1" :type "INDEX"
+                               :target-table "users")))
+                      ('object-action
+                       (clutch-db-object-action-metadata
+                        conn '(:name "users" :type "COLLECTION")
+                        'show-stats))
+                      ('collection-profile
+                       (clutch-db-collection-profile conn "users")))
+                    :type 'clutch-db-error)))
+              (should (equal (cadr err)
+                             (format "%s failed" operation))))))))))
+
 (ert-deftest clutch-db-test-mongodb-schema-sample-size-rejects-invalid ()
   "Native MongoDB metadata should reject invalid schema sample sizes."
   (let ((clutch-mongodb-schema-sample-size 0))
@@ -2639,7 +2837,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  :schema "default" :source-schema "default")))))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-column-details-omit-catalog ()
-  "ClickHouse column metadata RPCs should omit catalog from metadata calls."
+  "ClickHouse column metadata should map foreign keys without adding scope."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
                                                :database "default")))
@@ -2649,18 +2847,22 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (push (cons op params) calls)
                  (pcase op
                    ("get-primary-keys" '(:primary-keys ("id")))
-                   ("get-foreign-keys" '(:foreign-keys nil))
+                   ("get-foreign-keys"
+                    '(:foreign-keys ((:fk-column "user_id"
+                                      :pk-table "users" :pk-column "id"))))
                    ("get-columns" `(:columns ((:name "id" :type "UInt64"
                                                :nullable ,clutch-jdbc--json-false)
-                                              (:name "name" :type "String"
+                                              (:name "user_id" :type "UInt64"
                                                :nullable t))))
                    (_ (ert-fail (format "unexpected op: %s" op)))))))
       (should
        (equal (clutch-db-column-details conn "events")
               '((:name "id" :type "UInt64" :nullable nil
                  :primary-key t :foreign-key nil :comment nil)
-                (:name "name" :type "String" :nullable t
-                 :primary-key nil :foreign-key nil :comment nil))))
+                (:name "user_id" :type "UInt64" :nullable t
+                 :primary-key nil
+                 :foreign-key (:ref-table "users" :ref-column "id")
+                 :comment nil))))
       (dolist (call calls)
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
@@ -2690,25 +2892,36 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 (ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
   "Async JDBC RPC should call ERRBACK and clear state on timeout."
-  (let ((clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+  (let ((buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
+        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        (clutch-jdbc--response-queue nil)
         (clutch-jdbc-rpc-timeout-seconds 1)
         timeout-message
         timer-fn)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
-              ((symbol-function 'clutch-jdbc--send)
-               (lambda (_op _params) 77))
-              ((symbol-function 'run-at-time)
-               (lambda (_secs _repeat fn)
-                 (setq timer-fn fn)
-                 'fake-timer)))
-      (clutch-jdbc--rpc-async
-       "get-tables" '((conn-id . 1))
-       #'ignore
-       (lambda (message)
-         (setq timeout-message message)))
-      (funcall timer-fn)
-      (should (string-match-p "timeout waiting for async response" timeout-message))
-      (should-not (gethash 77 clutch-jdbc--async-callbacks)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                  ((symbol-function 'clutch-jdbc--send)
+                   (lambda (_op _params) 77))
+                  ((symbol-function 'process-buffer) (lambda (_proc) buf))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn)
+                     (setq timer-fn fn)
+                     'fake-timer)))
+          (clutch-jdbc--rpc-async
+           "get-tables" '((conn-id . 1))
+           #'ignore
+           (lambda (message)
+             (setq timeout-message message)))
+          (funcall timer-fn)
+          (should (string-match-p "timeout waiting for async response" timeout-message))
+          (should-not (gethash 77 clutch-jdbc--async-callbacks))
+          (should (gethash 77 clutch-jdbc--ignored-response-ids))
+          (clutch-jdbc--agent-filter 'fake-proc "{\"id\":77,\"ok\":true}\n")
+          (should-not clutch-jdbc--response-queue)
+          (should-not (gethash 77 clutch-jdbc--ignored-response-ids)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (ert-deftest clutch-db-test-jdbc-dispatch-async-response-remembers-conn-scoped-errors ()
   "Async JDBC failures should remember diagnostics and call ERRBACK."
@@ -2735,6 +2948,30 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                      '(conn-77 get-tables
                                (:id 77 :ok :json-false :error "metadata blew up"))))
       (should (equal errback-message "metadata blew up")))))
+
+(ert-deftest clutch-db-test-jdbc-dispatch-async-response-skips-disconnected-conn ()
+  "A deferred JDBC callback should not run after its connection disconnects."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver jdbc)))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         timer-fn
+         callback-called)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (puthash 77 (list :callback (lambda (_result)
+                                  (setq callback-called t))
+                      :conn conn
+                      :op 'get-tables)
+             clutch-jdbc--async-callbacks)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_secs _repeat fn &rest _args)
+                 (setq timer-fn fn)
+                 'fake-timer))
+              ((symbol-function 'clutch-jdbc--agent-live-p) (lambda () nil)))
+      (should (clutch-jdbc--dispatch-async-response
+               '(:id 77 :ok t :result (:tables nil))))
+      (clutch-db-disconnect conn)
+      (funcall timer-fn)
+      (should-not callback-called))))
 
 (ert-deftest clutch-db-test-jdbc-validate-agent-jar-rejects-mismatch ()
   "JDBC agent startup should reject a jar with the wrong checksum."
@@ -2957,15 +3194,13 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (pcase-let ((`(,driver ,params ,expected) case))
       (should (equal (clutch-jdbc--build-url driver params) expected)))))
 
-(ert-deftest clutch-db-test-jdbc-display-names-for-registered-drivers ()
-  "Registered JDBC connections should expose backend keys and display names."
-  (dolist (case '((redshift nil "Redshift")
-                  (clickhouse clickhouse "ClickHouse")))
-    (pcase-let* ((`(,driver ,expected-key ,expected-name) case)
-                 (conn (make-clutch-jdbc-conn :params `(:driver ,driver))))
-      (when expected-key
-        (should (eq (clutch-db-backend-key conn) expected-key)))
-      (should (equal (clutch-db-display-name conn) expected-name)))))
+(ert-deftest clutch-db-test-jdbc-oracle-keyword-probe-keeps-default-sql-product ()
+  "Oracle identifier rendering should not change the global SQL dialect."
+  (let ((default-product (default-value 'sql-product))
+        (clutch-jdbc--oracle-display-keyword-cache
+         (make-hash-table :test 'equal)))
+    (should (clutch-jdbc--oracle-display-keyword-p "SELECT"))
+    (should (eq (default-value 'sql-product) default-product))))
 
 ;;;; Unit tests — ClickHouse driver support
 
@@ -3239,6 +3474,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (clutch-backend-jdbc-transport-p 'jdbc '(:backend jdbc)))
     (should (clutch-backend-jdbc-transport-p
              'clickhouse '(:backend clickhouse)))
+    (should (eq (clutch-db-backend-key
+                 (make-clutch-jdbc-conn :params '(:driver clickhouse)))
+                'clickhouse))
     (should (equal (clutch--backend-display-name-from-params
                     '(:backend jdbc :display-name "KingbaseES"))
                    "KingbaseES"))
@@ -3742,6 +3980,20 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (equal (clutch-db-database conn) "pgdb"))
     (should (eq (clutch-db-backend-key conn) 'pg))
     (should (equal (clutch-db-display-name conn) "PostgreSQL"))))
+
+(ert-deftest clutch-db-test-adapter-disconnect-errors-surface ()
+  "Native and JDBC adapter disconnect failures should remain visible."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t)))
+    (dolist (case `((,(make-mysql-conn :host "localhost") mysql-disconnect mysql-error)
+                    (,(clutch-db-test--make-pgcon :host "localhost") pg-disconnect pg-error)
+                    (,(make-clutch-db-sqlite-conn :handle 'sqlite-handle) sqlite-close sqlite-error)
+                    (,(make-clutch-jdbc-conn :conn-id 7) clutch-jdbc--send wrong-type-argument)))
+      (pcase-let ((`(,conn ,disconnect-function ,error-type) case))
+        (cl-letf (((symbol-function disconnect-function)
+                   (lambda (&rest _args) (signal error-type '("close failed")))))
+          (should-error (clutch-db-disconnect conn) :type error-type))))))
 
 (ert-deftest clutch-db-test-pg-primary-keys-use-compatible-int2vector-ordering ()
   "PostgreSQL primary keys should preserve compatible int2vector order."
@@ -5022,8 +5274,14 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                         (clutch-db-object-entry-metadata conn entry)
                         :value-type)
                        "HASH"))
-              (should (equal (clutch-db-object-browse-query conn entry)
-                             (format "HGETALL %S" hash-key)))
+              (let ((clutch-redis-browse-limit 1))
+                (should (equal (clutch-db-object-browse-query conn entry)
+                               (format "HRANDFIELD %S 1 WITHVALUES" hash-key)))
+                (should (= (length
+                            (clutch-db-result-rows
+                             (clutch-db-query
+                              conn (clutch-db-object-browse-query conn entry))))
+                           1)))
               (let ((details (clutch-db-object-details conn entry)))
                 (should (member '("Type" . "hash") details))
                 (should (member '("Exists" . "yes") details)))))
@@ -5810,21 +6068,25 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
 
 (ert-deftest clutch-db-test-jdbc-live-p-variants ()
   "JDBC liveness should depend on current-agent identity and process state."
-  (dolist (case '(("matching-live-process" fake-proc fake-proc t t)
-                  ("dead-process" dead-proc dead-proc nil nil)
-                  ("nil-agent-process" old-proc nil t nil)
-                  ("mismatched-process" old-proc new-proc t nil)))
-    (pcase-let ((`(,label ,conn-proc ,agent-proc ,livep ,expected) case))
+  (dolist (case '(("matching-live-process" fake-proc fake-proc t t t)
+                  ("disconnected-logical-connection" fake-proc fake-proc t nil nil)
+                  ("dead-process" dead-proc dead-proc nil t nil)
+                  ("nil-agent-process" old-proc nil t t nil)
+                  ("mismatched-process" old-proc new-proc t t nil)))
+    (pcase-let ((`(,label ,conn-proc ,agent-proc ,livep ,registered ,expected)
+                 case))
       (ert-info ((format "live-p case: %s" label))
         (cl-letf (((symbol-function 'process-live-p) (lambda (_p) livep)))
-          (let ((clutch-jdbc--agent-process agent-proc))
+          (let* ((clutch-jdbc--agent-process agent-proc)
+                 (clutch-jdbc--connections-by-id
+                  (make-hash-table :test 'eql))
+                 (conn (make-clutch-jdbc-conn :process conn-proc :conn-id 1
+                                              :params nil :busy nil)))
+            (when registered
+              (puthash 1 conn clutch-jdbc--connections-by-id))
             (if expected
-                (should (clutch-db-live-p
-                         (make-clutch-jdbc-conn :process conn-proc :conn-id 1
-                                                :params nil :busy nil)))
-              (should-not (clutch-db-live-p
-                           (make-clutch-jdbc-conn :process conn-proc :conn-id 1
-                                                  :params nil :busy nil))))))))))
+                (should (clutch-db-live-p conn))
+              (should-not (clutch-db-live-p conn)))))))))
 
 ;;;; Unit tests — clutch-jdbc--recv-response timeout behaviour
 
@@ -5964,6 +6226,24 @@ It does so without touching the agent process."
              (should (string-match-p (regexp-quote clutch-debug-buffer-name)
                                      (cadr err))))))))))
 
+(ert-deftest clutch-db-test-jdbc-rpc-uses-connection-timeout-by-default ()
+  "Connection-scoped JDBC RPCs should inherit the connection RPC timeout."
+  (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+                                      :params '(:driver jdbc :rpc-timeout 0.25)))
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         captured-timeout)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 71))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (_id timeout &optional _op)
+                 (setq captured-timeout timeout)
+                 '(:ok t :result (:columns nil)))))
+      (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")))
+      (should (= captured-timeout 0.25))
+      (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")) 0.1)
+      (should (= captured-timeout 0.1)))))
+
 (ert-deftest clutch-db-test-jdbc-send-encodes-debug-and-boolean-values ()
   "JDBC requests should encode debug and false as JSON booleans."
   (let ((clutch-jdbc--next-request-id 0)
@@ -6067,6 +6347,131 @@ It does so without touching the agent process."
            (should (string-match-p "hidden_table"
                                    (plist-get context :generated-sql)))))))))
 
+(ert-deftest clutch-db-test-jdbc-invalidated-error-retires-only-target-handle ()
+  "An authoritative invalidation marker should retire only its JDBC handle."
+  (let* ((conn (make-clutch-jdbc-conn
+                :process 'fake-proc :conn-id 7 :params '(:driver oracle)))
+         (other (make-clutch-jdbc-conn
+                 :process 'fake-proc :conn-id 8 :params '(:driver oracle)))
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+         (diag '(:category "query"
+                 :op "execute"
+                 :request-id 88
+                 :conn-id 7
+                 :connection-invalidated t
+                 :exception-class "java.sql.SQLRecoverableException"
+                 :sql-state "08000"
+                 :vendor-code 17410
+                 :raw-message "No more data to read from socket"))
+         cancelled)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (puthash 8 other clutch-jdbc--connections-by-id)
+    (puthash conn 88 clutch-jdbc--busy-request-ids)
+    (puthash other 89 clutch-jdbc--busy-request-ids)
+    (puthash 90 (list :conn conn :timer 'target-timer)
+             clutch-jdbc--async-callbacks)
+    (puthash 91 (list :conn other :timer 'other-timer)
+             clutch-jdbc--async-callbacks)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'cancel-timer)
+               (lambda (timer) (push timer cancelled)))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (&rest _args)
+                 (ert-fail "Invalidated connection must not send disconnect"))))
+      (let ((err
+             (should-error
+              (clutch-jdbc--response-result-or-signal
+               conn "execute"
+               `(:ok ,clutch-jdbc--json-false
+                 :error "No more data to read from socket"
+                 :diag ,diag))
+              :type 'clutch-db-error)))
+        (should (string-match-p "No more data" (cadr err))))
+      (should-not (clutch-db-live-p conn))
+      (should (clutch-db-live-p other))
+      (should-not (gethash 7 clutch-jdbc--connections-by-id))
+      (should (eq (gethash 8 clutch-jdbc--connections-by-id) other))
+      (should-not (gethash conn clutch-jdbc--busy-request-ids))
+      (should (= (gethash other clutch-jdbc--busy-request-ids) 89))
+      (should-not (gethash 90 clutch-jdbc--async-callbacks))
+      (should (gethash 91 clutch-jdbc--async-callbacks))
+      (should (gethash 90 clutch-jdbc--ignored-response-ids))
+      (should (equal cancelled '(target-timer)))
+      (let* ((details (clutch-db-error-details conn))
+             (stored-diag (plist-get details :diag)))
+        (should (equal (plist-get stored-diag :raw-message)
+                       "No more data to read from socket"))
+        (should (eq (plist-get stored-diag :connection-invalidated) t)))
+      (should (eq clutch-jdbc--agent-process 'fake-proc)))))
+
+(ert-deftest clutch-db-test-jdbc-safe-retry-condition-requires-exact-protocol-facts ()
+  "Only a pre-execution query invalidation should signal the retry condition."
+  (dolist (case '(("execute" "execute" "query" 7 t t clutch-db-execution-not-started)
+                  ("execute-params" "execute-params" "query" 7 t t clutch-db-execution-not-started)
+                  ("execute" "execute" "query" 8 t t clutch-db-error)
+                  ("execute" "execute" "query" 7 t nil clutch-db-error)
+                  ("execute" "fetch" "query" 7 t t clutch-db-error)
+                  ("execute" "execute" "metadata" 7 t t clutch-db-error)
+                  ("fetch" "fetch" "fetch" 7 t t clutch-db-error)
+                  ("execute" "execute" "query" 7 nil t clutch-db-error)))
+    (pcase-let ((`(,op ,diag-op ,category ,diag-conn-id
+                        ,invalidated ,not-started ,expected)
+                 case))
+      (let* ((conn (make-clutch-jdbc-conn
+                    :process 'fake-proc :conn-id 7 :params '(:driver oracle)))
+             (clutch-jdbc--agent-process 'fake-proc)
+             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+             (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+             (diag `(:category ,category
+                     :op ,diag-op
+                     :conn-id ,diag-conn-id
+                     :connection-invalidated ,invalidated
+                     :execution-not-started ,not-started)))
+        (puthash 7 conn clutch-jdbc--connections-by-id)
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t)))
+          (let ((err
+                 (should-error
+                  (clutch-jdbc--response-result-or-signal
+                   conn op
+                   `(:ok ,clutch-jdbc--json-false
+                     :error "idle validation failed"
+                     :diag ,diag))
+                  :type 'clutch-db-error)))
+            (ert-info ((format "case: %S" case))
+              (should (eq (car err) expected)))))))))
+
+(ert-deftest clutch-db-test-jdbc-does-not-infer-invalidation-from-exception ()
+  "Clutch should require the protocol marker instead of classifying errors."
+  (let* ((conn (make-clutch-jdbc-conn
+                :process 'fake-proc :conn-id 7 :params '(:driver oracle)))
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t)))
+      (should-error
+       (clutch-jdbc--response-result-or-signal
+        conn "execute"
+        `(:ok ,clutch-jdbc--json-false
+          :error "No more data to read from socket"
+          :diag (:category "query"
+                 :op "execute"
+                 :conn-id 7
+                 :exception-class "java.sql.SQLRecoverableException"
+                 :sql-state "08000"
+                 :vendor-code 17410)))
+       :type 'clutch-db-error)
+      (should (clutch-db-live-p conn))
+      (should (eq (gethash 7 clutch-jdbc--connections-by-id) conn)))))
+
 (ert-deftest clutch-db-test-jdbc-interrupt-query-contract ()
   "JDBC interrupt should cancel only busy requests and preserve agent ownership."
   (let ((conn (make-clutch-jdbc-conn :conn-id 7
@@ -6074,7 +6479,8 @@ It does so without touching the agent process."
         (clutch-jdbc--agent-process 'fake-proc)
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
-        (clutch-jdbc--response-queue '((:id 99 :ok t)))
+        (clutch-jdbc--response-queue
+         '((:id 99 :ok t :result (:cancelled t :request-id 41))))
         captured-op captured-params)
     (puthash conn 41 clutch-jdbc--busy-request-ids)
     (cl-letf (((symbol-function 'clutch-jdbc--send)
@@ -6111,7 +6517,8 @@ It does so without touching the agent process."
       (should-not (clutch-db-interrupt-query conn))
       (should send-called)
       (should (eq clutch-jdbc--agent-process 'fake-proc))
-      (should-not deleted-proc)))
+      (should-not deleted-proc)
+      (should (gethash 99 clutch-jdbc--ignored-response-ids))))
   (let ((conn (make-clutch-jdbc-conn :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
@@ -6124,6 +6531,21 @@ It does so without touching the agent process."
       (should-not (clutch-db-interrupt-query conn))
       (should-not send-called)
       (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
+
+(ert-deftest clutch-db-test-jdbc-interrupt-requires-confirmed-request ()
+  "JDBC interrupt should reject unconfirmed or mismatched cancellation results."
+  (dolist (result `((:cancelled ,clutch-jdbc--json-false :request-id 41)
+                    (:cancelled t :request-id 42)
+                    nil))
+    (let ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver jdbc)))
+          (clutch-jdbc--agent-process 'fake-proc)
+          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+          (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+          (clutch-jdbc--response-queue `((:id 99 :ok t :result ,result))))
+      (puthash conn 41 clutch-jdbc--busy-request-ids)
+      (cl-letf (((symbol-function 'clutch-jdbc--send)
+                 (lambda (_op _params) 99)))
+        (should-not (clutch-db-interrupt-query conn))))))
 
 (ert-deftest clutch-db-test-jdbc-disconnect-cleans-state-contract ()
   "JDBC disconnect should clean local state without unsafe agent ownership changes."
@@ -6138,15 +6560,24 @@ It does so without touching the agent process."
     (ert-info ((format "case: %s" (plist-get case :label)))
       (let* ((conn (make-clutch-jdbc-conn :conn-id 7
                                           :params '(:driver jdbc :rpc-timeout 12)))
+             (other-conn (make-clutch-jdbc-conn :conn-id 8
+                                                :params '(:driver jdbc)))
              (clutch-jdbc-disconnect-timeout-seconds 0.1)
              (clutch-jdbc--agent-process (plist-get case :agent-process))
              (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
              (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
              (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
              (clutch-jdbc--response-queue nil)
              deleted-proc
-             send-called)
+             send-called
+             cancelled-timer)
         (puthash conn 41 clutch-jdbc--busy-request-ids)
+        (puthash 43 (list :conn conn :timer 'metadata-timer)
+                 clutch-jdbc--async-callbacks)
+        (puthash 44 (list :conn other-conn :timer 'other-timer)
+                 clutch-jdbc--async-callbacks)
         (puthash conn '(:summary "old error") clutch-jdbc--error-details-by-conn)
         (puthash 7 conn clutch-jdbc--connections-by-id)
         (cl-letf (((symbol-function 'clutch-jdbc--send)
@@ -6159,7 +6590,10 @@ It does so without touching the agent process."
                    (lambda (_proc _secs) nil))
                   ((symbol-function 'delete-process)
                    (lambda (proc)
-                     (setq deleted-proc proc))))
+                     (setq deleted-proc proc)))
+                  ((symbol-function 'cancel-timer)
+                   (lambda (timer)
+                     (setq cancelled-timer timer))))
           (clutch-db-disconnect conn)
           (if (plist-get case :expect-send)
               (should send-called)
@@ -6168,6 +6602,10 @@ It does so without touching the agent process."
                       (plist-get case :expect-agent-process)))
           (should-not deleted-proc)
           (should-not (gethash conn clutch-jdbc--busy-request-ids))
+          (should-not (gethash 43 clutch-jdbc--async-callbacks))
+          (should (gethash 44 clutch-jdbc--async-callbacks))
+          (should (eq cancelled-timer 'metadata-timer))
+          (should (gethash 43 clutch-jdbc--ignored-response-ids))
           (should-not (gethash conn clutch-jdbc--error-details-by-conn))
           (should-not (gethash 7 clutch-jdbc--connections-by-id)))))))
 
@@ -6197,6 +6635,44 @@ It does so without touching the agent process."
           (should-error (clutch-jdbc--recv-response 2 10.0)
                         :type 'clutch-db-error)
           (should-not clutch-jdbc--response-queue))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest clutch-db-test-jdbc-agent-filter-scans-fragments-incrementally ()
+  "JDBC response fragments should not rescan bytes seen by earlier filter calls."
+  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+        (clutch-jdbc--response-queue nil)
+        (fragments '("{\"id\":" "17,\"ok\":" "true}" "\n"))
+        scan-starts expected-starts record-scans)
+    (unwind-protect
+        (let ((original-search-forward (symbol-function 'search-forward)))
+          (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf))
+                    ((symbol-function 'search-forward)
+                     (lambda (string &rest args)
+                       (when (and record-scans
+                                  (eq (current-buffer) buf)
+                                  (equal string "\n"))
+                         (push (point) scan-starts))
+                       (apply original-search-forward string args)))
+                    ((symbol-function 'clutch-jdbc--dispatch-async-response)
+                     (lambda (_parsed) nil)))
+            (let ((next-start 1))
+              (setq record-scans t)
+              (dolist (fragment fragments)
+                (push next-start expected-starts)
+                (clutch-jdbc--agent-filter 'fake-proc fragment)
+                (setq next-start (+ next-start (length fragment))))
+              (push 1 expected-starts)
+              (setq record-scans nil))
+            (should (equal (nreverse scan-starts)
+                           (nreverse expected-starts)))
+            (clutch-jdbc--agent-filter
+             'fake-proc "{\"id\":18,\"ok\":true}\n{\"id\":")
+            (clutch-jdbc--agent-filter 'fake-proc "19,\"ok\":true}\n")
+            (should (equal clutch-jdbc--response-queue
+                           '((:id 17 :ok t) (:id 18 :ok t) (:id 19 :ok t))))
+            (with-current-buffer buf
+              (should (= (buffer-size) 0)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 

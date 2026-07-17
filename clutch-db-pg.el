@@ -34,12 +34,6 @@
 
 (defvar pg-connect-timeout)
 (defvar pg-read-timeout)
-(defvar clutch-connect-timeout-seconds 10
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-(defvar clutch-read-idle-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-(defvar clutch-query-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (declare-function pg-result "pg" (result what &rest arg))
 (declare-function pg-exec "pg" (con &rest args))
@@ -140,7 +134,6 @@
 (defconst clutch-db-pg--oid-json 114)
 (defconst clutch-db-pg--oid-float4 700)
 (defconst clutch-db-pg--oid-float8 701)
-(defconst clutch-db-pg--oid-varchar 1043)
 (defconst clutch-db-pg--oid-date 1082)
 (defconst clutch-db-pg--oid-time 1083)
 (defconst clutch-db-pg--oid-timestamp 1114)
@@ -491,8 +484,7 @@ When CONN is non-nil, include backend type metadata from its type cache."
   "Connect to DBNAME as USER using CONNECT-ARGS and SSLMODE."
   (pcase sslmode
     ('prefer
-     (if (and (fboundp 'gnutls-available-p)
-              (gnutls-available-p))
+     (if (gnutls-available-p)
          (condition-case err
              (apply #'pg-connect-plist
                     dbname user
@@ -797,9 +789,7 @@ FKS is an alist of (column-name . fk-plist)."
 (cl-defmethod clutch-db-disconnect ((conn pgcon))
   "Disconnect PostgreSQL CONN."
   (clutch-db-pg--set-manual-commit-enabled conn nil)
-  (condition-case nil
-      (pg-disconnect conn)
-    (pg-error nil)))
+  (pg-disconnect conn))
 
 (cl-defmethod clutch-db-live-p ((conn pgcon))
   "Return non-nil if PostgreSQL CONN is live."

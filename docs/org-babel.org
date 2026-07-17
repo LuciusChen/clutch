@@ -2,10 +2,7 @@
 
 * Org-Babel Integration
 
-Execute SQL directly in org files via the separate
-[[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.  It
-bridges clutch connections into Org-Babel block types for MySQL, PostgreSQL,
-SQLite, and the generic =clutch= backend used for JDBC databases.
+Execute SQL directly in org files via the separate [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package.  It bridges clutch connections into Org-Babel block types for MySQL, PostgreSQL, SQLite, and the generic =clutch= backend used for JDBC databases.
 
 Configuration:
 
@@ -31,9 +28,7 @@ Using a saved connection (works for any backend including JDBC):
 : SELECT * FROM employees WHERE ROWNUM <= 10;
 : #+end_src
 
-The generic =clutch= block does not need an inline =:backend= when =:connection=
-is present; the backend is taken from the saved connection entry.  An explicit
-=:backend= is only required for inline connection parameters.
+The generic =clutch= block does not need an inline =:backend= when =:connection= is present; the backend is taken from the saved connection entry.  An explicit =:backend= is only required for inline connection parameters.
 
 Or with inline connection parameters:
 
@@ -65,8 +60,7 @@ Generic form with explicit backend — required for JDBC databases:
 : SELECT TOP 10 * FROM sys.tables;
 : #+end_src
 
-Compatibility entry files live in the
-[[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package:
+Compatibility entry files live in the [[https://github.com/LuciusChen/ob-clutch][ob-clutch]] package:
 - =ob-mysql.el=, =ob-postgresql.el=, =ob-sqlite.el= — thin language entry points for the named block types.
 - =ob-clutch.el= — core execution logic; also registers the generic =clutch= block type.
 
@@ -88,6 +82,4 @@ Compatibility entry files live in the
 
 ** Connection Caching
 
-Connections are cached by parameter hash and source TRAMP origin, then reused
-across source block evaluations in the same Emacs session.  All cached
-connections are cleanly disconnected when Emacs exits (via =kill-emacs-hook=).
+Connections are cached by parameter hash and source TRAMP origin, then reused across source block evaluations in the same Emacs session.  All cached connections are cleanly disconnected when Emacs exits (via =kill-emacs-hook=).

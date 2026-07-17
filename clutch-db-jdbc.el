@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.8"
+(defcustom clutch-jdbc-agent-version "0.2.13"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "257ebc4d6b56989afdf9072295122ba88c2c1567baba948602b08886a3b23fe4"
+  "ef3984ea3eaca1d60eb6e8e4a415e0483b9e4fe46f32611887272b1f7f51094d"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -81,9 +81,20 @@ Examples:
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-fetch-size 500
-  "Number of rows fetched per batch from the agent."
-  :type 'natnum
+  "Number of rows fetched per batch from the agent, from 1 through 10000."
+  :type 'integer
   :group 'clutch-jdbc)
+
+(defcustom clutch-jdbc-validate-after-idle-seconds 300
+  "Validate a JDBC primary session before executing after this idle period.
+The agent validates immediately before statement creation.  When that check
+proves the session dead, Clutch may reconnect and execute once on a clean
+transaction.  Set this to nil or 0 to disable idle validation."
+  :type '(choice (const :tag "Disable" nil) natnum)
+  :group 'clutch-jdbc)
+
+(defconst clutch-jdbc--max-fetch-size 10000
+  "Maximum batch size accepted by the JDBC agent protocol.")
 
 (defcustom clutch-jdbc-oracle-manual-commit t
   "When non-nil, Oracle JDBC connections default to manual-commit mode.
@@ -91,18 +102,6 @@ Set this to nil to keep Oracle in auto-commit by default.  Per-connection
 `:manual-commit' still overrides this default when explicitly present."
   :type 'boolean
   :group 'clutch-jdbc)
-
-(defvar clutch-connect-timeout-seconds 10
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-read-idle-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-query-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-jdbc-rpc-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defvar clutch-jdbc-cancel-timeout-seconds 5
   "Seconds to wait for a cancel acknowledgement from the JDBC agent.
@@ -114,10 +113,10 @@ should degrade to disconnect, not block the user.")
 A stuck disconnect should not block the user or kill the agent.")
 
 (defvar clutch-debug-mode nil
-  "Forward declaration; defined as a global minor mode in clutch.el.")
+  "Forward declaration; defined as a global minor mode in clutch-diagnostics.el.")
 
 (defvar clutch-debug-buffer-name "*clutch-debug*"
-  "Forward declaration; defined in clutch.el.")
+  "Forward declaration; defined in clutch-diagnostics.el.")
 
 ;;;; Driver sources (for automatic installation from Maven Central)
 
@@ -131,14 +130,17 @@ A stuck disconnect should not block the user or kill the agent.")
     ;; ojdbc8 (19c driver) is the safest default across Oracle 11g/12c/19c.
     (oracle    . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
                   :filename "ojdbc8.jar"
-                  :class "oracle.jdbc.OracleDriver"))
+                  :class "oracle.jdbc.OracleDriver"
+                  :companions (oracle-i18n)))
     (oracle-8  . (:maven "com.oracle.database.jdbc:ojdbc8:19.21.0.0"
                   :filename "ojdbc8.jar"
-                  :class "oracle.jdbc.OracleDriver"))
+                  :class "oracle.jdbc.OracleDriver"
+                  :companions (oracle-i18n)))
     ;; ojdbc11 remains available for users who explicitly want the newer line.
     (oracle-11 . (:maven "com.oracle.database.jdbc:ojdbc11:21.13.0.0"
                   :filename "ojdbc11.jar"
-                  :class "oracle.jdbc.OracleDriver"))
+                  :class "oracle.jdbc.OracleDriver"
+                  :companions (oracle-i18n)))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
                     :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
@@ -149,7 +151,8 @@ A stuck disconnect should not block the user or kill the agent.")
                   :class "com.amazon.redshift.jdbc.Driver"))
     (clickhouse . (:maven "com.clickhouse:clickhouse-jdbc:0.9.8:all"
                    :filename "clickhouse-jdbc.jar"
-                   :class "com.clickhouse.jdbc.ClickHouseDriver"))
+                   :class "com.clickhouse.jdbc.ClickHouseDriver"
+                   :companions (slf4j-api slf4j-nop)))
     (duckdb     . (:maven "org.duckdb:duckdb_jdbc:1.5.3.0"
                   :filename "duckdb_jdbc.jar"
                   :class "org.duckdb.DuckDBDriver"))
@@ -162,12 +165,6 @@ A stuck disconnect should not block the user or kill the agent.")
                    :filename "slf4j-nop.jar")))
   "Known JDBC driver sources.
 All entries support auto-download via `clutch-jdbc-install-driver'.")
-
-;;;; Drivers that default to JDBC backend
-
-(defconst clutch-jdbc--jdbc-drivers
-  '(jdbc oracle sqlserver db2 snowflake redshift clickhouse)
-  "Backend/driver symbols that are routed to the JDBC backend.")
 
 (defconst clutch-jdbc--driver-metadata
   '((jdbc       . (:display-name "JDBC"
@@ -182,11 +179,13 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
     (sqlserver  . (:display-name "SQL Server"
                   :default-port 1433
                   :support-level core
-                  :data-model relational))
+                  :data-model relational
+                  :sql-product ms))
     (db2        . (:display-name "DB2"
                   :default-port 50000
                   :support-level basic
-                  :data-model relational))
+                  :data-model relational
+                  :sql-product db2))
     (snowflake  . (:display-name "Snowflake"
                   :default-port 443
                   :support-level basic
@@ -194,19 +193,13 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
     (redshift   . (:display-name "Redshift"
                   :default-port 5439
                   :support-level basic
-                  :data-model relational))
+                  :data-model relational
+                  :sql-product postgres))
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
                   :support-level basic
                   :data-model relational)))
   "User-facing metadata for JDBC-backed concrete drivers.")
-
-(defconst clutch-jdbc--driver-companions
-  '((oracle oracle-i18n)
-    (oracle-8 oracle-i18n)
-    (oracle-11 oracle-i18n)
-    (clickhouse slf4j-api slf4j-nop))
-  "Optional companion driver artifacts to install alongside a primary driver.")
 
 (defconst clutch-jdbc--oracle-driver-filenames
   '("ojdbc8.jar" "ojdbc11.jar")
@@ -235,6 +228,9 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 
 (defvar clutch-jdbc--response-queue nil
   "List of parsed synchronous JSON responses, oldest first.")
+
+(defvar-local clutch-jdbc--agent-scan-position nil
+  "Buffer position where the JDBC agent filter should resume line scanning.")
 
 (defvar clutch-jdbc--async-callbacks (make-hash-table :test 'eql)
   "Map of JDBC request ids to asynchronous callbacks.")
@@ -319,13 +315,21 @@ JAR defaults to `clutch-jdbc--agent-jar'."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
-(defun clutch-jdbc--clear-async-callbacks ()
-  "Cancel and clear all pending asynchronous JDBC callbacks."
-  (maphash (lambda (_id entry)
-             (when-let* ((timer (plist-get entry :timer)))
-               (cancel-timer timer)))
-           clutch-jdbc--async-callbacks)
-  (clrhash clutch-jdbc--async-callbacks))
+(defun clutch-jdbc--clear-async-callbacks (&optional conn)
+  "Cancel pending asynchronous JDBC callbacks.
+When CONN is non-nil, clear only callbacks for that connection and ignore their
+late responses.  Otherwise clear every callback."
+  (let (ids)
+    (maphash (lambda (id entry)
+               (when (or (null conn) (eq conn (plist-get entry :conn)))
+                 (when-let* ((timer (plist-get entry :timer)))
+                   (cancel-timer timer))
+                 (when conn
+                   (puthash id t clutch-jdbc--ignored-response-ids))
+                 (push id ids)))
+             clutch-jdbc--async-callbacks)
+    (dolist (id ids)
+      (remhash id clutch-jdbc--async-callbacks))))
 
 (defun clutch-jdbc--clear-request-state ()
   "Clear in-flight and ignored JDBC request bookkeeping."
@@ -348,18 +352,24 @@ Return non-nil when RESPONSE was consumed asynchronously."
         (run-at-time
          0 nil
          (lambda ()
-           (condition-case err
-              (if (eq t (plist-get response :ok))
-                  (when callback
-                    (funcall callback (plist-get response :result)))
-                (clutch-jdbc--remember-error-response conn op response)
-                (let ((message (clutch-jdbc--rpc-error-message op response)))
-                  (if errback
-                      (funcall errback message)
-                    (message "clutch-jdbc async error: %s" message))))
-             (error
-              (message "clutch-jdbc async callback failed: %s"
-                       (error-message-string err)))))))
+           (when (or (not (clutch-jdbc-conn-p conn))
+                     (eq conn
+                         (gethash (clutch-jdbc-conn-conn-id conn)
+                                  clutch-jdbc--connections-by-id)))
+             (condition-case err
+                 (if (eq t (plist-get response :ok))
+                     (when callback
+                       (funcall callback (plist-get response :result)))
+                   (clutch-jdbc--remember-error-response conn op response)
+                   (when (clutch-jdbc--connection-invalidated-p response)
+                     (clutch-jdbc--retire-invalidated-connection conn))
+                   (let ((message (clutch-jdbc--rpc-error-message op response)))
+                     (if errback
+                         (funcall errback message)
+                       (message "clutch-jdbc async error: %s" message))))
+               (error
+                (message "clutch-jdbc async callback failed: %s"
+                         (error-message-string err))))))))
       t)))
 
 (defun clutch-jdbc--agent-filter (proc string)
@@ -370,7 +380,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
         (goto-char (point-max))
         (insert string)
         ;; Collect complete lines into the response queue.
-        (goto-char (point-min))
+        (goto-char (min (or clutch-jdbc--agent-scan-position (point-min))
+                        (point-max)))
         (while (search-forward "\n" nil t)
           (let ((line (string-trim (buffer-substring (point-min) (point)))))
             (delete-region (point-min) (point))
@@ -395,7 +406,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
                      (t
                       (setq clutch-jdbc--response-queue
                             (nconc clutch-jdbc--response-queue
-                                   (list parsed)))))))))))))))
+                                   (list parsed)))))))))))
+        (setq clutch-jdbc--agent-scan-position (point-max))))))
 
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
@@ -606,6 +618,8 @@ Unlike `clutch-jdbc--recv-response', this never kills the agent process."
                  clutch-jdbc--agent-process
                  (not (process-live-p clutch-jdbc--agent-process)))
         (setq agent-exited t))
+      (when (and (not response) (not agent-exited))
+        (puthash id t clutch-jdbc--ignored-response-ids))
       (unless agent-exited
         response))))
 
@@ -616,7 +630,9 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
   (clutch-jdbc--ensure-agent)
   (let* ((conn (clutch-jdbc--conn-from-params params))
          (id (clutch-jdbc--send op params))
-         (response (clutch-jdbc--recv-response id timeout-seconds op)))
+         (timeout (or timeout-seconds
+                      (and conn (clutch-jdbc--conn-rpc-timeout conn))))
+         (response (clutch-jdbc--recv-response id timeout op)))
     (clutch-jdbc--response-result-or-signal conn op response)))
 
 (defun clutch-jdbc--rpc-error-message (op response)
@@ -650,13 +666,44 @@ When CONN is nil, return the details snapshot for the current failure."
       (puthash conn details clutch-jdbc--error-details-by-conn))
     details))
 
+(defun clutch-jdbc--connection-invalidated-p (response)
+  "Return non-nil if RESPONSE has an invalidated logical connection."
+  (eq t (plist-get (plist-get response :diag) :connection-invalidated)))
+
+(defun clutch-jdbc--retire-invalidated-connection (conn)
+  "Retire invalidated JDBC CONN from local live-request state.
+The agent has already removed the logical connection, so do not send a
+disconnect request.  Preserve connection-scoped diagnostics for the caller."
+  (when (and (clutch-jdbc-conn-p conn)
+             (eq conn
+                 (gethash (clutch-jdbc-conn-conn-id conn)
+                          clutch-jdbc--connections-by-id)))
+    (remhash conn clutch-jdbc--busy-request-ids)
+    (clutch-jdbc--clear-async-callbacks conn)
+    (remhash (clutch-jdbc-conn-conn-id conn)
+             clutch-jdbc--connections-by-id)))
+
 (defun clutch-jdbc--response-result-or-signal (conn op response)
   "Return RESPONSE's result or signal `clutch-db-error' for OP.
 When CONN is non-nil, remember structured diagnostics on the connection."
   (if (eq t (plist-get response :ok))
       (plist-get response :result)
-    (let ((details (clutch-jdbc--remember-error-response conn op response)))
-      (signal 'clutch-db-error
+    (let* ((details (clutch-jdbc--remember-error-response conn op response))
+           (diag (plist-get response :diag))
+           (execution-not-started
+            (and (clutch-jdbc-conn-p conn)
+                 (eql (clutch-jdbc-conn-conn-id conn)
+                      (plist-get diag :conn-id))
+                 (member op '("execute" "execute-params"))
+                 (equal (plist-get diag :category) "query")
+                 (equal (plist-get diag :op) op)
+                 (eq t (plist-get diag :connection-invalidated))
+                 (eq t (plist-get diag :execution-not-started)))))
+      (when (clutch-jdbc--connection-invalidated-p response)
+        (clutch-jdbc--retire-invalidated-connection conn))
+      (signal (if execution-not-started
+                  'clutch-db-execution-not-started
+                'clutch-db-error)
               (if details
                   (list (clutch-jdbc--rpc-error-message op response) details)
                 (list (clutch-jdbc--rpc-error-message op response)))))))
@@ -674,15 +721,13 @@ When CONN is non-nil, remember structured diagnostics on the connection."
          response)
     (puthash conn id clutch-jdbc--busy-request-ids)
     (unwind-protect
-        (condition-case err
+        (condition-case nil
             (progn
               (setq response (clutch-jdbc--recv-response id timeout-seconds op))
               (clutch-jdbc--response-result-or-signal conn op response))
           (quit
            (setq clear-request-id nil)
-           (signal 'quit nil))
-          (clutch-db-error
-           (signal (car err) (cdr err))))
+           (signal 'quit nil)))
       (when (and clear-request-id
                  (eql (gethash conn clutch-jdbc--busy-request-ids) id))
         (remhash conn clutch-jdbc--busy-request-ids)))))
@@ -702,6 +747,7 @@ diagnostics when non-nil.  Return the request id."
                    (let ((entry (gethash id clutch-jdbc--async-callbacks)))
                      (when entry
                        (remhash id clutch-jdbc--async-callbacks)
+                       (puthash id t clutch-jdbc--ignored-response-ids)
                        (when-let* ((timeout-errback (plist-get entry :errback)))
                          (funcall timeout-errback
                                   (format "clutch-jdbc-agent: timeout waiting for async response to request %d"
@@ -749,31 +795,32 @@ or :sid (Oracle SID-style connection)."
       (and (not (eq driver 'mongodb))
            (plist-get params :url))
       (let ((host     (or (plist-get params :host) "localhost"))
-            (port     (plist-get params :port))
+            (port     (or (plist-get params :port)
+                          (clutch-backend-default-port driver)))
             (database (plist-get params :database))
             (sid      (plist-get params :sid)))
         (pcase driver
           ('oracle
            (if sid
                (format "jdbc:oracle:thin:@%s:%d:%s"
-                       host (or port 1521) sid)
+                       host port sid)
              (format "jdbc:oracle:thin:@//%s:%d/%s"
-                     host (or port 1521) database)))
+                     host port database)))
           ('sqlserver
            (format "jdbc:sqlserver://%s:%d;databaseName=%s"
-                   host (or port 1433) database))
+                   host port database))
           ('db2
            (format "jdbc:db2://%s:%d/%s"
-                   host (or port 50000) database))
+                   host port database))
           ('snowflake
            (format "jdbc:snowflake://%s.snowflakecomputing.com/?db=%s"
                    host database))
           ('redshift
            (format "jdbc:redshift://%s:%d/%s"
-                   host (or port 5439) database))
+                   host port database))
           ('clickhouse
            (format "jdbc:clickhouse://%s:%d/%s"
-                   host (or port 8123) database))
+                   host port database))
           ('mongodb
            (clutch-jdbc--sql-interface-url params))
           (_
@@ -925,6 +972,11 @@ Returns a `clutch-jdbc-conn'."
 
 (defun clutch-db-jdbc-connect--internal (driver params)
   "Connect to JDBC DRIVER using PARAMS after driver dispatch is resolved."
+  (unless (or (null clutch-jdbc-validate-after-idle-seconds)
+              (and (integerp clutch-jdbc-validate-after-idle-seconds)
+                   (>= clutch-jdbc-validate-after-idle-seconds 0)))
+    (user-error
+     "JDBC idle validation interval must be nil or a non-negative integer"))
   (clutch-jdbc--setup-prerequisites driver)
   (clutch-jdbc--ensure-agent)
   (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
@@ -949,6 +1001,10 @@ Returns a `clutch-jdbc-conn'."
                       (connect-timeout-seconds . ,connect-timeout)
                       ,@(when read-idle-timeout
                           `((network-timeout-seconds . ,read-idle-timeout)))
+                      ,@(when (and (integerp clutch-jdbc-validate-after-idle-seconds)
+                                   (> clutch-jdbc-validate-after-idle-seconds 0))
+                          `((validate-after-idle-seconds
+                             . ,clutch-jdbc-validate-after-idle-seconds)))
                       ,@(when props `((props . ,props))))
                     rpc-timeout)))
     (let* ((conn-params (plist-put normalized-params :driver driver))
@@ -973,18 +1029,17 @@ Returns a `clutch-jdbc-conn'."
 ;; inside clutch-db-jdbc-connect without requiring a redundant :driver key
 ;; in the user's params plist (:backend is stripped by clutch--build-conn
 ;; before the connect-fn is called).
-(dolist (driver clutch-jdbc--jdbc-drivers)
-  (unless (alist-get driver clutch-backend--registry)
-    (let ((drv driver))
+(dolist (entry clutch-jdbc--driver-metadata)
+  (let ((driver (car entry)))
+    (unless (alist-get driver clutch-backend--registry)
       (add-to-list
        'clutch-backend--registry
-       (cons drv
-             (append (copy-sequence
-                      (alist-get drv clutch-jdbc--driver-metadata))
+       (cons driver
+             (append (cdr entry)
                      (list :require 'clutch-db-jdbc
                            :connect-fn
                            (lambda (p)
-                             (clutch-db-jdbc-connect drv p)))))
+                             (clutch-db-jdbc-connect driver p)))))
        t))))
 
 ;;;; Lifecycle methods
@@ -992,16 +1047,15 @@ Returns a `clutch-jdbc-conn'."
 (cl-defmethod clutch-db-disconnect ((conn clutch-jdbc-conn))
   "Disconnect JDBC CONN, releasing it in the agent."
   (remhash conn clutch-jdbc--busy-request-ids)
+  (clutch-jdbc--clear-async-callbacks conn)
   (remhash conn clutch-jdbc--error-details-by-conn)
   (remhash (clutch-jdbc-conn-conn-id conn) clutch-jdbc--connections-by-id)
   (when (clutch-jdbc--agent-live-p)
-    (condition-case nil
-        (let ((id (clutch-jdbc--send
-                   "disconnect"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
-          (clutch-jdbc--recv-response-nonfatal
-           id clutch-jdbc-disconnect-timeout-seconds))
-      (error nil))))
+    (let ((id (clutch-jdbc--send
+               "disconnect"
+               `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
+      (clutch-jdbc--recv-response-nonfatal
+       id clutch-jdbc-disconnect-timeout-seconds))))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-jdbc-conn))
   "Return non-nil if the agent process is running and CONN belongs to it.
@@ -1012,6 +1066,9 @@ pass `process-live-p' briefly; the identity check closes that window."
   (and (clutch-jdbc-conn-p conn)
        clutch-jdbc--agent-process
        (eq (clutch-jdbc-conn-process conn) clutch-jdbc--agent-process)
+       (eq conn
+           (gethash (clutch-jdbc-conn-conn-id conn)
+                    clutch-jdbc--connections-by-id))
        (process-live-p (clutch-jdbc-conn-process conn))))
 
 (cl-defmethod clutch-db-backend-key ((conn clutch-jdbc-conn))
@@ -1208,17 +1265,26 @@ This is allowed in the hot path."
 
 ;;;; Query methods
 
+(defun clutch-jdbc--effective-fetch-size ()
+  "Return the validated JDBC fetch batch size."
+  (unless (and (integerp clutch-jdbc-fetch-size)
+               (<= 1 clutch-jdbc-fetch-size clutch-jdbc--max-fetch-size))
+    (user-error "JDBC fetch size must be between 1 and %d"
+                clutch-jdbc--max-fetch-size))
+  clutch-jdbc-fetch-size)
+
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn))
         (effective-qt (clutch-jdbc--conn-effective-query-timeout conn))
+        (fetch-size (clutch-jdbc--effective-fetch-size))
         batches done)
     (while (not done)
       (let ((result (clutch-jdbc--rpc-on-conn
                      conn
                      "fetch"
                      `((cursor-id  . ,cursor-id)
-                       (fetch-size . ,clutch-jdbc-fetch-size)
+                       (fetch-size . ,fetch-size)
                        ,@(when effective-qt
                            `((query-timeout-seconds . ,effective-qt))))
                      rpc-timeout)))
@@ -1363,21 +1429,20 @@ Clob plists become their :preview string."
   "Execute JDBC RPC OP with PAYLOAD on CONN and return a database result."
   (setf (clutch-jdbc-conn-busy conn) t)
   (unwind-protect
-      (condition-case err
-          (let* ((rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
-                 (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
-                 (result (clutch-jdbc--rpc-on-conn
-                          conn
-                          op
-                          (append
-                           `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-                           payload
-                           `((fetch-size . ,clutch-jdbc-fetch-size))
-                           (when effective-qt
-                             `((query-timeout-seconds . ,effective-qt))))
-                          rpc-timeout)))
-            (clutch-jdbc--rpc-result conn result))
-        (clutch-db-error (signal (car err) (cdr err))))
+      (let* ((rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn))
+             (effective-qt  (clutch-jdbc--conn-effective-query-timeout conn))
+             (fetch-size (clutch-jdbc--effective-fetch-size))
+             (result (clutch-jdbc--rpc-on-conn
+                      conn
+                      op
+                      (append
+                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                       payload
+                       `((fetch-size . ,fetch-size))
+                       (when effective-qt
+                         `((query-timeout-seconds . ,effective-qt))))
+                      rpc-timeout)))
+        (clutch-jdbc--rpc-result conn result))
     (setf (clutch-jdbc-conn-busy conn) nil)))
 
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
@@ -1400,7 +1465,10 @@ Clob plists become their :preview string."
                                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))))
            (response (clutch-jdbc--recv-response-nonfatal
                       id clutch-jdbc-cancel-timeout-seconds)))
-      (and response (eq t (plist-get response :ok))))))
+      (when (eq t (plist-get response :ok))
+        (let ((result (plist-get response :result)))
+          (and (eq t (plist-get result :cancelled))
+               (eql request-id (plist-get result :request-id))))))))
 
 (defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
   "Build Oracle ROWNUM-based pagination SQL for CONN.
@@ -1517,6 +1585,7 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
         (let ((keywordp
                (with-temp-buffer
                  (sql-mode)
+                 (make-local-variable 'sql-product)
                  (sql-set-product 'oracle)
                  (insert name)
                  (font-lock-ensure)
@@ -1565,6 +1634,12 @@ when a catalog is supplied."
         (schema (clutch-jdbc--conn-schema conn)))
     (append (when catalog `((catalog . ,catalog)))
             (when schema `((schema . ,schema))))))
+
+(defun clutch-jdbc--table-metadata-params (conn table)
+  "Return JDBC metadata params for TABLE on CONN."
+  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+    (table . ,table)
+    ,@(clutch-jdbc--metadata-scope-params conn)))
 
 (defun clutch-jdbc--visible-schemas (conn schemas)
   "Normalize visible SCHEMAS for CONN."
@@ -1693,9 +1768,7 @@ the metadata request."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (table . ,table)
-       ,@(clutch-jdbc--metadata-scope-params conn))
+     (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
          (funcall callback (plist-get result :columns))))
@@ -1710,9 +1783,7 @@ the metadata request."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-columns"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (table . ,table)
-       ,@(clutch-jdbc--metadata-scope-params conn))
+     (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
          (funcall callback
@@ -1723,24 +1794,24 @@ the metadata request."
      conn)
     t))
 
+(defun clutch-jdbc--foreign-keys-from-result (result)
+  "Return normalized foreign keys from JDBC metadata RESULT."
+  (mapcar (lambda (fk)
+            (cons (plist-get fk :fk-column)
+                  (list :ref-table (plist-get fk :pk-table)
+                        :ref-column (plist-get fk :pk-column))))
+          (plist-get result :foreign-keys)))
+
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback
                                             &optional errback)
   "Fetch foreign-key info for TABLE on JDBC CONN asynchronously."
   (let ((rpc-timeout (clutch-jdbc--conn-rpc-timeout conn)))
     (clutch-jdbc--rpc-async
      "get-foreign-keys"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (table . ,table)
-       ,@(clutch-jdbc--metadata-scope-params conn))
+     (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
-         (funcall callback
-                  (mapcar
-                   (lambda (fk)
-                     (cons (plist-get fk :fk-column)
-                           (list :ref-table (plist-get fk :pk-table)
-                                 :ref-column (plist-get fk :pk-column))))
-                   (plist-get result :foreign-keys)))))
+         (funcall callback (clutch-jdbc--foreign-keys-from-result result))))
      errback
      rpc-timeout
      conn)
@@ -1750,9 +1821,7 @@ the metadata request."
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
   (let* ((result  (clutch-jdbc--rpc
                    "get-columns"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     (table   . ,table)
-                     ,@(clutch-jdbc--metadata-scope-params conn)))))
+                   (clutch-jdbc--table-metadata-params conn table))))
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
@@ -1817,10 +1886,8 @@ the metadata request."
      ((eq driver 'oracle)
       (let* ((result (clutch-jdbc--rpc
                       "search-columns"
-                      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                        (table   . ,table)
-                        (prefix  . ,prefix)
-                        ,@(clutch-jdbc--metadata-scope-params conn)))))
+                      (append (clutch-jdbc--table-metadata-params conn table)
+                              `((prefix . ,prefix))))))
         (mapcar (lambda (col) (plist-get col :name))
                 (plist-get result :columns)))))))
 
@@ -1953,9 +2020,7 @@ the metadata request."
   "Return primary key columns for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   "get-primary-keys"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
+                  (clutch-jdbc--table-metadata-params conn table))))
     (plist-get result :primary-keys)))
 
 (defun clutch-jdbc--index-column-name (column)
@@ -2033,22 +2098,14 @@ the metadata request."
   "Return foreign key info for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   "get-foreign-keys"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
-    (mapcar (lambda (fk)
-              (cons (plist-get fk :fk-column)
-                    (list :ref-table  (plist-get fk :pk-table)
-                          :ref-column (plist-get fk :pk-column))))
-            (plist-get result :foreign-keys))))
+                  (clutch-jdbc--table-metadata-params conn table))))
+    (clutch-jdbc--foreign-keys-from-result result)))
 
 (cl-defmethod clutch-db-referencing-objects ((conn clutch-jdbc-conn) table)
   "Return objects that reference TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   "get-referencing-objects"
-                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                    (table   . ,table)
-                    ,@(clutch-jdbc--metadata-scope-params conn)))))
+                  (clutch-jdbc--table-metadata-params conn table))))
     (mapcar (lambda (entry)
               (list :name (plist-get entry :name)
                     :type "TABLE"
@@ -2063,9 +2120,7 @@ the metadata request."
          (fks     (clutch-db-foreign-keys conn table))
          (result  (clutch-jdbc--rpc
                    "get-columns"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     (table   . ,table)
-                     ,@(clutch-jdbc--metadata-scope-params conn))))
+                   (clutch-jdbc--table-metadata-params conn table)))
          (cols    (plist-get result :columns)))
     (mapcar (lambda (col)
               (let ((name (plist-get col :name)))
@@ -2160,7 +2215,7 @@ Fetches from GitHub Releases."
   (let* ((spec       (alist-get driver clutch-jdbc--driver-sources))
          (filename   (plist-get spec :filename))
          (dest       (expand-file-name filename (clutch-jdbc--drivers-dir)))
-         (companions (alist-get driver clutch-jdbc--driver-companions)))
+         (companions (plist-get spec :companions)))
     (make-directory (clutch-jdbc--drivers-dir) t)
     (cond
      ((file-exists-p dest)

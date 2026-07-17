@@ -7,7 +7,8 @@
 ;;; Code:
 
 (eval-and-compile
-  (require 'clutch-test-common))
+  (require 'clutch-test-common)
+  (require 'clutch-db-sqlite))
 
 ;;;; Debug — error humanization
 
@@ -126,16 +127,11 @@
           (should (string-match-p "get-columns" text)))))))
 
 (ert-deftest clutch-test-debug-buffer-appends-debug-trace-when-enabled ()
-  "Debug mode should append recent captured events to the debug buffer."
-  (let ((details '(:backend jdbc
-                   :summary "Query failed"
-                   :diag (:category "query"
-                          :op "execute"
-                          :raw-message "ORA-00942"))))
+  "Debug mode should append and bound trace without removing problems."
+  (let ((clutch-debug-event-limit 2))
     (with-temp-buffer
       (let ((clutch-debug-mode t))
         (clutch--clear-debug-capture)
-        (setq-local clutch--buffer-error-details details)
         (clutch--remember-debug-event
          :op "execute"
          :phase "error"
@@ -143,11 +139,19 @@
          :summary "Query failed"
          :sql "SELECT * FROM missing_table")
         (let ((text (clutch-test--debug-buffer-string)))
-          (should (string-match-p "Trace Event" text))
           (should (string-match-p "Operation: execute" text))
-          (should (string-match-p "Phase: error" text))
-          (should (string-match-p "Query failed" text))
-          (should (string-match-p "SELECT \\* FROM missing_table" text)))))))
+          (should (string-match-p "SELECT \\* FROM missing_table" text)))
+        (clutch--append-debug-buffer-entry "Historical Problems" "keep-history")
+        (clutch--remember-problem-record :problem '(:summary "keep-problem"))
+        (dolist (summary '("keep-trace-one" "keep-trace-two"))
+          (clutch--remember-debug-event :op "query" :summary summary))
+        (let ((text (clutch-test--debug-buffer-string)))
+          (should-not (string-match-p "Query failed" text))
+          (dolist (expected '("keep-history" "keep-problem"
+                              "keep-trace-one" "keep-trace-two"))
+            (should (string-match-p expected text))))
+        (with-current-buffer (get-buffer clutch-debug-buffer-name)
+          (should (= (how-many "^Trace Event$" (point-min) (point-max)) 2)))))))
 
 (ert-deftest clutch-test-run-db-query-success-clears-problems-across-connection-buffers ()
   "Successful queries should clear stale failure state for the whole connection."
@@ -181,8 +185,8 @@
       (kill-buffer source)
       (kill-buffer peer))))
 
-(ert-deftest clutch-test-debug-mode-enable-preserves-problems-and-resets-events ()
-  "Enabling debug mode should replay problems, keep records, and reset events."
+(ert-deftest clutch-test-debug-mode-enable-preserves-problems-and-resets-buffer ()
+  "Enabling debug mode should replay problems into a fresh debug buffer."
   (let ((conn 'fake-conn)
         (source (generate-new-buffer " *clutch-debug-capture*")))
     (unwind-protect
@@ -209,11 +213,12 @@
              :op "execute"
              :phase "error"
              :summary "boom")
-            (should clutch--debug-events)
             (should clutch--buffer-error-details)
+            (should (string-match-p "boom" (clutch-test--debug-buffer-string)))
             (clutch-debug-mode -1)
             (clutch-debug-mode 1)
-            (should-not clutch--debug-events)
+            (should-not (string-match-p
+                         "boom" (clutch-test--debug-buffer-string)))
             (should clutch--buffer-error-details)))
       (when clutch-debug-mode
         (clutch-debug-mode -1))
@@ -242,8 +247,8 @@
                      (lambda (_conn) nil))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args) buf)))
-            (catch 'clutch--execution-aborted
-              (clutch--execute-select "SELECT * FROM missing_table" 'fake-conn))
+            (clutch-test--execute-and-present
+             "SELECT * FROM missing_table" 'fake-conn)
             (let* ((details clutch--buffer-error-details)
                    (diag (plist-get details :diag)))
               (should details)
@@ -255,6 +260,53 @@
               (should (equal (plist-get (plist-get diag :context) :sql)
                              "SELECT * FROM missing_table")))))
       (kill-buffer source))))
+
+(ert-deftest clutch-test-diagnostics-backend-label-and-elapsed-format ()
+  "Backend metadata labels connections and preserves elapsed formatting."
+  (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/demo.db"))
+        (clutch-debug-mode t)
+        (clutch-debug-buffer-name " *diagnostics-elapsed*")
+        (clutch--problem-records-by-conn (make-hash-table :test 'eq)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (clutch--remember-debug-event
+             :connection conn :op "query" :phase "done" :elapsed 0.042)
+            (clutch--remember-debug-event
+             :connection conn :op "query" :phase "done" :elapsed 1.25))
+          (let ((text (clutch-test--debug-buffer-string)))
+            (should (string-match-p "Connection: sqlite:/tmp/demo.db" text))
+            (should (string-match-p "Elapsed: 42ms" text))
+            (should (string-match-p "Elapsed: 1.250s" text))))
+      (when-let* ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
+
+(ert-deftest clutch-test-diagnostics-historical-replay-preserves-source ()
+  "Connection-scoped history preserves its recorded source buffer."
+  (let ((clutch-debug-mode nil)
+        (clutch-debug-buffer-name " *diagnostics-history*")
+        (clutch--problem-records-by-conn (make-hash-table :test 'eq))
+        (source (generate-new-buffer " *diagnostics-source*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (clutch--remember-problem-record
+             :buffer source
+             :connection 'conn
+             :problem '(:summary "historic")))
+          (let ((clutch-debug-mode t))
+            (with-temp-buffer
+              (clutch--replay-problem-records-to-debug-buffer)))
+          (should (string-match-p (regexp-quote (buffer-name source))
+                                  (clutch-test--debug-buffer-string))))
+      (kill-buffer source)
+      (when-let* ((buffer (get-buffer clutch-debug-buffer-name))) (kill-buffer buffer)))))
+
+(ert-deftest clutch-test-diagnostics-error-details-use-backend-generic ()
+  "Problem records derive :backend from the backend contract."
+  (cl-letf (((symbol-function 'clutch-db-backend-key) (lambda (_connection) 'pg)))
+    (let ((details (clutch--make-buffer-query-error-details
+                    'conn "SELECT 1" '(clutch-db-error "boom"))))
+      (should (eq (plist-get details :backend) 'pg)))))
 
 (provide 'clutch-test-debug)
 

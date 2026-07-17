@@ -21,15 +21,17 @@
 
 ;;; Commentary:
 
-;; Connection lifecycle management, transaction state tracking, backend
-;; detection, transport, and authentication for clutch.
+;; Connection lifecycle management, transaction state tracking, schema/database
+;; switching, backend detection, transport, and authentication for clutch.
 ;;
 ;; This module is required by `clutch.el' — do not require `clutch' here.
 
 ;;; Code:
 
 (require 'clutch-backend)
+(require 'clutch-diagnostics)
 (require 'clutch-schema)
+(require 'clutch-ui)
 (require 'auth-source)
 (require 'cl-lib)
 (require 'comint)
@@ -38,25 +40,131 @@
 
 (declare-function auth-source-pass-entries "auth-source-pass" ())
 (declare-function auth-source-pass-parse-entry "auth-source-pass" (entry))
+(declare-function sql-set-product "sql" (product))
 (declare-function tramp-rpc-controlmaster-options "tramp-rpc" (vec))
+(defvar sql-product)
 (defvar tramp-rpc-use-controlmaster)
 
 ;; Forward declarations — shared buffer-local variables
-(defvar clutch-connection)
+(defvar-local clutch-connection nil
+  "Current database connection for this buffer.")
 (defvar clutch--executing-p)
-(defvar clutch--conn-sql-product)
-(defvar clutch--connection-params)
+(defvar-local clutch--conn-sql-product nil
+  "SQL product for the current connection, or nil to use the default.")
+(defvar-local clutch--connection-params nil
+  "Params plist used to establish the current connection.
+Stored at connect time so the connection can be re-established
+automatically when it drops.")
 (defvar clutch--console-name)
 (defvar clutch--console-ad-hoc-params)
 (defvar clutch--describe-object-entry)
-(defvar clutch-connection-alist nil)
-(defvar clutch-connect-timeout-seconds 10)
-(defvar clutch-read-idle-timeout-seconds 30)
-(defvar clutch-query-timeout-seconds 30)
-(defvar clutch-jdbc-rpc-timeout-seconds 30)
-(defvar clutch-tramp-context-policy 'ask)
+(defcustom clutch-connection-alist nil
+  "Alist of saved database connections.
+Each entry has the form:
+  (NAME . (:host H :port P :user U [:password P] :database D
+           [:backend SYM] [:sql-product SYM]
+           [:profile-entry STR] [:pass-entry STR]
+           [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
+           [:tramp-default-directory TRAMP-DIRECTORY]
+           [:url STR] [:display-name STR] [:props ALIST]
+           [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
+           [:connect-timeout N] [:read-idle-timeout N]
+           [:query-timeout N] [:rpc-timeout N]))
+NAME is a string used for `completing-read'.
+:backend is required and names the backend symbol (\\='mysql, \\='pg,
+\\='sqlite, \\='mongodb, or a JDBC backend such as \\='oracle or
+\\='sqlserver).
+:surface selects a non-default surface for backends that expose more than one
+query language.  For MongoDB, omit it for the normal document/MongoDB Shell
+surface, or use \\='sql-interface for MongoDB SQL Interface JDBC endpoints.
+:sql-product overrides the product derived from backend metadata.
+:auth-database / :auth-source set the MongoDB authentication database for
+native MongoDB URLs and the default auth database in structured
+MongoDB SQL Interface JDBC URLs.
+:tls is a convenience shortcut for backend TLS defaults.  For MySQL,
+an explicit `:tls nil' forces plaintext and suppresses the automatic
+MySQL 8 TLS retry path; for PostgreSQL, `:tls t' maps to `:sslmode require'
+and `:tls nil' maps to `:sslmode disable'.
+:ssl-mode is currently MySQL-only; `disabled' is a compatibility spelling for
+the same explicit plaintext mode.  The older alias `off' is also accepted.
+:sslmode is PostgreSQL-only and follows the upstream naming.  Supported values
+are `disable', `prefer', `require', and `verify-full'.
+:ssh-host enables a local SSH tunnel using the named host from ~/.ssh/config.
+clutch starts `ssh -N -L ... SSH-HOST' automatically, so this currently
+requires structured `:host' / `:port' params and does not apply to `:url'
+based JDBC entries.
+:ssh-tunnel controls when that tunnel is used.  The default `always'
+preserves the explicit tunnel behavior; `direct-first' probes `:host' / `:port'
+briefly and skips the tunnel when the database endpoint is already reachable.
+:tramp-default-directory enables the same local forward from an ssh-like TRAMP
+directory such as /ssh:host:/path/ or /rpc:host:/path/.
+:profile-entry reads missing connection fields from an encrypted profile in
+pass or .authinfo/.authinfo.gpg.  For pass, use the normal first-line password
+and `key: value' fields such as `backend:', `host:', `port:', `user:',
+`database:', `ssh-host:', and `ssh-tunnel:'.  For .authinfo, the `machine'
+value is the profile id; use `db-host' for the real database host.  Profile
+fields are defaults: explicit fields in `clutch-connection-alist' override
+profile fields, including :backend, :host, :port, :user, :database, and
+transport keys.  Keeping non-sensitive hints such as :backend in this alist lets
+completion show backend icons without decrypting profiles for display.  If
+:backend is omitted here, the profile must provide it before connecting.
+
+Password resolution order:
+  1. :password — used as-is when present.
+  2. :profile-entry — uses the profile's first-line/`password' secret when no
+     explicit :password or :pass-entry is configured.
+  3. Pass store by connection name — when `auth-source-pass' is loaded,
+     clutch automatically looks up a pass entry whose name matches NAME
+     (the car of this alist entry).  The password is on the first line.
+     Use :pass-entry STR to override the entry name if it differs.
+  4. `auth-source-search' — searches ~/.authinfo / ~/.authinfo.gpg / pass
+     by :host, :user, and :port (standard auth-source matching)."
+  :type '(alist :key-type string
+                :value-type (plist :options
+                                   ((:host string)
+                                    (:port integer)
+                                    (:user string)
+                                    (:password string)
+                                    (:database string)
+                                    (:auth-database string)
+                                    (:auth-source string)
+                                    (:backend symbol)
+                                    (:sql-product symbol)
+                                    (:profile-entry string)
+                                    (:pass-entry string)
+                                    (:ssh-host string)
+                                    (:ssh-tunnel
+                                     (choice (const always)
+                                             (const direct-first)))
+                                    (:tramp-default-directory string)
+                                    (:url string)
+                                    (:display-name string)
+                                    (:props (alist :key-type string :value-type string))
+                                    (:ssl-mode (choice (const :tag "Disabled" disabled)
+                                                       (const :tag "Off (alias)" off)))
+                                    (:sslmode (choice (const :tag "Disable" disable)
+                                                      (const :tag "Prefer" prefer)
+                                                      (const :tag "Require" require)
+                                                      (const :tag "Verify Full" verify-full)))
+                                    (:connect-timeout natnum)
+                                    (:read-idle-timeout natnum)
+                                    (:query-timeout natnum)
+                                    (:rpc-timeout natnum)
+                                    (:tls boolean))))
+  :group 'clutch)
+(defcustom clutch-tramp-context-policy 'ask
+  "How connection commands use the current TRAMP buffer context.
+When nil, Clutch never infers TRAMP transport from the current buffer.
+When `ask', Clutch prompts before using the current TRAMP default directory.
+When `auto', Clutch uses the current TRAMP default directory without asking.
+This only applies when a connection has no explicit transport such as
+:ssh-host or :tramp-default-directory.  TRAMP transport currently supports
+ssh-like TRAMP directories."
+  :type '(choice (const :tag "Never infer TRAMP context" nil)
+                 (const :tag "Ask before using current TRAMP context" ask)
+                 (const :tag "Automatically use current TRAMP context" auto))
+  :group 'clutch)
 (defvar clutch--dml-result)
-(defvar clutch-debug-mode nil)
 (defvar clutch--spinner-timer nil
   "Timer driving the mode-line spinner animation, or nil.")
 (defvar clutch--spinner-index 0
@@ -77,19 +185,6 @@
 
 (defconst clutch--ssh-direct-first-connect-timeout 0.5
   "Seconds to wait for a provisional direct database connection.")
-
-;; Forward declarations — sibling module functions
-(declare-function clutch--clear-connection-problem-capture "clutch-query" (connection))
-(declare-function clutch--forget-problem-record "clutch-query" (&optional buffer connection))
-(declare-function clutch--remember-debug-event "clutch-query" (&rest event))
-(declare-function clutch--remember-problem-record "clutch-query" (&rest args))
-(declare-function clutch--update-console-buffer-name "clutch-query" ())
-(declare-function clutch--refresh-result-status-line "clutch-ui" ())
-(declare-function clutch--debug-workflow-message "clutch-query" (message))
-(declare-function clutch--render-object-describe
-                  "clutch-object" (conn entry params product))
-(declare-function clutch--build-connection-header-line "clutch-ui" ())
-(declare-function clutch--completion-backend-icon-prefix "clutch-ui" (key))
 
 ;;;; Connection identity
 
@@ -277,13 +372,20 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
            (format " via %s" transport-label)
          "")))))
 
-(defun clutch--ensure-clutch-loaded ()
-  "Load the `clutch' entrypoint before module-autoloaded commands run.
-This ensures user setup attached to feature `clutch' has executed before
-interactive readers inspect shared customization such as
-`clutch-connection-alist'."
-  (unless (featurep 'clutch)
-    (require 'clutch)))
+(defun clutch--command-context-buffer ()
+  "Return the active clutch buffer for the current command."
+  (if (and (minibufferp)
+           (window-live-p (minibuffer-selected-window)))
+      (window-buffer (minibuffer-selected-window))
+    (current-buffer)))
+
+(defun clutch--command-connection-context ()
+  "Return connection context for the current command."
+  (let ((buf (clutch--command-context-buffer)))
+    (list :buffer buf
+          :connection (buffer-local-value 'clutch-connection buf)
+          :params (buffer-local-value 'clutch--connection-params buf)
+          :product (buffer-local-value 'clutch--conn-sql-product buf))))
 
 (defun clutch--connection-clickhouse-p (conn)
   "Return non-nil when CONN is a ClickHouse connection."
@@ -325,9 +427,61 @@ interactive readers inspect shared customization such as
   "Return non-nil when CONN supports Clutch transaction controls."
   (and conn (clutch-db-manual-commit-supported-p conn)))
 
+(defun clutch--make-connection-render-state (conn params)
+  "Build semantic presentation state from CONN and reconnect PARAMS.
+The returned plist contains no connection object, params, callback, or
+pre-rendered text."
+  (let* ((connected-p (and conn (clutch--connection-alive-p conn)))
+         (connection-backend-key
+          (and conn (clutch--backend-key-from-conn conn)))
+         (backend-key (or connection-backend-key
+                          (and params
+                               (clutch--backend-key-from-params params))))
+         (backend-label
+          (or (and connected-p connection-backend-key
+                   (clutch-db-display-name conn))
+              (and params
+                   (clutch--backend-display-name-from-params params)))))
+    (list :connected-p connected-p
+          :backend-key backend-key
+          :backend-label backend-label
+          :connection-label
+          (and connected-p connection-backend-key
+               (clutch--connection-display-key conn))
+          :namespace
+          (and connected-p connection-backend-key
+               (clutch--current-namespace-name conn))
+          :schema-state
+          (and connected-p
+               (plist-get (clutch--schema-status-entry conn) :state))
+          :transaction-state
+          (and connected-p
+               (clutch--manual-commit-supported-p conn)
+               (if (clutch-db-manual-commit-p conn)
+                   (if (clutch--tx-dirty-p conn) 'dirty 'manual)
+                 'auto)))))
+
+(defun clutch--refresh-connection-render-state ()
+  "Project current buffer connection state into semantic UI input."
+  (setq-local clutch--connection-render-state
+              (clutch--make-connection-render-state
+               clutch-connection clutch--connection-params)))
+
 (defun clutch--query-buffer-p ()
   "Return non-nil when the current buffer is a clutch query console."
   (bound-and-true-p clutch--query-buffer-local-p))
+
+(defun clutch--update-console-buffer-name ()
+  "Rename the current query console to reflect its schema state."
+  (when clutch--console-name
+    (let ((entry (and clutch-connection
+                      (clutch--schema-status-entry clutch-connection))))
+      (rename-buffer
+       (clutch--render-console-buffer-name
+        clutch--console-name
+        (plist-get entry :state)
+        (plist-get entry :tables))
+       t))))
 
 (defun clutch--refresh-transaction-ui (conn)
   "Refresh transaction indicators for buffers attached to CONN."
@@ -336,10 +490,14 @@ interactive readers inspect shared customization such as
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and clutch-connection
-                     (eq clutch-connection conn)
-                     (or (clutch--query-buffer-p)
-                         (derived-mode-p 'clutch-repl-mode)))
-            (clutch--update-mode-line)))))))
+                     (eq clutch-connection conn))
+            (cond
+             ((derived-mode-p 'clutch-result-mode)
+              (clutch--refresh-connection-render-state)
+              (clutch--refresh-result-status-line t))
+             ((or (clutch--query-buffer-p)
+                  (derived-mode-p 'clutch-repl-mode))
+              (clutch--update-mode-line)))))))))
 
 (defun clutch--set-tx-dirty (conn)
   "Mark CONN as having uncommitted DML."
@@ -448,19 +606,23 @@ Also store PARAMS and PRODUCT when present."
   (when (or params product)
     (setq-local clutch--conn-sql-product
                 (or product
-                    (and params (clutch--effective-sql-product params))
-                    clutch--conn-sql-product))))
-
-(defun clutch--attached-buffer-for-connection (connection)
-  "Return one live buffer attached to CONNECTION, or nil."
-  (when connection
-    (or (and (eq clutch-connection connection)
-             (current-buffer))
-        (cl-loop for buf in (buffer-list)
-                 when (and (buffer-live-p buf)
-                           (eq (buffer-local-value 'clutch-connection buf)
-                               connection))
-                 return buf))))
+                    (and params (clutch--effective-sql-product params)))))
+  (let ((display-product
+         (or clutch--conn-sql-product
+             (and params (default-value 'sql-product)))))
+    (when (and display-product (derived-mode-p 'sql-mode))
+      ;; `sql-mode' starts with the ANSI product before a query console has a
+      ;; connection.  Synchronize it after binding so dialect font-lock and
+      ;; syntax tables follow the effective backend product.
+      (unless (and (local-variable-p 'sql-product)
+                   (eq sql-product display-product))
+        (let ((query-buffer-p (clutch--query-buffer-p))
+              (query-mode-name mode-name))
+          (setq-local sql-product display-product)
+          (sql-set-product display-product)
+          (when query-buffer-p
+            (setq mode-name query-mode-name))))))
+  (clutch--refresh-connection-render-state))
 
 (defun clutch--rebind-connection-buffers (old-conn new-conn params product)
   "Replace OLD-CONN with NEW-CONN across attached buffers using PARAMS and PRODUCT."
@@ -492,13 +654,10 @@ Also remember PARAMS and PRODUCT."
   (clutch--refresh-transaction-ui conn)
   conn)
 
-(defun clutch--clear-reconnect-metadata-caches (old-conn new-conn old-key)
-  "Clear schema-scoped metadata when replacing OLD-CONN with NEW-CONN.
-OLD-KEY is OLD-CONN's key captured before the old connection is released.
-The old and new connections often share the same logical connection key, so
-stale `refreshing' schema state must not survive a successful reconnect."
-  (when old-key
-    (clutch--clear-connection-metadata-caches old-conn old-key))
+(defun clutch--clear-reconnect-metadata-caches (old-conn new-conn)
+  "Clear schema-scoped metadata when replacing OLD-CONN with NEW-CONN."
+  (when old-conn
+    (clutch--clear-connection-metadata-caches old-conn))
   (when new-conn
     (clutch--clear-connection-metadata-caches new-conn)))
 
@@ -519,7 +678,8 @@ Connection failures propagate to the calling command."
       (clutch--clear-tx-dirty old-conn)
       (clutch--release-connection-transport old-conn)
       (clutch--require-live-connection conn)
-      (clutch--clear-reconnect-metadata-caches old-conn conn nil)
+      (clutch--clear-connection-problem-capture old-conn)
+      (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--rebind-connection-buffers old-conn conn params product)
       (clutch--finalize-rebound-connection conn)
       (message "Reconnected to %s" (clutch--connection-key conn))
@@ -529,7 +689,6 @@ Connection failures propagate to the calling command."
   "Replace OLD-CONN with a new connection built from PARAMS.
 PRODUCT is the effective SQL product for the new logical session."
   (let* ((product (or product (clutch--effective-sql-product params)))
-         (old-key (clutch--connection-key old-conn))
          (new-conn (clutch--build-conn params)))
     (clutch--clear-tx-dirty old-conn)
     (unwind-protect
@@ -538,7 +697,7 @@ PRODUCT is the effective SQL product for the new logical session."
       (clutch--release-connection-transport old-conn))
     (clutch--require-live-connection new-conn)
     (clutch--rebind-connection-buffers old-conn new-conn params product)
-    (clutch--clear-reconnect-metadata-caches old-conn new-conn old-key)
+    (clutch--clear-reconnect-metadata-caches old-conn new-conn)
     (clutch--finalize-rebound-connection new-conn)))
 
 (defun clutch--ensure-connection ()
@@ -558,24 +717,74 @@ using the stored params.  Signals a user-error if not recoverable."
 (defun clutch--refresh-schema-status-ui (conn)
   "Refresh mode-line or status line in buffers attached to CONN."
   (when conn
-    (let ((key (clutch--connection-key conn)))
-      (dolist (buf (buffer-list))
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (when (and clutch-connection
-                       (string= (clutch--connection-key clutch-connection) key))
-              (cond
-               ((derived-mode-p 'clutch-describe-mode)
-                (when clutch--describe-object-entry
-                  (clutch--render-object-describe clutch-connection
-                                                 clutch--describe-object-entry
-                                                 clutch--connection-params
-                                                 clutch--conn-sql-product)))
-               ((derived-mode-p 'clutch-result-mode)
-                (clutch--refresh-result-status-line))
-               ((clutch--query-buffer-p)
-                (clutch--update-console-buffer-name)
-                (clutch--update-mode-line))))))))))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (eq clutch-connection conn)
+            (clutch--refresh-connection-render-state)
+            (cond
+             ((derived-mode-p 'clutch-result-mode)
+              (clutch--refresh-result-status-line))
+             ((clutch--query-buffer-p)
+              (clutch--update-console-buffer-name)
+              (clutch--update-mode-line))
+             (revert-buffer-function
+              (revert-buffer t t)))))))))
+
+(add-hook 'clutch--metadata-state-changed-hook
+          #'clutch--refresh-schema-status-ui)
+
+(defun clutch--refresh-current-schema (&optional quiet force-sync)
+  "Refresh schema for the current connection and report the outcome.
+When QUIET is non-nil, do not emit a minibuffer message.
+When FORCE-SYNC is non-nil, bypass any background refresh path.
+Returns non-nil on success, nil on failure."
+  (clutch--ensure-connection)
+  (let* ((conn clutch-connection)
+         (entry (clutch--schema-status-entry conn)))
+    (if (eq (plist-get entry :state) 'refreshing)
+        (progn
+          (unless quiet
+            (message "Schema refresh already in progress"))
+          nil)
+      (if (or force-sync
+              (clutch-db-eager-schema-refresh-p conn))
+          (let* ((ok (clutch--refresh-schema-cache conn))
+                 (entry (clutch--schema-status-entry conn))
+                 (tables (plist-get entry :tables))
+                 (err (plist-get entry :error)))
+            (unless quiet
+              (message (if ok
+                           (format "Schema refreshed%s"
+                                   (if tables (format " (%d tables)" tables) ""))
+                         (format "Schema refresh failed%s"
+                                 (if err (format ": %s" err) "")))))
+            ok)
+        (let ((started (clutch--refresh-schema-cache-async conn)))
+          (if started
+              (progn
+                (unless quiet
+                  (message "Schema refresh started in background"))
+                t)
+            (let* ((ok (clutch--refresh-schema-cache conn))
+                   (entry (clutch--schema-status-entry conn))
+                   (tables (plist-get entry :tables))
+                   (err (plist-get entry :error)))
+              (unless quiet
+                (message (if ok
+                             (format "Schema refreshed%s"
+                                     (if tables (format " (%d tables)" tables) ""))
+                           (format "Schema refresh failed%s"
+                                   (if err (format ": %s" err) "")))))
+              ok)))))))
+
+;;;###autoload
+(defun clutch-refresh-schema ()
+  "Refresh the schema cache for the current connection.
+Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
+executed outside clutch that would otherwise leave stale completions."
+  (interactive)
+  (clutch--refresh-current-schema nil t))
 
 (defun clutch--current-namespace-name (conn)
   "Return the current schema/database label for CONN, or nil."
@@ -715,7 +924,7 @@ using the stored params.  Signals a user-error if not recoverable."
                  (buffer-local-value 'clutch--executing-p buf))
         (setq any-busy t)
         (with-current-buffer buf
-          (clutch--update-mode-line))))
+          (clutch--update-mode-line t))))
     (if any-busy
         (redisplay)
       (clutch--spinner-stop))))
@@ -725,26 +934,40 @@ using the stored params.  Signals a user-error if not recoverable."
   (when clutch--spinner-timer
     (aref clutch--spinner-frames clutch--spinner-index)))
 
-(defun clutch--update-mode-line ()
-  "Update buffer-local execution UI with connection status."
+(defun clutch--update-mode-line (&optional spinner-only)
+  "Update buffer-local execution UI with connection status.
+When SPINNER-ONLY is non-nil, retain semantic connection state and update only
+the high-frequency execution indicator."
+  (unless spinner-only
+    (clutch--refresh-connection-render-state))
   (let* ((base (cond
                 ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
                 ((clutch--query-buffer-p)
                  (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
          (spinner (clutch--spinner-string)))
+    (setq-local clutch--execution-spinner-frame
+                (and clutch--executing-p spinner))
     (setq mode-name
-          (if (and clutch--executing-p spinner)
-              (concat base " " (propertize spinner 'face 'success))
+          (if clutch--execution-spinner-frame
+              (concat base " "
+                      (propertize clutch--execution-spinner-frame
+                                  'face 'success))
             base)))
   (when (derived-mode-p 'clutch-result-mode)
-    (when (fboundp 'clutch--refresh-footer-timing)
-      (clutch--refresh-footer-timing)))
+    (if spinner-only
+        (clutch--refresh-footer-timing)
+      (clutch--refresh-result-status-line t)))
   (when (or (clutch--query-buffer-p)
             (derived-mode-p 'clutch-repl-mode))
-    ;; Use :eval so line-number-display-width is recomputed on each redraw,
-    ;; keeping alignment correct when display-line-numbers-mode is toggled.
-    (setq header-line-format '((:eval (clutch--build-connection-header-line)))))
+    ;; Recompute liveness and line-number indentation on every redraw.
+    (setq header-line-format
+          (list (list :eval
+                      (list
+                       #'clutch--render-connection-header-line
+                       'clutch--connection-render-state
+                       (list #'clutch--connection-alive-p
+                             'clutch-connection))))))
   (force-mode-line-update))
 
 (defun clutch--jdbc-connection-params-p (params)
@@ -2124,7 +2347,6 @@ or unmatched input starts the temporary connection flow, matching
 `clutch-query-console'.  Otherwise prompts for :backend first, then for the
 backend-specific connection parameters.
 The password is resolved via `auth-source' before falling back to `read-passwd'."
-  (clutch--ensure-clutch-loaded)
   (let* ((names (mapcar #'car clutch-connection-alist))
          (choice (if names
                      (clutch--read-saved-connection-choice "Connection: " names)
@@ -2133,9 +2355,118 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
         (clutch--saved-connection-params choice)
       (clutch--read-manual-connection-params))))
 
+(defun clutch--update-connection-params-for-buffers (conn update-fn)
+  "Apply UPDATE-FN to buffer-local connection params for buffers attached to CONN."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (eq clutch-connection conn)
+          (setq-local clutch--connection-params
+                      (funcall update-fn clutch--connection-params))
+          (clutch--update-mode-line))))))
+
+(defun clutch--list-clickhouse-databases (conn)
+  "Return sorted database names visible to ClickHouse CONN."
+  (sort
+   (delete-dups
+    (cl-loop for row in (clutch-db-result-rows
+                         (clutch-db-query conn "SHOW DATABASES"))
+             for db = (car row)
+             when (and (stringp db) (not (string-empty-p db)))
+             collect db))
+   #'string-collate-lessp))
+
+;;;###autoload (autoload 'clutch-switch-database "clutch" nil t)
+(defun clutch-switch-database ()
+  "Switch the current ClickHouse connection to another database by reconnecting."
+  (interactive)
+  (let* ((context (clutch--command-connection-context))
+         (conn (or clutch-connection
+                   (plist-get context :connection)
+                   (user-error "No active connection")))
+         (params (or (plist-get context :params)
+                     (car (clutch--connection-context conn))
+                     (user-error "No reconnect parameters for this connection")))
+         (current (or (plist-get params :database) "default"))
+         (databases (clutch--list-clickhouse-databases conn)))
+    (unless (or (clutch--connection-clickhouse-p conn)
+                (clutch--params-clickhouse-p params))
+      (user-error
+       "Runtime database switching is currently available only for ClickHouse"))
+    (unless databases
+      (user-error "No databases returned by SHOW DATABASES"))
+    (let ((database (completing-read
+                     (if current
+                         (format "Switch to database (current %s): " current)
+                       "Switch to database: ")
+                     databases nil t nil nil current)))
+      (unless (string-empty-p database)
+        (if (string-equal database current)
+            (message "Already on database %s" current)
+          (when (clutch--connection-alive-p conn)
+            (clutch--confirm-disconnect-transaction-loss
+             conn
+             "Uncommitted changes will be lost.  Switch database? "))
+          (clutch--replace-connection
+           conn
+           (plist-put (copy-sequence params) :database database)
+           (plist-get context :product))
+          (message "Current database: %s" database))))))
+
+;;;###autoload (autoload 'clutch-switch-schema "clutch" nil t)
+(defun clutch-switch-schema ()
+  "Switch the current schema or database on the active connection."
+  (interactive)
+  (let* ((context (clutch--command-connection-context))
+         (conn (or clutch-connection
+                   (plist-get context :connection)
+                   (user-error "No active connection")))
+         (params (or clutch--connection-params
+                     (plist-get context :params))))
+    (if (or (clutch--connection-clickhouse-p conn)
+            (clutch--params-clickhouse-p params))
+        (clutch-switch-database)
+      (let* ((schemas (clutch-db-list-schemas conn))
+             (current (clutch-db-current-schema conn)))
+        (unless schemas
+          (user-error
+           "Runtime schema switching is not available for this connection"))
+        (let ((schema (completing-read
+                       (if current
+                           (format "Switch to schema (current %s): " current)
+                         "Switch to schema: ")
+                       schemas nil t nil nil current)))
+          (unless (string-empty-p schema)
+            (if (and current
+                     (string= (downcase schema) (downcase current)))
+                (message "Already on schema %s" current)
+              (condition-case err
+                  (progn
+                    (clutch-db-set-current-schema conn schema)
+                    (clutch--clear-connection-problem-capture conn)
+                    (clutch--update-connection-params-for-buffers
+                     conn
+                     (lambda (connection-params)
+                       (if (eq (plist-get connection-params :backend) 'mysql)
+                           (plist-put connection-params :database schema)
+                         (plist-put connection-params :schema schema))))
+                    (clutch--clear-connection-metadata-caches conn)
+                    (clutch--refresh-current-schema t)
+                    (message "Current schema: %s" schema))
+                (clutch-db-error
+                 (let ((summary
+                        (cdr
+                         (clutch--remember-query-error
+                          (current-buffer) conn "schema-switch" nil err
+                          (list :schema schema
+                                :current-schema current)))))
+                   (user-error "%s"
+                               (clutch--debug-workflow-message
+                                summary))))))))))))
+
 ;;;; Interactive connect/disconnect
 
-;;;###autoload
+;;;###autoload (autoload 'clutch-connect "clutch" nil t)
 (defun clutch-connect ()
   "Connect to a database server interactively.
 If `clutch-connection-alist' is non-empty, offer saved connections via
@@ -2159,7 +2490,7 @@ params; see `clutch-connection-alist' for details."
       (when old-live-p
         (clutch--do-disconnect old-conn))
       (clutch--require-live-connection conn)
-      (clutch--clear-reconnect-metadata-caches old-conn conn nil)
+      (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--activate-current-buffer-connection conn effective-params product)
       (message "Connected to %s" (clutch--connection-key conn)))))
 
@@ -2205,21 +2536,51 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
                (eq (buffer-local-value 'clutch-connection buf) conn))
       (with-current-buffer buf
         (setq-local clutch-connection nil)
-        (force-mode-line-update)))))
+        (cond
+         ((derived-mode-p 'clutch-result-mode)
+          (clutch--refresh-connection-render-state)
+          (clutch--refresh-result-status-line t))
+         ((or (clutch--query-buffer-p)
+              (derived-mode-p 'clutch-repl-mode))
+          (clutch--update-mode-line))
+         (t
+          (clutch--refresh-connection-render-state)
+          (force-mode-line-update)))))))
 
 (defun clutch--clear-connection-client-state (conn)
   "Clear Clutch-owned client state for CONN."
   (clutch--mark-dml-results-connection-closed conn)
   (clutch--invalidate-derived-buffers conn)
   (clutch--clear-tx-dirty conn)
-  (when (clutch--backend-key-from-conn conn)
-    (clutch--clear-connection-metadata-caches conn)))
+  (clutch--clear-connection-metadata-caches conn))
 
 (defun clutch--cleanup-dead-connection (conn)
   "Release Clutch-owned state for already closed CONN."
   (clutch--clear-connection-client-state conn)
   (clutch--forget-problem-record nil conn)
   (clutch--release-connection-transport conn))
+
+(defun clutch--preserve-dead-connection-for-reconnect (conn)
+  "Release dead CONN state while preserving attached reconnect anchors.
+The backend has already closed CONN.  Keep buffer bindings and reconnect
+parameters so the next command can replace the logical session."
+  (clutch--mark-dml-results-connection-closed conn)
+  (clutch--clear-tx-dirty conn)
+  (clutch--clear-connection-metadata-caches conn)
+  (clutch--release-connection-transport conn)
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (eq (buffer-local-value 'clutch-connection buffer) conn))
+      (with-current-buffer buffer
+        (clutch--refresh-connection-render-state)
+        (cond
+         ((derived-mode-p 'clutch-result-mode)
+          (clutch--refresh-result-status-line t))
+         ((or (clutch--query-buffer-p)
+              (derived-mode-p 'clutch-repl-mode))
+          (clutch--update-mode-line))
+         (t
+          (force-mode-line-update)))))))
 
 (defun clutch--do-disconnect (conn)
   "Perform full disconnect sequence for CONN.
@@ -2297,9 +2658,7 @@ any open transaction according to its own semantics."
     (when (and manual-now (clutch--tx-dirty-p clutch-connection))
       (user-error "Cannot toggle: commit or roll back staged changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
-    (when manual-now
-      (clutch--clear-tx-dirty clutch-connection))
-    (clutch--update-mode-line)
+    (clutch--clear-tx-dirty clutch-connection)
     (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
 
 (provide 'clutch-connection)

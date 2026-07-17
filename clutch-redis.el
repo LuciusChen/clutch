@@ -48,7 +48,25 @@
 (declare-function redis-conn-host "redis" (conn))
 (declare-function redis-conn-port "redis" (conn))
 
-(defvar clutch--query-mode-map)
+;;;; Configuration
+
+(defcustom clutch-redis-key-discovery-limit 5000
+  "Maximum number of Redis keys collected by one discovery operation.
+Redis `SCAN' is incremental, but Clutch's object and completion contracts return
+lists.  Stop before those lists can grow without bound."
+  :type 'integer
+  :group 'clutch)
+
+(defcustom clutch-redis-browse-limit 200
+  "Maximum collection elements returned by a generated Redis browse command."
+  :type 'integer
+  :group 'clutch)
+
+(defconst clutch-redis--key-scan-count 1000
+  "COUNT hint used by Redis key discovery SCAN calls.")
+
+(defconst clutch-redis--key-discovery-max-scan-batches 8
+  "Maximum SCAN round trips performed by one Redis key discovery call.")
 
 ;;;; redis.el API boundary
 
@@ -118,12 +136,14 @@
 
 (defconst clutch-redis--command-candidates
   '("APPEND" "AUTH" "DBSIZE" "DECR" "DEL" "EXISTS" "EXPIRE" "GET" "HDEL"
-    "HEXISTS" "HGET" "HGETALL" "HKEYS" "HLEN" "HMGET" "HSET" "HVALS" "INCR"
+    "HEXISTS" "HGET" "HGETALL" "HKEYS" "HLEN" "HMGET" "HRANDFIELD" "HSCAN"
+    "HSET" "HVALS" "INCR"
     "KEYS" "LLEN" "LINDEX" "LRANGE" "LPOP" "LPUSH" "MGET" "MSET" "PING"
     "RENAME" "RPUSH" "SADD" "SCAN" "SCARD" "SELECT" "SET" "SISMEMBER"
-    "SMEMBERS" "SREM" "TTL" "TYPE" "UNLINK" "XINFO" "XLEN" "XRANGE" "ZADD"
+    "SMEMBERS" "SRANDMEMBER" "SREM" "SSCAN" "TTL" "TYPE" "UNLINK" "XINFO"
+    "XLEN" "XRANGE" "ZADD"
     "ZCARD" "ZRANGE" "ZRANGEBYSCORE" "ZREM" "ZREVRANGE" "ZREVRANGEBYSCORE"
-    "ZSCORE")
+    "ZSCAN" "ZSCORE")
   "Redis command completion candidates for `clutch-redis-mode'.")
 
 (defconst clutch-redis-font-lock-keywords
@@ -264,20 +284,30 @@
 (defun clutch-redis--scan-result (conn command value)
   "Return a SCAN-family result for COMMAND VALUE on CONN."
   (pcase-let ((`(,cursor ,items) value))
-    (if (member command '("HSCAN" "ZSCAN"))
-        (make-clutch-db-result
-         :connection conn
-         :columns (clutch-redis--columns "cursor" "name" "value")
-         :rows (cl-loop for (name item-value) on items by #'cddr
-                        collect (list (clutch-redis--value-cell cursor)
-                                      (clutch-redis--value-cell name)
-                                      (clutch-redis--value-cell item-value))))
+    (let* ((cursor-cell (clutch-redis--value-cell cursor))
+           (pair-scan-p (member command '("HSCAN" "ZSCAN")))
+           (columns (if pair-scan-p
+                        (clutch-redis--columns "cursor" "name" "value")
+                      (clutch-redis--columns "cursor" "value")))
+           (rows
+            (if pair-scan-p
+                (cl-loop for (name item-value) on items by #'cddr
+                         collect (list cursor-cell
+                                       (clutch-redis--value-cell name)
+                                       (clutch-redis--value-cell item-value)))
+              (cl-loop for item in items
+                       collect (list cursor-cell
+                                     (clutch-redis--value-cell item))))))
+      ;; Redis permits an empty scan batch before cursor zero.  Preserve that
+      ;; continuation cursor instead of rendering a misleading empty result.
+      (when (and (null rows) (not (equal cursor-cell "0")))
+        (setq rows (list (if pair-scan-p
+                             (list cursor-cell nil nil)
+                           (list cursor-cell nil)))))
       (make-clutch-db-result
        :connection conn
-       :columns (clutch-redis--columns "cursor" "value")
-       :rows (cl-loop for item in items
-                      collect (list (clutch-redis--value-cell cursor)
-                                    (clutch-redis--value-cell item)))))))
+       :columns columns
+       :rows rows))))
 
 (defun clutch-redis--argument-present-p (arguments name)
   "Return non-nil when ARGUMENTS contain Redis option NAME."
@@ -297,7 +327,9 @@
    ((and (member command '("SCAN" "HSCAN" "SSCAN" "ZSCAN"))
          (consp value))
     (clutch-redis--scan-result conn command value))
-   ((and (member command '("HGETALL"))
+   ((and (or (string= command "HGETALL")
+             (and (string= command "HRANDFIELD")
+                  (clutch-redis--argument-present-p arguments "WITHVALUES")))
          (listp value))
     (clutch-redis--pair-result conn "field" "value" value))
    ((and (clutch-redis--zrange-with-scores-p command arguments)
@@ -397,22 +429,57 @@
   (or (clutch-db-database conn) "0"))
 
 (defun clutch-redis--scan-keys (conn &optional pattern)
-  "Return keys from Redis CONN matching PATTERN."
+  "Return keys from Redis CONN matching PATTERN within discovery budgets.
+Duplicate keys permitted by Redis `SCAN' are removed while preserving their
+first-seen order."
+  (unless (and (integerp clutch-redis-key-discovery-limit)
+               (> clutch-redis-key-discovery-limit 0))
+    (user-error "Redis key discovery limit must be a positive integer"))
   (let ((client (clutch-redis-conn-client conn))
         (cursor "0")
-        keys)
-    (while
-        (progn
-          (pcase-let* ((response (if pattern
-                                     (redis-command client "SCAN" cursor "MATCH" pattern "COUNT" 1000)
-                                   (redis-command client "SCAN" cursor "COUNT" 1000)))
-                       (`(,next-cursor ,batch) response))
-            (setq cursor (clutch-redis--string-value next-cursor))
-            (setq keys
-                  (nconc keys
-                         (mapcar #'clutch-redis--string-value batch))))
-          (not (string= cursor "0"))))
-    keys))
+        (seen (make-hash-table :test 'equal))
+        keys
+        (key-count 0)
+        (scan-batches 0)
+        truncated)
+    (while (and (not truncated)
+                (< scan-batches clutch-redis--key-discovery-max-scan-batches)
+                (or (= scan-batches 0) (not (string= cursor "0"))))
+      (pcase-let* ((response
+                    (if pattern
+                        (redis-command
+                         client "SCAN" cursor "MATCH" pattern "COUNT"
+                         clutch-redis--key-scan-count)
+                      (redis-command
+                       client "SCAN" cursor "COUNT"
+                       clutch-redis--key-scan-count)))
+                   (`(,next-cursor ,batch) response))
+        (setq scan-batches (1+ scan-batches)
+              cursor (clutch-redis--string-value next-cursor))
+        (dolist (raw-key batch)
+          (let ((key (clutch-redis--string-value raw-key)))
+            (unless (gethash key seen)
+              (if (< key-count clutch-redis-key-discovery-limit)
+                  (progn
+                    (puthash key t seen)
+                    (push key keys)
+                    (setq key-count (1+ key-count)))
+                (setq truncated 'key-limit)))))
+        (when (and (not (string= cursor "0"))
+                   (>= key-count clutch-redis-key-discovery-limit))
+          (setq truncated 'key-limit))))
+    (when (and (not truncated) (not (string= cursor "0")))
+      (setq truncated 'scan-budget))
+    (pcase truncated
+      ('key-limit
+       (message
+        "Redis key discovery stopped at %d keys; type an exact key or use SCAN for more"
+        clutch-redis-key-discovery-limit))
+      ('scan-budget
+       (message
+        "Redis key discovery stopped after %d SCAN batches; type an exact key or use SCAN"
+        scan-batches)))
+    (nreverse keys)))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-redis-conn))
   "Return Redis key names for CONN."
@@ -432,15 +499,28 @@
               (clutch-redis--key-entry conn key))
             (clutch-redis--scan-keys conn))))
 
+(cl-defmethod clutch-db-browseable-object-entries ((conn clutch-redis-conn))
+  "Return one bounded Redis key snapshot for CONN."
+  (clutch-db-list-table-entries conn))
+
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-redis-conn) prefix)
   "Return Redis key entries for CONN matching PREFIX."
-  (let ((pattern (if (string-empty-p prefix)
-                     "*"
-                   (concat prefix "*"))))
-    (clutch-redis--with-redis-errors
+  (clutch-redis--with-redis-errors
+    (let ((keys
+           (clutch-redis--scan-keys
+            conn
+            (if (string-empty-p prefix) "*" (concat prefix "*")))))
       (mapcar (lambda (key)
                 (clutch-redis--key-entry conn key))
-              (clutch-redis--scan-keys conn pattern)))))
+              keys))))
+
+(cl-defmethod clutch-db-find-table-entry ((conn clutch-redis-conn) name)
+  "Return the Redis key entry exactly matching NAME on CONN."
+  (clutch-redis--with-redis-errors
+    (when (= (redis-command (clutch-redis-conn-client conn)
+                            "EXISTS" name)
+             1)
+      (clutch-redis--key-entry conn name))))
 
 (cl-defmethod clutch-db-complete-tables ((conn clutch-redis-conn) prefix)
   "Return Redis key names for CONN matching PREFIX."
@@ -456,9 +536,11 @@
   (if (or (plist-get entry :value-type)
           (not (equal (plist-get entry :type) "KEY")))
       entry
-    (plist-put (copy-sequence entry)
-               :value-type
-               (upcase (clutch-redis--key-type conn (plist-get entry :name))))))
+    (clutch-redis--with-redis-errors
+      (plist-put (copy-sequence entry)
+                 :value-type
+                 (upcase (clutch-redis--key-type conn
+                                                 (plist-get entry :name)))))))
 
 (defun clutch-redis--quoted-argument (value)
   "Return Redis query text for VALUE."
@@ -472,30 +554,39 @@
 (cl-defmethod clutch-db-object-browse-query
   ((conn clutch-redis-conn) entry)
   "Return a Redis command to browse key ENTRY on CONN."
+  (unless (and (integerp clutch-redis-browse-limit)
+               (> clutch-redis-browse-limit 0))
+    (user-error "Redis browse limit must be a positive integer"))
   (let* ((key (plist-get entry :name))
          (quoted (clutch-redis--quoted-argument key))
          (type (clutch-redis--with-redis-errors
                  (clutch-redis--key-type conn key))))
     (pcase type
       ("string" (format "GET %s" quoted))
-      ("hash" (format "HGETALL %s" quoted))
-      ("list" (format "LRANGE %s 0 -1" quoted))
-      ("set" (format "SMEMBERS %s" quoted))
-      ("zset" (format "ZRANGE %s 0 -1 WITHSCORES" quoted))
-      ("stream" (format "XRANGE %s - + COUNT 100" quoted))
+      ("hash" (format "HRANDFIELD %s %d WITHVALUES"
+                      quoted clutch-redis-browse-limit))
+      ("list" (format "LRANGE %s 0 %d"
+                      quoted (1- clutch-redis-browse-limit)))
+      ("set" (format "SRANDMEMBER %s %d"
+                     quoted clutch-redis-browse-limit))
+      ("zset" (format "ZRANGE %s 0 %d WITHSCORES"
+                      quoted (1- clutch-redis-browse-limit)))
+      ("stream" (format "XRANGE %s - + COUNT %d"
+                        quoted clutch-redis-browse-limit))
       (_ (format "TYPE %s" quoted)))))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-redis-conn) entry)
   "Return Redis metadata pairs for key ENTRY on CONN."
-  (let* ((client (clutch-redis-conn-client conn))
-         (key (plist-get entry :name))
-         (type (clutch-redis--string-value (redis-command client "TYPE" key)))
-         (ttl (redis-command client "TTL" key))
-         (exists (redis-command client "EXISTS" key)))
-    (delq nil
-          `(("Type" . ,type)
-            ("TTL" . ,(number-to-string ttl))
-            ("Exists" . ,(if (= exists 1) "yes" "no"))))))
+  (clutch-redis--with-redis-errors
+    (let* ((client (clutch-redis-conn-client conn))
+           (key (plist-get entry :name))
+           (type (clutch-redis--string-value (redis-command client "TYPE" key)))
+           (ttl (redis-command client "TTL" key))
+           (exists (redis-command client "EXISTS" key)))
+      (delq nil
+            `(("Type" . ,type)
+              ("TTL" . ,(number-to-string ttl))
+              ("Exists" . ,(if (= exists 1) "yes" "no")))))))
 
 (provide 'clutch-redis)
 ;;; clutch-redis.el ends here

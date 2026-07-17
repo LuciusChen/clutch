@@ -4,43 +4,67 @@
 
 ;;; Commentary:
 
-;; Schema refresh commands, status, and metadata cache state.
+;; Schema refresh services, status, and metadata cache state.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-diagnostics)
 (require 'subr-x)
 
-(defvar clutch--schema-cache (make-hash-table :test 'equal)
-  "Global schema cache keyed by connection key string.")
+(defcustom clutch-schema-refresh-idle-delay-seconds 0.5
+  "Idle delay before automatic schema cache refresh after connect.
+A small non-zero delay keeps the first query responsive for native backends
+whose schema refresh runs on the foreground connection.  Manual schema
+refresh commands still start immediately."
+  :type 'number
+  :group 'clutch)
 
-(defvar clutch--table-metadata-cache (make-hash-table :test 'equal)
+(defcustom clutch-schema-cache-install-batch-size 500
+  "Maximum number of schema entries to install per idle slice.
+Large schema snapshots are installed incrementally to keep Emacs responsive
+after async metadata refreshes."
+  :type 'natnum
+  :group 'clutch)
+
+(defvar clutch--schema-cache (make-hash-table :test 'eq)
+  "Global schema cache keyed by connection object identity.")
+
+(defvar clutch--table-metadata-cache (make-hash-table :test 'eq)
   "Table metadata and load status keyed by connection and table identity.")
 
-(defvar clutch--column-details-queue-cache (make-hash-table :test 'equal)
+(defvar clutch--column-details-queue-cache (make-hash-table :test 'eq)
   "Per-connection queue of tables waiting for async column-detail fetch.")
 
-(defvar clutch--column-details-active-cache (make-hash-table :test 'equal)
+(defvar clutch--column-details-active-cache (make-hash-table :test 'eq)
   "Per-connection active async column-detail fetch as (TABLE . TICKET).")
 
 (defvar clutch--metadata-ticket-counter 0
   "Monotonic counter used to reject stale async table metadata callbacks.")
 
-(defvar clutch--help-doc-cache (make-hash-table :test 'equal)
+(defvar clutch--help-doc-cache (make-hash-table :test 'eq)
   "Cache for live function docs fetched from the database server.")
 
-(defvar clutch--schema-install-timers (make-hash-table :test 'equal)
-  "Idle timers finishing large schema installs keyed by connection key string.")
+(defvar clutch--schema-install-timers (make-hash-table :test 'eq)
+  "Idle timers finishing large schema installs keyed by connection identity.")
 
-(defvar clutch--schema-status-cache (make-hash-table :test 'equal)
-  "Schema refresh status cache keyed by connection key string.")
+(defvar clutch--schema-status-cache (make-hash-table :test 'eq)
+  "Schema refresh status cache keyed by connection object identity.")
 
 (defvar clutch--schema-refresh-ticket-counter 0
   "Monotonic counter used to reject stale async schema refreshes.")
 
-(defvar clutch--schema-refresh-tickets (make-hash-table :test 'equal)
-  "Latest schema refresh ticket keyed by connection key string.")
+(defvar clutch--schema-refresh-tickets (make-hash-table :test 'eq)
+  "Latest schema refresh ticket keyed by connection object identity.")
+
+(defvar clutch--schema-cache-updated-hook nil
+  "Hook run when a connection's schema cache lifecycle changes.
+Functions receive CONN and STATE, where STATE is `invalidated' or `ready'.")
+
+(defvar clutch--metadata-state-changed-hook nil
+  "Hook run after metadata state changes for a connection.
+Functions receive the connection object as their sole argument.")
 
 (defvar clutch--table-metadata-updated-hook nil
   "Hook run after table-scoped metadata is updated.
@@ -53,34 +77,24 @@ Functions receive CONN, TABLE, and KIND.")
     clutch--help-doc-cache)
   "Metadata cache variables invalidated when schema cache changes.")
 
-(defvar clutch--object-cache)
 (defvar clutch-connection)
-(defvar clutch-debug-mode nil)
-(defvar clutch-schema-cache-install-batch-size)
-(defvar clutch-schema-refresh-idle-delay-seconds)
 (defvar clutch--oracle-i18n-warning-shown nil
   "Non-nil after showing the Oracle orai18n completion warning once.")
 (defvar clutch--completion-metadata-warning-cache (make-hash-table :test 'equal)
   "Completion metadata errors already surfaced in this session.")
 
-(declare-function clutch--connection-alive-p "clutch-connection" (conn))
-(declare-function clutch--backend-key-from-conn "clutch-connection" (conn))
-(declare-function clutch--connection-key "clutch-connection" (conn))
-(declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch--attached-buffer-for-connection "clutch-connection" (connection))
-(declare-function clutch--invalidate-object-warmup "clutch-object" (conn &optional key))
-(declare-function clutch--remember-debug-event "clutch-query" (&rest event))
-(declare-function clutch--remember-problem-record "clutch-query" (&rest args))
-(declare-function clutch--schedule-object-warmup "clutch-object" (conn))
-(declare-function clutch--refresh-schema-status-ui "clutch-connection" (conn))
-(declare-function clutch--run-db-query "clutch-connection" (conn sql))
+(defun clutch--notify-schema-cache-updated (conn state)
+  "Notify schema-cache consumers that CONN entered STATE."
+  (run-hook-with-args 'clutch--schema-cache-updated-hook conn state))
+
+(defun clutch--notify-metadata-state-changed (conn)
+  "Notify metadata consumers that state changed for CONN."
+  (run-hook-with-args 'clutch--metadata-state-changed-hook conn))
 
 (defun clutch--metadata-debug-backend (conn)
   "Return CONN's backend key for debug metadata events, or nil."
   (when clutch-debug-mode
-    (condition-case nil
-        (clutch--backend-key-from-conn conn)
-      (error nil))))
+    (clutch-db-backend-key conn)))
 
 (defun clutch--metadata-debug-event (conn op phase backend summary &optional context)
   "Record a metadata debug event.
@@ -126,27 +140,6 @@ CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
     (puthash message-text t clutch--completion-metadata-warning-cache)
     (message "Completion metadata unavailable: %s" message-text)))
 
-(defun clutch--remember-recoverable-metadata-warning (connection op err &optional context)
-  "Record a recoverable metadata warning for CONNECTION and operation OP.
-ERR is the original condition object.  Optional CONTEXT is attached to the
-debug event when `clutch-debug-mode' is enabled."
-  (when clutch-debug-mode
-    (let* ((buffer (or (clutch--attached-buffer-for-connection connection)
-                       (current-buffer)))
-           (summary (clutch--humanize-db-error (error-message-string err)))
-           (backend (and connection
-                         (condition-case nil
-                             (clutch--backend-key-from-conn connection)
-                           (error nil)))))
-      (clutch--remember-debug-event
-       :buffer buffer
-       :connection connection
-       :op op
-       :phase "warning"
-       :backend backend
-       :summary summary
-       :context context))))
-
 (defun clutch--safe-completion-call (thunk)
   "Call THUNK for completion and swallow recoverable metadata errors."
   (condition-case err
@@ -162,24 +155,21 @@ debug event when `clutch-debug-mode' is enabled."
 
 (defun clutch--table-metadata (conn key)
   "Return the metadata plist for KEY on CONN, or nil."
-  (let* ((cache-key (clutch--connection-key conn))
-         (cache (gethash cache-key clutch--table-metadata-cache)))
+  (let ((cache (gethash conn clutch--table-metadata-cache)))
     (and cache (gethash key cache))))
 
 (defun clutch--set-table-metadata (conn table property value)
   "Set PROPERTY to VALUE in TABLE metadata for CONN."
-  (let* ((connection-key (clutch--connection-key conn))
-         (cache (or (gethash connection-key clutch--table-metadata-cache)
+  (let* ((cache (or (gethash conn clutch--table-metadata-cache)
                     (let ((cache (make-hash-table :test 'equal)))
-                      (puthash connection-key cache clutch--table-metadata-cache)
+                      (puthash conn cache clutch--table-metadata-cache)
                       cache)))
          (metadata (plist-put (gethash table cache) property value)))
     (puthash table metadata cache)))
 
 (defun clutch--clear-table-metadata-property (conn table property)
   "Remove PROPERTY from TABLE metadata for CONN."
-  (when-let* ((cache (gethash (clutch--connection-key conn)
-                              clutch--table-metadata-cache))
+  (when-let* ((cache (gethash conn clutch--table-metadata-cache))
               (metadata (gethash table cache)))
     (setq metadata (cl-loop for (key value) on metadata by #'cddr
                             unless (eq key property)
@@ -190,26 +180,25 @@ debug event when `clutch-debug-mode' is enabled."
 
 (defun clutch--clear-table-metadata-caches (conn table)
   "Clear table-scoped metadata caches for TABLE on CONN."
-  (let ((key (clutch--connection-key conn)))
-    (when-let* ((schema (gethash key clutch--schema-cache)))
-      (unless (eq (gethash table schema 'missing) 'missing)
-        (puthash table nil schema)))
-    (when-let* ((cache (gethash key clutch--table-metadata-cache)))
-      (remhash table cache)
-      (let (comment-keys)
-        (maphash (lambda (cache-key _value)
-                   (when (equal (cdr-safe cache-key) table)
-                     (push cache-key comment-keys)))
-                 cache)
-        (dolist (comment-key comment-keys)
-          (remhash comment-key cache))))
-    (when-let* ((queue (gethash key clutch--column-details-queue-cache)))
-      (puthash key
-               (cl-remove table queue :test #'equal)
-               clutch--column-details-queue-cache))
-    (when-let* ((active (gethash key clutch--column-details-active-cache)))
-      (when (equal (car active) table)
-        (remhash key clutch--column-details-active-cache)))))
+  (when-let* ((schema (gethash conn clutch--schema-cache)))
+    (unless (eq (gethash table schema 'missing) 'missing)
+      (puthash table nil schema)))
+  (when-let* ((cache (gethash conn clutch--table-metadata-cache)))
+    (remhash table cache)
+    (let (comment-keys)
+      (maphash (lambda (cache-key _value)
+                 (when (equal (cdr-safe cache-key) table)
+                   (push cache-key comment-keys)))
+               cache)
+      (dolist (comment-key comment-keys)
+        (remhash comment-key cache))))
+  (when-let* ((queue (gethash conn clutch--column-details-queue-cache)))
+    (puthash conn
+             (cl-remove table queue :test #'equal)
+             clutch--column-details-queue-cache))
+  (when-let* ((active (gethash conn clutch--column-details-active-cache)))
+    (when (equal (car active) table)
+      (remhash conn clutch--column-details-active-cache))))
 
 (defun clutch--begin-metadata-ticket ()
   "Issue a new table metadata freshness ticket."
@@ -218,29 +207,18 @@ debug event when `clutch-debug-mode' is enabled."
 (defun clutch--metadata-ticket-current-p (conn ticket status)
   "Return non-nil when TICKET is current for live CONN and STATUS."
   (and conn
-       (clutch--connection-alive-p conn)
+       (clutch-db-live-p conn)
        (eql (plist-get status :ticket) ticket)))
 
-(defun clutch--clear-schema-dependent-caches (key)
-  "Clear metadata caches derived from schema cache KEY."
+(defun clutch--clear-schema-dependent-caches (conn)
+  "Clear metadata caches derived from the schema cache for CONN."
   (dolist (cache-symbol clutch--schema-dependent-cache-symbols)
-    (remhash key (symbol-value cache-symbol))))
+    (remhash conn (symbol-value cache-symbol))))
 
 (defun clutch--schema-status-entry (conn)
   "Return schema status plist for CONN, or nil."
   (and conn
-       (gethash (clutch--connection-key conn) clutch--schema-status-cache)))
-
-(defun clutch--schema-status-header-line-segment (conn)
-  "Return a header-line segment for CONN schema status, or nil.
-Returns nil when the schema is ready (no noise for the happy path)."
-  (when-let* ((entry (clutch--schema-status-entry conn))
-              (state (plist-get entry :state)))
-    (pcase state
-      ('refreshing (propertize "schema…" 'face 'shadow))
-      ('stale      (propertize "schema~" 'face 'warning))
-      ('failed     (propertize "schema!" 'face 'error))
-      (_ nil))))
+       (gethash conn clutch--schema-status-cache)))
 
 (defun clutch--schema-cache-guidance (conn)
   "Return a recovery hint for CONN schema cache state, or nil."
@@ -280,47 +258,44 @@ Returns nil when the schema is ready (no noise for the happy path)."
 TABLE-COUNT is the number of known tables when STATE is \\='ready.
 ERROR-MESSAGE is stored when STATE is \\='failed."
   (when conn
-    (puthash (clutch--connection-key conn)
+    (puthash conn
              (list :state state
                    :tables table-count
                    :error error-message)
              clutch--schema-status-cache)
-    (clutch--refresh-schema-status-ui conn)))
+    (clutch--notify-metadata-state-changed conn)))
 
 (defun clutch--begin-schema-refresh-ticket (conn)
   "Issue and record a new schema refresh ticket for CONN."
   (let ((ticket (cl-incf clutch--schema-refresh-ticket-counter)))
-    (puthash (clutch--connection-key conn) ticket clutch--schema-refresh-tickets)
+    (puthash conn ticket clutch--schema-refresh-tickets)
     ticket))
 
 (defun clutch--schema-refresh-ticket-latest-p (conn ticket)
   "Return non-nil when TICKET is the latest refresh ticket for CONN."
   (and conn
-       (eql (gethash (clutch--connection-key conn) clutch--schema-refresh-tickets)
+       (eql (gethash conn clutch--schema-refresh-tickets)
             ticket)))
 
 (defun clutch--schema-refresh-ticket-current-p (conn ticket)
   "Return non-nil when TICKET is current on a live CONN."
-  (and (clutch--connection-alive-p conn)
+  (and (clutch-db-live-p conn)
        (clutch--schema-refresh-ticket-latest-p conn ticket)))
 
-(defun clutch--columns-status (conn table)
-  "Return column-name load status plist for TABLE on CONN, or nil."
-  (plist-get (clutch--table-metadata conn table) :columns-status))
+(defun clutch--metadata-status (conn key status-property)
+  "Return STATUS-PROPERTY from metadata KEY on CONN."
+  (plist-get (clutch--table-metadata conn key) status-property))
 
-(defun clutch--set-columns-status (conn table state &optional error-message ticket)
-  "Record synchronous column-name load STATE for TABLE on CONN."
+(defun clutch--set-metadata-status (conn key status-property state
+                                         &optional error-message ticket)
+  "Record STATE under STATUS-PROPERTY for metadata KEY on CONN."
   (clutch--set-table-metadata
-   conn table :columns-status
+   conn key status-property
    (list :state state :error error-message :ticket ticket)))
 
-(defun clutch--clear-columns-status (conn table)
-  "Clear any recorded column-name load status for TABLE on CONN."
-  (clutch--clear-table-metadata-property conn table :columns-status))
-
-(defun clutch--column-details-status (conn table)
-  "Return async column-detail status plist for TABLE on CONN, or nil."
-  (plist-get (clutch--table-metadata conn table) :column-details-status))
+(defun clutch--clear-metadata-status (conn key status-property)
+  "Clear STATUS-PROPERTY from metadata KEY on CONN."
+  (clutch--clear-table-metadata-property conn key status-property))
 
 (defun clutch--cached-column-details (conn table)
   "Return cached column details for TABLE on CONN, or nil if not loaded."
@@ -328,15 +303,13 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
     (when (plist-member metadata :column-details)
       (plist-get metadata :column-details))))
 
+(defun clutch--column-details-cached-p (conn table)
+  "Return non-nil when TABLE has cached column details on CONN."
+  (plist-member (clutch--table-metadata conn table) :column-details))
+
 (defun clutch--table-comment-key (conn table &optional schema)
   "Return the schema-qualified cache key for TABLE on CONN."
   (cons (or schema (clutch-db-current-schema conn)) table))
-
-(defun clutch--table-comment-status (conn table &optional schema)
-  "Return async comment status for TABLE in SCHEMA on CONN, or nil."
-  (plist-get
-   (clutch--table-metadata conn (clutch--table-comment-key conn table schema))
-   :comment-status))
 
 (defun clutch--cached-table-comment (conn table &optional schema)
   "Return TABLE's cached comment in SCHEMA on CONN, or nil."
@@ -351,10 +324,6 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
   (plist-member
    (clutch--table-metadata conn (clutch--table-comment-key conn table schema))
    :comment))
-
-(defun clutch--foreign-keys-status (conn table)
-  "Return async foreign-key status plist for TABLE on CONN, or nil."
-  (plist-get (clutch--table-metadata conn table) :foreign-keys-status))
 
 (defun clutch--cached-foreign-keys (conn table)
   "Return cached foreign-key metadata for TABLE on CONN, or nil."
@@ -371,29 +340,6 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
              for idx = (cl-position col-name col-names :test #'string=)
              when idx collect (cons idx ref-info))))
 
-(defun clutch--set-foreign-keys-status (conn table state
-                                             &optional error-message ticket)
-  "Record async foreign-key STATE for TABLE on CONN."
-  (clutch--set-table-metadata
-   conn table :foreign-keys-status
-   (list :state state :error error-message :ticket ticket)))
-
-(defun clutch--clear-foreign-keys-status (conn table)
-  "Clear any recorded foreign-key status for TABLE on CONN."
-  (clutch--clear-table-metadata-property conn table :foreign-keys-status))
-
-(defun clutch--set-table-comment-status (conn table state
-                                              &optional error-message ticket schema)
-  "Record async comment STATE for TABLE in SCHEMA on CONN."
-  (clutch--set-table-metadata
-   conn (clutch--table-comment-key conn table schema) :comment-status
-   (list :state state :error error-message :ticket ticket)))
-
-(defun clutch--clear-table-comment-status (conn table &optional schema)
-  "Clear recorded comment status for TABLE in SCHEMA on CONN."
-  (clutch--clear-table-metadata-property
-   conn (clutch--table-comment-key conn table schema) :comment-status))
-
 (defun clutch--cache-table-entry-comments (conn entries)
   "Prime CONN's table-comment cache from ENTRIES with explicit comments."
   (when conn
@@ -408,67 +354,65 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
              (if (and (stringp comment) (string-empty-p comment))
                  nil
                comment)))
-          (clutch--clear-table-comment-status
-           conn name (plist-get entry :schema)))))))
-
-(defun clutch--set-column-details-status (conn table state
-                                               &optional error-message ticket)
-  "Record async column-detail STATE for TABLE on CONN."
-  (clutch--set-table-metadata
-   conn table :column-details-status
-   (list :state state :error error-message :ticket ticket)))
-
-(defun clutch--clear-column-details-status (conn table)
-  "Clear any recorded column-detail status for TABLE on CONN."
-  (clutch--clear-table-metadata-property conn table :column-details-status))
+          (clutch--clear-metadata-status
+           conn (clutch--table-comment-key
+                 conn name (plist-get entry :schema))
+           :comment-status))))))
 
 (defun clutch--column-details-queue (conn)
   "Return the async column-details queue for CONN."
-  (gethash (clutch--connection-key conn) clutch--column-details-queue-cache))
+  (gethash conn clutch--column-details-queue-cache))
 
 (defun clutch--set-column-details-queue (conn queue)
   "Store async column-details QUEUE for CONN."
-  (puthash (clutch--connection-key conn) queue clutch--column-details-queue-cache))
+  (puthash conn queue clutch--column-details-queue-cache))
 
 (defun clutch--column-details-active (conn)
   "Return the active async column-details fetch for CONN, or nil."
-  (gethash (clutch--connection-key conn) clutch--column-details-active-cache))
+  (gethash conn clutch--column-details-active-cache))
 
 (defun clutch--set-column-details-active (conn table ticket)
   "Record TABLE/TICKET as the active async column-details fetch for CONN."
-  (puthash (clutch--connection-key conn) (cons table ticket)
+  (puthash conn (cons table ticket)
            clutch--column-details-active-cache))
 
 (defun clutch--clear-column-details-active (conn)
   "Clear the active async column-details fetch for CONN."
-  (remhash (clutch--connection-key conn) clutch--column-details-active-cache))
+  (remhash conn clutch--column-details-active-cache))
 
-(defun clutch--cancel-schema-install (conn &optional key)
-  "Cancel any pending schema-install timer for CONN or explicit KEY."
-  (let ((key (or key (clutch--connection-key conn))))
-    (when-let* ((timer (gethash key clutch--schema-install-timers)))
-      (cancel-timer timer)
-      (remhash key clutch--schema-install-timers))))
+(defun clutch--finish-stale-column-details-callback (conn table ticket)
+  "Release stale TABLE/TICKET work on CONN and resume its details queue."
+  (let ((active (clutch--column-details-active conn)))
+    (when (or (null active)
+              (and (equal (car active) table)
+                   (eql (cdr active) ticket)))
+      (when active
+        (clutch--clear-column-details-active conn))
+      (clutch--drain-column-details-async conn))))
 
-(defun clutch--finish-install-schema-cache (conn key schema)
-  "Publish installed SCHEMA cache for CONN under KEY."
-  (puthash key schema clutch--schema-cache)
-  (clutch--clear-schema-dependent-caches key)
-  (clutch--invalidate-object-warmup conn)
-  (remhash key clutch--object-cache)
+(defun clutch--cancel-schema-install (conn)
+  "Cancel any pending schema-install timer for CONN."
+  (when-let* ((timer (gethash conn clutch--schema-install-timers)))
+    (cancel-timer timer)
+    (remhash conn clutch--schema-install-timers)))
+
+(defun clutch--finish-install-schema-cache (conn schema)
+  "Publish installed SCHEMA cache for CONN."
+  (puthash conn schema clutch--schema-cache)
+  (clutch--clear-schema-dependent-caches conn)
   (clutch--set-schema-status conn 'ready (hash-table-count schema))
-  (clutch--schedule-object-warmup conn)
+  (clutch--notify-schema-cache-updated conn 'ready)
   t)
 
-(defun clutch--install-schema-cache-batched (conn table-names key ticket)
+(defun clutch--install-schema-cache-batched (conn table-names ticket)
   "Install TABLE-NAMES for CONN incrementally using idle timers."
   (let ((schema (make-hash-table :test 'equal))
         (remaining table-names)
         (batch-size (max 1 clutch-schema-cache-install-batch-size)))
     (cl-labels ((step ()
-                  (remhash key clutch--schema-install-timers)
+                  (remhash conn clutch--schema-install-timers)
                   (when (and conn
-                             (clutch--connection-alive-p conn)
+                             (clutch-db-live-p conn)
                              (or (null ticket)
                                  (clutch--schema-refresh-ticket-current-p conn ticket)))
                     (let ((count 0))
@@ -477,11 +421,11 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
                         (setq remaining (cdr remaining))
                         (cl-incf count))
                       (if remaining
-                          (puthash key
+                          (puthash conn
                                    (run-with-idle-timer 0 nil #'step)
                                    clutch--schema-install-timers)
-                        (clutch--finish-install-schema-cache conn key schema))))))
-      (puthash key
+                        (clutch--finish-install-schema-cache conn schema))))))
+      (puthash conn
                (run-with-idle-timer 0 nil #'step)
                clutch--schema-install-timers))
     t))
@@ -490,40 +434,35 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
   "Install TABLE-NAMES as the schema cache for CONN.
 When TICKET is non-nil, ignore the update unless it is still current."
   (when (and conn
-             (clutch--connection-alive-p conn)
+             (clutch-db-live-p conn)
              (or (null ticket)
                  (clutch--schema-refresh-ticket-current-p conn ticket)))
-    (let* ((key (clutch--connection-key conn))
-           (small-p (<= (length table-names) clutch-schema-cache-install-batch-size))
+    (let* ((small-p (<= (length table-names) clutch-schema-cache-install-batch-size))
            (schema (and small-p (make-hash-table :test 'equal))))
       (clutch--cancel-schema-install conn)
-      (clutch--invalidate-object-warmup conn)
-      (remhash key clutch--object-cache)
+      (clutch--notify-schema-cache-updated conn 'invalidated)
       (if small-p
           (progn
             (dolist (tbl table-names)
               (puthash tbl nil schema))
-            (clutch--finish-install-schema-cache conn key schema))
-        (clutch--install-schema-cache-batched conn table-names key ticket)))))
+            (clutch--finish-install-schema-cache conn schema))
+        (clutch--install-schema-cache-batched conn table-names ticket)))))
 
-(defun clutch--clear-connection-metadata-caches (conn &optional key)
-  "Clear schema-scoped metadata caches for CONN.
-When KEY is non-nil, clear that cache namespace instead of CONN's current key."
-  (let ((key (or key (clutch--connection-key conn))))
-    (remhash key clutch--schema-cache)
-    (clutch--clear-schema-dependent-caches key)
-    (clutch--cancel-schema-install conn key)
-    (clutch--invalidate-object-warmup conn key)
-    (remhash key clutch--object-cache)
-    (remhash key clutch--schema-status-cache)
-    (remhash key clutch--schema-refresh-tickets)))
+(defun clutch--clear-connection-metadata-caches (conn)
+  "Clear schema-scoped metadata caches for CONN."
+  (remhash conn clutch--schema-cache)
+  (clutch--clear-schema-dependent-caches conn)
+  (clutch--cancel-schema-install conn)
+  (remhash conn clutch--schema-status-cache)
+  (remhash conn clutch--schema-refresh-tickets)
+  (clutch--notify-schema-cache-updated conn 'invalidated))
 
 (defun clutch--remember-schema-refresh-error (conn message backend)
   "Record schema refresh MESSAGE for CONN and BACKEND."
   (clutch--set-schema-status conn 'failed nil message)
   (clutch--remember-problem-record
    :connection conn
-   :problem (list :backend (clutch--backend-key-from-conn conn)
+   :problem (list :backend (clutch-db-backend-key conn)
                   :summary (clutch--humanize-db-error message)
                   :diag (list :category "metadata"
                               :op "schema-refresh"
@@ -577,7 +516,7 @@ Only loads table names (fast).  Column info is loaded lazily."
              conn "schema-refresh" "success"
              (clutch--metadata-debug-backend conn)
              (format "Loaded %d tables" (length table-names)))))
-      (error
+      (clutch-db-error
        (clutch--remember-schema-refresh-error
         conn (error-message-string err) (clutch--metadata-debug-backend conn))
        nil))))
@@ -590,120 +529,96 @@ Only loads table names (fast).  Column info is loaded lazily."
              conn clutch-schema-refresh-idle-delay-seconds)
       (clutch--refresh-schema-cache conn))))
 
-(defun clutch--refresh-current-schema (&optional quiet force-sync)
-  "Refresh schema for the current connection and report the outcome.
-When QUIET is non-nil, do not emit a minibuffer message.
-When FORCE-SYNC is non-nil, bypass any background refresh path.
-Returns non-nil on success, nil on failure."
-  (clutch--ensure-connection)
-  (let* ((conn clutch-connection)
-         (entry (clutch--schema-status-entry conn)))
-    (if (eq (plist-get entry :state) 'refreshing)
-        (progn
-          (unless quiet
-            (message "Schema refresh already in progress"))
-          nil)
-      (if (or force-sync
-              (clutch-db-eager-schema-refresh-p conn))
-          (let* ((ok (clutch--refresh-schema-cache conn))
-                 (entry (clutch--schema-status-entry conn))
-                 (tables (plist-get entry :tables))
-                 (err (plist-get entry :error)))
-            (unless quiet
-              (message (if ok
-                           (format "Schema refreshed%s"
-                                   (if tables (format " (%d tables)" tables) ""))
-                         (format "Schema refresh failed%s"
-                                 (if err (format ": %s" err) "")))))
-            ok)
-        (let ((started (clutch--refresh-schema-cache-async conn)))
-          (if started
-              (progn
-                (unless quiet
-                  (message "Schema refresh started in background"))
-                t)
-            (let* ((ok (clutch--refresh-schema-cache conn))
-                   (entry (clutch--schema-status-entry conn))
-                   (tables (plist-get entry :tables))
-                   (err (plist-get entry :error)))
-              (unless quiet
-                (message (if ok
-                             (format "Schema refreshed%s"
-                                     (if tables (format " (%d tables)" tables) ""))
-                           (format "Schema refresh failed%s"
-                                   (if err (format ": %s" err) "")))))
-              ok)))))))
-
-;;;###autoload
-(defun clutch-refresh-schema ()
-  "Refresh the schema cache for the current connection.
-Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
-executed outside clutch that would otherwise leave stale completions."
-  (interactive)
-  (clutch--refresh-current-schema nil t))
-
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA for CONN.
 Fetches from the backend if not yet cached.  Returns column list."
   (let ((cols (gethash table schema 'missing))
-        (status (clutch--columns-status conn table)))
+        (status (clutch--metadata-status conn table :columns-status)))
     (unless (eq cols 'missing)
       (or cols
           (unless (eq (plist-get status :state) 'failed)
             (condition-case err
                 (let ((col-names (clutch-db-list-columns conn table)))
                   (puthash table col-names schema)
-                  (clutch--clear-columns-status conn table)
+                  (clutch--clear-metadata-status conn table :columns-status)
                   col-names)
               (clutch-db-error
-               (clutch--set-columns-status conn table 'failed
-                                           (error-message-string err))
+               (clutch--set-metadata-status
+                conn table :columns-status 'failed (error-message-string err))
                nil)))))))
+
+(defun clutch--metadata-callback-current-p
+    (conn ticket status table op backend outcome)
+  "Return non-nil when a metadata callback is current.
+Record a stale OUTCOME for TABLE and OP on CONN otherwise.  TICKET and STATUS
+identify the request; BACKEND labels its diagnostic event."
+  (if (clutch--metadata-ticket-current-p conn ticket status)
+      t
+    (clutch--metadata-debug-stale-table-event
+     conn op backend table outcome)
+    nil))
+
+(defun clutch--start-table-metadata-request
+    (conn key table status-property op fetch install &optional report-error)
+  "Start one independent async metadata request for TABLE on CONN.
+KEY and STATUS-PROPERTY locate its state.  OP labels diagnostics.  FETCH is
+called with CONN, TABLE, a success callback, and an error callback.  INSTALL
+stores the successful value.  REPORT-ERROR, when non-nil, handles an error
+message after its failed state is recorded."
+  (let ((ticket (clutch--begin-metadata-ticket))
+        (backend (clutch--metadata-debug-backend conn)))
+    (clutch--set-metadata-status
+     conn key status-property 'loading nil ticket)
+    (let ((started
+           (funcall
+            fetch conn table
+            (lambda (value)
+              (when (clutch--metadata-callback-current-p
+                     conn ticket
+                     (clutch--metadata-status conn key status-property)
+                     table op backend "result")
+                (clutch--metadata-debug-table-event
+                 conn op "success" backend table
+                 (format "Loaded %s for %s" op table))
+                (funcall install value)
+                (clutch--clear-metadata-status conn key status-property)
+                (clutch--notify-metadata-state-changed conn)))
+            (lambda (message)
+              (when (clutch--metadata-callback-current-p
+                     conn ticket
+                     (clutch--metadata-status conn key status-property)
+                     table op backend "error")
+                (clutch--set-metadata-status
+                 conn key status-property 'failed message ticket)
+                (clutch--metadata-debug-table-event
+                 conn op "error" backend table message)
+                (when report-error
+                  (funcall report-error message))
+                (clutch--notify-metadata-state-changed conn))))))
+      (when started
+        (clutch--metadata-debug-table-event
+         conn op "submit" backend table
+         (format "Queued background %s for %s" op table)))
+      started)))
 
 (defun clutch--ensure-columns-async (conn schema table)
   "Queue an async column-name fetch for TABLE in SCHEMA on CONN when needed."
-  (let ((state (plist-get (clutch--columns-status conn table) :state))
-        (ticket (clutch--begin-metadata-ticket))
-        (backend (clutch--metadata-debug-backend conn)))
+  (let ((state (plist-get
+                (clutch--metadata-status conn table :columns-status)
+                :state)))
     (unless (or (clutch--cached-columns schema table)
                 (memq state '(queued loading)))
-      (clutch--set-columns-status conn table 'loading nil ticket)
       (let ((started
-             (clutch-db-list-columns-async
-              conn table
+             (clutch--start-table-metadata-request
+              conn table table :columns-status "list-columns"
+              #'clutch-db-list-columns-async
               (lambda (columns)
-                (if (clutch--metadata-ticket-current-p
-                     conn ticket (clutch--columns-status conn table))
-                    (progn
-                      (clutch--metadata-debug-table-event
-                       conn "list-columns" "success" backend table
-                       (format "Loaded %d column names for %s"
-                               (length columns) table))
-                      (when-let* ((live-schema
-                                   (gethash (clutch--connection-key conn)
-                                            clutch--schema-cache)))
-                        (puthash table columns live-schema))
-                      (clutch--clear-columns-status conn table)
-                      (clutch--refresh-schema-status-ui conn))
-                  (clutch--metadata-debug-stale-table-event
-                   conn "list-columns" backend table "column-name result")))
-              (lambda (message)
-                (if (clutch--metadata-ticket-current-p
-                     conn ticket (clutch--columns-status conn table))
-                    (progn
-                      (clutch--set-columns-status conn table 'failed message ticket)
-                      (clutch--metadata-debug-table-event
-                       conn "list-columns" "error" backend table message)
-                      (clutch--refresh-schema-status-ui conn))
-                  (clutch--metadata-debug-stale-table-event
-                   conn "list-columns" backend table "column-name error"))))))
-        (when started
-          (clutch--metadata-debug-table-event
-           conn "list-columns" "submit" backend table
-           (format "Queued background column-name preheat for %s" table)))
+                (when-let* ((live-schema
+                             (gethash conn clutch--schema-cache)))
+                  (puthash table columns live-schema))))))
         (unless started
           (clutch--ensure-columns conn schema table)
-          (clutch--refresh-schema-status-ui conn)))
+          (clutch--notify-metadata-state-changed conn)))
       t)))
 
 (defun clutch--ensure-column-details (conn table &optional strict)
@@ -714,7 +629,8 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
          (cached (if (plist-member metadata :column-details)
                      (plist-get metadata :column-details)
                    'missing))
-         (status (clutch--column-details-status conn table)))
+         (status (clutch--metadata-status
+                  conn table :column-details-status)))
     (if (not (eq cached 'missing))
         cached
       (if (eq (plist-get status :state) 'failed)
@@ -730,13 +646,15 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
         (condition-case err
             (let ((details (clutch-db-column-details conn table)))
               (clutch--set-table-metadata conn table :column-details details)
-              (clutch--clear-column-details-status conn table)
+              (clutch--clear-metadata-status
+               conn table :column-details-status)
               details)
           (clutch-db-error
            (let* ((message (error-message-string err))
                   (details (or (nth 2 err)
                                (clutch-db-error-details conn))))
-             (clutch--set-column-details-status conn table 'failed message)
+             (clutch--set-metadata-status
+              conn table :column-details-status 'failed message)
              (when strict
                (signal 'clutch-db-error
                        (if details
@@ -747,20 +665,28 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
 (defun clutch--drain-column-details-async (conn)
   "Start the next queued async column-details fetch for CONN."
   (unless (or (clutch--column-details-active conn)
-              (not (clutch--connection-alive-p conn)))
+              (not (clutch-db-live-p conn)))
     (let ((backend (clutch--metadata-debug-backend conn)))
       (when-let* ((queue (clutch--column-details-queue conn))
                   (table (car queue))
-                  (ticket (plist-get (clutch--column-details-status conn table) :ticket)))
+                  (ticket
+                   (plist-get
+                    (clutch--metadata-status
+                     conn table :column-details-status)
+                    :ticket)))
         (clutch--set-column-details-queue conn (cdr queue))
         (clutch--set-column-details-active conn table ticket)
-        (clutch--set-column-details-status conn table 'loading nil ticket)
+        (clutch--set-metadata-status
+         conn table :column-details-status 'loading nil ticket)
         (let ((started
                (clutch-db-column-details-async
                 conn table
                 (lambda (details)
-                  (if (clutch--metadata-ticket-current-p
-                       conn ticket (clutch--column-details-status conn table))
+                  (if (clutch--metadata-callback-current-p
+                       conn ticket
+                       (clutch--metadata-status
+                        conn table :column-details-status)
+                       table "column-details" backend "column-detail result")
                       (progn
                         (clutch--metadata-debug-table-event
                          conn "column-details" "success" backend table
@@ -768,28 +694,33 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
                                  (length details) table))
                         (clutch--set-table-metadata
                          conn table :column-details details)
-                        (clutch--clear-column-details-status conn table)
+                        (clutch--clear-metadata-status
+                         conn table :column-details-status)
                         (clutch--clear-column-details-active conn)
                         (run-hook-with-args
                          'clutch--table-metadata-updated-hook
                          conn table 'column-details)
-                        (clutch--refresh-schema-status-ui conn)
+                        (clutch--notify-metadata-state-changed conn)
                         (clutch--drain-column-details-async conn))
-                    (clutch--metadata-debug-stale-table-event
-                     conn "column-details" backend table "column-detail result")))
+                    (clutch--finish-stale-column-details-callback
+                     conn table ticket)))
                 (lambda (message)
-                  (if (clutch--metadata-ticket-current-p
-                       conn ticket (clutch--column-details-status conn table))
+                  (if (clutch--metadata-callback-current-p
+                       conn ticket
+                       (clutch--metadata-status
+                        conn table :column-details-status)
+                       table "column-details" backend "column-detail error")
                       (progn
-                        (clutch--set-column-details-status conn table 'failed
-                                                           message ticket)
+                        (clutch--set-metadata-status
+                         conn table :column-details-status
+                         'failed message ticket)
                         (clutch--metadata-debug-table-event
                          conn "column-details" "error" backend table message)
                         (clutch--clear-column-details-active conn)
-                        (clutch--refresh-schema-status-ui conn)
+                        (clutch--notify-metadata-state-changed conn)
                         (clutch--drain-column-details-async conn))
-                    (clutch--metadata-debug-stale-table-event
-                     conn "column-details" backend table "column-detail error"))))))
+                    (clutch--finish-stale-column-details-callback
+                     conn table ticket))))))
           (when started
             (clutch--metadata-debug-table-event
              conn "column-details" "submit" backend table
@@ -797,20 +728,24 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
           (unless started
             (clutch--ensure-column-details conn table)
             (clutch--clear-column-details-active conn)
-            (when (clutch--cached-column-details conn table)
+            (when (clutch--column-details-cached-p conn table)
               (run-hook-with-args
                'clutch--table-metadata-updated-hook
                conn table 'column-details))
-            (clutch--refresh-schema-status-ui conn)
+            (clutch--notify-metadata-state-changed conn)
             (clutch--drain-column-details-async conn)))))))
 
 (defun clutch--ensure-column-details-async (conn table)
   "Queue an async column-detail fetch for TABLE on CONN when needed."
-  (let ((state (plist-get (clutch--column-details-status conn table) :state))
+  (let ((state (plist-get
+                (clutch--metadata-status
+                 conn table :column-details-status)
+                :state))
         (ticket (clutch--begin-metadata-ticket)))
-    (unless (or (clutch--cached-column-details conn table)
+    (unless (or (clutch--column-details-cached-p conn table)
                 (memq state '(queued loading)))
-      (clutch--set-column-details-status conn table 'queued nil ticket)
+      (clutch--set-metadata-status
+       conn table :column-details-status 'queued nil ticket)
       (clutch--set-column-details-queue
        conn
        (append (clutch--column-details-queue conn) (list table)))
@@ -837,108 +772,60 @@ Returns a string or nil."
   "Queue an async table-comment fetch for TABLE on CONN when needed."
   (let* ((schema (clutch-db-current-schema conn))
          (key (clutch--table-comment-key conn table schema))
-         (state (plist-get (clutch--table-comment-status conn table schema) :state))
-         (ticket (clutch--begin-metadata-ticket))
-         (backend (clutch--metadata-debug-backend conn)))
+         (state (plist-get
+                 (clutch--metadata-status conn key :comment-status)
+                 :state)))
     (unless (or (not table)
                 (clutch--table-comment-cached-p conn table schema)
                 (memq state '(queued loading failed)))
-      (clutch--set-table-comment-status conn table 'loading nil ticket schema)
       (let ((started
-             (clutch-db-table-comment-async
-              conn table
+             (clutch--start-table-metadata-request
+              conn key table :comment-status "table-comment"
+              #'clutch-db-table-comment-async
               (lambda (comment)
-                (if (clutch--metadata-ticket-current-p
-                     conn ticket
-                     (clutch--table-comment-status conn table schema))
-                    (progn
-                      (clutch--metadata-debug-table-event
-                       conn "table-comment" "success" backend table
-                       (format "Loaded table comment for %s" table))
-                      (clutch--set-table-metadata conn key :comment comment)
-                      (clutch--clear-table-comment-status conn table schema)
-                      (clutch--refresh-schema-status-ui conn))
-                  (clutch--metadata-debug-stale-table-event
-                   conn "table-comment" backend table "table-comment result")))
-              (lambda (message)
-                (if (clutch--metadata-ticket-current-p
-                     conn ticket
-                     (clutch--table-comment-status conn table schema))
-                    (progn
-                      (clutch--set-table-comment-status
-                       conn table 'failed message ticket schema)
-                      (clutch--metadata-debug-table-event
-                       conn "table-comment" "error" backend table message)
-                      (clutch--refresh-schema-status-ui conn))
-                  (clutch--metadata-debug-stale-table-event
-                   conn "table-comment" backend table "table-comment error"))))))
-        (when started
-          (clutch--metadata-debug-table-event
-           conn "table-comment" "submit" backend table
-           (format "Queued background table-comment preheat for %s" table)))
+                (clutch--set-table-metadata conn key :comment comment)))))
         (unless started
           (condition-case err
               (progn
                 (clutch--set-table-metadata
                  conn key :comment
                  (clutch-db-table-comment conn table schema))
-                (clutch--clear-table-comment-status conn table schema))
+                (clutch--clear-metadata-status conn key :comment-status))
             (clutch-db-error
-             (clutch--set-table-comment-status
-              conn table 'failed (error-message-string err) ticket schema)))
-          (clutch--refresh-schema-status-ui conn)))
+             (clutch--set-metadata-status
+              conn key :comment-status 'failed (error-message-string err)
+              (plist-get (clutch--metadata-status conn key :comment-status)
+                         :ticket))))
+          (clutch--notify-metadata-state-changed conn)))
       t)))
 
 (defun clutch--ensure-foreign-keys-async (conn table)
   "Queue an async foreign-key fetch for TABLE on CONN when needed."
-  (let ((state (plist-get (clutch--foreign-keys-status conn table) :state))
-        (ticket (clutch--begin-metadata-ticket))
-        (backend (clutch--metadata-debug-backend conn)))
+  (let ((state (plist-get
+                (clutch--metadata-status conn table :foreign-keys-status)
+                :state)))
     (unless (or (not table)
                 (clutch--foreign-keys-cached-p conn table)
                 (memq state '(queued loading failed)))
-      (clutch--set-foreign-keys-status conn table 'loading nil ticket)
       (let ((started
-             (clutch-db-foreign-keys-async
-              conn table
+             (clutch--start-table-metadata-request
+              conn table table :foreign-keys-status "foreign-keys"
+              #'clutch-db-foreign-keys-async
               (lambda (fks)
-                (if (clutch--metadata-ticket-current-p
-                     conn ticket (clutch--foreign-keys-status conn table))
-                    (progn
-                      (clutch--metadata-debug-table-event
-                       conn "foreign-keys" "success" backend table
-                       (format "Loaded %d foreign keys for %s"
-                               (length fks) table))
-                      (clutch--set-table-metadata conn table :foreign-keys fks)
-                      (clutch--clear-foreign-keys-status conn table)
-                      (run-hook-with-args
-                       'clutch--table-metadata-updated-hook
-                       conn table 'foreign-keys)
-                      (clutch--refresh-schema-status-ui conn))
-                  (clutch--metadata-debug-stale-table-event
-                   conn "foreign-keys" backend table "foreign-key result")))
+                (clutch--set-table-metadata conn table :foreign-keys fks)
+                (clutch--clear-metadata-status
+                 conn table :foreign-keys-status)
+                (run-hook-with-args
+                 'clutch--table-metadata-updated-hook
+                 conn table 'foreign-keys))
               (lambda (message)
-                (if (clutch--metadata-ticket-current-p
-                     conn ticket (clutch--foreign-keys-status conn table))
-                    (progn
-                      (clutch--set-foreign-keys-status conn table 'failed
-                                                       message ticket)
-                      (clutch--metadata-debug-table-event
-                       conn "foreign-keys" "error" backend table message)
-                      (clutch--remember-recoverable-metadata-warning
-                       conn "foreign-key metadata"
-                       `(clutch-db-error ,message)
-                       `(:table ,table))
-                      (clutch--refresh-schema-status-ui conn))
-                  (clutch--metadata-debug-stale-table-event
-                   conn "foreign-keys" backend table "foreign-key error"))))))
-        (when started
-          (clutch--metadata-debug-table-event
-           conn "foreign-keys" "submit" backend table
-           (format "Queued background foreign-key preheat for %s" table)))
+                (clutch--remember-recoverable-metadata-warning
+                 conn "foreign-key metadata"
+                 `(clutch-db-error ,message)
+                 `(:table ,table))))))
         (unless started
           (clutch--set-table-metadata conn table :foreign-keys nil)
-          (clutch--clear-foreign-keys-status conn table)))
+          (clutch--clear-metadata-status conn table :foreign-keys-status)))
       t)))
 
 (defun clutch--format-help-doc (doc)
@@ -953,10 +840,9 @@ Returns a string or nil."
   "Return a backend-provided eldoc string for SYM from CONN, with caching.
 Queries the server on first access; subsequent calls read from cache.
 Returns nil when SYM is not a known built-in on this server."
-  (let* ((key   (clutch--connection-key conn))
-         (cache (or (gethash key clutch--help-doc-cache)
+  (let* ((cache (or (gethash conn clutch--help-doc-cache)
                     (let ((h (make-hash-table :test 'equal)))
-                      (puthash key h clutch--help-doc-cache)
+                      (puthash conn h clutch--help-doc-cache)
                       h)))
          (uname (upcase sym))
          (entry (gethash uname cache 'missing)))
@@ -977,8 +863,8 @@ Returns nil when SYM is not a known built-in on this server."
   "Return the schema hash-table for CONN, or nil.
 When CONN is nil, use `clutch-connection'."
   (let ((conn (or conn clutch-connection)))
-    (when (clutch--connection-alive-p conn)
-      (gethash (clutch--connection-key conn) clutch--schema-cache))))
+    (when (and conn (clutch-db-live-p conn))
+      (gethash conn clutch--schema-cache))))
 
 (provide 'clutch-schema)
 

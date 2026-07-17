@@ -36,9 +36,39 @@
 (require 'cl-lib)
 (require 'subr-x)
 
+;;;; Configuration
+
+(defcustom clutch-connect-timeout-seconds 10
+  "Timeout in seconds for establishing a database connection.
+Applies to networked backends.  SQLite ignores this setting."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-read-idle-timeout-seconds 30
+  "Idle timeout in seconds while waiting for query I/O.
+Applies to MySQL, PostgreSQL, and JDBC network I/O.  SQLite ignores this
+setting."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-query-timeout-seconds 30
+  "Timeout in seconds for database-side query execution.
+Currently applied by PostgreSQL and JDBC.  Native MySQL does not yet enforce a
+server-side statement timeout."
+  :type 'natnum
+  :group 'clutch)
+
+(defcustom clutch-jdbc-rpc-timeout-seconds 30
+  "Timeout in seconds for round-trips to the JDBC agent process."
+  :type 'natnum
+  :group 'clutch)
+
 ;;;; Error types
 
 (define-error 'clutch-db-error "Database error")
+(define-error 'clutch-db-execution-not-started
+  "Database operation did not start"
+  'clutch-db-error)
 (define-error 'clutch-query-interrupted "Query interrupted" 'user-error)
 
 (defconst clutch--db-error-hints
@@ -208,9 +238,6 @@ AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   "Connections currently reserved by foreground Clutch commands.
 Values are nesting counts.")
 
-(defvar clutch-schema-refresh-idle-delay-seconds 0.5
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
 (defun clutch-db--foreground-busy-p (conn)
   "Return non-nil when CONN is reserved by foreground Clutch work."
   (and conn (gethash conn clutch-db--foreground-connections)))
@@ -265,33 +292,72 @@ backtick-quoted, and bracket-quoted identifiers, including doubled closing
 delimiter escapes.  Returns nil when POS is at normal code."
   (let ((len (length sql))
         (ch (and (< pos (length sql)) (aref sql pos))))
-    (if-let* ((delimiter
-               (cond
-                ((eq ch ?\') ?\')
-                ((and identifiers (memq ch '(?\" ?`))) ch)
-                ((and identifiers (eq ch ?\[)) ?\]))))
-        (cl-loop for i from (1+ pos) below len
-                 when (= (aref sql i) delimiter)
-                 do (if (and (< (1+ i) len)
-                             (= (aref sql (1+ i)) delimiter))
-                        (cl-incf i)
-                      (cl-return (1+ i)))
-                 finally return len)
-      (pcase ch
-      (?-  ;; Possible -- line comment.
-       (if (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
-           (or (cl-loop for i from (+ pos 2) below len
-                        when (= (aref sql i) ?\n) return (1+ i))
-               len)
-         nil))
-      (?/  ;; Possible /* block comment */.
-       (if (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?*))
-           (let ((end (cl-loop for i from (+ pos 2) below (1- len)
-                               when (and (= (aref sql i) ?*)
-                                         (= (aref sql (1+ i)) ?/))
-                               return (+ i 2))))
-             (or end len))
-         nil))))))
+    (cond
+     ((let ((delimiter
+             (cond
+              ((eq ch ?\') ?\')
+              ((and identifiers (memq ch '(?\" ?`))) ch)
+              ((and identifiers (eq ch ?\[)) ?\]))))
+        (when delimiter
+          (cl-loop for i from (1+ pos) below len
+                   when (= (aref sql i) delimiter)
+                   do (if (and (< (1+ i) len)
+                               (= (aref sql (1+ i)) delimiter))
+                          (cl-incf i)
+                        (cl-return (1+ i)))
+                   finally return len))))
+     ((eq ch ?-)  ;; Possible -- line comment.
+      (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
+        (or (cl-loop for i from (+ pos 2) below len
+                     when (= (aref sql i) ?\n) return (1+ i))
+            len)))
+     ((eq ch ?/)  ;; Possible /* block comment */.
+      (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?*))
+        (or (cl-loop for i from (+ pos 2) below (1- len)
+                     when (and (= (aref sql i) ?*)
+                               (= (aref sql (1+ i)) ?/))
+                     return (+ i 2))
+            len))))))
+
+(defun clutch-db-sql--skip-dollar-quote (sql pos)
+  "Return the end of a PostgreSQL dollar-quoted body at POS, or nil.
+Only PostgreSQL identifier-style tags are accepted.  An opener immediately
+following an identifier character is rejected, as PostgreSQL requires lexical
+separation there.  An unterminated opener consumes the rest of SQL so statement
+selection fails closed.  This parser is linear and does not alter match data."
+  (let ((len (length sql)))
+    (when (and (< pos len)
+               (= (aref sql pos) ?$)
+               (or (zerop pos)
+                   (not (let ((previous (aref sql (1- pos))))
+                          (or (and (>= previous ?A) (<= previous ?Z))
+                              (and (>= previous ?a) (<= previous ?z))
+                              (and (>= previous ?0) (<= previous ?9))
+                              (memq previous '(?_ ?$)))))))
+      (let ((tag-end
+             (cond
+              ((and (< (1+ pos) len) (= (aref sql (1+ pos)) ?$))
+               (+ pos 2))
+              ((and (< (1+ pos) len)
+                    (let ((first (aref sql (1+ pos))))
+                      (or (and (>= first ?A) (<= first ?Z))
+                          (and (>= first ?a) (<= first ?z))
+                          (= first ?_))))
+               (let ((index (+ pos 2)))
+                 (while (and (< index len)
+                             (let ((char (aref sql index)))
+                               (or (and (>= char ?A) (<= char ?Z))
+                                   (and (>= char ?a) (<= char ?z))
+                                   (and (>= char ?0) (<= char ?9))
+                                   (= char ?_))))
+                   (setq index (1+ index)))
+                 (and (< index len)
+                      (= (aref sql index) ?$)
+                      (1+ index)))))))
+        (when tag-end
+          (let* ((delimiter (substring sql pos tag-end))
+                 (close (string-search delimiter sql tag-end)))
+            (if close (+ close (length delimiter)) len)))))))
 
 (defun clutch-db-sql-mask-literal-or-comment (sql)
   "Return a string the same length as SQL with literals/comments blanked.
@@ -321,16 +387,19 @@ are left intact.  Safe for multibyte strings (avoids `aset')."
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
-(defun clutch-db-sql-scan-code (sql start end fn)
+(defun clutch-db-sql-scan-code (sql start end fn &optional dollar-quotes)
   "Scan SQL code characters from START to END, skipping strings/comments.
 FN is called with (POS CHAR DEPTH), where DEPTH is the parenthesis depth before
-CHAR is applied.  When FN returns non-nil, stop and return that value."
+CHAR is applied.  When FN returns non-nil, stop and return that value.
+When DOLLAR-QUOTES is non-nil, also skip PostgreSQL dollar-quoted bodies."
   (let ((pos (or start 0))
         (end (or end (length sql)))
         (depth 0)
         result)
     (while (and (< pos end) (not result))
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
+      (if-let* ((skip (or (and dollar-quotes
+                               (clutch-db-sql--skip-dollar-quote sql pos))
+                          (clutch-db-sql-skip-literal-or-comment sql pos t))))
           (setq pos (min skip end))
         (let ((ch (aref sql pos)))
           (setq result (funcall fn pos ch depth))
@@ -352,16 +421,18 @@ CHAR is applied.  When FN returns non-nil, stop and return that value."
 
 ;;;; SQL helpers (statement boundaries)
 
-(defun clutch-db-sql-statement-breaks (sql)
+(defun clutch-db-sql-statement-breaks (sql &optional dollar-quotes)
   "Return zero-based offsets of top-level semicolons in SQL.
-Semicolons inside strings, line comments, and block comments do not count."
+Semicolons inside strings and comments do not count.  When DOLLAR-QUOTES is
+non-nil, semicolons inside PostgreSQL dollar-quoted bodies do not count."
   (let (breaks)
     (clutch-db-sql-scan-code
      sql 0 nil
      (lambda (pos ch depth)
        (when (and (zerop depth) (= ch ?\;))
          (push pos breaks))
-       nil))
+       nil)
+     dollar-quotes)
     (nreverse breaks)))
 
 (defun clutch-db-sql-statement-effective-offset (text offset)
@@ -378,15 +449,16 @@ preceding statement."
       (1- offset))
      (t offset))))
 
-(defun clutch-db-sql-semicolon-statement-bounds (text offset)
+(defun clutch-db-sql-semicolon-statement-bounds
+    (text offset &optional dollar-quotes)
   "Return zero-based statement bounds around OFFSET in TEXT.
 Top-level semicolons delimit statements.  Semicolons inside strings and
-comments are ignored."
+comments are ignored.  DOLLAR-QUOTES enables PostgreSQL dollar quoting."
   (let ((beg 0)
         (end (length text))
         (effective-offset
          (clutch-db-sql-statement-effective-offset text offset)))
-    (dolist (break (clutch-db-sql-statement-breaks text))
+    (dolist (break (clutch-db-sql-statement-breaks text dollar-quotes))
       (if (< break effective-offset)
           (setq beg (1+ break))
         (when (= end (length text))
@@ -405,13 +477,14 @@ comments are ignored."
     (cons beg end)))
 
 (defun clutch-db-sql-semicolon-statement-bounds-at-offset
-    (text offset &optional strict-leading-space)
+    (text offset &optional strict-leading-space dollar-quotes)
   "Return zero-based semicolon statement bounds around OFFSET in TEXT.
 When STRICT-LEADING-SPACE is non-nil and OFFSET is before the trimmed
 statement body, return an empty range at OFFSET.  This lets execute-at-point
 avoid running the previous statement from blank space between semicolon
-delimited statements."
-  (let* ((bounds (clutch-db-sql-semicolon-statement-bounds text offset))
+delimited statements.  DOLLAR-QUOTES enables PostgreSQL dollar quoting."
+  (let* ((bounds (clutch-db-sql-semicolon-statement-bounds
+                  text offset dollar-quotes))
          (effective-offset (clutch-db-sql-statement-effective-offset text offset))
          (semicolon-edge (or (/= effective-offset offset)
                              (and (< offset (length text))
@@ -809,6 +882,16 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
   "Signal unsupported runtime auto-commit toggling for this backend."
   (user-error "Manual commit is not supported by this connection"))
 
+(cl-defgeneric clutch-db-call-with-atomic-batch (conn function)
+  "Call zero-argument FUNCTION as one atomic mutation batch on CONN.
+Backends implementing this for autocommit connections must commit every
+mutation together or roll all of them back when FUNCTION signals.")
+
+(cl-defmethod clutch-db-call-with-atomic-batch ((_conn t) _function)
+  "Reject atomic batches on backends without an autocommit batch boundary."
+  (user-error
+   "Cannot execute multiple staged statements in autocommit mode; disable autocommit first"))
+
 (cl-defgeneric clutch-db-schema-transaction-effect (conn sql)
   "Return dirty-cache effect for successful schema SQL on CONN.
 SQL is known to affect schema metadata.  Return `dirty' when the SQL leaves
@@ -1148,6 +1231,16 @@ Derived from `clutch-db-list-tables'."
 Derived from `clutch-db-complete-tables'."
   (mapcar (lambda (name) (list :name name :type "TABLE"))
           (or (clutch-db-complete-tables conn prefix) '())))
+
+(cl-defgeneric clutch-db-find-table-entry (conn name)
+  "Return the exact table-like entry named NAME on CONN, or nil.")
+
+(cl-defmethod clutch-db-find-table-entry ((conn t) name)
+  "Find NAME exactly in the table-entry search results for CONN."
+  (cl-find-if
+   (lambda (entry)
+     (string= name (or (plist-get entry :name) "")))
+   (clutch-db-search-table-entries conn name)))
 
 (cl-defgeneric clutch-db-browseable-object-entries (conn)
   "Return the base browseable object entry list for CONN.

@@ -1,5 +1,7 @@
 # 009 — SQL Error Position Overlay
 
+_Superseded by 093 and 094: current query failures use result-buffer error presentation and a red status marker rather than the overlay described here._
+
 ## Background
 
 When a query fails, the DB error message is shown via `user-error`. The user must read the message, mentally find the offending token in the SQL buffer, and fix it. For longer queries this is tedious.

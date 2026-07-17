@@ -18,6 +18,11 @@
 
 ;;;; Test helpers
 
+(defun clutch-test--execute-and-present (sql connection &optional context)
+  "Execute SQL on CONNECTION and present its result using CONTEXT."
+  (clutch--present-statement-outcome
+   sql connection (clutch--execute-statement sql connection t context)))
+
 (defun clutch-test--debug-buffer-string ()
   "Return the current dedicated clutch debug buffer contents."
   (let ((buf (get-buffer clutch-debug-buffer-name)))
@@ -35,21 +40,24 @@
         (setq-local clutch--buffer-error-details nil)))))
 
 (defmacro clutch-test--with-isolated-metadata-caches (&rest body)
-  "Run BODY with fresh schema, table, and object metadata state."
+  "Run BODY with fresh metadata state and no installed lifecycle consumers."
   (declare (indent 0) (debug (body)))
-  `(let ((clutch--schema-cache (make-hash-table :test 'equal))
-         (clutch--table-metadata-cache (make-hash-table :test 'equal))
-         (clutch--column-details-queue-cache (make-hash-table :test 'equal))
-         (clutch--column-details-active-cache (make-hash-table :test 'equal))
-         (clutch--help-doc-cache (make-hash-table :test 'equal))
-         (clutch--object-cache (make-hash-table :test 'equal))
-         (clutch--object-warmup-timers (make-hash-table :test 'equal))
-         (clutch--object-warmup-generations (make-hash-table :test 'equal))
-         (clutch--schema-status-cache (make-hash-table :test 'equal))
-         (clutch--schema-refresh-tickets (make-hash-table :test 'equal))
+  `(let ((clutch--schema-cache (make-hash-table :test 'eq))
+         (clutch--table-metadata-cache (make-hash-table :test 'eq))
+         (clutch--column-details-queue-cache (make-hash-table :test 'eq))
+         (clutch--column-details-active-cache (make-hash-table :test 'eq))
+         (clutch--help-doc-cache (make-hash-table :test 'eq))
+         (clutch--object-cache (make-hash-table :test 'eq))
+         (clutch--object-warmup-timers (make-hash-table :test 'eq))
+         (clutch--object-warmup-generations (make-hash-table :test 'eq))
+         (clutch--schema-status-cache (make-hash-table :test 'eq))
+         (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
          (clutch--schema-refresh-ticket-counter 0)
-         (clutch--schema-install-timers (make-hash-table :test 'equal))
-         (clutch--metadata-ticket-counter 0))
+         (clutch--schema-install-timers (make-hash-table :test 'eq))
+         (clutch--metadata-ticket-counter 0)
+         (clutch--schema-cache-updated-hook nil)
+         (clutch--metadata-state-changed-hook nil)
+         (clutch--table-metadata-updated-hook nil))
      ,@body))
 
 (defun clutch-test--primary-row-identity (&optional table columns indices)
@@ -139,9 +147,16 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
   (let* ((columns (if (plist-member spec :columns)
                       (plist-get spec :columns)
                     '("id" "name")))
-         (column-defs (if (plist-member spec :column-defs)
-                          (plist-get spec :column-defs)
-                        (mapcar (lambda (name) (list :name name)) columns)))
+         (raw-column-defs (if (plist-member spec :column-defs)
+                              (plist-get spec :column-defs)
+                            (mapcar (lambda (name) (list :name name)) columns)))
+         (column-defs
+          (cl-mapcar
+           (lambda (name definition)
+             (if (plist-member definition :source-column)
+                 definition
+               (plist-put (copy-sequence definition) :source-column name)))
+           columns raw-column-defs))
          (rows (if (plist-member spec :rows)
                    (plist-get spec :rows)
                  '((1 "alice") (2 "bob"))))

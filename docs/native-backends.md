@@ -9,24 +9,18 @@
 - `clutch-document.el` — document query-console layer for MongoDB native buffers
 - `clutch-redis.el` over external `redis.el` — native Redis key/value adapter and command buffers
 
-Use this document for backend-specific connection, protocol, TLS, timeout, and
-usage notes for the native backends.  The JDBC sidecar has its own document in
-[`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are
-defined in [`docs/backend-support.org`](./backend-support.org).
+Use this document for backend-specific connection, protocol, TLS, timeout, and usage notes for the native backends.  The JDBC sidecar has its own document in [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are defined in [`docs/backend-support.org`](./backend-support.org).
 
 ## Live Testing
 
-Live tests use ordinary host/port connection variables, so any local database
-or Docker-compatible runtime works.  The examples below use Docker only as a
-portable way to start test servers.
+Live tests use ordinary host/port connection variables, so any local database or Docker-compatible runtime works.  The examples below use Docker only as a portable way to start test servers.
 
 ```sh
 docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8.0
 docker run --name clutch-pg-16 -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
 ```
 
-Run the standalone MySQL protocol live suite from the
-[`mysql.el`](https://github.com/LuciusChen/mysql.el) checkout:
+Run the standalone MySQL protocol live suite from the [`mysql.el`](https://github.com/LuciusChen/mysql.el) checkout:
 
 ```sh
 emacs -Q --batch -L . -l ert -l test/mysql-test.el \
@@ -40,45 +34,19 @@ Run clutch native adapter live tests from the `clutch` checkout:
 ./test/run-native-live-tests.sh
 ```
 
-The runner starts or reuses local Docker/OrbStack containers and executes both
-UI-level `:clutch-live` tests and backend-level native tests such as
-`:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT
-runs skip those live tags unless credentials are provided.
+The runner starts or reuses local Docker/OrbStack containers and executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT runs skip those live tags unless credentials are provided.
 
-MongoDB backend details live in
-[`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses
-the external `mongodb.el` native client by default; Clutch owns the adapter,
-query-buffer helper parsing, result-grid mapping, and SQL Interface surface
-selection. Protocol capability details are documented in the `mongodb.el`
-repository.
+MongoDB backend details live in [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
 
-MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires
-the JDBC sidecar plus the MongoDB JDBC driver jar.
+MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires the JDBC sidecar plus the MongoDB JDBC driver jar.
 
-Redis uses the external `redis.el` native RESP client.  Clutch owns the
-line-oriented Redis command buffers, key browsing, type-aware read commands,
-TTL/existence metadata, and result-grid mapping.  Redis is a basic key/value
-backend, not a document backend and not a SQL surface.
+Redis uses the external `redis.el` native RESP client.  Clutch owns the line-oriented Redis command buffers, key browsing, type-aware read commands, TTL/existence metadata, and result-grid mapping.  Redis is a basic key/value backend, not a document backend and not a SQL surface.
 
-Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and
-MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake,
-capability, or password-plugin code.
+Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake, capability, or password-plugin code.
 
 ## SSH Tunnels
 
-For saved clutch connections, `:ssh-host` starts a local SSH forward through
-the named host in `~/.ssh/config` before the native backend connects by default.
-The database `:host` / `:port` remain the remote endpoint as seen from the
-bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT`
-internally.
-This transport layer only rewrites structured `:host` / `:port` connection
-params.  Opaque `:url` profiles, including JDBC URLs and MongoDB
-`mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level
-transport support.
-Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be
-directly reachable on some machines; clutch tries that route briefly and falls
-back to SSH when the TCP endpoint is not reachable or the direct database
-connection fails.
+For saved clutch connections, `:ssh-host` starts a local SSH forward through the named host in `~/.ssh/config` before the native backend connects by default. The database `:host` / `:port` remain the remote endpoint as seen from the bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally. This transport layer only rewrites structured `:host` / `:port` connection params.  Opaque `:url` profiles, including JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level transport support. Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be directly reachable on some machines; clutch tries that route briefly and falls back to SSH when the TCP endpoint is not reachable or the direct database connection fails.
 
 This SSH path is intentionally OpenSSH-first:
 
@@ -86,23 +54,11 @@ This SSH path is intentionally OpenSSH-first:
 - let `ssh-agent` or the OpenSSH client handle SSH credentials
 - keep database passwords in `auth-source`
 
-If the first SSH use still needs a passphrase or host-key confirmation, run
-`M-x clutch-prepare-ssh-host` for that alias once, or press `S` from
-`clutch-dispatch`. After that, `clutch-connect` goes back to the normal batch
-tunnel path.
+If the first SSH use still needs a passphrase or host-key confirmation, run `M-x clutch-prepare-ssh-host` for that alias once, or press `S` from `clutch-dispatch`. After that, `clutch-connect` goes back to the normal batch tunnel path.
 
-The batch tunnel uses `ssh -o BatchMode=yes`, so it cannot prompt. If
-interactive `ssh HOST` succeeds but clutch still reports SSH authentication
-failure, configure OpenSSH to authenticate non-interactively too, usually by
-loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
+The batch tunnel uses `ssh -o BatchMode=yes`, so it cannot prompt. If interactive `ssh HOST` succeeds but clutch still reports SSH authentication failure, configure OpenSSH to authenticate non-interactively too, usually by loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 
-TRAMP-aware forwarding follows the same rule.  Configure
-`:tramp-default-directory "/ssh:HOST:/path/"` when the database endpoint is
-reachable from that TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an
-interactive password does not make that password available to clutch's separate
-OpenSSH `-L` process.  Use non-interactive OpenSSH auth or a reusable
-ControlMaster; `/rpc:` paths can reuse tramp-rpc's active ControlPath when
-tramp-rpc has one.
+TRAMP-aware forwarding follows the same rule.  Configure `:tramp-default-directory "/ssh:HOST:/path/"` when the database endpoint is reachable from that TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an interactive password does not make that password available to clutch's separate OpenSSH `-L` process.  Use non-interactive OpenSSH auth or a reusable ControlMaster; `/rpc:` paths can reuse tramp-rpc's active ControlPath when tramp-rpc has one.
 
 ## MySQL (`mysql`)
 
@@ -135,13 +91,9 @@ tramp-rpc has one.
 
 ### TLS
 
-When `:tls t` is used, certificate and hostname verification are enabled by
-default.  For MySQL, explicit `:ssl-mode disabled` is the canonical plaintext
-opt-out; `:tls nil` remains a shorthand.
+When `:tls t` is used, certificate and hostname verification are enabled by default.  For MySQL, explicit `:ssl-mode disabled` is the canonical plaintext opt-out; `:tls nil` remains a shorthand.
 
-For MySQL only, `:ssl-mode disabled` is a compatibility spelling for that same
-plaintext mode.  The older alias `off` is still accepted.  Either spelling
-disables the automatic MySQL 8 TLS reconnect path.
+For MySQL only, `:ssl-mode disabled` is a compatibility spelling for that same plaintext mode.  The older alias `off` is still accepted.  Either spelling disables the automatic MySQL 8 TLS reconnect path.
 
 Relevant variables:
 
@@ -149,9 +101,7 @@ Relevant variables:
 - `mysql-tls-verify-server`
 - `mysql-tls-keylist`
 
-For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS
-for authentication.  For self-signed local dev certificates, either trust the
-CA or set `mysql-tls-verify-server` to `nil` explicitly.
+For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS for authentication.  For self-signed local dev certificates, either trust the CA or set `mysql-tls-verify-server` to `nil` explicitly.
 
 ### Convenience API
 
@@ -172,8 +122,7 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 - `C-c C-a` toggles session autocommit with `SET autocommit = 0/1`
 - `C-c C-m` issues `COMMIT`
 - `C-c C-u` issues `ROLLBACK`
-- clutch header-line state (`Tx: Auto` / `Tx: Manual` / `Tx: Manual*`) follows
-  those session semantics
+- clutch header-line state (`Tx: Auto` / `Tx: Manual` / `Tx: Manual*`) follows those session semantics
 
 ### Prepared Statements
 
@@ -212,26 +161,14 @@ CA or set `mysql-tls-verify-server` to `nil` explicitly.
 
 ### TLS
 
-PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`,
-`require`, and `verify-full`.  `:tls t` and `:tls nil` remain convenience
-shorthands for `require` and `disable`.
+PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`, `require`, and `verify-full`.  `:tls t` and `:tls nil` remain convenience shorthands for `require` and `disable`.
 
-When `:sslmode require` or `:sslmode verify-full` is used, certificate and
-hostname verification are enabled by default through `pg-tls-verify-server`.
-When `:sslmode prefer` is used, clutch attempts TLS first and falls back to
-plaintext if the server declines SSL or GnuTLS is unavailable.
-
-Relevant variables:
-
-- `pg-tls-trustfiles`
-- `pg-tls-verify-server`
-- `pg-tls-keylist`
+`:sslmode require` encrypts the connection without requesting certificate or hostname verification from `pg-el`.  `:sslmode verify-full` enables both certificate and hostname verification.  With `:sslmode prefer`, clutch attempts TLS first and falls back to plaintext if the server declines SSL or GnuTLS is unavailable.
 
 ### Convenience API
 
 - `with-pg-connection`
 - `with-pg-transaction`
-- `pg-ping`
 - `pg-escape-identifier`
 - `pg-escape-literal`
 
@@ -247,24 +184,17 @@ Relevant variables:
 
 - PostgreSQL does not expose a session autocommit toggle like MySQL
 - In clutch, `C-c C-a` enables a clutch-managed manual mode
-- Manual mode uses lazy `BEGIN`: the first foreground statement opens the
-  transaction
+- Manual mode uses lazy `BEGIN`: the first foreground statement opens the transaction
 - `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
-- Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains
-  accurate for native PostgreSQL
+- Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains accurate for native PostgreSQL
 
 ### Interrupts and Timeouts
 
-- Native MySQL `C-g` uses a helper connection to issue `KILL QUERY` for the
-  original connection id, then drains the interrupted response on the original
-  socket so the same session remains usable.
+- Native MySQL `C-g` uses a helper connection to issue `KILL QUERY` for the original connection id, then drains the interrupted response on the original socket so the same session remains usable.
 - `:query-timeout` maps to PostgreSQL `statement_timeout`.
-- `pg-cancel` sends a wire-protocol `CancelRequest` on an auxiliary
-  socket, then drains the main connection until `ReadyForQuery`.
-- In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled
-  query keeps the same session usable for the next SQL.
-- Native SQLite does not currently provide the same recoverable interrupt path;
-  clutch falls back to disconnect/reconnect semantics there.
+- `pg-cancel` sends a wire-protocol `CancelRequest` on an auxiliary socket, then drains the main connection until `ReadyForQuery`.
+- In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled query keeps the same session usable for the next SQL.
+- Native SQLite does not currently provide the same recoverable interrupt path; clutch falls back to disconnect/reconnect semantics there.
 
 ## SQLite
 
@@ -287,9 +217,7 @@ Relevant variables:
 
 - SQLite does not use `:host`, `:port`, or `:user`
 - Network timeout settings do not apply
-- `:ssh-host`, `:ssh-tunnel`, and `:tramp-default-directory` do not apply to
-  SQLite; those transports forward structured TCP endpoints, while SQLite opens
-  a file
+- `:ssh-host`, `:ssh-tunnel`, and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
 - Schema/database switching is not part of the SQLite path
 
 ## Shared Native-Backend Notes
@@ -297,46 +225,28 @@ Relevant variables:
 ### Timeouts
 
 - MySQL supports `:connect-timeout` and `:read-idle-timeout`
-- On native MySQL query read-idle timeout, Clutch tries to cancel and drain the
-  server query; if the protocol stream cannot be resynchronized, the connection
-  is closed and the next query reconnects
+- On native MySQL query read-idle timeout, Clutch tries to cancel and drain the server query; if the protocol stream cannot be resynchronized, the connection is closed and the next query reconnects
 - PostgreSQL supports `:connect-timeout`, `:read-idle-timeout`, and `:query-timeout`
 - SQLite does not use the network timeout parameters
 
 ### Completion and Schema Refresh
 
 - Native backends integrate directly with clutch schema refresh and completion
-- MySQL and PostgreSQL defer the initial schema snapshot until Emacs has been
-  idle after connect/reconnect; SQLite keeps its synchronous in-process path
-- Schema/database switch prompts remain synchronous, but the post-switch schema
-  snapshot refresh runs as deferred idle work
-- Completion and Eldoc remain statement-scoped where possible, but native
-  MySQL/PostgreSQL hot paths are cache-first and schedule idle-time metadata
-  preheat on cache miss instead of blocking point motion or CAPF
-- Result buffers render first and then opportunistically enrich cached column
-  details in the background; explicit detail commands still load synchronously
-- Object warmup keeps non-table categories off the first-open path and fills
-  them lazily during idle time
-- Native MySQL/PostgreSQL deferred metadata stays on the Emacs main thread via
-  idle callbacks rather than using worker threads
-- Native MySQL and PostgreSQL both support clutch transaction toggling (`C-c C-a`
-  / `C-c C-m` / `C-c C-u`), while SQLite still has no native runtime
-  auto-commit toggle
+- MySQL and PostgreSQL defer the initial schema snapshot until Emacs has been idle after connect/reconnect; SQLite keeps its synchronous in-process path
+- Schema/database switch prompts remain synchronous, but the post-switch schema snapshot refresh runs as deferred idle work
+- Completion and Eldoc remain statement-scoped where possible, but native MySQL/PostgreSQL hot paths are cache-first and schedule idle-time metadata preheat on cache miss instead of blocking point motion or CAPF
+- Result buffers render first and then opportunistically enrich cached column details in the background; explicit detail commands still load synchronously
+- Object warmup keeps non-table categories off the first-open path and fills them lazily during idle time
+- Native MySQL/PostgreSQL deferred metadata stays on the Emacs main thread via idle callbacks rather than using worker threads
+- Native MySQL and PostgreSQL both support clutch transaction toggling (`C-c C-a` / `C-c C-m` / `C-c C-u`), while SQLite still has no native runtime auto-commit toggle
 
 ### Parameterized DML
 
 - clutch preview buffers still show fully rendered SQL text for readability
-- Native MySQL/PostgreSQL/SQLite staged `INSERT` / `UPDATE` / `DELETE` execute
-  through backend parameter binding instead of literal SQL interpolation
-- Staged `UPDATE` / `DELETE` use row identity metadata rather than requiring a
-  primary key in every table: primary keys are preferred, non-null unique keys
-  are used next, PostgreSQL can fall back to `ctid`, and SQLite rowid tables
-  can fall back to `rowid`
-- Physical row locators such as PostgreSQL `ctid` and SQLite `rowid` identify
-  the current row version only.  They may change after `UPDATE`, and result
-  refresh ordering remains defined only by the query's explicit `ORDER BY`
-- JDBC currently keeps its literal-SQL fallback until the sidecar grows a
-  prepared-execute operation
+- Native MySQL/PostgreSQL/SQLite and JDBC staged `INSERT` / `UPDATE` / `DELETE` execute through backend parameter binding instead of literal SQL interpolation
+- Staged `UPDATE` / `DELETE` use row identity metadata rather than requiring a primary key in every table: primary keys are preferred, non-null unique keys are used next, PostgreSQL can fall back to `ctid`, and SQLite rowid tables can fall back to `rowid`
+- Physical row locators such as PostgreSQL `ctid` and SQLite `rowid` identify the current row version only.  They may change after `UPDATE`, and result refresh ordering remains defined only by the query's explicit `ORDER BY`
+- JDBC sends bound values through the sidecar's `execute-params` operation
 
 ### UI Layer
 

@@ -14,11 +14,19 @@
 (require 'subr-x)
 (require 'xref)
 (require 'clutch-backend)
-(require 'clutch-connection)
 (require 'clutch-schema)
 
+(defcustom clutch-sql-completion-case-style 'preserve
+  "How SQL completion inserts keywords and identifiers.
+`preserve' keeps backend-provided identifier case and uppercase SQL keywords.
+`lower' inserts lowercase keywords and lowercases completion identifiers.
+`upper' inserts uppercase keywords and uppercases completion identifiers."
+  :type '(choice (const :tag "Preserve backend / default keyword case" preserve)
+                 (const :tag "Lowercase keywords and identifiers" lower)
+                 (const :tag "Uppercase keywords and identifiers" upper))
+  :group 'clutch)
+
 (defvar clutch-connection)
-(defvar clutch-sql-completion-case-style)
 (defvar clutch--sql-keywords)
 
 (defvar-local clutch--tables-in-buffer-cache nil
@@ -32,8 +40,6 @@
 
 (defconst clutch--schema-inline-min-prefix-length 2
   "Minimum symbol prefix length before loading column hints synchronously.")
-
-(declare-function clutch--safe-completion-call "clutch-schema" (thunk))
 
 ;;;; SQL context, completion, eldoc, and xref
 
@@ -158,9 +164,10 @@
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
-(defun clutch--compute-tables-in-query-cache (schema)
-  "Return a fresh cache plist for table-name analysis on SCHEMA."
-  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+(defun clutch--compute-tables-in-query-cache (schema &optional bounds)
+  "Return a fresh cache plist for table-name analysis on SCHEMA.
+BOUNDS, when non-nil, is the already computed statement range."
+  (pcase-let* ((`(,beg . ,end) (or bounds (clutch--statement-bounds)))
                (tick (buffer-chars-modified-tick))
                (text (buffer-substring-no-properties beg end))
                (`(,found . ,aliases)
@@ -168,6 +175,8 @@
                (statement-tables (delete-dups found)))
     (list :schema schema
           :tick tick
+          :restriction-beg (point-min)
+          :restriction-end (point-max)
           :beg beg
           :end end
           :statement-tables statement-tables
@@ -177,17 +186,26 @@
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
-  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
-               (tick (buffer-chars-modified-tick))
-               (cached clutch--tables-in-query-cache))
+  (let* ((tick (buffer-chars-modified-tick))
+         (cached clutch--tables-in-query-cache)
+         (beg (and cached (plist-get cached :beg)))
+         (end (and cached (plist-get cached :end))))
     (if (and cached
              (eq (plist-get cached :schema) schema)
              (= (plist-get cached :tick) tick)
-             (= (plist-get cached :beg) beg)
-             (= (plist-get cached :end) end))
+             (eql (plist-get cached :restriction-beg) (point-min))
+             (eql (plist-get cached :restriction-end) (point-max))
+             (<= beg (point))
+             (or (< (point) end)
+                 (and (= (point) end)
+                      (or (= end (point-max))
+                          (eq (char-after) ?\;)))
+                 (and (= (point) (1+ end))
+                      (eq (char-before) ?\;))))
         cached
-      (setq clutch--tables-in-query-cache
-            (clutch--compute-tables-in-query-cache schema)))))
+      (let ((bounds (clutch--statement-bounds)))
+        (setq clutch--tables-in-query-cache
+              (clutch--compute-tables-in-query-cache schema bounds))))))
 
 (defun clutch--tables-in-current-statement (schema)
   "Return known table names mentioned in the current statement for SCHEMA."
@@ -1370,49 +1388,64 @@ when completion triggers during an in-flight query)."
       (completion-at-point)
     (indent-for-tab-command)))
 
+(defun clutch--eldoc-metadata-plan (schema sym qualified-table statement-tables sync-columns-p)
+  "Return a pure metadata plan for documenting SYM from SCHEMA.
+The plan contains (ACTION TABLE COLUMNS) entries selected using
+QUALIFIED-TABLE, STATEMENT-TABLES, and SYNC-COLUMNS-P."
+  (cond
+   ((not (eq (gethash sym schema 'missing) 'missing))
+    (let ((columns (clutch--cached-columns schema sym)))
+      (append (and sync-columns-p (not columns) `((queue-column ,sym)))
+              `((table-summary ,sym ,columns)))))
+   ((< (length sym) clutch--schema-inline-min-prefix-length) '((skip)))
+   (t
+    (let ((tables (or (and qualified-table (list qualified-table)) statement-tables)))
+      (if (or (null tables) (and (not qualified-table)
+                                 (> (length tables) clutch--schema-inline-table-limit)))
+          '((skip))
+        (mapcar (lambda (table)
+                  (if-let* ((columns (clutch--cached-columns schema table)))
+                      (list 'cached-column table columns)
+                    (list (if sync-columns-p 'sync-column 'skip) table)))
+                tables))))))
+
 (defun clutch--eldoc-schema-string (conn schema sym &optional qualified-table)
-  "Return an eldoc string for SYM via SCHEMA on CONN, or nil.
-Matches SYM as a table name first, then as a column in any visible table.
-When QUALIFIED-TABLE is non-nil, resolve field metadata against that table
-even if the current statement exceeds `clutch--schema-inline-table-limit'."
-  (let ((sync-columns-p (clutch-db-completion-sync-columns-p conn)))
-    (cond
-     ((not (eq (gethash sym schema 'missing) 'missing))
-      (let* ((cols    (clutch--cached-columns schema sym))
-             (_       (when (and sync-columns-p (not cols))
-                        (clutch--ensure-columns-async conn schema sym)))
-             (comment (clutch--cached-table-comment conn sym))
-             (_       (when (not (clutch--table-comment-cached-p conn sym))
-                        (clutch--ensure-table-comment-async conn sym)))
-             (n       (length cols)))
-        (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
-                (propertize sym 'face 'font-lock-type-face)
-                (when cols
-                  (propertize (format "  (%d col%s)" n (if (= n 1) "" "s"))
-                              'face 'shadow))
-                (when comment
-                  (propertize (format "  — %s" comment) 'face 'shadow)))))
-     ((>= (length sym) clutch--schema-inline-min-prefix-length)
-      (let ((tables (or (and qualified-table (list qualified-table))
-                        (clutch--tables-in-current-statement schema))))
-        (when (and tables
-                   (or qualified-table
-                       (<= (length tables) clutch--schema-inline-table-limit)))
-          (cl-loop for tbl in tables
-                   for cached-cols = (clutch--cached-columns schema tbl)
-                   for cols = (cond
-                               (cached-cols cached-cols)
-                               ((not sync-columns-p) nil)
-                               ((clutch-db-busy-p conn)
-                                (clutch--ensure-columns-async conn schema tbl)
-                                nil)
-                               (t
-                                (clutch--ensure-columns conn schema tbl)))
-                   for matched-col = (and cols
-                                          (clutch--identifier-match sym cols))
-                   when matched-col
-                   return (clutch--eldoc-column-string conn tbl matched-col)))))
-     (t nil))))
+  "Return an eldoc string for SYM via SCHEMA on CONN, or nil."
+  (let* ((sync-columns-p (clutch-db-completion-sync-columns-p conn))
+         (statement-tables
+          (and (eq (gethash sym schema 'missing) 'missing)
+               (>= (length sym) clutch--schema-inline-min-prefix-length)
+               (not qualified-table) (clutch--tables-in-current-statement schema))))
+    (cl-loop for (action table columns)
+             in (clutch--eldoc-metadata-plan
+                 schema sym qualified-table statement-tables sync-columns-p)
+             do (pcase action
+                  ('queue-column
+                   (clutch--ensure-columns-async conn schema table))
+                  ('table-summary
+                   (let ((comment (clutch--cached-table-comment conn table)))
+                     (unless (clutch--table-comment-cached-p conn table)
+                       (clutch--ensure-table-comment-async conn table))
+                     (cl-return
+                      (concat
+                       (propertize (format "[%s] " (clutch-db-database conn))
+                                   'face 'shadow)
+                       (propertize table 'face 'font-lock-type-face)
+                       (when columns
+                         (propertize
+                          (format "  (%d col%s)" (length columns)
+                                  (if (= (length columns) 1) "" "s"))
+                          'face 'shadow))
+                       (when comment
+                         (propertize (format "  — %s" comment) 'face 'shadow))))))
+                  ((or 'cached-column 'sync-column)
+                   (let* ((values (or columns
+                                      (clutch--ensure-columns conn schema table)))
+                          (match (and values
+                                      (clutch--identifier-match sym values))))
+                     (when match
+                       (cl-return
+                        (clutch--eldoc-column-string conn table match)))))))))
 
 (defun clutch--eldoc-effective-symbol-at-point (sym schema)
   "Return the effective eldoc symbol at point for raw SYM and SCHEMA.
@@ -1450,7 +1483,7 @@ SQL keyword/function docs are shown even without a connection."
                  ((not (clutch-db-busy-p conn))))
        (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
      (when-let* ((conn clutch-connection)
-                 ((clutch--connection-alive-p conn))
+                 ((clutch-db-live-p conn))
                  ((not (clutch-db-busy-p conn))))
        (clutch--ensure-help-doc conn effective-sym))
      (clutch--eldoc-keyword-string effective-sym)))))

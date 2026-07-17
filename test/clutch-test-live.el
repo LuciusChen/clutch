@@ -123,7 +123,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (with-temp-buffer
     (let ((clutch-connection conn)
           (clutch--source-window (selected-window)))
-      (clutch--execute-select sql conn))))
+      (clutch-test--execute-and-present sql conn))))
 
 (ert-deftest clutch-test-live-schema-introspection ()
   :tags '(:clutch-live)

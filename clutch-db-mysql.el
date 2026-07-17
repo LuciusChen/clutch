@@ -57,8 +57,6 @@
 (declare-function mysql-select-database "mysql" (conn database))
 (declare-function mysql-set-autocommit "mysql" (conn autocommit))
 (declare-function mysql-stmt-close "mysql" (stmt))
-(defvar mysql-tls-verify-server)
-
 ;;;; Type-category mapping
 
 (defconst clutch-db-mysql--type-category-alist
@@ -95,12 +93,6 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
   "Seconds to wait while cancelling and draining an interrupted MySQL query."
   :type 'number
   :group 'clutch)
-
-(defvar clutch-connect-timeout-seconds 10
-  "Forward declaration; defined as `defcustom' in clutch.el.")
-
-(defvar clutch-read-idle-timeout-seconds 30
-  "Forward declaration; defined as `defcustom' in clutch.el.")
 
 (defvar clutch-db-mysql--connection-params
   (make-hash-table :test 'eq :weakness 'key)
@@ -318,9 +310,7 @@ Return nil when TEXT has no Syntax section."
 
 (cl-defmethod clutch-db-disconnect ((conn mysql-conn))
   "Disconnect MySQL CONN."
-  (condition-case nil
-      (mysql-disconnect conn)
-    (mysql-error nil)))
+  (mysql-disconnect conn))
 
 (cl-defmethod clutch-db-live-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is live."
