@@ -2476,6 +2476,29 @@
       (when (buffer-live-p other) (kill-buffer other))
       (when (buffer-live-p describe) (kill-buffer describe)))))
 
+(ert-deftest clutch-test-refresh-schema-status-ui-skips-inherited-default-revert ()
+  "Schema status refresh should not revert an unrelated attached buffer."
+  (let ((conn (list 'attached-conn))
+        (attached (generate-new-buffer " *clutch-schema-status-attached*"))
+        (original-default (default-value 'revert-buffer-function))
+        default-reverted)
+    (unwind-protect
+        (progn
+          (set-default 'revert-buffer-function
+                       (lambda (&rest _args)
+                         (setq default-reverted t)))
+          (with-current-buffer attached
+            (kill-local-variable 'revert-buffer-function)
+            (setq-local clutch-connection conn)
+            (should-not (local-variable-p 'revert-buffer-function)))
+          (cl-letf (((symbol-function 'clutch--refresh-connection-render-state)
+                     #'ignore))
+            (clutch--refresh-schema-status-ui conn))
+          (should-not default-reverted))
+      (set-default 'revert-buffer-function original-default)
+      (when (buffer-live-p attached)
+        (kill-buffer attached)))))
+
 (ert-deftest clutch-test-kill-non-owner-buffers-does-not-disconnect ()
   "Killing indirect SQL or derived result buffers should not disconnect."
   (dolist (case '((indirect " *clutch-indirect*")

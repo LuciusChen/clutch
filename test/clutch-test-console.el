@@ -270,6 +270,44 @@
         (should (eq (clutch-test-console--face-at-match "db>" output)
                     'minibuffer-prompt))))))
 
+(ert-deftest clutch-test-repl-ddl-success-does-not-revert-non-file-buffer ()
+  "Successful DDL should submit schema refresh without reverting the REPL."
+  (clutch-test--with-isolated-metadata-caches
+    (with-temp-buffer
+      (clutch-repl-mode)
+      (let ((conn (list 'fake-conn))
+            (clutch--metadata-state-changed-hook
+             '(clutch--refresh-schema-status-ui))
+            (clutch-db--foreground-connections (make-hash-table :test 'eq))
+            executed
+            submitted)
+        (unwind-protect
+            (progn
+              (setq-local clutch-connection conn)
+              (should-not buffer-file-name)
+              (should-not (local-variable-p 'revert-buffer-function))
+              (cl-letf (((symbol-function 'clutch--run-db-query)
+                         (lambda (actual-conn sql)
+                           (setq executed (list actual-conn sql))
+                           (make-clutch-db-result :affected-rows 0)))
+                        ((symbol-function 'clutch-db-eager-schema-refresh-p)
+                         (lambda (_conn) nil))
+                        ((symbol-function 'clutch-db-refresh-schema-async)
+                         (lambda (actual-conn &rest _args)
+                           (setq submitted actual-conn)
+                           t))
+                        ((symbol-function 'clutch--refresh-connection-render-state)
+                         #'ignore))
+                (let ((outcome
+                       (clutch--execute-statement
+                        "CREATE TABLE users (id INT)" conn nil)))
+                  (should (clutch-db-result-p
+                           (plist-get outcome :result)))))
+              (should (equal executed
+                             (list conn "CREATE TABLE users (id INT)")))
+              (should (eq submitted conn)))
+          (setq-local clutch-connection nil))))))
+
 (ert-deftest clutch-test-repl-dead-query-retains-reconnect-anchor ()
   "REPL errors should retire a dead session without dropping its anchor."
   (with-temp-buffer

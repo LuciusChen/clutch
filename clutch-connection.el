@@ -728,7 +728,14 @@ using the stored params.  Signals a user-error if not recoverable."
              ((clutch--query-buffer-p)
               (clutch--update-console-buffer-name)
               (clutch--update-mode-line))
-             (revert-buffer-function
+             ((derived-mode-p 'clutch-repl-mode)
+              (clutch--update-mode-line))
+             ;; Newer Emacs versions give every buffer the inherited default
+             ;; `revert-buffer--default', including non-file buffers.  Only a
+             ;; buffer-local function represents an intentional derived-view
+             ;; refresh contract here.
+             ((and (local-variable-p 'revert-buffer-function)
+                   revert-buffer-function)
               (revert-buffer t t)))))))))
 
 (add-hook 'clutch--metadata-state-changed-hook
