@@ -1166,7 +1166,7 @@ follow the server's total ordering."
      (t (string< left-digits right-digits)))))
 
 (defun clutch-result--numeric-key-less-p (left right)
-  "Return non-nil when exact numeric key LEFT sorts before RIGHT."
+  "Return non-nil if exact numeric key LEFT precedes RIGHT."
   (let ((left-class (aref left 0))
         (right-class (aref right 0)))
     (cond
