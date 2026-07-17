@@ -2754,7 +2754,7 @@ ROW-INDEX and COLUMN-INDEX reject a stale idle callback after point moves."
             (error (clutch--close-cell-preview))))))))
 
 (defun clutch--schedule-cell-preview ()
-  "Coalesce automatic preview updates for the cell at point."
+  "Schedule a coalesced preview update for the cell at point."
   (let* ((source (current-buffer))
          (source-window (selected-window))
          (available
