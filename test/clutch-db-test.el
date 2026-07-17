@@ -5005,6 +5005,25 @@ Skips if `clutch-db-test-pg-password' is nil."
         (when timer
           (cancel-timer timer))))))
 
+(ert-deftest clutch-db-test-pg-live-query-timeout-keeps-connection-usable ()
+  :tags '(:db-live :pg-live)
+  "PostgreSQL statement timeout should preserve the synchronized client."
+  (if (not (clutch-db-test--pg-live-configured-p))
+      (ert-skip "Set clutch-db-test-pg-password to enable PostgreSQL live tests")
+    (let ((conn (clutch-db-connect
+                 'pg
+                 (plist-put (clutch-db-test--pg-live-params)
+                            :query-timeout 1))))
+      (unwind-protect
+          (let ((client (clutch-db-pg--connection-client conn)))
+            (should-error (clutch-db-query conn "SELECT pg_sleep(2)")
+                          :type 'clutch-db-error)
+            (should (eq (clutch-db-pg--connection-client conn) client))
+            (should (= (caar (clutch-db-result-rows
+                              (clutch-db-query conn "SELECT 17")))
+                       17)))
+        (clutch-db-disconnect conn)))))
+
 (ert-deftest clutch-db-test-pg-live-authinfo-profile-provides-backend ()
   :tags '(:db-live :pg-live)
   "PostgreSQL should connect when authinfo profile provides the backend."
