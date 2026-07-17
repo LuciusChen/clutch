@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Suppressed automatic child-frame cell previews while refining a rectangular result selection.
 - Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.
 - Made staged SQL mutations fail closed: hidden row-identity columns are verified at their injected trailing positions, computed or uncertain projections are read-only, writable identifiers are reconciled with canonical backend metadata, and multi-statement batches cannot partially commit.  SQLite batches use a real transaction; unsupported autocommit and already-dirty manual transactions fail before execution.
 - Kept SQL highlighting enabled when query consoles are created, with dialect state local to each console, object definition, and preview buffer. Connection binding and rebinding select or reset the product deterministically, including Oracle, SQL Server, DB2, and Redshift mappings, without changing the user's global `sql-product` default.

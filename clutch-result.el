@@ -1472,7 +1472,8 @@ Prompts for a pattern; enter empty string to clear."
 \\[clutch-refine-cancel]: cancel"
   :keymap clutch-refine-mode-map
   :lighter " [REFINE: m=row x=col RET=ok C-g=cancel]"
-  (unless clutch-refine-mode
+  (if clutch-refine-mode
+      (clutch--cleanup-cell-preview)
     (clutch-refine--clear-overlays)))
 
 (defun clutch-refine--clear-overlays ()
@@ -2410,8 +2411,9 @@ blob type with non-text value → binary string; otherwise plain text."
 
 (defun clutch--cell-preview-context ()
   "Return the cell preview context at point, or nil."
-  (when (or (derived-mode-p 'clutch-result-mode)
-            (derived-mode-p 'clutch-record-mode))
+  (when (and (not clutch-refine-mode)
+             (or (derived-mode-p 'clutch-result-mode)
+                 (derived-mode-p 'clutch-record-mode)))
     (when-let* (((get-text-property (point) 'clutch-cell-truncated))
                 (cell (clutch--cell-at-point)))
       (pcase-let* ((`(,ridx ,cidx ,value) cell)

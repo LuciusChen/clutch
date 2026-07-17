@@ -5660,7 +5660,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
    '(:columns ("id" "name")
      :column-defs ((:name "id" :type-category numeric)
                    (:name "name" :type-category text))
-     :rows ((1 "alice") (2 "bob") (3 "carol"))
+     :rows ((1 "alice-long-value") (2 "bob") (3 "carol"))
      :column-widths [2 5]))
   (clutch--refresh-display))
 
@@ -5674,6 +5674,39 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (equal clutch--refine-rect '((0 1 2) . (0 1))))
       (should clutch--refine-overlays)
       (should (eq clutch--refine-callback callback)))))
+
+(ert-deftest clutch-test-refine-suspends-automatic-cell-preview ()
+  "Refine mode should close and suppress automatic cell previews."
+  (with-temp-buffer
+    (clutch-test--setup-refine-result-buffer)
+    (goto-char (point-min))
+    (let ((match (text-property-search-forward
+                  'clutch-cell-truncated t #'eq)))
+      (should match)
+      (goto-char (prop-match-beginning match)))
+    (let ((clutch-cell-preview-style 'child-frame)
+          (clutch--cell-preview-state
+           (list :source-buffer (current-buffer)))
+          (clutch--cell-preview-timer 'pending)
+          cancelled
+          scheduled)
+      (cl-letf (((symbol-function 'cancel-timer)
+                 (lambda (timer) (setq cancelled timer)))
+                ((symbol-function 'clutch--cell-preview-supported-p)
+                 (lambda (_window) t))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _args)
+                   (setq scheduled t)
+                   nil)))
+        (clutch-result--start-refine '((0) . (0 1)) #'ignore)
+        (should (eq cancelled 'pending))
+        (should-not clutch--cell-preview-timer)
+        (should-not clutch--cell-preview-state)
+        (clutch--schedule-cell-preview)
+        (should-not scheduled)
+        (clutch-refine-cancel)
+        (clutch--schedule-cell-preview)
+        (should scheduled)))))
 
 (ert-deftest clutch-test-refine-toggle-excludes-and-includes ()
   "Refine mode should toggle row and column exclusions at point."
