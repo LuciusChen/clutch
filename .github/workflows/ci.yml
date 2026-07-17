@@ -13,7 +13,7 @@ jobs:
   elisp:
     runs-on: ubuntu-latest
     env:
-      PGSQL_EL_DIR: ${{ runner.temp }}/pgsql.el
+      PGSQL_EL_DIR: ${{ github.workspace }}/../pgsql.el
     strategy:
       fail-fast: false
       matrix:
