@@ -861,7 +861,10 @@ For example, SET NAMES utf8mb4 on MySQL.")
   nil)
 
 (cl-defgeneric clutch-db-commit (conn)
-  "Commit the current transaction on CONN.")
+  "Finish the current transaction on CONN.
+Return `rolled-back' when the backend had to roll back an already failed
+transaction instead of committing it.  Other successful commits may return
+any value except `rolled-back'.")
 
 (cl-defmethod clutch-db-commit ((_conn t))
   "Fallback implementation for backends without explicit commit support."
@@ -1683,7 +1686,7 @@ Returns a backend-specific connection object."
                  (file-missing
                   (pcase backend
                     ('mysql (user-error "MySQL backend requires the mysql package"))
-                    ('pg (user-error "PostgreSQL backend requires the pg package"))
+                    ('pg (user-error "PostgreSQL backend requires pgsql.el"))
                     (_ (signal (car err) (cdr err))))))
                (plist-get feature-plist :connect-fn))))
       (condition-case err

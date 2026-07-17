@@ -2619,17 +2619,25 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
 
 ;;;###autoload
 (defun clutch-commit ()
-  "Commit the current transaction."
+  "Commit the current transaction.
+If the backend reports an already failed transaction, mark it rolled back and
+signal that nothing was committed."
   (interactive)
   (clutch--ensure-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
     (user-error "Connection is in autocommit mode"))
-  (clutch-db-commit clutch-connection)
-  (clutch--mark-dml-results-committed clutch-connection)
-  (clutch--clear-tx-dirty clutch-connection)
-  (message "Transaction committed"))
+  (let ((outcome (clutch-db-commit clutch-connection)))
+    (if (eq outcome 'rolled-back)
+        (progn
+          (clutch--mark-dml-results-rolled-back clutch-connection)
+          (clutch--clear-tx-dirty clutch-connection)
+          (user-error
+           "Transaction had already failed and was rolled back; nothing was committed"))
+      (clutch--mark-dml-results-committed clutch-connection)
+      (clutch--clear-tx-dirty clutch-connection)
+      (message "Transaction committed"))))
 
 ;;;###autoload
 (defun clutch-rollback ()

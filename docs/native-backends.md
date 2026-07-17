@@ -3,7 +3,7 @@
 `clutch` uses non-JDBC backends that do not require the JDBC sidecar:
 
 - [`mysql`](https://github.com/LuciusChen/mysql.el) — external pure Emacs Lisp MySQL wire protocol client
-- [`pg`](https://github.com/emarsden/pg-el) — external PostgreSQL client from [`pg-el`](https://github.com/emarsden/pg-el)
+- [`pgsql.el`](https://github.com/LuciusChen/pgsql.el) — external pure Emacs Lisp PostgreSQL wire-protocol client
 - `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
 - `clutch-mongodb.el` over external `mongodb.el` — native MongoDB document adapter
 - `clutch-document.el` — document query-console layer for MongoDB native buffers
@@ -133,52 +133,55 @@ For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS 
   (mysql-stmt-close stmt))
 ```
 
-## PostgreSQL (`pg`)
+## PostgreSQL (`:backend pg`, `pgsql.el`)
 
 ### Scope
 
-- Pure Elisp PostgreSQL protocol v3
-- SCRAM-SHA-256 (SASL) and MD5 authentication
+- Pure Elisp PostgreSQL protocol v3 without `psql`, native libraries, or the JDBC sidecar
+- Clear-text, MD5, and SCRAM-SHA-256 authentication
 - TLS via Emacs GnuTLS
-- OID-based type decoding for scalar, temporal, JSON, and `bytea` values
+- Simple-query and parameterized extended-query execution
+- OID-based decoding for scalar, temporal, JSON, `bytea`, and array values
+- Structured server errors, `ReadyForQuery` transaction state, and protocol-level cancellation
 
 ### Connection Example
 
 ```elisp
-(require 'pg)
+(require 'pgsql)
 
-(setq conn (pg-connect-plist "mydb" "postgres"
-                             :password "secret"
-                             :host "127.0.0.1"
-                             :port 5432))
+(setq conn (pgsql-connect :database "mydb"
+                          :user "postgres"
+                          :password "secret"
+                          :host "127.0.0.1"
+                          :port 5432
+                          :sslmode 'prefer))
 
-(let ((result (pg-exec conn "SELECT * FROM users LIMIT 10")))
-  (pg-result result :attributes)
-  (pg-result result :tuples))
+(let ((result (pgsql-exec conn "SELECT * FROM users LIMIT 10")))
+  (pgsql-result-columns result)
+  (pgsql-result-rows result))
 
-(pg-disconnect conn)
+(pgsql-disconnect conn)
 ```
 
 ### TLS
 
-PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`, `require`, and `verify-full`.  `:tls t` and `:tls nil` remain convenience shorthands for `require` and `disable`.
+PostgreSQL connections accept `:sslmode` with `disable`, `prefer`, `require`, and `verify-full`.  Clutch also accepts `:tls t` and `:tls nil` as convenience shorthands for `require` and `disable`.
 
-`:sslmode require` encrypts the connection without requesting certificate or hostname verification from `pg-el`.  `:sslmode verify-full` enables both certificate and hostname verification.  With `:sslmode prefer`, clutch attempts TLS first and falls back to plaintext if the server declines SSL or GnuTLS is unavailable.
+`:sslmode require` encrypts the connection without requesting certificate or hostname verification.  `:sslmode verify-full` enables both certificate and hostname verification.  With `:sslmode prefer`, `pgsql.el` falls back to plaintext only when the server explicitly rejects PostgreSQL SSL negotiation; TLS handshake and certificate failures remain visible.
 
-### Convenience API
-
-- `with-pg-connection`
-- `with-pg-transaction`
-- `pg-escape-identifier`
-- `pg-escape-literal`
-
-### Transaction Example
+### Parameterized Queries
 
 ```elisp
-(with-pg-transaction conn
-  (pg-exec conn "INSERT INTO users (name) VALUES ('alice')")
-  (pg-exec conn "INSERT INTO users (name) VALUES ('bob')"))
+(pgsql-exec-params
+ conn
+ "SELECT $1::int4, $2::text, $3::boolean, $4::int4[]"
+ (list (cons 42 "int4")
+       (cons pgsql-null "text")
+       (cons nil "bool")
+       (cons (vector 1 pgsql-null 3) "int4[]")))
 ```
+
+Each parameter is a value/type pair. `pgsql-null` is SQL NULL, while Lisp `nil` is PostgreSQL boolean false. See the [`pgsql.el` README](https://github.com/LuciusChen/pgsql.el) for protocol usage and its public API; Clutch keeps the returned client opaque and owns the query-console, metadata, rendering, and manual-transaction workflow.
 
 ### Transaction Control in clutch
 
@@ -192,7 +195,7 @@ PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`, `requi
 
 - Native MySQL `C-g` uses a helper connection to issue `KILL QUERY` for the original connection id, then drains the interrupted response on the original socket so the same session remains usable.
 - `:query-timeout` maps to PostgreSQL `statement_timeout`.
-- `pg-cancel` sends a wire-protocol `CancelRequest` on an auxiliary socket, then drains the main connection until `ReadyForQuery`.
+- `pgsql-cancel` sends a wire-protocol `CancelRequest` on an auxiliary socket, while the main query path drains through `ReadyForQuery`.
 - In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled query keeps the same session usable for the next SQL.
 - Native SQLite does not currently provide the same recoverable interrupt path; clutch falls back to disconnect/reconnect semantics there.
 
