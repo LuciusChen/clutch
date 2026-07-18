@@ -29,6 +29,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/LuciusChen/mongodb.el.git "$GITHUB_WORKSPACE/../mongodb.el"
           git clone --depth 1 https://github.com/LuciusChen/redis.el.git "$GITHUB_WORKSPACE/../redis.el"
+          git clone --depth 1 https://github.com/emarsden/pg-el.git "$GITHUB_WORKSPACE/../pg-el"
           git clone --depth 1 https://github.com/emacs-straight/peg.git "$RUNNER_TEMP/peg"
           PEG_CHECKOUT="$RUNNER_TEMP/peg" emacs -Q --batch \
             --eval "(require 'package)" \
@@ -41,7 +42,7 @@ jobs:
             --eval "(setq package-archives '((\"melpa\" . \"https://melpa.org/packages/\")))" \
             --eval "(package-initialize)" \
             --eval "(package-refresh-contents)" \
-            --eval "(dolist (pkg '(transient mysql pg package-lint)) (unless (package-installed-p pkg) (package-install pkg)))"
+            --eval "(dolist (pkg '(transient mysql package-lint)) (unless (package-installed-p pkg) (package-install pkg)))"
 
       - name: Run main ERT suite
         run: test/run-ci.sh main
