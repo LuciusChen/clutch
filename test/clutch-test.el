@@ -5945,19 +5945,45 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should execute)
         (should (eq (oref execute command) #'clutch-execute-dwim))))))
 
-(ert-deftest clutch-test-staged-transient-heading-shows-pending-count ()
-  "Staged transient heading should summarize pending mutation count."
+(ert-deftest clutch-test-edit-transient-heading-shows-pending-count ()
+  "Edit transient heading should summarize pending mutation count."
   (with-temp-buffer
     (setq-local clutch--pending-edits '(edit-a edit-b)
                 clutch--pending-deletes '(delete-a)
                 clutch--pending-inserts '(insert-a insert-b insert-c))
     (should (equal (substring-no-properties
-                    (clutch-result--staged-transient-heading))
-                   "Staged (6 pending)"))
+                    (clutch-result--edit-transient-heading))
+                   "Edit (6 pending)"))
     (setq-local clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil)
-    (should (equal (clutch-result--staged-transient-heading) "Staged"))))
+    (should (equal (clutch-result--edit-transient-heading) "Edit"))))
+
+(ert-deftest clutch-test-result-dispatch-pending-actions-follow-state ()
+  "Result dispatch should show pending actions only while changes are staged."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'clutch-result--action-supported-p)
+               (lambda (action) (eq action 'sql-mutation))))
+        (cl-labels ((render-menu ()
+                      (when-let* ((buffer (get-buffer " *transient*")))
+                        (kill-buffer buffer))
+                      (transient-setup 'clutch-result-dispatch)
+                      (with-current-buffer " *transient*"
+                        (buffer-string))))
+          (unwind-protect
+              (let ((labels '("Commit staged"
+                              "Discard staged at point"
+                              "Copy staged SQL"
+                              "Save staged SQL"))
+                    (menu (render-menu)))
+                (dolist (label labels)
+                  (should-not (string-match-p (regexp-quote label) menu)))
+                (setq-local clutch--pending-edits '(pending))
+                (setq menu (render-menu))
+                (dolist (label labels)
+                  (should (string-match-p (regexp-quote label) menu))))
+            (when-let* ((buffer (get-buffer " *transient*")))
+              (kill-buffer buffer)))))))
 
 (ert-deftest clutch-test-filter-transient-descriptions-show-current-values ()
   "Result filter labels should expose inactive and active values."

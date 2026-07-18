@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Reorganized the result dispatch into two balanced workflow rows, kept staged mutation actions together under Edit, and hid pending-only actions until changes are staged without changing any command keys.
 - Removed Clutch's duplicate PostgreSQL transaction-state tracking and explicit-array-bound rejection now that pg-el exposes `ReadyForQuery` status and parses dimension-prefixed array values upstream.
 - Allowed the native live-test runner to continue under Podman instead of exiting during the macOS-only OrbStack guard.
 - Extended the active column-header background across the full cell width instead of highlighting only the label text.

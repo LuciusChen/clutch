@@ -34,8 +34,8 @@ Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-
 | =M->= / =M-<= | Last row window / first page                 |
 | =#=            | Query total row count                         |
 | =A=            | Aggregate numeric values (region/current cell; =C-u= with region enters visual refine mode) |
-| =]=            | Page right (snap to next column border)       |
-| =[=            | Page left (snap to previous column border)    |
+| =]=            | Scroll right (snap to next column border)     |
+| =[=            | Scroll left (snap to previous column border)  |
 | ===            | Widen current column                          |
 | =-=            | Narrow current column                         |
 | =W=            | WHERE filter (press again to clear)           |
@@ -406,7 +406,7 @@ Finite state is displayed as parenthesized choices, with the active choice highl
 
 The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=, =Commit=, =Rollback=, =Auto-commit=, and =REPL=.  =Prepare SSH= opens an interactive OpenSSH setup session for host-key confirmation or key passphrase entry before retrying the normal non-interactive connect path.
 
-In the result buffer, the *Staged* heading includes the current pending count. Its copy/save actions and the mutation group's commit/discard actions are inapt when no changes are staged.  The unified staged-commit workflow uses =i= to stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending change at point, and =C-c C-c= to commit all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
+In the result buffer, the *Edit* heading includes the current pending count. Commit, discard, and staged-SQL copy/save actions appear only while changes are staged.  The unified staged-commit workflow uses =i= to stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending change at point, and =C-c C-c= to commit all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
 The result and record transients expose an *Inspect* group in which =v= opens the full value in a normal buffer.  Automatic child-frame previews are a display preference rather than a transient action: set =clutch-cell-preview-style= to =child-frame= to follow a truncated result or collapsed Record cell without moving focus.
 
