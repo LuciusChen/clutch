@@ -50,6 +50,7 @@
 (declare-function pgcon-process "pg" (object))
 (declare-function pgcon-dbname "pg" (object))
 (declare-function pgcon-connect-plist "pg" (object))
+(declare-function pgcon-transaction-status "pg" (object))
 (declare-function pgcon-typname-by-oid "pg" (object))
 (declare-function pg-escape-identifier "pg" (identifier))
 (declare-function pg-escape-literal "pg" (string))
@@ -61,6 +62,9 @@
   (unless (require 'pg nil t)
     (signal 'clutch-db-error
             (list "PostgreSQL backend requires pg.el. Install emarsden/pg-el, ensure it is on load-path, then restart Emacs.")))
+  (unless (fboundp 'pgcon-transaction-status)
+    (signal 'clutch-db-error
+            (list "PostgreSQL backend requires a newer pg.el with pgcon-transaction-status. Update emarsden/pg-el, then restart Emacs.")))
   (unless clutch-db-pg--methods-installed
     (signal 'clutch-db-error
             (list "PostgreSQL backend was loaded before pg.el was available. Restart Emacs after installing pg.el."))))
@@ -348,116 +352,47 @@ When CONN is non-nil, include backend type metadata from its type cache."
 (defvar clutch-db-pg--manual-commit-cache (make-hash-table :test 'eq :weakness 'key)
   "Connections whose foreground SQL should run in manual-commit mode.")
 
-(defvar clutch-db-pg--tx-open-cache (make-hash-table :test 'eq :weakness 'key)
-  "Connections whose foreground transaction is currently open.")
-
-(defvar clutch-db-pg--tx-failed-cache (make-hash-table :test 'eq :weakness 'key)
-  "Connections whose foreground transaction is currently failed/aborted.")
-
 (defun clutch-db-pg--manual-commit-enabled-p (conn)
   "Return non-nil when CONN is in clutch-managed manual-commit mode."
   (and conn (gethash conn clutch-db-pg--manual-commit-cache)))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
-  (and conn (gethash conn clutch-db-pg--tx-open-cache)))
+  (and conn (memq (pgcon-transaction-status conn) '(?T ?E))))
 
 (defun clutch-db-pg--tx-failed-p (conn)
   "Return non-nil when CONN's foreground transaction is failed/aborted."
-  (and conn (gethash conn clutch-db-pg--tx-failed-cache)))
-
-(defun clutch-db-pg--clear-tx-state (conn)
-  "Clear PostgreSQL foreground transaction state for CONN."
-  (when conn
-    (remhash conn clutch-db-pg--tx-open-cache)
-    (remhash conn clutch-db-pg--tx-failed-cache)))
+  (and conn (eql (pgcon-transaction-status conn) ?E)))
 
 (defun clutch-db-pg--set-manual-commit-enabled (conn enabled)
   "Set clutch-managed manual-commit mode on CONN to ENABLED."
   (when conn
     (if enabled
         (puthash conn t clutch-db-pg--manual-commit-cache)
-      (remhash conn clutch-db-pg--manual-commit-cache)
-      (clutch-db-pg--clear-tx-state conn))))
-
-(defun clutch-db-pg--mark-tx-open (conn)
-  "Mark CONN as having an open, usable foreground transaction."
-  (when conn
-    (puthash conn t clutch-db-pg--tx-open-cache)
-    (remhash conn clutch-db-pg--tx-failed-cache)))
-
-(defun clutch-db-pg--mark-tx-failed (conn)
-  "Mark CONN as having an open failed/aborted foreground transaction."
-  (when conn
-    (puthash conn t clutch-db-pg--tx-open-cache)
-    (puthash conn t clutch-db-pg--tx-failed-cache)))
-
-(defun clutch-db-pg--begin-query-p (sql)
-  "Return non-nil for PostgreSQL transaction-start SQL."
-  (let ((case-fold-search t)
-        (trimmed (clutch-db-sql-strip-leading-comments sql)))
-    (string-match-p
-     "\\`\\s-*\\(?:BEGIN\\|START\\s-+TRANSACTION\\)\\b"
-     trimmed)))
-
-(defun clutch-db-pg--end-query-p (sql)
-  "Return non-nil when SQL ends a PostgreSQL transaction."
-  (let ((case-fold-search t)
-        (trimmed (clutch-db-sql-strip-leading-comments sql)))
-    (or (string-match-p
-         "\\`\\s-*\\(?:COMMIT\\|END\\|ABORT\\)\\(?:\\s-+\\(?:TRANSACTION\\|WORK\\)\\)?\\(?:\\s-*;\\|\\s-*$\\)"
-         trimmed)
-        (string-match-p
-         "\\`\\s-*ROLLBACK\\(?:\\s-+\\(?:TRANSACTION\\|WORK\\)\\)?\\(?:\\s-*;\\|\\s-*$\\)"
-         trimmed))))
+      (remhash conn clutch-db-pg--manual-commit-cache))))
 
 (defun clutch-db-pg--transaction-control-query-p (sql)
   "Return non-nil when SQL is explicit PostgreSQL transaction control."
-  (let ((trimmed (clutch-db-sql-strip-leading-comments sql)))
-    (or (clutch-db-pg--begin-query-p trimmed)
-        (clutch-db-pg--end-query-p trimmed)
-        (let ((case-fold-search t))
-          (or (string-match-p "\\`\\s-*SAVEPOINT\\b" trimmed)
-              (string-match-p "\\`\\s-*RELEASE\\b" trimmed)
-              (string-match-p "\\`\\s-*ROLLBACK\\s-+TO\\b" trimmed))))))
+  (let ((case-fold-search t)
+        (trimmed (clutch-db-sql-strip-leading-comments sql)))
+    (string-match-p
+     "\\`\\s-*\\(?:BEGIN\\|START\\s-+TRANSACTION\\|COMMIT\\|END\\|ABORT\\|ROLLBACK\\|SAVEPOINT\\|RELEASE\\)\\b"
+     trimmed)))
 
 (defun clutch-db-pg--ensure-foreground-transaction (conn sql)
   "Lazily open a foreground transaction on CONN before running SQL."
   (when (and (clutch-db-pg--manual-commit-enabled-p conn)
              (not (clutch-db-pg--transaction-control-query-p sql))
              (not (clutch-db-pg--tx-open-p conn)))
-    (clutch-db-pg--exec conn "BEGIN")
-    (clutch-db-pg--mark-tx-open conn)))
-
-(defun clutch-db-pg--note-query-success (conn sql)
-  "Update CONN foreground transaction state after successful SQL."
-  (when (clutch-db-pg--manual-commit-enabled-p conn)
-    (cond
-     ((clutch-db-pg--begin-query-p sql)
-      (clutch-db-pg--mark-tx-open conn))
-     ((clutch-db-pg--end-query-p sql)
-      (clutch-db-pg--clear-tx-state conn))
-     ((clutch-db-pg--transaction-control-query-p sql)
-      (clutch-db-pg--mark-tx-open conn))
-     (t
-      (clutch-db-pg--mark-tx-open conn)))))
-
-(defun clutch-db-pg--note-query-error (conn sql)
-  "Update CONN foreground transaction state after failed SQL."
-  (when (and (clutch-db-pg--manual-commit-enabled-p conn)
-             (clutch-db-pg--tx-open-p conn)
-             (not (clutch-db-pg--end-query-p sql)))
-    (clutch-db-pg--mark-tx-failed conn)))
+    (clutch-db-pg--exec conn "BEGIN")))
 
 (defun clutch-db-pg--run-query-with-transaction-state (conn sql thunk)
-  "Run THUNK for SQL on CONN and keep manual-commit state in sync."
+  "Run THUNK for SQL on CONN after applying lazy-BEGIN semantics."
   (condition-case err
       (progn
         (clutch-db-pg--ensure-foreground-transaction conn sql)
-        (prog1 (funcall thunk)
-          (clutch-db-pg--note-query-success conn sql)))
+        (funcall thunk))
     (pg-error
-     (clutch-db-pg--note-query-error conn sql)
      (signal 'clutch-db-error
              (list (error-message-string err))))))
 
@@ -634,8 +569,7 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
        ((string-prefix-p "{" trimmed) trimmed)
        ((string-match-p "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+="
                         trimmed)
-        (user-error
-         "PostgreSQL array values with explicit dimension bounds are not supported"))
+        trimmed)
        ((string-prefix-p "[" trimmed)
         (clutch-db-pg--array-literal-from-sequence
          (clutch-db-pg--parse-json-array-param trimmed type)))
@@ -830,15 +764,13 @@ No special init needed — encoding is set in startup message.")
   "Commit the current foreground transaction on PostgreSQL CONN."
   (clutch-db--translate-library-error pg-error
     (when (clutch-db-pg--tx-open-p conn)
-      (clutch-db-pg--exec conn "COMMIT"))
-    (clutch-db-pg--clear-tx-state conn)))
+      (clutch-db-pg--exec conn "COMMIT"))))
 
 (cl-defmethod clutch-db-rollback ((conn pgcon))
   "Roll back the current foreground transaction on PostgreSQL CONN."
   (clutch-db--translate-library-error pg-error
     (when (clutch-db-pg--tx-open-p conn)
-      (clutch-db-pg--exec conn "ROLLBACK"))
-    (clutch-db-pg--clear-tx-state conn)))
+      (clutch-db-pg--exec conn "ROLLBACK"))))
 
 (cl-defmethod clutch-db-set-auto-commit ((conn pgcon) auto-commit)
   "Set foreground autocommit mode on PostgreSQL CONN.

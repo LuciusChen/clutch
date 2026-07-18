@@ -17,7 +17,7 @@ Architecture diagrams and module ownership are in [[file:docs/architecture.md][d
 | Backend | Support level | Requirements and notes |
 |---------+---------------+------------------------|
 | MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
-| PostgreSQL | Core SQL support | Functional and compatible, with less daily-use coverage than MySQL |
+| PostgreSQL | Core SQL support | Requires current [[https://github.com/emarsden/pg-el][pg-el]] with =pgcon-transaction-status= |
 | SQLite | Core SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
 | DuckDB | Core SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |

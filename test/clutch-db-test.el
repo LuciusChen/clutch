@@ -1026,6 +1026,18 @@ authinfo, and PARAMS are explicit connection parameters."
     (clutch-db-set-auto-commit conn t)
     (should-not (clutch-db-manual-commit-p conn))))
 
+(ert-deftest clutch-db-test-native-pg-transaction-state-follows-pg-el ()
+  "Native PostgreSQL should read transaction state from pg-el."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test")))
+    (pcase-dolist (`(,status ,open ,failed)
+                   '((?I nil nil)
+                     (?T t nil)
+                     (?E t t)))
+      (setf (pgcon-transaction-status conn) status)
+      (should (eq (and (clutch-db-pg--tx-open-p conn) t) open))
+      (should (eq (and (clutch-db-pg--tx-failed-p conn) t) failed)))))
+
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
   (require 'clutch-db-pg)
@@ -1037,6 +1049,7 @@ authinfo, and PARAMS are explicit connection parameters."
                  (push sql calls)
                  (pcase sql
                    ("BEGIN"
+                    (setf (pgcon-transaction-status conn) ?T)
                     (make-pgresult :connection conn :status "BEGIN"))
                    ("SELECT 1"
                     (make-pgresult :connection conn
@@ -1068,10 +1081,13 @@ authinfo, and PARAMS are explicit connection parameters."
                  (push sql calls)
                  (pcase sql
                    ("BEGIN"
+                    (setf (pgcon-transaction-status conn) ?T)
                     (make-pgresult :connection conn :status "BEGIN"))
                    ("UPDATE demo SET x = 1"
+                    (setf (pgcon-transaction-status conn) ?E)
                     (signal 'pg-error '("statement failed")))
                    ("ROLLBACK"
+                    (setf (pgcon-transaction-status conn) ?I)
                     (make-pgresult :connection conn :status "ROLLBACK"))
                    (_
                     (ert-fail (format "Unexpected SQL: %s" sql)))))))
@@ -3673,11 +3689,10 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (equal (clutch-db-pg--typed-arguments
                     (list (clutch-db-typed-param [0 1 2] "_int4")))
                    '(("{0,1,2}" . nil))))
-    (let ((err (should-error
-                (clutch-db-pg--typed-arguments
-                 (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
-                :type 'user-error)))
-      (should (string-match-p "explicit dimension bounds" (cadr err))))))
+    (should (equal (clutch-db-pg--typed-arguments
+                    (list (clutch-db-typed-param
+                           "[0:2]={1,2,3}" "_int4")))
+                   '(("[0:2]={1,2,3}" . nil))))))
 
 (ert-deftest clutch-db-test-pg-column-details-keep-array-display-type ()
   "PostgreSQL column details should keep display type while saving backend type."

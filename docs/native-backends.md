@@ -137,6 +137,7 @@ For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS 
 
 ### Scope
 
+- Requires current [`pg-el`](https://github.com/emarsden/pg-el) with `pgcon-transaction-status`
 - Pure Elisp PostgreSQL protocol v3
 - SCRAM-SHA-256 (SASL) and MD5 authentication
 - TLS via Emacs GnuTLS
@@ -186,6 +187,7 @@ PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`, `requi
 - In clutch, `C-c C-a` enables a clutch-managed manual mode
 - Manual mode uses lazy `BEGIN`: the first foreground statement opens the transaction
 - `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
+- Transaction state comes directly from pg-el's latest PostgreSQL `ReadyForQuery` status
 - Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains accurate for native PostgreSQL
 
 ### Interrupts and Timeouts

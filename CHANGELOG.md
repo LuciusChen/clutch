@@ -12,9 +12,11 @@
 - Native MongoDB now requires mongodb.el's public connection host, port, and username accessors. Update mongodb.el when Clutch reports a missing public API instead of relying on configured parameters that may not describe the effective endpoint.
 - Reduced the native MongoDB console to common reads, generated single-document mutations, `runCommand`, and `ObjectId` / `ISODate`.  Database switching now uses `clutch-switch-schema`; dedicated admin/index helpers, database aggregation, multi-document mutations, cursor `batchSize` / `comment`, and numeric/timestamp constructor aliases were removed.
 - Generated Redis hash Browse now requires Redis 6.2 or newer because bounded sampling uses `HRANDFIELD`.  On older servers, issue `HSCAN` or `HGETALL` manually instead.
+- Native PostgreSQL now requires current pg-el with `pgcon-transaction-status`; update pg-el if Clutch reports that the accessor is unavailable.
 
 ### Fixed
 
+- Removed Clutch's duplicate PostgreSQL transaction-state tracking and explicit-array-bound rejection now that pg-el exposes `ReadyForQuery` status and parses dimension-prefixed array values upstream.
 - Extended the active column-header background across the full cell width instead of highlighting only the label text.
 - Suppressed automatic child-frame cell previews while refining a rectangular result selection.
 - Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.
