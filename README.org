@@ -20,7 +20,7 @@ Architecture diagrams and module ownership are in [[file:docs/architecture.md][d
 | PostgreSQL | Core SQL support | Requires current [[https://github.com/emarsden/pg-el][pg-el]] with =pgcon-transaction-status= |
 | SQLite | Core SQL support | Requires Emacs 29.1+ built-in =sqlite-*= functions; no external dependencies |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and =clutch-jdbc-agent.jar= |
-| DuckDB | Core SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a =jdbc:duckdb:...= URL |
+| DuckDB | Core SQL model, generic JDBC entry | Install the DuckDB JDBC driver and connect with a file-backed =jdbc:duckdb:...= URL; the shared namespace command switches schemas in the current catalog |
 | MongoDB | Basic native document support; optional SQL Interface surface | Normal connections use external =mongodb.el= native protocol support plus Clutch's MongoDB Shell / MQL helper query buffers; SQL Interface endpoints use =:surface sql-interface= and require the JDBC driver |
 | Redis | Basic key/value support | Normal connections use external =redis.el= native RESP support plus Clutch's line-oriented Redis command buffers, key browsing, and type-aware value display |
 | ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Useful through JDBC, with backend-specific limits around edits, transactions, and dialect behavior |
@@ -67,7 +67,7 @@ Joined, grouped, derived, or otherwise ambiguous result sets remain read-only fo
 - [[file:docs/interactive-client.org][Interactive client guide]] — key bindings, result workflows, object actions, REPL, transient menus, faces, timeouts, and customization.
 - [[file:docs/backend-support.org][Backend support levels]] — Core SQL, basic support, MongoDB SQL Interface, DuckDB, and Redis.
 - [[file:docs/native-backends.md][Native backend guide]] — MySQL, PostgreSQL, SQLite, SSH tunnels, TLS, timeout behavior, and backend-specific examples.
-- [[file:docs/jdbc-backend.org][JDBC backend guide]] — JDBC driver setup, connection examples, Oracle notes, transaction behavior, and generic JDBC URLs.
+- [[file:docs/jdbc-backend.org][JDBC backend guide]] — JDBC driver setup, connection examples, Oracle and DuckDB notes, transaction behavior, and generic JDBC URLs.
 - [[file:docs/org-babel.org][Org-Babel guide]] — =ob-clutch= setup, source block examples, header arguments, and connection caching.
 - [[file:docs/jdbc-agent-protocol.md][JDBC agent protocol]] — sidecar RPC protocol and implementation notes.
 
@@ -195,7 +195,7 @@ M-x clutch-query-sqlite-file ;; Shortcut: select a SQLite file → opens a conne
                              ;;         or SQLite[my.db]
 #+end_src
 
-Repeated calls with the same name switch to the existing buffer instead of opening a new one.  Use =clutch-switch-console= to jump between open consoles. =clutch-query-console= lists saved connections; pressing RET with no matching connection starts a temporary connection flow and opens a query console for it. SQLite is part of that flow and asks for a database file instead of host/user credentials.  =clutch-query-sqlite-file= is the direct shortcut for local SQLite files.  If no saved connections are configured, =clutch-query-console= starts the temporary connection flow immediately.
+=clutch-query-console= lists both open consoles and saved connections.  An open saved console appears once, while open temporary and SQLite consoles remain directly selectable.  Repeated calls with the same connection switch to the existing buffer instead of opening a new one.  Pressing RET with no matching connection starts a temporary connection flow; SQLite is part of that flow and asks for a database file instead of host/user credentials.  =clutch-query-sqlite-file= is the direct shortcut for local SQLite files.  If no saved connections or consoles exist, =clutch-query-console= starts the temporary connection flow immediately.
 
 *** 3. Write and execute SQL
 
@@ -374,9 +374,13 @@ Common entry points:
 
 MongoDB is basic native document support through =mongodb.el=: ordinary MongoDB deployments, supported MongoDB Shell / MQL helper commands, and shared object/result workflows.  It is not a full =mongosh= JavaScript runtime. MongoDB SQL Interface stays on the same =mongodb= backend as =:surface sql-interface= and requires the JDBC sidecar plus MongoDB JDBC driver jar.  See [[file:docs/mongodb-backend.org][docs/mongodb-backend.org]].
 
+The shared =clutch-switch-schema= command lists databases visible to the current MongoDB user and changes Clutch's logical database without reconnecting.
+
 ** Redis Backend
 
 Redis is basic key/value support through =redis.el=.  It connects to ordinary Redis TCP endpoints, uses line-oriented =clutch-redis-mode= command buffers, and maps key browsing/type-aware reads into the shared Clutch grid.  Redis support is intentionally basic: no SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows.  Generated discovery and collection-browse operations are bounded; use explicit scan/range commands for larger traversals.  See [[file:docs/backend-support.org][docs/backend-support.org]] and [[file:docs/native-backends.md][docs/native-backends.md]] for support boundaries.
+
+Redis profiles may select an initial logical database with =:database=.  Clutch does not offer it in =clutch-switch-schema= because Redis has no generally available, ACL-safe command that enumerates every configured logical database.
 
 ** JDBC Backend
 

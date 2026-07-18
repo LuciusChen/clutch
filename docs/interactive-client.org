@@ -290,7 +290,6 @@ db> SELECT * FROM users;     ;; Type SQL, auto-executes on ;
 
 Useful =M-x= entry points outside the main keymaps:
 
-- =clutch-switch-database= — ClickHouse-only reconnect-based database switch
 - =clutch-describe-refresh= — refresh the current describe buffer
 - =clutch-object-show-ddl-or-source= — show object DDL/source directly
 - =clutch-describe-dwim= / =clutch-act-dwim= — resolve objects and choose describe, browse, or backend-specific actions
@@ -311,13 +310,11 @@ The command does not run the SQL being copied.  It only uses clutch metadata API
 
 * Query Console
 
-=clutch-query-console= opens a dedicated buffer =*clutch: NAME*=, enables =clutch-mode=, and connects automatically.  The picker lists saved connections; pressing RET with no matching connection starts a temporary connection flow.  SQLite is part of that flow and reads a database file instead of host/user credentials.  =clutch-query-sqlite-file= jumps straight to the SQLite-file shortcut.  Repeated calls with the same saved connection or temporary connection switch to the existing buffer rather than creating a new one.  Connection happens before the buffer is shown: if the initial connect or a reconnect of an existing disconnected console fails, clutch raises the error without leaving a visible disconnected console buffer behind.
+=clutch-query-console= opens a dedicated buffer =*clutch: NAME*=, enables =clutch-mode=, and connects automatically.  Its unified picker lists open consoles and saved connections; an open saved console appears once, while open temporary and SQLite consoles remain directly selectable.  Pressing RET with no matching connection starts a temporary connection flow.  SQLite is part of that flow and reads a database file instead of host/user credentials.  =clutch-query-sqlite-file= jumps straight to the SQLite-file shortcut.  Repeated calls with the same connection switch to the existing buffer rather than creating a new one.  Connection happens before the buffer is shown: if the initial connect or a reconnect of an existing disconnected console fails, clutch raises the error without leaving a visible disconnected console buffer behind.
 
 Inside a query console, =C-c C-e= reconnects only that console's current connection.  For saved consoles, if the saved connection entry was removed from =clutch-connection-alist=, clutch raises a clear error instead of silently reconnecting to some other database.  For ad hoc consoles, reconnect uses the original temporary parameters; SQLite reuses the original file path.  To move to a different saved or temporary connection, call =clutch-query-console= again; press RET with no matching connection to create another temporary connection.
 
 In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps the generic connect picker: select a saved connection, or press RET with no matching connection to enter temporary params.  For SQLite files, use the query-console path instead of opening the database file itself as an editor buffer.
-
-=clutch-switch-console= lists all open console buffers via =completing-read= for fast switching between active connections.
 
 ** Paste whitespace cleanup
 
@@ -331,7 +328,6 @@ Suggested global bindings:
 
 #+begin_src emacs-lisp
 (global-set-key (kbd "C-c d") #'clutch-query-console)
-(global-set-key (kbd "C-c D") #'clutch-switch-console)
 #+end_src
 
 * Object Workflow
@@ -357,7 +353,7 @@ The main navigation path is object-centric rather than tree-centric.  =C-c C-j= 
 - =n=: copy object name
 - =f=: copy fully-qualified object name
 
-=C-c C-l= switches the current schema/database on the active connection and refreshes metadata for the new context.  Oracle/JDBC connections can switch business schemas such as =sales= and =analytics= within one connection, PostgreSQL-style wire connections use =SET search_path TO ...=, and MySQL connections map schema switching to =USE database=.  ClickHouse is handled separately: it has databases rather than runtime schemas, so =C-c C-l= prompts with =SHOW DATABASES= and reconnects to the selected =:database= instead of attempting session-level schema switching.  Generic =:backend jdbc= connections only support runtime schema switching when clutch has an explicit implementation for that driver/backend; custom JDBC URLs such as KingbaseES do not gain schema switching automatically.
+=C-c C-l= / =clutch-switch-schema= is the one public namespace entrypoint.  Each backend owns its candidates, current value, switch operation, and connection-state projection; the command layer only orchestrates an in-session change or a reconnect.  Oracle's JDBC adapter changes business schemas, PostgreSQL uses =SET search_path TO ...=, MySQL uses =USE database=, MongoDB changes its logical database from names returned by =mongodb.el=, and file-backed DuckDB uses =USE= for schemas in the current catalog.  ClickHouse exposes the same command but returns reconnect parameters because its HTTP-backed connection cannot rely on session-local =USE=.  Generic JDBC URLs gain no switching merely from JDBC metadata, and Redis remains profile-selected because it cannot reliably enumerate all configured logical databases through an ACL-safe command.
 
 For JDBC backends, [[https://github.com/LuciusChen/clutch-jdbc-agent][clutch-jdbc-agent]] now isolates foreground SQL from metadata traffic by keeping separate primary and metadata JDBC sessions under one logical clutch connection.  This avoids Oracle-style contention between user queries and background schema/object introspection.
 

@@ -1180,14 +1180,14 @@ RENDER-FN is called once per parameter and must return the replacement string."
   "Return a list of table name strings for CONN's current database.")
 
 (cl-defgeneric clutch-db-list-schemas (conn)
-  "Return available schema names for CONN, or nil when unsupported.")
+  "Return switchable schema/database names for CONN, or nil when unsupported.")
 
 (cl-defmethod clutch-db-list-schemas ((_conn t))
   "Backends without schema enumeration support return nil."
   nil)
 
 (cl-defgeneric clutch-db-current-schema (conn)
-  "Return the effective current schema for CONN, or nil when not applicable.")
+  "Return CONN's effective current schema/database, or nil when not applicable.")
 
 (cl-defmethod clutch-db-current-schema ((_conn t))
   "Default: no current schema abstraction."
@@ -1199,6 +1199,23 @@ RENDER-FN is called once per parameter and must return the replacement string."
 (cl-defmethod clutch-db-set-current-schema ((_conn t) _schema)
   "Default: runtime schema switching is unsupported."
   (user-error "This backend does not support switching schemas"))
+
+(cl-defgeneric clutch-db-update-namespace-params (conn params)
+  "Return connection PARAMS updated with CONN's current namespace.")
+
+(cl-defmethod clutch-db-update-namespace-params ((conn t) params)
+  "Store CONN's current schema in a copy of connection PARAMS."
+  (let ((schema (clutch-db-current-schema conn)))
+    (unless schema
+      (error "Backend switched namespace without reporting a current schema"))
+    (plist-put (copy-sequence params) :schema schema)))
+
+(cl-defgeneric clutch-db-namespace-reconnect-params (conn params namespace)
+  "Return replacement PARAMS when switching CONN to NAMESPACE needs reconnecting.")
+
+(cl-defmethod clutch-db-namespace-reconnect-params ((_conn t) _params _namespace)
+  "Default to switching the namespace within the existing connection."
+  nil)
 
 (cl-defgeneric clutch-db-list-table-entries (conn)
   "Return browseable table-like object entries for CONN.

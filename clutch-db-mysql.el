@@ -483,6 +483,10 @@ when non-nil."
   (clutch-db--translate-library-error mysql-error
     (mysql-select-database conn schema)))
 
+(cl-defmethod clutch-db-update-namespace-params ((conn mysql-conn) params)
+  "Store MySQL CONN's current database in a copy of connection PARAMS."
+  (plist-put (copy-sequence params) :database (clutch-db-database conn)))
+
 (cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
   "Return table/view entry plists for the current MySQL database on CONN."
   (clutch-db--translate-library-error mysql-error

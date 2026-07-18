@@ -6,6 +6,9 @@
 
 - **Result-cell preview overhaul:** Removed the `V` live-view commands, their bottom-window viewer, and freeze/refresh/quit controls.  `v` remains the explicit full value viewer; optional automatic child-frame previews are now controlled by `clutch-cell-preview-style`, appear only for visibly truncated cells, fit tightly to their formatted content, follow window resizing, use a theme-relative contrasting surface, and silently stay disabled on unsupported displays.
 - Removed the public `clutch-execute-query-at-point` and `clutch-execute-statement-at-point` commands.  Use `clutch-execute-dwim`, `clutch-execute-region`, or `clutch-execute-buffer`; select a region first when exact execution boundaries matter.
+- Removed the undocumented `clutch-execute` command and its direct arbitrary-buffer execution behavior.  Execute through the connection-local DWIM, region, or buffer commands; the explicit indirect-edit workflow remains available for SQL embedded in other source buffers.
+- Removed the ClickHouse-only `clutch-switch-database` command.  Use `clutch-switch-schema` for every backend; ClickHouse still selects a database by reconnecting internally.
+- Removed `clutch-switch-console`.  `clutch-query-console` now lists both open consoles and saved connections, including open temporary and SQLite consoles.
 - Removed the table-specific `clutch-describe-table`, `clutch-describe-table-at-point`, and `clutch-browse-table` commands.  Use `clutch-describe-dwim` or `clutch-act-dwim`.
 - Removed the standalone `clutch-result-insert-mode` entry point and its public map/hook.  Open insert forms with `clutch-result-insert-row` from a result.
 - Removed the `:tramp` saved-connection parameter spelling.  Use `:tramp-default-directory` for explicit TRAMP connection origins.
@@ -14,9 +17,14 @@
 - Generated Redis hash Browse now requires Redis 6.2 or newer because bounded sampling uses `HRANDFIELD`.  On older servers, issue `HSCAN` or `HGETALL` manually instead.
 - Native PostgreSQL now requires current pg-el with `pgcon-transaction-status`; update pg-el if Clutch reports that the accessor is unavailable.
 
+### Added
+
+- Added backend-owned namespace switching through the shared `clutch-switch-schema` entrypoint: file-backed DuckDB can switch schemas within its current catalog, MongoDB enumerates visible databases through `mongodb.el`, and ClickHouse keeps reconnect-based database switching without leaking its mechanics into the command layer.
+
 ### Fixed
 
 - Removed Clutch's duplicate PostgreSQL transaction-state tracking and explicit-array-bound rejection now that pg-el exposes `ReadyForQuery` status and parses dimension-prefixed array values upstream.
+- Allowed the native live-test runner to continue under Podman instead of exiting during the macOS-only OrbStack guard.
 - Extended the active column-header background across the full cell width instead of highlighting only the label text.
 - Suppressed automatic child-frame cell previews while refining a rectangular result selection.
 - Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.

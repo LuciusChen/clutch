@@ -22,13 +22,15 @@ MongoDB SQL Interface is not another backend.  It is the optional =:surface sql-
 
 * DuckDB Boundary
 
-DuckDB belongs with SQL-first databases, not with document/basic support.  Its data model, query language, metadata, and mutation behavior are close to the core clutch SQL workflow.  The current integration is through the generic JDBC backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC driver, so the entry point is less polished than first-class native/manual backends.
+DuckDB belongs with SQL-first databases, not with document/basic support.  Its data model, query language, metadata, and mutation behavior are close to the core clutch SQL workflow.  The current integration is through the generic JDBC backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC driver.  =clutch-switch-schema= lists and switches schemas only in the current file-backed catalog.  Pure in-memory URLs and attached catalogs are deliberately excluded because those databases or =ATTACH= state belong to one JDBC session while Clutch's metadata sidecar uses a separate session; use qualified =catalog.schema.table= names for attached catalogs.
 
 * Redis And Similar Systems
 
 Redis is not a MongoDB-like document backend for clutch purposes.  It is a key/value and data-structure server with command-oriented workflows, different metadata, different result shapes, and no table/collection row identity model.
 
 Redis support uses the separate =redis= backend and the external =redis.el= native RESP client.  Clutch owns the command query buffer, key browsing, type-aware value display, TTL metadata, and result-grid mapping.  The protocol package owns RESP encoding/decoding, TCP connection lifecycle, AUTH, SELECT, and Redis error responses.
+
+Saved Redis profiles may choose an initial =:database=.  Runtime logical-database switching is not advertised through the shared namespace picker because the server's configured database count is not reliably enumerable under ordinary ACLs; hard-coding the common 0–15 range would overstate the backend capability.
 
 Redis support is intentionally basic.  It does not expose SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows.
 
