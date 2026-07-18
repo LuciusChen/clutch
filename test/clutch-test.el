@@ -7483,29 +7483,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (equal captured '(document-conn "db.users.find()")))
       (should (plist-get outcome :result-query-p)))))
 
-(ert-deftest clutch-test-execute-from-arbitrary-buffer-uses-live-connection ()
-  "`clutch-execute' should execute with a connection found in another buffer."
-  (let ((conn-buf (generate-new-buffer " *clutch-conn*"))
-        captured-conn)
-    (unwind-protect
-        (progn
-          (with-current-buffer conn-buf
-            (setq-local clutch-connection 'fake-conn))
-          (with-temp-buffer
-            (insert "SELECT 1")
-            (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                      ((symbol-function 'clutch--connection-alive-p)
-                       (lambda (conn) (eq conn 'fake-conn)))
-                      ((symbol-function 'clutch--execute)
-                       (lambda (_sql conn &optional _context)
-                         (setq captured-conn conn)))
-                      ((symbol-function 'clutch--mark-executed-sql-region)
-                       #'ignore))
-              (clutch-execute "SELECT 1")
-              (should (eq captured-conn 'fake-conn)))))
-      (when (buffer-live-p conn-buf)
-        (kill-buffer conn-buf)))))
-
 (ert-deftest clutch-test-execute-statements-confirms-each-nonselect ()
   "Batch execution should apply destructive and risky DML guards."
   (with-temp-buffer

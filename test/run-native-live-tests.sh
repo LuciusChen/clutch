@@ -56,9 +56,9 @@ ctr() {
 }
 
 require_orbstack_docker() {
-  [[ "$container_runtime" == "docker" ]] || return
-  [[ "$os_name" == "Darwin" ]] || return
-  [[ "${CLUTCH_TEST_ALLOW_NON_ORBSTACK:-}" == "1" ]] && return
+  [[ "$container_runtime" == "docker" ]] || return 0
+  [[ "$os_name" == "Darwin" ]] || return 0
+  [[ "${CLUTCH_TEST_ALLOW_NON_ORBSTACK:-}" == "1" ]] && return 0
 
   local docker_os
   docker_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"

@@ -387,15 +387,6 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
           :params (buffer-local-value 'clutch--connection-params buf)
           :product (buffer-local-value 'clutch--conn-sql-product buf))))
 
-(defun clutch--connection-clickhouse-p (conn)
-  "Return non-nil when CONN is a ClickHouse connection."
-  (and conn
-       (eq (clutch--backend-key-from-conn conn) 'clickhouse)))
-
-(defun clutch--params-clickhouse-p (params)
-  "Return non-nil when connection PARAMS target ClickHouse."
-  (eq (and params (clutch--backend-key-from-params params)) 'clickhouse))
-
 ;;;; SQL helpers for transaction state
 
 (defun clutch--manual-commit-dirtying-query-p (sql)
@@ -450,7 +441,7 @@ pre-rendered text."
                (clutch--connection-display-key conn))
           :namespace
           (and connected-p connection-backend-key
-               (clutch--current-namespace-name conn))
+               (clutch-db-current-schema conn))
           :schema-state
           (and connected-p
                (plist-get (clutch--schema-status-entry conn) :state))
@@ -792,12 +783,6 @@ Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
 executed outside clutch that would otherwise leave stale completions."
   (interactive)
   (clutch--refresh-current-schema nil t))
-
-(defun clutch--current-namespace-name (conn)
-  "Return the current schema/database label for CONN, or nil."
-  (or (and (clutch--connection-clickhouse-p conn)
-           (clutch-db-database conn))
-      (clutch-db-current-schema conn)))
 
 ;;;; Backend detection
 
@@ -2372,54 +2357,6 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                       (funcall update-fn clutch--connection-params))
           (clutch--update-mode-line))))))
 
-(defun clutch--list-clickhouse-databases (conn)
-  "Return sorted database names visible to ClickHouse CONN."
-  (sort
-   (delete-dups
-    (cl-loop for row in (clutch-db-result-rows
-                         (clutch-db-query conn "SHOW DATABASES"))
-             for db = (car row)
-             when (and (stringp db) (not (string-empty-p db)))
-             collect db))
-   #'string-collate-lessp))
-
-;;;###autoload (autoload 'clutch-switch-database "clutch" nil t)
-(defun clutch-switch-database ()
-  "Switch the current ClickHouse connection to another database by reconnecting."
-  (interactive)
-  (let* ((context (clutch--command-connection-context))
-         (conn (or clutch-connection
-                   (plist-get context :connection)
-                   (user-error "No active connection")))
-         (params (or (plist-get context :params)
-                     (car (clutch--connection-context conn))
-                     (user-error "No reconnect parameters for this connection")))
-         (current (or (plist-get params :database) "default"))
-         (databases (clutch--list-clickhouse-databases conn)))
-    (unless (or (clutch--connection-clickhouse-p conn)
-                (clutch--params-clickhouse-p params))
-      (user-error
-       "Runtime database switching is currently available only for ClickHouse"))
-    (unless databases
-      (user-error "No databases returned by SHOW DATABASES"))
-    (let ((database (completing-read
-                     (if current
-                         (format "Switch to database (current %s): " current)
-                       "Switch to database: ")
-                     databases nil t nil nil current)))
-      (unless (string-empty-p database)
-        (if (string-equal database current)
-            (message "Already on database %s" current)
-          (when (clutch--connection-alive-p conn)
-            (clutch--confirm-disconnect-transaction-loss
-             conn
-             "Uncommitted changes will be lost.  Switch database? "))
-          (clutch--replace-connection
-           conn
-           (plist-put (copy-sequence params) :database database)
-           (plist-get context :product))
-          (message "Current database: %s" database))))))
-
 ;;;###autoload (autoload 'clutch-switch-schema "clutch" nil t)
 (defun clutch-switch-schema ()
   "Switch the current schema or database on the active connection."
@@ -2429,47 +2366,54 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                    (plist-get context :connection)
                    (user-error "No active connection")))
          (params (or clutch--connection-params
-                     (plist-get context :params))))
-    (if (or (clutch--connection-clickhouse-p conn)
-            (clutch--params-clickhouse-p params))
-        (clutch-switch-database)
-      (let* ((schemas (clutch-db-list-schemas conn))
-             (current (clutch-db-current-schema conn)))
-        (unless schemas
-          (user-error
-           "Runtime schema switching is not available for this connection"))
-        (let ((schema (completing-read
-                       (if current
-                           (format "Switch to schema (current %s): " current)
-                         "Switch to schema: ")
-                       schemas nil t nil nil current)))
-          (unless (string-empty-p schema)
-            (if (and current
-                     (string= (downcase schema) (downcase current)))
-                (message "Already on schema %s" current)
-              (condition-case err
-                  (progn
-                    (clutch-db-set-current-schema conn schema)
-                    (clutch--clear-connection-problem-capture conn)
-                    (clutch--update-connection-params-for-buffers
-                     conn
-                     (lambda (connection-params)
-                       (if (eq (plist-get connection-params :backend) 'mysql)
-                           (plist-put connection-params :database schema)
-                         (plist-put connection-params :schema schema))))
-                    (clutch--clear-connection-metadata-caches conn)
-                    (clutch--refresh-current-schema t)
-                    (message "Current schema: %s" schema))
-                (clutch-db-error
-                 (let ((summary
-                        (cdr
-                         (clutch--remember-query-error
-                          (current-buffer) conn "schema-switch" nil err
-                          (list :schema schema
-                                :current-schema current)))))
-                   (user-error "%s"
-                               (clutch--debug-workflow-message
-                                summary))))))))))))
+                     (plist-get context :params)))
+         (namespaces (clutch-db-list-schemas conn))
+         (current (clutch-db-current-schema conn)))
+    (unless namespaces
+      (user-error
+       "Runtime schema/database switching is not available for this connection"))
+    (let ((namespace
+           (completing-read
+            (if current
+                (format "Switch schema/database (current %s): " current)
+              "Switch schema/database: ")
+            namespaces nil t nil nil current)))
+      (unless (string-empty-p namespace)
+        (if (and current (string-equal-ignore-case namespace current))
+            (message "Already on schema/database %s" current)
+          (if-let* ((replacement-params
+                     (clutch-db-namespace-reconnect-params
+                      conn params namespace)))
+              (progn
+                (when (clutch--connection-alive-p conn)
+                  (clutch--confirm-disconnect-transaction-loss
+                   conn
+                   "Uncommitted changes will be lost.  Switch database? "))
+                (clutch--replace-connection
+                 conn replacement-params (plist-get context :product))
+                (message "Current schema/database: %s" namespace))
+            (condition-case err
+                (progn
+                  (clutch-db-set-current-schema conn namespace)
+                  (clutch--clear-connection-problem-capture conn)
+                  (clutch--update-connection-params-for-buffers
+                   conn
+                   (lambda (connection-params)
+                     (clutch-db-update-namespace-params
+                      conn connection-params)))
+                  (clutch--clear-connection-metadata-caches conn)
+                  (clutch--refresh-current-schema t)
+                  (message "Current schema/database: %s" namespace))
+              (clutch-db-error
+               (let ((summary
+                      (cdr
+                       (clutch--remember-query-error
+                        (current-buffer) conn "schema-switch" nil err
+                        (list :schema namespace
+                              :current-schema current)))))
+                 (user-error "%s"
+                             (clutch--debug-workflow-message
+                              summary)))))))))))
 
 ;;;; Interactive connect/disconnect
 

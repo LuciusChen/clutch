@@ -303,21 +303,42 @@ console window; (3) nil, meaning use the selected window."
           :params params
           :ad-hoc t)))
 
-(defun clutch--read-query-console-choice (names)
-  "Read a query console choice from NAMES; no match means new."
-  (clutch--read-saved-connection-choice "Console: " names))
+(defun clutch--query-console-targets ()
+  "Return `(DISPLAY . TARGET)' entries for saved and open consoles."
+  (let (matched-buffers)
+    (append
+     (cl-loop for (name . _) in clutch-connection-alist
+              for params = (clutch--saved-connection-params name)
+              for storage = (clutch--console-persistence-name name params)
+              for buffer = (clutch--find-console-buffer name storage)
+              do (when buffer
+                   (push buffer matched-buffers))
+              collect (cons name name))
+     (cl-loop for buffer in (buffer-list)
+              for target =
+              (unless (memq buffer matched-buffers)
+                (with-current-buffer buffer
+                  (when (and (clutch--query-buffer-p)
+                             clutch--console-name
+                             clutch--connection-params)
+                    (cons (buffer-name buffer)
+                          (list :name clutch--console-name
+                                :params clutch--connection-params
+                                :ad-hoc t)))))
+              when target collect target))))
 
 (defun clutch--read-query-console-target ()
-  "Read a saved connection name or an ad hoc connection target."
-  (let* ((names (mapcar #'car clutch-connection-alist))
+  "Read an open, saved, or new ad hoc query console target."
+  (let* ((targets (clutch--query-console-targets))
+         (names (mapcar #'car targets))
          (choice (if names
-                     (clutch--read-query-console-choice names)
-                   "")))
+                     (clutch--read-saved-connection-choice "Console: " names)
+                   ""))
+         (target (cdr (assoc choice targets))))
     (cond
      ((string= choice "")
       (clutch--ad-hoc-console-target))
-     ((member choice names)
-      choice)
+     (target target)
      (t
       (clutch--ad-hoc-console-target)))))
 
@@ -425,17 +446,6 @@ window rather than replacing the current window."
             (params (plist-get target :params)))
         (clutch--open-query-console
          name params params source-default-directory)))))
-
-;;;###autoload (autoload 'clutch-switch-console "clutch" nil t)
-(defun clutch-switch-console ()
-  "Switch to an open clutch query console using `completing-read'."
-  (interactive)
-  (let ((consoles (cl-loop for buf in (buffer-list)
-                            when (string-prefix-p "*clutch: " (buffer-name buf))
-                            collect (buffer-name buf))))
-    (if consoles
-        (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
-      (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
 
 (defconst clutch--row-identity-hidden-prefix "clutch__rid_"
   "Prefix used for hidden row identity result columns.")
@@ -1465,26 +1475,6 @@ Returns the connection or nil."
            for conn = (buffer-local-value 'clutch-connection buf)
            when (clutch--connection-alive-p conn)
            return conn))
-
-;;;###autoload (autoload 'clutch-execute "clutch" nil t)
-(defun clutch-execute (sql)
-  "Execute SQL from any buffer.
-With an active region, execute the region.  Otherwise execute the
-current line.  Uses the connection from any `clutch-mode' buffer."
-  (interactive
-   (list (string-trim
-          (if (use-region-p)
-              (buffer-substring-no-properties (region-beginning) (region-end))
-            (buffer-substring-no-properties
-             (line-beginning-position) (line-end-position))))))
-  (when (string-empty-p sql)
-    (user-error "No SQL to execute"))
-  (let* ((conn (or clutch-connection
-                   (clutch--find-connection)
-                   (user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
-         (beg (if (use-region-p) (region-beginning) (line-beginning-position)))
-         (end (if (use-region-p) (region-end) (line-end-position))))
-    (clutch--execute-and-mark sql beg end conn)))
 
 ;;;; Indirect edit buffer
 

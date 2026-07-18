@@ -118,7 +118,7 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
                          :auth-database "admin"
                          :user "reporter" :pass-entry "atlas-sql"))
 
-        ;; DuckDB (local embedded database through generic JDBC URL)
+        ;; DuckDB (file-backed local database through a generic JDBC URL)
         ("duckdb" . (:backend jdbc
                       :url "jdbc:duckdb:/path/to/analytics.duckdb"
                       :driver-class "org.duckdb.DuckDBDriver"
@@ -136,6 +136,12 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
 #+end_src
 
 JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.org::*Password Management][Password Management]] for details.
+
+** DuckDB-specific Notes
+
+=C-c C-l= / =clutch-switch-schema= lists schemas in DuckDB's current file-backed catalog and switches the primary JDBC session with =USE catalog.schema=.  Clutch stores the raw catalog and schema names so reconnect and metadata scope remain synchronized; SQL quoting is applied only when executing the switch.
+
+Pure in-memory URLs and attached catalogs are not listed.  An in-memory database and DuckDB =ATTACH= state are local to the primary JDBC session, while Clutch intentionally uses a separate JDBC metadata session.  Until the sidecar has an explicit shared-session contract, use a file-backed database for the shared metadata workflow and query attached objects with qualified =catalog.schema.table= names.
 
 ** Oracle-specific Notes
 
