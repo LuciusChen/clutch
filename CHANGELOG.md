@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Extended the active column-header background across the full cell width instead of highlighting only the label text.
 - Suppressed automatic child-frame cell previews while refining a rectangular result selection.
 - Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.
 - Made staged SQL mutations fail closed: hidden row-identity columns are verified at their injected trailing positions, computed or uncertain projections are read-only, writable identifiers are reconciled with canonical backend metadata, and multi-statement batches cannot partially commit.  SQLite batches use a real transaction; unsupported autocommit and already-dirty manual transactions fail before execution.

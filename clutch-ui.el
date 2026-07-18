@@ -1134,9 +1134,8 @@ indicator for unsorted columns too.  CIDX disambiguates duplicate names."
         (concat (propertize name 'clutch-header-name t) " " sort)
       (propertize name 'clutch-header-name t))))
 
-(defun clutch--header-cell-label (cidx width &optional active-cidx)
-  "Return the styled header label for CIDX within logical WIDTH.
-ACTIVE-CIDX identifies the highlighted column, if any."
+(defun clutch--header-cell-label (cidx width)
+  "Return the styled header label for CIDX within logical WIDTH."
   (let* ((name (nth cidx clutch--result-columns))
          (label (clutch--header-label name t cidx))
          (label (if (> (string-width label) width)
@@ -1144,9 +1143,6 @@ ACTIVE-CIDX identifies the highlighted column, if any."
                   (copy-sequence label))))
     (add-face-text-property 0 (length label) 'clutch-field-name-face
                             'append label)
-    (when (eql cidx active-cidx)
-      (add-face-text-property 0 (length label) 'clutch-header-active-face
-                              'append label))
     ;; Only underline the column name, not its spacer or sort indicator.
     (dotimes (i (length label))
       (when (get-text-property i 'clutch-header-name label)
@@ -1930,12 +1926,15 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (pixel-width (and (vectorp clutch--column-pixel-widths)
                            (< cidx (length clutch--column-pixel-widths))
                            (aref clutch--column-pixel-widths cidx)))
-         (label (clutch--header-cell-label cidx w active-cidx))
+         (label (clutch--header-cell-label cidx w))
          (label (clutch--center-display-string label w pixel-width))
          (pad-str (make-string clutch-column-padding ?\s))
          (sort-map (clutch--header-sort-keymap cidx name))
          (body nil))
     (setq body (concat pad-str label pad-str))
+    (when (eql cidx active-cidx)
+      (add-face-text-property 0 (length body) 'clutch-header-active-face
+                              'append body))
     (add-text-properties 0 (length body)
                          `(clutch-header-col ,cidx
                            local-map ,sort-map

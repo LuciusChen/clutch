@@ -1944,6 +1944,24 @@
           (should (equal (get-text-property 0 'display rendered)
                          '(space :align-to 0))))))))
 
+(ert-deftest clutch-test-active-header-face-covers-cell-width ()
+  "The active header face should cover the full cell, including padding."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id")
+                clutch--result-column-defs '((:name "id"))
+                clutch--column-pixel-widths nil)
+    (let* ((clutch--header-sort-indicator-cache
+            (make-hash-table :test 'equal))
+           (cell (clutch--header-cell 0 [8] 0)))
+      (should
+       (cl-loop for pos from 1 below (length cell)
+                for face = (get-text-property pos 'face cell)
+                always (or (eq face 'clutch-header-active-face)
+                           (and (listp face)
+                                (memq 'clutch-header-active-face face)))))
+      (should-not (eq (get-text-property 0 'face cell)
+                      'clutch-header-active-face)))))
+
 (ert-deftest clutch-test-refresh-chrome-lines-update-without-changing-body ()
   "Header and footer refreshes should update chrome without touching body text."
   (ert-info ("footer")
