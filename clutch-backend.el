@@ -1531,6 +1531,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :default-port 3306
 	       :support-level core
 	       :data-model relational
+	       :update-default t
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
 	       :aliases (postgres postgresql)
@@ -1540,6 +1541,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :default-port 5432
 	       :support-level core
 	       :data-model relational
+	       :update-default t
 	       :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
 	       :connect-fn clutch-db-sqlite-connect
@@ -1570,7 +1572,8 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 Each plist has :require (the feature to load), :connect-fn (a function taking
 a plist of connection params and returning a conn), and optional :aliases,
 :normalize-fn plus UI metadata such as :display-name, :default-port,
-:support-level, :data-model, :query-mode, :surfaces, and :manual-choice.
+:support-level, :data-model, :query-mode, :surfaces, and :manual-choice, plus
+capability metadata such as :update-default.
 Surface entries may set :execution-model and :transport for non-default
 execution paths.")
 
@@ -1611,6 +1614,10 @@ before returning the list."
        (plist-get (clutch-backend-feature
                    (clutch-backend-normalize backend))
                   :data-model)))
+
+(defun clutch-backend-update-default-p (backend)
+  "Return non-nil when BACKEND supports DEFAULT in UPDATE assignments."
+  (plist-get (clutch-backend-feature backend) :update-default))
 
 (defun clutch-backend-surface-feature (backend surface)
   "Return registered feature plist for BACKEND SURFACE, or nil."

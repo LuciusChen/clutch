@@ -2360,16 +2360,17 @@ When QUIET is non-nil, suppress informational fallback messages."
 
 (defun clutch--view-format-value (val)
   "Format VAL for value viewers."
-  (if (null val)
-      (clutch--null-display-string)
-    (clutch--format-value val)))
+  (or (when-let* ((placeholder (clutch--cell-placeholder-value val)))
+        (propertize placeholder 'face 'clutch-null-face))
+      (and (null val) (clutch--null-display-string))
+      (clutch--format-value val)))
 
 (defun clutch--view-spec (val col-def &optional quiet)
   "Return rendering spec for VAL with column metadata COL-DEF.
 When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
-     ((null val)
+     ((or (null val) (clutch--cell-placeholder-value val))
       (list :kind "Value"
             :content (clutch--view-format-value val)
             :setup #'clutch--setup-plain-view-buffer))
@@ -2831,9 +2832,7 @@ Selects JSON, XML, or binary string view based on column type and content."
   (interactive "sShell command on cell: ")
   (pcase-let ((`(,_ridx ,_cidx ,val) (or (clutch--cell-at-point)
                                           (user-error "No cell at point"))))
-    (let ((input (if (stringp val)
-                     val
-                   (clutch--format-value val))))
+    (let ((input (clutch--format-value val)))
       (clutch--view-in-buffer
        (with-temp-buffer
          (insert input)
@@ -3514,9 +3513,9 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
          (fk (cdr (assq cidx fk-info)))
-         (formatted (if (null display-val)
-                        clutch--null-cell-display-text
-                      (clutch--format-value display-val)))
+         (formatted (or (clutch--cell-placeholder-value display-val)
+                        (and (null display-val) clutch--null-cell-display-text)
+                        (clutch--format-value display-val)))
          (display (if (and long-p (not expanded-p) (> (length formatted) 80))
                       (concat (substring formatted 0 80) "…")
                     formatted))
@@ -3586,6 +3585,8 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
   "Navigate to the FK-referenced row for VAL using FK plist, via RESULT-BUF."
   (when (null val)
     (user-error "NULL value — cannot follow"))
+  (when-let* ((placeholder (clutch--cell-placeholder-value val)))
+    (user-error "%s value — cannot follow" placeholder))
   (with-current-buffer result-buf
     (let ((c (buffer-local-value 'clutch-connection result-buf)))
       (clutch--execute
@@ -3607,11 +3608,13 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
             (buffer-local-value 'clutch--result-column-defs result-buf))
            (col-def (nth cidx col-defs))
            (value (get-text-property (point) 'clutch-full-value))
+           (placeholder (clutch--cell-placeholder-value value))
            (expandable-p
-            (and (clutch--long-field-type-p col-def)
+            (and (not placeholder)
+                 (clutch--long-field-type-p col-def)
                  (> (length (clutch--format-value value)) 80)))
            (action (cond
-                    (fk 'follow-fk)
+                    ((and fk value (not placeholder)) 'follow-fk)
                     ((and expandable-p
                           (memq cidx clutch-record--expanded-fields))
                      'collapse)

@@ -2875,16 +2875,17 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                    ("get-columns" `(:columns ((:name "id" :type "UInt64"
                                                :nullable ,clutch-jdbc--json-false)
                                               (:name "user_id" :type "UInt64"
-                                               :nullable t))))
+                                               :nullable t
+                                               :default "0"))))
                    (_ (ert-fail (format "unexpected op: %s" op)))))))
       (should
        (equal (clutch-db-column-details conn "events")
               '((:name "id" :type "UInt64" :nullable nil
-                 :primary-key t :foreign-key nil :comment nil)
+                 :primary-key t :foreign-key nil :comment nil :default nil)
                 (:name "user_id" :type "UInt64" :nullable t
                  :primary-key nil
                  :foreign-key (:ref-table "users" :ref-column "id")
-                 :comment nil))))
+                 :comment nil :default "0"))))
       (dolist (call calls)
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
@@ -3414,6 +3415,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (eq (plist-get pg-features :data-model) 'relational))
     (should (eq (plist-get pg-features :sql-product) 'postgres))
     (should (eq (plist-get sqlite-features :data-model) 'relational))
+    (should (clutch-backend-update-default-p 'oracle))
+    (should-not (clutch-backend-update-default-p 'sqlite))
     ;; Generic JDBC backend
     (should jdbc-features)
     (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))

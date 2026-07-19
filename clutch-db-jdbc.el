@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.13"
+(defcustom clutch-jdbc-agent-version "0.2.14"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "ef3984ea3eaca1d60eb6e8e4a415e0483b9e4fe46f32611887272b1f7f51094d"
+  "312794d28682fafa8fbe8edafd372b0218097588ced33fa2e27ac871aac12311"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -175,31 +175,36 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
                   :default-port 1521
                   :support-level core
                   :data-model relational
+                  :update-default t
                   :sql-product oracle))
     (sqlserver  . (:display-name "SQL Server"
                   :default-port 1433
                   :support-level core
                   :data-model relational
+                  :update-default t
                   :sql-product ms))
     (db2        . (:display-name "DB2"
                   :default-port 50000
                   :support-level basic
                   :data-model relational
+                  :update-default t
                   :sql-product db2))
     (snowflake  . (:display-name "Snowflake"
                   :default-port 443
                   :support-level basic
-                  :data-model relational))
+                  :data-model relational
+                  :update-default t))
     (redshift   . (:display-name "Redshift"
                   :default-port 5439
                   :support-level basic
                   :data-model relational
+                  :update-default t
                   :sql-product postgres))
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
                   :support-level basic
                   :data-model relational)))
-  "User-facing metadata for JDBC-backed concrete drivers.")
+  "Metadata for JDBC-backed concrete drivers.")
 
 (defconst clutch-jdbc--oracle-driver-filenames
   '("ojdbc8.jar" "ojdbc11.jar")
@@ -2204,7 +2209,8 @@ the metadata request."
                       :nullable    (clutch-jdbc--json-bool (plist-get col :nullable))
                       :primary-key (and (member name pk-cols) t)
                       :foreign-key (cdr (assoc name fks))
-                      :comment     nil)))
+                      :comment     nil
+                      :default     (plist-get col :default))))
             cols)))
 
 ;;;; Re-entrancy guard

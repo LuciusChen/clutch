@@ -75,10 +75,11 @@ Single-cell edit buffers use the same staged-mutation vocabulary as result buffe
 | =C-c '=           | Edit current JSON field in a dedicated buffer  |
 | =C-c .=           | Set current date/time field to "now"           |
 | =C-c C-n=         | Set database =NULL=                            |
+| =C-c C-d=         | Set database =DEFAULT=                         |
 | =C-c C-c=         | Stage edited value                             |
 | =C-c C-k=         | Cancel                                         |
 
-Database =NULL= displays as =<null>= in result cells and edit buffers.  In an edit buffer, =C-c C-n= sets an explicit =NULL= state; an empty buffer remains an empty string, and typing =NULL= stages the literal text =NULL=.
+Database =NULL= and =DEFAULT= display as =<null>= and =<default>= with the same placeholder face.  The edit header shows =Set NULL= only for nullable columns and =Set DEFAULT= only when the column declares a default and the backend supports it.  An empty buffer remains an empty string, while typing =NULL= or =DEFAULT= stages literal text; use =C-c C-n= or =C-c C-d= for the database values.
 
 #+CAPTION: Result browser with staged markers, sort state, and query timing.
 [[file:screenshots/result-browser-basic.png]]
@@ -222,9 +223,10 @@ The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=
                                M-TAB completes enum / bool-like values when available
                                non-JSON edit buffers still use C-c ' for the JSON sub-editor fallback
                                C-c . sets temporal columns to now
-                               C-c C-n sets database NULL
+                               C-c C-n sets database NULL when the column is nullable
+                               C-c C-d sets database DEFAULT when supported for that column
 5. Edit the value, C-c C-c to stage (C-c C-k to cancel)
-                               empty text is an empty string; C-c C-n is database NULL
+                               empty text is an empty string; NULL and DEFAULT use their explicit commands
                                enum / bool / numeric / temporal fields validate locally as you edit
                                JSON validation follows the same model but waits for a short idle pause
                                validation shows a compact inline token instead of a long full-line message

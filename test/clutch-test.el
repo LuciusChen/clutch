@@ -792,29 +792,37 @@
         (should (equal (plist-get prep :sql)
                        "SELECT id FROM APP.reports"))))))
 
-(ert-deftest clutch-test-qualified-row-identity-preserves-mutation-target ()
-  "Qualified source tokens should remain the target of staged mutations."
+(ert-deftest clutch-test-qualified-update-preserves-target-and-default-syntax ()
+  "Qualified UPDATE targets and DEFAULT assignments should remain SQL syntax."
   (let ((clutch-connection
          (make-clutch-jdbc-conn :params '(:driver oracle)))
-        (clutch--result-columns '("ID" "STATUS"))
+        (clutch--result-columns '("ID" "STATUS" "NOTE"))
         (clutch--result-column-defs
          '((:name "ID" :backend-type "NUMBER" :source-column "ID")
            (:name "STATUS" :backend-type "VARCHAR2"
-            :source-column "STATUS")))
+            :source-column "STATUS")
+           (:name "NOTE" :backend-type "VARCHAR2" :source-column "NOTE")))
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "REPORTS" :source-token "APP.reports"
                     :columns ("ID") :indices (0) :source-indices (0))))
     (cl-letf (((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  '((:name "ID" :backend-type "NUMBER")
-                   (:name "STATUS" :backend-type "VARCHAR2")))))
-      (pcase-let ((`(,update-sql . ,_)
+                   (:name "STATUS" :backend-type "VARCHAR2" :default "'new'")
+                   (:name "NOTE" :backend-type "VARCHAR2")))))
+      (pcase-let ((`(,update-sql . ,update-params)
                    (clutch-result--build-update-stmt
-                    "REPORTS" [7] '((1 . "ready")) '("ID" "STATUS") identity))
+                    "REPORTS" [7]
+                    (list (cons 1 clutch--cell-default-placeholder)
+                          (cons 2 "ready"))
+                    clutch--result-columns identity))
                   (`(,delete-sql . ,_)
                    (clutch-result--build-delete-stmt-for-identity
                     "REPORTS" [7] identity)))
-        (should (string-prefix-p "UPDATE APP.reports SET" update-sql))
+        (should (equal update-sql
+                       (concat "UPDATE APP.reports SET \"STATUS\" = DEFAULT, "
+                               "\"NOTE\" = ? WHERE \"ID\" = ?")))
+        (should (equal (clutch-db-param-values update-params) '("ready" 7)))
         (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql))))))
 
 (ert-deftest clutch-test-update-canonicalizes-source-column-case ()
@@ -1834,6 +1842,9 @@
             (with-current-buffer result-buf
               (setq-local clutch--fk-info '((0 . (:ref-table "users")))))
             (should (equal (clutch-record--field-action-description) "Follow FK"))
+            (put-text-property (point-min) (point-max) 'clutch-full-value
+                               clutch--cell-default-placeholder)
+            (should (equal (clutch-record--field-action-description) "Show value"))
             (with-current-buffer result-buf
               (setq-local clutch--fk-info nil
                           clutch--result-column-defs
@@ -2663,8 +2674,9 @@
 
 (ert-deftest clutch-test-shell-command-on-cell-pipes-value-and-requires-cell ()
   "Shell commands should pipe the current cell value and reject non-cell points."
-  (dolist (case '(("hello world" "hello world")
-                  (42 "42")))
+  (dolist (case `(("hello world" "hello world")
+                  (42 "42")
+                  (,clutch--cell-default-placeholder "<default>")))
     (pcase-let ((`(,value ,expected) case))
       (ert-info ((format "value: %S" value))
         (with-temp-buffer
@@ -3343,16 +3355,20 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-edit-cell-shows-metadata-and-completion-hints ()
   "Edit buffer should expose enum metadata and completion affordances."
   (clutch-test--with-open-edit-cell buf result-buf
-      (:columns '("severity")
+      (:connection (make-clutch-jdbc-conn :params '(:driver oracle))
+       :columns '("severity")
        :column-defs '((:name "severity" :type-category text))
        :rows '(("low"))
        :row-identity
        (clutch-test--primary-row-identity "shipping_incidents" '("severity") '(0)))
       '(0 0 "low")
       "shipping_incidents"
-      (list (list :name "severity" :type "enum('low','medium','high')"))
+      (list (list :name "severity" :type "enum('low','medium','high')"
+                  :nullable t :default "'low'"))
     (with-current-buffer buf
       (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
+      (should (string-match-p "Set NULL.*Set DEFAULT"
+                              (format "%s" header-line-format)))
       (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
       (pcase-let ((`(,beg ,end ,candidates . ,_)
                    (clutch-result-edit-completion-at-point)))
@@ -3373,34 +3389,66 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       "shipping_incidents"
       (list (list :name "note" :type "text"))
     (with-current-buffer buf
-      (should clutch-result-edit--null-p)
+      (should (eq clutch-result-edit--special-value 'null))
       (should (equal (buffer-string) ""))
-      (should (overlayp clutch-result-edit--null-placeholder-overlay))
+      (should (overlayp clutch-result-edit--special-placeholder-overlay))
       (should (equal
                (substring-no-properties
-                (overlay-get clutch-result-edit--null-placeholder-overlay
+                (overlay-get clutch-result-edit--special-placeholder-overlay
                              'after-string))
                "<null>"))
       (should (eq (get-text-property
                    0 'face
-                   (overlay-get clutch-result-edit--null-placeholder-overlay
+                   (overlay-get clutch-result-edit--special-placeholder-overlay
                                 'after-string))
                   'clutch-null-face))
       (insert "hello")
-      (should-not clutch-result-edit--null-p)
-      (should-not (overlayp clutch-result-edit--null-placeholder-overlay))
+      (should-not clutch-result-edit--special-value)
+      (should-not (overlayp clutch-result-edit--special-placeholder-overlay))
       (should (equal (buffer-string) "hello")))))
 
+(ert-deftest clutch-test-edit-special-value-hints-follow-column-detail ()
+  "Edit hints and commands should reject unsupported column special values."
+  (clutch-test--with-result-edit-buffer _edit-buf "keep"
+    (setq-local clutch-result-edit--column-name "status"
+                clutch-result-edit--default-supported-p t)
+    (dolist (case '((nil nil nil nil)
+                    (t nil t nil)
+                    (nil "'new'" nil t)
+                    (t "'new'" t t)))
+      (pcase-let ((`(,nullable ,default ,show-null ,show-default) case))
+        (setq-local clutch-result-edit--column-detail
+                    (list :name "status" :nullable nullable :default default))
+        (let ((header (clutch-result-edit--header-line 0 "status")))
+          (should (equal (list (and (string-match-p "Set NULL" header) t)
+                               (and (string-match-p "Set DEFAULT" header) t))
+                         (list show-null show-default))))))
+    (setq-local clutch-result-edit--column-detail
+                '(:name "status" :nullable nil))
+    (should-error (clutch-result-edit-set-null) :type 'user-error)
+    (should-error (clutch-result-edit-set-default) :type 'user-error)
+    (should (equal (buffer-string) "keep"))))
+
 (ert-deftest clutch-test-edit-cell-original-value-does-not-stage ()
-  "Submitting the original value should leave no staged edit behind."
-  (dolist (case '((unchanged 42 nil nil "42")
-                  (reverted "43" ((([1] . 1) . "43")) "42" "43")))
+  "Submitting or restoring the effective value should preserve staged state."
+  (dolist (case `((unchanged 42 nil nil "42" nil nil)
+                  (reverted "43" ((([1] . 1) . "43")) "42" "43" nil nil)
+                  (default-unchanged
+                   ,clutch--cell-default-placeholder
+                   ((([1] . 1) . ,clutch--cell-default-placeholder))
+                   nil "" default
+                   ((([1] . 1) . ,clutch--cell-default-placeholder)))
+                  (default-reverted
+                   ,clutch--cell-default-placeholder
+                   ((([1] . 1) . ,clutch--cell-default-placeholder))
+                   "42" "" default nil)))
     (pcase-let ((`(,label ,opened-value ,pending-edits ,replacement
-                          ,initial-text)
+                          ,initial-text ,special-value ,expected-pending)
                  case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-open-edit-cell buf result-buf
-            (:columns '("id" "qty")
+            (:connection (make-clutch-jdbc-conn :params '(:driver oracle))
+             :columns '("id" "qty")
              :column-defs '((:name "id" :type-category numeric)
                             (:name "qty" :type-category numeric))
              :rows '((1 42))
@@ -3409,9 +3457,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
              :pending-edits pending-edits)
             (list 0 1 opened-value)
             "orders"
-            (list (list :name "qty" :type "int"))
+            (list (list :name "qty" :type "int" :default "0"))
           (with-current-buffer buf
             (should (equal (buffer-string) initial-text))
+            (should (eq clutch-result-edit--special-value special-value))
+            (when special-value
+              (should (equal
+                       (substring-no-properties
+                        (overlay-get clutch-result-edit--special-placeholder-overlay
+                                     'after-string))
+                       "<default>")))
             (when replacement
               (erase-buffer)
               (insert replacement))
@@ -3420,8 +3475,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       ((symbol-function 'quit-window) #'ignore)
                       ((symbol-function 'message) #'ignore))
               (clutch-result-edit-finish))
-            (should-not (with-current-buffer result-buf
-                          clutch--pending-edits))))))))
+            (should (equal (with-current-buffer result-buf
+                             clutch--pending-edits)
+                           expected-pending))))))))
 
 (ert-deftest clutch-test-edit-cell-rejects-stale-source ()
   "Finishing an edit should not stage over a changed visible row or cell."
@@ -3840,7 +3896,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
          :rows '((1 "low" "alice" "2026-03-01 10:00:00"))
          :row-identity (clutch-test--primary-row-identity
                         "shipping_incidents" '("id") '(0))
-         :pending-edits '((([1] . 1) . "high")))
+         :pending-edits `((([1] . 1) . "high")
+                          (([1] . 3) . ,clutch--cell-default-placeholder)))
       (cl-letf (((symbol-function 'clutch--row-idx-at-line)
                  (lambda () 0))
                 ((symbol-function 'clutch--ensure-column-details)
@@ -3857,8 +3914,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
                                 (buffer-string)))
         (should (string-match-p "^owner[ ]*: alice$" (buffer-string)))
-        (should (string-match-p "^created_at .*2026-03-01 10:00:00$"
-                                (buffer-string)))))))
+        (should (string-match-p "^created_at .*: $" (buffer-string)))
+        (should-not (string-match-p "2026-03-01 10:00:00"
+                                    (buffer-string)))))))
 
 (ert-deftest clutch-test-clone-row-to-insert-from-record-buffer ()
   "Cloning from a record buffer should prefill the current visible record row."
@@ -4437,7 +4495,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (clutch-test--with-result-edit-buffer _edit-buf "12.5"
       (setq-local clutch-result-edit--column-name "impact_score"
                   clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
-                  clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
+                  clutch-result-edit--column-detail
+                  '(:name "impact_score" :type "decimal(5,1)" :nullable t)
                   clutch-result--edit-callback
                   (lambda (value) (setq staged-value (list value))))
       (cl-letf (((symbol-function 'quit-window)
@@ -4447,18 +4506,56 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should quit-called)
         (should (equal staged-value '(nil)))))))
 
-(ert-deftest clutch-test-edit-finish-preserves-literal-null-string ()
-  "Typing NULL should stage literal text, not database NULL."
-  (let (staged-value)
-    (clutch-test--with-result-edit-buffer _edit-buf "NULL"
-      (setq-local clutch-result-edit--column-name "note"
-                  clutch-result-edit--column-def '(:name "note" :type-category text)
-                  clutch-result-edit--column-detail '(:name "note" :type "text")
-                  clutch-result--edit-callback (lambda (value) (setq staged-value value)))
+(ert-deftest clutch-test-edit-set-default-stages-explicit-sentinel ()
+  "The explicit DEFAULT command should stage the database-default sentinel."
+  (let ((staged-value :not-called)
+        quit-called)
+    (clutch-test--with-result-edit-buffer _edit-buf "manual"
+      (setq-local clutch-result-edit--column-name "status"
+                  clutch-result-edit--column-def
+                  '(:name "status" :type-category text)
+                  clutch-result-edit--column-detail
+                  '(:name "status" :type "text" :nullable t :default "'new'")
+                  clutch-result-edit--default-supported-p t
+                  clutch-result--edit-callback
+                  (lambda (value) (setq staged-value value)))
       (cl-letf (((symbol-function 'quit-window)
-                 (lambda (&rest _args))))
+                 (lambda (&rest _args) (setq quit-called t))))
+        (should (eq (lookup-key clutch--result-edit-mode-map (kbd "C-c C-d"))
+                    #'clutch-result-edit-set-default))
+        (clutch-result-edit-set-default)
+        (should (eq clutch-result-edit--special-value 'default))
+        (should (equal (buffer-string) ""))
+        (should (equal
+                 (substring-no-properties
+                  (overlay-get clutch-result-edit--special-placeholder-overlay
+                               'after-string))
+                 "<default>"))
+        (should (eq (get-text-property
+                     0 'face
+                     (overlay-get clutch-result-edit--special-placeholder-overlay
+                                  'after-string))
+                    'clutch-null-face))
         (clutch-result-edit-finish)
-        (should (equal staged-value "NULL"))))))
+        (should quit-called)
+        (should (eq staged-value clutch--cell-default-placeholder))))))
+
+(ert-deftest clutch-test-edit-finish-preserves-literal-special-strings ()
+  "Typing NULL or DEFAULT should stage literal text, not a special value."
+  (dolist (text '("NULL" "DEFAULT"))
+    (let (staged-value)
+      (clutch-test--with-result-edit-buffer _edit-buf text
+        (setq-local clutch-result-edit--column-name "note"
+                    clutch-result-edit--column-def
+                    '(:name "note" :type-category text)
+                    clutch-result-edit--column-detail
+                    '(:name "note" :type "text" :nullable t :default "'x'")
+                    clutch-result-edit--default-supported-p t
+                    clutch-result--edit-callback
+                    (lambda (value) (setq staged-value value)))
+        (cl-letf (((symbol-function 'quit-window) #'ignore))
+          (clutch-result-edit-finish)
+          (should (equal staged-value text)))))))
 
 (ert-deftest clutch-test-edit-finish-restores-result-cell-position ()
   "Finishing a cell edit should restore point without shifting the viewport."
@@ -5532,9 +5629,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-tsv-copy-selection-contract ()
   "TSV copy should use region cells when active, otherwise the point cell."
-  (dolist (case '((t "1\tshanghai\nbob")
-                  (nil "alice")))
-    (pcase-let ((`(,region-active ,expected) case))
+  (dolist (case `((t "alice" "1\t<default>\nbob")
+                  (nil "alice" "alice")
+                  (nil ,clutch--cell-default-placeholder "<default>")))
+    (pcase-let ((`(,region-active ,value ,expected) case))
       (ert-info ((format "region: %s" region-active))
         (with-temp-buffer
           (let (kill-ring kill-ring-yank-pointer)
@@ -5546,9 +5644,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        (lambda () 20))
                       ((symbol-function 'clutch-result--region-cells)
                        (lambda ()
-                         '((0 0 1) (0 2 "shanghai") (1 1 "bob"))))
+                         `((0 0 1)
+                           (0 2 ,clutch--cell-default-placeholder)
+                           (1 1 "bob"))))
                       ((symbol-function 'clutch--cell-at-point)
-                       (lambda () '(2 3 "alice"))))
+                       (lambda () (list 2 3 value))))
               (clutch-result-copy 'tsv)
               (should (equal (current-kill 0) expected)))))))))
 

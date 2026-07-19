@@ -69,7 +69,7 @@
   "Result window viewport captured when the edit buffer opened.")
 
 (defvar-local clutch-result-edit--initial-value-state nil
-  "Cons of null-state and editable text captured when the edit buffer opened.")
+  "Cons of special-value state and text captured when the edit buffer opened.")
 
 (defvar-local clutch-result-edit--column-name nil
   "Column name for the current single-cell edit buffer.")
@@ -92,11 +92,14 @@
 (defvar-local clutch-result-edit--target-cell nil
   "Cons cell (ROW-IDX . COL-IDX) represented by this edit buffer.")
 
-(defvar-local clutch-result-edit--null-p nil
-  "Non-nil when this edit buffer is explicitly staging database NULL.")
+(defvar-local clutch-result-edit--special-value nil
+  "Special value staged by this edit buffer: nil, `null', or `default'.")
 
-(defvar-local clutch-result-edit--null-placeholder-overlay nil
-  "Overlay displaying the database NULL placeholder in an edit buffer.")
+(defvar-local clutch-result-edit--special-placeholder-overlay nil
+  "Overlay displaying a special database value in an edit buffer.")
+
+(defvar-local clutch-result-edit--default-supported-p nil
+  "Non-nil when this edit buffer's connection supports UPDATE DEFAULT.")
 
 (defvar-local clutch-result-edit-json--parent-buffer nil
   "Parent edit buffer for the current JSON sub-editor.")
@@ -116,6 +119,7 @@
     (define-key map (kbd "C-M-i") #'clutch-result-edit-complete-field)
     (define-key map (kbd "C-c .") #'clutch-result-edit-set-current-time)
     (define-key map (kbd "C-c C-n") #'clutch-result-edit-set-null)
+    (define-key map (kbd "C-c C-d") #'clutch-result-edit-set-default)
     map)
   "Keymap for the cell edit buffer.")
 
@@ -127,6 +131,7 @@
 \\[clutch-result-edit-complete-field]  Complete enum/bool-like values
 \\[clutch-result-edit-set-current-time]  Set temporal field to now
 \\[clutch-result-edit-set-null]  Set database NULL
+\\[clutch-result-edit-set-default]  Set database DEFAULT
 \\[clutch-result-edit-json-field]  Open JSON editor"
   :lighter " DB-Edit"
   :keymap clutch--result-edit-mode-map
@@ -137,7 +142,7 @@
     (remove-hook 'after-change-functions #'clutch-result-edit--after-change t)
     (remove-hook 'kill-buffer-hook #'clutch-result-edit--clear-active-target t)
     (clutch-result-edit--cancel-validation-timer)
-    (clutch-result-edit--set-null-state nil)
+    (clutch-result-edit--set-special-value nil)
     (setq-local clutch-result-edit--error-message nil)))
 
 (defun clutch-result--field-candidates-from-detail (detail)
@@ -271,8 +276,8 @@ Return nil when validation succeeds, or signal `user-error' when invalid."
 
 (defun clutch-result-edit--json-editor-available-p ()
   "Return non-nil when the current edit buffer can use the JSON editor."
-  (or (clutch-result-edit--json-p)
-      (and (not clutch-result-edit--null-p)
+  (and (not clutch-result-edit--special-value)
+       (or (clutch-result-edit--json-p)
            (clutch-result-edit--json-text-p
             (string-trim
              (buffer-substring-no-properties (point-min) (point-max)))))))
@@ -282,20 +287,58 @@ Return nil when validation succeeds, or signal `user-error' when invalid."
   (clutch-result--field-metadata-tags clutch-result-edit--column-def
                                       clutch-result-edit--column-detail))
 
-(defun clutch-result-edit--set-null-state (enabled)
-  "Set whether this edit buffer represents database NULL.
-When ENABLED is non-nil, the buffer text is cleared and a visual
-placeholder is displayed.  The placeholder is not part of the buffer text."
-  (when (overlayp clutch-result-edit--null-placeholder-overlay)
-    (delete-overlay clutch-result-edit--null-placeholder-overlay))
-  (setq-local clutch-result-edit--null-placeholder-overlay nil
-              clutch-result-edit--null-p enabled)
-  (when enabled
+(defun clutch-result-edit--set-special-value (value)
+  "Set special edit VALUE to nil, `null', or `default'.
+For a non-nil VALUE, clear the buffer and display a visual placeholder that is
+not part of the buffer text."
+  (when (overlayp clutch-result-edit--special-placeholder-overlay)
+    (delete-overlay clutch-result-edit--special-placeholder-overlay))
+  (setq-local clutch-result-edit--special-placeholder-overlay nil
+              clutch-result-edit--special-value value)
+  (when value
     (erase-buffer)
-    (let ((ov (make-overlay (point-min) (point-min) nil t nil)))
-      (overlay-put ov 'after-string (clutch--null-display-string))
-      (setq-local clutch-result-edit--null-placeholder-overlay ov))
+    (let* ((placeholder
+            (pcase value
+              ('null clutch--null-cell-display-text)
+              ('default (clutch--cell-placeholder-value
+                         clutch--cell-default-placeholder))
+              (_ (error "Unknown special edit value: %S" value))))
+           (ov (make-overlay (point-min) (point-min) nil t nil)))
+      (overlay-put ov 'after-string
+                   (propertize placeholder 'face 'clutch-null-face))
+      (setq-local clutch-result-edit--special-placeholder-overlay ov))
     (goto-char (point-min))))
+
+(defun clutch-result-edit--state-for-value (value &optional text)
+  "Return comparison state for staged VALUE and optional editable TEXT."
+  (cond
+   ((eq value clutch--cell-default-placeholder) '(default . ""))
+   ((null value) '(null . ""))
+   (t (cons nil (or text value)))))
+
+(defun clutch-result-edit--current-state ()
+  "Return the current edit buffer's comparable value state."
+  (cons clutch-result-edit--special-value
+        (string-trim-right
+         (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun clutch-result-edit--null-available-p ()
+  "Return non-nil when the current column accepts database NULL."
+  (plist-get clutch-result-edit--column-detail :nullable))
+
+(defun clutch-result-edit--validate-special-value (value)
+  "Validate special edit VALUE against current column capabilities."
+  (pcase value
+    ('null
+     (unless (clutch-result-edit--null-available-p)
+       (user-error "Column %s does not allow NULL"
+                   clutch-result-edit--column-name)))
+    ('default
+     (unless (plist-get clutch-result-edit--column-detail :default)
+       (user-error "Column %s has no default"
+                   clutch-result-edit--column-name))
+     (unless clutch-result-edit--default-supported-p
+       (user-error "This database does not support DEFAULT in UPDATE assignments")))))
 
 (defun clutch-result-edit--refresh-target-row (ridx)
   "Refresh rendered result row RIDX when the row is currently rendered."
@@ -376,8 +419,13 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
             (clutch--key-hints
              (append (nreverse affordances)
                      '(("C-c C-c" "Stage edit")
-                       ("C-c C-k" "Cancel")
-                       ("C-c C-n" "Set NULL")))))))
+                       ("C-c C-k" "Cancel"))
+                     (when (clutch-result-edit--null-available-p)
+                       '(("C-c C-n" "Set NULL")))
+                     (when (and clutch-result-edit--default-supported-p
+                                (plist-get clutch-result-edit--column-detail
+                                           :default))
+                       '(("C-c C-d" "Set DEFAULT"))))))))
 
 (defun clutch-result-edit--refresh-header-line ()
   "Refresh the edit-buffer header line, including any validation token."
@@ -403,15 +451,16 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
 
 (defun clutch-result-edit--current-validation-message ()
   "Return a validation message for the current edit buffer, or nil."
-  (let* ((raw-value (string-trim-right (buffer-string)))
-         (value (if clutch-result-edit--null-p nil raw-value)))
-    (condition-case err
+  (condition-case err
+      (if clutch-result-edit--special-value
+          (clutch-result-edit--validate-special-value
+           clutch-result-edit--special-value)
         (clutch-result--field-validation-message
          clutch-result-edit--column-name
-         value
+         (string-trim-right (buffer-string))
          clutch-result-edit--column-def
-         clutch-result-edit--column-detail)
-      (user-error (error-message-string err)))))
+         clutch-result-edit--column-detail))
+    (user-error (error-message-string err))))
 
 (defun clutch-result-edit--validate-live ()
   "Run local validation for the current edit buffer and refresh UI."
@@ -438,9 +487,9 @@ All field types use the same delay so feedback timing is consistent."
 
 (defun clutch-result-edit--after-change (_beg _end _len)
   "Schedule local validation after any edit-buffer change."
-  (when (and clutch-result-edit--null-p
+  (when (and clutch-result-edit--special-value
              (> (buffer-size) 0))
-    (clutch-result-edit--set-null-state nil))
+    (clutch-result-edit--set-special-value nil))
   (clutch-result-edit--schedule-validation))
 
 ;;;###autoload
@@ -473,9 +522,19 @@ All field types use the same delay so feedback timing is consistent."
 (defun clutch-result-edit-set-null ()
   "Set the current edit buffer to database NULL."
   (interactive)
-  (clutch-result-edit--set-null-state t)
+  (clutch-result-edit--validate-special-value 'null)
+  (clutch-result-edit--set-special-value 'null)
   (clutch-result-edit--validate-live)
   (message "Cell set to NULL"))
+
+;;;###autoload
+(defun clutch-result-edit-set-default ()
+  "Set the current edit buffer to the column's database DEFAULT."
+  (interactive)
+  (clutch-result-edit--validate-special-value 'default)
+  (clutch-result-edit--set-special-value 'default)
+  (clutch-result-edit--validate-live)
+  (message "Cell set to DEFAULT"))
 
 ;;;###autoload
 (defun clutch-result-edit-json-field (&optional whole-edit-p)
@@ -598,14 +657,18 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                   (user-error
                    "Cannot %s: source column %s is missing from table metadata"
                    op (clutch-result--writable-source-column cidx op))))
+             (default-supported-p
+              (clutch-backend-update-default-p
+               (clutch-db-backend-key clutch-connection)))
              (source-column (plist-get detail :name))
              (original-state
-              (cons (null original)
-                    (if (null original)
-                        ""
-                      (string-trim-right
-                       (clutch-result--editable-field-string
-                        original col-def detail)))))
+              (clutch-result-edit--state-for-value
+               original
+               (unless (or (null original)
+                           (eq original clutch--cell-default-placeholder))
+                 (string-trim-right
+                  (clutch-result--editable-field-string
+                   original col-def detail)))))
              (target-row (list
                           :identity (clutch-db-row-identity-values
                                      display-row row-identity)
@@ -626,6 +689,8 @@ RETURN-BUFFER is the buffer that invoked the edit command."
           (setq-local clutch-result-edit--column-name col-name
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
+                      clutch-result-edit--default-supported-p
+                      default-supported-p
                       clutch-result-edit--row-idx ridx
                       clutch-result-edit--target-cell target-cell
                       clutch-result--edit-result-buffer result-buf
@@ -635,15 +700,16 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                       completion-at-point-functions
                       '(clutch-result-edit-completion-at-point))
           (erase-buffer)
-          (if (null val)
-              (clutch-result-edit--set-null-state t)
-            (clutch-result-edit--set-null-state nil)
-            (insert (clutch-result--editable-field-string val col-def detail)))
+          (cond
+           ((eq val clutch--cell-default-placeholder)
+            (clutch-result-edit--set-special-value 'default))
+           ((null val)
+            (clutch-result-edit--set-special-value 'null))
+           (t
+            (clutch-result-edit--set-special-value nil)
+            (insert (clutch-result--editable-field-string val col-def detail))))
           (setq-local clutch-result-edit--initial-value-state
-                      (cons clutch-result-edit--null-p
-                            (string-trim-right
-                             (buffer-substring-no-properties
-                              (point-min) (point-max)))))
+                      (clutch-result-edit--current-state))
           (goto-char (point-min))
           (clutch-result-edit--refresh-header-line)
           (setq-local clutch-result--edit-callback
@@ -657,8 +723,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
             (setq-local clutch--active-edit-cell target-cell)
             (clutch-result-edit--refresh-target-row ridx)))
         (if (with-current-buffer edit-buf
-              (and (not clutch-result-edit--null-p)
-                   (clutch-result-edit--json-editor-available-p)))
+              (clutch-result-edit--json-editor-available-p))
             (with-current-buffer edit-buf
               (clutch-result-edit-json-field t))
           (pop-to-buffer edit-buf))))))
@@ -698,20 +763,26 @@ Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to c
   "Stage the current edit buffer and return to the result buffer.
 When KILL-BUFFER-DIRECTLY is non-nil, kill the current buffer without relying on
 the selected window."
-  (let* ((raw-value (string-trim-right (buffer-string)))
-         (new-value (if clutch-result-edit--null-p nil raw-value))
-         (new-state (cons clutch-result-edit--null-p raw-value))
+  (let* ((new-state (clutch-result-edit--current-state))
+         (new-value
+          (pcase (car new-state)
+            ('null nil)
+            ('default clutch--cell-default-placeholder)
+            (_ (cdr new-state))))
          (cb clutch-result--edit-callback)
          (result-buf clutch-result--edit-result-buffer)
          (return-buf clutch-result-edit--return-buffer)
          (target-cell clutch-result-edit--target-cell)
          (viewport clutch-result-edit--result-viewport))
     (clutch-result-edit--cancel-validation-timer)
-    (clutch-result--validate-field-value
-     clutch-result-edit--column-name
-     new-value
-     clutch-result-edit--column-def
-     clutch-result-edit--column-detail)
+    (if clutch-result-edit--special-value
+        (clutch-result-edit--validate-special-value
+         clutch-result-edit--special-value)
+      (clutch-result--validate-field-value
+       clutch-result-edit--column-name
+       new-value
+       clutch-result-edit--column-def
+       clutch-result-edit--column-detail))
     (setq-local clutch-result-edit--error-message nil)
     (when (and cb
                (not (equal new-state
@@ -764,8 +835,7 @@ Refresh the affected row and footer in place when possible."
          (key (cons identity-vec cidx))
          (original (plist-get target-row :original))
          (original-state (plist-get target-row :original-state))
-         (new-state (cons (null new-value)
-                          (if (null new-value) "" new-value))))
+         (new-state (clutch-result-edit--state-for-value new-value)))
     (unless (and (plist-member target-row :identity)
                  (plist-member target-row :original)
                  (plist-member target-row :original-state))
@@ -926,16 +996,19 @@ IDENTITY-VEC is the row identity vector, EDITS is a list of
                     (user-error
                      "Cannot %s: source column %s is missing from table metadata"
                      op (clutch-result--writable-source-column cidx op))))
-               (col-name (plist-get detail :name)))
+               (col-name (plist-get detail :name))
+               (value (cdr edit))
+               (escaped-column
+                (clutch-db-escape-identifier conn col-name)))
           (when (plist-get detail :generated)
             (user-error "Cannot %s: source column %s is generated"
                         op col-name))
-          (push (format "%s = ?"
-                        (clutch-db-escape-identifier conn col-name))
-                set-parts)
-          (push (clutch-result--typed-param-for-column
-                 table col-name (cdr edit) cidx)
-                set-params)))
+          (if (eq value clutch--cell-default-placeholder)
+              (push (format "%s = DEFAULT" escaped-column) set-parts)
+            (push (format "%s = ?" escaped-column) set-parts)
+            (push (clutch-result--typed-param-for-column
+                   table col-name value cidx)
+                  set-params))))
       (cons (format "UPDATE %s SET %s WHERE %s"
                     (or (plist-get row-identity :source-token)
                         (clutch-db-escape-identifier conn table))
@@ -1916,7 +1989,8 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
              for detail = (cl-find col details
                                    :key (lambda (item) (plist-get item :name))
                                    :test #'string=)
-             unless (plist-get col-def :hidden)
+             unless (or (plist-get col-def :hidden)
+                        (eq value clutch--cell-default-placeholder))
              do (push (cons col (if (null value)
                                     ""
                                   (clutch-result--editable-field-string
