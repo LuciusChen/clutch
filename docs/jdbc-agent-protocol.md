@@ -15,7 +15,7 @@ Each logical JDBC connection in clutch maps to one logical session in the agent.
 
 This split exists to keep metadata traffic from contending with foreground SQL, especially on Oracle.
 
-Runtime schema switching updates both sessions together so one clutch connection still presents one effective schema/database context.
+The agent's `set-current-schema` operation, currently used by Oracle, updates both sessions together so one logical Clutch connection still presents one effective schema.  Product-specific namespace paths remain explicit: DuckDB switches the primary session with `USE` and synchronizes catalog/schema metadata parameters, while ClickHouse reconnects with a different database.
 
 The stdin reader is intentionally not blocked by one long-running request. Each decoded request is submitted to a request pool.  The dispatcher then serializes most operations per `conn-id`, so one JDBC connection still sees one foreground operation at a time.
 
@@ -79,7 +79,7 @@ Connection lifecycle:
 - `commit`
 - `rollback`
 - `set-auto-commit`
-- `set-current-schema`
+- `set-current-schema` (currently used by Oracle to update both JDBC sessions)
 
 Execution and cursor flow:
 
@@ -193,6 +193,10 @@ Generic JDBC rows contain:
 `comment` is populated from `DatabaseMetaData.getTables(...).REMARKS` when the driver returns a non-blank value.  It may be `null`, and backend-specific paths may omit it.  In particular, Oracle's direct SQL table discovery intentionally keeps the smaller `name`/`type`/`schema`/`source_schema` row shape.
 
 `search-tables` returns table entry objects with the same logical fields.  The Elisp side treats `comment` as optional; absence means unknown or unsupported, not an empty comment.
+
+## Column metadata payload
+
+`get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one.
 
 ## Error semantics
 

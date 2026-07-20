@@ -34,7 +34,7 @@ Run clutch native adapter live tests from the `clutch` checkout:
 ./test/run-native-live-tests.sh
 ```
 
-The runner starts or reuses local Docker/OrbStack containers and executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT runs skip those live tags unless credentials are provided.
+The runner starts or reuses local Podman containers on Linux or Docker/OrbStack containers on macOS, then executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT runs skip those live tags unless credentials are provided.
 
 MongoDB backend details live in [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
 
@@ -137,6 +137,7 @@ For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS 
 
 ### Scope
 
+- Requires current [`pg-el`](https://github.com/emarsden/pg-el) with `pgcon-transaction-status`
 - Pure Elisp PostgreSQL protocol v3
 - SCRAM-SHA-256 (SASL) and MD5 authentication
 - TLS via Emacs GnuTLS
@@ -186,6 +187,7 @@ PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`, `requi
 - In clutch, `C-c C-a` enables a clutch-managed manual mode
 - Manual mode uses lazy `BEGIN`: the first foreground statement opens the transaction
 - `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
+- Transaction state comes directly from pg-el's latest PostgreSQL `ReadyForQuery` status
 - Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains accurate for native PostgreSQL
 
 ### Interrupts and Timeouts

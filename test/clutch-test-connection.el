@@ -1978,24 +1978,6 @@
     (should (equal (clutch--icon '(octicon . "missing") "fallback")
                    "fallback"))))
 
-(ert-deftest clutch-test-current-namespace-name-contract ()
-  "Connection policy should select schema, or ClickHouse database, as namespace."
-  (dolist (case '((mysql "sales" "sales" mysql)
-                  (clickhouse "demo" nil clickhouse)
-                  (oracle "ORCL" "SALES" oracle)))
-    (pcase-let ((`(,label ,database ,schema ,backend) case))
-      (ert-info ((symbol-name label))
-        (cl-letf (((symbol-function 'clutch-db-backend-key)
-                   (lambda (_conn) backend))
-                  ((symbol-function 'clutch-db-database)
-                   (lambda (_conn) database))
-                  ((symbol-function 'clutch-db-current-schema)
-                   (lambda (_conn) schema)))
-          (should (equal (clutch--current-namespace-name 'fake-conn)
-                         (if (eq backend 'clickhouse)
-                             database
-                           schema))))))))
-
 (ert-deftest clutch-test-mongodb-completion-uses-shell-and-collection-candidates ()
   "MongoDB completion should offer shell methods and cached collections."
   (let ((schema (make-hash-table :test 'equal)))
@@ -3205,6 +3187,66 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
               (when (buffer-live-p opened)
                 (kill-buffer opened)))))))))
 
+(ert-deftest clutch-test-query-console-picker-switches-to-open-ad-hoc-console ()
+  "The public picker should merge saved consoles and reuse an open ad hoc one."
+  (let* ((name "PostgreSQL: alice@db.example.com:5432/app")
+         (params '(:backend pg
+                   :host "db.example.com"
+                   :port 5432
+                   :user "alice"
+                   :database "app"))
+         (saved-params '(:backend mysql :host "new.example" :database "app"))
+         (old-params '(:backend mysql :host "old.example" :database "app"))
+         (ad-hoc (generate-new-buffer " *clutch-open-ad-hoc*"))
+         (matching (generate-new-buffer " *clutch-open-saved*"))
+         (collision (generate-new-buffer " *clutch-open-collision*"))
+         (clutch-connection-alist `(("alpha" . ,saved-params)))
+         candidates
+         built)
+    (unwind-protect
+        (progn
+          (with-current-buffer ad-hoc
+            (clutch-mode)
+            (setq-local clutch--console-name name
+                        clutch--console-storage-name
+                        (clutch--console-persistence-name name params)
+                        clutch--console-ad-hoc-params params
+                        clutch--connection-params params
+                        clutch-connection 'live-conn))
+          (dolist (spec `((,matching ,saved-params) (,collision ,old-params)))
+            (pcase-let ((`(,buffer ,console-params) spec))
+              (with-current-buffer buffer
+                (clutch-mode)
+                (setq-local clutch--console-name "alpha"
+                            clutch--console-storage-name
+                            (clutch--console-persistence-name
+                             "alpha" console-params)
+                            clutch--connection-params console-params
+                            clutch-connection (list 'live console-params)))))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt collection &rest _args)
+                       (should (equal prompt "Console: "))
+                       (setq candidates collection)
+                       (buffer-name ad-hoc)))
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (eq conn 'live-conn)))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (_params)
+                       (setq built t)
+                       'unexpected-conn))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     #'ignore))
+            (call-interactively #'clutch-query-console)
+            (should (member (buffer-name ad-hoc) candidates))
+            (should (= (cl-count "alpha" candidates :test #'equal) 1))
+            (should-not (member (buffer-name matching) candidates))
+            (should (member (buffer-name collision) candidates))
+            (should-not built)
+            (should (eq (current-buffer) ad-hoc))))
+      (dolist (buffer (list ad-hoc matching collision))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest clutch-test-query-console-tramp-origin-contract ()
   "Query console connection origin should come from the command source buffer."
   (dolist (case
@@ -3552,6 +3594,7 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
     (pcase-let ((`(,label ,params ,schemas ,current ,selected ,expected) case))
       (ert-info ((format "backend: %s" label))
         (let ((conn (list 'fake-conn label))
+              (effective current)
               switched cleared-conns refresh-quiet message-text)
           (with-temp-buffer
             (setq-local clutch-connection conn
@@ -3559,13 +3602,18 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
             (cl-letf (((symbol-function 'clutch-db-list-schemas)
                        (lambda (_conn) schemas))
                       ((symbol-function 'clutch-db-current-schema)
-                       (lambda (_conn) current))
+                       (lambda (_conn) effective))
                       ((symbol-function 'completing-read)
                        (lambda (&rest _args) selected))
                       ((symbol-function 'clutch-db-set-current-schema)
                        (lambda (_conn schema)
-                         (setq switched schema)
+                         (setq switched schema
+                               effective schema)
                          schema))
+                      ((symbol-function 'clutch-db-update-namespace-params)
+                       (lambda (actual-conn _actual-params)
+                         (should (eq actual-conn conn))
+                         (copy-sequence expected)))
                       ((symbol-function 'clutch--clear-connection-metadata-caches)
                        (lambda (actual-conn)
                          (push actual-conn cleared-conns)))
@@ -3582,7 +3630,8 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
               (should (equal cleared-conns (list conn)))
               (should refresh-quiet)
               (should (equal message-text
-                             (format "Current schema: %s" selected))))))))))
+                             (format "Current schema/database: %s"
+                                     selected))))))))))
 
 (ert-deftest clutch-test-switch-schema-failure-populates-problem-record-and-debug-trace ()
   "Schema-switch failures should feed the shared problem/debug workflow."
@@ -3636,8 +3685,13 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                                               :port 8123
                                               :database "default"
                                               :user "default"))
-      (cl-letf (((symbol-function 'clutch--list-clickhouse-databases)
+      (cl-letf (((symbol-function 'clutch-db-list-schemas)
                  (lambda (_conn) '("default" "demo")))
+                ((symbol-function 'clutch-db-current-schema)
+                 (lambda (_conn) "default"))
+                ((symbol-function 'clutch-db-namespace-reconnect-params)
+                 (lambda (_conn params namespace)
+                   (plist-put (copy-sequence params) :database namespace)))
                 ((symbol-function 'clutch--connection-alive-p)
                  (lambda (_conn) nil))
                 ((symbol-function 'completing-read)

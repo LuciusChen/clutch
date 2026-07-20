@@ -1180,14 +1180,14 @@ RENDER-FN is called once per parameter and must return the replacement string."
   "Return a list of table name strings for CONN's current database.")
 
 (cl-defgeneric clutch-db-list-schemas (conn)
-  "Return available schema names for CONN, or nil when unsupported.")
+  "Return switchable schema/database names for CONN, or nil when unsupported.")
 
 (cl-defmethod clutch-db-list-schemas ((_conn t))
   "Backends without schema enumeration support return nil."
   nil)
 
 (cl-defgeneric clutch-db-current-schema (conn)
-  "Return the effective current schema for CONN, or nil when not applicable.")
+  "Return CONN's effective current schema/database, or nil when not applicable.")
 
 (cl-defmethod clutch-db-current-schema ((_conn t))
   "Default: no current schema abstraction."
@@ -1199,6 +1199,23 @@ RENDER-FN is called once per parameter and must return the replacement string."
 (cl-defmethod clutch-db-set-current-schema ((_conn t) _schema)
   "Default: runtime schema switching is unsupported."
   (user-error "This backend does not support switching schemas"))
+
+(cl-defgeneric clutch-db-update-namespace-params (conn params)
+  "Return connection PARAMS updated with CONN's current namespace.")
+
+(cl-defmethod clutch-db-update-namespace-params ((conn t) params)
+  "Store CONN's current schema in a copy of connection PARAMS."
+  (let ((schema (clutch-db-current-schema conn)))
+    (unless schema
+      (error "Backend switched namespace without reporting a current schema"))
+    (plist-put (copy-sequence params) :schema schema)))
+
+(cl-defgeneric clutch-db-namespace-reconnect-params (conn params namespace)
+  "Return replacement PARAMS when switching CONN to NAMESPACE needs reconnecting.")
+
+(cl-defmethod clutch-db-namespace-reconnect-params ((_conn t) _params _namespace)
+  "Default to switching the namespace within the existing connection."
+  nil)
 
 (cl-defgeneric clutch-db-list-table-entries (conn)
   "Return browseable table-like object entries for CONN.
@@ -1514,6 +1531,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :default-port 3306
 	       :support-level core
 	       :data-model relational
+	       :update-default t
 	       :sql-product mysql))
     (pg     . (:require clutch-db-pg
 	       :aliases (postgres postgresql)
@@ -1523,6 +1541,7 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 	       :default-port 5432
 	       :support-level core
 	       :data-model relational
+	       :update-default t
 	       :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
 	       :connect-fn clutch-db-sqlite-connect
@@ -1553,7 +1572,8 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 Each plist has :require (the feature to load), :connect-fn (a function taking
 a plist of connection params and returning a conn), and optional :aliases,
 :normalize-fn plus UI metadata such as :display-name, :default-port,
-:support-level, :data-model, :query-mode, :surfaces, and :manual-choice.
+:support-level, :data-model, :query-mode, :surfaces, and :manual-choice, plus
+capability metadata such as :update-default.
 Surface entries may set :execution-model and :transport for non-default
 execution paths.")
 
@@ -1594,6 +1614,10 @@ before returning the list."
        (plist-get (clutch-backend-feature
                    (clutch-backend-normalize backend))
                   :data-model)))
+
+(defun clutch-backend-update-default-p (backend)
+  "Return non-nil when BACKEND supports DEFAULT in UPDATE assignments."
+  (plist-get (clutch-backend-feature backend) :update-default))
 
 (defun clutch-backend-surface-feature (backend surface)
   "Return registered feature plist for BACKEND SURFACE, or nil."

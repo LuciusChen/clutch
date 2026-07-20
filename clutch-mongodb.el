@@ -63,6 +63,7 @@
 (declare-function mongodb-connection-username "mongodb" (conn))
 (declare-function mongodb-list-collection-docs "mongodb" (client database &optional filter options))
 (declare-function mongodb-list-collections "mongodb" (client database &optional filter options))
+(declare-function mongodb-list-databases "mongodb" (client))
 (declare-function mongodb-list-indexes "mongodb" (client database collection))
 (declare-function mongodb-live-p "mongodb" (conn))
 (declare-function mongodb-object-id "mongodb" (hex))
@@ -154,6 +155,7 @@ Emacs result contract from materializing an unbounded collection."
     mongodb-insert
     mongodb-list-collection-docs
     mongodb-list-collections
+    mongodb-list-databases
     mongodb-list-indexes
     mongodb-live-p
     mongodb-object-id
@@ -1633,7 +1635,14 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 
 (cl-defmethod clutch-db-list-schemas ((conn clutch-mongodb-conn))
   "Return database names visible to MongoDB CONN."
-  (list (clutch-mongodb-conn-database conn)))
+  (clutch-mongodb--with-mongodb-errors
+    (sort
+     (delete-dups
+      (seq-filter
+       (lambda (database)
+         (and (stringp database) (not (string-empty-p database))))
+       (mongodb-list-databases (clutch-mongodb-conn-client conn))))
+     #'string-collate-lessp)))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-mongodb-conn))
   "Return the current MongoDB database name for CONN."
@@ -1646,6 +1655,12 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
         (plist-put (copy-sequence (clutch-mongodb-conn-params conn))
                    :database schema))
   schema)
+
+(cl-defmethod clutch-db-update-namespace-params
+    ((conn clutch-mongodb-conn) params)
+  "Store MongoDB CONN's current database in a copy of connection PARAMS."
+  (plist-put (copy-sequence params)
+             :database (clutch-mongodb-conn-database conn)))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-mongodb-conn))
   "Return collection names for CONN's current MongoDB database."

@@ -311,7 +311,6 @@
                      clutch-debug-mode
                      clutch-dispatch
                      clutch-edit-indirect
-                     clutch-execute
                      clutch-execute-buffer
                      clutch-execute-dwim
                      clutch-execute-region
@@ -324,8 +323,6 @@
                      clutch-repl
                      clutch-repl-mode
                      clutch-repl-send-input
-                     clutch-switch-console
-                     clutch-switch-database
                      clutch-switch-schema))
             (let ((targets
                    (cl-loop for (candidate . target) in autoloads

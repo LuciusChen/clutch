@@ -260,8 +260,7 @@ Uses the full connection key so each console gets its own result buffer."
        clutch--result-server-rewritable))
 
 (defconst clutch-result--action-requirements
-  '((sql-staged . (:surface sql))
-    (sql-mutation . (:surface sql))
+  '((sql-mutation . (:surface sql))
     (copy-insert . (:surface sql))
     (copy-update . (:surface sql))
     (export-insert . (:surface sql))
@@ -364,14 +363,14 @@ so callers cannot apply WHERE before hidden identity columns are injected."
       clutch--pending-deletes
       clutch--pending-inserts))
 
-(defun clutch-result--staged-transient-heading ()
-  "Return the transient heading for staged row mutations."
+(defun clutch-result--edit-transient-heading ()
+  "Return the transient heading for result editing."
   (let ((count (+ (length clutch--pending-edits)
                   (length clutch--pending-deletes)
                   (length clutch--pending-inserts))))
     (if (zerop count)
-        "Staged"
-      (concat "Staged ("
+        "Edit"
+      (concat "Edit ("
               (propertize (format "%d pending" count) 'face 'warning)
               ")"))))
 
@@ -994,8 +993,8 @@ Navigate (row):
   \\[clutch-result-last-page]	Last data page
   \\[clutch-result-count-total]	Query total row count
   \\[clutch-result-aggregate]	Aggregate current/selected column values
-  \\[clutch-result-scroll-right]	Page right (snap to next column border)
-  \\[clutch-result-scroll-left]	Page left (snap to previous column border)
+  \\[clutch-result-scroll-right]	Scroll right (snap to next column border)
+  \\[clutch-result-scroll-left]	Scroll left (snap to previous column border)
 Copy:
   \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
   \\[clutch-result-export]	Export all rows (copy/file)
@@ -1472,7 +1471,8 @@ Prompts for a pattern; enter empty string to clear."
 \\[clutch-refine-cancel]: cancel"
   :keymap clutch-refine-mode-map
   :lighter " [REFINE: m=row x=col RET=ok C-g=cancel]"
-  (unless clutch-refine-mode
+  (if clutch-refine-mode
+      (clutch--cleanup-cell-preview)
     (clutch-refine--clear-overlays)))
 
 (defun clutch-refine--clear-overlays ()
@@ -2360,16 +2360,17 @@ When QUIET is non-nil, suppress informational fallback messages."
 
 (defun clutch--view-format-value (val)
   "Format VAL for value viewers."
-  (if (null val)
-      (clutch--null-display-string)
-    (clutch--format-value val)))
+  (or (when-let* ((placeholder (clutch--cell-placeholder-value val)))
+        (propertize placeholder 'face 'clutch-null-face))
+      (and (null val) (clutch--null-display-string))
+      (clutch--format-value val)))
 
 (defun clutch--view-spec (val col-def &optional quiet)
   "Return rendering spec for VAL with column metadata COL-DEF.
 When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
-     ((null val)
+     ((or (null val) (clutch--cell-placeholder-value val))
       (list :kind "Value"
             :content (clutch--view-format-value val)
             :setup #'clutch--setup-plain-view-buffer))
@@ -2410,8 +2411,9 @@ blob type with non-text value → binary string; otherwise plain text."
 
 (defun clutch--cell-preview-context ()
   "Return the cell preview context at point, or nil."
-  (when (or (derived-mode-p 'clutch-result-mode)
-            (derived-mode-p 'clutch-record-mode))
+  (when (and (not clutch-refine-mode)
+             (or (derived-mode-p 'clutch-result-mode)
+                 (derived-mode-p 'clutch-record-mode)))
     (when-let* (((get-text-property (point) 'clutch-cell-truncated))
                 (cell (clutch--cell-at-point)))
       (pcase-let* ((`(,ridx ,cidx ,value) cell)
@@ -2830,9 +2832,7 @@ Selects JSON, XML, or binary string view based on column type and content."
   (interactive "sShell command on cell: ")
   (pcase-let ((`(,_ridx ,_cidx ,val) (or (clutch--cell-at-point)
                                           (user-error "No cell at point"))))
-    (let ((input (if (stringp val)
-                     val
-                   (clutch--format-value val))))
+    (let ((input (clutch--format-value val)))
       (clutch--view-in-buffer
        (with-temp-buffer
          (insert input)
@@ -3513,9 +3513,9 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
          (fk (cdr (assq cidx fk-info)))
-         (formatted (if (null display-val)
-                        clutch--null-cell-display-text
-                      (clutch--format-value display-val)))
+         (formatted (or (clutch--cell-placeholder-value display-val)
+                        (and (null display-val) clutch--null-cell-display-text)
+                        (clutch--format-value display-val)))
          (display (if (and long-p (not expanded-p) (> (length formatted) 80))
                       (concat (substring formatted 0 80) "…")
                     formatted))
@@ -3585,6 +3585,8 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
   "Navigate to the FK-referenced row for VAL using FK plist, via RESULT-BUF."
   (when (null val)
     (user-error "NULL value — cannot follow"))
+  (when-let* ((placeholder (clutch--cell-placeholder-value val)))
+    (user-error "%s value — cannot follow" placeholder))
   (with-current-buffer result-buf
     (let ((c (buffer-local-value 'clutch-connection result-buf)))
       (clutch--execute
@@ -3606,11 +3608,13 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
             (buffer-local-value 'clutch--result-column-defs result-buf))
            (col-def (nth cidx col-defs))
            (value (get-text-property (point) 'clutch-full-value))
+           (placeholder (clutch--cell-placeholder-value value))
            (expandable-p
-            (and (clutch--long-field-type-p col-def)
+            (and (not placeholder)
+                 (clutch--long-field-type-p col-def)
                  (> (length (clutch--format-value value)) 80)))
            (action (cond
-                    (fk 'follow-fk)
+                    ((and fk value (not placeholder)) 'follow-fk)
                     ((and expandable-p
                           (memq cidx clutch-record--expanded-fields))
                      'collapse)
@@ -3710,27 +3714,24 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."
-  [ :pad-keys t
+  [
    ["Navigate"
     ("TAB" "Next cell"       clutch-result-next-cell)
     ("<backtab>" "Prev cell" clutch-result-prev-cell)
     ("n" "Down row"          clutch-result-down-cell)
     ("p" "Up row"            clutch-result-up-cell)
-    ("RET" "Open record"     clutch-result-open-record)
-    ("C" "Go to column"      clutch-result-goto-column)
-    ("?" "Column info"       clutch-result-column-info)]
+    ("C" "Go to column"      clutch-result-goto-column)]
+   ["Pages"
+    ("N" "Next page"         clutch-result-next-page)
+    ("P" "Prev page"         clutch-result-prev-page)
+    ("M-<" "First page"      clutch-result-first-page)
+    ("M->" "Last page"       clutch-result-last-page)]
    ["Query"
     ("g" "Re-execute"        clutch-result-rerun)
     ("x" "Preview execution" clutch-preview-execution-sql)
     ("#" "Count total"       clutch-result-count-total
      :if clutch-result--server-rewritable-p)
     ("A" "Aggregate"         clutch-result-aggregate)]
-   [ :description clutch-result--staged-transient-heading
-     :if (lambda () (clutch-result--action-supported-p 'sql-staged))
-    ("y" "Copy staged SQL"  clutch-result-copy-pending-sql
-     :inapt-if-not clutch-result--pending-changes-p)
-    ("Y" "Save staged SQL"  clutch-result-save-pending-sql
-     :inapt-if-not clutch-result--pending-changes-p)]
    ["Filter / Sort"
     ("/" "Client filter" clutch-result-filter
      :description clutch-result--client-filter-transient-description)
@@ -3740,36 +3741,36 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("s" "Sort current" clutch-result-sort-by-column
      :description clutch-result--sort-transient-description
      :inapt-if-not clutch-result--column-name-at-point)]]
-  [ :pad-keys t
-   ["Pages"
-    ("N" "Next page"         clutch-result-next-page)
-    ("P" "Prev page"         clutch-result-prev-page)
-    ("M-<" "First page"      clutch-result-first-page)
-    ("M->" "Last page"       clutch-result-last-page)
-    ("]" "Page right →│"     clutch-result-scroll-right)
-    ("[" "Page left │←"      clutch-result-scroll-left)]
-   ["Mutate"
-    :if (lambda () (clutch-result--action-supported-p 'sql-mutation))
+  [
+   [ :description clutch-result--edit-transient-heading
+     :if (lambda () (clutch-result--action-supported-p 'sql-mutation))
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("i" "Stage insert"      clutch-result-insert-row)
     ("I" "Clone row → insert" clutch-clone-row-to-insert)
     ("d" "Stage delete"      clutch-result-delete-rows)
     ("C-c C-c" "Commit staged" clutch-result-commit
-     :inapt-if-not clutch-result--pending-changes-p)
+     :if clutch-result--pending-changes-p)
     ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point
-     :inapt-if-not clutch-result--pending-changes-p)]
-   ["Layout"
-    ("=" "Widen column"      clutch-result-widen-column)
-    ("-" "Narrow column"     clutch-result-narrow-column)
-    ("f" "Fullscreen" clutch-result-fullscreen-toggle
-     :description clutch-result--fullscreen-transient-description)]]
-  [ :pad-keys t
+     :if clutch-result--pending-changes-p)
+    ("y" "Copy staged SQL" clutch-result-copy-pending-sql
+     :if clutch-result--pending-changes-p)
+    ("Y" "Save staged SQL" clutch-result-save-pending-sql
+     :if clutch-result--pending-changes-p)]
    ["Inspect"
-    ("v" "Full value" clutch-result-view-value)]
+    ("RET" "Open record" clutch-result-open-record)
+    ("v" "Full value" clutch-result-view-value)
+    ("?" "Column info" clutch-result-column-info)]
    ["Copy / Export"
     ("c" "Copy…" clutch-result-copy-dispatch)
-    ("k" "Copy agent context" clutch-copy-context-for-agent)
-    ("e" "Export" clutch-result-export)]])
+    ("e" "Export" clutch-result-export)
+    ("k" "Copy agent context" clutch-copy-context-for-agent)]
+    ["Layout"
+     ("=" "Widen column"      clutch-result-widen-column)
+     ("-" "Narrow column"     clutch-result-narrow-column)
+     ("[" "Scroll left"       clutch-result-scroll-left)
+    ("]" "Scroll right"      clutch-result-scroll-right)
+     ("f" "Fullscreen" clutch-result-fullscreen-toggle
+      :description clutch-result--fullscreen-transient-description)]])
 
 (transient-define-prefix clutch-record-dispatch ()
   "Dispatch menu for clutch record buffer."

@@ -125,6 +125,106 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
           (clutch--source-window (selected-window)))
       (clutch-test--execute-and-present sql conn))))
 
+(ert-deftest clutch-test-live-clickhouse-converged-console-and-namespace-entrypoints ()
+  :tags '(:clutch-live)
+  "Unified console and namespace commands should work against ClickHouse."
+  (unless (clutch-test--clickhouse-live-p)
+    (ert-skip (clutch-test-capability-skip-message :clickhouse-engine)))
+  (clutch-test--with-conn admin
+    (let* ((database (format "clutch_switch_%d" (emacs-pid)))
+           (params (append (list :backend 'clickhouse)
+                           (clutch-test--live-connect-params)))
+           (name (clutch--ad-hoc-console-name params))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console-buffer)
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE DATABASE %s" database))
+            (clutch-query-console (list :name name :params params))
+            (setq console-buffer (current-buffer))
+            (let ((old-connection clutch-connection)
+                  (console-key (buffer-name console-buffer)))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (prompt collection &rest _args)
+                           (should (equal prompt "Console: "))
+                           (should (member console-key collection))
+                           console-key)))
+                (call-interactively #'clutch-query-console))
+              (should (eq (current-buffer) console-buffer))
+              (should (eq clutch-connection old-connection))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (prompt collection &rest _args)
+                           (should (string-prefix-p
+                                    "Switch schema/database" prompt))
+                           (should (member database collection))
+                           database)))
+                (clutch-switch-schema))
+              (should-not (eq clutch-connection old-connection))
+              (should (equal (plist-get clutch--connection-params :database)
+                             database))
+              (should
+               (equal
+                (caar
+                 (clutch-db-result-rows
+                  (clutch-db-query clutch-connection
+                                   "SELECT currentDatabase()")))
+                database))))
+        (when (buffer-live-p console-buffer)
+          (kill-buffer console-buffer))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))
+        (delete-directory clutch-console-directory t)))))
+
+(ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
+  :tags '(:clutch-live :duckdb-live)
+  "The public command should switch DuckDB schemas in the current catalog."
+  (unless (eq (clutch-test-live-backend-id) 'duckdb)
+    (ert-skip "Live backend is not DuckDB"))
+  (let* ((params (append
+                  (list :backend 'jdbc
+                        :driver-class "org.duckdb.DuckDBDriver"
+                        :display-name "DuckDB")
+                  (clutch-test--live-connect-params)))
+         (conn (clutch-db-connect 'jdbc params))
+         original original-catalog)
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-mode)
+          (setq-local clutch-connection conn
+                      clutch--connection-params params)
+          (setq original (clutch-db-current-schema conn)
+                original-catalog
+                (caar (clutch-db-result-rows
+                       (clutch-db-query
+                        conn "SELECT current_catalog(), current_schema()"))))
+          (clutch-db-query conn "CREATE SCHEMA \"odd.schema\"")
+          (unwind-protect
+              (progn
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (prompt collection &rest _args)
+                             (should (string-prefix-p
+                                      "Switch schema/database" prompt))
+                             (should (member "odd.schema" collection))
+                             "odd.schema")))
+                  (clutch-switch-schema))
+                (should (eq clutch-connection conn))
+                (should (equal (plist-get clutch--connection-params :catalog)
+                               original-catalog))
+                (should (equal (plist-get clutch--connection-params :schema)
+                               "odd.schema"))
+                (clutch-db-query conn
+                                 "CREATE TABLE namespace_probe (id INTEGER)")
+                (should
+                 (cl-find "namespace_probe"
+                          (clutch-db-list-table-entries conn)
+                          :key (lambda (entry) (plist-get entry :name))
+                          :test #'string=)))
+            (when (clutch-db-live-p conn)
+              (ignore-errors (clutch-db-set-current-schema conn original))
+              (ignore-errors
+                (clutch-db-query conn "DROP SCHEMA \"odd.schema\" CASCADE")))))
+      (ignore-errors (clutch-db-disconnect conn)))))
+
 (ert-deftest clutch-test-live-schema-introspection ()
   :tags '(:clutch-live)
   "Test schema introspection functions."

@@ -1026,6 +1026,18 @@ authinfo, and PARAMS are explicit connection parameters."
     (clutch-db-set-auto-commit conn t)
     (should-not (clutch-db-manual-commit-p conn))))
 
+(ert-deftest clutch-db-test-native-pg-transaction-state-follows-pg-el ()
+  "Native PostgreSQL should read transaction state from pg-el."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test")))
+    (pcase-dolist (`(,status ,open ,failed)
+                   '((?I nil nil)
+                     (?T t nil)
+                     (?E t t)))
+      (setf (pgcon-transaction-status conn) status)
+      (should (eq (and (clutch-db-pg--tx-open-p conn) t) open))
+      (should (eq (and (clutch-db-pg--tx-failed-p conn) t) failed)))))
+
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
   (require 'clutch-db-pg)
@@ -1037,6 +1049,7 @@ authinfo, and PARAMS are explicit connection parameters."
                  (push sql calls)
                  (pcase sql
                    ("BEGIN"
+                    (setf (pgcon-transaction-status conn) ?T)
                     (make-pgresult :connection conn :status "BEGIN"))
                    ("SELECT 1"
                     (make-pgresult :connection conn
@@ -1068,10 +1081,13 @@ authinfo, and PARAMS are explicit connection parameters."
                  (push sql calls)
                  (pcase sql
                    ("BEGIN"
+                    (setf (pgcon-transaction-status conn) ?T)
                     (make-pgresult :connection conn :status "BEGIN"))
                    ("UPDATE demo SET x = 1"
+                    (setf (pgcon-transaction-status conn) ?E)
                     (signal 'pg-error '("statement failed")))
                    ("ROLLBACK"
+                    (setf (pgcon-transaction-status conn) ?I)
                     (make-pgresult :connection conn :status "ROLLBACK"))
                    (_
                     (ert-fail (format "Unexpected SQL: %s" sql)))))))
@@ -2433,6 +2449,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         sample-collections)
     (cl-letf (((symbol-function 'mongodb-list-collections)
                (lambda (_client _database) '("users" "orders")))
+              ((symbol-function 'mongodb-list-databases)
+               (lambda (_client) '("app" "analytics")))
               ((symbol-function 'mongodb-find)
                (lambda (_client _database collection _filter _projection limit
                                  &rest _)
@@ -2443,7 +2461,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  '((("name" . "users")
                     ("type" . "collection"))))))
       (let ((conn (clutch-db-test--make-mongodb-conn)))
-        (should (equal (clutch-db-list-schemas conn) '("app")))
+        (should (equal (clutch-db-list-schemas conn)
+                       '("analytics" "app")))
         (should (equal (clutch-db-list-tables conn) '("users" "orders")))
         (should (equal (clutch-db-list-table-entries conn)
                        '((:name "users" :schema "app" :type "COLLECTION")
@@ -2790,6 +2809,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (clutch-db-set-current-schema conn "analytics")
     (should (equal (clutch-db-current-schema conn) "analytics"))
     (should (equal (clutch-db-database conn) "analytics"))
+    (should (equal (clutch-db-update-namespace-params
+                    conn '(:backend mongodb :database "app"))
+                   '(:backend mongodb :database "analytics")))
     (let (captured-database)
       (cl-letf (((symbol-function 'mongodb-find)
                  (lambda (_client database _collection _filter
@@ -2853,16 +2875,17 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                    ("get-columns" `(:columns ((:name "id" :type "UInt64"
                                                :nullable ,clutch-jdbc--json-false)
                                               (:name "user_id" :type "UInt64"
-                                               :nullable t))))
+                                               :nullable t
+                                               :default "0"))))
                    (_ (ert-fail (format "unexpected op: %s" op)))))))
       (should
        (equal (clutch-db-column-details conn "events")
               '((:name "id" :type "UInt64" :nullable nil
-                 :primary-key t :foreign-key nil :comment nil)
+                 :primary-key t :foreign-key nil :comment nil :default nil)
                 (:name "user_id" :type "UInt64" :nullable t
                  :primary-key nil
                  :foreign-key (:ref-table "users" :ref-column "id")
-                 :comment nil))))
+                 :comment nil :default "0"))))
       (dolist (call calls)
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
@@ -3257,6 +3280,44 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (clutch-db-list-schemas conn)
                      '("APP_USER" "ANALYTICS" "SALES"))))))
 
+(ert-deftest clutch-db-test-jdbc-duckdb-switches-current-catalog-schema ()
+  "DuckDB JDBC should switch a schema within the current catalog."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 8
+               :params '(:driver jdbc
+                         :url "jdbc:duckdb:/tmp/analytics.duckdb"
+                         :rpc-timeout 9)))
+        queries)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (push sql queries)
+                 (cond
+                  ((string-match-p "duckdb_schemas" sql)
+                   (make-clutch-db-result
+                    :rows '(("main") ("sales") ("odd.schema"))))
+                  ((string-match-p "current_catalog" sql)
+                   (make-clutch-db-result :rows '(("analytics" "main"))))
+                  ((string-prefix-p "USE " sql)
+                   (make-clutch-db-result :rows nil))
+                  (t (ert-fail (format "Unexpected SQL: %s" sql)))))))
+      (should
+       (equal (clutch-db-list-schemas conn)
+              '("main" "sales" "odd.schema")))
+      (should (equal (clutch-db-current-schema conn) "main"))
+      (should
+       (equal (clutch-db-set-current-schema
+               conn "odd.schema")
+              "odd.schema"))
+      (should (member "USE \"analytics\".\"odd.schema\"" queries))
+      (should (equal (plist-get (clutch-jdbc-conn-params conn) :catalog)
+                     "analytics"))
+      (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
+                     "odd.schema"))
+      (should-not
+       (clutch-db-list-schemas
+        (make-clutch-jdbc-conn
+         :params '(:driver jdbc :url "jdbc:duckdb:")))))))
+
 (ert-deftest clutch-db-test-jdbc-set-current-schema-contract ()
   "JDBC schema switching should support Oracle sessions and reject generic JDBC."
   (let ((conn (make-clutch-jdbc-conn
@@ -3293,7 +3354,10 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (make-mysql-result :connection conn :affected-rows 0))))
       (should (equal (clutch-db-set-current-schema conn "analytics") "analytics"))
       (should (equal executed-sql "USE `analytics`"))
-      (should (equal (mysql-current-database conn) "analytics")))))
+      (should (equal (mysql-current-database conn) "analytics"))
+      (should (equal (clutch-db-update-namespace-params
+                      conn '(:backend mysql :database "sales"))
+                     '(:backend mysql :database "analytics"))))))
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
@@ -3361,6 +3425,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (eq (plist-get pg-features :data-model) 'relational))
     (should (eq (plist-get pg-features :sql-product) 'postgres))
     (should (eq (plist-get sqlite-features :data-model) 'relational))
+    (should (clutch-backend-update-default-p 'oracle))
+    (should-not (clutch-backend-update-default-p 'sqlite))
     ;; Generic JDBC backend
     (should jdbc-features)
     (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))
@@ -3683,11 +3749,10 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (should (equal (clutch-db-pg--typed-arguments
                     (list (clutch-db-typed-param [0 1 2] "_int4")))
                    '(("{0,1,2}" . nil))))
-    (let ((err (should-error
-                (clutch-db-pg--typed-arguments
-                 (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
-                :type 'user-error)))
-      (should (string-match-p "explicit dimension bounds" (cadr err))))))
+    (should (equal (clutch-db-pg--typed-arguments
+                    (list (clutch-db-typed-param
+                           "[0:2]={1,2,3}" "_int4")))
+                   '(("[0:2]={1,2,3}" . nil))))))
 
 (ert-deftest clutch-db-test-pg-column-details-keep-array-display-type ()
   "PostgreSQL column details should keep display type while saving backend type."
@@ -4615,7 +4680,7 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   :tags '(:db-live :mysql-live)
-  "Test MySQL schema introspection."
+  "Test MySQL schema introspection and database switching."
   (clutch-db-test--with-mysql conn
     ;; list-tables
     (let ((tables (clutch-db-list-tables conn)))
@@ -4629,7 +4694,21 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
     (let ((ddl (clutch-db-object-definition
                 conn '(:name "user" :type "TABLE"))))
       (should (stringp ddl))
-      (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))))
+      (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))
+    (let* ((original (clutch-db-current-schema conn))
+           (schema (clutch-db-test--live-name "clutch_switch"))
+           (quoted (clutch-db-escape-identifier conn schema)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE DATABASE %s" quoted))
+            (should (member schema (clutch-db-list-schemas conn)))
+            (clutch-db-set-current-schema conn schema)
+            (should (equal (clutch-db-current-schema conn) schema))
+            (clutch-db-query conn "CREATE TABLE namespace_probe (id INT)")
+            (should (member "namespace_probe" (clutch-db-list-tables conn))))
+        (ignore-errors (clutch-db-set-current-schema conn original))
+        (ignore-errors
+          (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" quoted)))))))
 
 (ert-deftest clutch-db-test-mysql-live-row-identity-uses-unique-not-null ()
   :tags '(:db-live :mysql-live)
@@ -4784,7 +4863,7 @@ Skips if `clutch-db-test-pg-password' is nil."
 
 (ert-deftest clutch-db-test-pg-live-schema ()
   :tags '(:db-live :pg-live)
-  "Test PostgreSQL schema introspection."
+  "Test PostgreSQL schema introspection and switching."
   (clutch-db-test--with-pg conn
     (let* ((table (clutch-db-test--live-name "clutch_schema"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
@@ -4809,7 +4888,24 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
             (let ((ddl (clutch-db-object-definition
                         conn (list :name table :type "TABLE"))))
               (should (stringp ddl))
-              (should (string-match-p "CREATE TABLE" ddl))))
+              (should (string-match-p "CREATE TABLE" ddl)))
+            (let* ((original (clutch-db-current-schema conn))
+                   (schema (clutch-db-test--live-name "clutch_switch"))
+                   (quoted (clutch-db-escape-identifier conn schema)))
+              (unwind-protect
+                  (progn
+                    (clutch-db-query conn (format "CREATE SCHEMA %s" quoted))
+                    (should (member schema (clutch-db-list-schemas conn)))
+                    (clutch-db-set-current-schema conn schema)
+                    (should (equal (clutch-db-current-schema conn) schema))
+                    (clutch-db-query conn
+                                     "CREATE TABLE namespace_probe (id INT)")
+                    (should (member "namespace_probe"
+                                    (clutch-db-list-tables conn))))
+                (ignore-errors (clutch-db-set-current-schema conn original))
+                (ignore-errors
+                  (clutch-db-query conn
+                                   (format "DROP SCHEMA %s CASCADE" quoted))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()
@@ -5546,7 +5642,7 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-schema ()
   :tags '(:db-live :jdbc-live :oracle-live)
-  "Oracle JDBC schema introspection should list tables and columns."
+  "Oracle JDBC should introspect and switch schemas on both sessions."
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_SCHEMA"))
            (drop-sql (format "DROP TABLE %s" tbl)))
@@ -5561,7 +5657,33 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
               (should (member "ID" cols))
               (should (member "NAME" cols))))
         (ignore-errors
-          (clutch-db-query conn drop-sql))))))
+          (clutch-db-query conn drop-sql))))
+    (let* ((original (clutch-db-current-schema conn))
+           (schema (upcase (clutch-db-test--live-name "CC_SWITCH")))
+           (quoted (clutch-db-escape-identifier conn schema)))
+      (unwind-protect
+          (progn
+            (ignore-errors
+              (clutch-db-query conn (format "DROP USER %s CASCADE" quoted)))
+            (clutch-db-query
+             conn
+             (format "CREATE USER %s IDENTIFIED BY \"ClutchSwitch1\"" quoted))
+            (should (member schema (clutch-db-list-schemas conn)))
+            (clutch-db-set-current-schema conn schema)
+            (should (equal (clutch-db-current-schema conn) schema))
+            (clutch-db-query conn "CREATE TABLE namespace_probe (id NUMBER)")
+            (should (member "NAMESPACE_PROBE" (clutch-db-list-tables conn)))
+            (should
+             (equal
+              (caar
+               (clutch-db-result-rows
+                (clutch-db-query
+                 conn
+                 "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))
+              schema)))
+        (ignore-errors (clutch-db-set-current-schema conn original))
+        (ignore-errors
+          (clutch-db-query conn (format "DROP USER %s CASCADE" quoted)))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-uses-unique-not-null ()
   :tags '(:db-live :jdbc-live :oracle-live)
