@@ -48,6 +48,7 @@ Usage: test/run-ci.sh [TARGET...]
 Targets:
   all            Run every non-live CI check.
   main           Run the main ERT suite.
+  smoke          Run minimal tagged non-live coverage.
   db             Run the database backend unit suite.
   db-contract    Run backend contract unit tests.
   db-cross       Run cross-backend live tests using configured credentials.
@@ -61,20 +62,35 @@ Targets:
   byte-compile   Byte-compile distributable clutch*.el files.
   package-lint   Run package-lint with clutch.el as package metadata source.
   checkdoc       Run checkdoc on distributable clutch*.el files.
+  architecture   Check Clutch module dependency boundaries.
   native-live    Run native backend/UI live tests against local containers.
 EOF
 }
 
 run_main_tests() {
+  run_main_tests_matching "${CLUTCH_TEST_SELECTOR:-t}"
+}
+
+run_main_tests_matching() {
+  local selector="$1"
+  local -a modules args
+  IFS=: read -r -a modules <<<"${CLUTCH_TEST_MODULES:-clutch-test}"
+  args=(-l ert -l clutch)
+  local module
+  for module in "${modules[@]}"; do
+    args+=(-l "$module")
+  done
   run_emacs \
-    -l ert \
-    -l clutch \
-    -l clutch-test \
-    --eval "(ert-run-tests-batch-and-exit)"
+    "${args[@]}" \
+    --eval "(ert-run-tests-batch-and-exit $selector)"
 }
 
 run_db_tests() {
-  run_db_tests_matching "'(not (tag :db-live))"
+  local selector="${CLUTCH_TEST_SELECTOR:-}"
+  if [[ -z "$selector" ]]; then
+    selector="'(not (tag :db-live))"
+  fi
+  run_db_tests_matching "$selector"
 }
 
 run_db_tests_matching() {
@@ -116,6 +132,13 @@ run_checkdoc() {
   )
 }
 
+run_architecture() {
+  run_emacs --eval "(setq clutch--architecture-skip-main t)" \
+    -l ert -l check-architecture -l check-architecture-test \
+    --eval "(ert-run-tests-batch-and-exit t)"
+  run_emacs -l check-architecture
+}
+
 run_native_live() {
   "$repo/test/run-native-live-tests.sh"
 }
@@ -123,11 +146,16 @@ run_native_live() {
 run_target() {
   case "$1" in
     all)
-      run_main_tests
-      run_db_tests
+      CLUTCH_TEST_MODULES=clutch-test run_main_tests_matching t
+      run_db_tests_matching "'(not (tag :db-live))"
       run_byte_compile
       run_package_lint
       run_checkdoc
+      run_architecture
+      ;;
+    smoke)
+      run_main_tests_matching "'(tag :smoke)"
+      run_db_tests_matching "'(and (not (tag :db-live)) (tag :smoke))"
       ;;
     main) run_main_tests ;;
     db) run_db_tests ;;
@@ -183,6 +211,7 @@ run_target() {
     byte-compile) run_byte_compile ;;
     package-lint) run_package_lint ;;
     checkdoc) run_checkdoc ;;
+    architecture) run_architecture ;;
     native-live) run_native_live ;;
     -h|--help) usage ;;
     *)

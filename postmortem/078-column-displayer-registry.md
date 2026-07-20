@@ -10,8 +10,7 @@ Result buffers already had one rendering pipeline:
 - truncation / padding
 - cell face application
 
-That kept the table renderer simple, but it also meant every column in every
-table had to look the same.  Users had no narrow hook for common cases such as:
+That kept the table renderer simple, but it also meant every column in every table had to look the same.  Users had no narrow hook for common cases such as:
 
 - BYTEA / blob thumbnails
 - JSON summary labels
@@ -26,11 +25,9 @@ Add a per-table/per-column displayer registry in =clutch-ui.el=.
 - Matching is case-insensitive
 - The registered function receives the raw cell value
 - Returning nil falls back to the default renderer
-- Renderer failures are isolated at the UI boundary and fall back to the
-  default display
+- Renderer failures are isolated at the UI boundary and fall back to the default display
 
-The hook is intentionally narrow: it changes only the visible cell text in the
-result table.
+The hook is intentionally narrow: it changes only the visible cell text in the result table.
 
 * Why Here
 
@@ -39,11 +36,9 @@ This is a UI concern, not a backend concern.
 - Backends should keep returning raw values
 - The value viewer should keep showing the raw value
 - Edit / insert flows should keep using the raw value
-- Cell face, padding, and borders should keep following the existing render
-  rules
+- Cell face, padding, and borders should keep following the existing render rules
 
-Putting the hook in =clutch--cell-display-content= keeps the behavior local to
-the one place where raw values become table text.
+Putting the hook in =clutch--cell-display-content= keeps the behavior local to the one place where raw values become table text.
 
 * What We Did Not Add
 
@@ -54,5 +49,4 @@ We did not add:
 - viewer-specific rendering hooks
 - edit-buffer rendering hooks
 
-That would blur the boundary between stored data and displayed text.  The
-registry is deliberately only a result-table presentation override.
+That would blur the boundary between stored data and displayed text.  The registry is deliberately only a result-table presentation override.

@@ -51,6 +51,11 @@ HANA has no canonical default port — always set =:port= explicitly.  Common
 values: =3<instance>13= (SYSTEMDB), =3<instance>15= (single container / first
 tenant), =443= (HANA Cloud).
 
+Because there is no sensible port default, HANA is intentionally excluded from
+the interactive =clutch-connect= manual-entry picker (=:manual-choice nil=).
+Reach a HANA endpoint through a =clutch-connection-alist= entry or =.hana.gpg=
+discovery instead.
+
 ** URL Construction
 
 Structured plists are turned into =jdbc:sap://{host}:{port}/= URLs.  The only
@@ -98,7 +103,7 @@ saved connection in =M-x clutch-query-console=.  Field mapping:
 | =:server=               | connection =:host= (real HANA hostname)             |
 | =:port=                 | =:port= (parsed to number)                          |
 | =:user=                 | =:user=                                             |
-| =:secret=               | resolved lazily at connect time                     |
+| =:secret=               | =:password= (resolved at discovery time)           |
 | =:schema=               | =:schema= (becomes =currentSchema=)                 |
 
 =clutch-saphana-auth-source-files= defaults to ='("~/.hana.gpg")=.  Missing
@@ -110,10 +115,21 @@ Entries in =clutch-connection-alist= always win over auth-source entries when
 names collide, so you can override a discovered entry (e.g. to add =:props=)
 without touching the =.gpg= file.
 
-Passwords are resolved through the standard chain at connect time:
+As a safety net for the reverse case — a static entry is *removed* and a
+discovered =.hana.gpg= entry happens to reuse its name — a query console
+remembers the endpoint it was opened for and refuses to silently reconnect if
+its saved name later resolves to a different endpoint, raising a =user-error=
+instead of quietly rerouting to another database.  This guard is
+backend-agnostic; it protects any saved-connection console, not just HANA.
+
+The =:secret= thunk in a discovered auth-source entry is resolved eagerly, at
+discovery time, and stored as =:password= on the virtual connection.  This is
+safe because =.hana.gpg= is already decrypted while auth-source builds the
+entry, and it avoids a second lookup at connect that would normally fail —
+=~/.hana.gpg= is not usually part of the global =auth-sources=.  For a
+statically configured entry in =clutch-connection-alist= (no discovery),
+passwords still resolve through the standard chain at connect time:
 =:pass-entry= → =auth-source-search= on host/user/port → =read-passwd= prompt.
-The =:secret= thunk in the auth-source entry is only invoked when clutch
-actually reaches the auth-source fallback.
 
 ** Transaction Control
 
@@ -133,10 +149,16 @@ and =C-c C-a= / =C-c C-m= / =C-c C-u= behave as documented in the main
 
 ** Staged Mutation Row Identity
 
-HANA follows the standard JDBC row-identity policy: primary key first, then
-non-null unique key.  There is no =$rowid$= physical fallback — result sets
-from tables without a PK or non-null unique key stay read-only for staged
-=UPDATE= / =DELETE=.
+HANA row identity stops at the primary key.  There is no =$rowid$= physical
+fallback (as Oracle has), and — unlike the generic JDBC policy — clutch does
+*not* fall back to a non-null unique key on HANA.  Result sets from tables
+without a primary key stay read-only for staged =UPDATE= / =DELETE=.
+
+The unique-key fallback is deliberately skipped: HANA's JDBC =getIndexInfo=
+call is slow and serialized on the connection monitor, so probing it on every
+PK-less table would starve the shared JDBC agent thread pool.  HANA user
+tables in practice always carry a primary key; the fallback would only fire
+for system views (e.g. =DUMMY=) or generated read-only schemas anyway.
 
 ** Schema Enumeration
 
@@ -147,13 +169,38 @@ same way it treats Oracle:
 - =clutch-connect= returns immediately; no full schema enumeration blocks the
   console.
 - SQL completion at point issues prefix queries against HANA's data
-  dictionary.
+  dictionary.  When no explicit =:schema= is configured, completion and object
+  discovery default to the login user's own schema (the uppercased =:user=),
+  which keeps =search-tables= / =search-columns= RPCs bounded on large
+  tenants.  Set =:schema= (or =currentSchema=) to browse a different schema.
 - =C-c C-j= object discovery is served from a cache that a background job
   populates after connect.
 - =clutch-schema-refresh= re-fetches the snapshot on demand.
 
-No system-schema filtering is applied; =SYS=, =_SYS_*=, =PUBLIC=, and every
-application container show up in =C-c C-j= exactly as HANA reports them.
+Object-category enumeration skips =indexes=, =procedures=, and =functions= on
+HANA.  =getIndexInfo= is slow and serialized on the JDBC connection monitor,
+and =getProcedures= / =getFunctions= reference an ANSI =SPECIFIC_NAME= column
+that HANA's =SYS.PROCEDURES= / =SYS.FUNCTIONS= views do not expose (the calls
+fail outright).  Query =SYS.INDEXES=, =SYS.PROCEDURES=, or =SYS.FUNCTIONS=
+directly for those listings.  Tables, views, and columns enumerate normally.
+
+Within the resolved schema, no system-schema exclusion is applied; =SYS=,
+=_SYS_*=, =PUBLIC=, and application containers appear in =C-c C-j= as HANA
+reports them.
+
+** Schema Switching
+
+=clutch-switch-schema= is supported on HANA.  The picker is populated from a
+bounded =SELECT SCHEMA_NAME FROM SYS.SCHEMAS= query — not
+=DatabaseMetaData.getSchemas= — so a large tenant does not enumerate thousands
+of internal containers.  System and =_SYS_*= dictionary/repository schemas are
+hidden (see =clutch-jdbc--saphana-system-schemas=); the current schema sorts
+first.  Selecting one runs a =SET SCHEMA "name"= statement (HANA's =ngdbc=
+driver rejects the JDBC =setSchema= path other backends use) and updates the
+connection's =:schema= (i.e. the effective =currentSchema=) so subsequent
+completion, object discovery, and staged mutations scope to it.  Schema names
+pass through verbatim — HANA stores them in canonical form, so unlike Oracle
+they are not upcased.
 
 ** Pagination and Identifier Quoting
 

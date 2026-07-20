@@ -17,28 +17,17 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-connection)
 (require 'clutch-query)
 (require 'clutch-schema)
 (require 'clutch-ui)
 (require 'subr-x)
 (require 'transient)
 
-(defvar clutch-connection)
-
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
-(declare-function clutch-connect "clutch-connection" ())
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
-(declare-function clutch-disconnect "clutch-connection" ())
-(declare-function clutch--ensure-connection "clutch-connection" ())
-(declare-function clutch-execute-buffer "clutch-query" ())
-(declare-function clutch-execute-query-at-point "clutch-query" ())
-(declare-function clutch-execute-region "clutch-query" ())
-(declare-function clutch--dwim-bounds-at-point "clutch-query" ())
 (declare-function clutch-jump "clutch-object" (&optional entry))
-(declare-function clutch-query-console "clutch-query" (target))
-(declare-function clutch-refresh-schema "clutch-schema" ())
-(declare-function clutch-switch-schema "clutch" ())
 
 (defgroup clutch-mongodb nil
   "Native MongoDB backend for clutch."
@@ -79,18 +68,8 @@
     table)
   "Syntax table for `clutch-mongodb-mode'.")
 
-(defconst clutch-mongodb--function-keywords
-  '("adminCommand" "aggregate" "countDocuments" "createCollection"
-    "createIndex" "deleteMany" "deleteOne" "distinct" "drop"
-    "dropDatabase" "dropIndex" "estimatedDocumentCount" "find" "findOne"
-    "getCollection" "getCollectionInfos" "getCollectionNames" "getName"
-    "getSiblingDB" "insertMany" "insertOne" "listIndexes" "replaceOne"
-    "runCommand" "updateMany" "updateOne")
-  "MongoDB shell function names highlighted in `clutch-mongodb-mode'.")
-
 (defconst clutch-mongodb--constructor-keywords
-  '("Decimal128" "ISODate" "Int32" "Long" "NumberDecimal" "NumberInt"
-    "NumberLong" "ObjectId" "Timestamp")
+  '("ISODate" "ObjectId")
   "Supported MongoDB BSON constructor names highlighted in `clutch-mongodb-mode'.")
 
 (defconst clutch-mongodb-font-lock-keywords
@@ -190,17 +169,13 @@
 
 (defconst clutch-mongodb--db-method-candidates
   (clutch-mongodb--call-candidates
-   '("adminCommand" "aggregate" "createCollection" "dropDatabase"
-     "getCollection" "getCollectionInfos" "getCollectionNames"
-     "getName" "getSiblingDB" "runCommand"))
+   '("getCollection" "runCommand"))
   "MongoDB shell methods useful after `db.'.")
 
 (defconst clutch-mongodb--collection-method-candidates
   (clutch-mongodb--call-candidates
-   '("aggregate" "countDocuments" "createIndex" "deleteMany" "deleteOne"
-     "distinct" "drop" "dropIndex" "estimatedDocumentCount" "find"
-     "findOne" "insertMany" "insertOne" "listIndexes" "replaceOne"
-     "updateMany" "updateOne"))
+   '("aggregate" "countDocuments" "deleteOne" "distinct" "find" "findOne"
+     "insertMany" "insertOne" "replaceOne" "updateOne"))
   "MongoDB shell methods useful after a collection expression.")
 
 (defconst clutch-mongodb--collection-template-candidates
@@ -214,25 +189,21 @@
 
 (defconst clutch-mongodb--find-chain-candidates
   (clutch-mongodb--call-candidates
-   '("sort" "skip" "limit" "maxTimeMS" "batchSize" "allowDiskUse"
-     "comment" "explain"))
+   '("sort" "skip" "limit" "maxTimeMS" "allowDiskUse" "explain"))
   "MongoDB cursor helper methods useful after `find(...)'.")
 
 (defconst clutch-mongodb--aggregate-chain-candidates
   (clutch-mongodb--call-candidates
-   '("allowDiskUse" "batchSize" "maxTimeMS" "comment" "explain"))
+   '("allowDiskUse" "maxTimeMS" "explain"))
   "MongoDB cursor helper methods useful after `aggregate(...)'.")
 
 (defconst clutch-mongodb--cursor-chain-methods
-  '("sort" "skip" "limit" "maxTimeMS" "batchSize" "allowDiskUse"
-    "comment")
+  '("sort" "skip" "limit" "maxTimeMS" "allowDiskUse")
   "Non-terminal MongoDB cursor helper method names.")
 
 (defconst clutch-mongodb--top-level-candidates
   (append '("db")
-          (clutch-mongodb--call-candidates
-           '("ObjectId" "ISODate" "Timestamp" "Int32" "Long"
-             "NumberLong" "NumberInt" "Decimal128" "NumberDecimal")))
+          (clutch-mongodb--call-candidates '("ObjectId" "ISODate")))
   "MongoDB shell top-level completion candidates.")
 
 (defun clutch-mongodb--collection-candidates ()
@@ -527,7 +498,7 @@ path expressions."
     ("q" "Query console" clutch-query-console)
     ("d" "Disconnect"    clutch-disconnect)]
    ["Execute"
-    ("x" "Query at point"     clutch-execute-query-at-point)
+    ("x" "DWIM"               clutch-execute-dwim)
     ("p" "Explain query"      clutch-mongodb-explain-query-at-point)
     ("r" "Region"             clutch-execute-region)
     ("b" "Buffer"             clutch-execute-buffer)

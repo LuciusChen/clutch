@@ -58,13 +58,6 @@
   "Return non-nil when result workflow SQL is valid for the backend."
   (clutch-test-live-backend-capability-p :result-workflow))
 
-(defun clutch-test--live-column-type (kind)
-  "Return a live-test SQL column type for KIND."
-  (pcase kind
-    ('int (if (clutch-test--clickhouse-live-p) "Int32" "INT"))
-    ('string (if (clutch-test--clickhouse-live-p) "String" "VARCHAR(64)"))
-    (_ (error "Unknown live test column kind: %S" kind))))
-
 (defun clutch-test--live-create-table-sql (table columns)
   "Return CREATE TABLE SQL for TABLE with COLUMNS.
 COLUMNS entries have the shape (NAME KIND . ATTRS)."
@@ -75,7 +68,12 @@ COLUMNS entries have the shape (NAME KIND . ATTRS)."
              (pcase-let ((`(,name ,kind . ,attrs) column))
                (format "%s %s%s"
                        name
-                       (clutch-test--live-column-type kind)
+                       (pcase kind
+                         ('int (if (clutch-test--clickhouse-live-p)
+                                   "Int32" "INT"))
+                         ('string (if (clutch-test--clickhouse-live-p)
+                                      "String" "VARCHAR(64)"))
+                         (_ (error "Unknown live test column kind: %S" kind)))
                        (if (and (memq 'primary attrs)
                                 (not (clutch-test--clickhouse-live-p)))
                            " PRIMARY KEY"
@@ -125,7 +123,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (with-temp-buffer
     (let ((clutch-connection conn)
           (clutch--source-window (selected-window)))
-      (clutch--execute-select sql conn))))
+      (clutch-test--execute-and-present sql conn))))
 
 (ert-deftest clutch-test-live-schema-introspection ()
   :tags '(:clutch-live)
@@ -169,8 +167,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
       (let ((clutch--object-cache (make-hash-table :test 'equal))
             (clutch--object-warmup-timers (make-hash-table :test 'equal))
             (clutch--object-warmup-generations (make-hash-table :test 'equal))
-            (clutch--column-details-cache (make-hash-table :test 'equal))
-            (clutch--column-details-status-cache (make-hash-table :test 'equal)))
+            (clutch--table-metadata-cache (make-hash-table :test 'equal)))
         (unwind-protect
             (progn
               (clutch-db-query conn drop-sql)
@@ -486,7 +483,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
            (insert-sql
              (format "INSERT INTO %s (id, name) VALUES (1, 'before')" table))
            (select-sql
-            (format "SELECT id, name FROM %s ORDER BY id" table))
+            (concat (and (eq (clutch-db-backend-key conn) 'pg)
+                         "-- row identity comment regression\n")
+                    (format "SELECT id, name FROM %s ORDER BY id" table)))
            (result-name (format " *clutch-edit-live-%d*" (emacs-pid))))
       (unwind-protect
           (progn

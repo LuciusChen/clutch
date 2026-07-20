@@ -2,13 +2,9 @@
 
 ## Background
 
-Official MySQL 8 defaults to `caching_sha2_password`.  On an insecure TCP
-connection, the server may accept the fast-auth path, but when full
-authentication is required it rejects the client unless the exchange moves onto
-TLS or uses RSA public-key encryption.
+Official MySQL 8 defaults to `caching_sha2_password`.  On an insecure TCP connection, the server may accept the fast-auth path, but when full authentication is required it rejects the client unless the exchange moves onto TLS or uses RSA public-key encryption.
 
-`mysql.el` already supported the TLS path when callers opted into `:tls t`, but
-the default non-TLS connection flow failed with:
+`mysql.el` already supported the TLS path when callers opted into `:tls t`, but the default non-TLS connection flow failed with:
 
 - `caching_sha2_password full authentication requires TLS`
 
@@ -20,8 +16,7 @@ That left an awkward gap:
 
 ## Decision
 
-When `mysql.el` sees the specific `caching_sha2_password` full-auth failure on a
-non-TLS connection, it now retries the entire connection once with `:tls t`.
+When `mysql.el` sees the specific `caching_sha2_password` full-auth failure on a non-TLS connection, it now retries the entire connection once with `:tls t`.
 
 This is deliberately narrow:
 
@@ -29,9 +24,7 @@ This is deliberately narrow:
 - only the initial non-TLS attempt is retried
 - verification behavior is unchanged
 
-If TLS verification fails, the connection still fails.  Users must explicitly
-configure `mysql-tls-trustfiles` or set `mysql-tls-verify-server` to `nil` for
-local/self-signed development servers.
+If TLS verification fails, the connection still fails.  Users must explicitly configure `mysql-tls-trustfiles` or set `mysql-tls-verify-server` to `nil` for local/self-signed development servers.
 
 ## Why this approach
 
@@ -51,19 +44,12 @@ The TLS retry was chosen because it:
 
 ### Add RSA public-key auth now
 
-This would preserve plaintext TCP while satisfying MySQL 8 full auth, but it
-would require new crypto machinery in Emacs Lisp or an external dependency.
-That is a larger protocol surface than the current project needs.
+This would preserve plaintext TCP while satisfying MySQL 8 full auth, but it would require new crypto machinery in Emacs Lisp or an external dependency. That is a larger protocol surface than the current project needs.
 
 ### Silently disable TLS verification during retry
 
-This would make local self-signed containers "just work", but it would also
-change the security meaning of a normal connection attempt in a non-obvious way.
-The project kept verification semantics explicit instead.
+This would make local self-signed containers "just work", but it would also change the security meaning of a normal connection attempt in a non-obvious way. The project kept verification semantics explicit instead.
 
 ## Testing impact
 
-Live test helpers for local MySQL integration now bind
-`mysql-tls-verify-server` to `nil`, because the containerized local/dev matrix
-uses self-signed certificates.  That matches the documented local/dev guidance
-and lets the auto-retry path be exercised end-to-end.
+Live test helpers for local MySQL integration now bind `mysql-tls-verify-server` to `nil`, because the containerized local/dev matrix uses self-signed certificates.  That matches the documented local/dev guidance and lets the auto-retry path be exercised end-to-end.

@@ -22,15 +22,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Stabilize workflow changes before coding**: For any change that alters a primary entry point, default action, or action menu, write a short design note first.
 - **Keep experiments narrow**: Start new directions with the smallest slice that proves the workflow is worth having. Do not expand scope before the first slice shows real user value.
 - **Audit the whole project for broad refactors**: For project-wide cleanup, review all `*.el` modules, tests, documentation, and relevant sibling repositories before choosing changes. Do not optimize one visible subsystem and call the architecture done.
-- **Clarify broad refactors before coding**: When architecture, scope,
-  compatibility, naming, ownership, user-visible behavior, or stopping criteria
-  are unclear, ask focused questions before implementation.  Inspect code,
-  tests, docs, and existing conventions first; do not ask the user questions
-  that local evidence can answer.  Ask at most 10 questions per round, include
-  the recommended answer and tradeoff for each question, and order questions so
-  upstream architectural decisions come before downstream implementation
-  details.  Multiple rounds are allowed, but stop asking once the remaining
-  uncertainty no longer changes the implementation plan.
+- **Clarify broad refactors before coding**: When architecture, scope, compatibility, naming, ownership, user-visible behavior, or stopping criteria are unclear, ask focused questions before implementation.  Inspect code, tests, docs, and existing conventions first; do not ask the user questions that local evidence can answer.  Ask at most 10 questions per round, include the recommended answer and tradeoff for each question, and order questions so upstream architectural decisions come before downstream implementation details.  Multiple rounds are allowed, but stop asking once the remaining uncertainty no longer changes the implementation plan.
 - **Flag compensating code as design debt**: When touching a subsystem, look for code that compensates in the wrong layer — `condition-case nil` swallowing internal errors, re-querying data already available from a caller, timing hacks, or silent fallbacks. These are not blockers; record them in a postmortem as design debt rather than fixing inline. Do not let debt discovery delay the current change.
 
 ## Error Handling and Testing Discipline
@@ -42,11 +34,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Tests must fail when the code is wrong**: If deleting or breaking the function under test does not turn the test red, the test is worthless. Assert specific, distinguishable output values.
 - **Test the real dispatch path for dispatch bugs**: When the bug is in completion, hooks, command routing, async callbacks, or another dispatcher, include a test that drives the installed/public entry path. Helper-level tests are fine, but they must use the same filtering/input shape as the real caller; do not assert only against an unfiltered candidate collection unless the test is explicitly about candidate construction.
 - **Match test weight to change size**: Use the smallest test that proves the intended behavior. Do not turn comment edits, documentation changes, mechanical refactors, or message-only wording changes into heavy red/green exercises.
-- **Do not test cosmetic presentation by default**: For pure UI copy, punctuation,
-  separator, truncation, icon, face, padding, or display-order tweaks, do not add
-  new tests unless the text carries a real product contract such as state
-  visibility, command availability, destructive-action warning, execution
-  payload, accessibility-relevant meaning, or a previously regressed behavior.
+- **Do not test cosmetic presentation by default**: For pure UI copy, punctuation, separator, truncation, icon, face, padding, or display-order tweaks, do not add new tests unless the text carries a real product contract such as state visibility, command availability, destructive-action warning, execution payload, accessibility-relevant meaning, or a previously regressed behavior.
 - **Treat tests as part of the architecture budget**: Keep tests that prove public workflows, real invariants, and meaningful edge cases. Remove or simplify tests that only lock in implementation details, duplicate another assertion, or cannot fail when product behavior is wrong.
 - **No hard-coded expectations**: Use diverse inputs — multiple data sets, random values, boundary cases — so that a hard-coded return cannot satisfy all assertions.
 - **Red before green for real bug fixes**: When fixing a user-visible bug, correctness issue, regression, or timing-sensitive behavior, first write a failing test that reproduces it. Confirm it fails. Then fix the code. If an existing test already proves the path and the change is only a small wording or expectation update, updating that test is sufficient.
@@ -56,50 +44,17 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Interface / implementation separation**: `mysql`, upstream `pg`, `mongodb`, and `redis` are external protocol libraries with no UI. `clutch.el` depends on `clutch-backend.el`, not protocol layers directly.
 - **External dependency boundaries stay explicit**: Protocol packages are backend-specific optional dependencies. `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are loaded only when users connect to the corresponding backend; missing protocol packages must produce clear connection-time errors. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
 - **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `mongodb--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
-- **MongoDB is one backend**: User configuration must use `:backend mongodb` for
-  MongoDB.  The ordinary document surface uses native `mongodb.el`; MongoDB SQL
-  Interface is only `:surface sql-interface` on the same backend.  Do not add a
-  second public SQL-specific MongoDB backend, driver, feature, or manual chooser
-  entry.
-- **MongoDB protocol belongs in `mongodb.el`**: Clutch owns query-console syntax,
-  completion, result rendering, saved connections, and auth-source/pass
-  resolution.  BSON, wire messages, auth, sessions, server selection, cursors,
-  and pooling belong in `mongodb.el` behind public `mongodb-` APIs.
-- **MongoDB helper syntax stays basic**: Clutch's native MongoDB query adapter
-  may translate a documented, small set of `db.*` helper forms into public
-  `mongodb-` calls, but it must not grow toward full `mongosh` compatibility.
-  Do not add arbitrary JavaScript evaluation, broad BSON constructor emulation,
-  regex literal parsing, change-stream helpers, or long-tail cursor options
-  without first moving the responsibility into a separate package/API and
-  updating the support-level contract.
-- **MongoDB residue must stay classified**: Clutch may keep only caller-facing
-  MongoDB code: `clutch-mongodb.el` as the adapter from public `mongodb-` APIs
-  to Clutch's generic database contract; `clutch-document.el` as the document
-  query-console layer currently providing `clutch-mongodb-mode` syntax,
-  highlighting, and completion; and MongoDB SQL Interface JDBC routing inside
-  `clutch-db-jdbc.el` for `:backend mongodb :surface sql-interface`.
-  Clutch must not contain BSON codecs, wire framing, URI/SRV parsing, auth,
-  sessions, transactions, server selection, cursors, retry logic, compression,
-  pooling, `mongosh` dependencies, or direct `mongodb--*` calls.  The internal
-  JDBC driver key `mongodb` may exist only inside the JDBC surface and tests;
-  user-facing configuration examples must not use `:driver mongodb`.
-- **MongoDB client handles stay opaque**: The native adapter may store the
-  public `mongodb-conn` object returned by `mongodb-connect`, but it should name it
-  as `client` or connection state.  Do not expose protocol-layer words such as
-  `wire`, `socket`, `pool`, `topology`, `OP_MSG`, or `serviceId` as Clutch
-  adapter state or user-documentation concepts.
-- **MongoDB connection params are opaque to Clutch**: Clutch may collect saved
-  connection params, resolve `:password` from `:pass-entry` / auth-source, and
-  pass the resulting plist to public `mongodb-` APIs.  It must not parse
-  `mongodb://` / `mongodb+srv://` URLs, synthesize MongoDB URIs, infer SRV/TLS
-  semantics, or duplicate `mongodb.el`'s effective database logic.  When Clutch
-  needs the effective database or endpoint, read it from public `mongodb-`
-  connection accessors or add a public API in `mongodb.el`.
+- **MongoDB is one backend**: User configuration must use `:backend mongodb` for MongoDB.  The ordinary document surface uses native `mongodb.el`; MongoDB SQL Interface is only `:surface sql-interface` on the same backend.  Do not add a second public SQL-specific MongoDB backend, driver, feature, or manual chooser entry.
+- **MongoDB protocol belongs in `mongodb.el`**: Clutch owns query-console syntax, completion, result rendering, saved connections, and auth-source/pass resolution.  BSON, wire messages, auth, sessions, server selection, cursors, and pooling belong in `mongodb.el` behind public `mongodb-` APIs.
+- **MongoDB helper syntax stays basic**: Clutch's native MongoDB query adapter may translate a documented, small set of `db.*` helper forms into public `mongodb-` calls, but it must not grow toward full `mongosh` compatibility. Do not add arbitrary JavaScript evaluation, broad BSON constructor emulation, regex literal parsing, change-stream helpers, or long-tail cursor options without first moving the responsibility into a separate package/API and updating the support-level contract.
+- **MongoDB residue must stay classified**: Clutch may keep only caller-facing MongoDB code: `clutch-mongodb.el` as the adapter from public `mongodb-` APIs to Clutch's generic database contract; `clutch-document.el` as the document query-console layer currently providing `clutch-mongodb-mode` syntax, highlighting, and completion; and MongoDB SQL Interface JDBC routing inside `clutch-db-jdbc.el` for `:backend mongodb :surface sql-interface`. Clutch must not contain BSON codecs, wire framing, URI/SRV parsing, auth, sessions, transactions, server selection, cursors, retry logic, compression, pooling, `mongosh` dependencies, or direct `mongodb--*` calls.  The internal JDBC driver key `mongodb` may exist only inside the JDBC surface and tests; user-facing configuration examples must not use `:driver mongodb`.
+- **MongoDB client handles stay opaque**: The native adapter may store the public `mongodb-conn` object returned by `mongodb-connect`, but it should name it as `client` or connection state.  Do not expose protocol-layer words such as `wire`, `socket`, `pool`, `topology`, `OP_MSG`, or `serviceId` as Clutch adapter state or user-documentation concepts.
+- **MongoDB connection params are opaque to Clutch**: Clutch may collect saved connection params, resolve `:password` from `:pass-entry` / auth-source, and pass the resulting plist to public `mongodb-` APIs.  It must not parse `mongodb://` / `mongodb+srv://` URLs, synthesize MongoDB URIs, infer SRV/TLS semantics, or duplicate `mongodb.el`'s effective database logic.  When Clutch needs the effective database or endpoint, read it from public `mongodb-` connection accessors or add a public API in `mongodb.el`.
 - **Single responsibility per file**: Do not mix protocol code with rendering code.
 - **Keep `clutch.el` as the entry point**: External consumers should continue to load `(require 'clutch)`. When implementation moves out, `clutch.el` becomes the assembler, not a grab bag.
 - **Split by stable workflow boundaries**: Prefer complete responsibilities such as result UI, object workflow, staged mutation flow, or schema/cache lifecycle. Do not split by vague internal labels like `common`, `utils`, or `helpers`, and do not split only to make `clutch.el` shorter.
 - **Stop splitting before glue takes over**: If an extraction mostly adds `defvar`, `declare-function`, cross-file hopping, or leftovers in the original file, stop and keep the ownership direct.
-- **Use declarations to keep modules honest**: When a module depends on shared globals or functions defined elsewhere, add explicit `defvar` / `declare-function` forms so byte-compilation stays clean.
+- **Use declarations to keep lazy boundaries honest**: Add explicit `defvar` / `declare-function` forms when an intentionally lazy or cyclic module boundary leaves the owner unloaded during byte-compilation.  A mandatory top-level `require` already supplies the owner's function contracts; do not repeat them as declarations.
 - **Do not use declarations as boundary patches**: A new `declare-function` to a higher-level clutch module, or to any external package private symbol, is a design smell. Move the interface to the owner module or expose a real public API instead.
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
@@ -162,7 +117,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - While `clutch` is still pre-1.0, bump patch for bug-fix-only releases and bump minor for new backends, substantial user-visible features, configuration/API breaks, or backend contract breaks. Breaking changes before 1.0 are recorded under the next minor version.
 - Feature-branch changelog sections that summarize changes relative to `origin/main` must include a `Breaking Changes` section only when there are real upgrade/configuration/API breaks. When present, place it before `Added`; do not add an empty section or write `None` just to document the absence of breaking changes.
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
-- Optimize documentation for the rendered reader, not source-width aesthetics. Do not rewrap unchanged Markdown/Org prose or lists just to fit a column; rendered documents already wrap naturally.
+- Keep each semantic Markdown/Org paragraph on one source line; rendered documents already wrap naturally, so source-width wrapping only obscures paragraph boundaries.
 - When documentation feels hard to read, improve the information structure: use a table, shorter bullets, a clearer heading, or a focused rewrite. Avoid changes whose only effect is different source line breaks.
 - `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
 - Do not assume a release asset is immutable just because the version string is unchanged. If the jar bytes change, update `clutch-jdbc-agent-sha256` immediately.
@@ -187,8 +142,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## MELPA Compatibility Checklist
 
-These rules keep the package compatible with MELPA submission requirements
-(`package-lint`, `checkdoc`, and MELPA review conventions).
+These rules keep the package compatible with MELPA submission requirements (`package-lint`, `checkdoc`, and MELPA review conventions).
 
 ### Emacs 29.1 baseline
 
@@ -200,16 +154,10 @@ These rules keep the package compatible with MELPA submission requirements
 - First line: `;;; file.el --- Short description -*- lexical-binding: t; -*-`
   - Description must NOT contain "for Emacs" or the package name — both are redundant.
   - Keep the description under 60 characters.
-- `clutch.el` is the package entry file.  It is the only file that should carry
-  package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`,
-  and `;; Author:`.
-- `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with
-  minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are documented but not listed.
-- Split implementation files must not carry `;; Package-Requires:` headers, but
-  they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
-- Keep the MELPA checklist attribution in the main package file when AI tools
-  materially assist the package:
-  `;; Assisted-by: OpenAI Codex:gpt-5.5`
+- `clutch.el` is the package entry file.  It is the only file that should carry package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`, and `;; Author:`.
+- `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are documented but not listed.
+- Split implementation files must not carry `;; Package-Requires:` headers, but they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
+- Keep the MELPA checklist attribution in the main package file when AI tools materially assist the package: `;; Assisted-by: OpenAI Codex:gpt-5.5`
 - Last line: `;;; file.el ends here`
 
 ### Naming
@@ -228,18 +176,14 @@ These rules keep the package compatible with MELPA submission requirements
 - Every public `defun`, `defmacro`, `defcustom`, and `defvar` must have a docstring.
 - Docstring first line must be a complete sentence ending with a period.
 - Argument names in docstrings should be UPPERCASED.
-- Run checkdoc across every distributable `clutch*.el` file, not only the main
-  entry file.
+- Run checkdoc across every distributable `clutch*.el` file, not only the main entry file.
 
 ### Common pitfalls
 
 - `cl-lib` functions require `(require 'cl-lib)` — do not rely on transitive loading.
 - Avoid `eval-when-compile` for runtime-needed dependencies.
-- Compatibility shims must stay in the `clutch--` namespace.  When an upstream
-  function exists, prefer a prefixed `defalias` over defining an unprefixed
-  replacement.
-- Avoid `with-eval-after-load` in package code unless the form registers an
-  optional integration at a clear package boundary.
+- Compatibility shims must stay in the `clutch--` namespace.  When an upstream function exists, prefer a prefixed `defalias` over defining an unprefixed replacement.
+- Avoid `with-eval-after-load` in package code unless the form registers an optional integration at a clear package boundary.
 
 ## Pre-Commit Checklist (Mandatory)
 
@@ -259,19 +203,15 @@ Also check that clutch does not depend on external private APIs:
 rg -n -P "(?<![A-Za-z0-9-])(mysql|mongodb|nerd-icons|tramp-rpc)--[A-Za-z0-9-]+" clutch*.el test/*.el
 ```
 
-This command should return no matches. Internal `clutch--*` and backend-local
-`clutch-foo--*` symbols are allowed inside this repo.
+This command should return no matches. Internal `clutch--*` and backend-local `clutch-foo--*` symbols are allowed inside this repo.
 
-Also check that MongoDB protocol implementation residue has not drifted back
-into Clutch:
+Also check that MongoDB protocol implementation residue has not drifted back into Clutch:
 
 ```bash
 rg -n -P "require 'mongodb-(wire|bson|params|auth)|(?<![A-Za-z0-9-])mongodb--[A-Za-z0-9-]+|mongosh" clutch*.el test/*.el
 ```
 
-This command should return no matches. Clutch may `(require 'mongodb)` and call
-public `mongodb-` APIs, but BSON, wire protocol, auth, URI parsing, pooling, and
-shell executable dependencies belong outside this repo.
+This command should return no matches. Clutch may `(require 'mongodb)` and call public `mongodb-` APIs, but BSON, wire protocol, auth, URI parsing, pooling, and shell executable dependencies belong outside this repo.
 
 Also check that Clutch has not reintroduced MongoDB URI parsing or synthesis:
 
@@ -279,51 +219,39 @@ Also check that Clutch has not reintroduced MongoDB URI parsing or synthesis:
 rg -n "clutch-mongodb--.*(uri|url)|url-hexify-string|url-unhex-string" clutch-mongodb.el test/*.el
 ```
 
-This command should return no matches.  `:url` may be passed through as an
-opaque saved connection parameter, but MongoDB URL interpretation belongs in
-`mongodb.el`.
+This command should return no matches.  `:url` may be passed through as an opaque saved connection parameter, but MongoDB URL interpretation belongs in `mongodb.el`.
 
-Also check that Clutch's native MongoDB adapter has not reintroduced
-protocol-layer naming:
+Also check that Clutch's native MongoDB adapter has not reintroduced protocol-layer naming:
 
 ```bash
 rg -n "conn-wire|:wire|OP_MSG|wire protocol|MongoDB wire" clutch-mongodb.el
 ```
 
-This command should return no matches.  Clutch may hold a public `mongodb-conn`
-as an opaque client handle; wire/protocol terminology belongs in `mongodb.el`.
+This command should return no matches.  Clutch may hold a public `mongodb-conn` as an opaque client handle; wire/protocol terminology belongs in `mongodb.el`.
 
-Also check that Clutch user docs do not duplicate detailed MongoDB protocol
-capability prose:
+Also check that Clutch user docs do not duplicate detailed MongoDB protocol capability prose:
 
 ```bash
 rg -n "OP_MSG|wire compression|BSON wrappers|SASLprep|server selection|load-balanced|serviceId|lsid|endSessions|speculative SCRAM" README.org docs PRD.md
 ```
 
-This command should return no matches.  Clutch docs may say that ordinary
-MongoDB uses the external `mongodb.el` native client, then link to `mongodb.el` for
-protocol details.
+This command should return no matches.  Clutch docs may say that ordinary MongoDB uses the external `mongodb.el` native client, then link to `mongodb.el` for protocol details.
 
-Also check that MongoDB SQL Interface has not reappeared as a second backend or
-driver:
+Also check that MongoDB SQL Interface has not reappeared as a second backend or driver:
 
 ```bash
 rg -n "mongodb[-_]sql(|[-_]interface)" clutch*.el test/*.el README.org docs
 ```
 
-This command should return no matches.  Prose may say "MongoDB SQL Interface"
-as the product name, but symbols and configuration examples must use
-`:backend mongodb :surface sql-interface`.
+This command should return no matches.  Prose may say "MongoDB SQL Interface" as the product name, but symbols and configuration examples must use `:backend mongodb :surface sql-interface`.
 
-Also check that user-facing documentation does not recommend the internal JDBC
-driver key as configuration:
+Also check that user-facing documentation does not recommend the internal JDBC driver key as configuration:
 
 ```bash
 rg -n ":driver +'?mongodb|:driver +mongodb" README.org docs PRD.md
 ```
 
-This command should return no matches.  `:driver 'mongodb` may appear only as
-internal JDBC connection state or in tests that reject old public config.
+This command should return no matches.  `:driver 'mongodb` may appear only as internal JDBC connection state or in tests that reject old public config.
 
 ### 2. Run all test files
 
@@ -331,19 +259,13 @@ internal JDBC connection state or in tests that reject old public config.
 ./test/run-ci.sh main db
 ```
 
-Default ERT runs skip live tests when credentials are unset. For changes touching
-query execution, row identity, result-buffer workflows, object metadata, or native
-backend adapters, also run the real MySQL/PostgreSQL/MongoDB live suite:
+Default ERT runs skip live tests when credentials are unset. For changes touching query execution, row identity, result-buffer workflows, object metadata, or native backend adapters, also run the real MySQL/PostgreSQL/MongoDB live suite:
 
 ```bash
 ./test/run-ci.sh native-live
 ```
 
-The native live runner starts or reuses local containers, preferring Podman on
-Linux and OrbStack-backed Docker on macOS. It runs both UI-level `:clutch-live`
-tests and backend-level `:pg-live` / `:mysql-live` / `:mongodb-live` /
-`:redis-live` tests. JDBC
-live tests remain separate because they require external credentials.
+The native live runner starts or reuses local containers, preferring Podman on Linux and OrbStack-backed Docker on macOS. It runs both UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live` / `:mongodb-live` / `:redis-live` tests. JDBC live tests remain separate because they require external credentials.
 
 ### 3. Byte-compile with zero warnings
 
@@ -353,14 +275,7 @@ live tests remain separate because they require external credentials.
 
 ### 4. Run package-lint on the package entry file
 
-`clutch` is one package split across multiple implementation files, so
-`package-lint` should run on the package entry file rather than on extracted
-modules as if they were standalone packages.  For local straight checkouts,
-make sure package metadata for required external deps such as `transient` is
-available to `package.el` in the batch session before running the command.
-Do not move `Package-Requires` into split files to satisfy per-file lint; set
-`package-lint-main-file` to `clutch.el` when linting implementation files
-directly.
+`clutch` is one package split across multiple implementation files, so `package-lint` should run on the package entry file rather than on extracted modules as if they were standalone packages.  For local straight checkouts, make sure package metadata for required external deps such as `transient` is available to `package.el` in the batch session before running the command. Do not move `Package-Requires` into split files to satisfy per-file lint; set `package-lint-main-file` to `clutch.el` when linting implementation files directly.
 
 ```bash
 ./test/run-ci.sh package-lint checkdoc

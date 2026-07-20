@@ -10,24 +10,27 @@
 
 (require 'cl-lib)
 (require 'clutch-backend)
+(require 'clutch-connection)
+(require 'clutch-diagnostics)
 (require 'clutch-schema)
+(require 'clutch-ui)
 (require 'json)
 
-(defvar clutch--cached-pk-indices)
+(defcustom clutch-insert-validation-idle-delay 0.2
+  "Idle seconds before validating heavier insert fields such as JSON."
+  :type 'number
+  :group 'clutch)
+
 (defvar clutch--row-identity)
 (defvar clutch--filtered-rows)
-(defvar clutch--last-query)
-(defvar clutch--connection-params)
 (defvar clutch--active-edit-cell)
 (defvar clutch--result-column-defs)
+(defvar clutch--result-column-details)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
 (defvar clutch--result-source-table)
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
-(defvar clutch--row-start-positions)
-(defvar clutch-insert-validation-idle-delay)
-(defvar clutch-connection)
 (defvar clutch-record--result-buffer)
 (defvar clutch-record--row-idx)
 
@@ -40,41 +43,6 @@
   "Alist of staged edits: ((IDENTITY-VEC . COL-IDX) . NEW-VALUE).")
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
-
-(declare-function clutch--execute "clutch-query" (sql &optional conn result-context))
-(declare-function clutch--format-value "clutch-ui" (value))
-(declare-function clutch--json-ts-mode-available-p "clutch-ui" ())
-(declare-function clutch--json-value-to-string "clutch-ui" (value))
-(declare-function clutch--json-like-string-p "clutch-ui" (value))
-(declare-function clutch--key-hints "clutch-ui" (hints))
-(declare-function clutch--null-display-string "clutch-ui" ())
-(declare-function clutch--result-source-table-or-user-error "clutch-ui" (op))
-(declare-function clutch--result-display-rows "clutch-ui" ())
-(declare-function clutch--run-db-query "clutch-connection" (conn sql &optional params))
-(declare-function clutch--string-pad "clutch-ui" (s width &optional pad-left numeric))
-(declare-function clutch--visible-column-names "clutch-ui" ())
-(declare-function clutch--visible-columns "clutch-ui" ())
-(declare-function clutch--append-pending-insert-row "clutch-ui" (iidx))
-(declare-function clutch--refresh-footer-line "clutch-ui" ())
-(declare-function clutch--refresh-display "clutch-ui" ())
-(declare-function clutch--replace-row-at-index "clutch-ui" (ridx))
-(declare-function clutch--ensure-foreign-keys-async "clutch-schema" (conn table))
-(declare-function clutch--foreign-key-column-info "clutch-schema" (conn table col-names))
-(declare-function clutch--foreign-keys-cached-p "clutch-schema" (conn table))
-(declare-function clutch-record--render "clutch-result" ())
-(declare-function clutch--message-count "clutch-ui" (value))
-(declare-function clutch--message-keyword "clutch-ui" (value))
-(declare-function clutch--message-path "clutch-ui" (value))
-(declare-function clutch--status-separator "clutch-ui" ())
-(declare-function clutch--cell-at-point "clutch-ui" ())
-(declare-function clutch--goto-cell "clutch-ui" (ridx cidx))
-(declare-function clutch--row-idx-at-line "clutch-ui" ())
-(declare-function clutch--selected-row-indices "clutch-ui" ())
-(declare-function clutch-db-escape-identifier "clutch-backend" (conn name))
-(declare-function clutch-db-result-affected-rows "clutch-backend" (result))
-(declare-function clutch-db-result-p "clutch-backend" (result))
-(declare-function clutch-db-sql-find-top-level-clause "clutch-backend" (sql pattern &optional start))
-(declare-function clutch-db-substitute-params "clutch-backend" (sql params render-fn))
 
 (defun clutch-edit--sql-surface-p ()
   "Return non-nil when SQL staged mutation is available in this result."
@@ -172,15 +140,6 @@
     (clutch-result-edit--set-null-state nil)
     (setq-local clutch-result-edit--error-message nil)))
 
-(defun clutch-result--column-detail (result-buf col-name)
-  "Return schema detail plist for COL-NAME in RESULT-BUF, or nil."
-  (with-current-buffer result-buf
-    (when-let* ((table clutch--result-source-table)
-                (details (clutch--ensure-column-details clutch-connection table t)))
-      (cl-find-if (lambda (detail)
-                    (equal (plist-get detail :name) col-name))
-                  details))))
-
 (defun clutch-result--field-candidates-from-detail (detail)
   "Return completion candidates derived from column DETAIL, or nil."
   (let ((type (downcase (or (plist-get detail :type) ""))))
@@ -203,6 +162,58 @@
   (if (clutch-result--field-json-p col-def detail)
       (clutch--json-value-to-string value)
     (clutch--format-value value)))
+
+(defun clutch-result--writable-source-column (cidx op)
+  "Return the writable source column at CIDX, or signal for OP.
+Real query results carry an explicit `:source-column' key, including nil when
+the SELECT projection cannot be proven writable."
+  (let* ((column-def (nth cidx clutch--result-column-defs))
+         (display-name (nth cidx clutch--result-columns))
+         (source-known-p (plist-member column-def :source-column))
+         (source-column (plist-get column-def :source-column)))
+    (when (plist-get column-def :hidden)
+      (user-error "Cannot %s: hidden result column %s is not writable"
+                  op display-name))
+    (cond
+     ((and source-known-p source-column)
+      source-column)
+     (source-known-p
+      (user-error "Cannot %s: result column %s is not a direct source column"
+                  op display-name))
+     (t
+     (user-error "Cannot %s: writable source for result column %s is unknown"
+                  op display-name)))))
+
+(defun clutch-result--writable-source-detail (table cidx op &optional details)
+  "Return canonical source-column metadata for CIDX in TABLE during OP.
+An exact metadata name wins.  Otherwise, accept a single case-insensitive
+match so unquoted identifiers can be reconciled with backend canonical case.
+Return nil when no metadata column matches, and reject ambiguous matches."
+  (let* ((source-column (clutch-result--writable-source-column cidx op))
+         (details
+          (or details
+              (clutch--ensure-column-details clutch-connection table t)
+              (user-error "Cannot %s: source column metadata is unavailable"
+                          op)))
+         (exact
+          (cl-find-if
+           (lambda (detail)
+             (string= (or (plist-get detail :name) "") source-column))
+           details)))
+    (or exact
+        (let ((matches
+               (cl-remove-if-not
+                (lambda (detail)
+                  (string-equal-ignore-case
+                   (or (plist-get detail :name) "") source-column))
+                details)))
+          (pcase matches
+            ('nil nil)
+            (`(,match) match)
+            (_
+             (user-error
+              "Cannot %s: source column %s is ambiguous in table metadata"
+              op source-column)))))))
 
 (defun clutch-result--field-metadata-tags (col-def detail)
   "Return short metadata tags for COL-DEF and DETAIL."
@@ -341,7 +352,7 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
              (with-current-buffer return-buf
                (derived-mode-p 'clutch-record-mode)))
     (with-current-buffer return-buf
-      (clutch-record--render)
+      (revert-buffer t t)
       (goto-char (point-min))
       (when-let* ((match (text-property-search-forward
                           'clutch-col-idx cidx #'eq)))
@@ -582,7 +593,12 @@ RETURN-BUFFER is the buffer that invoked the edit command."
              (original (nth cidx display-row))
              (col-name (nth cidx clutch--result-columns))
              (col-def (nth cidx clutch--result-column-defs))
-             (detail (clutch-result--column-detail (current-buffer) col-name))
+             (detail
+              (or (clutch-result--writable-source-detail table cidx op)
+                  (user-error
+                   "Cannot %s: source column %s is missing from table metadata"
+                   op (clutch-result--writable-source-column cidx op))))
+             (source-column (plist-get detail :name))
              (original-state
               (cons (null original)
                     (if (null original)
@@ -602,6 +618,9 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                                :hscroll (window-hscroll win))))
              (edit-buf (get-buffer-create
                         (format "*clutch-edit: [%d].%s*" ridx col-name))))
+        (when (plist-get detail :generated)
+          (user-error "Cannot %s: source column %s is generated"
+                      op source-column))
         (with-current-buffer edit-buf
           (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
@@ -779,8 +798,9 @@ Refresh the affected row and footer in place when possible."
       (when (eq clutch--row-identity-status 'error)
         (user-error "Cannot %s: row identity metadata failed for table %s: %s"
                     op table
-                    (or clutch--row-identity-error-message
-                        "unknown error")))
+                    (clutch--debug-workflow-message
+                     (or clutch--row-identity-error-message
+                         "unknown error"))))
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
 
@@ -807,19 +827,60 @@ column indices to their referenced table and column."
                   op-name
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
-(defun clutch--pk-where-parts (conn pk-names pk-values)
+(defun clutch-result--column-backend-type (table col-name &optional cidx)
+  "Return backend type metadata for COL-NAME in TABLE, or nil."
+  (or (when (integerp cidx)
+        (plist-get (nth cidx clutch--result-column-defs) :backend-type))
+      (when (integerp cidx)
+        (plist-get (nth cidx clutch--result-column-details) :backend-type))
+      (when-let* ((details (and table
+                                clutch-connection
+                                (clutch-db-backend-key clutch-connection)
+                                (clutch--ensure-column-details
+                                 clutch-connection table)))
+                  (detail (cl-find col-name details
+                                   :key (lambda (item)
+                                          (plist-get item :name))
+                                   :test #'string=)))
+        (plist-get detail :backend-type))))
+
+(defun clutch-result--typed-param-for-column (table col-name value &optional cidx)
+  "Return VALUE tagged with backend type metadata for TABLE.COL-NAME."
+  (clutch-db-typed-param
+   value
+   (clutch-result--column-backend-type table col-name cidx)))
+
+(defun clutch-result--row-identity-param-types (row-identity)
+  "Return backend type metadata aligned with ROW-IDENTITY values."
+  (let* ((table (plist-get row-identity :table))
+         (columns (plist-get row-identity :columns))
+         (indices (plist-get row-identity :indices))
+         (source-indices (plist-get row-identity :source-indices)))
+    (cl-loop for idx in indices
+             for col in (or columns (make-list (length indices) nil))
+             for source-idx in (or source-indices
+                                   (make-list (length indices) nil))
+             collect
+             (or (plist-get (nth idx clutch--result-column-defs)
+                            :backend-type)
+                 (and col
+                      (clutch-result--column-backend-type
+                       table col (or source-idx idx)))))))
+
+(defun clutch--pk-where-parts (conn pk-names pk-values &optional param-types)
   "Return `(PARTS . PARAMS)' for PK-NAMES with PK-VALUES using CONN.
 NULL primary-key values stay literal as `IS NULL' and are not added to
 the parameter list."
   (let (parts params)
     (cl-mapc
-     (lambda (col val)
+     (lambda (col val type)
        (let ((column-sql (clutch-db-escape-identifier conn col)))
          (if (null val)
              (push (format "%s IS NULL" column-sql) parts)
            (push (format "%s = ?" column-sql) parts)
-           (push val params))))
-     pk-names pk-values)
+           (push (clutch-db-typed-param val type) params))))
+     pk-names pk-values
+     (or param-types (make-list (length pk-values) nil)))
     (cons (nreverse parts) (nreverse params))))
 
 (defun clutch-result--render-statements (statements)
@@ -828,38 +889,56 @@ the parameter list."
             (pcase-let ((`(,sql . ,params) statement))
               (clutch-db-substitute-params
                sql params
-               (lambda (value)
+               (lambda (param)
                  (clutch-db-value-to-literal
-                  clutch-connection value #'clutch--format-value)))))
+                  clutch-connection param #'clutch--format-value)))))
           statements))
 
 (defun clutch--row-identity-where-parts (conn row-identity values)
   "Return `(PARTS . PARAMS)' for ROW-IDENTITY using VALUES on CONN."
-  (if-let* ((where-sql (plist-get row-identity :where-sql)))
-      (cons (list where-sql) (append values nil))
-    (clutch--pk-where-parts
-     conn
-     (plist-get row-identity :columns)
-     (append values nil))))
+  (let ((param-types (clutch-result--row-identity-param-types row-identity))
+        (param-values (append values nil)))
+    (if-let* ((where-sql (plist-get row-identity :where-sql)))
+        (cons (list where-sql)
+              (cl-loop for value in param-values
+                       for type-tail = param-types then (cdr type-tail)
+                       collect (clutch-db-typed-param value (car type-tail))))
+      (clutch--pk-where-parts
+       conn
+       (plist-get row-identity :columns)
+       param-values
+       param-types))))
 
-(defun clutch-result--build-update-stmt (table identity-vec edits col-names row-identity)
+(defun clutch-result--build-update-stmt (table identity-vec edits _col-names row-identity)
   "Build an UPDATE statement spec for TABLE.
 IDENTITY-VEC is the row identity vector, EDITS is a list of
-\(cidx . value), COL-NAMES are column names, and ROW-IDENTITY describes the
-WHERE predicate."
+\(cidx . value), and ROW-IDENTITY describes the WHERE predicate."
   (let ((conn clutch-connection))
     (let ((set-parts nil)
           (set-params nil)
           (where-spec (clutch--row-identity-where-parts
                        conn row-identity identity-vec)))
       (dolist (edit edits)
-        (push (format "%s = ?"
-                      (clutch-db-escape-identifier
-                       conn (nth (car edit) col-names)))
-              set-parts)
-        (push (cdr edit) set-params))
+        (let* ((cidx (car edit))
+               (op "build UPDATE")
+               (detail
+                (or (clutch-result--writable-source-detail table cidx op)
+                    (user-error
+                     "Cannot %s: source column %s is missing from table metadata"
+                     op (clutch-result--writable-source-column cidx op))))
+               (col-name (plist-get detail :name)))
+          (when (plist-get detail :generated)
+            (user-error "Cannot %s: source column %s is generated"
+                        op col-name))
+          (push (format "%s = ?"
+                        (clutch-db-escape-identifier conn col-name))
+                set-parts)
+          (push (clutch-result--typed-param-for-column
+                 table col-name (cdr edit) cidx)
+                set-params)))
       (cons (format "UPDATE %s SET %s WHERE %s"
-                    (clutch-db-escape-identifier conn table)
+                    (or (plist-get row-identity :source-token)
+                        (clutch-db-escape-identifier conn table))
                     (mapconcat #'identity (nreverse set-parts) ", ")
                     (mapconcat #'identity (car where-spec) " AND "))
             (append (nreverse set-params) (cdr where-spec))))))
@@ -967,6 +1046,49 @@ an affected row count other than one."
        (user-error "%s" (clutch--humanize-db-error
                          (error-message-string err)))))))
 
+(defun clutch-result--rollback-mutation-batch (original-error)
+  "Roll back a failed staged batch and re-signal ORIGINAL-ERROR."
+  (let (rollback-error)
+    (condition-case err
+        (progn
+          (clutch-db-rollback clutch-connection)
+          (clutch--clear-tx-dirty clutch-connection)
+          (clutch--mark-dml-results-rolled-back clutch-connection))
+      (error
+       (setq rollback-error err)))
+    (if rollback-error
+        (user-error "Staged batch failed (%s); rollback also failed (%s)"
+                    (error-message-string original-error)
+                    (error-message-string rollback-error))
+      (signal (car original-error) (cdr original-error)))))
+
+(defun clutch-result--execute-mutation-batch
+    (insert-stmts update-stmts delete-stmts)
+  "Execute INSERT-STMTS, UPDATE-STMTS, and DELETE-STMTS atomically."
+  (let* ((all-stmts (append insert-stmts update-stmts delete-stmts))
+         (multi-statement-p (> (length all-stmts) 1)))
+    (cl-labels
+        ((execute-all ()
+           (dolist (stmt insert-stmts)
+             (clutch-result--execute-mutation-stmt stmt))
+           (dolist (stmt update-stmts)
+             (clutch-result--execute-mutation-stmt stmt t))
+           (dolist (stmt delete-stmts)
+             (clutch-result--execute-mutation-stmt stmt t))))
+      (cond
+       ((not multi-statement-p)
+        (execute-all))
+       ((not (clutch-db-manual-commit-p clutch-connection))
+        (clutch-db-call-with-atomic-batch clutch-connection #'execute-all))
+       (t
+        (when (clutch--tx-dirty-p clutch-connection)
+          (user-error
+           "Cannot execute a staged batch inside a dirty transaction; commit or roll back first"))
+        (condition-case err
+            (execute-all)
+          ((error quit)
+           (clutch-result--rollback-mutation-batch err))))))))
+
 ;;;###autoload
 (defun clutch-result-commit ()
   "Commit all staged row mutations: INSERT, UPDATE, DELETE.
@@ -995,12 +1117,8 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
                                (length all-stmts)
                                (if (= (length all-stmts) 1) "" "s")
                                sql-text))
-      (dolist (stmt insert-stmts)
-        (clutch-result--execute-mutation-stmt stmt))
-      (dolist (stmt update-stmts)
-        (clutch-result--execute-mutation-stmt stmt t))
-      (dolist (stmt delete-stmts)
-        (clutch-result--execute-mutation-stmt stmt t))
+      (clutch-result--execute-mutation-batch
+       insert-stmts update-stmts delete-stmts)
       (setq clutch--pending-edits nil
             clutch--pending-deletes nil
             clutch--pending-inserts nil
@@ -1008,7 +1126,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
       (message "%s change%s committed"
                (clutch--message-count (length all-stmts))
                (if (= (length all-stmts) 1) "" "s"))
-      (clutch--execute clutch--last-query clutch-connection))))
+      (revert-buffer nil t))))
 
 ;;;; Delete rows
 
@@ -1019,7 +1137,8 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
          (where-spec (clutch--row-identity-where-parts
                       conn row-identity identity-vec)))
     (cons (format "DELETE FROM %s WHERE %s"
-                  (clutch-db-escape-identifier conn table)
+                  (or (plist-get row-identity :source-token)
+                      (clutch-db-escape-identifier conn table))
                   (mapconcat #'identity (car where-spec) " AND "))
           (cdr where-spec))))
 
@@ -1049,11 +1168,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 ;;;; Insert row
 
-(defconst clutch-result-insert--field-line-re
-  "^\\([^:\n[]+\\)\\(?: \\[[^]]+\\]\\)?: "
-  "Regexp matching an insert buffer field line prefix.")
-
-(defvar clutch-result-insert-mode-map
+(defvar clutch--result-insert-major-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c '") #'clutch-result-insert-edit-json-field)
     (define-key map (kbd "RET") #'clutch-result-insert-submit-field)
@@ -1067,16 +1182,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (define-key map (kbd "C-c C-c") #'clutch-result-insert-commit)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-cancel)
     map)
-  "Keymap for the INSERT form buffer.")
-
-(defvar clutch-result-insert-mode-hook nil
-  "Hook run after `clutch-result-insert-mode' is enabled.")
-
-(defvar clutch--result-insert-major-mode-map clutch-result-insert-mode-map
-  "Keymap used internally by `clutch--result-insert-major-mode'.")
-
-(defvar clutch--result-insert-major-mode-hook nil
-  "Internal hook run after `clutch--result-insert-major-mode' is enabled.")
+  "Keymap for the internal INSERT form buffer.")
 
 (defvar clutch--result-insert-json-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1092,36 +1198,19 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (define-derived-mode clutch--result-insert-major-mode text-mode "clutch-insert"
   "Major mode for editing a new row to INSERT.
-\\<clutch-result-insert-mode-map>
+\\<clutch--result-insert-major-mode-map>
 \\[clutch-result-insert-commit]	stage row insertion
 \\[clutch-result-insert-cancel]	cancel editing"
   (setq-local truncate-lines t)
   (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
   (add-hook 'after-change-functions #'clutch-result-insert--after-change nil t)
-  (add-hook 'kill-buffer-hook #'clutch-result-insert--cleanup nil t)
-  (clutch-result-insert--ensure-field-state))
-
-;;;###autoload
-(defun clutch-result-insert-mode (&optional _arg)
-  "Activate `clutch--result-insert-major-mode', ignoring optional ARG."
-  (interactive)
-  (clutch--result-insert-major-mode)
-  (run-hooks 'clutch-result-insert-mode-hook))
+  (add-hook 'kill-buffer-hook #'clutch-result-insert--cleanup nil t))
 
 (defvar-local clutch-result-insert--result-buffer nil
   "Reference to the parent result buffer (Insert buffer local).")
 
 (defvar-local clutch-result-insert--table nil
   "Table name for the INSERT (Insert buffer local).")
-
-(defvar-local clutch-result-insert--all-columns nil
-  "All insertable columns in canonical render order.")
-
-(defvar-local clutch-result-insert--seed-fields nil
-  "Canonical insert field values for all columns, visible or hidden.")
-
-(defvar-local clutch-result-insert--column-details-cache nil
-  "Cached schema detail plists keyed by column name for the insert buffer.")
 
 (defvar-local clutch-result-insert--pending-index nil
   "Staged insert index being edited, or nil for a new insert.")
@@ -1130,7 +1219,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
   "Source result table recorded when this insert buffer was opened.")
 
 (defvar-local clutch-result-insert--fields nil
-  "Structured field state for the current insert buffer.")
+  "Canonical field state for the current insert buffer.")
 
 (defvar-local clutch-result-insert--validation-timer nil
   "Idle validation timer for the current insert buffer.")
@@ -1185,68 +1274,27 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 
 (defun clutch-result-insert--all-column-names ()
   "Return canonical column order for the current insert buffer."
-  (or clutch-result-insert--all-columns
-      (progn
-        (clutch-result-insert--ensure-field-state)
-        (setq-local clutch-result-insert--all-columns
-                    (mapcar (lambda (field)
-                              (plist-get field :name))
-                            clutch-result-insert--fields)))))
-
-(defun clutch-result-insert--canonicalize-fields (col-names fields)
-  "Return COL-NAMES paired with string values from FIELDS.
-FIELDS is an alist keyed by column name.  Missing columns become empty strings."
-  (cl-loop for col in col-names
-           collect (cons col (or (cdr (assoc col fields)) ""))))
+  (mapcar (lambda (field) (plist-get field :name))
+          clutch-result-insert--fields))
 
 (defun clutch-result-insert--field-empty-p (value)
   "Return non-nil when VALUE should be treated as empty."
   (or (null value) (string-empty-p value)))
 
-(defun clutch-result-insert--ensure-field-state ()
-  "Populate structured field state from the current buffer when missing."
-  (unless clutch-result-insert--fields
-    (let (field-states)
-      (save-excursion
-        (goto-char (point-min))
-        (while (not (eobp))
-          (beginning-of-line)
-          (when (looking-at clutch-result-insert--field-line-re)
-            (let* ((name (string-trim-right (match-string-no-properties 1)))
-                   (value-start (match-end 0))
-                   (line-start (line-beginning-position))
-                   (line-end (min (point-max) (1+ (line-end-position)))))
-              (clutch-result-insert--annotate-field-line name line-start line-end)
-              (push (list :name name
-                          :value-marker (copy-marker value-start))
-                    field-states)))
-          (forward-line 1)))
-      (setq-local clutch-result-insert--fields (nreverse field-states)))))
-
 (defun clutch-result-insert--field-state (field-name)
   "Return structured insert field state for FIELD-NAME, or nil."
-  (clutch-result-insert--ensure-field-state)
   (cl-find field-name clutch-result-insert--fields
            :key (lambda (field) (plist-get field :name))
            :test #'string=))
 
-(defun clutch-result-insert--field-cell (field-name)
-  "Return the list cell holding FIELD-NAME in `clutch-result-insert--fields'."
-  (clutch-result-insert--ensure-field-state)
-  (cl-loop for cell on clutch-result-insert--fields
-           when (string= (plist-get (car cell) :name) field-name)
-           return cell))
-
 (defun clutch-result-insert--set-field-prop (field prop value)
   "Store VALUE for PROP on structured FIELD in canonical field state."
-  (when-let* ((name (plist-get field :name))
-              (cell (clutch-result-insert--field-cell name)))
-    (setcar cell (plist-put (car cell) prop value))
+  (when field
+    (setf (plist-get field prop) value)
     value))
 
 (defun clutch-result-insert--field-state-at-position (&optional pos)
   "Return structured insert field state at POS, or at point when POS is nil."
-  (clutch-result-insert--ensure-field-state)
   (or (when-let* ((field-name (clutch-result-insert--field-name-at-position pos)))
         (clutch-result-insert--field-state field-name))
       (let ((pos (or pos (point))))
@@ -1269,42 +1317,8 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
       (cons beg (line-end-position)))))
 
 (defun clutch-result-insert--field-value (field)
-  "Return the current buffer value for structured FIELD."
-  (when-let* ((bounds (clutch-result-insert--field-value-bounds field)))
-    (buffer-substring-no-properties (car bounds) (cdr bounds))))
-
-(defun clutch-result-insert--ensure-seed-fields ()
-  "Populate canonical field values from the current visible buffer when missing."
-  (unless clutch-result-insert--seed-fields
-    (clutch-result-insert--ensure-field-state)
-    (setq-local clutch-result-insert--seed-fields
-                (clutch-result-insert--canonicalize-fields
-                 (clutch-result-insert--all-column-names)
-                 (cl-loop for field in clutch-result-insert--fields
-                          collect (cons (plist-get field :name)
-                                        (or (clutch-result-insert--field-value field)
-                                            "")))))))
-
-(defun clutch-result-insert--seed-field-value (field-name)
-  "Return canonical insert value for FIELD-NAME."
-  (clutch-result-insert--ensure-seed-fields)
-  (cdr (assoc field-name clutch-result-insert--seed-fields)))
-
-(defun clutch-result-insert--set-seed-field-value (field-name value)
-  "Store VALUE as the canonical insert value for FIELD-NAME."
-  (clutch-result-insert--ensure-seed-fields)
-  (when-let* ((cell (assoc field-name clutch-result-insert--seed-fields)))
-    (setcdr cell (or value "")))
-  value)
-
-(defun clutch-result-insert--record-visible-values ()
-  "Copy visible insert buffer values into canonical insert state."
-  (clutch-result-insert--ensure-seed-fields)
-  (clutch-result-insert--ensure-field-state)
-  (dolist (field clutch-result-insert--fields)
-    (clutch-result-insert--set-seed-field-value
-     (plist-get field :name)
-     (clutch-result-insert--field-value field))))
+  "Return the canonical value for structured FIELD."
+  (or (plist-get field :value) ""))
 
 (defun clutch-result-insert--json-field-p (field)
   "Return non-nil for structured JSON FIELD values."
@@ -1360,8 +1374,7 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
 (defun clutch-result-insert--field-validation-message (field)
   "Return a validation message for structured FIELD, or nil."
   (let* ((name (plist-get field :name))
-         (value (or (clutch-result-insert--field-value field)
-                    (clutch-result-insert--seed-field-value name)))
+         (value (clutch-result-insert--field-value field))
          (detail (or (plist-get field :detail)
                      (clutch-result-insert--column-detail name)))
          (col-def (or (plist-get field :column-def)
@@ -1373,9 +1386,10 @@ FIELDS is an alist keyed by column name.  Missing columns become empty strings."
 
 (defun clutch-result-insert--validate-field-live (field)
   "Run local validation for structured FIELD and update inline UI."
-  (when-let* ((name (plist-get field :name)))
-    (clutch-result-insert--set-seed-field-value
-     name (clutch-result-insert--field-value field)))
+  (when-let* ((bounds (clutch-result-insert--field-value-bounds field)))
+    (clutch-result-insert--set-field-prop
+     field :value
+     (buffer-substring-no-properties (car bounds) (cdr bounds))))
   (if-let* ((message (clutch-result-insert--field-validation-message field)))
       (clutch-result-insert--show-field-error field message)
     (clutch-result-insert--clear-field-error field)))
@@ -1446,9 +1460,7 @@ All field types use the same delay so feedback timing is consistent."
   (if (string-empty-p value)
       ""
     (condition-case nil
-        (if (fboundp 'json-serialize)
-            (clutch--json-serialize-text (json-parse-string value))
-          value)
+        (clutch--json-serialize-text (json-parse-string value))
       (error (user-error "Field %s expects valid JSON" field-name)))))
 
 (defun clutch-result-insert--json-editor-mode ()
@@ -1456,10 +1468,8 @@ All field types use the same delay so feedback timing is consistent."
   (cond
    ((clutch--json-ts-mode-available-p)
     (json-ts-mode))
-   ((fboundp 'js-mode)
-    (js-mode))
    (t
-    (text-mode))))
+    (js-mode))))
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.
@@ -1477,8 +1487,7 @@ FINISH-FN and CANCEL-FN become the local save and cancel bindings."
             (json-pretty-print-buffer))
         (error nil))
       (clutch-result-insert--json-editor-mode)
-      (when (fboundp 'font-lock-ensure)
-        (font-lock-ensure (point-min) (point-max)))
+      (font-lock-ensure (point-min) (point-max))
       (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
         (define-key map (kbd "C-c C-c") finish-fn)
         (define-key map (kbd "C-c C-k") cancel-fn)
@@ -1534,31 +1543,12 @@ next field.  Returns nil when no matching field exists."
     (clutch-result-insert--field-value-bounds field)))
 
 (defun clutch-result-insert--column-def (field-name)
-  "Return result column plist for FIELD-NAME from the parent result buffer."
-  (or (plist-get (clutch-result-insert--field-state field-name) :column-def)
-      (when-let* ((result-buf clutch-result-insert--result-buffer)
-                  ((buffer-live-p result-buf)))
-        (with-current-buffer result-buf
-          (when-let* ((idx (cl-position field-name clutch--result-columns
-                                        :test #'string=)))
-            (nth idx clutch--result-column-defs))))))
+  "Return the captured result column plist for FIELD-NAME."
+  (plist-get (clutch-result-insert--field-state field-name) :column-def))
 
 (defun clutch-result-insert--column-detail (field-name)
-  "Return detailed column plist for FIELD-NAME from the parent result buffer."
-  (or (plist-get (clutch-result-insert--field-state field-name) :detail)
-      (cl-find field-name clutch-result-insert--column-details-cache
-               :key (lambda (d) (plist-get d :name))
-               :test #'string=)
-      (let ((table clutch-result-insert--table))
-        (when-let* ((result-buf clutch-result-insert--result-buffer)
-                    ((buffer-live-p result-buf)))
-          (with-current-buffer result-buf
-            (when-let* ((conn clutch-connection)
-                        (details (clutch--ensure-column-details conn table)))
-              (setq-local clutch-result-insert--column-details-cache details)
-              (cl-find field-name details
-                       :key (lambda (d) (plist-get d :name))
-                       :test #'string=)))))))
+  "Return the captured detailed column plist for FIELD-NAME."
+  (plist-get (clutch-result-insert--field-state field-name) :detail))
 
 (defun clutch-result-insert--enum-candidates (type)
   "Return enum candidates parsed from SQL TYPE, or nil."
@@ -1612,10 +1602,6 @@ TIME defaults to `current-time'."
                (not (plist-get detail :default)))
       (push "required" tags))
     (nreverse tags)))
-
-(defun clutch-result-insert--visible-columns ()
-  "Return the currently rendered insert columns."
-  (clutch-result-insert--all-column-names))
 
 (defun clutch-result-insert--header-line ()
   "Return the insert form header line."
@@ -1749,7 +1735,7 @@ If nothing handles the completion, fall back to `completing-read'."
     (unless (clutch-result-insert--json-field-p field)
       (user-error "Field %s is not a JSON column" field-name))
     (let ((value (clutch-result--json-normalize-string raw field-name)))
-      (clutch-result-insert--set-seed-field-value field-name value)
+      (clutch-result-insert--set-field-prop field :value value)
       (let ((buf (clutch--open-json-sub-editor
                   (format "*clutch-insert-json: %s.%s*"
                           clutch-result-insert--table field-name)
@@ -1790,40 +1776,28 @@ If nothing handles the completion, fall back to `completing-read'."
    clutch-result-insert-json--parent-buffer
    #'clutch-result-insert--normalize-point))
 
-(defun clutch-result-insert--populate-buffer (table col-names &optional fields)
-  "Populate the current insert buffer for TABLE and COL-NAMES.
-COL-NAMES is the canonical full column order.  When FIELDS is non-nil, replace
-the canonical seed values before rendering the current visible subset."
-  (setq-local clutch-result-insert--table table
-              clutch-result-insert--all-columns (copy-sequence col-names))
-  (when fields
-    (setq-local clutch-result-insert--seed-fields
-                (clutch-result-insert--canonicalize-fields col-names fields)))
-  (clutch-result-insert--ensure-seed-fields)
-  (let* ((visible-cols (clutch-result-insert--visible-columns))
-         (label-width (clutch-result-insert--field-label-width visible-cols)))
+(defun clutch-result-insert--populate-buffer ()
+  "Render the current canonical insert field state."
+  (let ((label-width
+         (clutch-result-insert--field-label-width
+          (clutch-result-insert--all-column-names))))
     (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t)
-          field-states)
+          (inhibit-modification-hooks t))
       (clutch-result-insert--cleanup)
       (setq-local clutch-result-insert--label-width label-width)
       (erase-buffer)
-      (dolist (col visible-cols)
-        (let ((prefix-start (point)))
+      (dolist (field clutch-result-insert--fields)
+        (let ((col (plist-get field :name))
+              (prefix-start (point)))
           (insert (clutch-result-insert--field-label-padded col)
                   ": ")
           (add-text-properties prefix-start (point)
                                '(read-only t front-sticky t rear-nonsticky t))
-          (let ((value (clutch-result-insert--seed-field-value col))
+          (let ((value (clutch-result-insert--field-value field))
                 (value-marker (copy-marker (point))))
             (insert value "\n")
             (clutch-result-insert--annotate-field-line col prefix-start (point))
-            (push (list :name col
-                        :detail (clutch-result-insert--column-detail col)
-                        :column-def (clutch-result-insert--column-def col)
-                        :value-marker value-marker)
-                  field-states))))
-      (setq-local clutch-result-insert--fields (nreverse field-states))))
+            (setf (plist-get field :value-marker) value-marker))))))
   (clutch-result-insert--refresh-header-line)
   (goto-char (point-min))
   (goto-char (or (clutch-result-insert--current-field-value-position)
@@ -1833,9 +1807,13 @@ the canonical seed values before rendering the current visible subset."
 (defun clutch-result-insert--clone-copy-column-p (detail cidx)
   "Return non-nil when clone-to-insert should copy column at CIDX.
 DETAIL is the column detail plist when available."
-  (and (not (plist-get detail :generated))
-       (not (plist-get detail :primary-key))
-       (not (memq cidx clutch--cached-pk-indices))))
+  (let ((identity-indices
+         (and (eq (plist-get clutch--row-identity :kind) 'primary-key)
+              (or (plist-get clutch--row-identity :source-indices)
+                  (plist-get clutch--row-identity :indices)))))
+    (and (not (plist-get detail :generated))
+         (not (plist-get detail :primary-key))
+         (not (memq cidx identity-indices)))))
 
 (defun clutch-result-insert--filter-clone-fields (table fields)
   "Return cloned insert FIELDS with generated and primary-key columns removed.
@@ -1858,33 +1836,38 @@ TABLE is used to resolve column details for the current result buffer."
     (table result-buf &optional fields pending-index)
   "Open an insert buffer for TABLE backed by RESULT-BUF.
 FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
-  (let* ((col-names
+  (let* ((field-state
           (with-current-buffer result-buf
-            (clutch--visible-column-names)))
+            (let* ((indices (clutch--visible-columns))
+                   (details (when clutch-connection
+                              (clutch--ensure-column-details clutch-connection table))))
+              (cl-loop for cidx in indices
+                       for name = (nth cidx clutch--result-columns)
+                       collect (list :name name
+                                     :value (or (cdr (assoc name fields)) "")
+                                     :value-marker nil
+                                     :column-def (nth cidx clutch--result-column-defs)
+                                     :detail (cl-find name details
+                                                      :key (lambda (detail)
+                                                             (plist-get detail :name))
+                                                      :test #'string=)
+                                     :error-overlay nil
+                                     :error-message nil)))))
          (buf (get-buffer-create (format "*clutch-insert: %s*" table))))
     (with-current-buffer buf
       (let ((inhibit-read-only t)
             (inhibit-modification-hooks t))
         (erase-buffer)
-        (setq-local clutch-result-insert--fields nil
-                    clutch-result-insert--seed-fields nil
-                    clutch-result-insert--all-columns nil
-                    clutch-result-insert--column-details-cache nil))
-      (clutch-result-insert-mode)
+        (setq-local clutch-result-insert--fields nil))
+      (clutch--result-insert-major-mode)
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
                   clutch-result-insert--source-table table
-                  clutch-result-insert--all-columns (copy-sequence col-names)
-                  clutch-result-insert--seed-fields
-                  (clutch-result-insert--canonicalize-fields col-names fields)
-                  clutch-result-insert--column-details-cache
-                  (with-current-buffer result-buf
-                    (when-let* ((conn clutch-connection))
-                      (clutch--ensure-column-details conn table)))
+                  clutch-result-insert--fields field-state
                   clutch-result-insert--pending-index pending-index
                   completion-at-point-functions
                   '(clutch-result-insert-completion-at-point))
-      (clutch-result-insert--populate-buffer table col-names))
+      (clutch-result-insert--populate-buffer))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--ensure-live-result-context ()
@@ -2063,7 +2046,6 @@ ROWS is a list of string lists."
 
 (defun clutch-result-insert--visible-field-names ()
   "Return the currently displayed insert field names."
-  (clutch-result-insert--ensure-field-state)
   (mapcar (lambda (field) (plist-get field :name))
           clutch-result-insert--fields))
 
@@ -2092,12 +2074,10 @@ ROWS is a list of string lists."
            unless (clutch-result-insert--field-empty-p value)
            collect (cons col value)))
 
-(defun clutch-result-insert--clear-seed-fields ()
+(defun clutch-result-insert--clear-fields ()
   "Reset all canonical insert values to empty strings."
-  (setq-local clutch-result-insert--seed-fields
-              (clutch-result-insert--canonicalize-fields
-               (clutch-result-insert--all-column-names)
-               nil)))
+  (dolist (field clutch-result-insert--fields)
+    (setf (plist-get field :value) "")))
 
 (defun clutch-result-insert--stage-imported-rows (rows)
   "Stage imported ROWS as INSERT operations in the parent result buffer."
@@ -2115,11 +2095,10 @@ ROWS is a list of string lists."
 (defun clutch-result-insert-import-delimited (&optional text)
   "Import TSV or CSV into the current insert buffer.
 Uses TEXT when non-nil.
-Otherwise reads from the active region or the current kill.
+  Otherwise reads from the active region or the current kill.
 Single-row imports prefill the current form.  Multi-row imports stage inserts
 immediately."
   (interactive)
-  (clutch-result-insert--record-visible-values)
   (pcase-let* ((raw (or text (clutch-result-insert--read-import-text)))
                (`(,delim . ,rows) (clutch-result-insert--parse-delimited-text raw))
                (`(,columns . ,data-rows) (clutch-result-insert--import-target-columns rows))
@@ -2128,10 +2107,9 @@ immediately."
      ((= row-count 1)
       (cl-loop for col in columns
                for value in (car data-rows)
-               do (clutch-result-insert--set-seed-field-value col value))
-      (clutch-result-insert--populate-buffer
-       clutch-result-insert--table
-       (clutch-result-insert--all-column-names))
+               for field = (clutch-result-insert--field-state col)
+               when field do (setf (plist-get field :value) value))
+      (clutch-result-insert--populate-buffer)
       (message "Imported %s row from %s into the insert form"
                (clutch--message-count 1)
                (clutch--message-keyword
@@ -2148,10 +2126,8 @@ immediately."
             (user-error "Cannot stage an empty imported row"))
           (clutch-result-insert--validate-fields fields))
         (clutch-result-insert--stage-imported-rows field-rows)
-        (clutch-result-insert--clear-seed-fields)
-        (clutch-result-insert--populate-buffer
-         clutch-result-insert--table
-         (clutch-result-insert--all-column-names))
+        (clutch-result-insert--clear-fields)
+        (clutch-result-insert--populate-buffer)
         (message "%s rows staged from %s import — C-c C-c to commit"
                  (clutch--message-count row-count)
                  (clutch--message-keyword
@@ -2160,9 +2136,9 @@ immediately."
 (defun clutch-result-insert--parse-fields ()
   "Parse the insert buffer into an alist of (COLUMN . VALUE).
 Skips columns with empty values."
-  (clutch-result-insert--record-visible-values)
-  (cl-loop for col in (clutch-result-insert--all-column-names)
-           for value = (clutch-result-insert--seed-field-value col)
+  (cl-loop for field in clutch-result-insert--fields
+           for col = (plist-get field :name)
+           for value = (clutch-result-insert--field-value field)
            unless (clutch-result-insert--field-empty-p value)
            collect (cons col value)))
 
@@ -2274,10 +2250,14 @@ FIELDS is an alist of (column-name . value-string)."
                          fields ", "))
         (placeholders (mapconcat (lambda (_field) "?") fields ", "))
         (params (mapcar (lambda (field)
-                          (let ((value (cdr field)))
-                            (if (string= (upcase value) "NULL")
-                                nil
-                              value)))
+                          (let* ((col-name (car field))
+                                 (value (cdr field))
+                                 (param-value
+                                  (if (string= (upcase value) "NULL")
+                                      nil
+                                    value)))
+                            (clutch-result--typed-param-for-column
+                             table col-name param-value)))
                         fields)))
     (cons (format "INSERT INTO %s (%s) VALUES (%s)"
                   (clutch-db-escape-identifier conn table)

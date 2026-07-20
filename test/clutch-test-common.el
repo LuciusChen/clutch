@@ -18,6 +18,11 @@
 
 ;;;; Test helpers
 
+(defun clutch-test--execute-and-present (sql connection &optional context)
+  "Execute SQL on CONNECTION and present its result using CONTEXT."
+  (clutch--present-statement-outcome
+   sql connection (clutch--execute-statement sql connection t context)))
+
 (defun clutch-test--debug-buffer-string ()
   "Return the current dedicated clutch debug buffer contents."
   (let ((buf (get-buffer clutch-debug-buffer-name)))
@@ -33,6 +38,27 @@
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (setq-local clutch--buffer-error-details nil)))))
+
+(defmacro clutch-test--with-isolated-metadata-caches (&rest body)
+  "Run BODY with fresh metadata state and no installed lifecycle consumers."
+  (declare (indent 0) (debug (body)))
+  `(let ((clutch--schema-cache (make-hash-table :test 'eq))
+         (clutch--table-metadata-cache (make-hash-table :test 'eq))
+         (clutch--column-details-queue-cache (make-hash-table :test 'eq))
+         (clutch--column-details-active-cache (make-hash-table :test 'eq))
+         (clutch--help-doc-cache (make-hash-table :test 'eq))
+         (clutch--object-cache (make-hash-table :test 'eq))
+         (clutch--object-warmup-timers (make-hash-table :test 'eq))
+         (clutch--object-warmup-generations (make-hash-table :test 'eq))
+         (clutch--schema-status-cache (make-hash-table :test 'eq))
+         (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
+         (clutch--schema-refresh-ticket-counter 0)
+         (clutch--schema-install-timers (make-hash-table :test 'eq))
+         (clutch--metadata-ticket-counter 0)
+         (clutch--schema-cache-updated-hook nil)
+         (clutch--metadata-state-changed-hook nil)
+         (clutch--table-metadata-updated-hook nil))
+     ,@body))
 
 (defun clutch-test--primary-row-identity (&optional table columns indices)
   "Return primary-key row identity metadata for tests."
@@ -69,6 +95,14 @@ When PREFIX is nil, use the text between CAPF's bounds, matching the real
   (let ((bounds (clutch-test--insert-field-value-bounds field-name)))
     (goto-char (if end (cdr bounds) (car bounds)))))
 
+(defun clutch-test--set-insert-field-value (field-name value)
+  "Replace FIELD-NAME's visible insert-form value with VALUE."
+  (pcase-let ((`(,beg . ,end)
+               (clutch-test--insert-field-value-bounds field-name)))
+    (goto-char beg)
+    (delete-region beg end)
+    (insert value)))
+
 (defmacro clutch-test--with-connection-data-model (spec &rest body)
   "Run BODY with SPEC identifying a test connection's backend data model.
 SPEC is (CONN BACKEND MODEL)."
@@ -101,15 +135,6 @@ SPEC is (CONN BACKEND MODEL)."
          ('document-conn 'mongodb 'document)
        ,@body)))
 
-(defun clutch-test--column-defs (columns)
-  "Return simple column definitions for COLUMNS."
-  (mapcar (lambda (name) (list :name name)) columns))
-
-(defun clutch-test--column-widths (columns)
-  "Return simple display widths matching COLUMNS."
-  (vconcat (cl-loop for idx below (length columns)
-                    collect (if (= idx 0) 2 8))))
-
 (defun clutch-test--init-result-state (spec)
   "Initialize the current buffer as a small result buffer.
 SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
@@ -122,9 +147,16 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
   (let* ((columns (if (plist-member spec :columns)
                       (plist-get spec :columns)
                     '("id" "name")))
-         (column-defs (if (plist-member spec :column-defs)
-                          (plist-get spec :column-defs)
-                        (clutch-test--column-defs columns)))
+         (raw-column-defs (if (plist-member spec :column-defs)
+                              (plist-get spec :column-defs)
+                            (mapcar (lambda (name) (list :name name)) columns)))
+         (column-defs
+          (cl-mapcar
+           (lambda (name definition)
+             (if (plist-member definition :source-column)
+                 definition
+               (plist-put (copy-sequence definition) :source-column name)))
+           columns raw-column-defs))
          (rows (if (plist-member spec :rows)
                    (plist-get spec :rows)
                  '((1 "alice") (2 "bob"))))
@@ -142,7 +174,9 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
                             100))
          (column-widths (if (plist-member spec :column-widths)
                             (plist-get spec :column-widths)
-                          (clutch-test--column-widths columns))))
+                          (vconcat
+                           (cl-loop for idx below (length columns)
+                                    collect (if (= idx 0) 2 8))))))
     (clutch-result-mode)
     (setq-local clutch-connection connection
                 clutch--connection-params (plist-get spec :connection-params)

@@ -1,7 +1,6 @@
 # 045. UPDATE Export and Pending SQL Are Different Workflows
 
-Issue #3 started as a request for SQL export, but the discussion clarified two
-different user needs that should not be collapsed into one command family.
+Issue #3 started as a request for SQL export, but the discussion clarified two different user needs that should not be collapsed into one command family.
 
 ## The Split
 
@@ -20,9 +19,7 @@ Those are related, but they are not the same workflow.
 - represent them as SQL text
 - copy or save that representation
 
-This is why `UPDATE` belongs next to `TSV`, `CSV`, and `INSERT` in the result
-copy/export UI.  It answers the same question: "how should this result set be
-serialized?"
+This is why `UPDATE` belongs next to `TSV`, `CSV`, and `INSERT` in the result copy/export UI.  It answers the same question: "how should this result set be serialized?"
 
 ### Pending SQL
 
@@ -32,12 +29,9 @@ Pending SQL is different:
 - it is the exact staged mutation batch
 - it should match preview/commit semantics
 
-If a user has staged two cell edits and one delete, pending SQL should export
-exactly those three statements and nothing else.  It should not re-derive SQL
-from the visible result rows.
+If a user has staged two cell edits and one delete, pending SQL should export exactly those three statements and nothing else.  It should not re-derive SQL from the visible result rows.
 
-That makes pending SQL part of the mutation workflow, not part of the copy
-extractor family.
+That makes pending SQL part of the mutation workflow, not part of the copy extractor family.
 
 ## Why Pending SQL Does Not Belong In `c`
 
@@ -53,13 +47,11 @@ Putting pending SQL in the same menu would mix two mental models:
 - "copy this result as a format"
 - "copy the staged changes I have accumulated"
 
-Those should stay separate.  Pending SQL therefore lives in the result
-transient as its own action group, near preview/commit behavior.
+Those should stay separate.  Pending SQL therefore lives in the result transient as its own action group, near preview/commit behavior.
 
 ## Why UPDATE Export Needs Extra Guardrails
 
-`INSERT` export can serialize arbitrary result values into rows more freely.
-`UPDATE` export cannot.
+`INSERT` export can serialize arbitrary result values into rows more freely. `UPDATE` export cannot.
 
 To generate defensible `UPDATE` statements, clutch needs all of these:
 
@@ -73,8 +65,7 @@ If the result includes aliases or computed columns such as:
 SELECT id, name, now() AS ts FROM users
 ```
 
-then exporting that as `UPDATE` would be misleading unless clutch silently
-dropped `ts`, which would make the command hard to reason about.
+then exporting that as `UPDATE` would be misleading unless clutch silently dropped `ts`, which would make the command hard to reason about.
 
 The chosen rule is simpler and safer:
 
@@ -88,5 +79,4 @@ This keeps `UPDATE` export strict and predictable.
 - result copy/export now includes `UPDATE`
 - pending SQL is exported separately as the exact staged batch
 - `UPDATE` export is guarded so it only operates on real source columns
-- the two workflows stay aligned with their real semantics instead of being
-  merged into one vague "SQL export" bucket
+- the two workflows stay aligned with their real semantics instead of being merged into one vague "SQL export" bucket

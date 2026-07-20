@@ -56,9 +56,9 @@ non-HANA users to keep the file on disk.
 For safety, the discovery layer only lifts entries that carry both a
 resolvable server (via `:server' or `:host') AND a `:port', so a shared
 `~/.authinfo.gpg' listing SSH/HTTP tokens will not pollute the HANA
-picker with entries that have no port.  Setting a defcustom value like
-`clutch-saphana-auth-source-strict-port' to nil is not supported; keep
-HANA credentials in a dedicated file."
+picker with entries that have no port.  This port requirement is not
+configurable; keep HANA credentials in a dedicated file if a shared
+auth-source store would otherwise surface unwanted entries."
   :type '(repeat file)
   :group 'clutch-saphana)
 
@@ -106,9 +106,9 @@ Results are memoized per-file by modification time (see
 
 (defun clutch-saphana--coerce-port (port-raw)
   "Return a positive integer port from PORT-RAW, or nil when unusable.
-Rejects zero, negative numbers, and strings that do not fully parse as
-a positive integer — the previous relaxed parser accepted \"12abc\" as
-12 and \"-30\" as -30, both of which produce silently wrong connections."
+Rejects zero, negative numbers, and strings that do not fully parse as a
+positive integer, so malformed values like \"12abc\" or \"-30\" become nil
+rather than a silently wrong connection."
   (cond
    ((null port-raw) nil)
    ((and (integerp port-raw) (> port-raw 0)) port-raw)

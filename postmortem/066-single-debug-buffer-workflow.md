@@ -9,17 +9,13 @@
 - `M-x clutch-debug-mode`, which enriches the same details buffer
 - JDBC's raw `*clutch-jdbc-agent-stderr*` buffer
 
-This design was an improvement over string-only diagnostics, but it still feels
-foreign relative to established Emacs workflows.
+This design was an improvement over string-only diagnostics, but it still feels foreign relative to established Emacs workflows.
 
 Two concrete problems remain:
 
-1. **The main troubleshooting entry point is ambiguous.**
-   Users must learn whether to inspect the inline message, the details buffer,
-   or the raw stderr buffer.
+1. **The main troubleshooting entry point is ambiguous.** Users must learn whether to inspect the inline message, the details buffer, or the raw stderr buffer.
 
-2. **The details view mixes two different jobs.**
-   It tries to serve both as:
+2. **The details view mixes two different jobs.** It tries to serve both as:
    - a user-facing "what failed" surface
    - a maintainer/debugging transcript
 
@@ -27,22 +23,17 @@ That makes it heavier than a normal error view and weaker than a real log view.
 
 ## Why the Current Model Feels Wrong
 
-The existing model does not match the interaction style of strong Emacs-native
-tools:
+The existing model does not match the interaction style of strong Emacs-native tools:
 
-- Flymake separates *problem navigation/listing* from low-level transport
-  debugging.
+- Flymake separates *problem navigation/listing* from low-level transport debugging.
 - Eglot provides explicit events/stderr buffers for protocol/runtime debugging.
-- Magit uses a process buffer for command/runtime output instead of folding that
-  log into each user-facing failure.
+- Magit uses a process buffer for command/runtime output instead of folding that log into each user-facing failure.
 
-`clutch` instead routes user diagnostics, backend diagnostics, and runtime log
-snippets into one "details" surface.  That convergence is too shallow:
+`clutch` instead routes user diagnostics, backend diagnostics, and runtime log snippets into one "details" surface.  That convergence is too shallow:
 
 - still too many entry points for users
 - still not a true debug log buffer for maintainers
-- still easy for one path (query, connect, object metadata) to miss the
-  expected storage hook and leave "no details available"
+- still easy for one path (query, connect, object metadata) to miss the expected storage hook and leave "no details available"
 
 ## Decision
 
@@ -59,8 +50,7 @@ These messages stay concise and actionable.
 
 ### 2. Explicit debug mode
 
-When `clutch-debug-mode` is enabled, `clutch` gets exactly one official
-troubleshooting surface:
+When `clutch-debug-mode` is enabled, `clutch` gets exactly one official troubleshooting surface:
 
 - a dedicated debug buffer
 
@@ -84,15 +74,13 @@ The new workflow is:
 
 That is the full supported debug workflow.
 
-The previous `clutch-show-error-details` command should be deleted, not aliased.
-This is intentional:
+The previous `clutch-show-error-details` command should be deleted, not aliased. This is intentional:
 
 - no compatibility shim
 - no fallback command
 - no dual-maintained UI
 
-`*clutch-jdbc-agent-stderr*` remains an implementation detail, not a documented
-primary user entry point.
+`*clutch-jdbc-agent-stderr*` remains an implementation detail, not a documented primary user entry point.
 
 After the migration, the intended command set is:
 
@@ -134,8 +122,7 @@ A user-visible failure snapshot:
 - SQL or generated SQL when relevant
 - structured diagnostics payload when available
 
-The intended representation is a plain plist, not a new abstraction-heavy layer.
-At minimum it should support:
+The intended representation is a plain plist, not a new abstraction-heavy layer. At minimum it should support:
 
 - `:summary`
 - `:backend`
@@ -169,8 +156,7 @@ A time-ordered troubleshooting event:
 - elapsed time when relevant
 - stderr excerpt or backend debug payload reference when relevant
 
-This record should also stay a plain plist.
-At minimum:
+This record should also stay a plain plist. At minimum:
 
 - `:time`
 - `:buffer`
@@ -185,8 +171,7 @@ At minimum:
 - `:request-id`
 - `:conn-id`
 
-The debug buffer may render both record types together, but they must not be
-stored as one ad-hoc plist blob.
+The debug buffer may render both record types together, but they must not be stored as one ad-hoc plist blob.
 
 ## Ownership and State
 
@@ -203,11 +188,9 @@ The redesign should reduce mixed responsibilities, not create more glue.
 
 - the dedicated "error details buffer fetcher" model
 - ad-hoc details-buffer-local copy state
-- the idea that a troubleshooting buffer must be regenerated via a thunk tied to
-  another source buffer
+- the idea that a troubleshooting buffer must be regenerated via a thunk tied to another source buffer
 
-The debug buffer should instead render from shared current problem/debug
-registries directly.
+The debug buffer should instead render from shared current problem/debug registries directly.
 
 ## Source Integration Rules
 
@@ -218,8 +201,7 @@ Every workflow that can fail must write into the same debug pipeline:
 - object describe / browse / definition
 - metadata / schema refresh
 
-Do not create workflow-specific troubleshooting UIs.
-Do not let object/metadata errors bypass the shared recording path.
+Do not create workflow-specific troubleshooting UIs. Do not let object/metadata errors bypass the shared recording path.
 
 ## Non-goals
 

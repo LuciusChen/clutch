@@ -1,5 +1,7 @@
 # 010 — Protocol Layer Optimizations
 
+> **2026-07-15 erratum — MySQL Opt 4:** The MySQL analysis below overstated the number of connection-buffer deletions in a real query. Row fields are decoded from complete packet strings, so the original synthetic `read-bytes` loop did not represent the packet lifecycle. A byte-compiled MySQL 8.0 A/B over text and prepared results of 1k, 10k, and 100k rows found median differences from 0.73% slower to 2.64% faster, with no repeatable regression and no 2x–10x improvement. The offset design remains valuable because packet reads can restore their position after timeout or quit. The performance claim is withdrawn for MySQL; the PostgreSQL path was not revalidated by this A/B.
+
 ## Background
 
 Code review of `mysql.el` and `pg.el` identified four specific inefficiencies. All four were addressed with targeted changes, each accompanied by correctness tests and benchmark stubs.

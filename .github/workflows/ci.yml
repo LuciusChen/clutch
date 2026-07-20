@@ -57,3 +57,6 @@ jobs:
 
       - name: Checkdoc package files
         run: test/run-ci.sh checkdoc
+
+      - name: Check architecture boundaries
+        run: test/run-ci.sh architecture
