@@ -24,6 +24,8 @@
 
 ### Fixed
 
+- Kept SQL identifier and keyword completion ahead of global fallback CAPFs regardless of package load order, without depending on Corfu-specific hook reordering.
+- Returned point-local Embark object targets with scalar bounds, so `embark-act` on a Query Console table name no longer passes a one-element list as the target end position. Non-default object action labels now use standard keymap menu items instead of advising an Embark private function.
 - Reorganized the result dispatch into two balanced workflow rows, kept staged mutation actions together under Edit, and hid pending-only actions until changes are staged without changing any command keys.
 - Removed Clutch's duplicate PostgreSQL transaction-state tracking and explicit-array-bound rejection now that pg-el exposes `ReadyForQuery` status and parses dimension-prefixed array values upstream.
 - Allowed the native live-test runner to continue under Podman instead of exiting during the macOS-only OrbStack guard.

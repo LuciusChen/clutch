@@ -1513,7 +1513,7 @@ document connection."
               ((symbol-function 'bounds-of-thing-at-point)
                (lambda (_thing) '(1 . 7))))
       (should (equal (clutch--embark-object-target)
-                     '(clutch-object (:name "orders" :type "TABLE") 1 7)))))
+                     '(clutch-object (:name "orders" :type "TABLE") 1 . 7)))))
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local major-mode 'sql-mode)
@@ -1638,7 +1638,13 @@ document connection."
                          (clutch--embark-action-specs))
                  '(describe show-definition index-insight explain-sample
                             show-validation show-stats jump-target copy-name
-                            copy-fqname))))
+                            copy-fqname)))
+  (let (bindings)
+    (map-keymap (lambda (key binding)
+                  (push (cons key binding) bindings))
+                (clutch--embark-actions-keymap))
+    (should (equal (alist-get ?d bindings)
+                   '("Describe object" . clutch-object-describe)))))
 
 (provide 'clutch-test-object)
 

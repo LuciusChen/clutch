@@ -929,6 +929,24 @@ ORDER BY id"
             (funcall exit-fn accepted 'exact)
             (should (equal (buffer-string) expected))))))))
 
+(ert-deftest clutch-test-sql-capfs-precede-late-global-fallbacks ()
+  "SQL CAPFs should take priority over generic global fallbacks."
+  (let ((fallback (lambda ()
+                    (list (point-min) (point)
+                          '("select-from-fallback") :exclusive 'no))))
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-mode)
+          (insert "sele")
+          (add-hook 'completion-at-point-functions fallback)
+          (let ((completion-in-region-function
+                 (lambda (start end collection &optional predicate)
+                   (all-completions
+                    (buffer-substring-no-properties start end)
+                    collection predicate))))
+            (should (equal (completion-at-point) '("SELECT")))))
+      (remove-hook 'completion-at-point-functions fallback))))
+
 ;;;; Completion — identifiers and columns
 
 (ert-deftest clutch-test-completion-at-point-keyword-phrase-exit-inserts-space ()
