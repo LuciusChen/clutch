@@ -1074,11 +1074,9 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
   (remove-hook 'completion-at-point-functions
                #'clutch-sql-keyword-completion-at-point t)
   (add-hook 'completion-at-point-functions
-            #'clutch-completion-at-point nil t)
+            #'clutch-sql-keyword-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
-            #'clutch-sql-keyword-completion-at-point t t)
-  (add-hook 'corfu-mode-hook
-            #'clutch--install-completion-capfs nil t))
+            #'clutch-completion-at-point nil t))
 
 (defun clutch--completion-table-context-p (beg)
   "Return non-nil when BEG is in a SQL table-name completion context."
