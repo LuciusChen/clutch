@@ -46,7 +46,18 @@ Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and MariaDB
 
 ## SSH Tunnels
 
-For saved clutch connections, `:ssh-host` starts a local SSH forward through the named host in `~/.ssh/config` before the native backend connects by default. The database `:host` / `:port` remain the remote endpoint as seen from the bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally. This transport layer only rewrites structured `:host` / `:port` connection params.  Opaque `:url` profiles, including JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level transport support. Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be directly reachable on some machines; clutch tries that route briefly and falls back to SSH when the TCP endpoint is not reachable or the direct database connection fails.
+For saved clutch connections, `:ssh-host` always starts a local SSH forward through the named host in `~/.ssh/config` before the native backend connects. The database `:host` / `:port` remain the remote endpoint as seen from the bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally. This transport layer only rewrites structured `:host` / `:port` connection params. Opaque `:url` profiles, including JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level transport support.
+
+When one database is reachable both directly and through SSH, define two named connections that share one profile:
+
+```elisp
+(setq clutch-connection-alist
+      '(("prod" . (:backend mysql :profile-entry "mysql/prod"))
+        ("prod-ssh" . (:backend mysql :profile-entry "mysql/prod"
+                        :ssh-host "bastion-prod"))))
+```
+
+From a local buffer, select `prod` for the direct route and `prod-ssh` for the tunnel. Clutch does not probe the endpoint or fall back between routes, so database connection timeouts retain their normal single-route meaning. Existing explicit and inferred TRAMP forwarding rules remain unchanged.
 
 This SSH path is intentionally OpenSSH-first:
 
@@ -219,7 +230,7 @@ PostgreSQL accepts the upstream `:sslmode` name with `disable`, `prefer`, `requi
 
 - SQLite does not use `:host`, `:port`, or `:user`
 - Network timeout settings do not apply
-- `:ssh-host`, `:ssh-tunnel`, and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
+- `:ssh-host` and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
 - Schema/database switching is not part of the SQLite path
 
 ## Shared Native-Backend Notes

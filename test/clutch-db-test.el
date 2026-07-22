@@ -45,6 +45,7 @@
 (require 'clutch-db-sqlite)
 (require 'clutch-mongodb)
 (require 'clutch-redis)
+(require 'mysql)
 (require 'redis)
 (require 'mongodb)
 
@@ -4658,7 +4659,7 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           message)
       (unwind-protect
           (progn
-            (clutch-db-mysql--set-read-idle-timeout conn 0.2)
+            (setf (mysql-conn-read-idle-timeout conn) 0.2)
             (condition-case err
                 (clutch-db-query conn "SELECT SLEEP(5)")
               (clutch-db-error
@@ -4666,7 +4667,7 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
             (should (string-match-p "restored MySQL connection" message))
             (let ((result (clutch-db-query conn "SELECT 1 AS n")))
               (should (= (caar (clutch-db-result-rows result)) 1))))
-        (clutch-db-mysql--set-read-idle-timeout conn old-timeout)))))
+        (setf (mysql-conn-read-idle-timeout conn) old-timeout)))))
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   :tags '(:db-live :mysql-live)

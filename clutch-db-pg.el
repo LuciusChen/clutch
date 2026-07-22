@@ -738,14 +738,6 @@ FKS is an alist of (column-name . fk-plist)."
   "Initialize PostgreSQL CONN.
 No special init needed — encoding is set in startup message.")
 
-(cl-defmethod clutch-db--restore-connection-timeouts ((conn pgcon) params)
-  "Restore PostgreSQL CONN timeout state from PARAMS."
-  (let* ((params (clutch-db-pg--apply-timeout-defaults
-                  (clutch-db--normalize-connect-params 'pg params)))
-         (read-idle-timeout (plist-get params :read-idle-timeout)))
-    (when read-idle-timeout
-      (clutch-db-pg--set-slot-value conn 'timeout read-idle-timeout))))
-
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn pgcon))
   "PostgreSQL schema refresh should not block connect."
   nil)

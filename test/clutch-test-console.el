@@ -93,6 +93,13 @@
                    "oracle-b"
                    (:backend oracle :host "db" :port 1521 :sid "SID2")
                    different)
+                  (ssh-transport
+                   "prod-direct"
+                   (:backend mysql :profile-entry "mysql/prod")
+                   "prod-ssh"
+                   (:backend mysql :profile-entry "mysql/prod"
+                    :ssh-host "bastion-prod")
+                   different)
                   (url-password
                    "prod"
                    (:backend mysql

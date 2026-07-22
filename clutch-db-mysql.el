@@ -101,9 +101,6 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 (defvar clutch-db-mysql--methods-installed nil
   "Non-nil when MySQL generic methods were installed.")
 
-(defvar clutch-db-mysql--set-read-idle-timeout-function nil
-  "Function used to update a mysql.el connection read-idle-timeout.")
-
 (defun clutch-db-mysql--timeout-error-message (err recovered)
   "Return a user-facing timeout message for ERR.
 RECOVERED is non-nil when the MySQL wire connection was resynchronized."
@@ -128,10 +125,6 @@ RECOVERED is non-nil when the MySQL wire connection was resynchronized."
   (unless clutch-db-mysql--methods-installed
     (signal 'clutch-db-error
             (list "MySQL backend was loaded before mysql.el was available. Restart Emacs after installing mysql.el."))))
-
-(defun clutch-db-mysql--set-read-idle-timeout (conn value)
-  "Set MySQL CONN read idle timeout to VALUE."
-  (funcall clutch-db-mysql--set-read-idle-timeout-function conn value))
 
 (defun clutch-db-mysql--apply-timeout-defaults (params)
   "Return PARAMS with MySQL timeout defaults filled in."
@@ -350,14 +343,6 @@ Return nil when TEXT has no Syntax section."
     (mysql-error
      (signal 'clutch-db-error
              (list (format "Init failed: %s" (error-message-string err)))))))
-
-(cl-defmethod clutch-db--restore-connection-timeouts ((conn mysql-conn) params)
-  "Restore MySQL CONN timeout state from PARAMS."
-  (let* ((params (clutch-db-mysql--apply-timeout-defaults
-                  (clutch-db--normalize-connect-params 'mysql params)))
-         (read-idle-timeout (plist-get params :read-idle-timeout)))
-    (when read-idle-timeout
-      (clutch-db-mysql--set-read-idle-timeout conn read-idle-timeout))))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
   "MySQL schema refresh should not block connect."
@@ -811,13 +796,6 @@ ORDER BY ORDINAL_POSITION"
   "Return \"MySQL\" as the display name."
   "MySQL")
 
- ;; Build the setter after mysql.el is loaded; otherwise byte-compilation of
- ;; this optional adapter can expand mysql.el's struct setter too early.
- (setq clutch-db-mysql--set-read-idle-timeout-function
-       (eval
-        '(lambda (conn value)
-           (setf (mysql-conn-read-idle-timeout conn) value))
-        t))
  (setq clutch-db-mysql--methods-installed t))
 
 (provide 'clutch-db-mysql)
