@@ -1,5 +1,7 @@
 # 101 -- Direct-First Requires Database Connection Success
 
+Superseded by [164 -- Connection Entries Own Their Transport](164-explicit-connection-transport.md).
+
 ## Background
 
 Postmortem 100 introduced `:ssh-tunnel direct-first` so one saved profile can be shared by a workstation that needs `:ssh-host` and by a host that can reach the database directly.

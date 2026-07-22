@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Removed the `:ssh-tunnel` saved-connection parameter, its `direct-first` route probing and fallback, and `clutch-ssh-direct-first-probe-timeout-seconds`. The old key now fails fast. Define separate direct and `:ssh-host` saved connections, optionally sharing one `:profile-entry`; `:ssh-host` now unconditionally requests an SSH tunnel.
 - **Result-cell preview overhaul:** Removed the `V` live-view commands, their bottom-window viewer, and freeze/refresh/quit controls.  `v` remains the explicit full value viewer; optional automatic child-frame previews are now controlled by `clutch-cell-preview-style`, appear only for visibly truncated cells, fit tightly to their formatted content, follow window resizing, use a theme-relative contrasting surface, and silently stay disabled on unsupported displays.
 - Removed the public `clutch-execute-query-at-point` and `clutch-execute-statement-at-point` commands.  Use `clutch-execute-dwim`, `clutch-execute-region`, or `clutch-execute-buffer`; select a region first when exact execution boundaries matter.
 - Removed the undocumented `clutch-execute` command and its direct arbitrary-buffer execution behavior.  Execute through the connection-local DWIM, region, or buffer commands; the explicit indirect-edit workflow remains available for SQL embedded in other source buffers.

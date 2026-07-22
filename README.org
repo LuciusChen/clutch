@@ -157,7 +157,7 @@ This release separates protocol and Org-Babel packages from the main =clutch= pa
                           :host "127.0.0.1" :port 5432
                           :user "postgres" :password "test"
                           :database "mydb"))
-        ("prod-pg"    . (:backend pg
+        ("prod-pg-ssh" . (:backend pg
                           :host "pg.internal" :port 5432
                           :user "app" :database "appdb"
                           :ssh-host "bastion-prod"))
@@ -173,7 +173,7 @@ This release separates protocol and Org-Babel packages from the main =clutch= pa
 #+end_src
 
 - Every entry must resolve to a backend (=mysql=, =pg=, =sqlite=, =mongodb=, =redis=, or a JDBC driver symbol such as =oracle=).  Prefer keeping =:backend= in =clutch-connection-alist= so completion can show backend icons; if it is omitted, an encrypted =:profile-entry= must provide =backend=.
-- SQLite is local and file-based: only =:database= is required; use =":memory:"= for a transient database.  Do not combine SQLite with =:ssh-host=, =:ssh-tunnel=, or =:tramp-default-directory=.
+- SQLite is local and file-based: only =:database= is required; use =":memory:"= for a transient database.  Do not combine SQLite with =:ssh-host= or =:tramp-default-directory=.
 - =:password= is optional for network backends; see [[*Password Management][Password Management]] for auth-source integration.
 - =:profile-entry= can load missing connection fields from encrypted =pass= or =.authinfo.gpg= profiles when host/user/database metadata should not live in Emacs init files.
 - Network backends accept =:connect-timeout= and =:read-idle-timeout=. PostgreSQL and JDBC also accept =:query-timeout=; JDBC additionally accepts =:rpc-timeout=.
@@ -243,7 +243,7 @@ For JDBC connections (including Org-Babel blocks), an explicit =:pass-entry= tha
 
 *** Encrypted connection profiles
 
-If host/IP addresses, usernames, database names, or tunnel metadata should not live in your Emacs configuration, use =:profile-entry=.  The profile is read before normal connection canonicalization, so Clutch-level fields such as =:ssh-host=, =:ssh-tunnel=, and =:tramp-default-directory= work the same way as if they had been written directly in =clutch-connection-alist=.
+If host/IP addresses, usernames, or database names should not live in your Emacs configuration, use =:profile-entry=.  The profile is read before normal connection canonicalization. Keep the transport choice in named connection entries when the same database profile needs both direct and SSH routes.
 
 #+begin_src emacs-lisp
 (setq clutch-connection-alist
@@ -251,7 +251,7 @@ If host/IP addresses, usernames, database names, or tunnel metadata should not l
         ("prod-reporting" . (:backend mysql :profile-entry "mysql/reporting"))))
 #+end_src
 
-Clutch treats profile fields as defaults.  Explicit keywords in =clutch-connection-alist= override values from =pass= or =.authinfo.gpg=, including =:backend=, =:host=, =:port=, =:user=, =:database=, =:ssh-host=, and =:ssh-tunnel=.  Keeping non-sensitive hints such as =:backend= in the alist lets Clutch show backend icons in completion without decrypting encrypted profiles just to render the candidate list.  If =:backend= is omitted, Clutch will still read it from the profile when connecting.
+Clutch treats profile fields as defaults.  Explicit keywords in =clutch-connection-alist= override values from =pass= or =.authinfo.gpg=, including =:backend=, =:host=, =:port=, =:user=, =:database=, =:ssh-host=, and =:tramp-default-directory=.  Keeping non-sensitive hints such as =:backend= in the alist lets Clutch show backend icons in completion without decrypting encrypted profiles just to render the candidate list.  If =:backend= is omitted, Clutch will still read it from the profile when connecting.
 
 With =pass=, the first line remains the password and the remaining lines use the standard =key: value= convention:
 
@@ -262,8 +262,6 @@ host: db.example.com
 port: 3306
 user: app_user
 database: app_db
-ssh-host: arch
-ssh-tunnel: direct-first
 connect-timeout: 8
 read-idle-timeout: 30
 #+end_src
@@ -278,8 +276,7 @@ With =.authinfo.gpg=, use the =machine= field as the logical profile id.  Since 
 
 #+begin_src text
 machine mysql/prod login app_user password db-password-here \
-  backend mysql db-host db.example.com port 3306 database app_db \
-  ssh-host arch ssh-tunnel direct-first
+  backend mysql db-host db.example.com port 3306 database app_db
 #+end_src
 
 Explicit fields are useful for variants such as a read-only database while still keeping the host and password encrypted:
@@ -295,18 +292,18 @@ See the [[https://www.gnu.org/software/emacs/manual/html_node/auth/index.html][a
 
 ** SSH Tunnels via ~/.ssh/config
 
-For bastion-style access, add =:ssh-host= to a saved network connection:
+For a database that is sometimes reachable directly and sometimes through a bastion, define two saved connections over one encrypted profile:
 
 #+begin_src emacs-lisp
-("prod-pg" . (:backend pg
-               :host "pg.internal" :port 5432
-               :user "app" :database "appdb"
-               :ssh-host "bastion-prod"))
+(setq clutch-connection-alist
+      '(("prod-pg" . (:backend pg :profile-entry "pg/prod"))
+        ("prod-pg-ssh" . (:backend pg :profile-entry "pg/prod"
+                           :ssh-host "bastion-prod"))))
 #+end_src
 
-Clutch opens a local SSH forward through your normal OpenSSH configuration. Use =M-x clutch-prepare-ssh-host=, or =S= from =C-c ?=, when the first SSH use needs host-key confirmation or a key passphrase.  The batch tunnel itself uses non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure =AddKeysToAgent= when needed.
+From a local buffer, the first entry connects directly. The second always opens a local SSH forward through the =bastion-prod= alias in your normal OpenSSH configuration; =:ssh-host= is an explicit transport request, not a database hostname or an automatic fallback hint. The shared profile holds the database endpoint and credentials without duplicating its password.
 
-Add =:ssh-tunnel direct-first= when the same profile should try a direct connection before falling back to SSH.  SSH forwarding applies to structured =:host= / =:port= entries; opaque =:url= profiles, including JDBC and MongoDB URLs, still need manual tunnels or backend-level transport support. Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
+Use =M-x clutch-prepare-ssh-host=, or =S= from =C-c ?=, when the first SSH use needs host-key confirmation or a key passphrase.  The batch tunnel itself uses non-interactive OpenSSH auth, so load keys into =ssh-agent= or configure =AddKeysToAgent= when needed. Clutch does not probe or switch between the two routes; select the connection whose transport you want. Existing explicit and inferred TRAMP forwarding rules remain unchanged. SSH forwarding applies to structured =:host= / =:port= entries; opaque =:url= profiles, including JDBC and MongoDB URLs, still need manual tunnels or backend-level transport support. Backend-specific tunnel details live in [[file:docs/native-backends.md][docs/native-backends.md]].
 
 ** TRAMP-aware Connection Origin
 

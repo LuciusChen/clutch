@@ -64,7 +64,7 @@ Each entry has the form:
   (NAME . (:host H :port P :user U [:password P] :database D
            [:backend SYM] [:sql-product SYM]
            [:profile-entry STR] [:pass-entry STR]
-           [:ssh-host SSH-HOST] [:ssh-tunnel MODE]
+           [:ssh-host SSH-HOST]
            [:tramp-default-directory TRAMP-DIRECTORY]
            [:url STR] [:display-name STR] [:props ALIST]
            [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
@@ -93,15 +93,12 @@ are `disable', `prefer', `require', and `verify-full'.
 clutch starts `ssh -N -L ... SSH-HOST' automatically, so this currently
 requires structured `:host' / `:port' params and does not apply to `:url'
 based JDBC entries.
-:ssh-tunnel controls when that tunnel is used.  The default `always'
-preserves the explicit tunnel behavior; `direct-first' probes `:host' / `:port'
-briefly and skips the tunnel when the database endpoint is already reachable.
 :tramp-default-directory enables the same local forward from an ssh-like TRAMP
 directory such as /ssh:host:/path/ or /rpc:host:/path/.
 :profile-entry reads missing connection fields from an encrypted profile in
 pass or .authinfo/.authinfo.gpg.  For pass, use the normal first-line password
 and `key: value' fields such as `backend:', `host:', `port:', `user:',
-`database:', `ssh-host:', and `ssh-tunnel:'.  For .authinfo, the `machine'
+`database:', and `ssh-host:'.  For .authinfo, the `machine'
 value is the profile id; use `db-host' for the real database host.  Profile
 fields are defaults: explicit fields in `clutch-connection-alist' override
 profile fields, including :backend, :host, :port, :user, :database, and
@@ -133,9 +130,6 @@ Password resolution order:
                                     (:profile-entry string)
                                     (:pass-entry string)
                                     (:ssh-host string)
-                                    (:ssh-tunnel
-                                     (choice (const always)
-                                             (const direct-first)))
                                     (:tramp-default-directory string)
                                     (:url string)
                                     (:display-name string)
@@ -179,12 +173,6 @@ ssh-like TRAMP directories."
 
 (defconst clutch--ssh-tunnel-ready-poll-interval 0.05
   "Seconds between SSH tunnel readiness checks.")
-
-(defconst clutch--ssh-direct-first-probe-timeout 0.25
-  "Seconds to wait when probing a direct endpoint before SSH fallback.")
-
-(defconst clutch--ssh-direct-first-connect-timeout 0.5
-  "Seconds to wait for a provisional direct database connection.")
 
 ;;;; Connection identity
 
@@ -1083,7 +1071,7 @@ cannot be read."
             (clutch--resolve-auth-source-password params)))))))
 
 (defconst clutch--profile-symbol-fields
-  '(:backend :driver :sql-product :surface :ssh-tunnel :ssl-mode :sslmode)
+  '(:backend :driver :sql-product :surface :ssl-mode :sslmode)
   "Connection profile fields parsed as symbols.")
 
 (defconst clutch--profile-number-fields
@@ -1297,6 +1285,11 @@ also wins over the profile's first-line password."
          (params (clutch--canonicalize-backend-aliases params)))
     (when (plist-member params :tramp)
       (user-error "Connection parameter :tramp was removed; use :tramp-default-directory"))
+    (when (plist-member params :ssh-tunnel)
+      (user-error
+       (concat
+        "Connection parameter :ssh-tunnel was removed; "
+        "define separate direct and :ssh-host connections")))
     params))
 
 (defun clutch--debug-connection-context (backend params)
@@ -1331,23 +1324,13 @@ also wins over the profile's first-line password."
          (ssh (and (stringp ssh-host)
                    (not (string-empty-p ssh-host))))
          (tramp (and (stringp tramp-default-directory)
-                     (not (string-empty-p tramp-default-directory))))
-         (ssh-mode (plist-get params :ssh-tunnel)))
+                     (not (string-empty-p tramp-default-directory)))))
     (cond
      ((and ssh tramp)
       (user-error
        "Connection cannot combine :ssh-host with :tramp-default-directory"))
-     ((and ssh-mode (not ssh))
-      (user-error "Connection :ssh-tunnel requires :ssh-host"))
      (ssh 'ssh)
      (tramp 'tramp))))
-
-(defun clutch--ssh-tunnel-mode (params)
-  "Return the SSH tunnel mode from PARAMS."
-  (let ((mode (or (plist-get params :ssh-tunnel) 'always)))
-    (unless (memq mode '(always direct-first))
-      (user-error "Connection :ssh-tunnel must be always or direct-first"))
-    mode))
 
 (defun clutch--tramp-origin-compatible-p (params)
   "Return non-nil when PARAMS can use an inferred TRAMP origin."
@@ -2001,30 +1984,6 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
           "or /rpc:host:/path/, and container paths such as "
           "/docker:container:/path/ or /podman:container:/path/")))))))
 
-(defun clutch--tcp-endpoint-open-p (host port timeout)
-  "Return non-nil when HOST:PORT accepts a TCP connection within TIMEOUT."
-  (let (proc)
-    (condition-case nil
-        (unwind-protect
-            (progn
-              (setq proc
-                    (make-network-process
-                     :name "clutch-direct-probe"
-                     :host host
-                     :service port
-                     :nowait t
-                     :noquery t))
-              (let ((deadline (+ (float-time) timeout)))
-                (while (and (eq (process-status proc) 'connect)
-                            (< (float-time) deadline))
-                  (accept-process-output
-                   proc clutch--ssh-tunnel-ready-poll-interval)))
-              (eq (process-status proc) 'open))
-          (when (and proc (process-live-p proc))
-            (delete-process proc)))
-      (file-error nil)
-      (error nil))))
-
 (defun clutch--prepare-forwarded-connect-params (params transport)
   "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS through TRANSPORT."
   (let ((connect-params (copy-sequence params)))
@@ -2033,31 +1992,19 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                                     (plist-get transport :local-port)))
     (list connect-params transport)))
 
-(defun clutch--prepare-ssh-connect-params (params)
-  "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS through an SSH tunnel."
-  (clutch--prepare-forwarded-connect-params
-   params (clutch--start-ssh-tunnel params)))
-
 (defun clutch--prepare-connect-params (params)
   "Return `(CONNECT-PARAMS TRANSPORT)' for PARAMS.
 When PARAMS request a transport, CONNECT-PARAMS targets the local forwarded
 port and TRANSPORT contains the live process metadata."
   (setq params (clutch--canonicalize-connection-params params))
   (if-let* ((kind (clutch--connection-transport-kind params)))
-      (if (and (eq kind 'ssh)
-               (eq (clutch--ssh-tunnel-mode params) 'direct-first)
-               (progn
-                 (clutch--validate-network-forward-params params "SSH tunnels")
-                 (clutch--tcp-endpoint-open-p
-                  (plist-get params :host)
-                  (plist-get params :port)
-                  clutch--ssh-direct-first-probe-timeout)))
-          (list params nil)
-        (pcase kind
-          ('ssh (clutch--prepare-ssh-connect-params params))
-          ('tramp
-           (clutch--prepare-forwarded-connect-params
-            params (clutch--start-tramp-tcp-forward params)))))
+      (pcase kind
+        ('ssh
+         (clutch--prepare-forwarded-connect-params
+          params (clutch--start-ssh-tunnel params)))
+        ('tramp
+         (clutch--prepare-forwarded-connect-params
+          params (clutch--start-tramp-tcp-forward params))))
     (list params nil)))
 
 (defun clutch--backend-connect-params (connect-params)
@@ -2066,37 +2013,12 @@ port and TRANSPORT contains the live process metadata."
         (db-params (cl-loop for (k v) on connect-params by #'cddr
                             unless (memq k '(:sql-product :backend :password
                                              :pass-entry :profile-entry
-                                             :ssh-host :ssh-tunnel
+                                             :ssh-host
                                              :tramp-default-directory))
                             append (list k v))))
     (if password
         (append db-params (list :password password))
       db-params)))
-
-(defun clutch--direct-first-connect-params (backend connect-params)
-  "Return CONNECT-PARAMS with short provisional timeouts for BACKEND."
-  (let* ((jdbc (clutch-backend-jdbc-transport-p backend connect-params))
-         (limit (if jdbc 1 clutch--ssh-direct-first-connect-timeout))
-         (params (copy-sequence connect-params))
-         (connect-timeout (plist-get params :connect-timeout))
-         (connect-timeout (if (and (numberp connect-timeout)
-                                   (> connect-timeout 0))
-                              (min connect-timeout limit)
-                            limit))
-         (connect-timeout (if jdbc (max 1 connect-timeout) connect-timeout)))
-    (setq params
-          (plist-put params :connect-timeout connect-timeout))
-    (if jdbc
-        (let* ((rpc-timeout (plist-get params :rpc-timeout))
-               (rpc-timeout (if (and (numberp rpc-timeout)
-                                     (> rpc-timeout 0))
-                                (min rpc-timeout (1+ connect-timeout))
-                              (1+ connect-timeout))))
-          (setq params
-                (plist-put params :rpc-timeout rpc-timeout)))
-      (setq params
-            (plist-put params :read-idle-timeout connect-timeout)))
-    params))
 
 (defun clutch--make-connection-error-details (params err)
   "Return structured error details for a failed connection attempt.
@@ -2163,50 +2085,28 @@ Returns a live connection object or signals a `user-error'."
           (setq effective-params (clutch--materialize-connection-params params))
           (setq backend (plist-get effective-params :backend))
           (let* ((prepared (clutch--prepare-connect-params effective-params))
-                 (connect-params (car prepared))
-                 (direct-first-fallback
-                  (and (plist-get effective-params :ssh-host)
-                       (eq (clutch--ssh-tunnel-mode effective-params)
-                           'direct-first)
-                       (null (cadr prepared))))
-                 conn)
+                 (connect-params (car prepared)))
             (setq transport (cadr prepared))
-            (condition-case direct-err
-                (progn
-                  (setq conn
-                        (clutch-db-connect
-                         backend
-                         (clutch--backend-connect-params
-                          (if direct-first-fallback
-                              (clutch--direct-first-connect-params
-                               backend connect-params)
-                            connect-params))))
-                  (when direct-first-fallback
-                    (clutch-db--restore-connection-timeouts conn connect-params)))
-              (clutch-db-error
-               (if direct-first-fallback
-                   (let ((fallback (clutch--prepare-ssh-connect-params
-                                    effective-params)))
-                     (setq transport (cadr fallback))
-                     (setq conn
-                           (clutch-db-connect
-                            backend (clutch--backend-connect-params
-                                     (car fallback)))))
-                 (signal (car direct-err) (cdr direct-err)))))
-            (clutch--require-live-connection conn)
-            (clutch--remember-connection-transport conn effective-params transport)
-            (when clutch-debug-mode
-              (clutch--remember-debug-event
-               :connection conn
-               :op "connect"
-               :phase "success"
-               :backend backend
-               :summary (condition-case nil
-                            (format "Connected to %s" (clutch--connection-key conn))
-                          (error "Connected"))
-               :context (clutch--debug-connection-context
-                         backend effective-params)))
-            conn))
+            (let ((conn
+                   (clutch-db-connect
+                    backend
+                    (clutch--backend-connect-params connect-params))))
+              (clutch--require-live-connection conn)
+              (clutch--remember-connection-transport
+               conn effective-params transport)
+              (when clutch-debug-mode
+                (clutch--remember-debug-event
+                 :connection conn
+                 :op "connect"
+                 :phase "success"
+                 :backend backend
+                 :summary (condition-case nil
+                              (format "Connected to %s"
+                                      (clutch--connection-key conn))
+                            (error "Connected"))
+                 :context (clutch--debug-connection-context
+                           backend effective-params)))
+              conn)))
       (clutch-db-error
        (when transport
          (clutch--stop-connection-transport transport))
