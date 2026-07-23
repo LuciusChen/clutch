@@ -825,6 +825,58 @@
         (should (equal (clutch-db-param-values update-params) '("ready" 7)))
         (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql))))))
 
+(ert-deftest clutch-test-jdbc-update-uses-schema-type-for-blob-parameter ()
+  "JDBC staged updates should retain BLOB type from column metadata."
+  (let ((clutch-connection
+         (make-clutch-jdbc-conn :params '(:driver oracle)))
+        (clutch--result-columns '("CONTENT" "STATUS"))
+        (clutch--result-column-defs
+         '((:name "CONTENT" :type-category blob :source-column "CONTENT")
+           (:name "STATUS" :type-category numeric :source-column "STATUS")))
+        (identity '(:kind row-locator :name "ROWID"
+                    :table "DOCUMENTS" :where-sql "ROWID = ?"
+                    :indices (2))))
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table &optional _strict)
+                 (clutch-jdbc--normalize-column-details
+                  '((:name "CONTENT" :type "BLOB")
+                    (:name "STATUS" :type "NUMBER"))))))
+      (pcase-let ((`(,_sql . ,params)
+                   (clutch-result--build-update-stmt
+                    "DOCUMENTS" ["AAAPr9AAEAAAACXAAA"]
+                    '((0 . "{\"message\":\"中文\"}")
+                      (1 . "1"))
+                    clutch--result-columns identity)))
+        (should (equal (mapcar #'clutch-db-param-type params)
+                       '("BLOB" "NUMBER" nil)))))))
+
+(ert-deftest clutch-test-jdbc-blob-edit-retains-source-encoding ()
+  "Editing a JDBC text BLOB should retain its source byte encoding."
+  (let (captured)
+    (with-temp-buffer
+      (insert "{\"message\":\"已修改\"}")
+      (setq-local clutch-result-edit--special-value nil
+                  clutch-result-edit--initial-value-state
+                  '(nil . "{\"message\":\"原值\"}")
+                  clutch-result-edit--blob-encoding "GB18030"
+                  clutch-result-edit--column-name "CONTENT"
+                  clutch-result-edit--column-def '(:type-category blob)
+                  clutch-result-edit--column-detail '(:type "BLOB")
+                  clutch-result--edit-callback
+                  (lambda (value) (setq captured value)))
+      (cl-letf (((symbol-function 'clutch-result-edit--refresh-record-return-buffer)
+                 #'ignore)
+                ((symbol-function 'clutch-result-edit--clear-active-target)
+                 #'ignore)
+                ((symbol-function 'clutch-result-edit--restore-result-position)
+                 #'ignore)
+                ((symbol-function 'quit-window) #'ignore))
+        (clutch-result-edit--finish-buffer)))
+    (should (equal captured "{\"message\":\"已修改\"}"))
+    (should (equal (get-text-property
+                    0 'clutch-jdbc-blob-encoding captured)
+                   "GB18030"))))
+
 (ert-deftest clutch-test-update-canonicalizes-source-column-case ()
   "Mutation SQL should quote the backend's canonical column spelling."
   (let ((clutch-connection
@@ -3375,6 +3427,55 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (= beg (point-min)))
         (should (= end (point-max)))
         (should (equal candidates '("low" "medium" "high")))))))
+
+(ert-deftest clutch-test-jdbc-blob-encoding-survives-complete-edit-path ()
+  "JDBC BLOB encoding should survive normalization, editing, staging, and wire."
+  (let* ((modified "{\"message\":\"已修改\"}")
+         (source
+          (car (clutch-jdbc--normalize-row
+                '((:__type "blob" :length 18
+                   :text "{\"message\":\"原值\"}" :encoding "GB18030")))))
+         parent-buf)
+    (unwind-protect
+        (clutch-test--with-open-edit-cell json-buf result-buf
+            (:connection (make-clutch-jdbc-conn :params '(:driver oracle))
+             :columns '("ID" "CONTENT")
+             :column-defs '((:name "ID" :type-category numeric)
+                            (:name "CONTENT" :type-category blob
+                             :backend-type "BLOB"))
+             :rows (list (list 1 source))
+             :row-identity
+             (clutch-test--primary-row-identity "DOCUMENTS" '("ID") '(0)))
+            (list 0 1 source)
+            "DOCUMENTS"
+            (list (list :name "CONTENT" :type "BLOB"
+                        :backend-type "BLOB"))
+          (with-current-buffer json-buf
+            (setq parent-buf clutch-result-edit-json--parent-buffer)
+            (should clutch-result-edit-json--whole-edit-p)
+            (erase-buffer)
+            (insert modified))
+          (with-current-buffer parent-buf
+            (should (equal clutch-result-edit--blob-encoding "GB18030")))
+          (cl-letf (((symbol-function 'quit-window)
+                     (lambda (&optional kill _window)
+                       (when kill
+                         (kill-buffer (current-buffer))))))
+            (with-current-buffer json-buf
+              (clutch-result-edit-json-finish)))
+          (let* ((staged (with-current-buffer result-buf
+                           (cdar clutch--pending-edits)))
+                 (wire
+                  (clutch-jdbc--wire-param
+                   (clutch-db-typed-param staged "BLOB"))))
+            (should (equal staged modified))
+            (should
+             (equal
+              (base64-decode-string (alist-get 'base64 wire))
+              (encode-coding-string
+               modified (coding-system-from-name "GB18030"))))))
+      (when (buffer-live-p parent-buf)
+        (kill-buffer parent-buf)))))
 
 (ert-deftest clutch-test-edit-cell-opens-null-state-placeholder ()
   "Editing a NULL cell should show a placeholder while keeping buffer text empty."

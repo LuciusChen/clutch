@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed Oracle/JDBC staged edits of BLOB and RAW/BINARY columns that could fail with `ORA-01465: invalid hex number`, and updated the agent pin to 0.2.15. Clutch now retains exact JDBC column types and text-BLOB source encodings, transports binary values through a reserved base64 parameter envelope, and preserves the distinction between typed SQL NULL and a non-null zero-byte value. The agent binds BLOB values with `setBlob` and RAW/BINARY-family values with `setBytes`; ordinary prepared parameters keep their existing behavior.
 - Kept SQL identifier and keyword completion ahead of global fallback CAPFs regardless of package load order, without depending on Corfu-specific hook reordering.
 - Returned point-local Embark object targets with scalar bounds, so `embark-act` on a Query Console table name no longer passes a one-element list as the target end position. Non-default object action labels now use standard keymap menu items instead of advising an Embark private function.
 - Reorganized the result dispatch into two balanced workflow rows, kept staged mutation actions together under Edit, and hid pending-only actions until changes are staged without changing any command keys.

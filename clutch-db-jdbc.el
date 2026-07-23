@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.14"
+(defcustom clutch-jdbc-agent-version "0.2.15"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "312794d28682fafa8fbe8edafd372b0218097588ced33fa2e27ac871aac12311"
+  "781884e4660421676759abeb0eba9b57c20f3b6abee5599620545e8c31fc381b"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1364,6 +1364,7 @@ cursor-style :rows format used in tests."
   "Build clutch-db column plists from agent COL-NAMES and COL-TYPES lists."
   (cl-mapcar (lambda (name type)
                (list :name name
+                     :backend-type type
                      :type-category (clutch-jdbc--type-category type)))
              col-names col-types))
 
@@ -1385,12 +1386,27 @@ Clob plists become their :preview string."
              ((and (listp val)
                    (equal (plist-get val :__type) "blob")
                    (plist-get val :text))
-              (plist-get val :text))
+              (let ((text (copy-sequence (plist-get val :text)))
+                    (encoding (plist-get val :encoding)))
+                (when (and encoding (> (length text) 0))
+                  (put-text-property 0 (length text)
+                                     'clutch-jdbc-blob-encoding encoding text))
+                text))
              ((and (listp val)
                    (equal (plist-get val :__type) "clob"))
               (plist-get val :preview))
              (t val)))
           row))
+
+(defun clutch-jdbc--normalize-column-details (columns)
+  "Return JDBC COLUMNS with exact types on the generic :backend-type key."
+  (mapcar
+   (lambda (column)
+     (let ((normalized (copy-sequence column)))
+       (when-let* ((type (plist-get normalized :type)))
+         (setq normalized (plist-put normalized :backend-type type)))
+       normalized))
+   columns))
 
 (defun clutch-jdbc--json-bool (value)
   "Normalize VALUE decoded from JSON into an Elisp boolean."
@@ -1454,12 +1470,63 @@ Clob plists become their :preview string."
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
   (clutch-jdbc--execute-rpc conn "execute" `((sql . ,sql))))
 
+(defconst clutch-jdbc--binary-param-type-names
+  '("BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB" "BINARY LARGE OBJECT"
+    "RAW" "LONG RAW" "BINARY" "VARBINARY" "LONGVARBINARY"
+    "BINARY VARYING" "IMAGE" "BINDATA" "BYTEA")
+  "Exact JDBC type names supported by the binary parameter protocol.")
+
+(defun clutch-jdbc--binary-param-p (param)
+  "Return non-nil when PARAM carries a JDBC binary backend type."
+  (when-let* ((type (clutch-db-param-type param))
+              ((stringp type)))
+    (and (member (upcase (string-trim type))
+                 clutch-jdbc--binary-param-type-names)
+         t)))
+
+(defun clutch-jdbc--blob-value-coding-system (value)
+  "Return the coding system for text BLOB VALUE."
+  (let* ((encoding (and (> (length value) 0)
+                        (get-text-property
+                         0 'clutch-jdbc-blob-encoding value)))
+         (coding (and encoding (coding-system-from-name encoding))))
+    (when (and encoding (not coding))
+      (user-error "Unsupported JDBC BLOB encoding: %s" encoding))
+    (or coding 'utf-8)))
+
+(defun clutch-jdbc--binary-param-bytes (value)
+  "Return VALUE as an unibyte string for JDBC binary parameter transport."
+  (cond
+   ((stringp value)
+    (if (multibyte-string-p value)
+        (encode-coding-string
+         value (clutch-jdbc--blob-value-coding-system value))
+      value))
+   ((vectorp value)
+    (condition-case nil
+        (apply #'unibyte-string (append value nil))
+      (error
+       (user-error "JDBC binary vector values must contain bytes 0..255"))))
+   (t
+    (user-error "JDBC binary parameters require text, bytes, or NULL"))))
+
+(defun clutch-jdbc--wire-param (param)
+  "Return PARAM encoded for the JDBC agent prepared-value protocol."
+  (let ((value (clutch-db-param-value param)))
+    (if (clutch-jdbc--binary-param-p param)
+        `((__clutch_jdbc_param . "binary")
+          (jdbc-type . ,(clutch-db-param-type param))
+          (base64 . ,(and value
+                          (base64-encode-string
+                           (clutch-jdbc--binary-param-bytes value) t))))
+      value)))
+
 (cl-defmethod clutch-db-execute-params ((conn clutch-jdbc-conn) sql params)
   "Execute SQL with positional PARAMS on CONN through JDBC prepared binding."
   (clutch-jdbc--execute-rpc
    conn "execute-params"
    `((sql . ,sql)
-     (values . ,(clutch-db-param-values params)))))
+     (values . ,(mapcar #'clutch-jdbc--wire-param params)))))
 
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-jdbc-conn))
   "Interrupt the active JDBC request on CONN without dropping the session."
@@ -1851,7 +1918,9 @@ the metadata request."
      (clutch-jdbc--table-metadata-params conn table)
      (lambda (result)
        (when callback
-         (funcall callback (plist-get result :columns))))
+         (funcall callback
+                  (clutch-jdbc--normalize-column-details
+                   (plist-get result :columns)))))
      errback
      rpc-timeout
      conn)
@@ -2201,11 +2270,13 @@ the metadata request."
          (result  (clutch-jdbc--rpc
                    "get-columns"
                    (clutch-jdbc--table-metadata-params conn table)))
-         (cols    (plist-get result :columns)))
+         (cols    (clutch-jdbc--normalize-column-details
+                   (plist-get result :columns))))
     (mapcar (lambda (col)
               (let ((name (plist-get col :name)))
                 (list :name        name
                       :type        (plist-get col :type)
+                      :backend-type (plist-get col :backend-type)
                       :nullable    (clutch-jdbc--json-bool (plist-get col :nullable))
                       :primary-key (and (member name pk-cols) t)
                       :foreign-key (cdr (assoc name fks))

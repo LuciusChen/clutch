@@ -161,6 +161,18 @@ The current Elisp client closes cursor state implicitly by fetching until the ag
 
 - `values`, an array of values bound to the statement placeholders
 
+Ordinary values keep their existing prepared-binding behavior. A binary value uses the reserved envelope `{"__clutch_jdbc_param":"binary","jdbc-type":"BLOB","base64":"eyJzdGF0dXMiOiJyZWFkeSJ9"}`. The marker must be exactly `binary`; maps without that marker remain ordinary structured values.
+
+Binary-envelope fields have exact semantics:
+
+- `jdbc-type` is the declared JDBC type retained from result or schema metadata.
+- `base64` is the base64 encoding of the exact bytes; `""` means a non-null zero-byte value.
+- A JSON `null` `base64` means a typed SQL `NULL`, not an empty value.
+- BLOB types bind through `PreparedStatement.setBlob`; RAW/BINARY-family types bind through `setBytes`; typed nulls use the corresponding JDBC null type.
+- A malformed envelope, invalid base64, or unsupported binary type fails protocol validation before JDBC execution.
+
+The envelope is deliberately limited to binary parameters. Clutch does not send type tags for ordinary values, and the agent does not claim a portable general-purpose JDBC type system. When a text-like BLOB result reports an encoding, Clutch retains that encoding across editing and converts the edited text back to those bytes; new text without source encoding uses UTF-8.
+
 `fetch` accepts:
 
 - `cursor-id`
@@ -196,7 +208,7 @@ Generic JDBC rows contain:
 
 ## Column metadata payload
 
-`get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one.
+`get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one. Clutch retains the exact `type` as backend metadata so staged binary mutations can select the narrow binary parameter envelope without guessing from edited text.
 
 ## Error semantics
 

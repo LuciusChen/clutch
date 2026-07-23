@@ -80,6 +80,9 @@
 (defvar-local clutch-result-edit--column-detail nil
   "Schema detail plist for the current single-cell edit buffer.")
 
+(defvar-local clutch-result-edit--blob-encoding nil
+  "Source byte encoding retained while editing a JDBC text BLOB.")
+
 (defvar-local clutch-result-edit--row-idx nil
   "Source row index for the current single-cell edit buffer.")
 
@@ -689,6 +692,11 @@ RETURN-BUFFER is the buffer that invoked the edit command."
           (setq-local clutch-result-edit--column-name col-name
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
+                      clutch-result-edit--blob-encoding
+                      (and (stringp original)
+                           (> (length original) 0)
+                           (get-text-property
+                            0 'clutch-jdbc-blob-encoding original))
                       clutch-result-edit--default-supported-p
                       default-supported-p
                       clutch-result-edit--row-idx ridx
@@ -774,6 +782,14 @@ the selected window."
          (return-buf clutch-result-edit--return-buffer)
          (target-cell clutch-result-edit--target-cell)
          (viewport clutch-result-edit--result-viewport))
+    (when (and clutch-result-edit--blob-encoding
+               (stringp new-value)
+               (> (length new-value) 0))
+      (setq new-value (copy-sequence new-value))
+      (put-text-property 0 (length new-value)
+                         'clutch-jdbc-blob-encoding
+                         clutch-result-edit--blob-encoding
+                         new-value))
     (clutch-result-edit--cancel-validation-timer)
     (if clutch-result-edit--special-value
         (clutch-result-edit--validate-special-value
