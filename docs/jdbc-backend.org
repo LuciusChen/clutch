@@ -189,7 +189,7 @@ Pure in-memory URLs and attached catalogs are not listed.  An in-memory database
 
 - Oracle JDBC connections use manual commit by default, matching DataGrip's safer query-console behavior.
 - Customize that default globally with =clutch-jdbc-oracle-manual-commit=, or override per connection with =:manual-commit t= / =:manual-commit nil=.
-- Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction.
+- Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction from the Query Console, an attached Result Browser, or its Record view.
 - Use =C-c C-a= to toggle between manual-commit and auto-commit at any time. The toggle is blocked when there are uncommitted changes (matching DataGrip's behavior); commit or roll back first, then switch.
 - Native MySQL supports the same commands by toggling the session autocommit flag.
 - Native PostgreSQL supports the same commands through a clutch-managed manual mode with lazy =BEGIN=; transactional DDL counts as pending work there too.

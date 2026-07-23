@@ -1826,6 +1826,100 @@
             (should (eq (not (null (clutch--tx-dirty-p clutch-connection)))
                         dirty-after))))))))
 
+(ert-deftest clutch-test-transaction-shortcuts-follow-attached-result-context ()
+  "Result and Record views should dispatch transaction keys for supported SQL."
+  (let ((overriding-local-map nil)
+        (overriding-terminal-local-map nil))
+    (dolist (mode '(clutch-result-mode clutch-record-mode))
+      (with-temp-buffer
+        (funcall mode)
+        (let (committed)
+          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+                     (lambda (_conn) t))
+                    ((symbol-function 'clutch-db-manual-commit-p)
+                     (lambda (_conn) t))
+                    ((symbol-function 'clutch--ensure-connection) #'ignore)
+                    ((symbol-function 'clutch-db-commit)
+                     (lambda (conn) (setq committed conn)))
+                    ((symbol-function 'clutch--mark-dml-results-committed)
+                     #'ignore)
+                    ((symbol-function 'clutch--clear-tx-dirty) #'ignore))
+            (clutch--bind-connection-context
+             'fake-conn '(:backend oracle) 'oracle)
+            (should clutch--transaction-shortcuts-mode)
+            (dolist (binding '(("C-c C-m" . clutch-commit)
+                               ("C-c C-u" . clutch-rollback)
+                               ("C-c C-a" . clutch-toggle-auto-commit)))
+              (should (eq (key-binding (kbd (car binding)))
+                          (cdr binding))))
+            (call-interactively (key-binding (kbd "C-c C-m")))
+            (should (eq committed 'fake-conn))
+            (when (eq mode 'clutch-result-mode)
+              (should (eq (key-binding (kbd "C-c C-c"))
+                          #'clutch-result-commit)))))))
+    (dolist (case '((clutch-result-mode nil)
+                    (special-mode t)))
+      (pcase-let ((`(,mode ,supported) case))
+        (with-temp-buffer
+          (funcall mode)
+          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+                     (lambda (_conn) supported)))
+            (clutch--bind-connection-context
+             'fake-conn '(:backend oracle) 'oracle))
+          (should-not clutch--transaction-shortcuts-mode)
+          (should-not (key-binding (kbd "C-c C-m"))))))))
+
+(ert-deftest clutch-test-transaction-shortcuts-disable-on-derived-invalidation ()
+  "Invalidated Result and Record views should drop transaction shortcuts."
+  (let ((overriding-local-map nil)
+        (overriding-terminal-local-map nil))
+    (dolist (mode '(clutch-result-mode clutch-record-mode))
+      (let ((owner (generate-new-buffer " *clutch-shortcuts-owner*"))
+            (view (generate-new-buffer " *clutch-shortcuts-view*")))
+        (unwind-protect
+            (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+                       (lambda (_conn) t)))
+              (with-current-buffer view
+                (funcall mode)
+                (clutch--bind-connection-context
+                 'fake-conn '(:backend oracle) 'oracle)
+                (should clutch--transaction-shortcuts-mode)
+                (should (eq (key-binding (kbd "C-c C-m"))
+                            #'clutch-commit)))
+              (with-current-buffer owner
+                (clutch--invalidate-derived-buffers 'fake-conn))
+              (with-current-buffer view
+                (should-not clutch-connection)
+                (should-not clutch--transaction-shortcuts-mode)
+                (should-not (key-binding (kbd "C-c C-m")))))
+          (when (buffer-live-p owner)
+            (kill-buffer owner))
+          (when (buffer-live-p view)
+            (kill-buffer view)))))))
+
+(ert-deftest clutch-test-transaction-shortcuts-disable-on-current-disconnect ()
+  "Disconnecting from a Result view should drop transaction shortcuts."
+  (let ((overriding-local-map nil)
+        (overriding-terminal-local-map nil))
+    (with-temp-buffer
+      (clutch-result-mode)
+      (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch--confirm-disconnect-transaction-loss)
+                 #'ignore)
+                ((symbol-function 'clutch--do-disconnect) #'ignore))
+        (clutch--bind-connection-context
+         'fake-conn '(:backend oracle) 'oracle)
+        (should clutch--transaction-shortcuts-mode)
+        (should (eq (key-binding (kbd "C-c C-m"))
+                    #'clutch-commit))
+        (clutch-disconnect)
+        (should-not clutch-connection)
+        (should-not clutch--transaction-shortcuts-mode)
+        (should-not (key-binding (kbd "C-c C-m")))))))
+
 (ert-deftest clutch-test-sqlite-omits-manual-commit-ui ()
   "SQLite should not advertise Clutch manual-commit controls."
   (require 'clutch-db-sqlite)

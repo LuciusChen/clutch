@@ -168,7 +168,7 @@ Binary-envelope fields have exact semantics:
 - `jdbc-type` is the declared JDBC type retained from result or schema metadata.
 - `base64` is the base64 encoding of the exact bytes; `""` means a non-null zero-byte value.
 - A JSON `null` `base64` means a typed SQL `NULL`, not an empty value.
-- BLOB types bind through `PreparedStatement.setBlob`; RAW/BINARY-family types bind through `setBytes`; typed nulls use the corresponding JDBC null type.
+- Non-empty BLOB types bind through length-bearing `PreparedStatement.setBinaryStream`; a non-null zero-byte BLOB uses an explicitly managed empty `Blob`; RAW/BINARY-family types bind through `setBytes`; typed nulls use the corresponding JDBC null type.
 - A malformed envelope, invalid base64, or unsupported binary type fails protocol validation before JDBC execution.
 
 The envelope is deliberately limited to binary parameters. Clutch does not send type tags for ordinary values, and the agent does not claim a portable general-purpose JDBC type system. When a text-like BLOB result reports an encoding, Clutch retains that encoding across editing and converts the edited text back to those bytes; new text without source encoding uses UTF-8.

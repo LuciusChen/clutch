@@ -49,6 +49,9 @@ Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-
 | =I=            | Clone current row into a prefilled insert form (without PK values) |
 | =d=            | Stage row(s) for deletion (supports region)   |
 | =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
+| =C-c C-m=     | Commit the current server transaction          |
+| =C-c C-u=     | Roll back the current server transaction       |
+| =C-c C-a=     | Toggle auto-commit when supported               |
 | =C-c C-k=     | Discard pending change at point               |
 | =C-c C-p=      | Preview execution (pending batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / aligned Org table / INSERT / UPDATE; =-r= controls refinement) |
@@ -64,6 +67,8 @@ Tip: =c= supports both regular region and rectangular selection (=C-x SPC=). Tip
 Tip: Press =s= to cycle sort state for the result column at point.  Simple table results use server-side SQL =ORDER BY=.  UNION, grouped, derived, and other results that Clutch cannot safely rewrite use a client-side sort of the current page; the footer marks this scope as =page=.  Use =C= to jump to a different visible column first, or click its header to cycle that column.  The cycle is unsorted, ascending, descending, then unsorted again.  Header icons appear after column names and use the original-size nerd-icons sort glyphs; when nerd-icons is unavailable, text arrows preserve the sort marker.
 
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the result transient as the exact staged SQL batch. Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong real table name.
+
+Tip: staged mutations and the server transaction are two separate layers on manual-commit connections. =C-c C-c= executes the staged batch and marks the transaction dirty; =C-c C-m= makes that transaction durable, while =C-c C-u= rolls it back.
 
 ** Edit Buffer Keys
 
@@ -161,6 +166,9 @@ Typical flow:
 | =n= / =p=  | Next row / previous row       |
 | =C-c '=     | Edit / re-edit current field  |
 | =C-c C-k=   | Discard staged change at field |
+| =C-c C-m=   | Commit the current server transaction |
+| =C-c C-u=   | Roll back the current server transaction |
+| =C-c C-a=   | Toggle auto-commit when supported |
 | =I=         | Clone current record into a prefilled insert form (without PK values) |
 | =v=         | Open the full field value (JSON / XML / BLOB) |
 | =g=         | Refresh                       |

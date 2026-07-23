@@ -1,5 +1,7 @@
 # 165 - Typed Binary JDBC Mutation Parameters
 
+> Superseded in part by [167](167-jdbc-blob-data-interface-release.md): non-empty BLOB values now use the JDBC binary data interface, while a non-null zero-byte BLOB uses an explicitly managed empty `Blob`.
+
 ## Context
 
 JDBC staged mutations already preserved the prepared-statement boundary, but Clutch discarded each parameter's backend type before sending `execute-params`, and the agent bound the resulting value with `PreparedStatement.setObject`. That is sufficient for ordinary scalar and structured values, but not for Oracle BLOB writes: a text edit reached the driver as a Java string, Oracle attempted a hexadecimal conversion for the binary column, and the update failed with `ORA-01465: invalid hex number`.
