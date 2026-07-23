@@ -406,6 +406,31 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
   "Return non-nil when CONN supports Clutch transaction controls."
   (and conn (clutch-db-manual-commit-supported-p conn)))
 
+(defun clutch--install-transaction-keybindings (map)
+  "Install the shared transaction key vocabulary into MAP."
+  (define-key map (kbd "C-c C-m") #'clutch-commit)
+  (define-key map (kbd "C-c C-u") #'clutch-rollback)
+  (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
+  map)
+
+(defvar clutch--transaction-shortcuts-mode-map
+  (clutch--install-transaction-keybindings (make-sparse-keymap))
+  "Keymap for transaction shortcuts in attached result views.")
+
+(define-minor-mode clutch--transaction-shortcuts-mode
+  "Enable transaction shortcuts in an attached SQL result view."
+  :init-value nil
+  :lighter nil
+  :keymap clutch--transaction-shortcuts-mode-map)
+
+(defun clutch--sync-transaction-shortcuts ()
+  "Synchronize transaction shortcuts for the current attached result view."
+  (clutch--transaction-shortcuts-mode
+   (if (and (derived-mode-p 'clutch-result-mode 'clutch-record-mode)
+            (clutch--manual-commit-supported-p clutch-connection))
+       1
+     -1)))
+
 (defun clutch--make-connection-render-state (conn params)
   "Build semantic presentation state from CONN and reconnect PARAMS.
 The returned plist contains no connection object, params, callback, or
@@ -586,6 +611,7 @@ Also store PARAMS and PRODUCT when present."
     (setq-local clutch--conn-sql-product
                 (or product
                     (and params (clutch--effective-sql-product params)))))
+  (clutch--sync-transaction-shortcuts)
   (let ((display-product
          (or clutch--conn-sql-product
              (and params (default-value 'sql-product)))))
@@ -2374,6 +2400,7 @@ still needs an initial passphrase entry or host-key confirmation."
      (conn
       (clutch--cleanup-dead-connection conn))))
   (setq clutch-connection nil)
+  (clutch--sync-transaction-shortcuts)
   (when clutch--console-name
     (clutch--update-console-buffer-name))
   (clutch--update-mode-line))
@@ -2387,6 +2414,7 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
                (eq (buffer-local-value 'clutch-connection buf) conn))
       (with-current-buffer buf
         (setq-local clutch-connection nil)
+        (clutch--sync-transaction-shortcuts)
         (cond
          ((derived-mode-p 'clutch-result-mode)
           (clutch--refresh-connection-render-state)
