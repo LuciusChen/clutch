@@ -1,5 +1,7 @@
 # 128 - JDBC staged mutations keep their parameter boundary
 
+> Superseded in part by [165](165-typed-binary-jdbc-mutation-parameters.md): JDBC binary mutations now carry a reserved typed envelope, while ordinary parameters retain the values-only path described here.
+
 ## Context
 
 Clutch's mutation builders already produce SQL templates plus positional values. Native backends bound those values, but JDBC used the generic literal-rendering fallback, so the parameter boundary was lost before execution.

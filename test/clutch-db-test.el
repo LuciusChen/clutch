@@ -974,14 +974,42 @@ authinfo, and PARAMS are explicit connection parameters."
                  '(:type "dml" :affected-rows 2))))
       (let ((result (clutch-db-execute-params
                      conn
-                     "UPDATE dbo.orders SET note = ? WHERE id = ?"
+                     (concat "UPDATE dbo.orders SET note = ?, payload = ?, "
+                             "raw_payload = ?, optional_blob = ?, empty_raw = ? "
+                             "WHERE id = ?")
                      (list (clutch-db-typed-param "中文" "NVARCHAR")
+                           (clutch-db-typed-param "{\"message\":\"中文\"}" "BLOB")
+                           (clutch-db-typed-param
+                            (unibyte-string 0 255 65) "RAW")
+                           (clutch-db-typed-param nil "BLOB")
+                           (clutch-db-typed-param (unibyte-string) "RAW")
                            (clutch-db-typed-param 17 "INTEGER")))))
         (should (equal captured-op "execute-params"))
         (should (equal (alist-get 'sql captured-params)
-                       "UPDATE dbo.orders SET note = ? WHERE id = ?"))
+                       (concat "UPDATE dbo.orders SET note = ?, payload = ?, "
+                               "raw_payload = ?, optional_blob = ?, empty_raw = ? "
+                               "WHERE id = ?")))
         (should (equal (alist-get 'values captured-params)
-                       '("中文" 17)))
+                       `("中文"
+                         ((__clutch_jdbc_param . "binary")
+                          (jdbc-type . "BLOB")
+                          (base64
+                           . ,(base64-encode-string
+                               (encode-coding-string
+                                "{\"message\":\"中文\"}" 'utf-8)
+                               t)))
+                         ((__clutch_jdbc_param . "binary")
+                          (jdbc-type . "RAW")
+                          (base64
+                           . ,(base64-encode-string
+                               (unibyte-string 0 255 65) t)))
+                         ((__clutch_jdbc_param . "binary")
+                          (jdbc-type . "BLOB")
+                          (base64))
+                         ((__clutch_jdbc_param . "binary")
+                          (jdbc-type . "RAW")
+                          (base64 . ""))
+                         17)))
         (should (= (clutch-db-result-affected-rows result) 2))))))
 
 (ert-deftest clutch-db-test-native-mysql-manual-commit-follows-autocommit ()
@@ -2881,9 +2909,11 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                    (_ (ert-fail (format "unexpected op: %s" op)))))))
       (should
        (equal (clutch-db-column-details conn "events")
-              '((:name "id" :type "UInt64" :nullable nil
+              '((:name "id" :type "UInt64" :backend-type "UInt64"
+                 :nullable nil
                  :primary-key t :foreign-key nil :comment nil :default nil)
-                (:name "user_id" :type "UInt64" :nullable t
+                (:name "user_id" :type "UInt64" :backend-type "UInt64"
+                 :nullable t
                  :primary-key nil
                  :foreign-key (:ref-table "users" :ref-column "id")
                  :comment nil :default "0"))))
@@ -3196,6 +3226,73 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
              ((1 "str" nil t) (1 "str" nil t))))
     (pcase-let ((`(,row ,expected) case))
       (should (equal (clutch-jdbc--normalize-row row) expected)))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-retains-blob-encoding ()
+  "JDBC text BLOB normalization should retain its byte encoding."
+  (let* ((row (clutch-jdbc--normalize-row
+               '((:__type "blob" :length 18
+                  :text "{\"message\":\"中文\"}" :encoding "GB18030"))))
+         (value (car row)))
+    (should (equal value "{\"message\":\"中文\"}"))
+    (should (equal (get-text-property 0 'clutch-jdbc-blob-encoding value)
+                   "GB18030"))))
+
+(ert-deftest clutch-db-test-jdbc-binary-param-types-fail-closed ()
+  "Only explicitly supported JDBC binary type names should use the envelope."
+  (dolist (type '("BLOB" "RAW" "VARBINARY" "BINARY LARGE OBJECT"))
+    (should
+     (clutch-jdbc--binary-param-p
+      (clutch-db-typed-param "value" type))))
+  (dolist (type '("BLOBSTER" "DRAWING" "NONBINARY" "VARCHAR2"))
+    (should-not
+     (clutch-jdbc--binary-param-p
+      (clutch-db-typed-param "value" type)))))
+
+(ert-deftest clutch-db-test-jdbc-columns-retain-backend-types ()
+  "JDBC result columns should retain exact types for prepared mutations."
+  (should
+   (equal (clutch-jdbc--make-columns '("PAYLOAD" "ID") '("BLOB" "NUMBER"))
+          '((:name "PAYLOAD" :backend-type "BLOB" :type-category blob)
+            (:name "ID" :backend-type "NUMBER" :type-category numeric)))))
+
+(ert-deftest clutch-db-test-jdbc-normalizes-column-detail-backend-types ()
+  "JDBC column details should expose exact types through the generic contract."
+  (should
+   (equal
+    (clutch-jdbc--normalize-column-details
+     '((:name "CONTENT" :type "BLOB" :nullable t)
+       (:name "STATUS" :type "NUMBER" :nullable nil)))
+    '((:name "CONTENT" :type "BLOB" :nullable t :backend-type "BLOB")
+      (:name "STATUS" :type "NUMBER" :nullable nil :backend-type "NUMBER")))))
+
+(ert-deftest clutch-db-test-jdbc-column-detail-methods-retain-backend-types ()
+  "Both JDBC metadata paths should expose exact backend types."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle)))
+        async-details)
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-db-foreign-keys)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _)
+                 '(:columns ((:name "CONTENT" :type "BLOB"
+                              :nullable t)))))
+              ((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (_op _params callback &rest _)
+                 (funcall callback
+                          '(:columns ((:name "CONTENT" :type "BLOB"
+                                      :nullable t))))
+                 17)))
+      (should
+       (equal (plist-get
+               (car (clutch-db-column-details conn "DOCUMENTS"))
+               :backend-type)
+              "BLOB"))
+      (should (clutch-db-column-details-async
+               conn "DOCUMENTS"
+               (lambda (details) (setq async-details details))))
+      (should (equal (plist-get (car async-details) :backend-type)
+                     "BLOB")))))
 
 ;;;; Unit tests — registered JDBC driver support
 
