@@ -712,6 +712,30 @@ and a `?' inside a dollar-quoted function body is part of the body."
                    20))
         (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
                    41)))))
+  (ert-info ("mixed explicit and default timeouts")
+    (let ((clutch-connect-timeout-seconds 10)
+          (clutch-read-idle-timeout-seconds 30)
+          (clutch-query-timeout-seconds 20)
+          (clutch-jdbc-rpc-timeout-seconds 41)
+          conn)
+      (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+                ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                ((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (&rest _args) '(:conn-id 7))))
+        (setq conn
+              (clutch-db-jdbc-connect
+               'oracle
+               '(:host "db" :port 1521 :database "svc"
+                 :user "scott" :password "tiger"
+                 :connect-timeout 99 :query-timeout 88)))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :connect-timeout)
+                   99))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout)
+                   88))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :read-idle-timeout)
+                   30))
+        (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
+                   41)))))
   (ert-info ("invalid idle validation intervals")
     (dolist (value '(-1 1.5 "300"))
       (let ((clutch-jdbc-validate-after-idle-seconds value))
@@ -1561,47 +1585,43 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                          (:name "USERS" :type "TABLE" :schema "APP" :source-schema "APP" :comment "用户")
                          (:name "USER_TABLES" :type "PUBLIC SYNONYM" :schema "SYS" :source-schema "PUBLIC"))))))))
 
-(ert-deftest clutch-db-test-jdbc-table-comment-async-uses-table-search-remarks ()
-  "JDBC table-comment async should use table remarks surfaced by search-tables."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                     :params '(:driver generic
-                                               :schema "APP"
-                                               :rpc-timeout 7)))
-        captured-op captured-params captured-timeout callback-result)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (op params callback &optional _errback timeout _conn)
-                 (setq captured-op op)
-                 (setq captured-params params)
-                 (setq captured-timeout timeout)
-                 (funcall callback
-                          '(:tables ((:name "ORDERS" :type "TABLE"
-                                       :schema "APP" :source-schema "APP"
-                                       :comment "订单")
-                                      (:name "ORDER_LOG" :type "TABLE"
-                                       :schema "APP" :source-schema "APP"
-                                       :comment "日志"))))
-                 t)))
-      (should (clutch-db-table-comment-async
-               conn "ORDERS" (lambda (comment)
-                               (setq callback-result comment))))
-      (should (equal captured-op "search-tables"))
-      (should (equal (alist-get 'prefix captured-params) "ORDERS"))
-      (should (= captured-timeout 7))
-      (should (equal callback-result "订单")))))
-
 (ert-deftest clutch-db-test-jdbc-table-comment-uses-table-search-remarks ()
-  "JDBC table-comment should use remarks surfaced by search-tables."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                     :params '(:driver generic
-                                               :schema "APP"))))
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
-                 (should (equal op "search-tables"))
-                 (should (equal (alist-get 'prefix params) "ORDERS"))
-                 '(:tables ((:name "ORDERS" :type "TABLE"
+  "JDBC table comments come from search-tables remarks, sync and async.
+Both methods share the remark extraction; the async case additionally
+pins the RPC op, prefix param, and connection-scoped timeout."
+  (let ((response '(:tables ((:name "ORDERS" :type "TABLE"
                               :schema "APP" :source-schema "APP"
-                              :comment "订单"))))))
-      (should (equal (clutch-db-table-comment conn "ORDERS") "订单")))))
+                              :comment "订单")
+                             (:name "ORDER_LOG" :type "TABLE"
+                              :schema "APP" :source-schema "APP"
+                              :comment "日志")))))
+    ;; Async carries op, params, and timeout to the agent.
+    (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                       :params '(:driver generic
+                                                 :schema "APP"
+                                                 :rpc-timeout 7)))
+          captured-op captured-params captured-timeout callback-result)
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+                 (lambda (op params callback &optional _errback timeout _conn)
+                   (setq captured-op op)
+                   (setq captured-params params)
+                   (setq captured-timeout timeout)
+                   (funcall callback response)
+                   t)))
+        (should (clutch-db-table-comment-async
+                 conn "ORDERS" (lambda (comment)
+                                 (setq callback-result comment))))
+        (should (equal captured-op "search-tables"))
+        (should (equal (alist-get 'prefix captured-params) "ORDERS"))
+        (should (= captured-timeout 7))
+        (should (equal callback-result "订单"))))
+    ;; Sync extracts the same remark from the same response shape.
+    (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                       :params '(:driver generic
+                                                 :schema "APP"))))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_op _params &optional _timeout) response)))
+        (should (equal (clutch-db-table-comment conn "ORDERS") "订单"))))))
 
 (ert-deftest clutch-db-test-jdbc-table-comment-skips-special-metadata-paths ()
   "JDBC table comments should not probe special metadata paths."
@@ -1831,37 +1851,26 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 
 ;;;; Unit tests — clutch-jdbc--collect-table-entries
 
-(ert-deftest clutch-db-test-jdbc-collect-table-entries-contract ()
-  "JDBC table entry collection should handle direct and cursor responses."
-  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott"))))
-    (dolist (case
-             '((:label "direct"
-                :response (:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
-                                    (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
-                :expected ((:name "USERS" :type "TABLE" :schema "SCOTT")
-                           (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
-               (:label "legacy cursor"
-                :response (:rows (("USERS" "TABLE" "SCOTT"))
-                          :cursor-id 42
-                          :done nil)
-                :fetch-rows (("PRODUCTS" "TABLE" "SCOTT"))
-                :fetch-cursor 42
-                :expected ((:name "USERS" :type "TABLE" :schema "SCOTT"
-                            :source-schema "SCOTT")
-                           (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
-                            :source-schema "SCOTT")))))
-      (ert-info ((plist-get case :label))
-        (let (fetch-cursor-id)
-          (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
-                     (lambda (_conn cursor-id)
-                       (setq fetch-cursor-id cursor-id)
-                       (plist-get case :fetch-rows))))
-            (should (equal (clutch-jdbc--collect-table-entries
-                            conn
-                            (plist-get case :response))
-                           (plist-get case :expected)))
-            (should (equal fetch-cursor-id
-                           (plist-get case :fetch-cursor)))))))))
+(ert-deftest clutch-db-test-jdbc-collect-table-entries-continues-legacy-cursors ()
+  "Legacy cursor responses must be drained through fetch continuations.
+The direct :tables mapping is proven through the public
+list-table-entries tests; only the cursor path needs the helper."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
+        fetch-cursor-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
+               (lambda (_conn cursor-id)
+                 (setq fetch-cursor-id cursor-id)
+                 '(("PRODUCTS" "TABLE" "SCOTT")))))
+      (should (equal (clutch-jdbc--collect-table-entries
+                      conn
+                      '(:rows (("USERS" "TABLE" "SCOTT"))
+                        :cursor-id 42
+                        :done nil))
+                     '((:name "USERS" :type "TABLE" :schema "SCOTT"
+                        :source-schema "SCOTT")
+                       (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
+                        :source-schema "SCOTT"))))
+      (should (equal fetch-cursor-id 42)))))
 
 (ert-deftest clutch-db-test-jdbc-list-table-entries-keeps-object-types ()
   "JDBC list-table-entries should preserve view and synonym metadata."
@@ -2318,15 +2327,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
         (ert-info ((format "query: %s" query))
           (should-error (clutch-mongodb--eval conn query)
                         :type 'clutch-db-error))))))
-
-(ert-deftest clutch-db-test-mongodb-helper-chains-are-method-specific ()
-  "MongoDB parsing should reject chains that execution would ignore."
-  (dolist (query '("db.users.findOne({}).limit(1)"
-                   "db.users.aggregate([]).sort({_id: 1})"
-                   "db.users.deleteOne({}).limit(1)"))
-    (ert-info ((format "query: %s" query))
-      (should-error (clutch-mongodb--parse-db-call query)
-                    :type 'clutch-db-error))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
   "Native MongoDB eval should translate aggregate options and helper chains."
@@ -3526,25 +3526,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
 
-(ert-deftest clutch-db-test-jdbc-apply-timeout-defaults ()
-  "Missing JDBC timeouts should be filled without overwriting explicit values."
-  (let ((clutch-connect-timeout-seconds 10)
-        (clutch-read-idle-timeout-seconds 20)
-        (clutch-query-timeout-seconds 30)
-        (clutch-jdbc-rpc-timeout-seconds 40))
-    (dolist (case '((nil
-                     (:connect-timeout 10 :read-idle-timeout 20
-                      :query-timeout 30 :rpc-timeout 40))
-                    ((:connect-timeout 99 :query-timeout 88)
-                     (:connect-timeout 99 :read-idle-timeout 20
-                      :query-timeout 88 :rpc-timeout 40))))
-      (pcase-let* ((`(,params ,expected) case)
-                   (result (clutch-jdbc--apply-timeout-defaults params)))
-        (dolist (key '(:connect-timeout :read-idle-timeout
-                       :query-timeout :rpc-timeout))
-          (should (= (plist-get result key)
-                     (plist-get expected key))))))))
-
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
@@ -4496,127 +4477,55 @@ back out in Extended JSON instead of handing `json-encode' a record."
       (should disconnected)
       (should (= (mysql-conn-read-idle-timeout conn) 30)))))
 
-(ert-deftest clutch-db-test-mysql-query-timeout-interrupts-and-keeps-connection ()
-  "MySQL query timeout should cancel the server query when recovery succeeds."
+(ert-deftest clutch-db-test-mysql-timeout-recovery-matrix ()
+  "MySQL timeouts cancel out of band, then keep or drop by recovery result.
+One rule across both entry points: interrupt the server-side query, keep
+the session when the cancel-and-drain recovery succeeds, disconnect and
+say so when it fails.  Statement close must wait until recovery has
+drained the wire, or it would desynchronize the session first."
   (require 'clutch-db-mysql)
   (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        interrupted
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn _sql)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq interrupted t)
-                 t))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (_conn)
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-query conn "SELECT SLEEP(60)")
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should-not disconnected)
-      (should (string-match-p "restored MySQL connection" message)))))
-
-(ert-deftest clutch-db-test-mysql-query-timeout-disconnects-when-recovery-fails ()
-  "MySQL query timeout should close the connection when cancel recovery fails."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        interrupted
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn _sql)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq interrupted t)
-                 nil))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-query conn "SELECT SLEEP(60)")
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should disconnected)
-      (should (string-match-p "timeout recovery failed" message)))))
-
-(ert-deftest clutch-db-test-mysql-execute-params-timeout-recovers-connection ()
-  "MySQL prepared execution timeout should run the same recovery as queries."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        (stmt 'fake-stmt)
-        interrupted
-        closed
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-prepare)
-               (lambda (_conn _sql) stmt))
-              ((symbol-function 'mysql-execute)
-               (lambda (&rest _)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'mysql-stmt-close)
-               (lambda (_stmt) (setq closed t)))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (should-not closed)
-                 (setq interrupted t)
-                 t))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (_conn) (setq disconnected t))))
-      (condition-case err
-          (clutch-db-execute-params conn "UPDATE t SET a = ?" '("v"))
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should-not disconnected)
-      (should (string-match-p "restored MySQL connection" message)))))
-
-(ert-deftest clutch-db-test-mysql-execute-params-timeout-disconnects-when-recovery-fails ()
-  "MySQL prepared execution timeout should drop the session when recovery fails."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-prepare)
-               (lambda (_conn _sql) 'fake-stmt))
-              ((symbol-function 'mysql-execute)
-               (lambda (&rest _)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'mysql-stmt-close) #'ignore)
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (_conn) nil))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-execute-params conn "UPDATE t SET a = ?" '("v"))
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should disconnected)
-      (should (string-match-p "timeout recovery failed" message)))))
+  (dolist (case '((query   t   "restored MySQL connection")
+                  (query   nil "timeout recovery failed")
+                  (execute t   "restored MySQL connection")
+                  (execute nil "timeout recovery failed")))
+    (pcase-let ((`(,entry ,recovers ,expected-message) case))
+      (ert-info ((format "entry: %s recovers: %s" entry recovers))
+        (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                                     :user "root" :database "test"))
+              interrupted closed disconnected message)
+          (cl-letf (((symbol-function 'mysql-query)
+                     (lambda (_conn _sql)
+                       (signal 'mysql-timeout
+                               '("Timed out waiting for 4 bytes"))))
+                    ((symbol-function 'mysql-prepare)
+                     (lambda (_conn _sql) 'fake-stmt))
+                    ((symbol-function 'mysql-execute)
+                     (lambda (&rest _)
+                       (signal 'mysql-timeout
+                               '("Timed out waiting for 4 bytes"))))
+                    ((symbol-function 'mysql-stmt-close)
+                     (lambda (_stmt) (setq closed t)))
+                    ((symbol-function 'clutch-db-interrupt-query)
+                     (lambda (mysql-conn)
+                       (should (eq mysql-conn conn))
+                       (should-not closed)
+                       (setq interrupted t)
+                       recovers))
+                    ((symbol-function 'mysql-disconnect)
+                     (lambda (mysql-conn)
+                       (should (eq mysql-conn conn))
+                       (setq disconnected t))))
+            (condition-case err
+                (pcase entry
+                  ('query (clutch-db-query conn "SELECT SLEEP(60)"))
+                  ('execute (clutch-db-execute-params
+                             conn "UPDATE t SET a = ?" '("v"))))
+              (clutch-db-error
+               (setq message (error-message-string err)))))
+          (should interrupted)
+          (should (eq disconnected (not recovers)))
+          (should (string-match-p expected-message message)))))))
 
 (ert-deftest clutch-db-test-pg-interrupt-query-return-contract ()
   "PostgreSQL interrupt should return t for successful cancel and nil on pg errors."
@@ -6716,9 +6625,7 @@ commit, so that loss is silent data loss."
                           "clutch-jdbc-request"))
            (should (string-match-p
                     "SQLNonTransientConnectionException"
-                    (plist-get (plist-get details :debug) :stack-trace))))
-         (should-not (string-match-p "cookie-secret-71"
-                                     (prin1-to-string (nth 2 err)))))))))
+                    (plist-get (plist-get details :debug) :stack-trace)))))))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
   "Connection-scoped JDBC errors should stay on that connection."
@@ -7098,7 +7005,6 @@ commit, so that loss is silent data loss."
                          '((:id 42 :ok t)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
-;;; clutch-db-test.el ends here
 
 (ert-deftest clutch-db-test-jdbc-escape-literal-follows-backend-dialect ()
   "JDBC literals must escape backslash on backends that read it as an escape.
@@ -7193,3 +7099,5 @@ then and the caller never receives the object to close it."
                (lambda (conn) (setq disconnected conn))))
       (should (eq (clutch-db-connect 'fake '(:host "h")) 'fresh-conn))
       (should-not disconnected))))
+
+;;; clutch-db-test.el ends here

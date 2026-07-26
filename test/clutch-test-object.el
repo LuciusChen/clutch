@@ -365,17 +365,19 @@ document connection."
               (plist-get case :expected-text)
               nil nil (plist-get case :title-suffix)))))))
 
-(ert-deftest clutch-test-copy-object-fqname-prompts-for-fqname ()
-  "Copy-fqname should use an fqname-specific prompt."
-  (let (prompt)
+(ert-deftest clutch-test-copy-object-fqname-copies-qualified-name ()
+  "Copy-fqname must place the qualified name on the kill ring."
+  (let (prompt killed)
     (cl-letf (((symbol-function 'clutch--resolve-object-entry)
                (lambda (arg &rest _)
                  (setq prompt arg)
                  '(:name "ORDERS" :type "TABLE" :schema "APP")))
-              ((symbol-function 'kill-new) #'ignore)
+              ((symbol-function 'kill-new)
+               (lambda (text) (setq killed text)))
               ((symbol-function 'message) #'ignore))
       (clutch-copy-object-fqname)
-      (should (equal prompt "Copy object fqname: ")))))
+      (should (equal prompt "Copy object fqname: "))
+      (should (equal killed "APP.ORDERS")))))
 
 ;;;; Object — describe and DDL
 
@@ -1376,7 +1378,13 @@ document connection."
   "Oracle JDBC browseable entries should not issue an extra empty-prefix search."
   (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
              (lambda (_conn)
-               '((:name "ORDERS" :type "TABLE")))))
+               '((:name "ORDERS" :type "TABLE"))))
+            ((symbol-function 'clutch-db-search-table-entries)
+             (lambda (&rest _args)
+               (ert-fail "browseable entries must not trigger a search")))
+            ((symbol-function 'clutch-db-list-table-entries)
+             (lambda (&rest _args)
+               (ert-fail "browseable entries must not list tables"))))
     (should (equal (clutch--browseable-object-entries 'fake-conn)
                    '((:name "ORDERS" :type "TABLE"))))))
 
