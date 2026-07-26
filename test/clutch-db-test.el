@@ -6519,9 +6519,10 @@ commit, so that loss is silent data loss."
         (should-not (gethash 1 clutch-jdbc--connections-by-id))
         (should (eq (gethash 2 clutch-jdbc--connections-by-id) bystander))
         ;; The silent request's late reply is dropped, and the agent was
-        ;; asked to release the stuck logical connection without waiting.
+        ;; asked to release the stuck logical connection without waiting,
+        ;; via the op that bypasses the connection's agent-side locks.
         (should (gethash 41 clutch-jdbc--ignored-response-ids))
-        (should (equal (car sent) "disconnect"))
+        (should (equal (car sent) "force-disconnect"))
         (should (eql (alist-get 'conn-id (cdr sent)) 1))
         (should (gethash 99 clutch-jdbc--ignored-response-ids))))))
 
