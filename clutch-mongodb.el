@@ -1084,18 +1084,30 @@ CHAIN contains parsed cursor helper calls, when present."
        (or (null value)
            (cl-every #'clutch-mongodb--alist-p value))))
 
+(defun clutch-mongodb--scalar-number (value)
+  "Return VALUE's number when it is a bare or int-wrapped BSON number.
+mongodb.el keeps int64 values in their `mongodb-int64' wrapper so a
+small value cannot re-encode as int32; cells still display them as
+numbers."
+  (cond
+   ((numberp value) value)
+   ((mongodb-int64-p value) (mongodb-int64-value value))
+   ((mongodb-int32-p value) (mongodb-int32-value value))))
+
 (defun clutch-mongodb--scalar-p (value)
   "Return non-nil when VALUE can be displayed as a scalar cell."
   (or (null value)
       (stringp value)
       (numberp value)
+      (mongodb-int64-p value)
+      (mongodb-int32-p value)
       (eq value t)
       (eq value :false)))
 
 (defun clutch-mongodb--column-category (value)
   "Return Clutch type category for MongoDB VALUE."
   (cond
-   ((numberp value) 'numeric)
+   ((clutch-mongodb--scalar-number value) 'numeric)
    ((clutch-mongodb--scalar-p value) 'text)
    (t 'json)))
 
@@ -1110,6 +1122,8 @@ CHAIN contains parsed cursor helper calls, when present."
    ((mongodb-document-p value) "object")
    ((clutch-mongodb--alist-p value) "object")
    ((listp value) "array")
+   ((mongodb-int64-p value) "long")
+   ((mongodb-int32-p value) "int")
    ((mongodb-object-id-p value) "objectId")
    ((mongodb-datetime-p value) "date")
    ((mongodb-timestamp-p value) "timestamp")
@@ -1126,7 +1140,7 @@ CHAIN contains parsed cursor helper calls, when present."
                         '("array" "object")))
               values)
     'json)
-   ((and values (cl-every #'numberp values)) 'numeric)
+   ((and values (cl-every #'clutch-mongodb--scalar-number values)) 'numeric)
    (t 'text)))
 
 (defun clutch-mongodb--display-value (value)
@@ -1134,6 +1148,7 @@ CHAIN contains parsed cursor helper calls, when present."
   (cond
    ((eq value :false) "false")
    ((eq value t) "true")
+   ((clutch-mongodb--scalar-number value))
    ((clutch-mongodb--scalar-p value) value)
    (t (clutch-mongodb--json-encode-text value))))
 
@@ -1454,7 +1469,8 @@ FIELDS is an optional list of top-level field names for update snippets."
    ((eq value t) "true")
    ((null value) "null")
    ((stringp value) (concat "s:" value))
-   ((numberp value) (format "n:%s" value))
+   ((clutch-mongodb--scalar-number value)
+    (format "n:%s" (clutch-mongodb--scalar-number value)))
    (t (clutch-mongodb--json-encode-text value))))
 
 (defun clutch-mongodb--profile-top-values (stat)
@@ -1484,17 +1500,17 @@ FIELDS is an optional list of top-level field names for update snippets."
                             (1+ (plist-get stat :present)))))
     (push value (plist-get stat :values))
     (puthash type (1+ (or (gethash type types) 0)) types)
-    (when (numberp value)
+    (when-let* ((number (clutch-mongodb--scalar-number value)))
       (setq stat
             (plist-put stat :numeric-min
                        (if (numberp (plist-get stat :numeric-min))
-                           (min (plist-get stat :numeric-min) value)
-                         value)))
+                           (min (plist-get stat :numeric-min) number)
+                         number)))
       (setq stat
             (plist-put stat :numeric-max
                        (if (numberp (plist-get stat :numeric-max))
-                           (max (plist-get stat :numeric-max) value)
-                         value))))
+                           (max (plist-get stat :numeric-max) number)
+                         number))))
     (when (clutch-mongodb--scalar-p value)
       (let* ((examples (plist-get stat :examples))
              (key (clutch-mongodb--profile-value-key value))

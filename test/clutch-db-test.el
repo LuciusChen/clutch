@@ -2181,6 +2181,7 @@ back out in Extended JSON instead of handing `json-encode' a record."
                     (cons "n" (/ 0.0 0.0))
                     (cons "d" (mongodb-decimal128 "1.23"))
                     (cons "w" (mongodb-datetime 1700000000000))
+                    (cons "small" (mongodb-int64 7))
                     (cons "arr" (vector (mongodb-min-key)))
                     (cons "empty" (mongodb-document nil))))
          (decoded (mongodb--decode-document-from-string
@@ -2191,7 +2192,15 @@ back out in Extended JSON instead of handing `json-encode' a record."
     (should (string-match-p "\"\\$numberDecimal\":\"1.23\"" text))
     (should (string-match-p "\"\\$date\":1700000000000" text))
     (should (string-match-p "\"\\$minKey\":1" text))
-    (should (string-match-p "\"empty\":{}" text))))
+    (should (string-match-p "\"empty\":{}" text))
+    ;; int64 wrappers render as plain numbers and count as numeric cells.
+    (should (string-match-p "\"small\":7" text))
+    (should (equal (clutch-mongodb--display-value
+                    (cdr (assoc "small" decoded)))
+                   7))
+    (should (eq (clutch-mongodb--column-category
+                 (cdr (assoc "small" decoded)))
+                'numeric))))
 
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
