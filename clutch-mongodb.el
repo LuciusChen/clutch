@@ -1098,9 +1098,7 @@ numbers."
   "Return non-nil when VALUE can be displayed as a scalar cell."
   (or (null value)
       (stringp value)
-      (numberp value)
-      (mongodb-int64-p value)
-      (mongodb-int32-p value)
+      (clutch-mongodb--scalar-number value)
       (eq value t)
       (eq value :false)))
 
@@ -1209,18 +1207,16 @@ display them in their Extended JSON spelling."
     (vconcat (mapcar #'clutch-mongodb--json-encodable (append value nil))))
    ((listp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable value)))
-   ((mongodb-int32-p value) (mongodb-int32-value value))
-   ((mongodb-int64-p value) (mongodb-int64-value value))
    ((and (floatp value) (isnan value))
     '(("$numberDouble" . "NaN")))
    ((and (floatp value) (= value 1.0e+INF))
     '(("$numberDouble" . "Infinity")))
    ((and (floatp value) (= value -1.0e+INF))
     '(("$numberDouble" . "-Infinity")))
-   ((clutch-mongodb--bson-scalar-json value)
-    (clutch-mongodb--json-encodable
-     (clutch-mongodb--bson-scalar-json value)))
-   (t value)))
+   ((clutch-mongodb--scalar-number value))
+   (t (if-let* ((scalar (clutch-mongodb--bson-scalar-json value)))
+          (clutch-mongodb--json-encodable scalar)
+        value))))
 
 (defun clutch-mongodb--json-encode-text (value)
   "Return VALUE encoded as JSON text for MongoDB result display."
@@ -1464,14 +1460,14 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (defun clutch-mongodb--profile-value-key (value)
   "Return a stable hash key for sampled profile VALUE."
-  (cond
-   ((eq value :false) "false")
-   ((eq value t) "true")
-   ((null value) "null")
-   ((stringp value) (concat "s:" value))
-   ((clutch-mongodb--scalar-number value)
-    (format "n:%s" (clutch-mongodb--scalar-number value)))
-   (t (clutch-mongodb--json-encode-text value))))
+  (let ((number (clutch-mongodb--scalar-number value)))
+    (cond
+     ((eq value :false) "false")
+     ((eq value t) "true")
+     ((null value) "null")
+     ((stringp value) (concat "s:" value))
+     (number (format "n:%s" number))
+     (t (clutch-mongodb--json-encode-text value)))))
 
 (defun clutch-mongodb--profile-top-values (stat)
   "Return top sampled scalar values for profile STAT."
