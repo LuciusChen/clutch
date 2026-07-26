@@ -60,7 +60,7 @@
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "53b7554352cfcdb6bf9d959e421bc64d4305735fc3d35796b22dae7963302131"
+  "d825226ff7fb489a539e1b6f34cd4abe6971a7e813ccf10a96b0dd8d63f7d637"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -983,8 +983,13 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
 
 (defun clutch-jdbc--setup-prerequisites (driver)
   "Ensure agent jar and DRIVER jar are present."
+  ;; Existence check only: the jar's checksum is verified where it counts,
+  ;; when the shared JVM actually starts (`clutch-jdbc--start-agent') and
+  ;; right after download.  Re-hashing 2.4MB per logical connect bought no
+  ;; integrity, and metadata-keyed caching could wave through a replaced
+  ;; file whose size and mtime were preserved.
   (let ((jar (clutch-jdbc--agent-jar)))
-    (unless (and (file-exists-p jar) (clutch-jdbc--agent-jar-valid-p jar))
+    (unless (file-exists-p jar)
       (user-error "JDBC agent not found.  Run M-x clutch-jdbc-ensure-agent")))
   (when-let* ((spec (alist-get driver clutch-jdbc--driver-sources))
               (filename (plist-get spec :filename))
