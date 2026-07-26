@@ -2154,6 +2154,23 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (clutch-db-document-mutation-snippets conn 'delete-one "users" (list doc))
       '("db.getCollection(\"users\").deleteOne({\"_id\":7});")))))
 
+(ert-deftest clutch-db-test-mongodb-decoded-id-filter-encodes-as-object-id ()
+  "An _id filter built from a decoded document must target the ObjectId.
+Generated mutations reuse the decoded _id value verbatim; if the tagged
+alist encoded as an embedded document, updates and deletes keyed on an
+ObjectId would silently match nothing."
+  (require 'mongodb)
+  (let* ((stored (list (cons "_id" (mongodb-object-id
+                                    "65f1a2b3c4d5e6f708090a0b"))
+                       (cons "name" "Ann")))
+         (decoded (mongodb--decode-document-from-string
+                   (mongodb--encode-document stored)))
+         (filter (clutch-mongodb--document-id-filter decoded "update"))
+         (encoded (mongodb--encode-document filter)))
+    ;; Wire type of the first element: 0x07 ObjectId, not 0x03 document.
+    (should (= (aref encoded 4) #x07))
+    (should (equal (mongodb--decode-document-from-string encoded) filter))))
+
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
