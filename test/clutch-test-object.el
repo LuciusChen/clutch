@@ -1463,6 +1463,38 @@ document connection."
                           (:name "beta" :type "KEY" :schema "0")))
                        '(:name "alpha" :type "KEY" :schema "0")))))))
 
+(ert-deftest clutch-test-object-entry-reader-affixation-stops-at-time-budget ()
+  "Affixation should stop enriching once the metadata time budget is spent.
+Each Redis entry lookup is a synchronous round trip, so a candidate count
+alone does not bound how long completion blocks."
+  (let ((clutch--object-affixation-metadata-limit 100)
+        (clutch--object-affixation-metadata-seconds 0.05)
+        (clock 0.0)
+        metadata-calls)
+    (cl-letf (((symbol-function 'float-time)
+               (lambda (&optional _) clock))
+              ((symbol-function 'clutch-db-object-entry-metadata)
+               (lambda (_conn entry)
+                 (push (plist-get entry :name) metadata-calls)
+                 ;; Each lookup costs a round trip.
+                 (setq clock (+ clock 0.03))
+                 (plist-put (copy-sequence entry) :value-type "STRING")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (let* ((metadata (funcall collection "" nil 'metadata))
+                        (affixation-fn
+                         (alist-get 'affixation-function (cdr metadata)))
+                        (candidates (funcall collection "" nil t)))
+                   (funcall affixation-fn candidates)
+                   "alpha"))))
+      (clutch--object-entry-reader
+       'fake-conn "Object: "
+       (mapcar (lambda (name) (list :name name :type "KEY" :schema "0"))
+               '("alpha" "beta" "gamma" "delta" "epsilon")))
+      ;; Two lookups fit the 0.05s budget; the rest fall back to plain entries
+      ;; instead of blocking for the whole candidate list.
+      (should (equal (nreverse metadata-calls) '("alpha" "beta"))))))
+
 (ert-deftest clutch-test-object-entry-reader-metadata-errors-surface ()
   "Display metadata errors should surface through object completion."
   (cl-letf (((symbol-function 'clutch-db-object-entry-metadata)

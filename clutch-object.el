@@ -106,6 +106,13 @@ Recoverable database liveness-check failures are warned once and treated as
 (defvar clutch--object-affixation-metadata-limit 64
   "Maximum object candidates to enrich during one affixation call.")
 
+(defvar clutch--object-affixation-metadata-seconds 0.05
+  "Seconds one affixation call may spend enriching object candidates.
+Backends may answer `clutch-db-object-entry-metadata' with a round trip per
+entry, so a candidate count alone does not bound how long completion blocks.
+Candidates left unenriched keep their discovered type and are enriched by a
+later call once earlier results are cached.")
+
 (defvar-local clutch-browser-current-object nil
   "Most recently selected database object for the current buffer.")
 
@@ -577,11 +584,14 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
                       (clutch--object-entry-group-title entry))))
                 (affixate (cands)
                   (let ((display-map (make-hash-table :test 'equal))
-                        (remaining clutch--object-affixation-metadata-limit))
+                        (remaining clutch--object-affixation-metadata-limit)
+                        (deadline (+ (float-time)
+                                     clutch--object-affixation-metadata-seconds)))
                     (dolist (cand cands)
                       (when-let* ((entry
                                    (or (gethash cand metadata-map)
                                        (and (> remaining 0)
+                                            (< (float-time) deadline)
                                             (gethash cand entry-map)
                                             (prog1 (metadata-entry cand)
                                               (setq remaining (1- remaining))))
