@@ -1786,8 +1786,11 @@ to one caller instead of the shared transition shows up here."
                   (dead clutch--cleanup-dead-connection
                         (mark-closed invalidate clear-tx clear-metadata
                          forget-problem release))
+                  ;; Preserve keeps the dirty-transaction flag: it is the
+                  ;; evidence that the server rolled back an open
+                  ;; transaction, read later by clutch--lost-transaction-p.
                   (preserve clutch--preserve-dead-connection-for-reconnect
-                            (mark-closed clear-tx clear-metadata release
+                            (mark-closed clear-metadata release
                              refresh-preserved))))
     (pcase-let ((`(,kind ,command ,expected) case))
       (ert-info ((format "kind: %s" kind))
@@ -1814,6 +1817,40 @@ to one caller instead of the shared transition shows up here."
                      (lambda (_conn) (push 'refresh-preserved steps))))
             (funcall command 'fake-conn)
             (should (equal (nreverse steps) expected))))))))
+
+(ert-deftest clutch-test-preserve-teardown-keeps-lost-transaction-evidence ()
+  "Retiring a dirty connection must keep the dirty flag for later refusal.
+The flag is the only record that the server rolled back an open
+transaction; clearing it on preserve let `clutch-commit' reconnect and
+commit an empty transaction instead of reporting the loss."
+  (with-temp-buffer
+    (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+          (rolled-back nil))
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (_conn) nil))
+                ((symbol-function 'clutch--mark-dml-results-connection-closed)
+                 #'ignore)
+                ((symbol-function 'clutch--mark-dml-results-rolled-back)
+                 (lambda (conn) (setq rolled-back conn)))
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 #'ignore)
+                ((symbol-function 'clutch--release-connection-transport)
+                 #'ignore)
+                ((symbol-function 'clutch--refresh-preserved-connection-buffers)
+                 #'ignore)
+                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+        (setq-local clutch-connection 'dead-conn)
+        (clutch--set-tx-dirty 'dead-conn)
+        (clutch--preserve-dead-connection-for-reconnect 'dead-conn)
+        ;; The evidence survives retirement.
+        (should (clutch--tx-dirty-p 'dead-conn))
+        (should (clutch--lost-transaction-p 'dead-conn))
+        ;; A transaction command refuses to run on a replacement session,
+        ;; consuming the evidence and marking results rolled back.
+        (should-error (clutch--ensure-transaction-connection)
+                      :type 'user-error)
+        (should (eq rolled-back 'dead-conn))
+        (should-not (clutch--tx-dirty-p 'dead-conn))))))
 
 (ert-deftest clutch-test-session-teardown-releases-transport-when-close-fails ()
   "A failing backend disconnect must still release the transport."

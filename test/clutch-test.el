@@ -7355,7 +7355,9 @@ statement."
         (should disconnected)
         (with-current-buffer buf
           (should (eq clutch-connection 'fake-conn)))
-        (should-not (gethash 'fake-conn clutch--tx-dirty-cache))
+        ;; Retirement keeps the dirty flag as lost-transaction evidence;
+        ;; the next transaction command consumes it and refuses to run.
+        (should (gethash 'fake-conn clutch--tx-dirty-cache))
         (should-not clutch--executing-p)))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
