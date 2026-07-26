@@ -1244,7 +1244,7 @@ Return a plist with :message, :summary, and :display-summary."
   "Return non-nil when the current buffer has a top-level semicolon."
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
     (consp (clutch-db-sql-statement-breaks
-            text (eq clutch--conn-sql-product 'postgres)))))
+            text (clutch-db-sql-dialect clutch--conn-sql-product)))))
 
 (defun clutch--preview-sql-buffer (sql &optional product)
   "Display SQL in the *clutch-preview* buffer using SQL PRODUCT."
@@ -1293,7 +1293,7 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (bounds (clutch-db-sql-semicolon-statement-bounds-at-offset
-                  text offset t (eq clutch--conn-sql-product 'postgres))))
+                  text offset t (clutch-db-sql-dialect clutch--conn-sql-product))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
@@ -1348,7 +1348,7 @@ product is `postgres'."
                            (and base-position (+ base-position tend)))
                      stmts)))))
       (dolist (break (clutch-db-sql-statement-breaks
-                      sql (eq clutch--conn-sql-product 'postgres)))
+                      sql (clutch-db-sql-dialect clutch--conn-sql-product)))
         (emit break)
         (setq start (1+ break)))
       (emit len))

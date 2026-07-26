@@ -160,7 +160,9 @@
   "Return (BEG . END) for the SQL statement surrounding point."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
-         (bounds (clutch-db-sql-context-statement-bounds text offset)))
+         (bounds (clutch-db-sql-context-statement-bounds
+                  text offset
+                  (clutch-db-connection-sql-dialect clutch-connection))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
