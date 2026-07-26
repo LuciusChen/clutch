@@ -6992,3 +6992,78 @@ It does so without touching the agent process."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 ;;; clutch-db-test.el ends here
+
+(ert-deftest clutch-db-test-jdbc-escape-literal-follows-backend-dialect ()
+  "JDBC literals must escape backslash on backends that read it as an escape.
+The escaped literal is concatenated into executed SQL by foreign-key
+navigation and metadata queries, so a value ending in a backslash would
+otherwise close the literal early."
+  (require 'clutch-db-jdbc)
+  (dolist (case '((clickhouse "a\\'; DROP TABLE t --" "'a\\\\''; DROP TABLE t --'")
+                  (snowflake "a\\" "'a\\\\'")
+                  ;; Oracle keeps backslash literal, so doubling it would
+                  ;; store a character the user never typed.
+                  (oracle "a\\" "'a\\'")
+                  (oracle "it's" "'it''s'")))
+    (pcase-let ((`(,driver ,value ,expected) case))
+      (ert-info ((format "driver: %s value: %S" driver value))
+        (let ((conn (make-clutch-jdbc-conn :driver driver)))
+          (should (equal (clutch-db-escape-literal conn value) expected)))))))
+
+(ert-deftest clutch-db-test-sqlite-select-routing-tolerates-comments-and-syntax ()
+  "SQLite row-yielding detection must survive comments and the caller's syntax.
+Misrouting sends a SELECT to `sqlite-execute', which runs it and drops the
+rows."
+  (require 'clutch-db-sqlite)
+  (dolist (sql '("SELECT 1"
+                 "-- note\nSELECT 1"
+                 "/* note */ SELECT 1"
+                 "\nSELECT 1"
+                 "  \n  SELECT 1"
+                 "VALUES (1)"
+                 "INSERT INTO t VALUES (1) RETURNING id"))
+    (ert-info ((format "sql: %S" sql))
+      ;; `sql-mode' gives newline comment-ending syntax, which `\s-' honours.
+      (with-temp-buffer
+        (sql-mode)
+        (should (clutch-db-sqlite--select-p sql)))))
+  (dolist (sql '("INSERT INTO t VALUES (1)"
+                 "-- note\nUPDATE t SET a = 1"))
+    (ert-info ((format "sql: %S" sql))
+      (should-not (clutch-db-sqlite--select-p sql)))))
+
+(ert-deftest clutch-db-test-connect-closes-connection-when-init-fails ()
+  "A connection whose initialization fails or is quit must be closed.
+Initialization runs statements, so the backend already holds a socket by
+then and the caller never receives the object to close it."
+  (dolist (case '((error (lambda (_conn) (signal 'clutch-db-error '("boom"))))
+                  (quit (lambda (_conn) (signal 'quit nil)))))
+    (pcase-let ((`(,label ,init-fn) case))
+      (ert-info ((format "case: %s" label))
+        (let (disconnected)
+          (cl-letf (((symbol-function 'clutch-backend-feature)
+                     (lambda (_backend)
+                       (list :require 'subr-x
+                             :connect-fn (lambda (_params) 'fresh-conn))))
+                    ((symbol-function 'clutch-db-init-connection) init-fn)
+                    ((symbol-function 'clutch-db-disconnect)
+                     (lambda (conn) (setq disconnected conn))))
+            ;; `should-error' does not catch quit, which is exactly one of
+            ;; the exits this guards.
+            (let ((raised (condition-case exit
+                              (progn (clutch-db-connect 'fake '(:host "h")) nil)
+                            (quit 'quit)
+                            (error 'error))))
+              (should (eq raised label)))
+            (should (eq disconnected 'fresh-conn)))))))
+  ;; A successful connection is of course left open.
+  (let (disconnected)
+    (cl-letf (((symbol-function 'clutch-backend-feature)
+               (lambda (_backend)
+                 (list :require 'subr-x
+                       :connect-fn (lambda (_params) 'fresh-conn))))
+              ((symbol-function 'clutch-db-init-connection) #'ignore)
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (conn) (setq disconnected conn))))
+      (should (eq (clutch-db-connect 'fake '(:host "h")) 'fresh-conn))
+      (should-not disconnected))))

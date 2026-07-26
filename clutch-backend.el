@@ -284,13 +284,35 @@ Values are nesting counts.")
    (replace-regexp-in-string
     ";\\s-*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
 
-(defun clutch-db-sql-skip-literal-or-comment (sql pos &optional identifiers)
+(defun clutch-db-sql-dialect (product)
+  "Return the lexical rules for SQL PRODUCT as a plist.
+These describe how a statement is tokenized, not how it executes, so they
+only cover constructs that change where a literal or statement ends:
+`:dollar-quotes' for PostgreSQL dollar-quoted bodies, and
+`:backslash-escapes' for the MySQL family, where a backslash escapes the
+next character inside a string literal.  PRODUCT is an `sql-mode' product
+symbol as registered by `clutch-backend-sql-product'."
+  (pcase product
+    ('postgres '(:dollar-quotes t))
+    ('mysql '(:backslash-escapes t))
+    (_ nil)))
+
+(defun clutch-db-connection-sql-dialect (conn)
+  "Return the `clutch-db-sql-dialect' rules for CONN, or nil."
+  (when conn
+    (clutch-db-sql-dialect
+     (clutch-backend-sql-product (clutch-db-backend-key conn)))))
+
+(defun clutch-db-sql-skip-literal-or-comment (sql pos &optional identifiers dialect)
   "If POS in SQL is at a string literal or comment, return position past it.
-Handles single-quoted strings (with '' escape), -- line comments, and
+Handles single-quoted strings (with `''' escape), -- line comments, and
 /* block comments */.  When IDENTIFIERS is non-nil, also skip double-quoted,
 backtick-quoted, and bracket-quoted identifiers, including doubled closing
-delimiter escapes.  Returns nil when POS is at normal code."
+delimiter escapes.  DIALECT is a `clutch-db-sql-dialect' plist; its
+`:backslash-escapes' rule additionally treats a backslash as escaping the
+next character inside a literal.  Returns nil when POS is at normal code."
   (let ((len (length sql))
+        (backslash (plist-get dialect :backslash-escapes))
         (ch (and (< pos (length sql)) (aref sql pos))))
     (cond
      ((let ((delimiter
@@ -299,13 +321,19 @@ delimiter escapes.  Returns nil when POS is at normal code."
               ((and identifiers (memq ch '(?\" ?`))) ch)
               ((and identifiers (eq ch ?\[)) ?\]))))
         (when delimiter
-          (cl-loop for i from (1+ pos) below len
-                   when (= (aref sql i) delimiter)
-                   do (if (and (< (1+ i) len)
-                               (= (aref sql (1+ i)) delimiter))
-                          (cl-incf i)
-                        (cl-return (1+ i)))
-                   finally return len))))
+          ;; Bracket-quoted identifiers have no backslash escape even in
+          ;; dialects that use one inside quoted strings.
+          (let ((escaping (and backslash (not (eq delimiter ?\])))))
+            (cl-loop for i from (1+ pos) below len
+                     do (cond
+                         ((and escaping (= (aref sql i) ?\\))
+                          (cl-incf i))
+                         ((= (aref sql i) delimiter)
+                          (if (and (< (1+ i) len)
+                                   (= (aref sql (1+ i)) delimiter))
+                              (cl-incf i)
+                            (cl-return (1+ i)))))
+                     finally return len)))))
      ((eq ch ?-)  ;; Possible -- line comment.
       (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
         (or (cl-loop for i from (+ pos 2) below len
@@ -359,17 +387,19 @@ selection fails closed.  This parser is linear and does not alter match data."
                  (close (string-search delimiter sql tag-end)))
             (if close (+ close (length delimiter)) len)))))))
 
-(defun clutch-db-sql-mask-literal-or-comment (sql)
+(defun clutch-db-sql-mask-literal-or-comment (sql &optional dialect)
   "Return a string the same length as SQL with literals/comments blanked.
 Single-quoted content (between the quotes) and comment text become spaces.
 Quote delimiters are preserved.  Double-quoted identifiers and backticks
-are left intact.  Safe for multibyte strings (avoids `aset')."
+are left intact.  DIALECT is a `clutch-db-sql-dialect' plist deciding where
+a literal ends.  Safe for multibyte strings (avoids `aset')."
   (let ((pieces nil)
         (copy-from 0)
         (pos 0)
         (len (length sql)))
     (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
+                       sql pos nil dialect)))
           (if (= (aref sql pos) ?\')
               ;; String literal: preserve quote delimiters, blank content.
               (let* ((has-close (and (> skip (1+ pos))
@@ -387,19 +417,21 @@ are left intact.  Safe for multibyte strings (avoids `aset')."
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
-(defun clutch-db-sql-scan-code (sql start end fn &optional dollar-quotes)
+(defun clutch-db-sql-scan-code (sql start end fn &optional dialect)
   "Scan SQL code characters from START to END, skipping strings/comments.
 FN is called with (POS CHAR DEPTH), where DEPTH is the parenthesis depth before
 CHAR is applied.  When FN returns non-nil, stop and return that value.
-When DOLLAR-QUOTES is non-nil, also skip PostgreSQL dollar-quoted bodies."
+DIALECT is a `clutch-db-sql-dialect' plist selecting the lexical rules that
+decide where literals end."
   (let ((pos (or start 0))
         (end (or end (length sql)))
         (depth 0)
         result)
     (while (and (< pos end) (not result))
-      (if-let* ((skip (or (and dollar-quotes
+      (if-let* ((skip (or (and (plist-get dialect :dollar-quotes)
                                (clutch-db-sql--skip-dollar-quote sql pos))
-                          (clutch-db-sql-skip-literal-or-comment sql pos t))))
+                          (clutch-db-sql-skip-literal-or-comment
+                           sql pos t dialect))))
           (setq pos (min skip end))
         (let ((ch (aref sql pos)))
           (setq result (funcall fn pos ch depth))
@@ -421,10 +453,11 @@ When DOLLAR-QUOTES is non-nil, also skip PostgreSQL dollar-quoted bodies."
 
 ;;;; SQL helpers (statement boundaries)
 
-(defun clutch-db-sql-statement-breaks (sql &optional dollar-quotes)
+(defun clutch-db-sql-statement-breaks (sql &optional dialect)
   "Return zero-based offsets of top-level semicolons in SQL.
-Semicolons inside strings and comments do not count.  When DOLLAR-QUOTES is
-non-nil, semicolons inside PostgreSQL dollar-quoted bodies do not count."
+Semicolons inside strings and comments do not count.  DIALECT is a
+`clutch-db-sql-dialect' plist; its rules decide where a literal ends, so a
+semicolon inside one is not a break."
   (let (breaks)
     (clutch-db-sql-scan-code
      sql 0 nil
@@ -432,7 +465,7 @@ non-nil, semicolons inside PostgreSQL dollar-quoted bodies do not count."
        (when (and (zerop depth) (= ch ?\;))
          (push pos breaks))
        nil)
-     dollar-quotes)
+     dialect)
     (nreverse breaks)))
 
 (defun clutch-db-sql-statement-effective-offset (text offset)
@@ -450,15 +483,15 @@ preceding statement."
      (t offset))))
 
 (defun clutch-db-sql-semicolon-statement-bounds
-    (text offset &optional dollar-quotes)
+    (text offset &optional dialect)
   "Return zero-based statement bounds around OFFSET in TEXT.
 Top-level semicolons delimit statements.  Semicolons inside strings and
-comments are ignored.  DOLLAR-QUOTES enables PostgreSQL dollar quoting."
+comments are ignored.  DIALECT is a `clutch-db-sql-dialect' plist."
   (let ((beg 0)
         (end (length text))
         (effective-offset
          (clutch-db-sql-statement-effective-offset text offset)))
-    (dolist (break (clutch-db-sql-statement-breaks text dollar-quotes))
+    (dolist (break (clutch-db-sql-statement-breaks text dialect))
       (if (< break effective-offset)
           (setq beg (1+ break))
         (when (= end (length text))
@@ -477,14 +510,14 @@ comments are ignored.  DOLLAR-QUOTES enables PostgreSQL dollar quoting."
     (cons beg end)))
 
 (defun clutch-db-sql-semicolon-statement-bounds-at-offset
-    (text offset &optional strict-leading-space dollar-quotes)
+    (text offset &optional strict-leading-space dialect)
   "Return zero-based semicolon statement bounds around OFFSET in TEXT.
 When STRICT-LEADING-SPACE is non-nil and OFFSET is before the trimmed
 statement body, return an empty range at OFFSET.  This lets execute-at-point
 avoid running the previous statement from blank space between semicolon
-delimited statements.  DOLLAR-QUOTES enables PostgreSQL dollar quoting."
+delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
   (let* ((bounds (clutch-db-sql-semicolon-statement-bounds
-                  text offset dollar-quotes))
+                  text offset dialect))
          (effective-offset (clutch-db-sql-statement-effective-offset text offset))
          (semicolon-edge (or (/= effective-offset offset)
                              (and (< offset (length text))
@@ -518,12 +551,13 @@ delimited statements.  DOLLAR-QUOTES enables PostgreSQL dollar quoting."
         (setq pos (if newline (1+ line-end) len))))
     (cons beg (or end len))))
 
-(defun clutch-db-sql-context-statement-bounds (text offset)
+(defun clutch-db-sql-context-statement-bounds (text offset &optional dialect)
   "Return statement bounds for SQL context features in TEXT at OFFSET.
 Use semicolon-aware bounds when TEXT has top-level semicolons; otherwise fall
-back to blank-line paragraph bounds."
-  (if (clutch-db-sql-statement-breaks text)
-      (clutch-db-sql-semicolon-statement-bounds text offset)
+back to blank-line paragraph bounds.  DIALECT is a `clutch-db-sql-dialect'
+plist, so context features split statements the same way execution does."
+  (if (clutch-db-sql-statement-breaks text dialect)
+      (clutch-db-sql-semicolon-statement-bounds text offset dialect)
     (clutch-db-sql-blank-line-statement-bounds text offset)))
 
 ;;;; SQL helpers (top-level clause detection)
@@ -1733,9 +1767,18 @@ Returns a backend-specific connection object."
                     (_ (signal (car err) (cdr err))))))
                (plist-get feature-plist :connect-fn))))
       (condition-case err
-          (let ((conn (funcall connect-fn params)))
-            (clutch-db-init-connection conn)
-            conn)
+          ;; Initialization runs statements, so it can fail or be quit after
+          ;; the backend already holds a socket.  Close that connection rather
+          ;; than losing the only reference to it.
+          (let (conn established)
+            (unwind-protect
+                (progn
+                  (setq conn (funcall connect-fn params))
+                  (clutch-db-init-connection conn)
+                  (setq established t)
+                  conn)
+              (when (and conn (not established))
+                (ignore-errors (clutch-db-disconnect conn)))))
         (clutch-db-error
          (signal (car err) (cdr err)))
         (error

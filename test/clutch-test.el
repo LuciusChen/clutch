@@ -7014,11 +7014,43 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (when (buffer-live-p preview-buffer)
         (kill-buffer preview-buffer)))))
 
+(ert-deftest clutch-test-statement-breaks-respect-mysql-backslash-escapes ()
+  "A MySQL escaped quote must not end the literal and split the statement.
+Splitting there would send the fragment before the semicolon as a whole
+statement."
+  (let* ((sql "UPDATE t SET note = 'it\\'s here; keep' WHERE id = 1; SELECT 2;")
+         (mysql (clutch-db-sql-dialect 'mysql))
+         (inside (string-search "; keep" sql)))
+    ;; Only the two real terminators, both outside the literal.
+    (should (equal (clutch-db-sql-statement-breaks sql mysql)
+                   (list (string-search ";" sql (string-search "id = 1" sql))
+                         (1- (length sql)))))
+    ;; Without the dialect the escaped quote is read as the literal's end, so
+    ;; the semicolon inside the value is taken for a statement terminator.
+    (should (member inside (clutch-db-sql-statement-breaks sql)))
+    (should-not (member inside (clutch-db-sql-statement-breaks sql mysql)))
+    ;; A trailing backslash keeps its standard meaning where the dialect has
+    ;; no backslash escape, so the literal still ends at the closing quote.
+    (should (= (length (clutch-db-sql-statement-breaks
+                        "SELECT 'a\\'; SELECT 2;"))
+               2))
+    (should (equal (clutch-db-sql-mask-literal-or-comment
+                    "SELECT 'a\\'b' FROM t" mysql)
+                   "SELECT '    ' FROM t"))))
+
+(ert-deftest clutch-test-sql-dialect-rules ()
+  "Dialect lookup should only claim rules a product actually has."
+  (should (equal (clutch-db-sql-dialect 'postgres) '(:dollar-quotes t)))
+  (should (equal (clutch-db-sql-dialect 'mysql) '(:backslash-escapes t)))
+  (dolist (product '(sqlite oracle ms db2 nil))
+    (should-not (clutch-db-sql-dialect product))))
+
 (ert-deftest clutch-test-statement-breaks-ignore-postgresql-dollar-quotes ()
   "Dollar-quoted function bodies should remain one executable statement."
   (dolist (case '(("$$" . "PERFORM 1; PERFORM 2;")
                   ("$body$" . "SELECT ';'; RETURN;")))
-    (let* ((delimiter (car case))
+    (let* ((pg (clutch-db-sql-dialect 'postgres))
+           (delimiter (car case))
            (body (cdr case))
            (sql (format (concat "CREATE FUNCTION f() RETURNS void AS %s%s%s "
                                 "LANGUAGE plpgsql; SELECT 2;")
@@ -7027,25 +7059,26 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (body-close (+ (string-search delimiter sql
                                           (+ body-open (length delimiter)))
                           (length delimiter)))
-           (breaks (clutch-db-sql-statement-breaks sql t)))
+           (breaks (clutch-db-sql-statement-breaks sql pg)))
       (ert-info ((format "delimiter: %s" delimiter))
         (should (= (length breaks) 2))
         (should (cl-every (lambda (offset) (>= offset body-close)) breaks)))))
   (should (= (length (clutch-db-sql-statement-breaks
-                      "SELECT $1; SELECT 2;" t))
+                      "SELECT $1; SELECT 2;" (clutch-db-sql-dialect 'postgres)))
              2))
   (should (= (length (clutch-db-sql-statement-breaks
                       "SELECT $tag$; SELECT 2;"))
              2))
   (should (= (length (clutch-db-sql-statement-breaks
-                      "SELECT foo$tag$; SELECT 2;" t))
+                      "SELECT foo$tag$; SELECT 2;"
+                      (clutch-db-sql-dialect 'postgres)))
              2))
   (string-match "needle" "needle")
   (let ((saved-match-data (match-data)))
     (clutch-db-sql-statement-breaks
      (concat "SELECT " (mapconcat #'identity
                                   (make-list 4000 "$1") ",") ";")
-     t)
+     (clutch-db-sql-dialect 'postgres))
     (should (equal (match-data) saved-match-data))))
 
 (ert-deftest clutch-test-postgresql-statement-bounds-enable-dollar-quotes ()

@@ -421,16 +421,27 @@ Return non-nil when RESPONSE was consumed asynchronously."
     (unless (executable-find clutch-jdbc-agent-java-executable)
       (user-error "Java not found.  Set `clutch-jdbc-agent-java-executable'"))
     (let* ((buf (generate-new-buffer " *clutch-jdbc-agent*"))
-           (proc (make-process
-                  :name "clutch-jdbc-agent"
-                  :buffer buf
-                  :command (append (list clutch-jdbc-agent-java-executable)
-                                  clutch-jdbc-agent-jvm-args
-                                  (list "-jar" jar (clutch-jdbc--drivers-dir)))
-                  :connection-type 'pipe
-                  :filter #'clutch-jdbc--agent-filter
-                  :stderr (get-buffer-create "*clutch-jdbc-agent-stderr*")
-                  :noquery t)))
+           (stderr (get-buffer-create "*clutch-jdbc-agent-stderr*"))
+           (proc (progn
+                   ;; The stderr buffer is reused across agent restarts, and
+                   ;; startup diagnostics read its tail.  Drop the previous
+                   ;; agent's output so it cannot be reported as this one's.
+                   (with-current-buffer stderr
+                     (let ((inhibit-read-only t))
+                       (erase-buffer)))
+                   (make-process
+                    :name "clutch-jdbc-agent"
+                    :buffer buf
+                    :command (append (list clutch-jdbc-agent-java-executable)
+                                     clutch-jdbc-agent-jvm-args
+                                     (list "-jar" jar (clutch-jdbc--drivers-dir)))
+                    :connection-type 'pipe
+                    ;; The protocol is line-delimited JSON, so both directions
+                    ;; are UTF-8 regardless of the locale Emacs was started in.
+                    :coding '(utf-8-unix . utf-8-unix)
+                    :filter #'clutch-jdbc--agent-filter
+                    :stderr stderr
+                    :noquery t))))
       (setq clutch-jdbc--agent-process proc)
       (setq clutch-jdbc--response-queue nil)
       (clutch-jdbc--clear-async-callbacks)
@@ -1671,9 +1682,21 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
           keywordp)
       cached)))
 
-(cl-defmethod clutch-db-escape-literal ((_conn clutch-jdbc-conn) value)
-  "Escape VALUE as a SQL string literal using single quotes (ANSI standard)."
-  (format "'%s'" (replace-regexp-in-string "'" "''" value)))
+(defconst clutch-jdbc--backslash-escape-drivers '(clickhouse snowflake)
+  "JDBC drivers whose string literals read a backslash as an escape.
+Doubling the quote alone leaves a trailing backslash escaping the closing
+quote on these engines.  Drivers absent from this list keep backslash
+literal, where doubling it would store a character the user never typed.")
+
+(cl-defmethod clutch-db-escape-literal ((conn clutch-jdbc-conn) value)
+  "Escape VALUE as a SQL string literal for CONN.
+Quote doubling is accepted by every supported engine; backslash handling
+follows `clutch-jdbc--backslash-escape-drivers'."
+  (let ((escaped (replace-regexp-in-string "'" "''" value)))
+    (when (memq (clutch-jdbc--conn-driver conn)
+                clutch-jdbc--backslash-escape-drivers)
+      (setq escaped (replace-regexp-in-string "\\\\" "\\\\\\\\" escaped)))
+    (format "'%s'" escaped)))
 
 ;;;; Schema methods
 
