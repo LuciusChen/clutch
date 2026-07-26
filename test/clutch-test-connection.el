@@ -414,6 +414,68 @@
        :type 'user-error)
       (should (eq stopped 'fake-proc)))))
 
+(ert-deftest clutch-test-build-conn-stops-ssh-tunnel-when-connect-quits ()
+  "Quits and untranslated errors during DB connect must still stop the tunnel.
+The tunnel is already forwarding while `clutch-db-connect' waits, and only
+`clutch-db-error' is translated for display; every other exit crosses the
+function raw, so cleanup cannot live in that handler."
+  (dolist (case '((quit . nil)
+                  (wrong-type-argument . (stringp nil))))
+    (pcase-let ((`(,condition . ,data) case))
+      (ert-info ((format "condition: %s" condition))
+        (let (stopped caught)
+          (cl-letf (((symbol-function 'clutch--resolve-password)
+                     (lambda (_params) nil))
+                    ((symbol-function 'clutch--start-ssh-tunnel)
+                     (lambda (_params)
+                       '(:process fake-proc :local-port 40123
+                         :ssh-host "bastion-prod")))
+                    ((symbol-function 'process-live-p)
+                     (lambda (proc) (eq proc 'fake-proc)))
+                    ((symbol-function 'delete-process)
+                     (lambda (proc) (setq stopped proc)))
+                    ((symbol-function 'clutch-db-connect)
+                     (lambda (_backend _params)
+                       (signal condition data))))
+            (condition-case err
+                (clutch--build-conn
+                 '(:backend pg
+                   :host "db.internal"
+                   :port 5432
+                   :user "alice"
+                   :database "appdb"
+                   :ssh-host "bastion-prod"))
+              (t (setq caught (car err))))
+            (should (eq caught condition))
+            (should (eq stopped 'fake-proc))))))))
+
+(ert-deftest clutch-test-start-ssh-tunnel-cleans-up-when-wait-quits ()
+  "A quit during tunnel readiness must delete the just-started process.
+The readiness wait polls with `accept-process-output', which is quittable,
+and the ssh -N process has no owner yet at that point."
+  (let (deleted caught)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_name) "/usr/bin/ssh"))
+              ((symbol-function 'clutch--allocate-local-port)
+               (lambda () 40124))
+              ((symbol-function 'make-process)
+               (lambda (&rest _args) 'fake-tunnel))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'process-live-p)
+               (lambda (proc) (eq proc 'fake-tunnel)))
+              ((symbol-function 'delete-process)
+               (lambda (proc) (setq deleted proc)))
+              ((symbol-function 'clutch--wait-for-ssh-tunnel)
+               (lambda (&rest _args) (signal 'quit nil))))
+      (condition-case nil
+          (clutch--start-ssh-tunnel '(:backend pg
+                                      :host "db.internal"
+                                      :port 5432
+                                      :ssh-host "bastion-prod"))
+        (quit (setq caught t)))
+      (should caught)
+      (should (eq deleted 'fake-tunnel)))))
+
 (ert-deftest clutch-test-start-ssh-tunnel-rejects-opaque-url-profiles ()
   "SSH tunneling should reject URL-only profiles before opening transports."
   (dolist (case

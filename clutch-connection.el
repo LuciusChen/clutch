@@ -1704,24 +1704,33 @@ and TIMEOUT is the maximum wait in seconds."
          (proc nil))
     (with-current-buffer buffer
       (erase-buffer))
-    (setq proc (make-process
-                :name (format "clutch-ssh-%s" ssh-host)
-                :buffer buffer
-                :command (list "ssh"
-                               "-N"
-                               "-o" "BatchMode=yes"
-                               "-o" "ExitOnForwardFailure=yes"
-                               "-L" (format "127.0.0.1:%d:%s:%s"
-                                            local-port
-                                            (plist-get params :host)
-                                            (plist-get params :port))
-                               ssh-host)
-                :coding 'utf-8
-                :noquery t))
-    (set-process-query-on-exit-flag proc nil)
-    (clutch--wait-for-ssh-tunnel
-     proc local-port (plist-put (copy-sequence params) :ssh-host ssh-host)
-     buffer timeout)
+    ;; The readiness wait is quittable; without the unwind a C-g there
+    ;; leaves the ssh -N process running with nothing tracking it.
+    (let (ready)
+      (unwind-protect
+          (progn
+            (setq proc (make-process
+                        :name (format "clutch-ssh-%s" ssh-host)
+                        :buffer buffer
+                        :command (list "ssh"
+                                       "-N"
+                                       "-o" "BatchMode=yes"
+                                       "-o" "ExitOnForwardFailure=yes"
+                                       "-L" (format "127.0.0.1:%d:%s:%s"
+                                                    local-port
+                                                    (plist-get params :host)
+                                                    (plist-get params :port))
+                                       ssh-host)
+                        :coding 'utf-8
+                        :noquery t))
+            (set-process-query-on-exit-flag proc nil)
+            (clutch--wait-for-ssh-tunnel
+             proc local-port (plist-put (copy-sequence params) :ssh-host ssh-host)
+             buffer timeout)
+            (setq ready t))
+        (unless ready
+          (when (and proc (process-live-p proc))
+            (delete-process proc)))))
     (list :kind 'ssh
           :process proc
           :local-port local-port
@@ -1832,28 +1841,37 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
        "TRAMP forwarding currently supports ssh-like TRAMP directories such as /ssh:host:/path/ or /rpc:host:/path/"))
     (with-current-buffer buffer
       (erase-buffer))
-    (setq proc (make-process
-                :name (format "clutch-tramp-ssh-%s:%s" host port)
-                :buffer buffer
-                :command (append
-                          (list "ssh"
-                                "-N"
-                                "-o" "BatchMode=yes"
-                                "-o" "ExitOnForwardFailure=yes"
-                                "-L" (format "127.0.0.1:%d:%s:%s"
-                                             local-port host port))
-                          (clutch--tramp-rpc-controlmaster-options vec)
-                          (when proxyjump
-                            (list "-J" proxyjump))
-                          (when ssh-port
-                            (list "-p" (format "%s" ssh-port)))
-                          (list target))
-                :coding 'utf-8
-                :noquery t))
-    (set-process-query-on-exit-flag proc nil)
-    (clutch--wait-for-ssh-tunnel
-     proc local-port (plist-put (copy-sequence params) :ssh-host target)
-     buffer timeout)
+    ;; Same quit window as `clutch--start-ssh-tunnel': the readiness wait
+    ;; must not orphan the forward process.
+    (let (ready)
+      (unwind-protect
+          (progn
+            (setq proc (make-process
+                        :name (format "clutch-tramp-ssh-%s:%s" host port)
+                        :buffer buffer
+                        :command (append
+                                  (list "ssh"
+                                        "-N"
+                                        "-o" "BatchMode=yes"
+                                        "-o" "ExitOnForwardFailure=yes"
+                                        "-L" (format "127.0.0.1:%d:%s:%s"
+                                                     local-port host port))
+                                  (clutch--tramp-rpc-controlmaster-options vec)
+                                  (when proxyjump
+                                    (list "-J" proxyjump))
+                                  (when ssh-port
+                                    (list "-p" (format "%s" ssh-port)))
+                                  (list target))
+                        :coding 'utf-8
+                        :noquery t))
+            (set-process-query-on-exit-flag proc nil)
+            (clutch--wait-for-ssh-tunnel
+             proc local-port (plist-put (copy-sequence params) :ssh-host target)
+             buffer timeout)
+            (setq ready t))
+        (unless ready
+          (when (and proc (process-live-p proc))
+            (delete-process proc)))))
     (list :kind 'tramp
           :process proc
           :local-port local-port
@@ -1988,24 +2006,31 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
        "Container TRAMP forwarding requires /docker: or /podman:"))
     (with-current-buffer buffer
       (erase-buffer))
-    (setq listener
-          (make-network-process
-           :name (format "clutch-tramp-container-%s:%s" host port)
-           :buffer buffer
-           :server t
-           :host "127.0.0.1"
-           :service t
-           :family 'ipv4
-           :coding 'no-conversion
-           :filter #'clutch--container-forward-client-filter
-           :sentinel #'clutch--container-forward-client-sentinel
-           :noquery t))
-    (setq local-port (process-contact listener :service))
-    (set-process-query-on-exit-flag listener nil)
-    (process-put listener :clutch-container-command command)
-    (process-put listener :clutch-container-buffer buffer)
-    (process-put listener :clutch-container-listener listener)
-    (process-put listener :clutch-container-children nil)
+    (let (ready)
+      (unwind-protect
+          (progn
+            (setq listener
+                  (make-network-process
+                   :name (format "clutch-tramp-container-%s:%s" host port)
+                   :buffer buffer
+                   :server t
+                   :host "127.0.0.1"
+                   :service t
+                   :family 'ipv4
+                   :coding 'no-conversion
+                   :filter #'clutch--container-forward-client-filter
+                   :sentinel #'clutch--container-forward-client-sentinel
+                   :noquery t))
+            (setq local-port (process-contact listener :service))
+            (set-process-query-on-exit-flag listener nil)
+            (process-put listener :clutch-container-command command)
+            (process-put listener :clutch-container-buffer buffer)
+            (process-put listener :clutch-container-listener listener)
+            (process-put listener :clutch-container-children nil)
+            (setq ready t))
+        (unless ready
+          (when (and listener (process-live-p listener))
+            (delete-process listener)))))
     (list :kind 'tramp
           :process listener
           :local-port local-port
@@ -2129,52 +2154,59 @@ Returns a live connection object or signals a `user-error'."
   (setq params (clutch--canonicalize-connection-params params))
   (let* ((effective-params params)
          (backend (plist-get params :backend))
-         (transport nil))
-    (condition-case err
-        (progn
-          (setq effective-params (clutch--materialize-connection-params params))
-          (setq backend (plist-get effective-params :backend))
-          (let* ((prepared (clutch--prepare-connect-params effective-params))
-                 (connect-params (car prepared)))
-            (setq transport (cadr prepared))
-            (let ((conn
-                   (clutch-db-connect
-                    backend
-                    (clutch--backend-connect-params connect-params))))
-              (clutch--require-live-connection conn)
-              (clutch--remember-connection-transport
-               conn effective-params transport)
-              (when clutch-debug-mode
-                (clutch--remember-debug-event
-                 :connection conn
-                 :op "connect"
-                 :phase "success"
-                 :backend backend
-                 :summary (condition-case nil
-                              (format "Connected to %s"
-                                      (clutch--connection-key conn))
-                            (error "Connected"))
-                 :context (clutch--debug-connection-context
-                           backend effective-params)))
-              conn)))
-      (clutch-db-error
-       (when transport
-         (clutch--stop-connection-transport transport))
-       (clutch--remember-problem-record
-        :buffer (current-buffer)
-        :problem (clutch--make-connection-error-details effective-params err))
-       (let ((message (clutch--humanize-db-error
-                       (or (car (cdr err))
-                           (error-message-string err)))))
-         (when clutch-debug-mode
-           (clutch--remember-debug-event
-            :op "connect"
-            :phase "error"
-            :backend backend
-            :summary message
-            :context (clutch--debug-connection-context backend effective-params)))
-         (user-error "%s"
-                     (clutch--debug-workflow-message message)))))))
+         (transport nil)
+         (owned nil))
+    ;; The unwind form owns transport cleanup: `clutch-db-connect' can wait
+    ;; several seconds, and a quit there — or any error class the handler
+    ;; below does not catch — must not orphan the tunnel process.
+    (unwind-protect
+        (condition-case err
+            (progn
+              (setq effective-params (clutch--materialize-connection-params params))
+              (setq backend (plist-get effective-params :backend))
+              (let* ((prepared (clutch--prepare-connect-params effective-params))
+                     (connect-params (car prepared)))
+                (setq transport (cadr prepared))
+                (let ((conn
+                       (clutch-db-connect
+                        backend
+                        (clutch--backend-connect-params connect-params))))
+                  (clutch--require-live-connection conn)
+                  (clutch--remember-connection-transport
+                   conn effective-params transport)
+                  (setq owned t)
+                  (when clutch-debug-mode
+                    (clutch--remember-debug-event
+                     :connection conn
+                     :op "connect"
+                     :phase "success"
+                     :backend backend
+                     :summary (condition-case nil
+                                  (format "Connected to %s"
+                                          (clutch--connection-key conn))
+                                (error "Connected"))
+                     :context (clutch--debug-connection-context
+                               backend effective-params)))
+                  conn)))
+          (clutch-db-error
+           (clutch--remember-problem-record
+            :buffer (current-buffer)
+            :problem (clutch--make-connection-error-details effective-params err))
+           (let ((message (clutch--humanize-db-error
+                           (or (car (cdr err))
+                               (error-message-string err)))))
+             (when clutch-debug-mode
+               (clutch--remember-debug-event
+                :op "connect"
+                :phase "error"
+                :backend backend
+                :summary message
+                :context (clutch--debug-connection-context backend effective-params)))
+             (user-error "%s"
+                         (clutch--debug-workflow-message message)))))
+      (unless owned
+        (when transport
+          (clutch--stop-connection-transport transport))))))
 
 (defun clutch-open-connection (params)
   "Open a database connection from PARAMS using Clutch connection rules.
