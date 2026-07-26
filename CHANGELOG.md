@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Made top-level SQL clause detection linear instead of quadratic in statement length. Clause, paging, row-identity, transaction-dirty, and completion scans collected their candidate positions by re-searching the rest of the statement at every scanned character. Long generated statements paid for that on every execution and every completion keystroke: a 15 KB statement spent 489 ms in three representative clause checks and now spends 0.32 ms, and per-keystroke completion token lookup on a 5.5 KB statement dropped from 11.4 ms to 0.6 ms.
 - Stopped `clutch-commit` from reporting success for a transaction the server had already discarded. A manual-commit session that dies is no longer silently replaced by a reconnect whose empty transaction commits cleanly; `clutch-commit`, `clutch-rollback`, and `clutch-toggle-auto-commit` now report the loss and stop. Automatic reconnect still recovers query workflows, but says that uncommitted changes were lost and marks open DML result buffers as rolled back.
 - Recovered the MySQL wire session after a parameterized statement times out. `clutch-db-execute-params` now runs the same cancel-and-drain recovery as plain queries instead of treating the timeout as an ordinary error, which left the connection desynchronized and corrupted every later query on it. The prepared statement is released only after recovery has resynchronized the wire.
 - Escaped the symbol in MySQL `HELP` lookups instead of interpolating it into the statement.

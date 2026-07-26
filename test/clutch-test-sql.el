@@ -828,6 +828,38 @@ ORDER BY id"
                                           "id = 1")
                    "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))))
 
+;;;; SQL parsing — candidate match collection
+
+(ert-deftest clutch-test-db-sql-code-match-positions ()
+  "Candidate collection should report every match start with its end.
+Structure is not interpreted here; callers confirm depth and literals through
+`clutch-db-sql-scan-code'."
+  (let* ((sql "SELECT a FROM t WHERE b = 'from x' GROUP  BY a")
+         (matches (clutch-db-sql-code-match-positions
+                   sql 0 nil "\\bfrom\\b\\|\\bgroup\\s-+by\\b")))
+    ;; Case-insensitive, and the literal occurrence is still reported.
+    (should (equal (sort (hash-table-keys matches) #'<)
+                   (list (string-match "FROM" sql)
+                         (string-match "from x" sql)
+                         (string-match "GROUP" sql))))
+    ;; Values are match ends, so callers can recover the matched text.
+    (should (equal (substring sql
+                              (string-match "GROUP" sql)
+                              (gethash (string-match "GROUP" sql) matches))
+                   "GROUP  BY")))
+  ;; END excludes a match that would extend past it, and START skips earlier
+  ;; matches entirely.
+  (let ((sql "FROM a FROM b"))
+    (should (equal (hash-table-keys
+                    (clutch-db-sql-code-match-positions sql 0 4 "\\bfrom\\b"))
+                   '(0)))
+    (should (equal (hash-table-keys
+                    (clutch-db-sql-code-match-positions sql 0 3 "\\bfrom\\b"))
+                   nil))
+    (should (equal (hash-table-keys
+                    (clutch-db-sql-code-match-positions sql 1 nil "\\bfrom\\b"))
+                   '(7)))))
+
 ;;;; SQL parsing — LIMIT detection and paging SQL
 
 (ert-deftest clutch-test-db-sql-has-top-level-limit-p ()
