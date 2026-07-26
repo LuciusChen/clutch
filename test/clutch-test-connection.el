@@ -1701,6 +1701,8 @@
               called)
           (puthash clutch-connection t clutch--tx-dirty-cache)
           (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) t))
                     ((symbol-function 'clutch-db-manual-commit-supported-p)
                      (lambda (_conn) t))
                     ((symbol-function 'clutch-db-manual-commit-p)
@@ -1711,6 +1713,76 @@
             (funcall command)
             (should called)
             (should-not (clutch--tx-dirty-p clutch-connection))))))))
+
+(ert-deftest clutch-test-transaction-commands-refuse-lost-transaction ()
+  "Commit and rollback must not report success after the session was replaced.
+A dead manual-commit session was already rolled back by the server, so a
+replacement connection would run the statement against an empty transaction."
+  (dolist (command '(clutch-commit clutch-rollback clutch-toggle-auto-commit))
+    (ert-info ((format "command: %s" command))
+      (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+            (clutch-connection 'dead-conn)
+            reconnected
+            rpc-called)
+        (puthash clutch-connection t clutch--tx-dirty-cache)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch--try-reconnect)
+                   (lambda () (setq reconnected t)))
+                  ((symbol-function 'clutch-db-manual-commit-supported-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-manual-commit-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-commit)
+                   (lambda (_conn) (setq rpc-called t)))
+                  ((symbol-function 'clutch-db-rollback)
+                   (lambda (_conn) (setq rpc-called t)))
+                  ((symbol-function 'clutch-db-set-auto-commit)
+                   (lambda (&rest _) (setq rpc-called t)))
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+          (should-error (funcall command) :type 'user-error)
+          (should-not rpc-called)
+          (should-not reconnected)
+          ;; The loss is reported once; the session is then clean so the next
+          ;; command reconnects normally.
+          (should-not (clutch--tx-dirty-p 'dead-conn)))))))
+
+(ert-deftest clutch-test-reconnect-reports-discarded-transaction ()
+  "Automatic reconnect should say that uncommitted changes were lost."
+  (let ((clutch--tx-dirty-cache (make-hash-table :test 'eq))
+        marked
+        messages)
+    (with-temp-buffer
+      (setq-local clutch-connection 'dead-conn
+                  clutch--connection-params '(:backend pg :host "db.internal")
+                  clutch--conn-sql-product 'pg)
+      (puthash 'dead-conn t clutch--tx-dirty-cache)
+      (cl-letf (((symbol-function 'clutch--build-conn)
+                 (lambda (_params) 'new-conn))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (eq conn 'new-conn)))
+                ((symbol-function 'clutch--release-connection-transport)
+                 #'ignore)
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 #'ignore)
+                ((symbol-function 'clutch--clear-reconnect-metadata-caches)
+                 #'ignore)
+                ((symbol-function 'clutch--rebind-connection-buffers) #'ignore)
+                ((symbol-function 'clutch--finalize-rebound-connection)
+                 #'ignore)
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "pg:db.internal"))
+                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                ((symbol-function 'clutch--mark-dml-results-rolled-back)
+                 (lambda (conn) (setq marked conn)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (should (clutch--try-reconnect))
+        (should (eq marked 'dead-conn))
+        (should-not (clutch--tx-dirty-p 'dead-conn))
+        (should (seq-find (lambda (m) (string-match-p "uncommitted" m))
+                          messages))))))
 
 (defun clutch-test--make-dml-result-buf (conn)
   "Create a temporary DML result buffer associated with CONN for testing."
@@ -1740,6 +1812,8 @@
                   ('rollback
                    (cl-letf (((symbol-function 'clutch--ensure-connection)
                               #'ignore)
+                             ((symbol-function 'clutch--connection-alive-p)
+                              (lambda (_conn) t))
                              ((symbol-function
                                'clutch-db-manual-commit-supported-p)
                               (lambda (_conn) t))
@@ -1752,6 +1826,8 @@
                   ('commit
                    (cl-letf (((symbol-function 'clutch--ensure-connection)
                               #'ignore)
+                             ((symbol-function 'clutch--connection-alive-p)
+                              (lambda (_conn) t))
                              ((symbol-function
                                'clutch-db-manual-commit-supported-p)
                               (lambda (_conn) t))
@@ -1805,6 +1881,8 @@
           (when dirty
             (puthash clutch-connection t clutch--tx-dirty-cache))
           (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) t))
                     ((symbol-function 'clutch-db-manual-commit-supported-p)
                      (lambda (_conn) supported))
                     ((symbol-function 'clutch-db-manual-commit-p)

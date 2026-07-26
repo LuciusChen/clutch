@@ -4113,6 +4113,21 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                      '(:sig "ABS(X)" :desc "Returns absolute value.")))
       (should (equal captured-sql "HELP 'ABS'")))))
 
+(ert-deftest clutch-db-test-mysql-symbol-help-escapes-symbol ()
+  "MySQL HELP lookup should escape the symbol instead of interpolating it."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "localhost"))
+        captured-sql)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-mysql-result :rows nil))))
+      (clutch-db-symbol-help conn "x' UNION SELECT 1 -- ")
+      (should (equal captured-sql
+                     (concat "HELP "
+                             (mysql-escape-literal "X' UNION SELECT 1 -- ")))))))
+
 (ert-deftest clutch-db-test-mysql-list-table-entries-carries-comments ()
   "MySQL table discovery should return comments with table entries."
   (require 'clutch-db-mysql)
@@ -4470,6 +4485,69 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (clutch-db-error
          (setq message (error-message-string err))))
       (should interrupted)
+      (should disconnected)
+      (should (string-match-p "timeout recovery failed" message)))))
+
+(ert-deftest clutch-db-test-mysql-execute-params-timeout-recovers-connection ()
+  "MySQL prepared execution timeout should run the same recovery as queries."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "test"))
+        (stmt 'fake-stmt)
+        interrupted
+        closed
+        disconnected
+        message)
+    (cl-letf (((symbol-function 'mysql-prepare)
+               (lambda (_conn _sql) stmt))
+              ((symbol-function 'mysql-execute)
+               (lambda (&rest _)
+                 (signal 'mysql-timeout
+                         '("Timed out waiting for 4 bytes"))))
+              ((symbol-function 'mysql-stmt-close)
+               (lambda (_stmt) (setq closed t)))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (should-not closed)
+                 (setq interrupted t)
+                 t))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (_conn) (setq disconnected t))))
+      (condition-case err
+          (clutch-db-execute-params conn "UPDATE t SET a = ?" '("v"))
+        (clutch-db-error
+         (setq message (error-message-string err))))
+      (should interrupted)
+      (should-not disconnected)
+      (should (string-match-p "restored MySQL connection" message)))))
+
+(ert-deftest clutch-db-test-mysql-execute-params-timeout-disconnects-when-recovery-fails ()
+  "MySQL prepared execution timeout should drop the session when recovery fails."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "test"))
+        disconnected
+        message)
+    (cl-letf (((symbol-function 'mysql-prepare)
+               (lambda (_conn _sql) 'fake-stmt))
+              ((symbol-function 'mysql-execute)
+               (lambda (&rest _)
+                 (signal 'mysql-timeout
+                         '("Timed out waiting for 4 bytes"))))
+              ((symbol-function 'mysql-stmt-close) #'ignore)
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (_conn) nil))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq disconnected t))))
+      (condition-case err
+          (clutch-db-execute-params conn "UPDATE t SET a = ?" '("v"))
+        (clutch-db-error
+         (setq message (error-message-string err))))
       (should disconnected)
       (should (string-match-p "timeout recovery failed" message)))))
 

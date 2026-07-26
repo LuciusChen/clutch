@@ -109,10 +109,12 @@ RECOVERED is non-nil when the MySQL wire connection was resynchronized."
               "; interrupted running query and restored MySQL connection"
             "; disconnected MySQL connection because timeout recovery failed")))
 
-(defun clutch-db-mysql--handle-query-timeout (conn err)
-  "Recover or close CONN after MySQL query timeout ERR, then signal error."
+(defun clutch-db-mysql--handle-query-timeout (conn err &optional stmt)
+  "Recover or close CONN after MySQL query timeout ERR, then signal error.
+STMT is released only once recovery has resynchronized the wire."
   (let ((recovered (clutch-db-interrupt-query conn)))
-    (unless recovered
+    (if recovered
+        (when stmt (ignore-errors (mysql-stmt-close stmt)))
       (ignore-errors (mysql-disconnect conn)))
     (signal 'clutch-db-error
             (list (clutch-db-mysql--timeout-error-message err recovered)))))
@@ -391,7 +393,9 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
   "Return MySQL HELP metadata for SYMBOL on CONN, or nil when unknown."
   (clutch-db--translate-library-error mysql-error
     (let* ((result (mysql-query
-                    conn (format "HELP '%s'" (upcase (format "%s" symbol)))))
+                    conn (format "HELP %s"
+                                 (mysql-escape-literal
+                                  (upcase (format "%s" symbol))))))
            (row (car (mysql-result-rows result)))
            (desc (nth 1 row)))
       (when (stringp desc)
@@ -399,9 +403,11 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
 
 (cl-defmethod clutch-db-execute-params ((conn mysql-conn) sql params)
   "Execute parameterized SQL on MySQL CONN with PARAMS."
-  (let (stmt result pending-error)
+  (let (stmt result pending-error timeout-error)
     (condition-case err
         (setq stmt (mysql-prepare conn sql))
+      (mysql-timeout
+       (setq timeout-error err))
       (mysql-error
        (setq pending-error err)))
     (when stmt
@@ -411,13 +417,20 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
                     (clutch-db-mysql--wrap-result
                      (apply #'mysql-execute
                             stmt (clutch-db-param-values params))))
+            (mysql-timeout
+             (setq timeout-error err))
             (mysql-error
              (setq pending-error err)))
-        (condition-case err
-            (mysql-stmt-close stmt)
-          (mysql-error
-           (unless pending-error
-             (setq pending-error err))))))
+        ;; A timed-out statement leaves its response on the wire; closing it
+        ;; here would desynchronize the session before recovery can drain it.
+        (unless timeout-error
+          (condition-case err
+              (mysql-stmt-close stmt)
+            (mysql-error
+             (unless pending-error
+               (setq pending-error err)))))))
+    (when timeout-error
+      (clutch-db-mysql--handle-query-timeout conn timeout-error stmt))
     (if pending-error
         (signal 'clutch-db-error
                 (list (error-message-string pending-error)))
