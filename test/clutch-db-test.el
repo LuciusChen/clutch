@@ -2171,6 +2171,28 @@ ObjectId would silently match nothing."
     (should (= (aref encoded 4) #x07))
     (should (equal (mongodb--decode-document-from-string encoded) filter))))
 
+(ert-deftest clutch-db-test-mongodb-display-renders-decoded-scalars ()
+  "Decoded wrapper structs must render as Extended JSON display text.
+mongodb.el decodes BSON scalars to structs; the result view spells them
+back out in Extended JSON instead of handing `json-encode' a record."
+  (require 'mongodb)
+  (let* ((doc (list (cons "_id" (mongodb-object-id
+                                 "65f1a2b3c4d5e6f708090a0b"))
+                    (cons "n" (/ 0.0 0.0))
+                    (cons "d" (mongodb-decimal128 "1.23"))
+                    (cons "w" (mongodb-datetime 1700000000000))
+                    (cons "arr" (vector (mongodb-min-key)))
+                    (cons "empty" (mongodb-document nil))))
+         (decoded (mongodb--decode-document-from-string
+                   (mongodb--encode-document doc)))
+         (text (clutch-mongodb--json-encode-text decoded)))
+    (should (string-match-p "\"\\$oid\":\"65f1a2b3c4d5e6f708090a0b\"" text))
+    (should (string-match-p "\"\\$numberDouble\":\"NaN\"" text))
+    (should (string-match-p "\"\\$numberDecimal\":\"1.23\"" text))
+    (should (string-match-p "\"\\$date\":1700000000000" text))
+    (should (string-match-p "\"\\$minKey\":1" text))
+    (should (string-match-p "\"empty\":{}" text))))
+
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
