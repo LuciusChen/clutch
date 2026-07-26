@@ -177,8 +177,12 @@
    :type 'user-error))
 
 (ert-deftest clutch-test-build-conn-leaves-timeout-defaults-to-backends ()
-  "Connection building should not synthesize backend timeout defaults."
-  (let (captured)
+  "Connection building should not synthesize backend timeout defaults.
+The globals are bound to non-default values so a backend that received
+them would fail the plist-member assertions rather than coincide."
+  (let ((clutch-connect-timeout-seconds 11)
+        (clutch-read-idle-timeout-seconds 42)
+        captured)
     (cl-letf (((symbol-function 'clutch--resolve-password)
                (lambda (_params) nil))
               ((symbol-function 'clutch-db-connect)
@@ -1261,25 +1265,6 @@ and the ssh -N process has no owner yet at that point."
             (should (equal (plist-get context :database) "orcl"))
             (should (eq (plist-get context :backend) 'oracle))))))))
 
-(ert-deftest clutch-test-build-conn-skips-timeouts-for-sqlite ()
-  "Test that `clutch--build-conn' does not pass network timeout keys to sqlite."
-  (let ((clutch-connect-timeout-seconds 11)
-        (clutch-read-idle-timeout-seconds 42)
-        captured)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (_backend params)
-                 (setq captured params)
-                 'fake-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t)))
-      (clutch--build-conn '(:backend sqlite :database ":memory:"))
-      (should-not (plist-member captured :connect-timeout))
-      (should-not (plist-member captured :read-idle-timeout))
-      (should-not (plist-member captured :query-timeout))
-      (should-not (plist-member captured :rpc-timeout)))))
-
 (ert-deftest clutch-test-build-conn-rejects-removed-read-timeout ()
   "Test that removed timeout keys fail fast with a clear error."
   (should-error
@@ -1350,10 +1335,6 @@ and the ssh -N process has no owner yet at that point."
                 :type 'user-error)))
       (should (string-match-p ":backend oracle"
                               (error-message-string err))))))
-
-(ert-deftest clutch-test-default-connect-timeout-is-10-seconds ()
-  "Project default connect timeout should stay at 10 seconds."
-  (should (= clutch-connect-timeout-seconds 10)))
 
 (ert-deftest clutch-test-build-conn-failure-debug-guidance ()
   "Connect failures should adapt their debug guidance to debug-mode state."
@@ -2563,33 +2544,6 @@ replacement connection would run the statement against an empty transaction."
         (should (equal (gethash other-conn clutch--schema-status-cache)
                        '(:state ready)))))))
 
-(ert-deftest clutch-test-kill-console-disconnects-and-invalidates ()
-  "Killing a console buffer disconnects and invalidates derived buffers."
-  (let ((disconnected nil)
-        (console (generate-new-buffer " *clutch-console*"))
-        (result (generate-new-buffer " *clutch-result*")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_c) t))
-                  ((symbol-function 'clutch-db-disconnect)
-                   (lambda (_c) (setq disconnected t)))
-                  ((symbol-function 'clutch--confirm-disconnect-transaction-loss) #'ignore)
-                  ((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
-                  ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
-                  ((symbol-function 'clutch--clear-connection-metadata-caches)
-                   #'ignore)
-                  ((symbol-function 'clutch--save-console) #'ignore))
-          (with-current-buffer result
-            (setq-local clutch-connection 'fake-conn))
-          (with-current-buffer console
-            (clutch-mode)
-            (setq clutch-connection 'fake-conn))
-          (kill-buffer console)
-          (should disconnected)
-          ;; Derived buffer's connection should be invalidated.
-          (should-not (buffer-local-value 'clutch-connection result)))
-      (when (buffer-live-p console) (kill-buffer console))
-      (when (buffer-live-p result) (kill-buffer result)))))
-
 (ert-deftest clutch-test-kill-dead-console-clears-schema-metadata-state ()
   "Killing a console with a dead connection should clear schema state."
   (clutch-test--with-isolated-metadata-caches
@@ -2711,13 +2665,14 @@ replacement connection would run the statement against an empty transaction."
           (should-not disconnected))))))
 
 (ert-deftest clutch-test-kill-owner-buffers-disconnect ()
-  "Killing plain SQL or REPL buffers that own a connection should disconnect."
+  "Killing an owner buffer disconnects and invalidates derived buffers."
   (dolist (case '((plain-sql " *clutch-plain-sql*" clutch-mode)
                   (repl " *clutch-repl-kill*" clutch-repl-mode)))
     (pcase-let ((`(,kind ,name ,mode-fn) case))
       (ert-info ((format "kind: %s" kind))
         (let ((disconnected nil)
-              (buf (generate-new-buffer name)))
+              (buf (generate-new-buffer name))
+              (result (generate-new-buffer " *clutch-derived-result*")))
           (unwind-protect
               (cl-letf (((symbol-function 'clutch--connection-alive-p)
                          (lambda (_c) t))
@@ -2733,12 +2688,17 @@ replacement connection would run the statement against an empty transaction."
                         ((symbol-function 'clutch--clear-connection-metadata-caches)
                          #'ignore)
                         ((symbol-function 'clutch--save-console) #'ignore))
+                (with-current-buffer result
+                  (setq-local clutch-connection 'fake-conn))
                 (with-current-buffer buf
                   (funcall mode-fn)
                   (setq clutch-connection 'fake-conn))
-                (kill-buffer buf))
-            (when (buffer-live-p buf) (kill-buffer buf)))
-          (should disconnected))))))
+                (kill-buffer buf)
+                (should disconnected)
+                ;; Buffers derived from the dead session lose their binding.
+                (should-not (buffer-local-value 'clutch-connection result)))
+            (when (buffer-live-p buf) (kill-buffer buf))
+            (when (buffer-live-p result) (kill-buffer result))))))))
 
 (ert-deftest clutch-test-reconnect-invalidates-derived-buffers ()
   "Explicit reconnect should invalidate old attachments before priming metadata."

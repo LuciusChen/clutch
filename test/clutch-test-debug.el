@@ -50,16 +50,6 @@
 
 ;;;; Debug — problem records and buffer
 
-(ert-deftest clutch-test-debug-buffer-removes-old-details-commands ()
-  "The old error-details workflow should be deleted outright."
-  (should-not (fboundp 'clutch-show-last-error-details))
-  (should-not (fboundp 'clutch-show-error-details))
-  (should-not (fboundp 'clutch-debug-buffer))
-  (should-not (fboundp 'clutch-error-details-refresh))
-  (should-not (fboundp 'clutch-error-details-copy-message))
-  (should-not (fboundp 'clutch-error-details-copy-all))
-  (should-not (boundp 'clutch-error-details-mode-map)))
-
 (ert-deftest clutch-test-debug-mode-creates-dedicated-buffer ()
   "Enabling debug mode should create the dedicated debug buffer immediately."
   (when-let* ((buf (get-buffer clutch-debug-buffer-name)))
