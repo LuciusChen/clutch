@@ -528,24 +528,51 @@ back to blank-line paragraph bounds."
 
 ;;;; SQL helpers (top-level clause detection)
 
+(defun clutch-db-sql-code-match-positions (sql start end regexp)
+  "Return a hash mapping REGEXP match positions in SQL to their match ends.
+Matching runs case-insensitively from START to END without interpreting SQL
+structure, so callers must still confirm each position is top-level code
+through `clutch-db-sql-scan-code'.  Collecting candidates in one pass keeps
+that confirmation linear; retrying REGEXP at every scanned position instead
+searches the remainder of SQL each time, which is quadratic."
+  (let ((case-fold-search t)
+        (limit (or end (length sql)))
+        (positions (make-hash-table :test 'eq))
+        (pos (or start 0)))
+    (while (and (< pos limit)
+                (string-match regexp sql pos)
+                (< (match-beginning 0) limit))
+      (when (<= (match-end 0) limit)
+        (puthash (match-beginning 0) (match-end 0) positions))
+      (setq pos (1+ (match-beginning 0))))
+    positions))
+
+(defun clutch-db-sql--clause-match-positions (sql start patterns)
+  "Return a hash mapping match position to pattern for PATTERNS in SQL.
+START is the initial search offset.  PATTERNS are case-insensitive regex
+fragments matched with word boundaries; earlier patterns win a position."
+  (let ((positions (make-hash-table :test 'eq)))
+    (dolist (pattern (reverse patterns))
+      (maphash (lambda (pos _end) (puthash pos pattern positions))
+               (clutch-db-sql-code-match-positions
+                sql start nil (format "\\b%s\\b" pattern))))
+    positions))
+
 (defun clutch-db-sql--top-level-clause-match (sql start patterns)
   "Return (POS . PATTERN) for the first top-level PATTERNS match in SQL.
 START is the initial search offset.  PATTERNS are case-insensitive regex
 fragments matched with word boundaries."
-  (let ((case-fold-search t)
-        (matchers (mapcar (lambda (pattern)
-                            (cons pattern (format "\\b%s\\b" pattern)))
-                          patterns)))
-    (clutch-db-sql-scan-code
-     sql start nil
-     (lambda (pos _ch depth)
-       (and (zerop depth)
-            (catch 'match
-              (dolist (matcher matchers)
-                (when (and (string-match (cdr matcher) sql pos)
-                           (= (match-beginning 0) pos))
-                  (throw 'match (cons pos (car matcher)))))
-              nil))))))
+  ;; Collect candidate positions in one pass per pattern, then walk the code
+  ;; once.  Testing each pattern at every scanned position instead searches
+  ;; the remainder of SQL per position, which is quadratic on long statements.
+  (let ((positions (clutch-db-sql--clause-match-positions sql start patterns)))
+    (unless (zerop (hash-table-count positions))
+      (clutch-db-sql-scan-code
+       sql start nil
+       (lambda (pos _ch depth)
+         (and (zerop depth)
+              (when-let* ((pattern (gethash pos positions)))
+                (cons pos pattern))))))))
 
 (defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)
   "Return start position of top-level PATTERN in SQL, or nil.
