@@ -157,7 +157,7 @@ These rules keep the package compatible with MELPA submission requirements (`pac
 - `clutch.el` is the package entry file.  It is the only file that should carry package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`, and `;; Author:`.
 - `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are documented but not listed.
 - Split implementation files must not carry `;; Package-Requires:` headers, but they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
-- Keep the MELPA checklist attribution in the main package file when AI tools materially assist the package: `;; Assisted-by: OpenAI Codex:gpt-5.5`
+- Keep the MELPA checklist attribution in the main package file when AI tools materially assist the package: `;; Assisted-by: OpenAI Codex:gpt-5.6-sol, Claude code:fable-5`
 - Last line: `;;; file.el ends here`
 
 ### Naming

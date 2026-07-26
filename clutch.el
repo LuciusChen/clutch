@@ -2,7 +2,7 @@
 ;; Copyright (C) 2025-2026 Lucius Chen
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: Lucius Chen <chenyh572@gmail.com>
-;; Assisted-by: OpenAI Codex:gpt-5.5
+;; Assisted-by: OpenAI Codex:gpt-5.6-sol, Claude code:fable-5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
 ;; Version: 0.2.4
 ;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
