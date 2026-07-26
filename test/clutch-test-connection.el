@@ -1714,6 +1714,64 @@
             (should called)
             (should-not (clutch--tx-dirty-p clutch-connection))))))))
 
+(ert-deftest clutch-test-session-teardown-step-matrix ()
+  "Each teardown kind should run exactly the steps it documents.
+The three session-end paths differ only in these steps, so a new step added
+to one caller instead of the shared transition shows up here."
+  (dolist (case '((disconnect clutch--do-disconnect
+                              (mark-closed invalidate clear-tx clear-metadata
+                               debug-event forget-problem disconnect release))
+                  (dead clutch--cleanup-dead-connection
+                        (mark-closed invalidate clear-tx clear-metadata
+                         forget-problem release))
+                  (preserve clutch--preserve-dead-connection-for-reconnect
+                            (mark-closed clear-tx clear-metadata release
+                             refresh-preserved))))
+    (pcase-let ((`(,kind ,command ,expected) case))
+      (ert-info ((format "kind: %s" kind))
+        (let ((clutch-debug-mode t)
+              steps)
+          (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed)
+                     (lambda (_conn) (push 'mark-closed steps)))
+                    ((symbol-function 'clutch--invalidate-derived-buffers)
+                     (lambda (_conn) (push 'invalidate steps)))
+                    ((symbol-function 'clutch--clear-tx-dirty)
+                     (lambda (_conn) (push 'clear-tx steps)))
+                    ((symbol-function 'clutch--clear-connection-metadata-caches)
+                     (lambda (_conn) (push 'clear-metadata steps)))
+                    ((symbol-function 'clutch--record-disconnect-debug-event)
+                     (lambda (_conn) (push 'debug-event steps)))
+                    ((symbol-function 'clutch--forget-problem-record)
+                     (lambda (_buf _conn) (push 'forget-problem steps)))
+                    ((symbol-function 'clutch-db-disconnect)
+                     (lambda (_conn) (push 'disconnect steps)))
+                    ((symbol-function 'clutch--release-connection-transport)
+                     (lambda (_conn) (push 'release steps)))
+                    ((symbol-function
+                      'clutch--refresh-preserved-connection-buffers)
+                     (lambda (_conn) (push 'refresh-preserved steps))))
+            (funcall command 'fake-conn)
+            (should (equal (nreverse steps) expected))))))))
+
+(ert-deftest clutch-test-session-teardown-releases-transport-when-close-fails ()
+  "A failing backend disconnect must still release the transport."
+  (let (released)
+    (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed)
+               #'ignore)
+              ((symbol-function 'clutch--invalidate-derived-buffers) #'ignore)
+              ((symbol-function 'clutch--clear-tx-dirty) #'ignore)
+              ((symbol-function 'clutch--clear-connection-metadata-caches)
+               #'ignore)
+              ((symbol-function 'clutch--record-disconnect-debug-event)
+               #'ignore)
+              ((symbol-function 'clutch--forget-problem-record) #'ignore)
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (signal 'clutch-db-error '("close failed"))))
+              ((symbol-function 'clutch--release-connection-transport)
+               (lambda (_conn) (setq released t))))
+      (should-error (clutch--do-disconnect 'fake-conn) :type 'clutch-db-error)
+      (should released))))
+
 (ert-deftest clutch-test-transaction-commands-refuse-lost-transaction ()
   "Commit and rollback must not report success after the session was replaced.
 A dead manual-commit session was already rolled back by the server, so a

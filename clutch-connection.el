@@ -2443,27 +2443,8 @@ Also refreshes their mode-line/header-line to reflect the disconnected state."
           (clutch--refresh-connection-render-state)
           (force-mode-line-update)))))))
 
-(defun clutch--clear-connection-client-state (conn)
-  "Clear Clutch-owned client state for CONN."
-  (clutch--mark-dml-results-connection-closed conn)
-  (clutch--invalidate-derived-buffers conn)
-  (clutch--clear-tx-dirty conn)
-  (clutch--clear-connection-metadata-caches conn))
-
-(defun clutch--cleanup-dead-connection (conn)
-  "Release Clutch-owned state for already closed CONN."
-  (clutch--clear-connection-client-state conn)
-  (clutch--forget-problem-record nil conn)
-  (clutch--release-connection-transport conn))
-
-(defun clutch--preserve-dead-connection-for-reconnect (conn)
-  "Release dead CONN state while preserving attached reconnect anchors.
-The backend has already closed CONN.  Keep buffer bindings and reconnect
-parameters so the next command can replace the logical session."
-  (clutch--mark-dml-results-connection-closed conn)
-  (clutch--clear-tx-dirty conn)
-  (clutch--clear-connection-metadata-caches conn)
-  (clutch--release-connection-transport conn)
+(defun clutch--refresh-preserved-connection-buffers (conn)
+  "Refresh chrome in buffers still bound to preserved dead CONN."
   (dolist (buffer (buffer-list))
     (when (and (buffer-live-p buffer)
                (eq (buffer-local-value 'clutch-connection buffer) conn))
@@ -2478,11 +2459,8 @@ parameters so the next command can replace the logical session."
          (t
           (force-mode-line-update)))))))
 
-(defun clutch--do-disconnect (conn)
-  "Perform full disconnect sequence for CONN.
-Marks DML results, invalidates derived buffers, clears transaction
-state, and disconnects the underlying connection."
-  (clutch--clear-connection-client-state conn)
+(defun clutch--record-disconnect-debug-event (conn)
+  "Record a debug trace entry for disconnecting CONN."
   (when clutch-debug-mode
     (clutch--remember-debug-event
      :connection conn
@@ -2491,11 +2469,60 @@ state, and disconnects the underlying connection."
      :backend (clutch--backend-key-from-conn conn)
      :summary (condition-case nil
                   (format "Disconnected from %s" (clutch--connection-key conn))
-                (error "Disconnected"))))
-  (clutch--forget-problem-record nil conn)
-  (unwind-protect
-      (clutch-db-disconnect conn)
-    (clutch--release-connection-transport conn)))
+                (error "Disconnected")))))
+
+(defun clutch--session-teardown (conn kind)
+  "Release Clutch-owned state for CONN, ending the session according to KIND.
+
+KIND selects how much of the logical session survives:
+
+  `disconnect'  close a live CONN and drop every anchor to it.
+  `dead'        the backend already closed CONN; drop every anchor to it.
+  `preserve'    the backend already closed CONN, but keep buffer bindings
+                and reconnect parameters so the next command can replace
+                the logical session in place.
+
+Every kind marks DML results, clears transaction state, drops metadata
+caches, and releases the transport.  The guarded steps below are the whole
+difference between the kinds, so a new teardown step has to say which kinds
+it belongs to instead of being added to one caller.
+
+Replacing a session is a different transition and does not come through
+here: `clutch--try-reconnect' and `clutch--replace-connection' move the
+attached buffers onto a new connection rather than ending the session."
+  (let ((keep-anchors (eq kind 'preserve))
+        (closing (eq kind 'disconnect)))
+    (clutch--mark-dml-results-connection-closed conn)
+    (unless keep-anchors
+      (clutch--invalidate-derived-buffers conn))
+    (clutch--clear-tx-dirty conn)
+    (clutch--clear-connection-metadata-caches conn)
+    (when closing
+      (clutch--record-disconnect-debug-event conn))
+    (unless keep-anchors
+      (clutch--forget-problem-record nil conn))
+    (unwind-protect
+        (when closing
+          (clutch-db-disconnect conn))
+      (clutch--release-connection-transport conn))
+    (when keep-anchors
+      (clutch--refresh-preserved-connection-buffers conn))))
+
+(defun clutch--cleanup-dead-connection (conn)
+  "Release Clutch-owned state for already closed CONN."
+  (clutch--session-teardown conn 'dead))
+
+(defun clutch--preserve-dead-connection-for-reconnect (conn)
+  "Release dead CONN state while preserving attached reconnect anchors.
+The backend has already closed CONN.  Keep buffer bindings and reconnect
+parameters so the next command can replace the logical session."
+  (clutch--session-teardown conn 'preserve))
+
+(defun clutch--do-disconnect (conn)
+  "Perform full disconnect sequence for CONN.
+Marks DML results, invalidates derived buffers, clears transaction
+state, and disconnects the underlying connection."
+  (clutch--session-teardown conn 'disconnect))
 
 (defun clutch--disconnect-on-kill ()
   "Disconnect the connection owned by this buffer.
