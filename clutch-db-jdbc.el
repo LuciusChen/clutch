@@ -558,10 +558,12 @@ Defaults to 8 lines.  Return nil when stderr is empty."
           (nconc (nreverse remaining) clutch-jdbc--response-queue))
     response))
 
-(defun clutch-jdbc--recv-response (id &optional timeout-seconds op)
+(defun clutch-jdbc--recv-response (id &optional timeout-seconds op conn)
   "Wait for and return the response with matching ID as a plist.
 TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'.
-OP, when non-nil, names the RPC for context-sensitive timeout errors."
+OP, when non-nil, names the RPC for context-sensitive timeout errors.
+CONN, when non-nil, is the connection the request ran on; a timeout with
+a live agent then condemns only that connection instead of the process."
   (let ((deadline (+ (float-time)
                      (or timeout-seconds clutch-jdbc-rpc-timeout-seconds)))
         response
@@ -595,20 +597,34 @@ OP, when non-nil, names the RPC for context-sensitive timeout errors."
       (signal 'clutch-db-error
               (list (plist-get response :error))))
     (unless response
-      ;; The agent is likely blocked on a dead JDBC call.  Kill the process so
-      ;; it does not remain wedged — subsequent requests would otherwise pile up
-      ;; behind the stuck op and all fail with "Closed Connection".
-      (when (process-live-p clutch-jdbc--agent-process)
-        (delete-process clutch-jdbc--agent-process))
-      (clutch-jdbc--clear-async-callbacks)
-      (clutch-jdbc--clear-request-state)
-      (setq clutch-jdbc--agent-process nil
-            clutch-jdbc--response-queue nil)
-      (signal 'clutch-db-error
-              (list (or failure-message
-                        (if (equal op "connect")
-                            "Connection attempt timed out or JDBC agent became unresponsive"
-                          "Connection lost — reconnect with C-c C-e")))))
+      (if (and (clutch-jdbc-conn-p conn)
+               (not failure-message)
+               (process-live-p clutch-jdbc--agent-process))
+          ;; One request went silent but the agent process is alive.  The
+          ;; agent serves requests on a thread pool, so a stuck JDBC call
+          ;; wedges only the session it ran on; killing the process would
+          ;; also destroy every other connection's sessions and any open
+          ;; transactions.  Condemn the owning connection alone.
+          (progn
+            (puthash id t clutch-jdbc--ignored-response-ids)
+            (clutch-jdbc--release-stuck-connection conn)
+            (signal 'clutch-db-error
+                    (list "Connection lost — reconnect with C-c C-e")))
+        ;; The agent process died, or the silent request has no owning
+        ;; connection (startup handshake, connect), so there is nothing
+        ;; narrower to reset than the process and every registration
+        ;; hanging off it.
+        (when (process-live-p clutch-jdbc--agent-process)
+          (delete-process clutch-jdbc--agent-process))
+        (clutch-jdbc--clear-async-callbacks)
+        (clutch-jdbc--clear-request-state)
+        (setq clutch-jdbc--agent-process nil
+              clutch-jdbc--response-queue nil)
+        (signal 'clutch-db-error
+                (list (or failure-message
+                          (if (equal op "connect")
+                              "Connection attempt timed out or JDBC agent became unresponsive"
+                            "Connection lost — reconnect with C-c C-e"))))))
     response))
 
 (defun clutch-jdbc--recv-response-nonfatal (id timeout-seconds)
@@ -655,7 +671,7 @@ TIMEOUT-SECONDS overrides the default wait time.  Signals
          (id (clutch-jdbc--send op params))
          (timeout (or timeout-seconds
                       (and conn (clutch-jdbc--conn-rpc-timeout conn))))
-         (response (clutch-jdbc--recv-response id timeout op)))
+         (response (clutch-jdbc--recv-response id timeout op conn)))
     (clutch-jdbc--response-result-or-signal conn op response)))
 
 (defun clutch-jdbc--rpc-error-message (op response)
@@ -706,6 +722,17 @@ disconnect request.  Preserve connection-scoped diagnostics for the caller."
     (remhash (clutch-jdbc-conn-conn-id conn)
              clutch-jdbc--connections-by-id)))
 
+(defun clutch-jdbc--release-stuck-connection (conn)
+  "Retire CONN after a request on it went silent, asking the agent to drop it.
+The disconnect is sent without waiting, since the stuck session may hold
+its agent thread for a while; the reply, if any, is ignored."
+  (clutch-jdbc--retire-invalidated-connection conn)
+  (when (clutch-jdbc--agent-live-p)
+    (puthash (clutch-jdbc--send
+              "disconnect"
+              `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))
+             t clutch-jdbc--ignored-response-ids)))
+
 (defun clutch-jdbc--response-result-or-signal (conn op response)
   "Return RESPONSE's result or signal `clutch-db-error' for OP.
 When CONN is non-nil, remember structured diagnostics on the connection."
@@ -746,7 +773,7 @@ When CONN is non-nil, remember structured diagnostics on the connection."
     (unwind-protect
         (condition-case nil
             (progn
-              (setq response (clutch-jdbc--recv-response id timeout-seconds op))
+              (setq response (clutch-jdbc--recv-response id timeout-seconds op conn))
               (clutch-jdbc--response-result-or-signal conn op response))
           (quit
            (setq clear-request-id nil)

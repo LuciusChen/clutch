@@ -6447,6 +6447,45 @@ It does so without touching the agent process."
         (should-not (gethash 77 clutch-jdbc--async-callbacks))
         (should (equal cancelled '(fake-timer)))))))
 
+(ert-deftest clutch-db-test-jdbc-recv-response-timeout-spares-other-connections ()
+  "A silent request with a live agent condemns only its own connection.
+The agent handles requests on a thread pool, so one stuck JDBC call says
+nothing about other connections' sessions; killing the process would also
+destroy their open transactions -- Oracle sessions default to manual
+commit, so that loss is silent data loss."
+  (let (deleted sent)
+    (cl-letf (((symbol-function 'process-live-p)
+               (lambda (p) (eq p 'fake-proc)))
+              ((symbol-function 'delete-process)
+               (lambda (p) (setq deleted p)))
+              ((symbol-function 'accept-process-output) (lambda (_p _s) nil))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (op params) (setq sent (cons op params)) 99)))
+      (let* ((clutch-jdbc--agent-process 'fake-proc)
+             (clutch-jdbc--response-queue nil)
+             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+             (stuck (make-clutch-jdbc-conn :process 'fake-proc :conn-id 1))
+             (bystander (make-clutch-jdbc-conn :process 'fake-proc :conn-id 2)))
+        (puthash 1 stuck clutch-jdbc--connections-by-id)
+        (puthash 2 bystander clutch-jdbc--connections-by-id)
+        (should-error (clutch-jdbc--recv-response 41 0.0 "execute" stuck)
+                      :type 'clutch-db-error)
+        ;; The agent survives; the stuck connection is retired, the
+        ;; bystander keeps its registration.
+        (should-not deleted)
+        (should (eq clutch-jdbc--agent-process 'fake-proc))
+        (should-not (gethash 1 clutch-jdbc--connections-by-id))
+        (should (eq (gethash 2 clutch-jdbc--connections-by-id) bystander))
+        ;; The silent request's late reply is dropped, and the agent was
+        ;; asked to release the stuck logical connection without waiting.
+        (should (gethash 41 clutch-jdbc--ignored-response-ids))
+        (should (equal (car sent) "disconnect"))
+        (should (eql (alist-get 'conn-id (cdr sent)) 1))
+        (should (gethash 99 clutch-jdbc--ignored-response-ids))))))
+
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-error-messages ()
   "Timeout errors should distinguish dead agents, lost sessions, and connects."
   (dolist (case
@@ -6553,7 +6592,7 @@ It does so without touching the agent process."
     (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 71))
               ((symbol-function 'clutch-jdbc--recv-response)
-               (lambda (_id timeout &optional _op)
+               (lambda (_id timeout &optional _op _conn)
                  (setq captured-timeout timeout)
                  '(:ok t :result (:columns nil)))))
       (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")))
