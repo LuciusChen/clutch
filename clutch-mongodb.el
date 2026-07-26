@@ -1079,6 +1079,12 @@ CHAIN contains parsed cursor helper calls, when present."
    ((mongodb-document-p value) "object")
    ((clutch-mongodb--alist-p value) "object")
    ((listp value) "array")
+   ((mongodb-object-id-p value) "objectId")
+   ((mongodb-datetime-p value) "date")
+   ((mongodb-timestamp-p value) "timestamp")
+   ((mongodb-decimal128-p value) "decimal")
+   ((mongodb-binary-p value) "binData")
+   ((mongodb-regex-p value) "regex")
    (t "value")))
 
 (defun clutch-mongodb--field-type-category (values)
@@ -1100,12 +1106,54 @@ CHAIN contains parsed cursor helper calls, when present."
    ((clutch-mongodb--scalar-p value) value)
    (t (clutch-mongodb--json-encode-text value))))
 
+(defun clutch-mongodb--bson-scalar-json (value)
+  "Return the Extended JSON alist for BSON scalar wrapper VALUE, or nil.
+mongodb.el decodes non-scalar BSON types to wrapper structs; results
+display them in their Extended JSON spelling."
+  (cond
+   ((mongodb-object-id-p value)
+    `(("$oid" . ,(mongodb-object-id-hex value))))
+   ((mongodb-datetime-p value)
+    `(("$date" . ,(mongodb-datetime-millis value))))
+   ((mongodb-timestamp-p value)
+    `(("$timestamp" . (("t" . ,(mongodb-timestamp-seconds value))
+                       ("i" . ,(mongodb-timestamp-increment value))))))
+   ((mongodb-decimal128-p value)
+    `(("$numberDecimal" . ,(mongodb-decimal128-value value))))
+   ((mongodb-binary-p value)
+    `(("$binary" . (("subType" . ,(format "%02x"
+                                          (mongodb-binary-subtype value)))
+                    ("bytes" . ,(base64-encode-string
+                                 (mongodb-binary-data value) t))))))
+   ((mongodb-regex-p value)
+    `(("$regularExpression" . (("pattern" . ,(mongodb-regex-pattern value))
+                               ("options" . ,(or (mongodb-regex-options value)
+                                                 ""))))))
+   ((mongodb-code-p value)
+    (if (mongodb-code-scope value)
+        `(("$code" . ,(mongodb-code-code value))
+          ("$scope" . ,(mongodb-code-scope value)))
+      `(("$code" . ,(mongodb-code-code value)))))
+   ((mongodb-symbol-p value)
+    `(("$symbol" . ,(mongodb-symbol-value value))))
+   ((mongodb-db-pointer-p value)
+    `(("$dbPointer" . (("$ref" . ,(mongodb-db-pointer-namespace value))
+                       ("$id" . ,(mongodb-db-pointer-object-id value))))))
+   ((mongodb-undefined-p value) '(("$undefined" . t)))
+   ((mongodb-min-key-p value) '(("$minKey" . 1)))
+   ((mongodb-max-key-p value) '(("$maxKey" . 1)))))
+
 (defun clutch-mongodb--json-encodable (value)
   "Return VALUE recursively normalized for `json-encode'."
   (cond
    ((eq value :false) json-false)
    ((mongodb-document-p value)
-    (clutch-mongodb--json-encodable (mongodb-document-elements value)))
+    (let ((elements (mongodb-document-elements value)))
+      (if elements
+          (clutch-mongodb--json-encodable elements)
+        ;; nil would render as null and a list as []; an empty hash
+        ;; table is the one value `json-encode' prints as {}.
+        (make-hash-table :test 'equal))))
    ((clutch-mongodb--alist-p value)
     (mapcar (lambda (pair)
               (cons (car pair)
@@ -1115,6 +1163,17 @@ CHAIN contains parsed cursor helper calls, when present."
     (vconcat (mapcar #'clutch-mongodb--json-encodable (append value nil))))
    ((listp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable value)))
+   ((mongodb-int32-p value) (mongodb-int32-value value))
+   ((mongodb-int64-p value) (mongodb-int64-value value))
+   ((and (floatp value) (isnan value))
+    '(("$numberDouble" . "NaN")))
+   ((and (floatp value) (= value 1.0e+INF))
+    '(("$numberDouble" . "Infinity")))
+   ((and (floatp value) (= value -1.0e+INF))
+    '(("$numberDouble" . "-Infinity")))
+   ((clutch-mongodb--bson-scalar-json value)
+    (clutch-mongodb--json-encodable
+     (clutch-mongodb--bson-scalar-json value)))
    (t value)))
 
 (defun clutch-mongodb--json-encode-text (value)
