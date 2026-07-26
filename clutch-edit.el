@@ -977,7 +977,8 @@ the parameter list."
                sql params
                (lambda (param)
                  (clutch-db-value-to-literal
-                  clutch-connection param #'clutch--format-value)))))
+                  clutch-connection param #'clutch--format-value))
+               (clutch-db-connection-sql-dialect clutch-connection))))
           statements))
 
 (defun clutch--row-identity-where-parts (conn row-identity values)

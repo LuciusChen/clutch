@@ -387,6 +387,29 @@
           (kill-buffer buf))))))
 
 
+;;;; REPL — input completeness
+
+(ert-deftest clutch-test-console-repl-input-completeness ()
+  "REPL input executes only when a top-level semicolon ends it.
+A semicolon inside an open string literal used to execute the fragment
+before it, sending half a statement with an unterminated literal."
+  (with-temp-buffer
+    (should (clutch-repl--input-complete-p "SELECT 1;"))
+    (should (clutch-repl--input-complete-p "SELECT 'a;b';  \n"))
+    (should-not (clutch-repl--input-complete-p "SELECT 1"))
+    (should-not (clutch-repl--input-complete-p
+                 "INSERT INTO t VALUES ('line one;"))
+    ;; Trailing text after the semicolon keeps accumulating; execution
+    ;; splits multi-statement input only once it is complete.
+    (should-not (clutch-repl--input-complete-p "SELECT 1; SELECT 2"))
+    (should (clutch-repl--input-complete-p "SELECT 1; SELECT 2;"))
+    ;; An open parenthesis means the statement cannot be complete yet.
+    (should-not (clutch-repl--input-complete-p "SELECT f(1;"))
+    ;; The connection's dialect decides where a literal ends.
+    (setq-local clutch--conn-sql-product 'mysql)
+    (should-not (clutch-repl--input-complete-p "SELECT 'it\\';"))
+    (should (clutch-repl--input-complete-p "SELECT 'it\\'s';"))))
+
 (provide 'clutch-test-console)
 
 ;;; clutch-test-console.el ends here

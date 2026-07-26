@@ -1244,7 +1244,7 @@ Return a plist with :message, :summary, and :display-summary."
   "Return non-nil when the current buffer has a top-level semicolon."
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
     (consp (clutch-db-sql-statement-breaks
-            text (clutch-db-sql-dialect clutch--conn-sql-product)))))
+            text (clutch--buffer-sql-dialect)))))
 
 (defun clutch--preview-sql-buffer (sql &optional product)
   "Display SQL in the *clutch-preview* buffer using SQL PRODUCT."
@@ -1293,7 +1293,7 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (bounds (clutch-db-sql-semicolon-statement-bounds-at-offset
-                  text offset t (clutch-db-sql-dialect clutch--conn-sql-product))))
+                  text offset t (clutch--buffer-sql-dialect))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
@@ -1348,7 +1348,7 @@ product is `postgres'."
                            (and base-position (+ base-position tend)))
                      stmts)))))
       (dolist (break (clutch-db-sql-statement-breaks
-                      sql (clutch-db-sql-dialect clutch--conn-sql-product)))
+                      sql (clutch--buffer-sql-dialect)))
         (emit break)
         (setq start (1+ break)))
       (emit len))
@@ -1644,13 +1644,24 @@ When CONTINUATION is non-nil, return the continuation prompt."
   (clutch-repl--ensure-process)
   (comint-send-input))
 
+(defun clutch-repl--input-complete-p (input)
+  "Return non-nil when INPUT ends with a top-level statement terminator.
+The trailing semicolon must sit outside string literals and comments under
+the connection's dialect, and outside parentheses, so a line ending inside
+an open literal keeps accumulating instead of executing a fragment."
+  (let ((end (string-match ";[ \t\r\n]*\\'" input)))
+    (and end
+         (memq end (clutch-db-sql-statement-breaks
+                    input (clutch--buffer-sql-dialect)))
+         t)))
+
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
-Accumulates input until a semicolon is found, then executes."
+Accumulates input until a top-level semicolon ends it, then executes."
   (let ((combined (concat clutch-repl--pending-input
                           (unless (string-empty-p clutch-repl--pending-input) "\n")
                           input)))
-    (if (string-match-p ";\\s-*$" combined)
+    (if (clutch-repl--input-complete-p combined)
         (progn
           (setq clutch-repl--pending-input "")
           (clutch-repl--execute-and-print (string-trim combined)))

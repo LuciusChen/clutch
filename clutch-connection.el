@@ -611,6 +611,13 @@ pre-rendered text."
                  return (list (buffer-local-value 'clutch--connection-params buf)
                               (buffer-local-value 'clutch--conn-sql-product buf))))))
 
+(defun clutch--buffer-sql-dialect ()
+  "Return the `clutch-db-sql-dialect' rules for the current buffer.
+Prefers the connection's backend rules, which also cover engines that have
+no `sql-mode' product, and falls back to the buffer's recorded product."
+  (or (clutch-db-connection-sql-dialect clutch-connection)
+      (clutch-db-sql-dialect clutch--conn-sql-product)))
+
 (defun clutch--bind-connection-context (conn &optional params product)
   "Bind CONN and related reconnect context in the current buffer.
 Also store PARAMS and PRODUCT when present."

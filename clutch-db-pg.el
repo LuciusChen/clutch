@@ -477,26 +477,24 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
        (signal 'clutch-db-error
                (list (error-message-string err)))))))
 
-(defun clutch-db-pg--rewrite-param-sql (sql)
-  "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form."
-  (let ((len (length sql))
-        (pos 0)
-        (index 1)
-        parts)
-    (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
-          (progn
-            (push (substring sql pos skip) parts)
-            (setq pos skip))
-        (let ((ch (aref sql pos)))
-          (if (= ch ??)
-              (progn
-                (push (format "$%d" index) parts)
-                (cl-incf index)
-                (cl-incf pos))
-            (push (string ch) parts)
-            (cl-incf pos)))))
-    (apply #'concat (nreverse parts))))
+(defun clutch-db-pg--rewrite-param-sql (sql &optional param-count)
+  "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form.
+`clutch-db-sql-map-placeholders' decides which question marks are
+placeholders, so jsonb's `?|' / `?&' operators pass through and `??'
+writes the bare `?' operator.  When PARAM-COUNT is non-nil, signal
+`clutch-db-error' if the placeholder count differs from it, since a bare
+`?' meant as an operator would otherwise bind parameters to the wrong
+positions."
+  (pcase-let ((`(,rewritten . ,count)
+               (clutch-db-sql-map-placeholders
+                sql (lambda (index) (format "$%d" (1+ index)))
+                (clutch-db-sql-dialect 'postgres))))
+    (when (and param-count (/= count param-count))
+      (signal 'clutch-db-error
+              (list (format
+                     "SQL has %d `?' placeholders but %d parameters; write `??' for the jsonb operator"
+                     count param-count))))
+    rewritten))
 
 (defun clutch-db-pg--array-type-name-p (type)
   "Return non-nil when PostgreSQL TYPE names an array type."
@@ -796,7 +794,7 @@ manual-commit mode via lazy BEGIN."
   (clutch-db-pg--run-query-with-transaction-state
    conn sql
    (lambda ()
-     (let* ((pg-sql (clutch-db-pg--rewrite-param-sql sql))
+     (let* ((pg-sql (clutch-db-pg--rewrite-param-sql sql (length params)))
             (typed-arguments (clutch-db-pg--typed-arguments params))
             (result (if (cl-some
                          (lambda (param)

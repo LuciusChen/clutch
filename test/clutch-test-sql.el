@@ -652,6 +652,49 @@ ORDER BY id"
      #'number-to-string)
     "SELECT \"?\", `?`, [?], 42")))
 
+(ert-deftest clutch-test-substitute-params-honors-dialect-literals ()
+  "Substitution must read literals with the backend's dialect.
+Without the dialect a MySQL escaped quote ends the literal early, so the
+rest of the statement is scanned as if it were still inside a string and
+the real placeholders are missed."
+  (let ((sql "INSERT INTO t VALUES ('a\\'b', ?, ?)"))
+    (should
+     (equal
+      (clutch-db-substitute-params
+       sql '(1 2) #'number-to-string (clutch-db-sql-dialect 'mysql))
+      "INSERT INTO t VALUES ('a\\'b', 1, 2)"))
+    ;; Standard rules misread the literal and find no placeholders, which
+    ;; surfaces as the existing count error rather than silent misbinding.
+    (should-error
+     (clutch-db-substitute-params sql '(1 2) #'number-to-string)
+     :type 'clutch-db-error)))
+
+(ert-deftest clutch-test-map-placeholders-spares-question-mark-operators ()
+  "`??' escapes a literal question mark; `?|' / `?&' pass through."
+  (pcase-let ((`(,sql . ,count)
+               (clutch-db-sql-map-placeholders
+                "SELECT ?, '?', d ?| x, d ?& y, d ?? 'k', $$?$$, ?"
+                (lambda (index) (format "<%d>" index))
+                (clutch-db-sql-dialect 'postgres))))
+    (should (= count 2))
+    (should (equal sql
+                   "SELECT <0>, '?', d ?| x, d ?& y, d ? 'k', $$?$$, <1>"))))
+
+(ert-deftest clutch-test-mask-blanks-dollar-quoted-bodies ()
+  "Masking with a dollar-quote dialect must blank dollar-quoted bodies.
+Keywords inside a function body are literal text, not clauses."
+  (let* ((sql "SELECT $$WHERE 'x;$$ FROM t")
+         (masked (clutch-db-sql-mask-literal-or-comment
+                  sql (clutch-db-sql-dialect 'postgres))))
+    (should (= (length masked) (length sql)))
+    (should-not (string-match-p "WHERE" masked))
+    (should (string-match-p "FROM t" masked)))
+  ;; Without the dialect the body's quote still opens a literal, so the
+  ;; masked text differs but stays the same length.
+  (should (= (length (clutch-db-sql-mask-literal-or-comment
+                      "SELECT $$WHERE 'x;$$ FROM t"))
+             (length "SELECT $$WHERE 'x;$$ FROM t"))))
+
 (ert-deftest clutch-test-mask-literal-or-comment ()
   "Mask string literals and comments but preserve identifiers."
   (let ((masked (clutch-db-sql-mask-literal-or-comment
