@@ -2521,10 +2521,14 @@ KIND selects how much of the logical session survives:
                 and reconnect parameters so the next command can replace
                 the logical session in place.
 
-Every kind marks DML results, clears transaction state, drops metadata
-caches, and releases the transport.  The guarded steps below are the whole
-difference between the kinds, so a new teardown step has to say which kinds
-it belongs to instead of being added to one caller.
+Every kind marks DML results, drops metadata caches, and releases the
+transport.  Transaction dirty state is cleared only when the anchors go
+too: for `preserve' it is the evidence that the server rolled back an
+open transaction, and `clutch--lost-transaction-p' reads it to refuse a
+commit on a replacement session and to report the loss on reconnect.
+The guarded steps below are the whole difference between the kinds, so a
+new teardown step has to say which kinds it belongs to instead of being
+added to one caller.
 
 Replacing a session is a different transition and does not come through
 here: `clutch--try-reconnect' and `clutch--replace-connection' move the
@@ -2533,8 +2537,8 @@ attached buffers onto a new connection rather than ending the session."
         (closing (eq kind 'disconnect)))
     (clutch--mark-dml-results-connection-closed conn)
     (unless keep-anchors
-      (clutch--invalidate-derived-buffers conn))
-    (clutch--clear-tx-dirty conn)
+      (clutch--invalidate-derived-buffers conn)
+      (clutch--clear-tx-dirty conn))
     (clutch--clear-connection-metadata-caches conn)
     (when closing
       (clutch--record-disconnect-debug-event conn))
