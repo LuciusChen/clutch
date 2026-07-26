@@ -189,21 +189,28 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
                   :data-model relational
                   :update-default t
                   :sql-product db2))
+    ;; Snowflake and ClickHouse have no `sql-mode' product, and Redshift's
+    ;; PostgreSQL 8.0 lineage predates standard_conforming_strings, so all
+    ;; three read a backslash as an escape and support dollar-quoted bodies.
+    ;; Their `:sql-dialect' entries state that directly.
     (snowflake  . (:display-name "Snowflake"
                   :default-port 443
                   :support-level basic
                   :data-model relational
-                  :update-default t))
+                  :update-default t
+                  :sql-dialect (:backslash-escapes t :dollar-quotes t)))
     (redshift   . (:display-name "Redshift"
                   :default-port 5439
                   :support-level basic
                   :data-model relational
                   :update-default t
-                  :sql-product postgres))
+                  :sql-product postgres
+                  :sql-dialect (:backslash-escapes t :dollar-quotes t)))
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
                   :support-level basic
-                  :data-model relational)))
+                  :data-model relational
+                  :sql-dialect (:backslash-escapes t :dollar-quotes t))))
   "Metadata for JDBC-backed concrete drivers.")
 
 (defconst clutch-jdbc--oracle-driver-filenames
@@ -1682,11 +1689,13 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
           keywordp)
       cached)))
 
-(defconst clutch-jdbc--backslash-escape-drivers '(clickhouse snowflake)
+(defconst clutch-jdbc--backslash-escape-drivers '(clickhouse redshift snowflake)
   "JDBC drivers whose string literals read a backslash as an escape.
 Doubling the quote alone leaves a trailing backslash escaping the closing
-quote on these engines.  Drivers absent from this list keep backslash
-literal, where doubling it would store a character the user never typed.")
+quote on these engines.  Redshift is here because its PostgreSQL 8.0
+lineage predates standard_conforming_strings, so escape processing is
+always on.  Drivers absent from this list keep backslash literal, where
+doubling it would store a character the user never typed.")
 
 (cl-defmethod clutch-db-escape-literal ((conn clutch-jdbc-conn) value)
   "Escape VALUE as a SQL string literal for CONN.

@@ -88,7 +88,8 @@
                   "clutch-db-pg" (row pk-cols fks))
 (declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns &optional conn))
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
-(declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg" (sql))
+(declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg"
+                  (sql &optional param-count))
 (declare-function clutch-db-pg--typed-arguments "clutch-db-pg" (params))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
@@ -321,6 +322,24 @@ authinfo, and PARAMS are explicit connection parameters."
   (should (equal (clutch-db-pg--rewrite-param-sql
                   "SELECT \"?\", ?")
                  "SELECT \"?\", $1")))
+
+(ert-deftest clutch-db-test-pg-param-rewrite-spares-jsonb-operators ()
+  "PostgreSQL rewriting must leave jsonb operators and dollar bodies alone.
+A rewritten operator shifts every later parameter to the wrong position,
+and a `?' inside a dollar-quoted function body is part of the body."
+  (require 'clutch-db-pg)
+  (should (equal (clutch-db-pg--rewrite-param-sql
+                  "SELECT * FROM t WHERE d ?| x AND d ?& y AND d ?? 'k' AND id = ?"
+                  1)
+                 "SELECT * FROM t WHERE d ?| x AND d ?& y AND d ? 'k' AND id = $1"))
+  (should (equal (clutch-db-pg--rewrite-param-sql
+                  "CREATE FUNCTION f() AS $body$ SELECT '?'; $body$ WHERE a = ? OR b IN (?, ?)"
+                  3)
+                 "CREATE FUNCTION f() AS $body$ SELECT '?'; $body$ WHERE a = $1 OR b IN ($2, $3)"))
+  ;; A bare `?' meant as the jsonb operator makes the counts disagree, which
+  ;; must fail loudly instead of binding parameters to the wrong slots.
+  (should-error (clutch-db-pg--rewrite-param-sql "SELECT d ? 'k' FROM t" 0)
+                :type 'clutch-db-error))
 
 (ert-deftest clutch-db-test-normalize-connect-params-rejects-removed-read-timeout ()
   "Removed connection timeout aliases should fail before reaching adapters."
@@ -7001,6 +7020,9 @@ otherwise close the literal early."
   (require 'clutch-db-jdbc)
   (dolist (case '((clickhouse "a\\'; DROP TABLE t --" "'a\\\\''; DROP TABLE t --'")
                   (snowflake "a\\" "'a\\\\'")
+                  ;; Redshift's PostgreSQL 8.0 lineage always processes
+                  ;; backslash escapes.
+                  (redshift "a\\" "'a\\\\'")
                   ;; Oracle keeps backslash literal, so doubling it would
                   ;; store a character the user never typed.
                   (oracle "a\\" "'a\\'")
@@ -7009,6 +7031,22 @@ otherwise close the literal early."
       (ert-info ((format "driver: %s value: %S" driver value))
         (let ((conn (make-clutch-jdbc-conn :driver driver)))
           (should (equal (clutch-db-escape-literal conn value) expected)))))))
+
+(ert-deftest clutch-db-test-jdbc-driver-dialects-follow-engine-lexing ()
+  "Engines that read backslash escapes must parse statements the same way.
+Snowflake and ClickHouse have no `sql-mode' product, and Redshift's product
+maps to modern PostgreSQL rules, so each registers explicit dialect rules;
+without them statement splitting ends a literal at an escaped quote and
+sends the fragment before an embedded semicolon as a whole statement."
+  (require 'clutch-db-jdbc)
+  (dolist (driver '(clickhouse redshift snowflake))
+    (ert-info ((format "driver: %s" driver))
+      (let ((conn (make-clutch-jdbc-conn :driver driver)))
+        (should (equal (clutch-db-connection-sql-dialect conn)
+                       '(:backslash-escapes t :dollar-quotes t))))))
+  ;; Oracle stays on its product-derived rules, which claim nothing.
+  (should-not (clutch-db-connection-sql-dialect
+               (make-clutch-jdbc-conn :driver 'oracle))))
 
 (ert-deftest clutch-db-test-sqlite-select-routing-tolerates-comments-and-syntax ()
   "SQLite row-yielding detection must survive comments and the caller's syntax.

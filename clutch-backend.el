@@ -298,10 +298,17 @@ symbol as registered by `clutch-backend-sql-product'."
     (_ nil)))
 
 (defun clutch-db-connection-sql-dialect (conn)
-  "Return the `clutch-db-sql-dialect' rules for CONN, or nil."
+  "Return the `clutch-db-sql-dialect' rules for CONN, or nil.
+A backend registering explicit `:sql-dialect' rules wins; everything else
+derives its rules from the registered `sql-mode' product.  The override
+serves engines whose lexical rules have no product equivalent, such as
+ClickHouse and Snowflake, or differ from their product's, such as
+Redshift."
   (when conn
-    (clutch-db-sql-dialect
-     (clutch-backend-sql-product (clutch-db-backend-key conn)))))
+    (let ((backend (clutch-db-backend-key conn)))
+      (or (plist-get (clutch-backend-feature backend) :sql-dialect)
+          (clutch-db-sql-dialect
+           (clutch-backend-sql-product backend))))))
 
 (defun clutch-db-sql-skip-literal-or-comment (sql pos &optional identifiers dialect)
   "If POS in SQL is at a string literal or comment, return position past it.
@@ -310,11 +317,14 @@ Handles single-quoted strings (with `''' escape), -- line comments, and
 backtick-quoted, and bracket-quoted identifiers, including doubled closing
 delimiter escapes.  DIALECT is a `clutch-db-sql-dialect' plist; its
 `:backslash-escapes' rule additionally treats a backslash as escaping the
-next character inside a literal.  Returns nil when POS is at normal code."
+next character inside a literal, and its `:dollar-quotes' rule skips
+dollar-quoted bodies.  Returns nil when POS is at normal code."
   (let ((len (length sql))
         (backslash (plist-get dialect :backslash-escapes))
         (ch (and (< pos (length sql)) (aref sql pos))))
     (cond
+     ((and (eq ch ?$) (plist-get dialect :dollar-quotes))
+      (clutch-db-sql--skip-dollar-quote sql pos))
      ((let ((delimiter
              (cond
               ((eq ch ?\') ?\')
@@ -417,6 +427,43 @@ a literal ends.  Safe for multibyte strings (avoids `aset')."
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
+(defun clutch-db-sql-map-placeholders (sql fn &optional dialect)
+  "Replace each `?' placeholder in SQL with FN's result.
+FN receives the zero-based placeholder ordinal and returns the replacement
+string.  `??' collapses to a literal question mark and `?|' / `?&' pass
+through untouched, so operators that spell themselves with a question mark
+are not taken for placeholders.  Literals, comments, and (per DIALECT)
+dollar-quoted bodies are copied verbatim.  Returns a cons of the rewritten
+string and the number of placeholders replaced."
+  (let ((len (length sql))
+        (pos 0)
+        (count 0)
+        (copy-from 0)
+        parts)
+    (cl-flet ((emit (upto next)
+                (push (substring sql copy-from upto) parts)
+                (setq copy-from next pos next)))
+      (while (< pos len)
+        (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
+                         sql pos t dialect)))
+            (setq pos skip)
+          (let ((ch (aref sql pos))
+                (next (and (< (1+ pos) len) (aref sql (1+ pos)))))
+            (cond
+             ((not (eq ch ??))
+              (cl-incf pos))
+             ((eq next ??)
+              ;; Escaped literal question mark: emit one of the pair.
+              (emit (1+ pos) (+ pos 2)))
+             ((memq next '(?| ?&))
+              (setq pos (+ pos 2)))
+             (t
+              (emit pos (1+ pos))
+              (push (funcall fn count) parts)
+              (cl-incf count))))))
+      (emit len len))
+    (cons (apply #'concat (nreverse parts)) count)))
+
 (defun clutch-db-sql-scan-code (sql start end fn &optional dialect)
   "Scan SQL code characters from START to END, skipping strings/comments.
 FN is called with (POS CHAR DEPTH), where DEPTH is the parenthesis depth before
@@ -428,10 +475,8 @@ decide where literals end."
         (depth 0)
         result)
     (while (and (< pos end) (not result))
-      (if-let* ((skip (or (and (plist-get dialect :dollar-quotes)
-                               (clutch-db-sql--skip-dollar-quote sql pos))
-                          (clutch-db-sql-skip-literal-or-comment
-                           sql pos t dialect))))
+      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
+                       sql pos t dialect)))
           (setq pos (min skip end))
         (let ((ch (aref sql pos)))
           (setq result (funcall fn pos ch depth))
@@ -1074,7 +1119,8 @@ Substitute PARAMS into SQL before calling `clutch-db-query'."
    (clutch-db-substitute-params sql params
                                 (lambda (param)
                                   (clutch-db-value-to-literal
-                                   conn param)))))
+                                   conn param))
+                                (clutch-db-connection-sql-dialect conn))))
 
 (cl-defgeneric clutch-db-interrupt-query (conn)
   "Interrupt the current query on CONN.
@@ -1201,34 +1247,28 @@ FALLBACK-FORMAT-FN formats non-scalar result values before string escaping."
         (clutch-db-value-to-typed-literal conn value type fallback-format-fn)
       (clutch-db--basic-value-to-literal conn value fallback-format-fn))))
 
-(defun clutch-db-substitute-params (sql params render-fn)
+(defun clutch-db-substitute-params (sql params render-fn &optional dialect)
   "Return SQL with PARAMS substituted using RENDER-FN.
-SQL uses `?' positional placeholders.  PARAMS is a list of parameter values.
-RENDER-FN is called once per parameter and must return the replacement string."
-  (let ((len (length sql))
-        (pos 0)
-        (remaining params)
-        parts)
-    (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
-          (progn
-            (push (substring sql pos skip) parts)
-            (setq pos skip))
-        (let ((ch (aref sql pos)))
-          (if (= ch ??)
-              (progn
-                (unless remaining
-                  (signal 'clutch-db-error
-                          (list (format "Not enough parameters for SQL template: %s" sql))))
-                (push (funcall render-fn (car remaining)) parts)
-                (setq remaining (cdr remaining))
-                (cl-incf pos))
-            (push (string ch) parts)
-            (cl-incf pos)))))
+SQL uses `?' positional placeholders; `clutch-db-sql-map-placeholders'
+decides which question marks are placeholders.  PARAMS is a list of
+parameter values.  RENDER-FN is called once per parameter and must return
+the replacement string.  DIALECT is a `clutch-db-sql-dialect' plist
+deciding where literals end."
+  (let* ((remaining params)
+         (rendered
+          (clutch-db-sql-map-placeholders
+           sql
+           (lambda (_index)
+             (unless remaining
+               (signal 'clutch-db-error
+                       (list (format "Not enough parameters for SQL template: %s" sql))))
+             (prog1 (funcall render-fn (car remaining))
+               (setq remaining (cdr remaining))))
+           dialect)))
     (when remaining
       (signal 'clutch-db-error
               (list (format "Too many parameters for SQL template: %s" sql))))
-    (apply #'concat (nreverse parts))))
+    (car rendered)))
 
 ;; Schema
 
