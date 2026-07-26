@@ -567,6 +567,17 @@ pre-rendered text."
     (clutch--record-tx-state-after-query conn sql)
     result))
 
+(defun clutch--discard-lost-transaction (conn)
+  "Record that CONN died before its open transaction was committed."
+  (clutch--mark-dml-results-rolled-back conn)
+  (clutch--clear-tx-dirty conn))
+
+(defun clutch--lost-transaction-p (conn)
+  "Return non-nil when CONN died while holding uncommitted DML."
+  (and conn
+       (clutch--tx-dirty-p conn)
+       (not (clutch--connection-alive-p conn))))
+
 (defun clutch--confirm-disconnect-transaction-loss (conn prompt)
   "Require confirmation with PROMPT before dropping dirty manual-commit CONN."
   (when (and (clutch-db-manual-commit-p conn)
@@ -679,15 +690,21 @@ Connection failures propagate to the calling command."
               (context (clutch--connection-context old-conn))
               (params (car context))
               (product (cadr context)))
-    (let ((conn (clutch--build-conn params)))
-      (clutch--clear-tx-dirty old-conn)
+    (let ((conn (clutch--build-conn params))
+          (lost-transaction (clutch--tx-dirty-p old-conn)))
+      (if lost-transaction
+          (clutch--discard-lost-transaction old-conn)
+        (clutch--clear-tx-dirty old-conn))
       (clutch--release-connection-transport old-conn)
       (clutch--require-live-connection conn)
       (clutch--clear-connection-problem-capture old-conn)
       (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--rebind-connection-buffers old-conn conn params product)
       (clutch--finalize-rebound-connection conn)
-      (message "Reconnected to %s" (clutch--connection-key conn))
+      (if lost-transaction
+          (message "Reconnected to %s; uncommitted changes were lost"
+                   (clutch--connection-key conn))
+        (message "Reconnected to %s" (clutch--connection-key conn)))
       t)))
 
 (defun clutch--replace-connection (old-conn params &optional product)
@@ -2496,11 +2513,22 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
 
 ;;;; Transaction commands
 
+(defun clutch--ensure-transaction-connection ()
+  "Ensure a live connection for a transaction command.
+Refuse to reconnect when the session died holding uncommitted DML: the
+server already rolled that transaction back, so running the statement on a
+replacement connection would report success for changes that were lost."
+  (when (clutch--lost-transaction-p clutch-connection)
+    (clutch--discard-lost-transaction clutch-connection)
+    (user-error
+     "Connection dropped with an open transaction; uncommitted changes were lost"))
+  (clutch--ensure-connection))
+
 ;;;###autoload
 (defun clutch-commit ()
   "Commit the current transaction."
   (interactive)
-  (clutch--ensure-connection)
+  (clutch--ensure-transaction-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
@@ -2514,7 +2542,7 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
 (defun clutch-rollback ()
   "Roll back the current transaction."
   (interactive)
-  (clutch--ensure-connection)
+  (clutch--ensure-transaction-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (unless (clutch-db-manual-commit-p clutch-connection)
@@ -2530,7 +2558,7 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
 When switching from manual-commit to auto-commit, the backend finishes
 any open transaction according to its own semantics."
   (interactive)
-  (clutch--ensure-connection)
+  (clutch--ensure-transaction-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
