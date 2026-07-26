@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.16"
+(defcustom clutch-jdbc-agent-version "0.2.17"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "43cca03a539c5df1591afba5149c6aa466db0fc70d77add564d8d193bd325f9e"
+  "53b7554352cfcdb6bf9d959e421bc64d4305735fc3d35796b22dae7963302131"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -724,12 +724,16 @@ disconnect request.  Preserve connection-scoped diagnostics for the caller."
 
 (defun clutch-jdbc--release-stuck-connection (conn)
   "Retire CONN after a request on it went silent, asking the agent to drop it.
-The disconnect is sent without waiting, since the stuck session may hold
-its agent thread for a while; the reply, if any, is ignored."
+The release uses force-disconnect, which bypasses the connection's locks
+in the agent: the ordinary disconnect queues behind them, so the very
+call that went silent would block the release forever and pin an agent
+thread.  The request is sent without waiting and its reply, if any, is
+ignored.  An older agent answers with an unknown-op error, which lands
+in the ignored table the same way."
   (clutch-jdbc--retire-invalidated-connection conn)
   (when (clutch-jdbc--agent-live-p)
     (puthash (clutch-jdbc--send
-              "disconnect"
+              "force-disconnect"
               `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))
              t clutch-jdbc--ignored-response-ids)))
 
