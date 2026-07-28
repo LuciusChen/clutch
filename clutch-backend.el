@@ -845,12 +845,17 @@ relations return nil."
   (clutch-db-sql-starts-with-keyword-p
    sql '("CREATE" "ALTER" "DROP" "TRUNCATE" "RENAME")))
 
-(defun clutch-db-sql-select-query-p (sql)
-  "Return non-nil for SQL that yields a result set."
-  (or (clutch-db-sql-starts-with-keyword-p
-       sql '("SELECT" "DESCRIBE" "DESC" "SHOW" "EXPLAIN"))
+(defun clutch-db-sql-pageable-query-p (sql)
+  "Return non-nil when SQL is a SELECT that accepts a pagination tail."
+  (or (clutch-db-sql-starts-with-keyword-p sql '("SELECT"))
       (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
            (equal (clutch-db-sql-main-op-keyword sql) "SELECT"))))
+
+(defun clutch-db-sql-select-query-p (sql)
+  "Return non-nil for SQL that yields a result set."
+  (or (clutch-db-sql-pageable-query-p sql)
+      (clutch-db-sql-starts-with-keyword-p
+       sql '("DESCRIBE" "DESC" "SHOW" "EXPLAIN"))))
 
 (defun clutch-db-sql-strip-top-level-order-by (sql)
   "Strip a top-level ORDER BY tail from SQL.

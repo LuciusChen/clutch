@@ -6362,6 +6362,46 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Execute — query execution and error handling
 
+(ert-deftest clutch-test-execute-only-paginates-select-statements ()
+  "Result-set commands must not inherit SELECT pagination rewrites."
+  (dolist (case
+           '(("SELECT * FROM users" t)
+             ("-- rows\nWITH active AS (SELECT * FROM users) SELECT * FROM active" t)
+             ("SHOW INDEX FROM users WHERE Key_name = 'users_name_key'" nil)
+             ("DESCRIBE users" nil)
+             ("DESC users" nil)
+             ("EXPLAIN SELECT * FROM users" nil)
+             ("PRAGMA table_info(users)" nil)
+             ("VALUES (1)" nil)
+             ("INSERT INTO users (name) VALUES ('Ada') RETURNING id" nil)
+             ("CALL list_users()" nil)))
+    (pcase-let ((`(,sql ,pageable) case))
+      (ert-info ((format "sql: %s" sql))
+        (let (executed-sql identity-prepared)
+          (cl-letf (((symbol-function 'clutch--prepare-row-identity-query)
+                     (lambda (_connection statement)
+                       (setq identity-prepared t)
+                       (list :sql statement)))
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_connection statement _page-num _page-size
+                              &optional _order-by _page-offset)
+                       (concat statement " /* paged */")))
+                    ((symbol-function 'clutch--run-db-query)
+                     (lambda (_connection statement)
+                       (setq executed-sql statement)
+                       (make-clutch-db-result
+                        :columns '((:name "value"))
+                        :rows '((1))))))
+            (let ((outcome
+                   (clutch--execute-statement-attempt sql 'fake-conn t)))
+              (should (plist-get outcome :result-query-p))
+              (should (eq (plist-get outcome :server-pageable) pageable))
+              (should (eq (and identity-prepared t) pageable))
+              (should (equal executed-sql
+                             (if pageable
+                                 (concat sql " /* paged */")
+                               sql))))))))))
+
 (ert-deftest clutch-test-result-filter-page-count-export-real-sqlite-workflow ()
   "Public result commands preserve one filtered SQLite workflow end to end."
   (skip-unless (sqlite-available-p))
