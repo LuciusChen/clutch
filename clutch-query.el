@@ -975,13 +975,16 @@ connection and signal `clutch-query-interrupted'."
              (row-identity-prep
               (and prepare-result-p
                    (or (plist-get result-context :row-identity-prep)
-                       (clutch--prepare-row-identity-query connection sql))))
+                       (and (clutch-db-sql-pageable-query-p sql)
+                            (clutch--prepare-row-identity-query
+                             connection sql)))))
              (identity-sql (or (plist-get row-identity-prep :sql) sql))
              (server-pageable
               (and prepare-result-p
                    (if (plist-member result-context :server-pageable)
                        (plist-get result-context :server-pageable)
-                     (not (clutch--sql-has-page-tail-p identity-sql)))))
+                     (and (clutch-db-sql-pageable-query-p identity-sql)
+                          (not (clutch--sql-has-page-tail-p identity-sql))))))
              (execution-sql
               (if server-pageable
                   (clutch-db-build-paged-sql
