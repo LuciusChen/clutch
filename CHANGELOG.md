@@ -23,6 +23,10 @@
 - **Explicit DEFAULT cell editing:** Single-cell edit buffers now show `Set NULL` only for nullable columns and `Set DEFAULT` only for columns and backends that support it.  DEFAULT remains staged SQL syntax rather than a bound string, and displays as `<default>` with the NULL placeholder face.
 - Added backend-owned namespace switching through the shared `clutch-switch-schema` entrypoint: file-backed DuckDB can switch schemas within its current catalog, MongoDB enumerates visible databases through `mongodb.el`, and ClickHouse keeps reconnect-based database switching without leaking its mechanics into the command layer.
 
+### Documentation
+
+- Replaced the root `README.org` with GitHub-flavored `README.md`, moved the built-in SQLite Quick Start to the top, rewrote capability and installation sections around user outcomes, added README authoring guardrails, and updated active repository references to the new path.
+
 ### Fixed
 
 - Converged the three end-of-session paths on one teardown transition, so closing a live connection, releasing an already dead one, and preserving one for reconnect no longer each spell out their own step sequence. The differences between them are now guarded lines in a single function with a test asserting each kind's steps, which is how a step added to one path but forgotten in another gets caught.

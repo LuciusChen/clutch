@@ -2,7 +2,7 @@
 
 This document describes the wire protocol and runtime model used by `clutch-db-jdbc.el` and [`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent).
 
-It is intentionally narrower than the user-facing JDBC section in `README.org`. `README.org` explains how to install and use the JDBC backend; this file documents how the Elisp side and JVM sidecar talk to each other.
+It is intentionally narrower than the user-facing JDBC section in `README.md`. `README.md` explains how to install and use the JDBC backend; this file documents how the Elisp side and JVM sidecar talk to each other.
 
 ## Runtime model
 
@@ -256,7 +256,7 @@ If `clutch-jdbc-agent-java-executable` or `JAVA_HOME` points to an older Java, t
 
 ## Relationship to README
 
-Use `README.org` for:
+Use `README.md` for:
 
 - installation
 - driver setup

@@ -135,7 +135,7 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
                         :rpc-timeout 15))))
 #+end_src
 
-JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.org::*Password Management][Password Management]] for details.
+JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.md#password-management][Password Management]] for details.
 
 ** DuckDB-specific Notes
 
