@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Let Emacs redisplay enforce graphical result-grid widths with the Emacs 29 `min-width` display property. Left-aligned cells use it directly; numeric cells, centered headers, sort icons, and partial header-scroll padding use minimum-width carriers. Display-aware measurement settles trailing `min-width` regions before reading their pixel width, improving alignment for custom displayers, font fallback, icons, and other propertized content while retaining logical padding for navigation, horizontal scrolling, and terminals.
+- Kept graphical result grids aligned across Emacs redisplay versions. Emacs 30 and later use `min-width` for result-body values, improving mixed-glyph and custom-display alignment; Emacs 29 uses explicit pixel padding because its redisplay does not enforce those widths reliably. Headers use explicit pixel padding on every version because zero-width `min-width` carriers are ignored in header lines. Both paths retain the same logical widths for navigation, horizontal scrolling, and terminals.
 
 ## 0.3.0 - 2026-07-28
 
