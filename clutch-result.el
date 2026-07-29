@@ -3105,6 +3105,31 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
                (transient-arg-value "--no-header" args))))
     (clutch--export-result kind destination omit-header)))
 
+(defun clutch-result--export-tsv ()
+  "Export all result rows as TSV using the active Transient options."
+  (interactive)
+  (clutch-result--export-kind 'tsv))
+
+(defun clutch-result--export-csv ()
+  "Export all result rows as CSV using the active Transient options."
+  (interactive)
+  (clutch-result--export-kind 'csv))
+
+(defun clutch-result--export-insert ()
+  "Export all result rows as INSERT SQL using the active Transient options."
+  (interactive)
+  (clutch-result--export-kind 'insert))
+
+(defun clutch-result--export-update ()
+  "Export all result rows as UPDATE SQL using the active Transient options."
+  (interactive)
+  (clutch-result--export-kind 'update))
+
+(defun clutch-result--export-document-insert-many ()
+  "Export all rows as a document insert-many helper."
+  (interactive)
+  (clutch-result--export-kind 'document-insert-many))
+
 ;;;###autoload (autoload 'clutch-result-export "clutch-result" nil t)
 (transient-define-prefix clutch-result-export ()
   "Export all rows from the current result.
@@ -3121,24 +3146,17 @@ to Clipboard; switch it to File before choosing an export format."
     :format " %k %d %v")]
   ["Export as"
    :pad-keys t
-   ("t" "TSV"
-    (lambda () (interactive) (clutch-result--export-kind 'tsv)))
-   ("c" "CSV"
-    (lambda () (interactive) (clutch-result--export-kind 'csv)))
-   ("i" "INSERT SQL"
-    (lambda () (interactive) (clutch-result--export-kind 'insert))
+   ("t" "TSV"        clutch-result--export-tsv)
+   ("c" "CSV"        clutch-result--export-csv)
+   ("i" "INSERT SQL" clutch-result--export-insert
     :if (lambda () (clutch-result--export-kind-available-p 'insert)))
-   ("u" "UPDATE SQL"
-    (lambda () (interactive) (clutch-result--export-kind 'update))
+   ("u" "UPDATE SQL" clutch-result--export-update
     :if (lambda () (clutch-result--export-kind-available-p 'update)))]
   ["Document helper"
    :pad-keys t
    :if (lambda ()
          (clutch-result--export-kind-available-p 'document-insert-many))
-   ("M" "Insert many"
-    (lambda ()
-      (interactive)
-      (clutch-result--export-kind 'document-insert-many)))])
+   ("M" "Insert many" clutch-result--export-document-insert-many)])
 
 (defun clutch--export-delimited-content (rows delimiter &optional omit-header)
   "Return export text for ROWS separated by DELIMITER.
