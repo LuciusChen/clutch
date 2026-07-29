@@ -1,5 +1,7 @@
 # 173 - Redisplay-Owned Minimum Result Cell Widths
 
+> Superseded in part by [postmortem 174](174-min-width-redisplay-version-boundary.md): graphical Emacs 29 needs explicit pixel padding, and header lines cannot use the zero-width `min-width` carrier.
+
 ## Context
 
 Postmortem 121 separated logical result-grid widths from graphical pixel widths. Clutch measured visible content with `string-pixel-width`, then represented the remaining width by stretching one padding character and hiding the other logical padding characters. That aligned mixed-font grids, but fixed-width `space` display specifications made Clutch reproduce a decision Emacs redisplay already owns: how much visual space remains after every face, fallback glyph, composition, and `display` specification has taken effect.
