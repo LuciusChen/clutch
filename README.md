@@ -44,7 +44,7 @@ For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Deta
 - **Inspect wide or structured results:** navigate a single-page table, scroll horizontally, open record and full-value views, and preview truncated JSON, XML, text, or BLOB values.
 - **Edit supported SQL results with guardrails:** stage inserts, updates, and deletes locally, inspect the execution preview, and commit only after validation and confirmation.
 - **Navigate with database context:** complete scoped tables and columns, inspect Eldoc and object definitions, follow foreign keys, and reuse cache-first metadata without blocking point motion.
-- **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side fuzzy filtering, page horizontally, and copy or export CSV, TSV, Org tables, SQL mutations, or native document helpers.
+- **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side fuzzy filtering, copy selections as TSV, CSV, or Org tables, and export complete pageable results as CSV or TSV with consistent Transient controls for optional headers and clipboard/file destinations.
 - **See connection state where it matters:** keep separate query consoles, reconnect from preserved parameters, and view schema-refresh, transaction, timeout, and diagnostic state in the relevant buffers.
 - **Choose the backend path you need:** use native or pure-Elisp integrations when available, or the Java 17+ [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent) for JDBC databases.
 
@@ -401,7 +401,7 @@ Org-Babel integration lives in the separate [ob-clutch](https://github.com/Luciu
 
 ### Timeouts, Interrupts, and Customization
 
-Timeouts can be configured globally or per connection, and long-running queries can be interrupted with `C-g`. Backend-specific cancel behavior, debug workflow, result displayers, schema warmup, CSV encoding, and completion customization are documented in [Query Timeout and Interrupt](docs/interactive-client.org#query-timeout-and-interrupt).
+Timeouts can be configured globally or per connection, and long-running queries can be interrupted with `C-g`. Backend-specific cancel behavior, debug workflow, result displayers, schema warmup, CSV/TSV encoding, and completion customization are documented in [Query Timeout and Interrupt](docs/interactive-client.org#query-timeout-and-interrupt).
 
 ## Testing
 

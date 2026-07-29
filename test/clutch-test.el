@@ -79,6 +79,14 @@
 (defvar clutch-test-props nil
   "JDBC connection properties for live tests.")
 
+(defun clutch-test--transient-suffix-for-key (prefix key)
+  "Return the suffix under PREFIX bound to KEY."
+  (cl-find-if
+   (lambda (suffix)
+     (and (slot-boundp suffix 'key)
+          (equal (oref suffix key) key)))
+   (transient-suffixes prefix)))
+
 (require 'clutch-test-sql)
 (require 'clutch-test-console)
 (require 'clutch-test-object)
@@ -4934,21 +4942,32 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-export-command-writes-selected-format-content ()
   "Export command should write the chosen format through the real export path."
-  (dolist (case '(("csv-copy" clipboard "id,name\n1,\"a,b\"\n")
-                  ("csv-file" file "id,name\n1,\"a,b\"\n")
-                  ("insert-copy" clipboard
-                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n")
-                  ("insert-file" file
-                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n")
-                  ("update-copy" clipboard
-                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n")
-                  ("update-file" file
-                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n")))
-    (pcase-let ((`(,choice ,target ,expected) case))
-      (ert-info ((format "export choice: %s" choice))
+  (dolist (case '(("c" nil clipboard "id,name\n1,\"a,b\"\n" nil)
+                  ("c" ("--no-header") clipboard "1,\"a,b\"\n" nil)
+                  ("c" ("--file") file "id,name\n1,\"a,b\"\n" "CSV")
+                  ("t" nil clipboard "id\tname\n1\ta,b\n" nil)
+                  ("t" ("--no-header") clipboard "1\ta,b\n" nil)
+                  ("t" ("--file") file "id\tname\n1\ta,b\n" "TSV")
+                  ("i" nil clipboard
+                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
+                   nil)
+                  ("i" ("--file") file
+                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
+                   nil)
+                  ("u" nil clipboard
+                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
+                   nil)
+                  ("u" ("--file") file
+                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
+                   nil)))
+    (pcase-let ((`(,key ,args ,target ,expected ,expected-coding-label) case))
+      (ert-info ((format "export key: %s, args: %S" key args))
         (let ((path (make-temp-file "clutch-export-"))
               (kill-ring nil)
-              (kill-ring-yank-pointer nil))
+              (kill-ring-yank-pointer nil)
+              (write-region-function (symbol-function 'write-region))
+              coding-label
+              written-coding)
           (unwind-protect
               (clutch-test--with-result-state
                   (:columns '("id" "name")
@@ -4960,37 +4979,73 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                    :row-identity
                    (clutch-test--primary-row-identity
                     "users" '("id") '(0)))
-                (cl-letf (((symbol-function 'completing-read)
-                           (lambda (prompt choices &rest _args)
-                             (cond
-                              ((string-prefix-p "Export format:" prompt)
-                               (should (member choice choices))
-                               choice)
-                              ((string-prefix-p "CSV encoding" prompt)
-                               "utf-8")
-                              (t
-                               (ert-fail (format "Unexpected prompt: %s" prompt))))))
-                          ((symbol-function 'read-file-name)
-                           (lambda (&rest _args) path))
-                          ((symbol-function 'clutch-result--collect-all-export-rows)
-                           (lambda () '((1 "a,b"))))
-                          ((symbol-function 'clutch--ensure-column-details)
-                           (lambda (_conn _table &optional _strict)
-                             (list (list :name "id")
-                                   (list :name "name"))))
-                          ((symbol-function 'clutch-db-escape-identifier)
-                           (lambda (_conn s) (format "\"%s\"" s)))
-                          ((symbol-function 'clutch-db-escape-literal)
-                           (lambda (_conn s) (format "'%s'" s))))
-                  (clutch-result-export)
-                  (should
-                   (equal (if (eq target 'clipboard)
-                              (current-kill 0)
-                            (with-temp-buffer
-                              (insert-file-contents path)
-                              (buffer-string)))
-                          expected))))
+                (let ((suffix
+                       (clutch-test--transient-suffix-for-key
+                        'clutch-result-export key)))
+                  (should suffix)
+                  (cl-letf (((symbol-function 'transient-args)
+                             (lambda (_prefix) args))
+                            ((symbol-function 'completing-read)
+                             (lambda (prompt choices &rest _args)
+                               (if (string-match
+                                    "\\`\\(CSV\\|TSV\\) encoding" prompt)
+                                   (progn
+                                     (should (member "utf-8" choices))
+                                     (setq coding-label
+                                           (match-string 1 prompt))
+                                     "utf-8")
+                                 (ert-fail
+                                  (format "Unexpected prompt: %s" prompt)))))
+                            ((symbol-function 'read-file-name)
+                             (lambda (&rest _args) path))
+                            ((symbol-function 'write-region)
+                             (lambda (&rest write-args)
+                               (setq written-coding coding-system-for-write)
+                               (apply write-region-function write-args)))
+                            ((symbol-function 'clutch-result--collect-all-export-rows)
+                             (lambda () '((1 "a,b"))))
+                            ((symbol-function 'clutch--ensure-column-details)
+                             (lambda (_conn _table &optional _strict)
+                               (list (list :name "id")
+                                     (list :name "name"))))
+                            ((symbol-function 'clutch-db-escape-identifier)
+                             (lambda (_conn s) (format "\"%s\"" s)))
+                            ((symbol-function 'clutch-db-escape-literal)
+                             (lambda (_conn s) (format "'%s'" s))))
+                    (funcall (oref suffix command))
+                    (should (equal coding-label expected-coding-label))
+                    (when expected-coding-label
+                      (should (eq written-coding 'utf-8)))
+                    (should
+                     (equal (if (eq target 'clipboard)
+                                (current-kill 0)
+                              (with-temp-buffer
+                                (insert-file-contents path)
+                                (buffer-string)))
+                            expected)))))
             (ignore-errors (delete-file path))))))))
+
+(ert-deftest clutch-test-export-transient-shares-copy-option-model ()
+  "Export should expose Header and Destination before choosing a format."
+  (let* ((header
+          (clutch-test--transient-suffix-for-key 'clutch-result-export "-h"))
+         (destination
+          (clutch-test--transient-suffix-for-key 'clutch-result-export "-f"))
+         (header-display (and header (transient-format-value header)))
+         (destination-display
+          (and destination (transient-format-value destination))))
+    (should header)
+    (should destination)
+    (should (equal (substring-no-properties header-display) "(No|Yes)"))
+    (should (eq (get-text-property (string-match "Yes" header-display)
+                                  'face header-display)
+                'transient-value))
+    (should (equal (substring-no-properties destination-display)
+                   "(Clipboard|File)"))
+    (should (eq (get-text-property
+                 (string-match "Clipboard" destination-display)
+                 'face destination-display)
+                'transient-value))))
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
@@ -5001,7 +5056,25 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (string-match-p "^id,\"display,name\"\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
       (should (string-match-p "2,\"x\"\"y\"" csv))
-      (should (string-match-p "3,\"x\ry\"" csv)))))
+      (should (string-match-p "3,\"x\ry\"" csv)))
+    (should (equal (clutch--export-csv-content '((1 "a,b")) t)
+                   "1,\"a,b\"\n"))))
+
+(ert-deftest clutch-test-tsv-content-includes-header-and-escapes-fields ()
+  "TSV content should preserve its tabular shape around special characters."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "display\tname"))
+    (should
+     (equal (clutch--export-tsv-content
+             '((1 "a,b") (2 "x\ty") (3 "x\"y") (4 "x\ny")))
+            (concat
+             "id\t\"display\tname\"\n"
+             "1\ta,b\n"
+             "2\t\"x\ty\"\n"
+             "3\t\"x\"\"y\"\n"
+             "4\t\"x\ny\"\n")))
+    (should (equal (clutch--export-tsv-content '((1 "a,b")) t)
+                   "1\ta,b\n"))))
 
 (ert-deftest clutch-test-insert-content-builds-full-row-sql ()
   :tags '(:smoke)
@@ -5051,43 +5124,45 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-result-export-formats-follow-result-surface ()
   "Export choices should match SQL, document, and key/value result surfaces."
-  (dolist (case '((document
-                   ("csv-copy" "csv-file"
-                    "document-insert-many-copy"
-                    "document-insert-many-file"))
-                  (sql
-                   ("csv-copy" "csv-file"
-                    "insert-copy" "insert-file"
-                    "update-copy" "update-file"))
-                  (key-value
-                   ("csv-copy" "csv-file"))))
-    (pcase-let ((`(,surface ,expected) case))
-      (pcase surface
-        ('document
-         (clutch-test--with-native-document-result-buffer
-           (cl-letf (((symbol-function 'clutch-db-document-mutation-supported-p)
-                      (lambda (_conn action) (eq action 'insert-many))))
-             (should (equal (mapcar #'car
-                                    (clutch-result--available-export-formats))
-                            expected)))))
-        ('sql
-         (with-temp-buffer
-           (setq-local clutch-connection 'sql-conn
-                       clutch--connection-params nil)
-           (clutch-test--with-connection-data-model
-               ('sql-conn 'mysql 'relational)
-             (should (equal (mapcar #'car
-                                    (clutch-result--available-export-formats))
-                            expected)))))
-        ('key-value
-         (with-temp-buffer
-           (setq-local clutch-connection 'redis-conn
-                       clutch--connection-params nil)
-           (clutch-test--with-connection-data-model
-               ('redis-conn 'redis 'key-value)
-             (should (equal (mapcar #'car
-                                    (clutch-result--available-export-formats))
-                            expected)))))))))
+  (cl-labels
+      ((render-menu ()
+         (when-let* ((buffer (get-buffer " *transient*")))
+           (kill-buffer buffer))
+         (transient-setup 'clutch-result-export)
+         (with-current-buffer " *transient*" (buffer-string)))
+       (check-menu (menu present absent)
+         (dolist (label present)
+           (should (string-match-p (regexp-quote label) menu)))
+         (dolist (label absent)
+           (should-not (string-match-p (regexp-quote label) menu)))))
+    (unwind-protect
+        (progn
+          (clutch-test--with-native-document-result-buffer
+            (cl-letf (((symbol-function
+                        'clutch-db-document-mutation-supported-p)
+                       (lambda (_conn action) (eq action 'insert-many))))
+              (check-menu (render-menu)
+                          '("CSV" "TSV" "Insert many")
+                          '("INSERT SQL" "UPDATE SQL"))))
+          (with-temp-buffer
+            (setq-local clutch-connection 'sql-conn
+                        clutch--connection-params nil)
+            (clutch-test--with-connection-data-model
+                ('sql-conn 'mysql 'relational)
+              (check-menu (render-menu)
+                          '("CSV" "TSV" "INSERT SQL" "UPDATE SQL")
+                          '("Insert many"))))
+          (with-temp-buffer
+            (setq-local clutch-connection 'redis-conn
+                        clutch--connection-params nil)
+            (clutch-test--with-connection-data-model
+                ('redis-conn 'redis 'key-value)
+              (check-menu (render-menu)
+                          '("CSV" "TSV")
+                          '("INSERT SQL" "UPDATE SQL"
+                            "Insert many")))))
+      (when-let* ((buffer (get-buffer " *transient*")))
+        (kill-buffer buffer)))))
 
 (ert-deftest clutch-test-document-copy-uses-backend-mutation-snippet-generic ()
   "Document helper copy should use backend-owned mutation snippet generation."
@@ -5278,8 +5353,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (should (equal op "copy UPDATE SQL"))
                  '("UPDATE users SET name = 'beta' WHERE id = 2"))))
       (clutch-result--copy-rows 'update)
-      (should (equal (clutch--csv-lines-for-rows
-                      (clutch-result--rows-for-display-indices '(0)) '(1))
+      (should (equal (clutch--delimited-lines-for-rows
+                      (clutch-result--rows-for-display-indices '(0)) '(1) ?,)
                      '("name" "beta")))
       (should (equal (clutch-result--build-insert-statements-for-rows
                       (clutch-result--rows-for-display-indices '(0))
@@ -5670,65 +5745,34 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-result-down-cell)
         (should-not deactivate-mark)))))
 
-(ert-deftest clutch-test-region-cells-rectangle ()
-  "Region cell extraction should use rectangular cell bounds."
-  (clutch-test--with-result-state
-      (:rows '((r0c0 r0c1 r0c2)
-               (r1c0 r1c1 r1c2)
-               (r2c0 r2c1 r2c2)))
-    (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
-              ((symbol-function 'region-end) (lambda () 20))
-              ((symbol-function 'clutch--cell-at-or-near)
-               (lambda (pos)
-                 (if (= pos 10) '(0 1 nil) '(2 1 nil)))))
-      (should (equal (clutch-result--region-cells)
-                     '((0 1 r0c1)
-                       (1 1 r1c1)
-                       (2 1 r2c1)))))))
-
-(ert-deftest clutch-test-region-cells-use-filtered-display-rows ()
-  "Region cell extraction should read from filtered visible rows."
-  (clutch-test--with-result-state
-      (:rows '((1 "alice") (2 "bob"))
-       :filter-pattern "bob"
-       :filtered-rows '((2 "bob")))
-    (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
-              ((symbol-function 'region-end) (lambda () 20))
-              ((symbol-function 'clutch--cell-at-or-near)
-               (lambda (_pos) '(0 1 nil))))
-      (should (equal (clutch-result--region-cells)
-                     '((0 1 "bob")))))))
-
 (ert-deftest clutch-test-tsv-copy-selection-contract ()
-  "TSV copy should use region cells when active, otherwise the point cell."
-  (dolist (case `((t "alice" "1\t<default>\nbob")
-                  (nil "alice" "alice")
-                  (nil ,clutch--cell-default-placeholder "<default>")))
-    (pcase-let ((`(,region-active ,value ,expected) case))
+  "TSV copy should use the selected columns with optional headers."
+  (dolist (case `((t ((0 1) . (0 2)) nil nil
+                     "id\tstate\n1\t<default>\n2\tactive")
+                  (nil nil (0 1 "alice") nil "name\nalice")
+                  (nil nil (0 2 ,clutch--cell-default-placeholder) t
+                       "<default>")))
+    (pcase-let ((`(,region-active ,rect ,cell ,omit-header ,expected) case))
       (ert-info ((format "region: %s" region-active))
-        (with-temp-buffer
+        (clutch-test--with-result-state
+            (:columns '("id" "name" "state")
+             :rows `((1 "alice" ,clutch--cell-default-placeholder)
+                     (2 "bob" "active")))
           (let (kill-ring kill-ring-yank-pointer)
             (cl-letf (((symbol-function 'use-region-p)
                        (lambda () region-active))
-                      ((symbol-function 'region-beginning)
-                       (lambda () 10))
-                      ((symbol-function 'region-end)
-                       (lambda () 20))
-                      ((symbol-function 'clutch-result--region-cells)
-                       (lambda ()
-                         `((0 0 1)
-                           (0 2 ,clutch--cell-default-placeholder)
-                           (1 1 "bob"))))
+                      ((symbol-function 'clutch-result--region-rectangle-indices)
+                       (lambda () rect))
                       ((symbol-function 'clutch--cell-at-point)
-                       (lambda () (list 2 3 value))))
-              (clutch-result-copy 'tsv)
+                       (lambda () cell)))
+              (clutch-result-copy 'tsv nil omit-header)
               (should (equal (current-kill 0) expected)))))))))
 
 (ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
   "Public CSV and TSV copy commands should copy through the real entry point."
   (dolist (case '((clutch-result-copy-csv "name\nalice")
                   (clutch-result-copy-org-table "| name  |\n|-------|\n| alice |")
-                  (clutch-result-copy-tsv "alice")))
+                  (clutch-result-copy-tsv "name\nalice")))
     (pcase-let ((`(,command ,expected-text) case))
       (ert-info ((symbol-name command))
         (clutch-test--with-result-state
@@ -5745,6 +5789,38 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        (lambda () '(0 1 "alice"))))
               (funcall command)
               (should (equal (current-kill 0) expected-text)))))))))
+
+(ert-deftest clutch-test-copy-header-switch-omits-tabular-headers ()
+  "Copy commands should honor the installed no-header switch."
+  (dolist (case '((clutch-result-copy-tsv "alice")
+                  (clutch-result-copy-csv "alice")
+                  (clutch-result-copy-org-table "| alice |")))
+    (pcase-let ((`(,command ,expected) case))
+      (clutch-test--with-result-state
+          (:columns '("name")
+           :rows '(("alice")))
+        (let (kill-ring kill-ring-yank-pointer)
+          (cl-letf (((symbol-function 'transient-args)
+                     (lambda (_prefix) '("--no-header")))
+                    ((symbol-function 'transient-arg-value)
+                     (lambda (flag args) (member flag args)))
+                    ((symbol-function 'use-region-p) (lambda () nil))
+                    ((symbol-function 'clutch--cell-at-point)
+                     (lambda () '(0 0 "alice"))))
+            (funcall command)
+            (should (equal (current-kill 0) expected))))))))
+
+(ert-deftest clutch-test-copy-header-switch-defaults-to-yes ()
+  "Copy transient should present Header as enabled by default."
+  (let* ((suffix
+          (clutch-test--transient-suffix-for-key
+           'clutch-result-copy-dispatch "-h"))
+         (display (and suffix (transient-format-value suffix))))
+    (should suffix)
+    (should (equal (substring-no-properties display) "(No|Yes)"))
+    (should (eq (get-text-property (string-match "Yes" display)
+                                  'face display)
+                'transient-value))))
 
 (ert-deftest clutch-test-copy-fmt-with-refine-uses-refined-rectangle ()
   "Refined copy should copy the final rectangle, not the initial region."
@@ -6446,10 +6522,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                    clutch--result-rows)
                            '(("one" 10) ("two" 20))))
             (cl-letf (((symbol-function 'completing-read)
-                       (lambda (prompt &rest _args)
-                         (if (string-prefix-p "Export" prompt)
-                             "csv-copy"
-                           "score")))
+                       (lambda (&rest _args) "score"))
                       ((symbol-function 'read-string)
                        (lambda (&rest _args) "> 20")))
               (clutch-result-apply-filter)
@@ -6468,12 +6541,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (should-not clutch--page-has-more)
               (should (equal (plist-get clutch--row-identity :indices) '(2)))
               (should (equal clutch--result-rows '(("five" 50 5))))
-              (clutch-result-export)
-              (let ((csv (current-kill 0 t)))
-                (should (equal csv
-                               "name,score\nthree,30\nfour,40\nfive,50\n"))
+              (let ((suffix
+                     (clutch-test--transient-suffix-for-key
+                      'clutch-result-export "t")))
+                (should suffix)
+                (cl-letf (((symbol-function 'transient-args)
+                           (lambda (_prefix) nil)))
+                  (funcall (oref suffix command))))
+              (let ((tsv (current-kill 0 t)))
+                (should (equal tsv
+                               "name\tscore\nthree\t30\nfour\t40\nfive\t50\n"))
                 (should-not
-                 (string-match-p "one\\|two\\|clutch__rid\\|id," csv))))))
+                 (string-match-p "one\\|two\\|clutch__rid\\|id\t" tsv))))))
       (clutch--spinner-stop)
       (when (buffer-live-p result)
         (kill-buffer result))
