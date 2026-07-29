@@ -342,28 +342,24 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
          (left (/ extra 2)))
     (cons left (- extra left))))
 
-(defun clutch--pixel-padding-string (cells pixels)
-  "Return CELLS padding characters displayed as PIXELS pixels.
-Keeping the original logical width preserves the existing hscroll and
-point-navigation model while tightening graphical alignment."
-  (cond
-   ((and (> cells 0)
-         (= pixels (* cells (default-font-width))))
-    (make-string cells ?\s))
-   ((> cells 0)
-    (let ((padding (make-string cells ?\s)))
-      (put-text-property 0 1 'display
-                         (if (> pixels 0)
-                             `(space :width (,pixels))
-                           "")
-                         padding)
-      (when (> cells 1)
-        (put-text-property 1 cells 'display "" padding))
-      padding))
-   ((> pixels 0)
-    ;; A zero-width carrier adds pixels without changing logical columns.
-    (propertize (string #x200b) 'display `(space :width (,pixels))))
-   (t "")))
+(defun clutch--display-string-pixel-width (string)
+  "Return the rendered pixel width of STRING.
+The final newline makes redisplay settle a trailing `min-width'
+specification before `string-pixel-width' reports the widest line."
+  (string-pixel-width (concat string "\n")))
+
+(defun clutch--min-width-padding-string (cells pixels)
+  "Return CELLS logical padding characters displayed as PIXELS pixels.
+A zero-width carrier supplies the graphical minimum width, while hidden
+spaces preserve the existing hscroll and point-navigation model."
+  (let ((logical-padding (make-string cells ?\s)))
+    (put-text-property 0 cells 'display "" logical-padding)
+    (if (> pixels 0)
+        (let ((carrier (string #x200b)))
+          (add-display-text-property
+           0 1 'min-width `((,pixels)) carrier)
+          (concat carrier logical-padding))
+      logical-padding)))
 
 (defun clutch--pad-display-string (string width pixel-width &optional right-align
                                           string-pixel-width)
@@ -371,14 +367,21 @@ point-navigation model while tightening graphical alignment."
 On graphical displays, pad to PIXEL-WIDTH actual pixels.  RIGHT-ALIGN pads
 before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil."
   (if pixel-width
-      (let* ((cells (max 0 (- width (string-width string))))
-             (padding (max 0 (- pixel-width
-                                (or string-pixel-width
-                                    (string-pixel-width string)))))
-             (pad-string (clutch--pixel-padding-string cells padding)))
-        (if right-align
-            (concat pad-string string)
-          (concat string pad-string)))
+      (if right-align
+          (let* ((cells (max 0 (- width (string-width string))))
+                 (pixels (or string-pixel-width
+                             (clutch--display-string-pixel-width string)))
+                 (padding (max 0 (- pixel-width pixels))))
+            (concat (clutch--min-width-padding-string cells padding) string))
+        (let* ((cells (max 0 (- width (string-width string))))
+               (content (copy-sequence string))
+               (logical-padding (make-string cells ?\s)))
+          (if (string-empty-p content)
+              (clutch--min-width-padding-string cells pixel-width)
+            (add-display-text-property
+             0 (length content) 'min-width `((,pixel-width)) content)
+            (put-text-property 0 cells 'display "" logical-padding)
+            (concat content logical-padding))))
     (clutch--string-pad string width right-align)))
 
 (defun clutch--center-display-string (string width pixel-width)
@@ -386,12 +389,12 @@ before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil."
   (if pixel-width
       (let* ((pads (clutch--center-padding-widths (string-width string) width))
              (extra (max 0 (- pixel-width
-                              (string-pixel-width string))))
+                              (clutch--display-string-pixel-width string))))
              (left (/ extra 2))
              (right (- extra left)))
-        (concat (clutch--pixel-padding-string (car pads) left)
+        (concat (clutch--min-width-padding-string (car pads) left)
                 string
-                (clutch--pixel-padding-string (cdr pads) right)))
+                (clutch--min-width-padding-string (cdr pads) right)))
     (let* ((pads (clutch--center-padding-widths (string-width string) width))
            (lead (make-string (car pads) ?\s))
            (trail (make-string (cdr pads) ?\s)))
@@ -452,7 +455,7 @@ before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil."
   "Return pixel width for result cell STRING under PIXEL-METRIC."
   (if (or (null pixel-metric)
           (clutch--string-has-properties-p string))
-      (string-pixel-width string)
+      (clutch--display-string-pixel-width string)
     (clutch--plain-string-pixel-width string pixel-metric)))
 
 (defun clutch--format-elapsed (seconds)
@@ -838,7 +841,7 @@ installed, the family is unsupported, or the renderer returns nil/empty."
       (let* ((raw (clutch--icon spec fallback))
              (indicator
               (if (and metric (not (string-empty-p raw)))
-                  (let* ((pixels (string-pixel-width raw))
+                  (let* ((pixels (clutch--display-string-pixel-width raw))
                          (raw-width (string-width raw))
                          (cells (max raw-width
                                      (ceiling (/ (float pixels) cell-width))))
@@ -846,7 +849,7 @@ installed, the family is unsupported, or the renderer returns nil/empty."
                          (pad (- target pixels)))
                     (if (or (> cells raw-width) (> pad 0))
                         (concat raw
-                                (clutch--pixel-padding-string
+                                (clutch--min-width-padding-string
                                  (- cells raw-width) pad))
                       raw))
                 raw)))
@@ -1401,7 +1404,7 @@ only headers are measured."
                  (label (clutch--header-cell-label cidx width)))
             (aset pixel-widths cidx
                   (max (aref pixel-widths cidx)
-                       (string-pixel-width label)))))
+                       (clutch--display-string-pixel-width label)))))
         (cl-loop for row in all-rows
                  for ridx from (or first-ridx 0)
                  do
@@ -1966,9 +1969,9 @@ ACTIVE-CIDX highlights that column when non-nil."
 
 (defun clutch--pixel-crop-left (string pixels)
   "Return STRING with PIXELS cropped from the left.
-Display spaces can be cropped partially.  When the crop point falls inside an
-ordinary glyph, replace the clipped remainder with zero-logical-width padding so
-following content keeps its pixel position."
+Display padding carriers can be cropped partially.  When the crop point falls
+inside an ordinary glyph, replace the clipped remainder with zero-logical-width
+padding so following content keeps its pixel position."
   (catch 'done
     (let ((pos 0)
           (len (length string))
@@ -1976,7 +1979,7 @@ following content keeps its pixel position."
       (while (and (< pos len) (> remaining 0))
         (let* ((next (1+ pos))
                (part (substring string pos next))
-               (part-pixels (string-pixel-width part)))
+               (part-pixels (clutch--display-string-pixel-width part)))
           (cond
            ((<= part-pixels 0)
             (setq pos next))
@@ -1984,28 +1987,36 @@ following content keeps its pixel position."
             (setq remaining (- remaining part-pixels)
                   pos next))
            (t
-            (let* ((display (get-text-property pos 'display string))
+            (let* ((minimum (get-display-property pos 'min-width string))
+                   (display (get-text-property pos 'display string))
                    (after (substring string next))
-                   (carry (clutch--pixel-padding-string
+                   (carry (clutch--min-width-padding-string
                            0 (- part-pixels remaining))))
-              (pcase display
-                (`(space . ,props)
-                 (let* ((rest (substring string pos))
-                        (width (plist-get props :width))
-                        (space-width (cond
-                                      ((consp width) (car width))
-                                      ((numberp width) width))))
-                   (if space-width
-                       (progn
-                         (put-text-property
-                          0 1 'display
-                          `(space :width (,(max 0 (- space-width remaining))))
-                         rest)
-                         (throw 'done rest))
-                     (throw 'done
-                            (concat carry after)))))
-                (_
-                 (throw 'done (concat carry after)))))))))
+              (if minimum
+                  (let ((rest (substring string pos)))
+                    (add-display-text-property
+                     0 1 'min-width
+                     `((,(max 0 (- part-pixels remaining))))
+                     rest)
+                    (throw 'done rest))
+                (pcase display
+                  (`(space . ,props)
+                   (let* ((rest (substring string pos))
+                          (width (plist-get props :width))
+                          (space-width (cond
+                                        ((consp width) (car width))
+                                        ((numberp width) width))))
+                     (if space-width
+                         (progn
+                           (put-text-property
+                            0 1 'display
+                            `(space :width
+                              (,(max 0 (- space-width remaining))))
+                            rest)
+                           (throw 'done rest))
+                       (throw 'done (concat carry after)))))
+                  (_
+                   (throw 'done (concat carry after))))))))))
       (substring string pos))))
 
 (defun clutch--header-line-with-hscroll ()

@@ -6,6 +6,10 @@
 
 - Added full-result TSV export with delimiter-aware quoting, automatic paging for pageable queries, and the same explicit spreadsheet-friendly encoding choices as CSV. Copy and Export now use consistent Transient menus with headers enabled by default; Export also exposes Clipboard/File as a destination switch.
 
+### Fixed
+
+- Let Emacs redisplay enforce graphical result-grid widths with the Emacs 29 `min-width` display property. Left-aligned cells use it directly; numeric cells, centered headers, sort icons, and partial header-scroll padding use minimum-width carriers. Display-aware measurement settles trailing `min-width` regions before reading their pixel width, improving alignment for custom displayers, font fallback, icons, and other propertized content while retaining logical padding for navigation, horizontal scrolling, and terminals.
+
 ## 0.3.0 - 2026-07-28
 
 ### Breaking Changes
