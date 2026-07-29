@@ -67,7 +67,7 @@ fraction.  Values must be greater than zero and no greater than one."
   :group 'clutch)
 
 (defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
-  "Default coding system when exporting CSV files."
+  "Default coding system when exporting CSV or TSV files."
   :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
                  (const :tag "UTF-8" utf-8)
                  (const :tag "GBK" gbk)
@@ -996,8 +996,8 @@ Navigate (row):
   \\[clutch-result-scroll-right]	Scroll right (snap to next column border)
   \\[clutch-result-scroll-left]	Scroll left (snap to previous column border)
 Copy:
-  \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r to refine)
-  \\[clutch-result-export]	Export all rows (copy/file)
+  \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r refine, -h header)
+  \\[clutch-result-export]	Export all rows… (transient: -h header, -f file)
   \\[clutch-preview-execution-sql]	Preview execution
 Inspect:
   \\[clutch-result-view-value]	View current cell once
@@ -1675,27 +1675,18 @@ RECT is (ROW-INDICES . COL-INDICES)."
 
 ;;;; Copy commands
 
-(defun clutch-result-copy (format &optional rect)
+(defun clutch-result-copy (format &optional rect omit-header)
   "Unified copy entry point for result buffer.
 FORMAT is one of symbols: `tsv', `csv', `org-table', `insert', `update',
 `document-insert-one', `document-insert-many', `document-replace-one',
 `document-delete-one', or `document-update-one-set'.
 When RECT is non-nil, use it as precomputed rectangle bounds.  If region
 is active, copy rectangle bounds from region endpoints.
-Otherwise, copy the current cell."
+Otherwise, copy the current cell.  When OMIT-HEADER is non-nil, omit the
+header from tabular formats."
   (pcase format
-    ('tsv
-     (if rect
-         (clutch-result--yank-rectangle-cells rect)
-       (if (use-region-p)
-           (clutch-result--yank-region-cells)
-         (pcase-let* ((`(,_ridx ,_cidx ,val) (or (clutch--cell-at-point)
-                                               (user-error "No cell at point"))))
-           (clutch-result--yank-cell-value val)))))
-    ('csv
-     (clutch-result--copy-rows 'csv rect))
-    ('org-table
-     (clutch-result--copy-rows 'org-table rect))
+    ((or 'tsv 'csv 'org-table)
+     (clutch-result--copy-rows format rect omit-header))
     ('insert
      (clutch-result--require-action 'copy-insert "Copy INSERT SQL")
      (clutch-result--copy-rows 'insert rect))
@@ -1715,25 +1706,43 @@ Otherwise, copy the current cell."
     (_
      (user-error "Unsupported copy format: %s" format))))
 
-(defclass clutch--transient-yes-no-switch (transient-switch) ()
+(defclass clutch--transient-yes-no-switch (transient-switch)
+  ((inverted :initarg :inverted :initform nil))
   "Transient switch that displays its state as a highlighted No/Yes pair.")
+
+(defclass clutch--transient-copy-file-switch (transient-switch) ()
+  "Transient switch that displays Clipboard/File destination state.")
 
 (cl-defmethod transient-format-value ((obj clutch--transient-yes-no-switch))
   "Format OBJ's current switch value as a No/Yes state pair."
   (clutch--transient-state-display
-   (if (oref obj value) 'yes 'no)
+   (if (if (oref obj inverted)
+           (not (oref obj value))
+         (oref obj value))
+       'yes
+     'no)
    '((no . "No") (yes . "Yes"))))
 
+(cl-defmethod transient-format-value ((obj clutch--transient-copy-file-switch))
+  "Format OBJ's current switch value as a Clipboard/File state pair."
+  (clutch--transient-state-display
+   (if (oref obj value) 'file 'clipboard)
+   '((clipboard . "Clipboard") (file . "File"))))
+
 (defun clutch-result--copy-fmt (fmt)
-  "Copy in FMT, entering refine mode first if --refine switch is set."
-  (if (transient-arg-value "--refine" (transient-args 'clutch-result-copy-dispatch))
+  "Copy in FMT using the Header and Refine Transient options."
+  (let* ((args (transient-args 'clutch-result-copy-dispatch))
+         (refine (transient-arg-value "--refine" args))
+         (omit-header (transient-arg-value "--no-header" args)))
+    (if refine
       (progn
         (unless (use-region-p)
           (user-error "Set a region before using refine mode"))
         (clutch-result--start-refine
          (clutch-result--region-rectangle-indices)
-         (lambda (final-rect) (clutch-result-copy fmt final-rect))))
-    (clutch-result-copy fmt)))
+         (lambda (final-rect)
+           (clutch-result-copy fmt final-rect omit-header))))
+      (clutch-result-copy fmt nil omit-header))))
 
 ;;;###autoload
 (defun clutch-result-copy-tsv ()
@@ -1743,13 +1752,13 @@ Otherwise, copy the current cell."
 
 ;;;###autoload
 (defun clutch-result-copy-csv ()
-  "Copy as CSV with header."
+  "Copy as CSV."
   (interactive)
   (clutch-result--copy-fmt 'csv))
 
 ;;;###autoload
 (defun clutch-result-copy-org-table ()
-  "Copy as an Org table with header."
+  "Copy as an Org table."
   (interactive)
   (clutch-result--copy-fmt 'org-table))
 
@@ -1793,16 +1802,21 @@ Otherwise, copy the current cell."
 (transient-define-prefix clutch-result-copy-dispatch ()
   "Copy result buffer data.
 Enable --refine to exclude rows/columns interactively before copying
-\(requires an active region set with \\<global-map>\\[set-mark-command] or mouse)."
+\(requires an active region set with \\<global-map>\\[set-mark-command] or mouse).
+Header controls tabular copy formats and defaults to Yes."
   ["Options"
    :pad-keys t
    ("-r" "Refine selection" "--refine"
     :class clutch--transient-yes-no-switch
+    :format " %k %d %v")
+   ("-h" "Header" "--no-header"
+    :class clutch--transient-yes-no-switch
+    :inverted t
     :format " %k %d %v")]
   ["Copy as"
    :pad-keys t
    ("t" "TSV"             clutch-result-copy-tsv)
-   ("c" "CSV with header" clutch-result-copy-csv)
+   ("c" "CSV"             clutch-result-copy-csv)
    ("o" "Org table"       clutch-result-copy-org-table)
    ("i" "INSERT SQL"      clutch-result-copy-insert
     :if (lambda () (clutch-result--action-supported-p 'copy-insert)))
@@ -1998,14 +2012,6 @@ latest matching result buffer; it does not execute the SQL being copied."
 
 ;;;; Cell and region selection
 
-(defun clutch-result--yank-cell-value (val)
-  "Copy VAL to kill ring and show a compact preview message."
-  (let ((text (clutch--format-value val)))
-    (kill-new text)
-    (message "Copied: %s"
-             (clutch--message-literal
-              (truncate-string-to-width text 60 nil nil "…")))))
-
 (defun clutch-result--region-rectangle-bounds ()
   "Return active region bounds as (ROW-INDICES . COL-INDICES)."
   (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch--cell-at-or-near
@@ -2021,70 +2027,12 @@ latest matching result buffer; it does not execute the SQL being copied."
     (cons (cl-loop for ridx from row-min to row-max collect ridx)
           (cl-loop for cidx from col-min to col-max collect cidx))))
 
-(defun clutch-result--cells-for-indices (row-indices col-indices)
-  "Return cell triples for ROW-INDICES and COL-INDICES."
-  (let ((rows (clutch--result-display-rows)))
-    (cl-loop for ridx in row-indices
-             append
-             (let ((row (nth ridx rows)))
-               (cl-loop for cidx in col-indices
-                        collect (list ridx cidx (nth cidx row)))))))
-
-(defun clutch-result--region-cells ()
-  "Return cells in active region as a rectangle of (ROW-IDX COL-IDX VALUE)."
-  (pcase-let ((`(,row-indices . ,col-indices)
-               (clutch-result--region-rectangle-bounds)))
-    (clutch-result--cells-for-indices row-indices col-indices)))
-
 (defun clutch-result--region-rectangle-indices ()
   "Return rectangle row/column indices from active region.
 Result is a cons cell (ROW-INDICES . COL-INDICES)."
   (unless (use-region-p)
     (user-error "Set a region to select rows and columns"))
   (clutch-result--region-rectangle-bounds))
-
-(defun clutch-result--cells-tsv-text (cells)
-  "Return TSV text for CELLS grouped by row index."
-  (let (lines
-        current-row
-        current-values)
-    (dolist (cell cells)
-      (pcase-let ((`(,ridx ,_cidx ,val) cell))
-        (if (or (null current-row) (= ridx current-row))
-            (progn
-              (setq current-row ridx)
-              (push (clutch--format-value val) current-values))
-          (push (string-join (nreverse current-values) "\t") lines)
-          (setq current-row ridx
-                current-values (list (clutch--format-value val))))))
-    (when current-values
-      (push (string-join (nreverse current-values) "\t") lines))
-    (string-join (nreverse lines) "\n")))
-
-(defun clutch-result--copy-cells-as-tsv (cells &optional deactivate)
-  "Copy CELLS as TSV and report the copied cell count.
-When DEACTIVATE is non-nil, deactivate the active region after copying."
-  (unless cells
-    (user-error "No cells in region"))
-  (kill-new (clutch-result--cells-tsv-text cells))
-  (when deactivate
-    (deactivate-mark))
-  (message "Copied %s cell%s from region"
-           (clutch--message-count (length cells))
-           (if (= (length cells) 1) "" "s")))
-
-(defun clutch-result--yank-region-cells ()
-  "Copy cell values from region as TSV-like text."
-  (unless (use-region-p)
-    (user-error "Set a region to copy multiple cells"))
-  (clutch-result--copy-cells-as-tsv (clutch-result--region-cells) t))
-
-(defun clutch-result--yank-rectangle-cells (rect)
-  "Copy cells from RECT as TSV-like text."
-  (pcase-let* ((`(,row-indices . ,col-indices) rect)
-               (cells (clutch-result--cells-for-indices
-                       row-indices col-indices)))
-    (clutch-result--copy-cells-as-tsv cells)))
 
 ;;;; Aggregate values
 
@@ -2930,54 +2878,45 @@ OP is a short operation description used in user-facing error messages."
               statements)))
     (clutch-result--render-statements (nreverse statements))))
 
-(defconst clutch--result-export-formats
-  '(("csv-copy" :kind csv :destination clipboard)
-    ("csv-file" :kind csv :destination file)
-    ("insert-copy" :kind insert :action export-insert :destination clipboard)
-    ("insert-file" :kind insert :action export-insert :destination file)
-    ("update-copy" :kind update :action export-update :destination clipboard)
-    ("update-file" :kind update :action export-update :destination file)
-    ("document-insert-many-copy" :kind document-insert-many
-     :action export-document-insert-many :destination clipboard)
-    ("document-insert-many-file" :kind document-insert-many
-     :action export-document-insert-many :destination file))
-  "Available result export choices and their execution targets.")
-
 (defconst clutch--result-export-kinds
   '((csv . (:content clutch--export-csv-content
             :file-prompt "Export CSV to file: "
             :default-file "export.csv"
             :copy-message "Copied %d row%s as CSV"
             :file-message "Exported %d row%s to %s (%s)"
-            :file-coding csv))
-    (insert . (:content clutch--export-insert-content
+            :file-coding delimited))
+    (tsv . (:content clutch--export-tsv-content
+            :file-prompt "Export TSV to file: "
+            :default-file "export.tsv"
+            :copy-message "Copied %d row%s as TSV"
+            :file-message "Exported %d row%s to %s (%s)"
+            :file-coding delimited))
+    (insert . (:action export-insert
+               :content clutch--export-insert-content
                :file-prompt "Export SQL to file: "
                :default-file "export.sql"
                :copy-message "Copied %d row%s as INSERT SQL"
                :file-message "Exported %d row%s as INSERT SQL to %s"))
-    (update . (:content clutch--export-update-content
+    (update . (:action export-update
+               :content clutch--export-update-content
                :file-prompt "Export SQL to file: "
                :default-file "export.sql"
                :copy-message "Copied %d row%s as UPDATE SQL"
                :file-message "Exported %d row%s as UPDATE SQL to %s"))
-    (document-insert-many . (:content clutch--export-document-insert-many-content
+    (document-insert-many . (:action export-document-insert-many
+                             :content clutch--export-document-insert-many-content
                              :file-prompt "Export document helper to file: "
                              :default-file "documents.txt"
                              :copy-message "Copied %d document%s as native insert-many helper"
                              :file-message "Exported %d document%s as native insert-many helper to %s")))
   "Result export behavior keyed by logical export kind.")
 
-(defun clutch-result--export-format-available-p (format)
-  "Return non-nil when export FORMAT is available in the current result."
-  (if-let* ((action (plist-get format :action)))
-      (clutch-result--action-supported-p action)
-    t))
-
-(defun clutch-result--available-export-formats ()
-  "Return export formats available for the current result buffer."
-  (cl-loop for format in clutch--result-export-formats
-           when (clutch-result--export-format-available-p (cdr format))
-           collect format))
+(defun clutch-result--export-kind-available-p (kind)
+  "Return non-nil when export KIND is available in the current result."
+  (when-let* ((spec (cdr (assq kind clutch--result-export-kinds))))
+    (if-let* ((action (plist-get spec :action)))
+        (clutch-result--action-supported-p action)
+      t)))
 
 (defun clutch-result--copy-selection-indices (&optional rect)
   "Return row and column indices for result copy commands.
@@ -2996,60 +2935,74 @@ rectangle and inactive regions fall back to the current cell."
           (or (cdr-safe rect)
               (clutch--visible-columns)))))
 
-(defun clutch-result--copy-lines (kind rows col-indices)
-  "Return copy output lines for KIND using ROWS and COL-INDICES."
-  (pcase kind
-    ('csv (clutch--csv-lines-for-rows rows col-indices))
-    ('org-table (clutch--org-table-lines-for-rows rows col-indices))
-    ('insert
-     (clutch-result--build-insert-statements-for-rows
-      rows col-indices (clutch--insert-target-table)))
-    ('update
-     (clutch-result--build-update-statements-for-rows
-      rows col-indices "copy UPDATE SQL"))
-    ((or 'document-insert-one 'document-insert-many
-         'document-replace-one 'document-delete-one
-         'document-update-one-set)
-     (let* ((action (pcase kind
-                      ('document-insert-one 'insert-one)
-                      ('document-insert-many 'insert-many)
-                      ('document-replace-one 'replace-one)
-                      ('document-delete-one 'delete-one)
-                      ('document-update-one-set 'update-one-set)))
-            (op (format "copy %s" kind))
-            (collection (clutch-result--document-source-collection op))
-            (documents (clutch-result--document-source-documents rows op))
-            (fields (when (eq action 'update-one-set)
-                      (clutch--column-names-for-indices col-indices))))
-       (clutch-result--require-action
-        (pcase action
-          ('insert-one 'document-insert-one)
-          ('insert-many 'document-insert-many)
-          ('replace-one 'document-replace-one)
-          ('delete-one 'document-delete-one)
-          ('update-one-set 'document-update-one-set))
-        op)
-       (clutch-db-document-mutation-snippets
-        clutch-connection action collection documents fields)))
-    (_
-     (user-error "Unsupported copy format: %s" kind))))
+(defun clutch-result--copy-lines (kind rows col-indices &optional omit-header)
+  "Return copy output lines for KIND using ROWS and COL-INDICES.
+When OMIT-HEADER is non-nil, omit headers from tabular formats."
+  (let ((lines
+         (pcase kind
+           ('tsv (clutch--delimited-lines-for-rows rows col-indices ?\t))
+           ('csv (clutch--delimited-lines-for-rows rows col-indices ?,))
+           ('org-table (clutch--org-table-lines-for-rows rows col-indices))
+           ('insert
+            (clutch-result--build-insert-statements-for-rows
+             rows col-indices (clutch--insert-target-table)))
+           ('update
+            (clutch-result--build-update-statements-for-rows
+             rows col-indices "copy UPDATE SQL"))
+           ((or 'document-insert-one 'document-insert-many
+                'document-replace-one 'document-delete-one
+                'document-update-one-set)
+            (let* ((action (pcase kind
+                             ('document-insert-one 'insert-one)
+                             ('document-insert-many 'insert-many)
+                             ('document-replace-one 'replace-one)
+                             ('document-delete-one 'delete-one)
+                             ('document-update-one-set 'update-one-set)))
+                   (op (format "copy %s" kind))
+                   (collection (clutch-result--document-source-collection op))
+                   (documents (clutch-result--document-source-documents rows op))
+                   (fields (when (eq action 'update-one-set)
+                             (clutch--column-names-for-indices col-indices))))
+              (clutch-result--require-action
+               (pcase action
+                 ('insert-one 'document-insert-one)
+                 ('insert-many 'document-insert-many)
+                 ('replace-one 'document-replace-one)
+                 ('delete-one 'document-delete-one)
+                 ('update-one-set 'document-update-one-set))
+               op)
+              (clutch-db-document-mutation-snippets
+               clutch-connection action collection documents fields)))
+           (_
+            (user-error "Unsupported copy format: %s" kind)))))
+    (if omit-header
+        (pcase kind
+          ((or 'tsv 'csv) (cdr lines))
+          ('org-table (cddr lines))
+          (_ lines))
+      lines)))
 
-(defun clutch-result--copy-rows (kind &optional rect)
-  "Copy selected rows as KIND using optional RECT."
+(defun clutch-result--copy-rows (kind &optional rect omit-header)
+  "Copy selected rows as KIND using optional RECT.
+When OMIT-HEADER is non-nil, omit headers from tabular formats."
   (let* ((selection (clutch-result--copy-selection-indices rect))
          (indices (car selection))
          (col-indices (cdr selection))
          (rows (clutch-result--rows-for-display-indices indices))
-         (lines (clutch-result--copy-lines kind rows col-indices)))
+         (lines (clutch-result--copy-lines
+                 kind rows col-indices omit-header)))
     (kill-new (mapconcat #'identity lines "\n"))
     (deactivate-mark)
     (pcase kind
-      ((or 'csv 'org-table)
+      ((or 'tsv 'csv 'org-table)
        (message "Copied %s row%s as %s (%s col%s)"
                 (clutch--message-count (length indices))
                 (if (= (length indices) 1) "" "s")
                 (clutch--message-keyword
-                 (if (eq kind 'csv) "CSV" "Org table"))
+                 (pcase kind
+                   ('tsv "TSV")
+                   ('csv "CSV")
+                   ('org-table "Org table")))
                 (clutch--message-count (length col-indices))
                 (if (= (length col-indices) 1) "" "s")))
       ((or 'insert 'update)
@@ -3067,20 +3020,27 @@ rectangle and inactive regions fall back to the current cell."
                 (clutch--message-count (length lines))
                 (if (= (length lines) 1) "" "s"))))))
 
-(defun clutch--csv-escape (val)
-  "Return CSV-escaped string for VAL."
+(defun clutch--delimited-escape (val delimiter)
+  "Return VAL escaped for text separated by DELIMITER."
   (let ((s (clutch--format-value val)))
-    (if (string-match-p "[,\"\r\n]" s)
+    (if (or (string-match-p "[\"\r\n]" s)
+            (string-match-p (regexp-quote (char-to-string delimiter)) s))
         (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
       s)))
 
-(defun clutch--csv-lines-for-rows (rows col-indices)
-  "Return CSV lines for ROWS using COL-INDICES."
-  (let ((col-names (clutch--column-names-for-indices col-indices)))
-    (cons (mapconcat #'clutch--csv-escape col-names ",")
+(defun clutch--delimited-lines-for-rows (rows col-indices delimiter)
+  "Return lines for ROWS using COL-INDICES and DELIMITER."
+  (let ((col-names (clutch--column-names-for-indices col-indices))
+        (separator (char-to-string delimiter)))
+    (cons (mapconcat
+           (lambda (val) (clutch--delimited-escape val delimiter))
+           col-names separator)
           (cl-loop for row in rows
                    for vals = (mapcar (lambda (i) (nth i row)) col-indices)
-                   collect (mapconcat #'clutch--csv-escape vals ",")))))
+                   collect
+                   (mapconcat
+                    (lambda (val) (clutch--delimited-escape val delimiter))
+                    vals separator)))))
 
 (defun clutch--org-table-lines-for-rows (rows col-indices)
   "Return aligned Org table lines for ROWS using COL-INDICES."
@@ -3135,37 +3095,74 @@ rectangle and inactive regions fall back to the current cell."
 
 ;;;; Export commands
 
-;;;###autoload
-(defun clutch-result-export ()
-  "Export the current result.
-Prompts for format:
-- csv-copy: all rows to clipboard as CSV text
-- csv-file: all rows to CSV file
-- insert-copy: all rows to clipboard as INSERT statements
-- insert-file: all rows to a .sql file as INSERT statements
-- update-copy: all rows to clipboard as UPDATE statements
-- update-file: all rows to a .sql file as UPDATE statements."
-  (interactive)
-  (let* ((formats (clutch-result--available-export-formats))
-         (choice (completing-read
-                  "Export format: "
-                  (mapcar #'car formats)
-                  nil t))
-         (format (cdr (assoc choice formats))))
-    (unless format
-      (user-error "Unsupported export format: %s" choice))
-    (clutch--export-result format)))
+(defun clutch-result--export-kind (kind)
+  "Export all result rows as KIND using the active Transient options."
+  (let* ((args (transient-args 'clutch-result-export))
+         (destination
+          (if (transient-arg-value "--file" args) 'file 'clipboard))
+         (omit-header
+          (and (memq kind '(csv tsv))
+               (transient-arg-value "--no-header" args))))
+    (clutch--export-result kind destination omit-header)))
 
-(defun clutch--export-csv-content (rows)
-  "Return CSV export text for ROWS using current visible result columns."
-  (let* ((lines (clutch--csv-lines-for-rows rows (clutch--visible-columns)))
-         (body (mapconcat #'identity (cdr lines) "\n")))
-    (if (string-empty-p body)
-        (concat (car lines) "\n")
-      (concat (car lines) "\n" body "\n"))))
+;;;###autoload (autoload 'clutch-result-export "clutch-result" nil t)
+(transient-define-prefix clutch-result-export ()
+  "Export all rows from the current result.
+Header applies to CSV and TSV and defaults to Yes.  Destination defaults
+to Clipboard; switch it to File before choosing an export format."
+  ["Options"
+   :pad-keys t
+   ("-h" "Header" "--no-header"
+    :class clutch--transient-yes-no-switch
+    :inverted t
+    :format " %k %d %v")
+   ("-f" "Destination" "--file"
+    :class clutch--transient-copy-file-switch
+    :format " %k %d %v")]
+  ["Export as"
+   :pad-keys t
+   ("t" "TSV"
+    (lambda () (interactive) (clutch-result--export-kind 'tsv)))
+   ("c" "CSV"
+    (lambda () (interactive) (clutch-result--export-kind 'csv)))
+   ("i" "INSERT SQL"
+    (lambda () (interactive) (clutch-result--export-kind 'insert))
+    :if (lambda () (clutch-result--export-kind-available-p 'insert)))
+   ("u" "UPDATE SQL"
+    (lambda () (interactive) (clutch-result--export-kind 'update))
+    :if (lambda () (clutch-result--export-kind-available-p 'update)))]
+  ["Document helper"
+   :pad-keys t
+   :if (lambda ()
+         (clutch-result--export-kind-available-p 'document-insert-many))
+   ("M" "Insert many"
+    (lambda ()
+      (interactive)
+      (clutch-result--export-kind 'document-insert-many)))])
 
-(defun clutch--csv-export-coding-choices ()
-  "Return alist of CSV export coding labels to coding systems."
+(defun clutch--export-delimited-content (rows delimiter &optional omit-header)
+  "Return export text for ROWS separated by DELIMITER.
+When OMIT-HEADER is non-nil, omit the column header."
+  (let ((lines (clutch--delimited-lines-for-rows
+                rows (clutch--visible-columns) delimiter)))
+    (when omit-header
+      (setq lines (cdr lines)))
+    (if lines
+        (concat (mapconcat #'identity lines "\n") "\n")
+      "")))
+
+(defun clutch--export-csv-content (rows &optional omit-header)
+  "Return CSV export text for ROWS using current visible result columns.
+When OMIT-HEADER is non-nil, omit the column header."
+  (clutch--export-delimited-content rows ?, omit-header))
+
+(defun clutch--export-tsv-content (rows &optional omit-header)
+  "Return TSV export text for ROWS using current visible result columns.
+When OMIT-HEADER is non-nil, omit the column header."
+  (clutch--export-delimited-content rows ?\t omit-header))
+
+(defun clutch--delimited-export-coding-choices ()
+  "Return alist of delimited export coding labels to coding systems."
   (let ((pairs '(("utf-8-bom" . utf-8-with-signature)
                  ("utf-8" . utf-8)
                  ("gbk" . gbk)
@@ -3174,15 +3171,16 @@ Prompts for format:
              when (coding-system-p coding)
              collect (cons label coding))))
 
-(defun clutch--read-csv-export-coding-system ()
-  "Read coding system for CSV file export."
-  (let* ((choices (clutch--csv-export-coding-choices))
+(defun clutch--read-delimited-export-coding-system (kind)
+  "Read coding system for delimited file export of KIND."
+  (let* ((choices (clutch--delimited-export-coding-choices))
          (default (if (coding-system-p clutch-csv-export-default-coding-system)
                       clutch-csv-export-default-coding-system
                     'utf-8-with-signature))
          (default-label (car (rassoc default choices)))
          (label (completing-read
-                 (format "CSV encoding (default %s): "
+                 (format "%s encoding (default %s): "
+                         (upcase (symbol-name kind))
                          (or default-label (symbol-name default)))
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
@@ -3247,17 +3245,18 @@ Prompts for format:
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
 
-(defun clutch--export-result (format)
-  "Execute result export described by FORMAT."
-  (let* ((kind (plist-get format :kind))
-         (destination (plist-get format :destination))
-         (spec (or (cdr (assq kind clutch--result-export-kinds))
+(defun clutch--export-result (kind destination &optional omit-header)
+  "Export result rows as KIND to DESTINATION.
+When OMIT-HEADER is non-nil, omit headers from delimited formats."
+  (let* ((spec (or (cdr (assq kind clutch--result-export-kinds))
                    (user-error "Unsupported export kind: %s" kind)))
          (rows (clutch-result--collect-all-export-rows))
          (coding (when (and (eq destination 'file)
-                            (eq (plist-get spec :file-coding) 'csv))
-                   (clutch--read-csv-export-coding-system)))
-         (text (funcall (plist-get spec :content) rows))
+                            (eq (plist-get spec :file-coding) 'delimited))
+                   (clutch--read-delimited-export-coding-system kind)))
+         (text (if (memq kind '(csv tsv))
+                   (funcall (plist-get spec :content) rows omit-header)
+                 (funcall (plist-get spec :content) rows)))
          (row-count (length rows))
          (row-suffix (if (= (length rows) 1) "" "s")))
     (pcase destination
@@ -3762,7 +3761,7 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("?" "Column info" clutch-result-column-info)]
    ["Copy / Export"
     ("c" "Copy…" clutch-result-copy-dispatch)
-    ("e" "Export" clutch-result-export)
+    ("e" "Export…" clutch-result-export)
     ("k" "Copy agent context" clutch-copy-context-for-agent)]
     ["Layout"
      ("=" "Widen column"      clutch-result-widen-column)

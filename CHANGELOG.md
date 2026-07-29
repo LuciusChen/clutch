@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 - Unreleased
+
+### Added
+
+- Added full-result TSV export with delimiter-aware quoting, automatic paging for pageable queries, and the same explicit spreadsheet-friendly encoding choices as CSV. Copy and Export now use consistent Transient menus with headers enabled by default; Export also exposes Clipboard/File as a destination switch.
+
 ## 0.3.0 - 2026-07-28
 
 ### Breaking Changes
