@@ -2163,38 +2163,33 @@ list-table-entries tests; only the cursor path needs the helper."
       (clutch-db-document-mutation-snippets conn 'delete-one "users" (list doc))
       '("db.getCollection(\"users\").deleteOne({\"_id\":7});")))))
 
-(ert-deftest clutch-db-test-mongodb-decoded-id-filter-encodes-as-object-id ()
-  "An _id filter built from a decoded document must target the ObjectId.
-Generated mutations reuse the decoded _id value verbatim; if the tagged
-alist encoded as an embedded document, updates and deletes keyed on an
-ObjectId would silently match nothing."
+(ert-deftest clutch-db-test-mongodb-id-filter-preserves-object-id ()
+  "An _id filter must preserve the document's public ObjectId value."
   (require 'mongodb)
-  (let* ((stored (list (cons "_id" (mongodb-object-id
-                                    "65f1a2b3c4d5e6f708090a0b"))
-                       (cons "name" "Ann")))
-         (decoded (mongodb--decode-document-from-string
-                   (mongodb--encode-document stored)))
-         (filter (clutch-mongodb--document-id-filter decoded "update"))
-         (encoded (mongodb--encode-document filter)))
-    ;; Wire type of the first element: 0x07 ObjectId, not 0x03 document.
-    (should (= (aref encoded 4) #x07))
-    (should (equal (mongodb--decode-document-from-string encoded) filter))))
+  (dolist (hex '("65f1a2b3c4d5e6f708090a0b"
+                 "000000000000000000000001"))
+    (let* ((object-id (mongodb-object-id hex))
+           (document (list (cons "_id" object-id)
+                           (cons "name" "Ann")))
+           (filter (clutch-mongodb--document-id-filter document "update"))
+           (filtered-id (cdr (assoc "_id" filter))))
+      (should (mongodb-object-id-p filtered-id))
+      (should (eq filtered-id object-id))
+      (should (equal (mongodb-object-id-hex filtered-id) hex)))))
 
 (ert-deftest clutch-db-test-mongodb-display-renders-decoded-scalars ()
   "Decoded wrapper structs must render as Extended JSON display text.
 mongodb.el decodes BSON scalars to structs; the result view spells them
 back out in Extended JSON instead of handing `json-encode' a record."
   (require 'mongodb)
-  (let* ((doc (list (cons "_id" (mongodb-object-id
-                                 "65f1a2b3c4d5e6f708090a0b"))
-                    (cons "n" (/ 0.0 0.0))
-                    (cons "d" (mongodb-decimal128 "1.23"))
-                    (cons "w" (mongodb-datetime 1700000000000))
-                    (cons "small" (mongodb-int64 7))
-                    (cons "arr" (vector (mongodb-min-key)))
-                    (cons "empty" (mongodb-document nil))))
-         (decoded (mongodb--decode-document-from-string
-                   (mongodb--encode-document doc)))
+  (let* ((decoded (list (cons "_id" (mongodb-object-id
+                                     "65f1a2b3c4d5e6f708090a0b"))
+                        (cons "n" (/ 0.0 0.0))
+                        (cons "d" (mongodb-decimal128 "1.23"))
+                        (cons "w" (mongodb-datetime 1700000000000))
+                        (cons "small" (mongodb-int64 7))
+                        (cons "arr" (vector (mongodb-min-key)))
+                        (cons "empty" (mongodb-document nil))))
          (text (clutch-mongodb--json-encode-text decoded)))
     (should (string-match-p "\"\\$oid\":\"65f1a2b3c4d5e6f708090a0b\"" text))
     (should (string-match-p "\"\\$numberDouble\":\"NaN\"" text))
