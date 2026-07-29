@@ -394,6 +394,7 @@
   (cl-loop for i below (length string)
            for display = (get-text-property i 'display string)
            sum (cond
+                ((eq (aref string i) ?\n) 0)
                 ((equal display "") 0)
                 ((stringp display)
                  (clutch-test--fake-pixel-width display))
@@ -402,35 +403,100 @@
                    (if (consp width) (car width) width)))
                 ((and (consp display) (eq (car display) 'raise))
                  25)
+                ((zerop (char-width (aref string i))) 0)
                 ((memq (aref string i) '(?中 ?文)) 30)
                 (t 10))))
 
-(ert-deftest clutch-test-result-grid-aligns-mixed-width-font-fallbacks ()
-  "Result headers and rows should share measured graphical column widths."
-  (clutch-test--with-result-state
-      (:columns '("name")
-       :column-defs '(nil)
-       :rows '(("中文"))
-       :page-total-rows 1
-       :column-widths [4])
-    (cl-letf (((symbol-function 'display-graphic-p)
-               (lambda (&optional _display) t))
-              ((symbol-function 'default-font-width)
-               (lambda () 10))
-              ((symbol-function 'string-pixel-width)
-               #'clutch-test--fake-pixel-width)
-              ((symbol-function 'clutch--header-label)
-               (lambda (name &optional _include-unsorted-sort _cidx)
-                 (propertize name 'clutch-header-name t)))
-              ((symbol-function 'clutch--refresh-footer-line) #'ignore))
-      (clutch--render-result)
-      (should (= (clutch-test--fake-pixel-width clutch--header-line-string)
-                 (clutch-test--fake-pixel-width
-                  (string-trim-right (buffer-string)))))
-      (should (= (string-width clutch--header-line-string)
-                 (string-width (string-trim-right (buffer-string)))))
-      (should (equal clutch--column-widths [4]))
-      (should (equal clutch--column-pixel-widths [60])))))
+(ert-deftest clutch-test-pixel-padding-alignments-use-min-width ()
+  "Every graphical cell alignment should use measurable minimum widths."
+  (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
+            ((symbol-function 'string-pixel-width)
+             #'clutch-test--fake-pixel-width))
+    (let ((left (clutch--pad-display-string "x" 4 50 nil 10))
+          (right (clutch--pad-display-string "7" 4 50 t))
+          (center (clutch--center-display-string "x" 4 50)))
+      (dolist (case `((,left ((50))) (,right ((40))) (,center ((20)))))
+        (pcase-let ((`(,string ,minimum) case))
+          (should (= (string-width string) 4))
+          (should
+           (equal (cl-loop for i below (length string)
+                           thereis
+                           (get-display-property i 'min-width string))
+                  minimum))))
+      (should-not
+       (cl-loop for string in (list left right center)
+                thereis
+                (cl-loop for i below (length string)
+                         for display = (get-text-property i 'display string)
+                         thereis (and (consp display)
+                                      (eq (car display) 'space))))))))
+
+(ert-deftest clutch-test-header-crop-preserves-partial-min-width ()
+  "Header hscroll should retain the visible part of a minimum-width carrier."
+  (with-temp-buffer
+    (let ((carrier (string #x200b))
+          (logical-padding (propertize "   " 'display "")))
+      (add-display-text-property 0 1 'min-width '((30)) carrier)
+      (setq-local clutch--header-line-string
+                  (concat carrier logical-padding "x")
+                  clutch--column-pixel-widths [30])
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _display) t))
+                ((symbol-function 'default-font-width) (lambda () 10))
+                ((symbol-function 'window-hscroll)
+                 (lambda (&optional _window) 1))
+                ((symbol-function 'string-pixel-width)
+                 (lambda (string)
+                   (if-let* ((minimum
+                              (get-display-property 0 'min-width string)))
+                       (caar minimum)
+                     (clutch-test--fake-pixel-width string)))))
+        (let ((cropped (clutch--header-line-with-hscroll)))
+          (should (equal (get-display-property 0 'min-width cropped)
+                         '((20))))
+          (should (= (string-width cropped) 4)))))))
+
+(ert-deftest clutch-test-result-grid-aligns-mixed-width-custom-displays ()
+  "Result headers and custom display subregions should share rendered widths."
+  (let ((clutch-column-displayers nil)
+        (clutch--column-displayer-version 0)
+        (wide (copy-sequence "中文"))
+        (narrow (copy-sequence "Ix")))
+    (put-text-property 0 2 'display '(space :width (30)) wide)
+    (put-text-property 0 1 'display '(raise 0.0) narrow)
+    (clutch-register-column-displayer
+     "items" "state"
+     (lambda (value)
+       (copy-sequence (if (string= value "wide") wide narrow))))
+    (clutch-test--with-result-state
+        (:source-table "items"
+         :columns '("state")
+         :column-defs '((:name "state"))
+         :rows '(("wide") ("narrow"))
+         :column-widths [5])
+      (let (header rows)
+        (cl-letf (((symbol-function 'display-graphic-p)
+                   (lambda (&optional _display) t))
+                  ((symbol-function 'default-font-width) (lambda () 1))
+                  ((symbol-function 'clutch--pixel-metric-signature)
+                   (lambda () '(mixed-width)))
+                  ((symbol-function 'string-pixel-width)
+                   #'clutch-test--fake-pixel-width)
+                  ((symbol-function 'clutch--header-label)
+                   (lambda (name &optional _include-unsorted-sort _cidx)
+                     (propertize name 'clutch-header-name t)))
+                  ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+          (clutch--render-result)
+          (setq header clutch--header-line-string
+                rows (string-lines (string-trim-right (buffer-string))))
+          (should (equal clutch--column-pixel-widths [60])))
+        (dolist (string rows)
+          (should
+           (cl-loop for i below (length string)
+                    thereis
+                    (equal (get-display-property i 'min-width string)
+                           '((60)))))
+          (should (= (string-width header) (string-width string))))))))
 
 (ert-deftest clutch-test-install-page-state-contract ()
   "Page refreshes should preserve compatible caches and widths only."
@@ -1987,7 +2053,8 @@
     (with-temp-buffer
       (setq-local clutch--sort-column nil)
       (let ((clutch--header-sort-indicator-cache (make-hash-table :test 'equal))
-            (wide-icon (propertize "I" 'display '(raise 0.0))))
+            (wide-icon (propertize "I" 'display '(raise 0.0)))
+            cropped)
         (cl-letf (((symbol-function 'display-graphic-p)
                    (lambda (&optional _display) t))
                   ((symbol-function 'default-font-width)
@@ -2001,10 +2068,12 @@
           (let ((indicator (clutch--header-sort-indicator "score" t 0)))
             (setq-local clutch--header-line-string (concat indicator "x")
                         clutch--column-pixel-widths [30])
-            (let ((cropped (clutch--header-line-with-hscroll)))
-              (should (equal (get-text-property 0 'display cropped)
-                             '(space :width (5))))
-              (should (= (clutch-test--fake-pixel-width cropped) 20))))))))
+            (setq cropped (clutch--header-line-with-hscroll))
+            (should (equal (get-display-property 0 'min-width cropped)
+                           '((5))))
+            (should (= (next-single-property-change
+                        0 'display cropped (length cropped))
+                       1)))))))
   (ert-info ("display prefix align-to")
     (with-temp-buffer
       (setq-local clutch--header-line-string "abc")
@@ -2162,11 +2231,13 @@
                      (pop icons)))))
         (let ((narrow (clutch--header-sort-indicator "score" t 1)))
           (should (= (string-width narrow) 1))
-          (should (= (clutch-test--fake-pixel-width narrow) 10)))
+          (should (equal (get-display-property 1 'min-width narrow)
+                         '((2)))))
         (clrhash clutch--header-sort-indicator-cache)
         (let ((wide (clutch--header-sort-indicator "score" t 1)))
           (should (= (string-width wide) 3))
-          (should (= (clutch-test--fake-pixel-width wide) 30))
+          (should (equal (get-display-property 1 'min-width wide)
+                         '((5))))
           (should-not (stringp (get-text-property 0 'display wide))))))))
 
 (ert-deftest clutch-test-header-sort-keymap-dispatches-in-event-window-buffer ()
