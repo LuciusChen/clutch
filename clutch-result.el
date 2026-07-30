@@ -43,6 +43,13 @@ full value viewer."
                  (const :tag "Child frame" child-frame))
   :group 'clutch)
 
+(defcustom clutch-cell-preview-delay 0.25
+  "Idle seconds before showing a child-frame cell preview.
+Moving to another cell hides the previous preview immediately, then starts
+this delay for the new cell."
+  :type 'float
+  :group 'clutch)
+
 (defcustom clutch-cell-preview-max-size '(0.65 . 0.45)
   "Maximum child-frame cell preview size relative to its parent frame.
 The car is the maximum width fraction and the cdr is the maximum height
@@ -2735,6 +2742,10 @@ ROW-INDEX and COLUMN-INDEX reject a stale idle callback after point moves."
           (clutch--close-cell-preview)
           (setq state nil))
         (clutch--cancel-cell-preview-timer)
+        (unless same-cell
+          (when-let* ((frame (plist-get state :frame))
+                      ((frame-live-p frame)))
+            (make-frame-invisible frame)))
         (if (and same-cell
                  (buffer-live-p (plist-get state :buffer))
                  (frame-live-p (plist-get state :frame)))
@@ -2750,10 +2761,10 @@ ROW-INDEX and COLUMN-INDEX reject a stale idle callback after point moves."
                   (clutch--position-cell-preview-frame frame source-window)
                   (make-frame-visible frame))
               (error (clutch--close-cell-preview)))
-          ;; A short fixed idle delay collapses rapid navigation into one render.
+          ;; The idle delay collapses rapid navigation into one render.
           (setq clutch--cell-preview-timer
                 (run-with-idle-timer
-                 0.08 nil #'clutch--show-scheduled-cell-preview
+                 clutch-cell-preview-delay nil #'clutch--show-scheduled-cell-preview
                  source source-window
                  (plist-get context :row-index)
                  (plist-get context :column-index)))))))))
