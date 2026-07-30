@@ -1,6 +1,6 @@
 # 173 - Redisplay-Owned Minimum Result Cell Widths
 
-> Superseded in part by [postmortem 174](174-min-width-redisplay-version-boundary.md): graphical Emacs 29 needs explicit pixel padding, and header lines cannot use the zero-width `min-width` carrier.
+> Superseded in part by [postmortem 174](174-min-width-redisplay-version-boundary.md) for the Emacs 29 result-body boundary and by [postmortem 176](176-header-line-min-width-after-emacs-31.md) for reliable header-line `min-width` from Emacs 31.1.
 
 ## Context
 

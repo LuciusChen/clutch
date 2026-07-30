@@ -8,7 +8,8 @@
 
 ### Fixed
 
-- Kept graphical result grids aligned across Emacs redisplay versions. Emacs 30 and later use `min-width` for result-body values, improving mixed-glyph and custom-display alignment; Emacs 29 uses explicit pixel padding because its redisplay does not enforce those widths reliably. Headers use explicit pixel padding on every version because zero-width `min-width` carriers are ignored in header lines. Both paths retain the same logical widths for navigation, horizontal scrolling, and terminals.
+- Kept graphical result grids aligned across Emacs redisplay versions. Emacs 30 and later use `min-width` for result-body values, improving mixed-glyph and custom-display alignment; Emacs 29 uses explicit pixel padding because its redisplay does not enforce those widths reliably. Headers retain explicit pixel padding through Emacs 30, while Emacs 31.1 and later use safely terminated `min-width` carriers after upstream fixed mode-line string handling; the carrier accounts for fonts that paint the nominally zero-width terminator as one pixel. All paths retain the same logical widths for navigation, horizontal scrolling, and terminals.
+- Made automatic child-frame cell previews wait for a configurable idle delay and hide stale content immediately when point moves to another cell, preventing the preview from visibly following navigation across adjacent rows.
 
 ## 0.3.0 - 2026-07-28
 

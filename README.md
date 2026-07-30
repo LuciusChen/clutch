@@ -41,7 +41,7 @@ For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Deta
 ## Key Capabilities
 
 - **Keep query context visible:** execute a region or statement without leaving the SQL buffer; results refresh in a split grid and the last executed statement stays marked.
-- **Inspect wide or structured results:** navigate a single-page table, scroll horizontally, open record and full-value views, and preview truncated JSON, XML, text, or BLOB values.
+- **Inspect wide or structured results:** navigate a single-page table, scroll horizontally, open record and full-value views, and preview truncated JSON, XML, text, or BLOB values after a brief pause without dragging the preview across cells during navigation.
 - **Edit supported SQL results with guardrails:** stage inserts, updates, and deletes locally, inspect the execution preview, and commit only after validation and confirmation.
 - **Navigate with database context:** complete scoped tables and columns, inspect Eldoc and object definitions, follow foreign keys, and reuse cache-first metadata without blocking point motion.
 - **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side fuzzy filtering, copy selections as TSV, CSV, or Org tables, and export complete pageable results as CSV or TSV with consistent Transient controls for optional headers and clipboard/file destinations.

@@ -1,5 +1,7 @@
 # 174 — `min-width` Redisplay Version Boundary
 
+> Superseded in part by [postmortem 176](176-header-line-min-width-after-emacs-31.md): later Emacs redisplay fixes and a terminated carrier make header-line `min-width` reliable from Emacs 31.1.
+
 ## Context
 
 Issue #37 reported that result headers no longer aligned on the supported Emacs 29.4 NS build after postmortem 173 replaced explicit pixel padding with `min-width`. The property and its Lisp APIs exist at the Emacs 29.1 baseline, but API availability does not prove that graphical redisplay enforces the property in every display context.

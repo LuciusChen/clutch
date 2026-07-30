@@ -389,23 +389,41 @@
 
 ;;;; Rendering — padding
 
+(defun clutch-test--fake-char-pixel-width (string pos)
+  "Return deterministic pixels for the character at POS in STRING."
+  (let ((display (get-text-property pos 'display string)))
+    (cond
+     ((eq (aref string pos) ?\n) 0)
+     ((equal display "") 0)
+     ((stringp display)
+      (clutch-test--fake-pixel-width display))
+     ((and (consp display) (eq (car display) 'space))
+      (let ((width (plist-get (cdr display) :width)))
+        (if (consp width) (car width) width)))
+     ((and (consp display) (eq (car display) 'raise)) 25)
+     ((zerop (char-width (aref string pos))) 0)
+     ((memq (aref string pos) '(?中 ?文)) 30)
+     (t 10))))
+
 (defun clutch-test--fake-pixel-width (string)
   "Return deterministic mixed-width pixels for STRING."
-  (cl-loop for i below (length string)
-           for display = (get-text-property i 'display string)
-           sum (cond
-                ((eq (aref string i) ?\n) 0)
-                ((equal display "") 0)
-                ((stringp display)
-                 (clutch-test--fake-pixel-width display))
-                ((and (consp display) (eq (car display) 'space))
-                 (let ((width (plist-get (cdr display) :width)))
-                   (if (consp width) (car width) width)))
-                ((and (consp display) (eq (car display) 'raise))
-                 25)
-                ((zerop (char-width (aref string i))) 0)
-                ((memq (aref string i) '(?中 ?文)) 30)
-                (t 10))))
+  (let ((pos 0)
+        (pixels 0))
+    (while (< pos (length string))
+      (if-let* ((min-width (get-display-property pos 'min-width string))
+                (target (caar min-width))
+                ((numberp target)))
+          (let* ((end (next-single-property-change
+                       pos 'display string (length string)))
+                 (content-pixels
+                  (cl-loop for i from pos below end
+                           sum (clutch-test--fake-char-pixel-width string i))))
+            (setq pixels (+ pixels (max target content-pixels))
+                  pos end))
+        (setq pixels (+ pixels
+                        (clutch-test--fake-char-pixel-width string pos))
+              pos (1+ pos))))
+    pixels))
 
 (ert-deftest clutch-test-result-pixel-padding-version-contract ()
   "Result cells should use the graphical width path supported by Emacs."
@@ -447,22 +465,70 @@
         (should (equal (get-display-property 0 'min-width empty)
                        '((50))))))))
 
-(ert-deftest clutch-test-header-pixel-padding-stays-explicit ()
-  "Header centering should not depend on `min-width' redisplay."
+(ert-deftest clutch-test-header-pixel-padding-version-contract ()
+  "Header centering should use the redisplay path supported by Emacs."
   (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
             ((symbol-function 'string-pixel-width)
              #'clutch-test--fake-pixel-width))
-    (dolist (major '(29 30 32))
-      (let ((emacs-major-version major))
-        (let ((centered (clutch--center-display-string "x" 4 50)))
+    (dolist (version '("29.1" "30.2" "31.0.50" "31.1" "32.0.50"))
+      (let* ((emacs-version version)
+             (min-width-p (clutch--header-min-width-supported-p)))
+        (let ((centered
+               (clutch--center-display-string "x" 4 50 min-width-p)))
           (should (= (string-width centered) 4))
           (should (= (clutch-test--fake-pixel-width centered) 50))
-          (should (equal (get-text-property 0 'display centered)
-                         '(space :width (20))))
-          (should-not
-           (cl-loop for i below (length centered)
-                    thereis
-                    (get-display-property i 'min-width centered))))))))
+          (if (not min-width-p)
+              (progn
+                (should (equal (get-text-property 0 'display centered)
+                               '(space :width (20))))
+                (should-not
+                 (cl-loop for i below (length centered)
+                          thereis
+                          (get-display-property i 'min-width centered))))
+            (should (equal (get-display-property 0 'min-width centered)
+                           '((20))))
+            (should
+             (cl-loop for i below (length centered)
+                      thereis
+                      (and (> i 0)
+                           (equal (get-display-property
+                                   i 'min-width centered)
+                                  '((20))))))))))))
+
+(ert-deftest clutch-test-header-min-width-accounts-for-terminator-pixels ()
+  "Header padding should not grow when a font paints the terminator."
+  (let ((original-char-width
+         (symbol-function 'clutch-test--fake-char-pixel-width))
+        (terminator-pixels 1))
+    (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
+              ((symbol-function 'string-pixel-width)
+               #'clutch-test--fake-pixel-width)
+              ((symbol-function 'clutch-test--fake-char-pixel-width)
+               (lambda (string pos)
+                 (if (= (aref string pos) #x200b)
+                     terminator-pixels
+                   (funcall original-char-width string pos)))))
+      (let ((centered (clutch--center-display-string "x" 4 50 t)))
+        (should (= (clutch-test--fake-pixel-width centered) 50))
+        (should (equal (get-display-property 0 'min-width centered)
+                       '((19))))
+        (should
+         (cl-loop for i below (length centered)
+                  thereis
+                  (and (> i 0)
+                       (equal (get-display-property i 'min-width centered)
+                              '((19)))))))
+      (let ((zero-padding (clutch--min-width-padding-string 2 0 t)))
+        (should (= (string-width zero-padding) 2))
+        (should (= (clutch-test--fake-pixel-width zero-padding) 0))
+        (should-not (string-match-p (string #x200b) zero-padding)))
+      (setq terminator-pixels 2)
+      (let ((narrow-padding (clutch--min-width-padding-string 1 1 t)))
+        (should (= (clutch-test--fake-pixel-width narrow-padding) 1))
+        (should (equal (get-text-property 0 'display narrow-padding)
+                       '(space :width (1))))
+        (should-not
+         (get-display-property 0 'min-width narrow-padding))))))
 
 (ert-deftest clutch-test-result-grid-aligns-mixed-width-custom-displays ()
   "Result headers and custom display subregions should share rendered widths."
@@ -2072,6 +2138,24 @@
             (should (equal (get-text-property 0 'display cropped)
                            '(space :width (20))))
             (should (= (clutch-test--fake-pixel-width cropped) 30)))))))
+  (ert-info ("min-width carrier crop")
+    (with-temp-buffer
+      (setq-local clutch--column-pixel-widths [30])
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _display) t))
+                ((symbol-function 'default-font-width)
+                 (lambda () 10))
+                ((symbol-function 'window-hscroll)
+                 (lambda (&optional _window) 1))
+                ((symbol-function 'string-pixel-width)
+                 #'clutch-test--fake-pixel-width))
+        (setq-local clutch--header-line-string
+                    (concat (clutch--min-width-padding-string 2 30 t) "x"))
+        (let ((cropped (clutch--header-line-with-hscroll)))
+          (should (equal (get-text-property 0 'display cropped)
+                         '(space :width (20))))
+          (should-not (get-display-property 0 'min-width cropped))
+          (should (= (clutch-test--fake-pixel-width cropped) 30))))))
   (ert-info ("sort indicator glyph crop preserves following alignment")
     (with-temp-buffer
       (setq-local clutch--sort-column nil)
@@ -2697,6 +2781,37 @@
               (should-not clutch--cell-preview-timer))))
       (when (buffer-live-p source)
         (kill-buffer source)))))
+
+(ert-deftest clutch-test-cell-preview-waits-and-hides-between-cells ()
+  "Changing cells should hide stale content until the preview delay passes."
+  (let* ((source (current-buffer))
+         (source-window (selected-window))
+         (clutch-cell-preview-style 'child-frame)
+         (clutch-cell-preview-delay 0.25)
+         (clutch--cell-preview-state
+          (list :source-buffer source
+                :source-window source-window
+                :frame 'preview
+                :cell-id '(1 0 0)))
+         (clutch--cell-preview-timer nil)
+         hidden scheduled)
+    (cl-letf (((symbol-function 'clutch--cell-preview-supported-p)
+               (lambda (_window) t))
+              ((symbol-function 'clutch--cell-preview-context)
+               (lambda ()
+                 '(:cell-id (1 0 1) :row-index 0 :column-index 1)))
+              ((symbol-function 'frame-live-p) (lambda (_frame) t))
+              ((symbol-function 'make-frame-invisible)
+               (lambda (frame) (setq hidden frame)))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (delay repeat function &rest args)
+                 (setq scheduled (list delay repeat function args))
+                 'new-timer)))
+      (clutch--schedule-cell-preview))
+    (should (eq hidden 'preview))
+    (should (eq clutch--cell-preview-timer 'new-timer))
+    (should (= (car scheduled) clutch-cell-preview-delay))
+    (should-not (nth 1 scheduled))))
 
 (ert-deftest clutch-test-cell-preview-cleans-up-nonlocal-exits-and-buffer-kills ()
   "Preview creation and external buffer kills should not leak global state."
