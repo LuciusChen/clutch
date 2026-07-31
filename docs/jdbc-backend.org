@@ -191,9 +191,10 @@ Pure in-memory URLs and attached catalogs are not listed.  An in-memory database
 - Customize that default globally with =clutch-jdbc-oracle-manual-commit=, or override per connection with =:manual-commit t= / =:manual-commit nil=.
 - Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction from the Query Console, an attached Result Browser, or its Record view.
 - Use =C-c C-a= to toggle between manual-commit and auto-commit at any time. The toggle is blocked when there are uncommitted changes (matching DataGrip's behavior); commit or roll back first, then switch.
+- In Manual mode, =C-c C-c= wraps each staged Result Browser submission in a JDBC savepoint. A failed later statement rolls this submission back without discarding earlier user work in the outer transaction. Drivers that report no savepoint support fail before staged DML begins.
 - Native MySQL supports the same commands by toggling the session autocommit flag.
 - Native PostgreSQL supports the same commands through a clutch-managed manual mode with lazy =BEGIN=; transactional DDL counts as pending work there too.
-- The console header-line always shows the current commit mode: =Tx: Auto=, =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
+- The console header-line always shows the current commit mode: =Tx: Auto=, =Tx: Manual=, =Tx: Manual*= (uncommitted changes present), or =Tx: Uncertain= after failed batch recovery or any unknown commit outcome. Uncertain state blocks further queries, commit, and transaction-mode changes until rollback or reconnect. Recovery makes the session usable; it does not prove that an earlier uncertain commit failed, so retained work must be verified before retry.
 - Open DML result buffers show a status banner in their header-line after each transaction event:
   - Commit: =✓ Transaction committed= (green)
   - Rollback: =⚠ Transaction rolled back — changes not persisted= (orange)

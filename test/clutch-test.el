@@ -4337,8 +4337,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Edit — staged mutations (row identity)
 
-(ert-deftest clutch-test-insert-commit-replaces-existing-pending-insert ()
-  "Committing a re-edited insert should replace the staged entry in place."
+(ert-deftest clutch-test-insert-stage-replaces-existing-pending-insert ()
+  "Staging a re-edited insert should replace the pending entry in place."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts '((("severity" . "low"))))
@@ -4360,15 +4360,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            "incidents" result-buf '(("severity" . "low")) 0)
           (with-current-buffer insert-buf
             (clutch-test--set-insert-field-value "severity" "high")
-            (clutch-result-insert-commit))))
+            (clutch-result-insert-stage))))
       (when (buffer-live-p insert-buf) (kill-buffer insert-buf))
       (should (= replaced 2))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
                      '((("severity" . "high"))))))))
 
-(ert-deftest clutch-test-insert-commit-appends-new-pending-insert-locally ()
-  "Committing a new insert should append one ghost row without full redraw."
+(ert-deftest clutch-test-insert-stage-appends-new-pending-insert-locally ()
+  "Staging a new insert should append one ghost row without full redraw."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts nil)
@@ -4389,15 +4389,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-result-insert--open-buffer "users" result-buf)
           (with-current-buffer insert-buf
             (clutch-test--set-insert-field-value "name" "carol")
-            (clutch-result-insert-commit))))
+            (clutch-result-insert-stage))))
       (when (buffer-live-p insert-buf) (kill-buffer insert-buf))
       (should (= appended 0))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
                      '((("name" . "carol"))))))))
 
-(ert-deftest clutch-test-insert-commit-rejects-stale-result-table-before-closing ()
-  "Insert commit should keep the form open when the parent result table changed."
+(ert-deftest clutch-test-insert-stage-rejects-stale-result-table-before-closing ()
+  "Insert staging should keep the form open when the parent result table changed."
   (let (closed)
     (clutch-test--with-pop-to-buffer-capture insert-buf
       (clutch-test--with-insert-result-buffer result-buf
@@ -4416,7 +4416,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (cl-letf (((symbol-function 'quit-window)
                      (lambda (&rest _) (setq closed t)))
                     ((symbol-function 'clutch--refresh-display) #'ignore))
-            (let ((err (should-error (clutch-result-insert-commit)
+            (let ((err (should-error (clutch-result-insert-stage)
                                      :type 'user-error)))
               (should (string-match-p "Result table changed"
                                       (error-message-string err))))))
@@ -4530,15 +4530,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                           :type 'user-error)))
       (kill-buffer buf))))
 
-(ert-deftest clutch-test-commit-ordering-insert-update-delete ()
-  "Commit executes INSERT before UPDATE before DELETE."
+(ert-deftest clutch-test-submit-orders-insert-update-delete ()
+  "Submit executes INSERT before UPDATE before DELETE."
   (clutch-test--with-result-state
       (:columns '("id" "name")
        :rows '((1 "a") (2 "b"))
        :pending-inserts '((("id" . "3") ("name" . "c")))
        :pending-edits (list (cons (cons (vector 1) 1) "a2"))
        :pending-deletes (list (vector 2)))
-    (let (executed reverts)
+    (let (atomic executed reverts)
       (setq-local revert-buffer-function
                   (lambda (ignore-auto noconfirm)
                     (push (list ignore-auto noconfirm
@@ -4554,103 +4554,154 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
-                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) nil))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (_conn function)
+                   (setq atomic t)
+                   (funcall function)))
                 ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql &optional params)
-                   (push (cons sql params) executed))))
-        (clutch-result-commit)
+                 (lambda (_conn sql &optional params _defer-transaction-state)
+                   (setq executed (append executed (list (cons sql params))))
+                   (make-clutch-db-result :affected-rows 1))))
+        (clutch-result-submit)
+        (should atomic)
         (should (= (length executed) 3))
-        ;; executed is in reverse push order: last executed is at (nth 0 executed)
-        (should (string-prefix-p "INSERT" (car (nth 2 executed))))
-        (should (equal (cdr (nth 2 executed)) '("3" "c")))
+        (should (string-prefix-p "INSERT" (car (nth 0 executed))))
+        (should (equal (cdr (nth 0 executed)) '("3" "c")))
         (should (string-prefix-p "UPDATE" (car (nth 1 executed))))
         (should (equal (cdr (nth 1 executed)) '("a2" 1)))
-        (should (string-prefix-p "DELETE" (car (nth 0 executed))))
-        (should (equal (cdr (nth 0 executed)) '(2)))
+        (should (string-prefix-p "DELETE" (car (nth 2 executed))))
+        (should (equal (cdr (nth 2 executed)) '(2)))
         (should (equal reverts '((nil t nil nil nil nil))))))))
 
-(ert-deftest clutch-test-commit-rolls-back-whole-batch-on-second-failure ()
-  "A failed later statement must roll back earlier staged mutations."
+(ert-deftest clutch-test-submit-validates-before-auto-commit ()
+  "Auto submit should roll back when row-count validation fails."
   (clutch-test--with-result-state
-      (:pending-inserts '(first second))
-    (let (executed rolled-back cleared reverted)
+      (:pending-edits '(edit))
+    (let (committed rolled-back reverted)
       (setq-local revert-buffer-function
                   (lambda (&rest _args) (setq reverted t)))
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '(("INSERT first") ("INSERT second"))))
-                ((symbol-function 'clutch-db-escape-literal)
-                 (lambda (_conn value) (format "'%s'" value)))
-                ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
-                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) nil))
-                ((symbol-function 'clutch-db-rollback)
-                 (lambda (_) (setq rolled-back t)))
-                ((symbol-function 'clutch--clear-tx-dirty)
-                 (lambda (_) (setq cleared t)))
-                ((symbol-function 'clutch--mark-dml-results-rolled-back) #'ignore)
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql &optional _params)
-                   (push sql executed)
-                   (when (= (length executed) 2)
-                     (signal 'clutch-db-error '("second failed"))))))
-        (should-error (clutch-result-commit) :type 'user-error)
-        (should (equal (nreverse executed) '("INSERT first" "INSERT second")))
-        (should rolled-back)
-        (should cleared)
-        (should (equal clutch--pending-inserts '(first second)))
-        (should-not reverted)))))
-
-(ert-deftest clutch-test-commit-rejects-multi-statement-autocommit-batch ()
-  "Autocommit must not expose a staged batch to partial success."
-  (clutch-test--with-result-state
-      (:pending-inserts '(first second))
-    (let (executed)
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '(("INSERT first") ("INSERT second"))))
+      (cl-letf (((symbol-function 'clutch-result--build-update-statements)
+                 (lambda ()
+                   '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
                 ((symbol-function 'clutch--run-db-query)
-                 (lambda (&rest _args) (setq executed t))))
-        (let ((err (should-error (clutch-result-commit) :type 'user-error)))
-          (should (string-match-p "autocommit" (error-message-string err))))
-        (should-not executed)
-        (should (equal clutch--pending-inserts '(first second)))))))
+                 (lambda (&rest _)
+                   (make-clutch-db-result :affected-rows 2)))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (_conn function)
+                   (condition-case err
+                       (prog1 (funcall function)
+                         (setq committed t))
+                     ((error quit)
+                      (setq rolled-back t)
+                      (signal (car err) (cdr err)))))))
+        (let ((err (should-error (clutch-result-submit) :type 'user-error)))
+          (should (string-match-p "Mutation matched 2 rows"
+                                  (error-message-string err))))
+        (should rolled-back)
+        (should-not committed)
+        (should-not reverted)
+        (should (equal clutch--pending-edits '(edit)))))))
 
-(ert-deftest clutch-test-commit-sqlite-autocommit-batch-is-atomic ()
-  "SQLite should commit or roll back a staged multi-row batch as a unit."
-  (skip-unless (sqlite-available-p))
-  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
-    (unwind-protect
-        (progn
-          (clutch-db-init-connection conn)
-          (clutch-db-query
-           conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
-          (with-temp-buffer
-            (setq-local clutch-connection conn)
-            (clutch-result--execute-mutation-batch
-             '(("INSERT INTO demo (id, name) VALUES (?, ?)" 1 "a")
-               ("INSERT INTO demo (id, name) VALUES (?, ?)" 2 "b"))
-             nil nil))
-          (should
-           (equal (clutch-db-result-rows
-                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
-                  '((1 "a") (2 "b"))))
-          (with-temp-buffer
-            (setq-local clutch-connection conn)
-            (should-error
-             (clutch-result--execute-mutation-batch
-              '(("INSERT INTO demo (id, name) VALUES (?, ?)" 3 "c")
-                ("INSERT INTO demo (id, name) VALUES (?, ?)" 1 "duplicate"))
-              nil nil)
-             :type 'user-error))
-          (should
-           (equal (clutch-db-result-rows
-                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
-                  '((1 "a") (2 "b")))))
-      (clutch-db-disconnect conn))))
+(ert-deftest clutch-test-submit-manual-batch-uses-atomic-backend-boundary ()
+  "Manual staged submit should be atomic without committing the user transaction."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
+    (clutch-test--with-result-state
+        (:pending-inserts '(first second))
+      (let (atomic executed notice)
+      (setq-local revert-buffer-function
+                  (lambda (&rest _args) nil))
+      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '(("INSERT first") ("INSERT second"))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (_conn function)
+                   (setq atomic t)
+                   (funcall function)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql &optional _params _defer-transaction-state)
+                   (push sql executed)
+                   (make-clutch-db-result :affected-rows 1)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (setq notice (apply #'format format-string args)))))
+        (clutch-result-submit)
+        (should (equal (nreverse executed) '("INSERT first" "INSERT second")))
+        (should atomic)
+        (should (equal notice "2 changes submitted"))
+        (should-not clutch--pending-inserts))))))
+
+(ert-deftest clutch-test-submit-handles-known-session-restore-outcomes ()
+  "Pending state must follow the known outcome when restoring Auto mode fails."
+  (dolist (outcome '(committed rolled-back))
+    (clutch-test--with-result-state
+        (:pending-inserts '(first second))
+      (let (refreshed reverted)
+        (setq-local revert-buffer-function
+                    (lambda (&rest _args) (setq reverted t)))
+        (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                   (lambda () '(("INSERT first") ("INSERT second"))))
+                  ((symbol-function 'clutch-db-escape-literal)
+                   (lambda (_conn value) (format "'%s'" value)))
+                  ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                  ((symbol-function 'clutch--refresh-transaction-ui)
+                   (lambda (_) (setq refreshed t)))
+                  ((symbol-function 'clutch-db-call-with-atomic-batch)
+                   (lambda (&rest _)
+                     (signal
+                      'clutch-db-session-restore-error
+                      (list "Restoring auto-commit failed"
+                            :outcome outcome)))))
+          (should-error (clutch-result-submit) :type 'user-error)
+          (should refreshed)
+          (if (eq outcome 'committed)
+              (should-not clutch--pending-inserts)
+            (should (equal clutch--pending-inserts '(first second))))
+          (should (eq (not (null reverted))
+                      (eq outcome 'committed))))))))
+
+(ert-deftest clutch-test-submit-marks-unknown-batch-outcome-uncertain ()
+  "An uncertain batch should retain staging and require transaction recovery."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
+    (clutch-test--with-result-state
+        (:pending-inserts '(first second))
+      (let (reverted)
+        (setq-local revert-buffer-function
+                    (lambda (&rest _args) (setq reverted t)))
+        (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                   (lambda () '(("INSERT first") ("INSERT second"))))
+                  ((symbol-function 'clutch-db-escape-literal)
+                   (lambda (_conn value) (format "'%s'" value)))
+                  ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                  ((symbol-function 'clutch-db-manual-commit-supported-p)
+                   (lambda (_) t))
+                  ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                  ((symbol-function 'clutch-db-call-with-atomic-batch)
+                   (lambda (_conn function)
+                     (funcall function)
+                     (signal
+                      'clutch-db-batch-outcome-uncertain
+                      '("commit outcome is uncertain"
+                        :phase commit))))
+                  ((symbol-function 'clutch--run-db-query)
+                   (lambda (&rest _)
+                     (make-clutch-db-result :affected-rows 1)))
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+          (let ((err (should-error (clutch-result-submit) :type 'user-error)))
+            (should (string-match-p
+                     "roll back or reconnect"
+                     (error-message-string err))))
+          (should (clutch--tx-uncertain-p clutch-connection))
+          (should (equal clutch--pending-inserts '(first second)))
+          (should-not reverted))))))
 
 ;;;; Edit — validation
 
@@ -4945,7 +4996,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (when (buffer-live-p edit-buf)
         (kill-buffer edit-buf)))))
 
-(ert-deftest clutch-test-insert-commit-validates-fields-before-stage ()
+(ert-deftest clutch-test-insert-stage-validates-fields-before-stage ()
   "Insert staging should reject invalid enum, bool, JSON, temporal, and numeric values."
   (dolist (case
            `((("severity" "is_ship_blocked" "postmortem")
@@ -4988,7 +5039,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (clutch-result-insert--open-buffer
              "shipping_incidents" result-buf fields)
             (with-current-buffer insert-buf
-              (let ((err (should-error (clutch-result-insert-commit)
+              (let ((err (should-error (clutch-result-insert-stage)
                                        :type 'user-error)))
                 (when expected-message
                   (should (string-match-p expected-message
@@ -5630,7 +5681,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (error-message-string err)))))))))
 
 (ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
-  "Staged SQL copy should mirror the staged commit batch."
+  "Staged SQL copy should mirror the staged submit batch."
   (with-temp-buffer
     (let (copied)
       (setq-local clutch--pending-inserts '(a)
@@ -5649,7 +5700,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        "INSERT INTO t VALUES (1);\nUPDATE t SET name='' WHERE id=1;\nDELETE FROM t WHERE id=1;\n"))))))
 
 (ert-deftest clutch-test-save-pending-sql-writes-current-batch ()
-  "Staged SQL save should write the staged commit batch to disk."
+  "Staged SQL save should write the staged submit batch to disk."
   (let ((path (make-temp-file "clutch-pending-" nil ".sql")))
     (unwind-protect
         (with-temp-buffer
@@ -6431,7 +6482,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       (with-current-buffer " *transient*"
                         (buffer-string))))
           (unwind-protect
-              (let ((labels '("Commit staged"
+              (let ((labels '("Submit staged"
                               "Discard staged at point"
                               "Copy staged SQL"
                               "Save staged SQL"))
@@ -7618,10 +7669,10 @@ statement."
           confirmation-quit
           phase
           spinner-started
-          (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+          (clutch--tx-state-cache (make-hash-table :test 'eq))
           (clutch-connection 'fake-conn)
           (clutch--executing-p nil))
-      (puthash clutch-connection t clutch--tx-dirty-cache)
+      (puthash clutch-connection 'dirty clutch--tx-state-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch--spinner-start)
@@ -7659,7 +7710,7 @@ statement."
           (should (eq clutch-connection 'fake-conn)))
         ;; Retirement keeps the dirty flag as lost-transaction evidence;
         ;; the next transaction command consumes it and refuses to run.
-        (should (gethash 'fake-conn clutch--tx-dirty-cache))
+        (should (gethash 'fake-conn clutch--tx-state-cache))
         (should-not clutch--executing-p)))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
@@ -7669,7 +7720,7 @@ statement."
            (conn 'fake-conn)
            (interrupted nil)
            (disconnected nil)
-           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch-connection conn)
            (clutch--executing-p nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
@@ -7699,7 +7750,7 @@ statement."
   (with-temp-buffer
     (let* ((conn 'fake-conn)
            (clutch-connection conn)
-           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch--executing-p nil)
            (displayed-error nil)
            (error-context nil)
@@ -7707,7 +7758,7 @@ statement."
            (details-cleared nil)
            (executions 0)
            (mode-line-updates 0))
-      (puthash conn t clutch--tx-dirty-cache)
+      (puthash conn 'dirty clutch--tx-state-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch-db-sql-destructive-p)
@@ -7758,7 +7809,7 @@ statement."
            (params '(:backend oracle :database "ORCL"))
            (source (generate-new-buffer " *clutch-reconnect-source*"))
            (attached (generate-new-buffer " *clutch-reconnect-attached*"))
-           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch--problem-records-by-conn (make-hash-table :test 'eq))
            (clutch--schema-cache-updated-hook
             '(clutch--handle-schema-cache-updated))
@@ -7851,7 +7902,7 @@ statement."
                  case))
       (with-temp-buffer
         (let ((clutch-connection 'old-conn)
-              (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+              (clutch--tx-state-cache (make-hash-table :test 'eq))
               (old-live t)
               (runs 0)
               (confirmations 0)
@@ -7859,7 +7910,7 @@ statement."
               (clutch-db--foreground-connections
                (make-hash-table :test 'eq)))
           (when dirty
-            (puthash 'old-conn t clutch--tx-dirty-cache))
+            (puthash 'old-conn 'dirty clutch--tx-state-cache))
           (cl-letf (((symbol-function 'clutch--confirm-query-execution)
                      (lambda (_sql) (cl-incf confirmations)))
                     ((symbol-function 'clutch-db-result-query-p)

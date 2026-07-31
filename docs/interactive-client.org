@@ -48,7 +48,7 @@ Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-
 | =i=            | Stage new row for insertion                   |
 | =I=            | Clone current row into a prefilled insert form (without PK values) |
 | =d=            | Stage row(s) for deletion (supports region)   |
-| =C-c C-c=     | Commit all pending changes (INSERT/UPDATE/DELETE) |
+| =C-c C-c=     | Submit all pending changes (INSERT/UPDATE/DELETE) |
 | =C-c C-m=     | Commit the current server transaction          |
 | =C-c C-u=     | Roll back the current server transaction       |
 | =C-c C-a=     | Toggle auto-commit when supported               |
@@ -70,11 +70,11 @@ Tip: Press =s= to cycle sort state for the result column at point.  Simple table
 
 Tip: pending changes can be previewed with =C-c C-p= and copied/saved from the result transient as the exact staged SQL batch. Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong real table name.
 
-Tip: staged mutations and the server transaction are two separate layers on manual-commit connections. =C-c C-c= executes the staged batch and marks the transaction dirty; =C-c C-m= makes that transaction durable, while =C-c C-u= rolls it back.
+Tip: staged mutations and the server transaction are two separate layers. Submission follows the current transaction mode, like DataGrip's data editor: in Auto mode, =C-c C-c= (=clutch-result-submit=) submits and automatically commits the staged batch on transaction-capable backends; in Manual mode, it wraps the batch in a savepoint inside the current transaction, =C-c C-m= (=clutch-commit=) makes successful work durable, and =C-c C-u= rolls the transaction back. If a later staged statement fails, the savepoint removes this submission's earlier statements while preserving work already in the transaction, so the retained batch is safe to correct and retry. Multiple staged statements never require changing transaction mode first. If recovery fails or any commit outcome is unknown, =Tx: Uncertain= blocks further queries, commit, and transaction-mode changes until an explicit rollback or reconnect. Recovery makes the session usable again, but an uncertain commit still requires checking the database before retrying retained work.
 
 ** Edit Buffer Keys
 
-Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: =C-c C-c= stages the edited value, and the result buffer's =C-c C-c= commits all pending row changes.
+Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: =C-c C-c= stages the edited value, and the result buffer's =C-c C-c= submits all pending row changes.
 
 | Key               | Action                                         |
 |-------------------+------------------------------------------------|
@@ -273,7 +273,7 @@ The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=
 15. C-c C-k                   → discard pending change at point
 16. g with pending changes    → prompts "Discard pending changes and re-run query?"
 17. C-c C-c in result buffer → confirmation prompt showing all statements
-                               commits in order: INSERT → UPDATE → DELETE
+                               submits in order: INSERT → UPDATE → DELETE
                                edited rows show =E= in the left marker column and =E-<n>= in the status line
 #+end_src
 
@@ -418,7 +418,7 @@ Finite state is displayed as parenthesized choices, with the active choice highl
 
 The *Connection* group contains =Connect=, =Prepare SSH= (=S=), =Disconnect=, =Commit=, =Rollback=, =Auto-commit=, and =REPL=.  =Prepare SSH= opens an interactive OpenSSH setup session for host-key confirmation or key passphrase entry before retrying the normal non-interactive connect path.
 
-In the result buffer, the *Edit* heading includes the current pending count. Commit, discard, and staged-SQL copy/save actions appear only while changes are staged.  The unified staged-commit workflow uses =i= to stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending change at point, and =C-c C-c= to commit all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
+In the result buffer, the *Edit* heading includes the current pending count. Submit, discard, and staged-SQL copy/save actions appear only while changes are staged. The unified staged-submit workflow uses =i= to stage an insert, =d= to stage a deletion, =C-c C-k= to discard a pending change at point, and =C-c C-c= to submit all pending changes (INSERT → UPDATE → DELETE) in a single confirmation.
 
 The result and record transients expose an *Inspect* group in which =v= opens the full value in a normal buffer.  Automatic child-frame previews are a display preference rather than a transient action: set =clutch-cell-preview-style= to =child-frame= to preview a truncated result or collapsed Record cell after point rests on it, without moving focus.
 

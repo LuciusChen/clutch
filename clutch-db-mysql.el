@@ -44,6 +44,7 @@
 (declare-function mysql-escape-identifier "mysql" (identifier))
 (declare-function mysql-escape-literal "mysql" (string))
 (declare-function mysql-execute "mysql" (stmt &rest params))
+(declare-function mysql-in-transaction-p "mysql" (conn))
 (declare-function mysql-live-p "mysql" (conn))
 (declare-function mysql-prepare "mysql" (conn sql))
 (declare-function mysql-query "mysql" (conn sql))
@@ -372,6 +373,25 @@ Return nil when TEXT has no Syntax section."
   "Set autocommit mode on MySQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
   (mysql-set-autocommit conn auto-commit))
+
+(cl-defmethod clutch-db-call-with-atomic-batch
+  ((conn mysql-conn) function)
+  "Call FUNCTION atomically in the selected MySQL transaction mode on CONN."
+  (clutch-db--translate-library-error mysql-error
+    (if (clutch-db-manual-commit-p conn)
+        (clutch-db--call-with-sql-savepoint
+         conn function
+         (lambda ()
+           (unless (mysql-in-transaction-p conn)
+             (clutch-db-query conn "START TRANSACTION"))))
+      (when (mysql-in-transaction-p conn)
+        (user-error
+         "Session already has an explicit transaction; switch to Manual mode or finish it before submitting"))
+      (clutch-db--call-with-transaction-boundary
+       (lambda () (clutch-db-query conn "START TRANSACTION"))
+       function
+       (lambda () (clutch-db-commit conn))
+       (lambda () (clutch-db-rollback conn))))))
 
 (cl-defmethod clutch-db-schema-transaction-effect ((_conn mysql-conn) _sql)
   "Return `clear' because MySQL DDL commits the current transaction."

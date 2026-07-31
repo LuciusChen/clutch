@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.17"
+(defcustom clutch-jdbc-agent-version "0.2.18"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "d825226ff7fb489a539e1b6f34cd4abe6971a7e813ccf10a96b0dd8d63f7d637"
+  "e8e4724f7019ddab5e43fc537c47e0f0959dcc4941080df2aa233d5198a8b1a2"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1291,6 +1291,17 @@ Supports common `jdbc:subprotocol://host[:port]/database' URLs."
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                     (clutch-jdbc--conn-rpc-timeout conn)))
 
+(defun clutch-jdbc--set-auto-commit-rpc (conn auto-commit)
+  "Set JDBC CONN's remote auto-commit state to AUTO-COMMIT.
+Unlike `clutch-db-set-auto-commit', this internal primitive does not change the
+user-selected transaction mode stored in CONN."
+  (clutch-jdbc--rpc "set-auto-commit"
+                    `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
+                      (auto-commit . ,(if auto-commit
+                                          t
+                                        clutch-jdbc--json-false)))
+                    (clutch-jdbc--conn-rpc-timeout conn)))
+
 (cl-defmethod clutch-db-set-auto-commit ((conn clutch-jdbc-conn) auto-commit)
   "Set auto-commit mode on JDBC CONN.
 AUTO-COMMIT non-nil enables auto-commit (disables manual-commit); nil
@@ -1298,12 +1309,70 @@ enables manual-commit.  When switching to auto-commit, the JDBC driver
 commits any pending transaction per the JDBC specification."
   (unless (clutch-db-manual-commit-supported-p conn)
     (user-error "Manual commit is not supported by this connection"))
-  (clutch-jdbc--rpc "set-auto-commit"
-                    `((conn-id    . ,(clutch-jdbc-conn-conn-id conn))
-                      (auto-commit . ,(if auto-commit t clutch-jdbc--json-false)))
-                    (clutch-jdbc--conn-rpc-timeout conn))
+  (clutch-jdbc--set-auto-commit-rpc conn auto-commit)
   (setf (clutch-jdbc-conn-params conn)
         (plist-put (clutch-jdbc-conn-params conn) :manual-commit (not auto-commit))))
+
+(cl-defmethod clutch-db-call-with-atomic-batch
+  ((conn clutch-jdbc-conn) function)
+  "Call FUNCTION atomically in the selected JDBC transaction mode on CONN."
+  (unless (clutch-db-manual-commit-supported-p conn)
+    (user-error "Atomic mutation submission is not supported by this connection"))
+  (if (clutch-db-manual-commit-p conn)
+      (let (savepoint-id)
+        (clutch-db--call-with-savepoint-boundary
+         (lambda ()
+           (setq savepoint-id
+                 (plist-get
+                  (clutch-jdbc--rpc
+                   "create-savepoint"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+                   (clutch-jdbc--conn-rpc-timeout conn))
+                  :savepoint-id)))
+         function
+         (lambda ()
+           (clutch-jdbc--rpc
+            "release-savepoint"
+            `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+              (savepoint-id . ,savepoint-id))
+            (clutch-jdbc--conn-rpc-timeout conn)))
+         (lambda ()
+           (clutch-jdbc--rpc
+            "rollback-savepoint"
+            `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+              (savepoint-id . ,savepoint-id))
+            (clutch-jdbc--conn-rpc-timeout conn)))))
+    (clutch-jdbc--set-auto-commit-rpc conn nil)
+    (let (outcome)
+      (unwind-protect
+          (clutch-db--call-with-transaction-boundary
+           #'ignore
+           function
+           (lambda ()
+             (clutch-db-commit conn)
+             (setq outcome 'committed))
+           (lambda ()
+             (clutch-db-rollback conn)
+             (setq outcome 'rolled-back)))
+        (if outcome
+            (condition-case restore-error
+                (clutch-jdbc--set-auto-commit-rpc conn t)
+              ((error quit)
+               (setf (clutch-jdbc-conn-params conn)
+                     (plist-put (clutch-jdbc-conn-params conn)
+                                :manual-commit t))
+               (signal
+                'clutch-db-session-restore-error
+                (list
+                 (format "Mutation batch was %s, but restoring auto-commit failed: %s"
+                         (if (eq outcome 'committed) "committed" "rolled back")
+                         (error-message-string restore-error))
+                 :outcome outcome))))
+          ;; An unknown transaction outcome leaves the remote session in
+          ;; Manual mode until the user explicitly recovers it.
+          (setf (clutch-jdbc-conn-params conn)
+                (plist-put (clutch-jdbc-conn-params conn)
+                           :manual-commit t)))))))
 
 (cl-defmethod clutch-db-schema-transaction-effect ((conn clutch-jdbc-conn) _sql)
   "Return schema SQL transaction effect for JDBC CONN.

@@ -990,18 +990,19 @@ to the display name (e.g. \"MySQL\")."
 
 (defun clutch--transaction-header-line-segment (transaction-state)
   "Return a header-line segment for semantic TRANSACTION-STATE, or nil.
-TRANSACTION-STATE is one of `auto', `manual', or `dirty'."
+TRANSACTION-STATE is one of `auto', `manual', `dirty', or `uncertain'."
   (when transaction-state
     (let* ((state-face (pcase transaction-state
                          ('auto 'success)
                          ('manual 'warning)
-                         ('dirty 'error)))
+                         ((or 'dirty 'uncertain) 'error)))
            (icon (clutch--icon-with-face '(mdicon . "nf-md-database_lock")
                                          "⛁" state-face))
            (label (pcase transaction-state
                     ('auto "Tx: Auto")
                     ('manual "Tx: Manual")
-                    ('dirty "Tx: Manual*"))))
+                    ('dirty "Tx: Manual*")
+                    ('uncertain "Tx: Uncertain"))))
       (concat (unless (string-empty-p icon)
                 (concat icon " "))
               (propertize label 'face state-face)))))
@@ -1750,7 +1751,7 @@ Returns a list of propertized strings (may be empty)."
       (push (format "I-%d" (length clutch--pending-inserts))
             parts))
     (when parts
-      (let ((commit-icon (clutch--icon-with-face '(codicon . "nf-cod-check")
+      (let ((submit-icon (clutch--icon-with-face '(codicon . "nf-cod-check")
                                                  "✓" 'font-lock-comment-face))
             (discard-icon (clutch--icon-with-face '(codicon . "nf-cod-discard")
                                                   "✗" 'font-lock-comment-face)))
@@ -1760,7 +1761,7 @@ Returns a list of propertized strings (may be empty)."
          (propertize (mapconcat #'identity (nreverse parts) " ")
                      'face 'clutch-modified-face)
          (propertize "  " 'face 'font-lock-comment-face)
-         commit-icon
+         submit-icon
          (propertize ":C-c C-c  " 'face 'font-lock-comment-face)
          discard-icon
          (propertize ":C-c C-k" 'face 'font-lock-comment-face))))))

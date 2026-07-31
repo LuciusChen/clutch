@@ -42,7 +42,7 @@ For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Deta
 
 - **Keep query context visible:** execute a region or statement without leaving the SQL buffer; results refresh in a split grid and the last executed statement stays marked.
 - **Inspect wide or structured results:** navigate a single-page table, scroll horizontally, open record and full-value views, and preview truncated JSON, XML, text, or BLOB values after a brief pause without dragging the preview across cells during navigation.
-- **Edit supported SQL results with guardrails:** stage inserts, updates, and deletes locally, inspect the execution preview, and commit only after validation and confirmation.
+- **Edit supported SQL results with guardrails:** stage inserts, updates, and deletes locally, inspect the execution preview, and submit only after validation and confirmation.
 - **Navigate with database context:** complete scoped tables and columns, inspect Eldoc and object definitions, follow foreign keys, and reuse cache-first metadata without blocking point motion.
 - **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side fuzzy filtering, copy selections as TSV, CSV, or Org tables, and export complete pageable results as CSV or TSV with consistent Transient controls for optional headers and clipboard/file destinations.
 - **See connection state where it matters:** keep separate query consoles, reconnect from preserved parameters, and view schema-refresh, transaction, timeout, and diagnostic state in the relevant buffers.
@@ -221,11 +221,13 @@ For native MySQL and PostgreSQL, and for JDBC connections that run in manual-com
 - `C-c C-m` commits
 - `C-c C-u` rolls back
 
-The same shortcuts work in an attached Result Browser or Record view when that SQL connection supports manual transactions. In a Result Browser, `C-c C-c` executes the locally staged INSERT/UPDATE/DELETE batch, while `C-c C-m` separately commits the resulting server transaction.
+The same shortcuts work in an attached Result Browser or Record view when that SQL connection supports manual transactions. Result submission follows the current transaction mode, like DataGrip's data editor: in Auto mode, `C-c C-c` (`clutch-result-submit`) submits and automatically commits the locally staged INSERT/UPDATE/DELETE batch on transaction-capable backends; in Manual mode, it uses a savepoint inside the current server transaction, where `C-c C-m` (`clutch-commit`) commits and `C-c C-u` rolls back. If a later staged statement fails, Clutch rolls this submission back to its savepoint while preserving work that was already in the transaction, so the retained staged batch can be corrected and retried safely. Submitting multiple staged statements never requires changing transaction mode first.
 
 SQLite does not expose these transaction controls; its console header omits the `Tx` segment.
 
 Native MySQL maps `C-c C-a` to the server session's autocommit flag directly. Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does not send `BEGIN` immediately, the first foreground statement opens the transaction lazily, and transactional DDL also counts as uncommitted work, so toggle/disconnect stays blocked until you commit or roll back.
+
+If recovery of an atomic submission fails, or any `COMMIT` returns without a known outcome, the transaction indicator changes to `Tx: Uncertain`. Clutch then blocks further queries, commit, and transaction-mode changes; explicitly roll back with `C-c C-u`, or reconnect if rollback cannot recover the session. Either action restores a usable session, but it cannot prove that an earlier uncertain commit did not happen, so verify the database before retrying retained work.
 
 ### Password Management
 
@@ -372,7 +374,7 @@ Common entry points:
 - `C-c C-j` starts the object workflow
 - `RET` opens record view from a result row
 - Pressing `s` cycles sorting for the result column at point; simple table results use server-side `ORDER BY`, while UNION, grouped, derived, and other non-rewritable results sort the current page locally. Use `C` to jump to another visible column first, or click a result header to cycle it
-- `i`, `d`, and `C-c C-c` stage and commit row changes in result buffers
+- `i`, `d`, and `C-c C-c` stage and submit row changes in result buffers
 - `C-c '` edits the current result cell or record-view field; JSON columns and text values containing JSON objects or arrays open in a JSON editor, and `C-c C-c` stages or `C-c C-k` cancels the edit directly when that JSON editor opened automatically. In ordinary edit buffers, nullable columns offer `C-c C-n` for database `NULL`, while columns with a usable default offer `C-c C-d` for database `DEFAULT`
 - `C-c C-k` discards the staged change at point from a result cell or record-view field
 - `M-x clutch-copy-context-for-agent` copies SQL, table metadata, and the latest matching visible result sample as Markdown for an external agent; the same command is available as `k` in the main and result transients. Table metadata reuses the existing object describe path.
