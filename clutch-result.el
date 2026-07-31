@@ -935,7 +935,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map [mouse-1] #'clutch-result-mouse-set-point)
     (define-key map [down-mouse-1] #'clutch-result-mouse-set-point)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
-    (define-key map (kbd "C-c C-c") #'clutch-result-commit)
+    (define-key map (kbd "C-c C-c") #'clutch-result-submit)
     (define-key map "g" #'clutch-result-rerun)
     (define-key map "e" #'clutch-result-export)
     (define-key map "C" #'clutch-result-goto-column)
@@ -1010,7 +1010,7 @@ Inspect:
   \\[clutch-result-view-value]	View current cell once
 Edit:
   \\[clutch-result-edit-cell]	Edit / re-edit at point
-  \\[clutch-result-commit]	Commit staged changes
+  \\[clutch-result-submit]	Submit staged changes
   \\[clutch-result-apply-filter]	Apply WHERE filter
   \\[clutch-result-sort-by-column]	Cycle current column sort
   \\[clutch-result-widen-column]	Widen column
@@ -3776,7 +3776,7 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("i" "Stage insert"      clutch-result-insert-row)
     ("I" "Clone row → insert" clutch-clone-row-to-insert)
     ("d" "Stage delete"      clutch-result-delete-rows)
-    ("C-c C-c" "Commit staged" clutch-result-commit
+    ("C-c C-c" "Submit staged" clutch-result-submit
      :if clutch-result--pending-changes-p)
     ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point
      :if clutch-result--pending-changes-p)

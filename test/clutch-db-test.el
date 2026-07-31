@@ -1003,6 +1003,157 @@ and a `?' inside a dollar-quoted function body is part of the body."
         (should (= timeout 12)))
       (should (plist-get (clutch-jdbc-conn-params conn) :manual-commit)))))
 
+(ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-user-mode ()
+  "A JDBC Auto batch should not expose its internal transaction as Manual mode."
+  (let* ((params '(:driver sqlserver :rpc-timeout 12))
+         (conn (make-clutch-jdbc-conn :conn-id 19
+                                      :params (copy-sequence params)))
+         events)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op rpc-params &optional _timeout)
+                 (push
+                  (pcase op
+                    ("set-auto-commit"
+                     (if (eq (alist-get 'auto-commit rpc-params) t)
+                         'auto
+                       'internal-manual))
+                    ("commit" 'commit)
+                    ("rollback" 'rollback))
+                  events))))
+      (should
+       (eq (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (should-not (clutch-db-manual-commit-p conn))
+              (push 'body events)
+              'done))
+           'done))
+      (should (equal (nreverse events)
+                     '(internal-manual body commit auto)))
+      (should (equal (clutch-jdbc-conn-params conn) params))
+      (setq events nil)
+      (should-error
+       (clutch-db-call-with-atomic-batch
+        conn
+        (lambda ()
+          (push 'body events)
+          (signal 'clutch-db-error '("statement failed"))))
+       :type 'clutch-db-error)
+      (should (equal (nreverse events)
+                     '(internal-manual body rollback auto)))
+      (should (equal (clutch-jdbc-conn-params conn) params)))))
+
+(ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-commit-error-uncertain ()
+  "A JDBC COMMIT error should not trigger rollback or restore Auto mode."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 19
+               :params '(:driver sqlserver :rpc-timeout 12)))
+        events)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (push
+                  (pcase op
+                    ("set-auto-commit"
+                     (if (eq (alist-get 'auto-commit params) t)
+                         'auto
+                       'internal-manual))
+                    ("commit" 'commit)
+                    ("rollback" 'rollback))
+                  events)
+                 (when (equal op "commit")
+                   (signal 'clutch-db-error '("commit response lost"))))))
+      (let ((err
+             (should-error
+              (clutch-db-call-with-atomic-batch
+               conn
+               (lambda ()
+                 (push 'body events)
+                 'done))
+              :type 'clutch-db-batch-outcome-uncertain)))
+        (should (eq (plist-get (cddr err) :phase) 'commit)))
+      (should (equal (nreverse events)
+                     '(internal-manual body commit)))
+      (should (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-jdbc-atomic-batch-reports-restore-outcome ()
+  "JDBC restore errors should report whether the batch committed or rolled back."
+  (dolist (case '((nil committed
+                       (internal-manual body commit auto))
+                  (t rolled-back
+                     (internal-manual body rollback auto))))
+    (pcase-let ((`(,body-error ,expected-outcome ,expected-events) case))
+      (let ((conn (make-clutch-jdbc-conn
+                   :conn-id 19
+                   :params (copy-sequence
+                            '(:driver sqlserver :rpc-timeout 12))))
+            events)
+        (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                   (lambda (op params &optional _timeout)
+                     (push
+                      (pcase op
+                        ("set-auto-commit"
+                         (if (eq (alist-get 'auto-commit params) t)
+                             'auto
+                           'internal-manual))
+                        ("commit" 'commit)
+                        ("rollback" 'rollback))
+                      events)
+                     (when (and (equal op "set-auto-commit")
+                                (eq (alist-get 'auto-commit params) t))
+                       (signal 'clutch-db-error '("restore failed"))))))
+          (let ((err
+                 (should-error
+                  (clutch-db-call-with-atomic-batch
+                   conn
+                   (lambda ()
+                     (push 'body events)
+                     (when body-error
+                       (signal 'clutch-db-error '("statement failed")))))
+                  :type 'clutch-db-session-restore-error)))
+            (should (eq (plist-get (cddr err) :outcome)
+                        expected-outcome)))
+          (should (equal (nreverse events) expected-events))
+          (should (clutch-db-manual-commit-p conn)))))))
+
+(ert-deftest clutch-db-test-jdbc-manual-atomic-batch-uses-savepoint ()
+  "A JDBC Manual batch should use a savepoint without ending the transaction."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 23
+               :params '(:driver sqlserver :rpc-timeout 14 :manual-commit t)))
+        events)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout)
+                 (should (= timeout 14))
+                 (push (cons op params) events)
+                 (when (equal op "create-savepoint")
+                   '(:savepoint-id 71)))))
+      (should
+       (eq (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (push '(body) events)
+              'done))
+           'done))
+      (should
+       (equal (nreverse events)
+              '(("create-savepoint" (conn-id . 23))
+                (body)
+                ("release-savepoint" (conn-id . 23) (savepoint-id . 71)))))
+      (setq events nil)
+      (should-error
+       (clutch-db-call-with-atomic-batch
+        conn
+        (lambda ()
+          (push '(body) events)
+          (signal 'clutch-db-error '("statement failed"))))
+       :type 'clutch-db-error)
+      (should
+       (equal (nreverse events)
+              '(("create-savepoint" (conn-id . 23))
+                (body)
+                ("rollback-savepoint" (conn-id . 23) (savepoint-id . 71)))))
+      (should (clutch-db-manual-commit-p conn)))))
+
 (ert-deftest clutch-db-test-jdbc-execute-params-uses-agent-binding ()
   "JDBC parameter execution should bind values in the agent."
   (let ((conn (make-clutch-jdbc-conn
@@ -1087,6 +1238,185 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (clutch-db-rollback conn)
       (should committed)
       (should rolled-back))))
+
+(ert-deftest clutch-db-test-native-atomic-batches-use-explicit-transactions ()
+  "Native Auto batches should commit or roll back without changing Auto mode."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (dolist (case `((,(make-mysql-conn :status-flags #x0002)
+                    "START TRANSACTION")
+                  (,(clutch-db-test--make-pgcon :database "test")
+                    "BEGIN")))
+    (pcase-let ((`(,conn ,begin-sql) case))
+      (let (events)
+        (cl-letf (((symbol-function 'clutch-db-query)
+                   (lambda (_conn sql)
+                     (push sql events)))
+                  ((symbol-function 'clutch-db-commit)
+                   (lambda (_) (push 'commit events)))
+                  ((symbol-function 'clutch-db-rollback)
+                   (lambda (_) (push 'rollback events))))
+          (should
+           (eq (clutch-db-call-with-atomic-batch
+                conn
+                (lambda ()
+                  (push 'body events)
+                  'done))
+               'done))
+          (should (equal (nreverse events)
+                         (list begin-sql 'body 'commit)))
+          (setq events nil)
+          (let ((err
+                 (should-error
+                  (clutch-db-call-with-atomic-batch
+                   conn
+                   (lambda ()
+                     (push 'body events)
+                     (signal 'clutch-db-error '("statement failed"))))
+                  :type 'clutch-db-error)))
+            (should (string-match-p "statement failed"
+                                    (error-message-string err))))
+          (should (equal (nreverse events)
+                         (list begin-sql 'body 'rollback))))))))
+
+(ert-deftest clutch-db-test-native-manual-atomic-batches-use-savepoints ()
+  "Native Manual batches should use savepoints without ending the transaction."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (let ((mysql-conn (make-mysql-conn :status-flags 0))
+        (pg-conn (clutch-db-test--make-pgcon :database "test")))
+    (clutch-db-set-auto-commit pg-conn nil)
+    (dolist (case `((,mysql-conn "START TRANSACTION")
+                    (,pg-conn "BEGIN")))
+      (pcase-let ((`(,conn ,begin-sql) case))
+        (let (events)
+          (cl-letf (((symbol-function 'clutch-db-query)
+                     (lambda (_conn sql)
+                       (push sql events))))
+            (should
+             (eq (clutch-db-call-with-atomic-batch
+                  conn
+                  (lambda ()
+                    (push 'body events)
+                    'done))
+                 'done))
+            (setq events (nreverse events))
+            (should (equal (car events) begin-sql))
+            (should (string-match-p
+                     "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
+                     (nth 1 events)))
+            (should (eq (nth 2 events) 'body))
+            (should
+             (equal (nth 3 events)
+                    (replace-regexp-in-string
+                     "\\`SAVEPOINT " "RELEASE SAVEPOINT " (nth 1 events))))))))
+    (setf (mysql-conn-status-flags mysql-conn) #x0001
+          (pgcon-transaction-status pg-conn) ?T)
+    (dolist (conn (list mysql-conn pg-conn))
+      (let (events)
+        (cl-letf (((symbol-function 'clutch-db-query)
+                   (lambda (_conn sql)
+                     (push sql events))))
+          (should-error
+           (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (push 'body events)
+              (signal 'clutch-db-error '("statement failed"))))
+           :type 'clutch-db-error)
+          (setq events (nreverse events))
+          (should (string-match-p
+                   "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
+                   (car events)))
+          (should (eq (nth 1 events) 'body))
+          (should
+           (equal (nth 2 events)
+                  (replace-regexp-in-string
+                   "\\`SAVEPOINT " "ROLLBACK TO SAVEPOINT " (car events))))
+          (should
+           (equal (nth 3 events)
+                  (replace-regexp-in-string
+                   "\\`SAVEPOINT " "RELEASE SAVEPOINT " (car events)))))))))
+
+(ert-deftest clutch-db-test-transaction-boundary-marks-failed-recovery-uncertain ()
+  "A failed rollback should surface as an uncertain batch outcome."
+  (let (events)
+    (let ((err
+           (should-error
+            (clutch-db--call-with-transaction-boundary
+             (lambda () (push 'open events))
+             (lambda ()
+               (push 'body events)
+               (signal 'clutch-db-error '("statement failed")))
+             (lambda () (push 'finish events))
+             (lambda ()
+               (push 'recover events)
+               (signal 'clutch-db-error '("rollback failed"))))
+            :type 'clutch-db-batch-outcome-uncertain)))
+      (should (string-match-p "statement failed"
+                              (error-message-string err)))
+      (should (string-match-p "rollback failed"
+                              (error-message-string err)))
+      (should (eq (plist-get (cddr err) :phase) 'recovery)))
+    (should (equal (nreverse events) '(open body recover)))))
+
+(ert-deftest clutch-db-test-transaction-boundary-does-not-rollback-commit-error ()
+  "A COMMIT error is uncertain and must not trigger a misleading rollback."
+  (let (events)
+    (let ((err
+           (should-error
+            (clutch-db--call-with-transaction-boundary
+             (lambda () (push 'open events))
+             (lambda ()
+               (push 'body events)
+               'done)
+             (lambda ()
+               (push 'commit events)
+               (signal 'clutch-db-error '("commit response lost")))
+             (lambda () (push 'rollback events)))
+            :type 'clutch-db-batch-outcome-uncertain)))
+      (should (string-match-p "commit outcome is uncertain"
+                              (error-message-string err)))
+      (should (eq (plist-get (cddr err) :phase) 'commit)))
+    (should (equal (nreverse events) '(open body commit)))))
+
+(ert-deftest clutch-db-test-savepoint-boundary-recovers-release-error ()
+  "A failed savepoint release may still be made safe by rollback-to-savepoint."
+  (let (events)
+    (let ((err
+           (should-error
+            (clutch-db--call-with-savepoint-boundary
+             (lambda () (push 'open events))
+             (lambda ()
+               (push 'body events)
+               'done)
+             (lambda ()
+               (push 'release events)
+               (signal 'clutch-db-error '("release failed")))
+             (lambda () (push 'recover events)))
+            :type 'clutch-db-error)))
+      (should (string-match-p "release failed"
+                              (error-message-string err))))
+    (should (equal (nreverse events) '(open body release recover)))))
+
+(ert-deftest clutch-db-test-native-atomic-batches-preserve-explicit-transactions ()
+  "An Auto submission must not commit a transaction opened explicitly with SQL."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (let ((mysql-conn (make-mysql-conn :status-flags #x0003))
+        (pg-conn (clutch-db-test--make-pgcon :database "test")))
+    (setf (pgcon-transaction-status pg-conn) ?T)
+    (dolist (conn (list mysql-conn pg-conn))
+      (let (executed)
+        (cl-letf (((symbol-function 'clutch-db-query)
+                   (lambda (&rest _) (setq executed t))))
+          (let ((err
+                 (should-error
+                  (clutch-db-call-with-atomic-batch conn #'ignore)
+                  :type 'user-error)))
+            (should (string-match-p "explicit transaction"
+                                    (error-message-string err))))
+          (should-not executed))))))
 
 (ert-deftest clutch-db-test-native-pg-toggle-enables-manual-mode ()
   "Native PostgreSQL should enter manual-commit mode after toggling autocommit off."
@@ -1435,6 +1765,41 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (plist-get candidate :name) "rowid"))
       (should (equal (plist-get candidate :select-expressions) '("rowid")))
       (should (equal (plist-get candidate :where-sql) "rowid = ?")))))
+
+(ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
+  "SQLite should commit or roll back a staged multi-row batch as a unit."
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+    (unwind-protect
+        (progn
+          (clutch-db-init-connection conn)
+          (clutch-db-query
+           conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
+          (clutch-db-call-with-atomic-batch
+           conn
+           (lambda ()
+             (clutch-db-execute-params
+              conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(1 "a"))
+             (clutch-db-execute-params
+              conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(2 "b"))))
+          (should
+           (equal (clutch-db-result-rows
+                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
+                  '((1 "a") (2 "b"))))
+          (should-error
+           (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (clutch-db-execute-params
+               conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(3 "c"))
+              (clutch-db-execute-params
+               conn "INSERT INTO demo (id, name) VALUES (?, ?)"
+               '(1 "duplicate")))))
+          (should
+           (equal (clutch-db-result-rows
+                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
+                  '((1 "a") (2 "b")))))
+      (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-db-test-sqlite-foreign-keys-async ()
   "SQLite foreign-key metadata should remain available through async dispatch."

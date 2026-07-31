@@ -60,7 +60,7 @@
   "Callback for the cell edit buffer: (lambda (new-value) ...).")
 
 (defvar-local clutch-result--edit-result-buffer nil
-  "The result buffer to commit edits to after `clutch-result-edit-finish'.")
+  "The result buffer to stage edits in after `clutch-result-edit-finish'.")
 
 (defvar-local clutch-result-edit--return-buffer nil
   "Buffer that opened the current single-cell edit buffer.")
@@ -763,7 +763,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
 ;;;###autoload
 (defun clutch-result-edit-finish ()
   "Stage the edit and return to the result buffer.
-Use \\<clutch-result-mode-map>\\[clutch-result-commit] in the result buffer to commit all staged edits."
+Use \\<clutch-result-mode-map>\\[clutch-result-submit] in the result buffer to submit all staged edits."
   (interactive)
   (clutch-result-edit--finish-buffer))
 
@@ -871,12 +871,12 @@ Refresh the affected row and footer in place when possible."
   (clutch--refresh-footer-line)
   (force-mode-line-update)
   (if clutch--pending-edits
-      (message "%s staged edit%s — C-c C-c to commit"
+      (message "%s staged edit%s — C-c C-c to submit"
                (clutch--message-count (length clutch--pending-edits))
                (if (= (length clutch--pending-edits) 1) "" "s"))
     (message "Edit reverted to original")))
 
-;;;; Commit staged changes
+;;;; Submit staged changes
 
 (defun clutch-result--row-identity-or-user-error (table op)
   "Return row identity metadata for TABLE, or signal `user-error' for OP."
@@ -1071,7 +1071,7 @@ IDENTITY-VEC is the row identity vector, EDITS is a list of
             clutch--pending-deletes)))
 
 (defun clutch-result--pending-sql-statements ()
-  "Return the staged SQL statements that would run on commit."
+  "Return the staged SQL statements that would run on submit."
   (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
     (user-error "No staged SQL"))
   (clutch-result--render-statements
@@ -1118,74 +1118,49 @@ When STMTS is nil, build statements from the current staged state."
              (if (= (length stmts) 1) "" "s")
              (clutch--message-path path))))
 
-(defun clutch-result--execute-mutation-stmt (stmt &optional require-single-row)
-  "Execute mutation STMT.
-When REQUIRE-SINGLE-ROW is non-nil, signal `user-error' if the backend reports
-an affected row count other than one."
-  (pcase-let ((`(,sql . ,params) stmt))
-    (condition-case err
-        (let ((result (clutch--run-db-query clutch-connection sql params)))
-          (when-let* ((affected (and require-single-row
-                                     (clutch-db-result-p result)
-                                     (clutch-db-result-affected-rows result))))
-            (unless (= affected 1)
-              (user-error "Mutation matched %d rows; expected exactly 1"
-                          affected)))
-          result)
-      (clutch-db-error
-       (user-error "%s" (clutch--humanize-db-error
-                         (error-message-string err)))))))
-
-(defun clutch-result--rollback-mutation-batch (original-error)
-  "Roll back a failed staged batch and re-signal ORIGINAL-ERROR."
-  (let (rollback-error)
-    (condition-case err
-        (progn
-          (clutch-db-rollback clutch-connection)
-          (clutch--clear-tx-dirty clutch-connection)
-          (clutch--mark-dml-results-rolled-back clutch-connection))
-      (error
-       (setq rollback-error err)))
-    (if rollback-error
-        (user-error "Staged batch failed (%s); rollback also failed (%s)"
-                    (error-message-string original-error)
-                    (error-message-string rollback-error))
-      (signal (car original-error) (cdr original-error)))))
-
-(defun clutch-result--execute-mutation-batch
-    (insert-stmts update-stmts delete-stmts)
-  "Execute INSERT-STMTS, UPDATE-STMTS, and DELETE-STMTS atomically."
-  (let* ((all-stmts (append insert-stmts update-stmts delete-stmts))
-         (multi-statement-p (> (length all-stmts) 1)))
-    (cl-labels
-        ((execute-all ()
-           (dolist (stmt insert-stmts)
-             (clutch-result--execute-mutation-stmt stmt))
-           (dolist (stmt update-stmts)
-             (clutch-result--execute-mutation-stmt stmt t))
-           (dolist (stmt delete-stmts)
-             (clutch-result--execute-mutation-stmt stmt t))))
-      (cond
-       ((not multi-statement-p)
-        (execute-all))
-       ((not (clutch-db-manual-commit-p clutch-connection))
-        (clutch-db-call-with-atomic-batch clutch-connection #'execute-all))
-       (t
-        (when (clutch--tx-dirty-p clutch-connection)
-          (user-error
-           "Cannot execute a staged batch inside a dirty transaction; commit or roll back first"))
-        (condition-case err
-            (execute-all)
-          ((error quit)
-           (clutch-result--rollback-mutation-batch err))))))))
+(defun clutch-result--submit-mutation-batch
+    (insert-statements update-statements delete-statements)
+  "Submit INSERT-STATEMENTS, UPDATE-STATEMENTS, and DELETE-STATEMENTS.
+The backend supplies an atomic transaction or savepoint boundary according to
+the current mode.  Return `submitted' in Manual mode and `committed' in Auto
+mode."
+  (cl-labels
+      ((execute-one
+        (statement &optional require-single-row)
+        (pcase-let ((`(,sql . ,params) statement))
+          (let ((result (clutch--run-db-query
+                         clutch-connection sql params t)))
+            (when-let* ((affected
+                         (and require-single-row
+                              (clutch-db-result-p result)
+                              (clutch-db-result-affected-rows result))))
+              (unless (= affected 1)
+                (user-error "Mutation matched %d rows; expected exactly 1"
+                            affected)))
+            result)))
+       (execute-all ()
+         (dolist (statement insert-statements)
+           (execute-one statement))
+         (dolist (statement update-statements)
+           (execute-one statement t))
+         (dolist (statement delete-statements)
+           (execute-one statement t))))
+    (let ((manual (clutch-db-manual-commit-p clutch-connection)))
+      (clutch-db-call-with-atomic-batch clutch-connection #'execute-all)
+      (when manual
+        (clutch--set-tx-dirty clutch-connection))
+      (if manual 'submitted 'committed))))
 
 ;;;###autoload
-(defun clutch-result-commit ()
-  "Commit all staged row mutations: INSERT, UPDATE, DELETE.
+(defun clutch-result-submit ()
+  "Submit all staged row mutations: INSERT, UPDATE, DELETE.
 Execute INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
   (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
     (user-error "No staged changes"))
+  (when (clutch--tx-uncertain-p clutch-connection)
+    (user-error
+     "Transaction state is uncertain; roll back or reconnect before submitting"))
   (let* ((insert-stmts (when clutch--pending-inserts
                          (clutch-result--build-pending-insert-statements)))
          (update-stmts (when clutch--pending-edits
@@ -1203,20 +1178,49 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
          (sql-text (mapconcat (lambda (s) (concat s ";")) preview-stmts "\n")))
     (clutch-result--ensure-where-guard delete-preview "DELETE")
     (clutch-result--ensure-where-guard update-preview "UPDATE")
-    (when (yes-or-no-p (format "Execute %d statement%s?\n\n%s\n\nProceed? "
+    (when (yes-or-no-p (format "Submit %d statement%s?\n\n%s\n\nProceed? "
                                (length all-stmts)
                                (if (= (length all-stmts) 1) "" "s")
                                sql-text))
-      (clutch-result--execute-mutation-batch
-       insert-stmts update-stmts delete-stmts)
-      (setq clutch--pending-edits nil
-            clutch--pending-deletes nil
-            clutch--pending-inserts nil
-            clutch--marked-rows nil)
-      (message "%s change%s committed"
-               (clutch--message-count (length all-stmts))
-               (if (= (length all-stmts) 1) "" "s"))
-      (revert-buffer nil t))))
+      (let (outcome restore-error)
+        (condition-case err
+            (setq outcome
+                  (clutch-result--submit-mutation-batch
+                   insert-stmts update-stmts delete-stmts))
+          (clutch-db-session-restore-error
+           (clutch--refresh-transaction-ui clutch-connection)
+           (pcase (plist-get (cddr err) :outcome)
+             ('committed
+              (setq outcome 'committed
+                    restore-error err))
+             ('rolled-back
+              (user-error "%s" (clutch--humanize-db-error
+                                (error-message-string err))))
+             (_
+              (signal (car err) (cdr err)))))
+          (clutch-db-batch-outcome-uncertain
+           (clutch--set-tx-uncertain clutch-connection)
+           (user-error
+            "%s; %s before continuing"
+            (clutch--humanize-db-error (error-message-string err))
+            (if (clutch--manual-commit-supported-p clutch-connection)
+                "roll back or reconnect"
+              "reconnect")))
+          (clutch-db-error
+           (user-error "%s" (clutch--humanize-db-error
+                             (error-message-string err)))))
+        (setq clutch--pending-edits nil
+              clutch--pending-deletes nil
+              clutch--pending-inserts nil
+              clutch--marked-rows nil)
+        (revert-buffer nil t)
+        (if restore-error
+            (user-error "%s" (clutch--humanize-db-error
+                              (error-message-string restore-error)))
+          (message "%s change%s %s"
+                   (clutch--message-count (length all-stmts))
+                   (if (= (length all-stmts) 1) "" "s")
+                   (if (eq outcome 'submitted) "submitted" "committed")))))))
 
 ;;;; Delete rows
 
@@ -1235,7 +1239,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
 ;;;###autoload
 (defun clutch-result-delete-rows ()
   "Stage selected rows for deletion.
-Use \\[clutch-result-commit] in the result buffer to commit."
+Use \\[clutch-result-submit] in the result buffer to submit."
   (interactive)
   (clutch-edit--require-sql-staged-mutation "Stage delete")
   (let* ((indices (or (clutch--selected-row-indices)
@@ -1252,7 +1256,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
       (clutch--replace-row-at-index ridx))
     (clutch--refresh-footer-line)
     (force-mode-line-update)
-    (message "%s row%s staged for deletion — C-c C-c to commit"
+    (message "%s row%s staged for deletion — C-c C-c to submit"
              (clutch--message-count (length indices))
              (if (= (length indices) 1) "" "s"))))
 
@@ -1269,7 +1273,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
     (define-key map (kbd "C-M-i") #'clutch-result-insert-complete-field)
     (define-key map (kbd "C-c .") #'clutch-result-insert-fill-current-time)
     (define-key map (kbd "C-c C-y") #'clutch-result-insert-import-delimited)
-    (define-key map (kbd "C-c C-c") #'clutch-result-insert-commit)
+    (define-key map (kbd "C-c C-c") #'clutch-result-insert-stage)
     (define-key map (kbd "C-c C-k") #'clutch-result-insert-cancel)
     map)
   "Keymap for the internal INSERT form buffer.")
@@ -1289,7 +1293,7 @@ Use \\[clutch-result-commit] in the result buffer to commit."
 (define-derived-mode clutch--result-insert-major-mode text-mode "clutch-insert"
   "Major mode for editing a new row to INSERT.
 \\<clutch--result-insert-major-mode-map>
-\\[clutch-result-insert-commit]	stage row insertion
+\\[clutch-result-insert-stage]	stage row insertion
 \\[clutch-result-insert-cancel]	cancel editing"
   (setq-local truncate-lines t)
   (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
@@ -2219,7 +2223,7 @@ immediately."
         (clutch-result-insert--stage-imported-rows field-rows)
         (clutch-result-insert--clear-fields)
         (clutch-result-insert--populate-buffer)
-        (message "%s rows staged from %s import — C-c C-c to commit"
+        (message "%s rows staged from %s import — C-c C-c to submit"
                  (clutch--message-count row-count)
                  (clutch--message-keyword
                   (clutch-result-insert--delimiter-name delim))))))))
@@ -2357,9 +2361,9 @@ FIELDS is an alist of (column-name . value-string)."
           params)))
 
 ;;;###autoload
-(defun clutch-result-insert-commit ()
+(defun clutch-result-insert-stage ()
   "Stage the new row for insertion and return to the result buffer.
-Use \\[clutch-result-commit] in the result buffer to commit."
+Use \\[clutch-result-submit] in the result buffer to submit."
   (interactive)
   (let* ((fields (clutch-result-insert--parse-fields))
          (result-buf clutch-result-insert--result-buffer)
@@ -2385,8 +2389,8 @@ Use \\[clutch-result-commit] in the result buffer to commit."
         (clutch--refresh-footer-line)
         (force-mode-line-update))
       (if pending-index
-          (message "Staged insert updated — C-c C-c to commit")
-        (message "%s insertion%s staged — C-c C-c to commit"
+          (message "Staged insert updated — C-c C-c to submit")
+        (message "%s insertion%s staged — C-c C-c to submit"
                  (clutch--message-count (length clutch--pending-inserts))
                  (if (= (length clutch--pending-inserts) 1) "" "s"))))))
 

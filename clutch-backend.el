@@ -69,6 +69,12 @@ server-side statement timeout."
 (define-error 'clutch-db-execution-not-started
   "Database operation did not start"
   'clutch-db-error)
+(define-error 'clutch-db-session-restore-error
+  "Database session state was not restored after a known batch outcome"
+  'clutch-db-error)
+(define-error 'clutch-db-batch-outcome-uncertain
+  "Atomic mutation batch outcome is uncertain"
+  'clutch-db-error)
 (define-error 'clutch-query-interrupted "Query interrupted" 'user-error)
 
 (defconst clutch--db-error-hints
@@ -988,15 +994,119 @@ AUTO-COMMIT non-nil enables auto-commit; nil enables manual-commit.")
   "Signal unsupported runtime auto-commit toggling for this backend."
   (user-error "Manual commit is not supported by this connection"))
 
+(defun clutch-db--signal-batch-outcome-uncertain
+    (phase original-error &optional recovery-error)
+  "Signal that a mutation batch outcome is uncertain.
+PHASE is either `commit' or `recovery'.  ORIGINAL-ERROR is the condition that
+started that phase.  RECOVERY-ERROR is the failed recovery condition, when
+PHASE is `recovery'."
+  (signal
+   'clutch-db-batch-outcome-uncertain
+   (list
+    (if recovery-error
+        (format "Mutation batch failed (%s); recovery also failed (%s); outcome is uncertain"
+                (error-message-string original-error)
+                (error-message-string recovery-error))
+      (format "Mutation batch commit failed (%s); commit outcome is uncertain"
+              (error-message-string original-error)))
+    :phase phase
+    :original original-error
+    :recovery recovery-error)))
+
+(defun clutch-db--recover-batch-or-signal-uncertain
+    (original-error recover)
+  "Call RECOVER after ORIGINAL-ERROR or signal an uncertain batch outcome."
+  (condition-case recovery-error
+      (funcall recover)
+    ((error quit)
+     (clutch-db--signal-batch-outcome-uncertain
+      'recovery original-error recovery-error))))
+
+(defun clutch-db--call-batch-body-with-recovery (function recover)
+  "Call FUNCTION, using RECOVER if it signals.
+After successful recovery, re-signal FUNCTION's original condition."
+  (condition-case original-error
+      (funcall function)
+    ((error quit)
+     (clutch-db--recover-batch-or-signal-uncertain
+      original-error recover)
+     (signal (car original-error) (cdr original-error)))))
+
+(defun clutch-db--call-with-transaction-boundary
+    (open function commit rollback)
+  "Call FUNCTION inside a transaction opened by OPEN.
+COMMIT finishes successful work.  ROLLBACK recovers a FUNCTION failure before
+the original condition is re-signaled.  A failed rollback or any COMMIT error
+signals `clutch-db-batch-outcome-uncertain'; COMMIT errors are never followed
+by rollback because the server may already have committed."
+  (funcall open)
+  (let ((result
+         (clutch-db--call-batch-body-with-recovery function rollback)))
+    (condition-case commit-error
+        (progn
+          (funcall commit)
+          result)
+      ((error quit)
+       (clutch-db--signal-batch-outcome-uncertain
+        'commit commit-error)))))
+
+(defun clutch-db--call-with-savepoint-boundary
+    (open function release recover)
+  "Call FUNCTION inside a savepoint opened by OPEN.
+RELEASE finishes successful work.  RECOVER rolls back to the savepoint after a
+FUNCTION or RELEASE failure, then the original condition is re-signaled.  A
+failed recovery signals `clutch-db-batch-outcome-uncertain'."
+  (funcall open)
+  (let ((result
+         (clutch-db--call-batch-body-with-recovery function recover)))
+    (condition-case release-error
+        (progn
+          (funcall release)
+          result)
+      ((error quit)
+       (clutch-db--recover-batch-or-signal-uncertain
+        release-error recover)
+       (signal (car release-error) (cdr release-error))))))
+
+(defvar clutch-db--savepoint-sequence 0
+  "Sequence used to generate collision-resistant staged-submit savepoint names.")
+
+(defconst clutch-db--savepoint-namespace
+  (format "%d_%d" (emacs-pid) (random most-positive-fixnum))
+  "Process-local namespace for staged-submit SQL savepoints.")
+
+(defun clutch-db--call-with-sql-savepoint (conn function ensure-transaction)
+  "Call FUNCTION inside a SQL savepoint on CONN.
+ENSURE-TRANSACTION is called before creating the savepoint and must leave an
+outer transaction open without committing user work."
+  (let ((name (format "clutch_submit_%s_%d"
+                      clutch-db--savepoint-namespace
+                      (cl-incf clutch-db--savepoint-sequence))))
+    (clutch-db--call-with-savepoint-boundary
+     (lambda ()
+       (funcall ensure-transaction)
+       (clutch-db-query conn (format "SAVEPOINT %s" name)))
+     function
+     (lambda ()
+       (clutch-db-query conn (format "RELEASE SAVEPOINT %s" name)))
+     (lambda ()
+       (clutch-db-query conn (format "ROLLBACK TO SAVEPOINT %s" name))
+       (clutch-db-query conn (format "RELEASE SAVEPOINT %s" name))))))
+
 (cl-defgeneric clutch-db-call-with-atomic-batch (conn function)
   "Call zero-argument FUNCTION as one atomic mutation batch on CONN.
-Backends implementing this for autocommit connections must commit every
-mutation together or roll all of them back when FUNCTION signals.")
+In Auto mode, use a backend-owned transaction and commit all work when FUNCTION
+returns.  In Manual mode, use a savepoint inside the user-owned transaction and
+leave that outer transaction uncommitted.  In either mode, roll back all work
+performed by FUNCTION when it signals and preserve the selected transaction
+mode.  A backend that cannot restore its original session mode after a known
+outcome may signal `clutch-db-session-restore-error' with an `:outcome' of
+`committed' or `rolled-back'.  An unknown commit outcome or failed recovery
+signals `clutch-db-batch-outcome-uncertain'.")
 
 (cl-defmethod clutch-db-call-with-atomic-batch ((_conn t) _function)
-  "Reject atomic batches on backends without an autocommit batch boundary."
-  (user-error
-   "Cannot execute multiple staged statements in autocommit mode; disable autocommit first"))
+  "Reject atomic mutation batches on unsupported connections."
+  (user-error "Atomic mutation submission is not supported by this connection"))
 
 (cl-defgeneric clutch-db-schema-transaction-effect (conn sql)
   "Return dirty-cache effect for successful schema SQL on CONN.

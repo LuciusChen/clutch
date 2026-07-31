@@ -173,23 +173,17 @@ Return a `clutch-db-result'."
   ((conn clutch-db-sqlite-conn) function)
   "Call FUNCTION inside a SQLite transaction on CONN."
   (let ((handle (clutch-db-sqlite-conn-handle conn)))
-    (clutch-db--translate-library-error sqlite-error
-      (sqlite-transaction handle))
-    (condition-case original-error
-        (prog1 (funcall function)
-          (clutch-db--translate-library-error sqlite-error
-            (sqlite-commit handle)))
-      ((error quit)
-       (let (rollback-error)
-         (condition-case err
-             (clutch-db--translate-library-error sqlite-error
-               (sqlite-rollback handle))
-           (error (setq rollback-error err)))
-         (if rollback-error
-             (user-error "SQLite batch failed (%s); rollback also failed (%s)"
-                         (error-message-string original-error)
-                         (error-message-string rollback-error))
-           (signal (car original-error) (cdr original-error))))))))
+    (clutch-db--call-with-transaction-boundary
+     (lambda ()
+       (clutch-db--translate-library-error sqlite-error
+         (sqlite-transaction handle)))
+     function
+     (lambda ()
+       (clutch-db--translate-library-error sqlite-error
+         (sqlite-commit handle)))
+     (lambda ()
+       (clutch-db--translate-library-error sqlite-error
+         (sqlite-rollback handle))))))
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)
                                           base-sql page-num page-size

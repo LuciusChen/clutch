@@ -776,6 +776,24 @@ manual-commit mode via lazy BEGIN."
           (clutch-db-pg--set-manual-commit-enabled conn nil))
       (clutch-db-pg--set-manual-commit-enabled conn t))))
 
+(cl-defmethod clutch-db-call-with-atomic-batch
+  ((conn pgcon) function)
+  "Call FUNCTION atomically in CONN's selected PostgreSQL transaction mode."
+  (if (clutch-db-manual-commit-p conn)
+      (clutch-db--call-with-sql-savepoint
+       conn function
+       (lambda ()
+         (unless (clutch-db-pg--tx-open-p conn)
+           (clutch-db-query conn "BEGIN"))))
+    (when (clutch-db-pg--tx-open-p conn)
+      (user-error
+       "Session already has an explicit transaction; switch to Manual mode or finish it before submitting"))
+    (clutch-db--call-with-transaction-boundary
+     (lambda () (clutch-db-query conn "BEGIN"))
+     function
+     (lambda () (clutch-db-commit conn))
+     (lambda () (clutch-db-rollback conn)))))
+
 (cl-defmethod clutch-db-schema-transaction-effect ((_conn pgcon) _sql)
   "Return `dirty' because PostgreSQL DDL participates in transactions."
   'dirty)

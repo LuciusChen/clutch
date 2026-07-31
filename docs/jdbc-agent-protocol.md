@@ -79,6 +79,9 @@ Connection lifecycle:
 - `commit`
 - `rollback`
 - `set-auto-commit`
+- `create-savepoint`
+- `rollback-savepoint`
+- `release-savepoint`
 - `set-current-schema` (currently used by Oracle to update both JDBC sessions)
 
 Execution and cursor flow:
@@ -135,6 +138,14 @@ The connect response returns:
 - `conn-id`
 
 Connection-scoped operations use that `conn-id`.  Cursor operations use the `cursor-id` returned by execution, while `ping` checks the agent process itself.
+
+Savepoint operations translate the standard JDBC `Connection` API without embedding SQL dialects in the Elisp client:
+
+- `create-savepoint` accepts `conn-id` and returns an opaque `savepoint-id`. It rejects auto-commit sessions and checks `DatabaseMetaData.supportsSavepoints()` before creating the savepoint.
+- `rollback-savepoint` accepts both ids, rolls back to that savepoint, and releases it.
+- `release-savepoint` accepts both ids and releases the savepoint after successful work.
+
+Successful commit, rollback, an auto-commit transition, and disconnect invalidate savepoint handles. Unknown or stale handles fail explicitly. Clutch uses these primitives to keep one Manual-mode staged submission atomic inside the user's outer transaction; statement order and staged state remain Elisp-owned.
 
 `cancel` accepts:
 

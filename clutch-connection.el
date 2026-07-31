@@ -389,8 +389,10 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
 
 ;;;; Transaction state
 
-(defvar clutch--tx-dirty-cache (make-hash-table :test 'eq :weakness 'key)
-  "Connections with uncommitted DML.")
+(defvar clutch--tx-state-cache (make-hash-table :test 'eq :weakness 'key)
+  "Transaction state by connection.
+Entries are `dirty' for known uncommitted work or `uncertain' when atomic-batch
+recovery failed or commit outcome is unknown.  Missing entries are clean.")
 
 (defvar-local clutch--query-buffer-local-p nil
   "Non-nil when the current buffer is a clutch query console.")
@@ -398,9 +400,21 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
 (defvar-local clutch--query-mode-line-name nil
   "Base mode-line name for the current clutch query console.")
 
+(defun clutch--tx-state (conn)
+  "Return CONN's tracked transaction state, or nil when clean."
+  (and conn (gethash conn clutch--tx-state-cache)))
+
 (defun clutch--tx-dirty-p (conn)
-  "Return non-nil when CONN has uncommitted DML."
-  (and conn (gethash conn clutch--tx-dirty-cache)))
+  "Return non-nil when CONN has known uncommitted work."
+  (eq (clutch--tx-state conn) 'dirty))
+
+(defun clutch--tx-unresolved-p (conn)
+  "Return non-nil when CONN requires commit, rollback, or reconnect."
+  (memq (clutch--tx-state conn) '(dirty uncertain)))
+
+(defun clutch--tx-uncertain-p (conn)
+  "Return non-nil when CONN's transaction outcome is uncertain."
+  (eq (clutch--tx-state conn) 'uncertain))
 
 (defun clutch--manual-commit-supported-p (conn)
   "Return non-nil when CONN supports Clutch transaction controls."
@@ -460,10 +474,12 @@ pre-rendered text."
                (plist-get (clutch--schema-status-entry conn) :state))
           :transaction-state
           (and connected-p
-               (clutch--manual-commit-supported-p conn)
-               (if (clutch-db-manual-commit-p conn)
-                   (if (clutch--tx-dirty-p conn) 'dirty 'manual)
-                 'auto)))))
+               (cond
+                ((clutch--tx-uncertain-p conn) 'uncertain)
+                ((clutch--manual-commit-supported-p conn)
+                 (if (clutch-db-manual-commit-p conn)
+                     (if (clutch--tx-dirty-p conn) 'dirty 'manual)
+                   'auto)))))))
 
 (defun clutch--refresh-connection-render-state ()
   "Project current buffer connection state into semantic UI input."
@@ -506,13 +522,19 @@ pre-rendered text."
 (defun clutch--set-tx-dirty (conn)
   "Mark CONN as having uncommitted DML."
   (when conn
-    (puthash conn t clutch--tx-dirty-cache)
+    (puthash conn 'dirty clutch--tx-state-cache)
     (clutch--refresh-transaction-ui conn)))
 
-(defun clutch--clear-tx-dirty (conn)
-  "Forget uncommitted transaction state for CONN."
+(defun clutch--set-tx-uncertain (conn)
+  "Mark CONN as requiring an explicit rollback or reconnect."
   (when conn
-    (remhash conn clutch--tx-dirty-cache)
+    (puthash conn 'uncertain clutch--tx-state-cache)
+    (clutch--refresh-transaction-ui conn)))
+
+(defun clutch--clear-tx-state (conn)
+  "Clear cached transaction state for CONN."
+  (when conn
+    (remhash conn clutch--tx-state-cache)
     (clutch--refresh-transaction-ui conn)))
 
 (defun clutch--annotate-dml-result-buffers (conn banner)
@@ -550,40 +572,56 @@ pre-rendered text."
   (when (clutch-db-manual-commit-p conn)
     (cond
      ((clutch--transaction-control-query-p sql)
-      (clutch--clear-tx-dirty conn))
+      (clutch--clear-tx-state conn))
      ((clutch-db-sql-schema-affecting-p sql)
       (pcase (clutch-db-schema-transaction-effect conn sql)
         ('dirty (clutch--set-tx-dirty conn))
-        ('clear (clutch--clear-tx-dirty conn))))
+        ('clear (clutch--clear-tx-state conn))))
      ((clutch--manual-commit-dirtying-query-p sql)
       (clutch--set-tx-dirty conn)))))
 
-(defun clutch--run-db-query (conn sql &optional params)
-  "Execute SQL on CONN with optional PARAMS and keep transaction UI state in sync."
+(defun clutch--run-db-query
+    (conn sql &optional params defer-transaction-state)
+  "Execute SQL on CONN with optional PARAMS and synchronize transaction state.
+When DEFER-TRANSACTION-STATE is non-nil, leave dirty-state accounting to the
+enclosing atomic-batch workflow."
+  (when (clutch--tx-uncertain-p conn)
+    (user-error
+     "Transaction state is uncertain; roll back or reconnect before running another query"))
   (let ((result (if params
                     (clutch-db-execute-params conn sql params)
                   (clutch-db-query conn sql))))
     (clutch--clear-connection-problem-capture conn)
-    (clutch--record-tx-state-after-query conn sql)
+    (unless defer-transaction-state
+      (clutch--record-tx-state-after-query conn sql))
     result))
 
 (defun clutch--discard-lost-transaction (conn)
   "Record that CONN died before its open transaction was committed."
   (clutch--mark-dml-results-rolled-back conn)
-  (clutch--clear-tx-dirty conn))
+  (clutch--clear-tx-state conn))
 
 (defun clutch--lost-transaction-p (conn)
-  "Return non-nil when CONN died while holding uncommitted DML."
+  "Return non-nil when CONN died with known uncommitted work."
   (and conn
        (clutch--tx-dirty-p conn)
        (not (clutch--connection-alive-p conn))))
 
-(defun clutch--confirm-disconnect-transaction-loss (conn prompt)
-  "Require confirmation with PROMPT before dropping dirty manual-commit CONN."
-  (when (and (clutch-db-manual-commit-p conn)
-             (clutch--tx-dirty-p conn)
-             (not (yes-or-no-p prompt)))
-    (user-error "Disconnect cancelled")))
+(defun clutch--confirm-session-close (conn action)
+  "Require confirmation before ACTION closes unresolved CONN.
+ACTION is a short question such as \"Disconnect? \"."
+  (let ((state (clutch--tx-state conn)))
+    (when (and (or (eq state 'uncertain)
+                   (and (eq state 'dirty)
+                        (clutch-db-manual-commit-p conn)))
+               (not
+                (yes-or-no-p
+                 (concat
+                  (if (eq state 'uncertain)
+                      "Prior transaction outcome is unknown.  "
+                    "Uncommitted changes will be lost.  ")
+                  action))))
+      (user-error "Disconnect cancelled"))))
 
 ;;;; Connection lifecycle
 
@@ -698,20 +736,26 @@ Connection failures propagate to the calling command."
               (params (car context))
               (product (cadr context)))
     (let ((conn (clutch--build-conn params))
-          (lost-transaction (clutch--tx-dirty-p old-conn)))
-      (if lost-transaction
+          (prior-tx-state (clutch--tx-state old-conn)))
+      (if (eq prior-tx-state 'dirty)
           (clutch--discard-lost-transaction old-conn)
-        (clutch--clear-tx-dirty old-conn))
+        (clutch--clear-tx-state old-conn))
       (clutch--release-connection-transport old-conn)
       (clutch--require-live-connection conn)
       (clutch--clear-connection-problem-capture old-conn)
       (clutch--clear-reconnect-metadata-caches old-conn conn)
       (clutch--rebind-connection-buffers old-conn conn params product)
       (clutch--finalize-rebound-connection conn)
-      (if lost-transaction
-          (message "Reconnected to %s; uncommitted changes were lost"
-                   (clutch--connection-key conn))
-        (message "Reconnected to %s" (clutch--connection-key conn)))
+      (pcase prior-tx-state
+        ('dirty
+         (message "Reconnected to %s; uncommitted changes were lost"
+                  (clutch--connection-key conn)))
+        ('uncertain
+         (message
+          "Reconnected to %s; prior transaction outcome is unknown, verify before retrying"
+          (clutch--connection-key conn)))
+        (_
+         (message "Reconnected to %s" (clutch--connection-key conn))))
       t)))
 
 (defun clutch--replace-connection (old-conn params &optional product)
@@ -719,7 +763,7 @@ Connection failures propagate to the calling command."
 PRODUCT is the effective SQL product for the new logical session."
   (let* ((product (or product (clutch--effective-sql-product params)))
          (new-conn (clutch--build-conn params)))
-    (clutch--clear-tx-dirty old-conn)
+    (clutch--clear-tx-state old-conn)
     (unwind-protect
         (when (clutch--connection-alive-p old-conn)
           (clutch-db-disconnect old-conn))
@@ -2368,9 +2412,8 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                       conn params namespace)))
               (progn
                 (when (clutch--connection-alive-p conn)
-                  (clutch--confirm-disconnect-transaction-loss
-                   conn
-                   "Uncommitted changes will be lost.  Switch database? "))
+                  (clutch--confirm-session-close
+                   conn "Switch database? "))
                 (clutch--replace-connection
                  conn replacement-params (plist-get context :product))
                 (message "Current schema/database: %s" namespace))
@@ -2410,9 +2453,8 @@ params; see `clutch-connection-alist' for details."
   (let ((old-conn clutch-connection)
         (old-live-p (clutch--connection-alive-p clutch-connection)))
     (when old-live-p
-      (clutch--confirm-disconnect-transaction-loss
-       old-conn
-       "Uncommitted changes will be lost.  Disconnect? "))
+      (clutch--confirm-session-close
+       old-conn "Disconnect? "))
     (let* ((source-default-directory default-directory)
            (params  (clutch-prepare-connection-params
                      (clutch--connect-params-for-current-buffer)
@@ -2448,9 +2490,8 @@ still needs an initial passphrase entry or host-key confirmation."
   (let ((conn clutch-connection))
     (cond
      ((clutch--connection-alive-p conn)
-      (clutch--confirm-disconnect-transaction-loss
-       conn
-       "Uncommitted changes will be lost.  Disconnect? ")
+      (clutch--confirm-session-close
+       conn "Disconnect? ")
       (clutch--do-disconnect conn)
       (message "Disconnected"))
      (conn
@@ -2522,10 +2563,11 @@ KIND selects how much of the logical session survives:
                 the logical session in place.
 
 Every kind marks DML results, drops metadata caches, and releases the
-transport.  Transaction dirty state is cleared only when the anchors go
-too: for `preserve' it is the evidence that the server rolled back an
-open transaction, and `clutch--lost-transaction-p' reads it to refuse a
-commit on a replacement session and to report the loss on reconnect.
+transport.  Transaction state is cleared only when the anchors go too.
+For `preserve', known dirty state records that the dead server session
+discarded uncommitted work, while uncertain state records that a prior
+submission outcome still cannot be inferred.  Reconnect reports those
+cases separately.
 The guarded steps below are the whole difference between the kinds, so a
 new teardown step has to say which kinds it belongs to instead of being
 added to one caller.
@@ -2538,7 +2580,7 @@ attached buffers onto a new connection rather than ending the session."
     (clutch--mark-dml-results-connection-closed conn)
     (unless keep-anchors
       (clutch--invalidate-derived-buffers conn)
-      (clutch--clear-tx-dirty conn))
+      (clutch--clear-tx-state conn))
     (clutch--clear-connection-metadata-caches conn)
     (when closing
       (clutch--record-disconnect-debug-event conn))
@@ -2575,9 +2617,8 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
              clutch-connection)
     (if (clutch--connection-alive-p clutch-connection)
         (progn
-          (clutch--confirm-disconnect-transaction-loss
-           clutch-connection
-           "Uncommitted changes will be lost.  Kill buffer? ")
+          (clutch--confirm-session-close
+           clutch-connection "Kill buffer? ")
           (clutch--do-disconnect clutch-connection))
       (clutch--cleanup-dead-connection clutch-connection))))
 
@@ -2587,11 +2628,18 @@ Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
   "Ensure a live connection for a transaction command.
 Refuse to reconnect when the session died holding uncommitted DML: the
 server already rolled that transaction back, so running the statement on a
-replacement connection would report success for changes that were lost."
-  (when (clutch--lost-transaction-p clutch-connection)
+replacement connection would report success for changes that were lost.
+Also preserve an uncertain transaction outcome instead of presenting a
+rollback on a replacement session as evidence about the dead session."
+  (cond
+   ((clutch--lost-transaction-p clutch-connection)
     (clutch--discard-lost-transaction clutch-connection)
     (user-error
      "Connection dropped with an open transaction; uncommitted changes were lost"))
+   ((and (clutch--tx-uncertain-p clutch-connection)
+         (not (clutch--connection-alive-p clutch-connection)))
+    (user-error
+     "Connection dropped with an uncertain transaction outcome; reconnect and verify it")))
   (clutch--ensure-connection))
 
 ;;;###autoload
@@ -2601,11 +2649,20 @@ replacement connection would report success for changes that were lost."
   (clutch--ensure-transaction-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
+  (when (clutch--tx-uncertain-p clutch-connection)
+    (user-error
+     "Transaction state is uncertain; roll back or reconnect instead of committing"))
   (unless (clutch-db-manual-commit-p clutch-connection)
     (user-error "Connection is in autocommit mode"))
-  (clutch-db-commit clutch-connection)
+  (condition-case err
+      (clutch-db-commit clutch-connection)
+    ((error quit)
+     (clutch--set-tx-uncertain clutch-connection)
+     (user-error
+      "%s; commit outcome is uncertain, roll back or reconnect"
+      (clutch--humanize-db-error (error-message-string err)))))
   (clutch--mark-dml-results-committed clutch-connection)
-  (clutch--clear-tx-dirty clutch-connection)
+  (clutch--clear-tx-state clutch-connection)
   (message "Transaction committed"))
 
 ;;;###autoload
@@ -2615,12 +2672,18 @@ replacement connection would report success for changes that were lost."
   (clutch--ensure-transaction-connection)
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
-  (unless (clutch-db-manual-commit-p clutch-connection)
-    (user-error "Connection is in autocommit mode"))
-  (clutch-db-rollback clutch-connection)
-  (clutch--mark-dml-results-rolled-back clutch-connection)
-  (clutch--clear-tx-dirty clutch-connection)
-  (message "Transaction rolled back"))
+  (let ((uncertain (clutch--tx-uncertain-p clutch-connection)))
+    (unless (or (clutch-db-manual-commit-p clutch-connection)
+                uncertain)
+      (user-error "Connection is in autocommit mode"))
+    (clutch-db-rollback clutch-connection)
+    (unless uncertain
+      (clutch--mark-dml-results-rolled-back clutch-connection))
+    (clutch--clear-tx-state clutch-connection)
+    (message
+     (if uncertain
+         "Session recovered by rollback; verify the prior transaction outcome before retrying"
+       "Transaction rolled back"))))
 
 ;;;###autoload
 (defun clutch-toggle-auto-commit ()
@@ -2632,10 +2695,10 @@ any open transaction according to its own semantics."
   (unless (clutch--manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection)))
-    (when (and manual-now (clutch--tx-dirty-p clutch-connection))
-      (user-error "Cannot toggle: commit or roll back staged changes first"))
+    (when (clutch--tx-unresolved-p clutch-connection)
+      (user-error "Cannot toggle: commit or roll back uncommitted changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
-    (clutch--clear-tx-dirty clutch-connection)
+    (clutch--clear-tx-state clutch-connection)
     (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
 
 (provide 'clutch-connection)

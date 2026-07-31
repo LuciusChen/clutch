@@ -504,7 +504,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                       :original (car row)
                       :original-state (cons nil (car row)))))
                   (should clutch--pending-edits)
-                  (clutch-result-commit)
+                  (clutch-result-submit)
                   (should-not clutch--pending-edits)
                   (should (equal (caar clutch--result-rows) "after")))))
             (let ((rows (clutch-db-result-rows
@@ -569,13 +569,13 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (should (string-match-p "2" (buffer-string))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
-(ert-deftest clutch-test-live-edit-field-and-commit-persists ()
+(ert-deftest clutch-test-live-edit-field-and-submit-persists ()
   :tags '(:clutch-live)
-  "Edit through a real SELECT result and commit the persisted row change."
+  "Edit through a real SELECT result and submit the persisted row change."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
-    (let* ((table (format "clutch_edit_commit_%d" (emacs-pid)))
+    (let* ((table (format "clutch_edit_submit_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
             (clutch-test--live-create-table-sql
@@ -612,7 +612,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                       :original (nth 1 row)
                       :original-state (cons nil (nth 1 row)))))
                   (should clutch--pending-edits)
-                  (clutch-result-commit)
+                  (clutch-result-submit)
                   (should-not clutch--pending-edits)
                   (should (equal (clutch-test--live-row-prefix-strings
                                   (car clutch--result-rows) 2)
@@ -626,9 +626,132 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                              '(("1" "after"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
-(ert-deftest clutch-test-live-insert-and-delete-commit-persists ()
+(ert-deftest clutch-test-live-autocommit-staged-batch-is-atomic ()
   :tags '(:clutch-live)
-  "Insert and delete staging should persist through real backend commits."
+  "Auto mode should commit or roll back a real staged batch as one submission."
+  (unless (clutch-test--updateable-live-backend-p)
+    (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
+  (clutch-test--with-conn conn
+    (when (clutch-db-manual-commit-p conn)
+      (ert-skip "This regression requires an auto-commit connection"))
+    (let* ((table (format "clutch_auto_batch_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (create-sql
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
+           (select-sql (format "SELECT id, name FROM %s ORDER BY id" table))
+           (result-name (format " *clutch-auto-batch-live-%d*" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query conn create-sql)
+            (clutch-test--with-live-result-buffer result-name
+              (clutch-test--execute-live-select conn select-sql)
+              (with-current-buffer result-name
+                (setq-local
+                 clutch--pending-inserts
+                 '((("id" . "1") ("name" . "one"))
+                   (("id" . "2") ("name" . "two"))))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t))
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result-submit))
+                (should-not clutch--pending-inserts)
+                (should-not (clutch-db-manual-commit-p conn))
+                (setq-local
+                 clutch--pending-inserts
+                 '((("id" . "3") ("name" . "three"))
+                   (("id" . "1") ("name" . "duplicate"))))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t))
+                          ((symbol-function 'message) #'ignore))
+                  (should-error (clutch-result-submit) :type 'user-error))
+                (should (= (length clutch--pending-inserts) 2))
+                (should-not (clutch-db-manual-commit-p conn))))
+            (should
+             (equal
+              (mapcar
+               (lambda (row)
+                 (clutch-test--live-row-prefix-strings row 2))
+               (clutch-db-result-rows (clutch-db-query conn select-sql)))
+              '(("1" "one") ("2" "two")))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
+
+(ert-deftest clutch-test-live-manual-staged-batch-rolls-back-to-savepoint ()
+  :tags '(:clutch-live)
+  "A failed Manual submission should preserve earlier work and undo its own prefix."
+  (unless (clutch-test--updateable-live-backend-p)
+    (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
+  (clutch-test--with-conn conn
+    (unless (clutch-db-manual-commit-supported-p conn)
+      (ert-skip "This regression requires manual-commit support"))
+    (let* ((table (format "clutch_manual_batch_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (create-sql
+            (clutch-test--live-create-table-sql
+             table '((id int primary) (name string))))
+           (select-sql (format "SELECT id, name FROM %s ORDER BY id" table))
+           (insert-sql (format "INSERT INTO %s (id, name) VALUES (?, ?)" table))
+           (result-name (format " *clutch-manual-batch-live-%d*" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query conn create-sql)
+            (clutch-db-set-auto-commit conn nil)
+            (clutch-test--with-live-result-buffer result-name
+              (clutch-test--execute-live-select conn select-sql)
+              (clutch--run-db-query conn insert-sql '(1 "earlier"))
+              (with-current-buffer result-name
+                (setq-local
+                 clutch--pending-inserts
+                 '((("id" . "2") ("name" . "batch-prefix"))
+                   (("id" . "1") ("name" . "duplicate"))))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t))
+                          ((symbol-function 'message) #'ignore))
+                  (should-error (clutch-result-submit) :type 'user-error))
+                (should (= (length clutch--pending-inserts) 2))
+                (should (clutch--tx-dirty-p conn))
+                (should
+                 (equal
+                  (mapcar
+                   (lambda (row)
+                     (clutch-test--live-row-prefix-strings row 2))
+                   (clutch-db-result-rows (clutch-db-query conn select-sql)))
+                  '(("1" "earlier"))))
+                (setq-local
+                 clutch--pending-inserts
+                 '((("id" . "2") ("name" . "batch-prefix"))
+                   (("id" . "3") ("name" . "fixed"))))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t))
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result-submit))
+                (should-not clutch--pending-inserts)
+                (should
+                 (equal
+                  (mapcar
+                   (lambda (row)
+                     (clutch-test--live-row-prefix-strings row 2))
+                   (clutch-db-result-rows (clutch-db-query conn select-sql)))
+                  '(("1" "earlier")
+                    ("2" "batch-prefix")
+                    ("3" "fixed"))))))
+            (clutch-db-rollback conn)
+            (clutch--clear-tx-state conn)
+            (should-not
+             (clutch-db-result-rows (clutch-db-query conn select-sql)))
+            (clutch-db-set-auto-commit conn t))
+        (ignore-errors
+          (when (clutch-db-manual-commit-p conn)
+            (clutch-db-rollback conn)
+            (clutch--clear-tx-state conn)
+            (clutch-db-set-auto-commit conn t)))
+          (clutch-db-query conn drop-sql)))))
+
+(ert-deftest clutch-test-live-insert-and-delete-submit-persists ()
+  :tags '(:clutch-live)
+  "Submitted insert and delete staging should persist on a real backend."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
@@ -662,7 +785,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (insert "ann")
                 (cl-letf (((symbol-function 'quit-window) #'ignore)
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-insert-commit)))
+                  (clutch-result-insert-stage)))
               (with-current-buffer result-name
                 (let ((insert (car clutch--pending-inserts)))
                   (should (equal (cdr (assoc-string "id" insert t)) "1"))
@@ -670,7 +793,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-commit))
+                  (clutch-result-submit))
                 (should-not clutch--pending-inserts))
               (should (equal (mapcar (lambda (row)
                                        (clutch-test--live-row-prefix-strings
@@ -694,7 +817,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-commit))
+                  (clutch-result-submit))
                 (should-not clutch--pending-deletes)))
             (should-not (clutch-db-result-rows
                          (clutch-db-query conn select-sql))))

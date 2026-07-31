@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.3.1 - Unreleased
+## 0.4.0 - Unreleased
+
+### Breaking Changes
+
+- Renamed the public staged-mutation commands from `clutch-result-commit` to `clutch-result-submit` and from `clutch-result-insert-commit` to `clutch-result-insert-stage`. The names now distinguish local staging, submission to the database session, and `clutch-commit`, which alone commits a Manual-mode server transaction. `C-c C-c` is unchanged, and no compatibility aliases are retained.
 
 ### Added
 
@@ -8,6 +12,7 @@
 
 ### Fixed
 
+- Made staged Result Browser submissions atomic in the connection's existing transaction mode, matching DataGrip's data-editor model without exposing partial retries. In Auto mode, `C-c C-c` validates and commits the submitted batch automatically on transaction-capable backends, rolling it back on statement failure. In Manual mode, it wraps that submission in a savepoint, so a later statement failure removes this batch's earlier statements while preserving pre-existing user work; successful work stays pending until explicit commit or rollback. MySQL and PostgreSQL use native savepoints, while JDBC uses standard savepoint primitives from agent 0.2.18 and rejects unsupported drivers before staged DML starts. A failed recovery or unknown commit outcome, including explicit `clutch-commit`, marks the transaction Uncertain and blocks further queries, commit, and transaction-mode changes until rollback or reconnect; recovery restores a usable session without claiming that an uncertain commit did not happen.
 - Kept graphical result grids aligned across Emacs redisplay versions. Emacs 30 and later use `min-width` for result-body values, improving mixed-glyph and custom-display alignment; Emacs 29 uses explicit pixel padding because its redisplay does not enforce those widths reliably. Headers retain explicit pixel padding through Emacs 30, while Emacs 31.1 and later use safely terminated `min-width` carriers after upstream fixed mode-line string handling; the carrier accounts for fonts that paint the nominally zero-width terminator as one pixel. All paths retain the same logical widths for navigation, horizontal scrolling, and terminals.
 - Made automatic child-frame cell previews wait for a configurable idle delay and hide stale content immediately when point moves to another cell, preventing the preview from visibly following navigation across adjacent rows.
 

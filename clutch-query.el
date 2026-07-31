@@ -1034,7 +1034,7 @@ as required after a preceding statement in the same batch."
   (clutch--confirm-query-execution sql)
   (setq clutch--last-query sql)
   (let* ((manual-dirty-p
-          (and (clutch--tx-dirty-p connection)
+          (and (clutch--tx-unresolved-p connection)
                (clutch-db-manual-commit-p connection)))
          (outcome
           (clutch-db-with-foreground-connection connection
@@ -1062,7 +1062,7 @@ as required after a preceding statement in the same batch."
 
 (defun clutch--connection-loss-context (connection &optional context)
   "Add transaction-loss state for CONNECTION to a copy of CONTEXT."
-  (if (clutch--tx-dirty-p connection)
+  (if (clutch--tx-unresolved-p connection)
       (plist-put (copy-sequence context) :transaction-outcome 'unknown)
     context))
 
@@ -1090,7 +1090,7 @@ as required after a preceding statement in the same batch."
                         (clutch--debug-workflow-message summary))
                nil)))))
     (let ((transaction-lost (and (not interrupted)
-                                 (clutch--tx-dirty-p connection))))
+                                 (clutch--tx-unresolved-p connection))))
       (when clutch-debug-mode
         (clutch--remember-debug-event
          :connection connection
@@ -1885,7 +1885,7 @@ Key bindings:
               (or (clutch--dispatch-transaction-controls-inapt-p)
                   (and clutch-connection
                        (clutch-db-manual-commit-p clutch-connection)
-                       (clutch--tx-dirty-p clutch-connection))))
+                       (clutch--tx-unresolved-p clutch-connection))))
   (interactive)
   (call-interactively #'clutch-toggle-auto-commit))
 
