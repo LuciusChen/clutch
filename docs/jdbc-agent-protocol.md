@@ -26,9 +26,10 @@ The stdin reader is intentionally not blocked by one long-running request. Each 
 - Request transport: stdin
 - Response transport: stdout
 - Format: one complete JSON object per line
-- Process stderr: reserved for startup failures and JVM/driver diagnostics
+- Process stderr: startup failures, JVM/agent diagnostics, and quarantined third-party Java console output
 
 The agent emits an initial ready response on startup before normal RPC traffic begins.
+Before loading any third-party driver code, the agent retains a dedicated operating-system stdout handle for protocol responses and redirects Java's global `System.out` to UTF-8 stderr. This keeps unconditional driver messages, including Snowflake external-browser login status, out of the JSON stream while preserving them in Clutch's captured diagnostics.
 
 ## Message shape
 
