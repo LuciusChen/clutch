@@ -395,6 +395,8 @@ Redis profiles may select an initial logical database with `:database`. Clutch d
 
 JDBC support covers Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, MongoDB SQL Interface, DuckDB, and generic JDBC URLs through the [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent) sidecar. For setup, driver installation, connection examples, backend-specific notes, and transaction behavior, see [docs/jdbc-backend.org](docs/jdbc-backend.org).
 
+The agent keeps stdout exclusively for its JSON protocol and redirects third-party Java console output to captured stderr before loading drivers. Driver messages such as Snowflake external-browser login status therefore remain available to Clutch diagnostics without breaking the connection.
+
 For the sidecar wire protocol and agent internals, see [docs/jdbc-agent-protocol.md](docs/jdbc-agent-protocol.md).
 
 ### Org-Babel Integration
