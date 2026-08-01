@@ -137,6 +137,12 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
 
 JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.md#password-management][Password Management]] for details.
 
+** Snowflake-specific Notes
+
+Each logical Clutch JDBC connection owns two underlying Snowflake JDBC connections: a primary session for foreground SQL and a metadata session for schema and object introspection.  Authentication happens per underlying connection, so an interactive authenticator such as =externalbrowser= can run twice during one logical connect (for example, by opening two browser SSO tabs); the same applies to per-connection MFA or push flows.  This is expected behavior from the two-session runtime model, not an authentication retry.
+
+If connection-token caching is permitted by your organization, an =ACCOUNTADMIN= can run =ALTER ACCOUNT SET ALLOW_ID_TOKEN = TRUE;= so Snowflake stores a connection token in the operating-system keystore and reuses it for subsequent connections while it remains valid.  Consult your security team before enabling this account-level option.  Snowflake JDBC connection caching also requires JNA on the agent classpath (JNA on macOS/Linux, plus JNA Platform on Windows), and Snowflake JDBC 3.12.18 and later no longer bundle those classes.  Clutch's Snowflake installer currently downloads only the JDBC driver, so place the JNA jar or jars recommended for that driver version in the =drivers/= subdirectory of =clutch-jdbc-agent-dir= before connecting.  See Snowflake's official [[https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use#using-connection-caching-to-minimize-the-number-of-prompts-for-authentication-optional][connection-caching]] and [[https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-download#add-the-jna-classes-to-your-classpath][JNA classpath]] guidance.
+
 ** DuckDB-specific Notes
 
 =C-c C-l= / =clutch-switch-schema= lists schemas in DuckDB's current file-backed catalog and switches the primary JDBC session with =USE catalog.schema=.  Clutch stores the raw catalog and schema names so reconnect and metadata scope remain synchronized; SQL quoting is applied only when executing the switch.
