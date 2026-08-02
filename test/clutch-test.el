@@ -452,83 +452,51 @@
             (right (clutch--pad-display-string "7" 4 50 t))
             (empty (clutch--pad-display-string "" 4 50)))
         (dolist (string (list left right empty))
-          (should (= (string-width string) 4))
-          (should-not
-           (cl-loop for i below (length string)
-                    for display = (get-text-property i 'display string)
-                    thereis (and (consp display)
-                                 (eq (car display) 'space)))))
+          (should (= (string-width string) 4)))
+        (should (= (clutch-test--fake-pixel-width left) 50))
         (should (equal (get-display-property 0 'min-width left)
                        '((50))))
-        (should (equal (get-display-property 0 'min-width right)
-                       '((40))))
-        (should (equal (get-display-property 0 'min-width empty)
-                       '((50))))))))
+        (dolist (string (list right empty))
+          (should (= (clutch-test--fake-pixel-width string) 50))
+          (should-not
+           (cl-loop for i below (length string)
+                    thereis
+                    (get-display-property i 'min-width string))))
+        (should (equal (get-text-property 0 'display right)
+                       '(space :width (40))))
+        (should (equal (get-text-property 0 'display empty)
+                       '(space :width (50))))))))
 
-(ert-deftest clutch-test-header-pixel-padding-version-contract ()
-  "Header centering should use the redisplay path supported by Emacs."
+(ert-deftest clutch-test-header-pixel-padding-contract ()
+  "Header centering should use exact pixel spaces."
   (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
             ((symbol-function 'string-pixel-width)
-             #'clutch-test--fake-pixel-width))
-    (dolist (version '("29.1" "30.2" "31.0.50" "31.1" "32.0.50"))
-      (let* ((emacs-version version)
-             (min-width-p (clutch--header-min-width-supported-p)))
-        (let ((centered
-               (clutch--center-display-string "x" 4 50 min-width-p)))
-          (should (= (string-width centered) 4))
-          (should (= (clutch-test--fake-pixel-width centered) 50))
-          (if (not min-width-p)
-              (progn
-                (should (equal (get-text-property 0 'display centered)
-                               '(space :width (20))))
-                (should-not
-                 (cl-loop for i below (length centered)
-                          thereis
-                          (get-display-property i 'min-width centered))))
-            (should (equal (get-display-property 0 'min-width centered)
-                           '((20))))
-            (should
-             (cl-loop for i below (length centered)
-                      thereis
-                      (and (> i 0)
-                           (equal (get-display-property
-                                   i 'min-width centered)
-                                  '((20))))))))))))
+             #'clutch-test--fake-pixel-width)
+            ((symbol-function 'clutch--header-cell-label)
+             (lambda (_cidx _width) "x")))
+    (let* ((clutch--result-columns '("x"))
+           (clutch--column-pixel-widths [50])
+           (header (clutch--header-cell 0 [4])))
+      (should-not
+       (cl-loop for i below (length header)
+                thereis
+                (get-display-property i 'min-width header)))
+      (should
+       (cl-loop for i below (length header)
+                thereis
+                (equal (get-text-property i 'display header)
+                       '(space :width (20))))))))
 
-(ert-deftest clutch-test-header-min-width-accounts-for-terminator-pixels ()
-  "Header padding should not grow when a font paints the terminator."
-  (let ((original-char-width
-         (symbol-function 'clutch-test--fake-char-pixel-width))
-        (terminator-pixels 1))
-    (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
-              ((symbol-function 'string-pixel-width)
-               #'clutch-test--fake-pixel-width)
-              ((symbol-function 'clutch-test--fake-char-pixel-width)
-               (lambda (string pos)
-                 (if (= (aref string pos) #x200b)
-                     terminator-pixels
-                   (funcall original-char-width string pos)))))
-      (let ((centered (clutch--center-display-string "x" 4 50 t)))
-        (should (= (clutch-test--fake-pixel-width centered) 50))
-        (should (equal (get-display-property 0 'min-width centered)
-                       '((19))))
-        (should
-         (cl-loop for i below (length centered)
-                  thereis
-                  (and (> i 0)
-                       (equal (get-display-property i 'min-width centered)
-                              '((19)))))))
-      (let ((zero-padding (clutch--min-width-padding-string 2 0 t)))
-        (should (= (string-width zero-padding) 2))
-        (should (= (clutch-test--fake-pixel-width zero-padding) 0))
-        (should-not (string-match-p (string #x200b) zero-padding)))
-      (setq terminator-pixels 2)
-      (let ((narrow-padding (clutch--min-width-padding-string 1 1 t)))
-        (should (= (clutch-test--fake-pixel-width narrow-padding) 1))
-        (should (equal (get-text-property 0 'display narrow-padding)
-                       '(space :width (1))))
-        (should-not
-         (get-display-property 0 'min-width narrow-padding))))))
+(ert-deftest clutch-test-pixel-measurement-applies-default-face-remapping ()
+  "Pixel measurement should include the result buffer's text remapping."
+  (let ((face-remapping-alist '((default (:height 2.0) default))))
+    (cl-letf (((symbol-function 'string-pixel-width)
+               (lambda (string)
+                 (if (equal (get-text-property 0 'face string)
+                            '(:height 2.0))
+                     20
+                   10))))
+      (should (= (clutch--display-string-pixel-width "x") 20)))))
 
 (ert-deftest clutch-test-result-grid-aligns-mixed-width-custom-displays ()
   "Result headers and custom display subregions should share rendered widths."
@@ -2138,24 +2106,6 @@
             (should (equal (get-text-property 0 'display cropped)
                            '(space :width (20))))
             (should (= (clutch-test--fake-pixel-width cropped) 30)))))))
-  (ert-info ("min-width carrier crop")
-    (with-temp-buffer
-      (setq-local clutch--column-pixel-widths [30])
-      (cl-letf (((symbol-function 'display-graphic-p)
-                 (lambda (&optional _display) t))
-                ((symbol-function 'default-font-width)
-                 (lambda () 10))
-                ((symbol-function 'window-hscroll)
-                 (lambda (&optional _window) 1))
-                ((symbol-function 'string-pixel-width)
-                 #'clutch-test--fake-pixel-width))
-        (setq-local clutch--header-line-string
-                    (concat (clutch--min-width-padding-string 2 30 t) "x"))
-        (let ((cropped (clutch--header-line-with-hscroll)))
-          (should (equal (get-text-property 0 'display cropped)
-                         '(space :width (20))))
-          (should-not (get-display-property 0 'min-width cropped))
-          (should (= (clutch-test--fake-pixel-width cropped) 30))))))
   (ert-info ("sort indicator glyph crop preserves following alignment")
     (with-temp-buffer
       (setq-local clutch--sort-column nil)
@@ -5794,6 +5744,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "The documented result-mode k binding should copy agent context."
   (should (eq (lookup-key clutch-result-mode-map "k")
               #'clutch-copy-context-for-agent)))
+
+(ert-deftest clutch-test-result-mode-scales-header-with-buffer-text ()
+  "Result headers should follow buffer-local text scaling exactly once."
+  (require 'face-remap)
+  (let ((text-scale-remap-header-line nil))
+    (with-temp-buffer
+      (clutch-result-mode)
+      (should (local-variable-p 'text-scale-remap-header-line))
+      (should text-scale-remap-header-line)
+      (dolist (face '(mode-line mode-line-inactive))
+        (let ((spec (cadr (assq face face-remapping-alist))))
+          (should-not (eq (plist-get spec :inherit) 'default)))))))
 
 (ert-deftest clutch-test-result-mouse-click-below-table-preserves-point ()
   "Clicking below the rendered table should not move the current cell."

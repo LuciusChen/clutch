@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 - Unreleased
+
+### Fixed
+
+- Kept graphical Result Browser headers aligned with rows when `text-scale-mode` changes the buffer font. Result buffers now opt header lines into buffer-local scaling, avoid applying the default-face scale twice through mode-line inheritance, and measure column content with the same default-face remappings used by redisplay.
+
 ## 0.4.0 - 2026-07-31
 
 ### Breaking Changes

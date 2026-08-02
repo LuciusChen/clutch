@@ -1,5 +1,7 @@
 # 176 — Header-Line `min-width` After Emacs 31
 
+> Superseded by [postmortem 178](178-result-header-text-scale-alignment.md): scaled result buffers use exact header padding on every supported Emacs version, while `min-width` remains limited to non-empty left-aligned result-body content from Emacs 30 onward.
+
 ## Context
 
 Postmortem 174 correctly retained explicit header padding for the unterminated zero-width carriers tested at the time, but its conclusion that header lines did not enforce `min-width` was broader than the redisplay failure. Later source inspection showed that Emacs renders mode lines, tab lines, and header lines through the same `display_mode_line` path in `src/xdisp.c`, while the tab bar has a separate `display_tab_bar_line` path but still uses the common display-property iterator.
