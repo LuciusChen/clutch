@@ -1020,9 +1020,13 @@ Edit:
   (hl-line-mode 1)
   (setq-local scroll-step 1)
   (setq-local hscroll-step 1)
-  ;; Make mode-line use default background so footer renders cleanly
-  (face-remap-add-relative 'mode-line :inherit 'default)
-  (face-remap-add-relative 'mode-line-inactive :inherit 'default)
+  ;; Keep the footer visually quiet without making header-line inherit the
+  ;; text-scaled default face a second time.
+  (let ((background (face-background 'default nil t)))
+    (face-remap-add-relative 'mode-line :background background :box nil)
+    (face-remap-add-relative 'mode-line-inactive
+                             :background background :box nil))
+  (setq-local text-scale-remap-header-line t)
   (setq-local revert-buffer-function #'clutch-result--revert)
   (setq-local clutch--header-sort-function #'clutch-result--sort-by-column-index)
   (add-hook 'post-command-hook

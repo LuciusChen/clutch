@@ -346,7 +346,16 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
   "Return the rendered pixel width of STRING.
 The final newline makes redisplay settle a trailing `min-width'
 specification before `string-pixel-width' reports the widest line."
-  (string-pixel-width (concat string "\n")))
+  (let ((measured (concat string "\n")))
+    ;; The call shape must also work on Emacs 29-30, where
+    ;; `string-pixel-width' cannot receive the originating buffer.  Apply the
+    ;; current default-face remappings to the measured copy so text scaling
+    ;; uses the same font as redisplay.
+    (when-let* ((entry (assq 'default face-remapping-alist))
+                (relative-specs (butlast (cdr entry))))
+      (dolist (spec relative-specs)
+        (add-face-text-property 0 (length measured) spec 'append measured)))
+    (string-pixel-width measured)))
 
 (defun clutch--pixel-padding-string (cells pixels)
   "Return CELLS padding characters displayed as PIXELS pixels.
@@ -370,103 +379,61 @@ point-navigation model while tightening graphical alignment."
     (propertize (string #x200b) 'display `(space :width (,pixels))))
    (t "")))
 
-(defun clutch--min-width-padding-string (cells pixels &optional terminate)
-  "Return padding of CELLS displayed as at least PIXELS pixels.
-A zero-width carrier supplies the graphical minimum width, while hidden
-spaces preserve the existing hscroll and point-navigation model.
-When TERMINATE is non-nil, follow the carrier with an unpropertized zero-width
-character so mode-line redisplay closes the `min-width' region before the
-hidden spaces.  Account for fonts that render that character one pixel wide."
-  (let ((logical-padding (make-string cells ?\s)))
-    (put-text-property 0 cells 'display "" logical-padding)
-    (if (<= pixels 0)
-        logical-padding
-      (let* ((terminator (and terminate (string #x200b)))
-             (terminator-pixels
-              (if terminator
-                  (clutch--display-string-pixel-width terminator)
-                0))
-             (carrier-pixels (max 0 (- pixels terminator-pixels))))
-        (cond
-         ((> terminator-pixels pixels)
-          (clutch--pixel-padding-string cells pixels))
-         ((> carrier-pixels 0)
-          (let ((carrier (string #x200b)))
-            (add-display-text-property
-             0 1 'min-width `((,carrier-pixels)) carrier)
-            (concat carrier terminator logical-padding)))
-         (t
-          (concat terminator logical-padding)))))))
-
 (defun clutch--pad-display-string (string width pixel-width &optional right-align
                                           string-pixel-width)
   "Pad STRING to WIDTH text cells for result display.
 On graphical displays, pad to PIXEL-WIDTH actual pixels.  RIGHT-ALIGN pads
 before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil.
-Emacs 29 uses explicit display spaces; Emacs 30 and later use `min-width'."
+Non-empty left-aligned cells use `min-width' on Emacs 30 and later.  Emacs 29,
+right-aligned values, and empty cells use exact display spaces."
   (if pixel-width
       (let* ((cells (max 0 (- width (string-width string))))
-             (explicit-p (< emacs-major-version 30))
-             (measure-p (or explicit-p right-align))
+             (explicit-p (or (< emacs-major-version 30)
+                             right-align
+                             (string-empty-p string)))
              (content-pixels
-              (and measure-p
+              (and explicit-p
                    (or string-pixel-width
                        (clutch--display-string-pixel-width string))))
              (padding (and content-pixels
                            (max 0 (- pixel-width content-pixels)))))
-        (cond
-         (explicit-p
-          (let ((pad-string (clutch--pixel-padding-string cells padding)))
-            (if right-align
-                (concat pad-string string)
-              (concat string pad-string))))
-         (right-align
-          (concat
-           (clutch--min-width-padding-string cells padding)
-           string))
-         (t
+        (if explicit-p
+            (let ((pad-string (clutch--pixel-padding-string cells padding)))
+              (if right-align
+                  (concat pad-string string)
+                (concat string pad-string)))
           (let ((content (copy-sequence string))
                 (logical-padding (make-string cells ?\s)))
-            (if (string-empty-p content)
-                (clutch--min-width-padding-string cells pixel-width)
-              (add-display-text-property
-               0 (length content) 'min-width `((,pixel-width)) content)
-              (put-text-property 0 cells 'display "" logical-padding)
-              (concat content logical-padding))))))
+            (add-display-text-property
+             0 (length content) 'min-width `((,pixel-width)) content)
+            (put-text-property 0 cells 'display "" logical-padding)
+            (concat content logical-padding))))
     (clutch--string-pad string width right-align)))
 
-(defun clutch--center-display-string
-    (string width pixel-width &optional min-width-padding)
+(defun clutch--center-display-string (string width pixel-width)
   "Center STRING within WIDTH text cells and optional PIXEL-WIDTH.
-When MIN-WIDTH-PADDING is non-nil, use terminated `min-width' carriers."
+Graphical padding uses exact display spaces because header-line redisplay does
+not enforce `min-width' consistently across supported Emacs versions."
   (if pixel-width
       (let* ((pads (clutch--center-padding-widths (string-width string) width))
              (extra (max 0 (- pixel-width
                               (clutch--display-string-pixel-width string))))
              (left (/ extra 2))
              (right (- extra left)))
-        (concat (if min-width-padding
-                    (clutch--min-width-padding-string (car pads) left t)
-                  (clutch--pixel-padding-string (car pads) left))
+        (concat (clutch--pixel-padding-string (car pads) left)
                 string
-                (if min-width-padding
-                    (clutch--min-width-padding-string (cdr pads) right t)
-                  (clutch--pixel-padding-string (cdr pads) right))))
+                (clutch--pixel-padding-string (cdr pads) right)))
     (let* ((pads (clutch--center-padding-widths (string-width string) width))
            (lead (make-string (car pads) ?\s))
            (trail (make-string (cdr pads) ?\s)))
       (concat lead string trail))))
-
-(defun clutch--header-min-width-supported-p ()
-  "Return non-nil when header-line redisplay reliably supports `min-width'."
-  (version<= "31.1" emacs-version))
 
 (defun clutch--pixel-metric-signature ()
   "Return the current graphical font metric signature, or nil."
   (when (display-graphic-p)
     (let* ((cell-width (default-font-width))
            (samples '("m" "i" "W" "中" "あ" "한" "m中あ한"))
-           (pixel-widths (mapcar #'string-pixel-width samples)))
+           (pixel-widths (mapcar #'clutch--display-string-pixel-width samples)))
       (unless (cl-loop for sample in samples
                        for pixels in pixel-widths
                        always (= pixels (* cell-width
@@ -503,11 +470,12 @@ When MIN-WIDTH-PADDING is non-nil, use terminated `min-width' carriers."
         (let* ((char (aref string i))
                (cached (gethash char cache)))
           (when (zerop (char-width char))
-            (throw 'fallback (string-pixel-width string)))
+            (throw 'fallback (clutch--display-string-pixel-width string)))
           (setq pixels
                 (+ pixels
                    (or cached
-                       (let ((width (string-pixel-width (char-to-string char))))
+                       (let ((width (clutch--display-string-pixel-width
+                                     (char-to-string char))))
                          (puthash char width cache)
                          width))))))
       pixels)))
@@ -1994,8 +1962,7 @@ ACTIVE-CIDX is the highlighted column index, if any."
                            (< cidx (length clutch--column-pixel-widths))
                            (aref clutch--column-pixel-widths cidx)))
          (label (clutch--header-cell-label cidx w))
-         (label (clutch--center-display-string
-                 label w pixel-width (clutch--header-min-width-supported-p)))
+         (label (clutch--center-display-string label w pixel-width))
          (pad-str (make-string clutch-column-padding ?\s))
          (sort-map (clutch--header-sort-keymap cidx name))
          (body nil))
