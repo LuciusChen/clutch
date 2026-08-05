@@ -4286,6 +4286,54 @@ back out in Extended JSON instead of handing `json-encode' a record."
                    '(:year 2026 :month 4 :day 7
                      :hours 8 :minutes 30 :seconds 45)))))
 
+(ert-deftest clutch-db-test-pg-query-distinguishes-false-from-null ()
+  "PostgreSQL query results should keep boolean false distinct from SQL NULL."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        observed-null-marker)
+    (cl-letf (((symbol-function 'pg-exec)
+               (lambda (context _sql)
+                 (setq observed-null-marker pg-null-marker)
+                 (make-pgresult
+                  :connection context
+                  :attributes `(("boolean_false" ,clutch-db-pg--oid-bool 1)
+                                ("boolean_true" ,clutch-db-pg--oid-bool 1)
+                                ("sql_null" 25 -1)
+                                ("nullable_ints" ,clutch-db-test--pg-oid-int4-array -1))
+                  :tuples `((nil t ,pg-null-marker
+                                 [1 ,pg-null-marker]))))))
+      (let* ((result (clutch-db-query
+                      conn "SELECT false, true, NULL::text"))
+             (row (car (clutch-db-result-rows result))))
+        (should observed-null-marker)
+        (should (equal row '(:false t nil [1 nil])))
+        (should (equal (mapcar #'clutch--format-value (cl-subseq row 0 3))
+                       '("false" "t" "NULL")))))))
+
+(ert-deftest clutch-db-test-pg-prepared-false-and-null-contract ()
+  "PostgreSQL prepared results and parameters should distinguish false and NULL."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        observed-arguments
+        observed-null-marker)
+    (cl-letf (((symbol-function 'pg-exec-prepared)
+               (lambda (context _sql arguments &rest _options)
+                 (setq observed-arguments arguments
+                       observed-null-marker pg-null-marker)
+                 (make-pgresult
+                  :connection context
+                  :attributes `(("boolean_false" ,clutch-db-pg--oid-bool 1)
+                                ("sql_null" 25 -1))
+                  :tuples `((nil ,pg-null-marker))))))
+      (let ((result
+             (clutch-db-execute-params
+              conn "SELECT ?::bool, NULL::text"
+              (list (clutch-db-typed-param :false "bool")))))
+        (should observed-null-marker)
+        (should (equal observed-arguments '(("false"))))
+        (should (equal (clutch-db-result-rows result)
+                       '((:false nil))))))))
+
 ;;;; Unit tests — SQL building (paged queries)
 
 (ert-deftest clutch-db-test-mysql-build-paged-sql ()
