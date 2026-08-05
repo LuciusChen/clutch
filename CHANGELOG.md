@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept simple single-table `SELECT ... LIMIT ...` results editable when a safe row identity is available. A top-level page tail still disables server-side pagination, filtering, sorting, and count rewrites, but no longer discards the independently verified source table used by staged edits and deletes.
 - Kept graphical Result Browser headers aligned with rows when `text-scale-mode` changes the buffer font. Result buffers now opt header lines into buffer-local scaling, avoid applying the default-face scale twice through mode-line inheritance, and measure column content with the same default-face remappings used by redisplay.
 
 ## 0.4.0 - 2026-07-31

@@ -521,6 +521,7 @@ are produced by the query execution layer."
          (buf (get-buffer-create (clutch-result--buffer-name)))
          (params clutch--connection-params)
          (product clutch--conn-sql-product)
+         (analysis-sql (clutch-db-sql-normalize sql))
          (raw-columns (clutch-db-result-columns result))
          (columns (clutch--apply-row-identity-column-metadata
                    raw-columns row-identity-prep))
@@ -531,9 +532,12 @@ are produced by the query execution layer."
               (plist-get result-context :server-rewritable)
             (and server-pageable
                  (clutch--server-rewritable-result-p sql visible-columns))))
-         (source-table (or (plist-get result-context :source-table)
-                           (and server-rewritable
-                                (plist-get row-identity-prep :table))))
+         (prepared-source-table (plist-get row-identity-prep :table))
+         (source-table
+          (or (plist-get result-context :source-table)
+              (and (clutch--row-identity-augmentable-sql-p
+                    analysis-sql prepared-source-table)
+                   prepared-source-table)))
          (page (if server-pageable
                    (clutch-result--split-page-lookahead-rows
                     (clutch-db-result-rows result) page-size)
