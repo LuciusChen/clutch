@@ -33,6 +33,7 @@
 (require 'json)
 
 (defvar pg-connect-timeout)
+(defvar pg-null-marker)
 (defvar pg-read-timeout)
 
 (declare-function pg-result "pg" (result what &rest arg))
@@ -145,6 +146,10 @@
 (defconst clutch-db-pg--oid-numeric 1700)
 (defconst clutch-db-pg--oid-jsonb 3802)
 
+(defconst clutch-db-pg--null-marker
+  (make-symbol "clutch-db-pg-null-marker")
+  "Private marker that keeps PostgreSQL NULL distinct from boolean false.")
+
 (defconst clutch-db-pg--type-category-alist
   `((,clutch-db-pg--oid-int2 . numeric)
     (,clutch-db-pg--oid-int4 . numeric)
@@ -251,17 +256,34 @@ When CONN is non-nil, include backend type metadata from its type cache."
             :minutes minutes
             :seconds seconds)))))
 
-(defun clutch-db-pg--normalize-value (value col-def)
-  "Normalize PG VALUE according to COL-DEF's clutch type category."
-  (pcase (plist-get col-def :type-category)
-    ('date (clutch-db-pg--normalize-date-value value))
-    ('time (clutch-db-pg--normalize-time-value value))
-    ('datetime (clutch-db-pg--normalize-datetime-value value))
-    (_ value)))
+(defun clutch-db-pg--normalize-null-markers (value)
+  "Replace private PostgreSQL NULL markers recursively in VALUE."
+  (cond
+   ((eq value clutch-db-pg--null-marker) nil)
+   ((vectorp value)
+    (vconcat (mapcar #'clutch-db-pg--normalize-null-markers value)))
+   ((consp value)
+    (mapcar #'clutch-db-pg--normalize-null-markers value))
+   (t value)))
 
-(defun clutch-db-pg--normalize-row (row columns)
-  "Normalize PG ROW using clutch column metadata COLUMNS."
-  (cl-mapcar #'clutch-db-pg--normalize-value row columns))
+(defun clutch-db-pg--normalize-value (value pg-column col-def)
+  "Normalize PG VALUE using PG-COLUMN and clutch COL-DEF metadata."
+  (cond
+   ((eq value clutch-db-pg--null-marker) nil)
+   ((and (null value)
+         (= (nth 1 pg-column) clutch-db-pg--oid-bool))
+    :false)
+   ((eq (plist-get col-def :type-category) 'date)
+    (clutch-db-pg--normalize-date-value value))
+   ((eq (plist-get col-def :type-category) 'time)
+    (clutch-db-pg--normalize-time-value value))
+   ((eq (plist-get col-def :type-category) 'datetime)
+    (clutch-db-pg--normalize-datetime-value value))
+   (t (clutch-db-pg--normalize-null-markers value))))
+
+(defun clutch-db-pg--normalize-row (row pg-columns columns)
+  "Normalize PG ROW using PG-COLUMNS and clutch metadata COLUMNS."
+  (cl-mapcar #'clutch-db-pg--normalize-value row pg-columns columns))
 
 (defun clutch-db-pg--wrap-result (pg-result)
   "Convert PG-RESULT to a `clutch-db-result'."
@@ -270,7 +292,7 @@ When CONN is non-nil, include backend type metadata from its type cache."
          (cols (when raw-cols (clutch-db-pg--convert-columns raw-cols conn)))
          (rows (if cols
                    (mapcar (lambda (row)
-                             (clutch-db-pg--normalize-row row cols))
+                             (clutch-db-pg--normalize-row row raw-cols cols))
                            (clutch-db-pg--rows pg-result))
                  (clutch-db-pg--rows pg-result))))
     (make-clutch-db-result
@@ -584,10 +606,12 @@ positions."
   "Return PARAM as one pg-el typed argument."
   (let ((value (clutch-db-param-value param))
         (type (clutch-db-param-type param)))
-    (if (and (not (null value))
-             (clutch-db-pg--array-type-name-p type))
-        (cons (clutch-db-pg--array-literal-string value type) nil)
-      (cons value nil))))
+    (cond
+     ((eq value :false) (cons "false" nil))
+     ((and (not (null value))
+           (clutch-db-pg--array-type-name-p type))
+      (cons (clutch-db-pg--array-literal-string value type) nil))
+     (t (cons value nil)))))
 
 (defun clutch-db-pg--typed-arguments (params)
   "Return PARAMS as pg-el typed arguments."
@@ -805,14 +829,16 @@ manual-commit mode via lazy BEGIN."
   (clutch-db-pg--run-query-with-transaction-state
    conn sql
    (lambda ()
-     (clutch-db-pg--wrap-result (clutch-db-pg--exec conn sql)))))
+     (let ((pg-null-marker clutch-db-pg--null-marker))
+       (clutch-db-pg--wrap-result (clutch-db-pg--exec conn sql))))))
 
 (cl-defmethod clutch-db-execute-params ((conn pgcon) sql params)
   "Execute parameterized SQL on PostgreSQL CONN with PARAMS."
   (clutch-db-pg--run-query-with-transaction-state
    conn sql
    (lambda ()
-     (let* ((pg-sql (clutch-db-pg--rewrite-param-sql sql (length params)))
+     (let* ((pg-null-marker clutch-db-pg--null-marker)
+            (pg-sql (clutch-db-pg--rewrite-param-sql sql (length params)))
             (typed-arguments (clutch-db-pg--typed-arguments params))
             (result (if (cl-some
                          (lambda (param)
