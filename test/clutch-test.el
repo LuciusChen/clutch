@@ -6936,8 +6936,43 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 (should-not clutch--result-server-pageable)
                 (should-not clutch--result-server-rewritable)
                 (should-not clutch--page-has-more)
+                (when (eq label 'complex-limit)
+                  (should-not clutch--result-source-table))
                 (when expected-rows
                   (should (equal clutch--result-rows expected-rows)))))))))))
+
+(ert-deftest clutch-test-execute-simple-limit-select-retains-edit-source ()
+  "A simple SELECT with LIMIT should retain its staged-edit source table."
+  (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
+        (sql "SELECT id, name FROM users LIMIT 10")
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (_conn _table)
+                 (list (list :kind 'primary-key
+                             :name "PRIMARY"
+                             :columns '("id")))))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id)))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn query)
+                 (setq captured-sql query)
+                 (make-clutch-db-result
+                  :columns '((:name "id")
+                             (:name "name")
+                             (:name "clutch__rid_0"))
+                  :rows '((1 "alice" 1))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch-test--execute-and-present sql 'fake-conn)
+        (should (string-match-p "LIMIT 10\\'" captured-sql))
+        (with-current-buffer result-name
+          (should-not clutch--result-server-pageable)
+          (should-not clutch--result-server-rewritable)
+          (should (equal clutch--result-source-table "users"))
+          (should (equal (clutch--result-source-table-or-user-error "edit cell")
+                         "users"))
+          (should (eq (plist-get clutch--row-identity :kind)
+                      'primary-key)))))))
 
 (ert-deftest clutch-test-execute-select-duplicate-labels-are-not-rewritable ()
   "Duplicate result labels should remain pageable but not relation-rewritable."
