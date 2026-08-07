@@ -1500,25 +1500,38 @@ Accepts either an alist ((\"key\" . val) ...) or a plist (:key val ...)."
       (cl-loop for (k v) on props by #'cddr
                collect (cons (substring (symbol-name k) 1) v)))))
 
+(defun clutch-jdbc--normalize-json-false (value)
+  "Return VALUE with JDBC JSON false sentinels replaced by `:false'.
+Recurses into lists and vectors so nested JSON cell values are normalized."
+  (cond
+   ((eq value clutch-jdbc--json-false) :false)
+   ((consp value)
+    (mapcar #'clutch-jdbc--normalize-json-false value))
+   ((vectorp value)
+    (vconcat (mapcar #'clutch-jdbc--normalize-json-false value)))
+   (t value)))
+
 (defun clutch-jdbc--normalize-row (row)
   "Convert JDBC-specific value representations in ROW to generic forms.
 Blob plists with :text content become plain strings.
-Clob plists become their :preview string."
+Clob plists become their :preview string.
+JDBC JSON false sentinels become `:false'."
   (mapcar (lambda (val)
-            (cond
-             ((and (listp val)
-                   (equal (plist-get val :__type) "blob")
-                   (plist-get val :text))
-              (let ((text (copy-sequence (plist-get val :text)))
-                    (encoding (plist-get val :encoding)))
-                (when (and encoding (> (length text) 0))
-                  (put-text-property 0 (length text)
-                                     'clutch-jdbc-blob-encoding encoding text))
-                text))
-             ((and (listp val)
-                   (equal (plist-get val :__type) "clob"))
-              (plist-get val :preview))
-             (t val)))
+            (clutch-jdbc--normalize-json-false
+             (cond
+              ((and (listp val)
+                    (equal (plist-get val :__type) "blob")
+                    (plist-get val :text))
+               (let ((text (copy-sequence (plist-get val :text)))
+                     (encoding (plist-get val :encoding)))
+                 (when (and encoding (> (length text) 0))
+                   (put-text-property 0 (length text)
+                                      'clutch-jdbc-blob-encoding encoding text))
+                 text))
+              ((and (listp val)
+                    (equal (plist-get val :__type) "clob"))
+               (plist-get val :preview))
+              (t val))))
           row))
 
 (defun clutch-jdbc--normalize-column-details (columns)

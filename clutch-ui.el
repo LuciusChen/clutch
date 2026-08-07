@@ -256,12 +256,8 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
    (t (format "%S" val))))
 
 (defun clutch--json-false-value-p (val)
-  "Return non-nil when VAL represents a parsed JSON false sentinel."
-  (or (eq val :false)
-      ;; JDBC uses a private false sentinel so it can distinguish JSON false
-      ;; from SQL NULL when decoding metadata payloads.
-      (and (symbolp val)
-           (string= (symbol-name val) "clutch-jdbc-json-false"))))
+  "Return non-nil when VAL is the generic parsed JSON false sentinel."
+  (eq val :false))
 
 (defun clutch--json-normalize-text (text)
   "Return TEXT parsed and serialized as compact JSON."
