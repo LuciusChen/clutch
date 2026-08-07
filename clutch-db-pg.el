@@ -484,8 +484,7 @@ positions."
        ((string-prefix-p "{" trimmed) trimmed)
        ((string-match-p "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+="
                         trimmed)
-        (user-error
-         "PostgreSQL array values with explicit dimension bounds are not supported"))
+        trimmed)
        ((string-prefix-p "[" trimmed)
         (pgsql-array-literal
          (clutch-db-pg--prepare-array-value
@@ -518,8 +517,7 @@ positions."
                    ((string-prefix-p "{" trimmed) trimmed)
                    ((string-match-p
                      "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+=" trimmed)
-                    (user-error
-                     "PostgreSQL array values with explicit dimension bounds are not supported"))
+                    trimmed)
                    ((string-prefix-p "[" trimmed)
                     (clutch-db-pg--prepare-array-value
                      (clutch-db-pg--parse-json-array-param trimmed type)))

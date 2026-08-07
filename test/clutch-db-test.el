@@ -3932,11 +3932,9 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (list (cons (vector (vector t nil pgsql-null)
                           (vector nil t pgsql-null))
                   "_bool"))))
-    (let ((err (should-error
-                (clutch-db-pg--typed-arguments
-                 (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
-                :type 'user-error)))
-      (should (string-match-p "explicit dimension bounds" (cadr err))))))
+    (should (equal (clutch-db-pg--typed-arguments
+                    (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
+                   (list (cons "[0:2]={1,2,3}" "_int4"))))))
 
 (ert-deftest clutch-db-test-pg-execute-params-uses-public-value-contract ()
   "PostgreSQL parameter execution should use pgsql.el's typed public API."
