@@ -160,7 +160,9 @@
   "Return (BEG . END) for the SQL statement surrounding point."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
-         (bounds (clutch-db-sql-context-statement-bounds text offset)))
+         (bounds (clutch-db-sql-context-statement-bounds
+                  text offset
+                  (clutch-db-connection-sql-dialect clutch-connection))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
@@ -246,15 +248,16 @@ inside string literals, comments, or nested parentheses are ignored."
                                    sub-offset))
                (boundaries (list 0))
                (case-fold-search t))
-    (clutch-db-sql-scan-code
-     sub 0 nil
-     (lambda (pos _ch depth)
-       (when (and (zerop depth)
-                  (string-match "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?" sub pos)
-                  (= (match-beginning 0) pos))
-         (push (match-beginning 0) boundaries)
-         (push (match-end 0) boundaries))
-       nil))
+    (let ((matches (clutch-db-sql-code-match-positions
+                    sub 0 nil "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?")))
+      (clutch-db-sql-scan-code
+       sub 0 nil
+       (lambda (pos _ch depth)
+         (when (zerop depth)
+           (when-let* ((end (gethash pos matches)))
+             (push pos boundaries)
+             (push end boundaries)))
+         nil)))
     (push sub-len boundaries)
     (setq boundaries (nreverse boundaries))
     (let ((beg 0)
@@ -1074,11 +1077,9 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
   (remove-hook 'completion-at-point-functions
                #'clutch-sql-keyword-completion-at-point t)
   (add-hook 'completion-at-point-functions
-            #'clutch-completion-at-point nil t)
+            #'clutch-sql-keyword-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
-            #'clutch-sql-keyword-completion-at-point t t)
-  (add-hook 'corfu-mode-hook
-            #'clutch--install-completion-capfs nil t))
+            #'clutch-completion-at-point nil t))
 
 (defun clutch--completion-table-context-p (beg)
   "Return non-nil when BEG is in a SQL table-name completion context."
@@ -1193,27 +1194,26 @@ control backend column loading."
 
 (defun clutch--completion-top-level-token-before (sql offset)
   "Return the last top-level SQL token in SQL before OFFSET."
-  (let ((case-fold-search t)
-        token)
-    (clutch-db-sql-scan-code
-     sql 0 (min offset (length sql))
-     (lambda (pos _ch depth)
-       (when (and (zerop depth)
-                  (string-match
+  (let* ((case-fold-search t)
+         (limit (min offset (length sql)))
+         (matches (clutch-db-sql-code-match-positions
+                   sql 0 limit
                    (rx word-start
-                       (group
-                        (or "select" "from" "where" "having" "on" "join"
-                            "into" "update" "set" "values" "limit" "offset"
-                            "fetch" "for"
-                            (seq "group" (+ (any " \t\n\r")) "by")
-                            (seq "order" (+ (any " \t\n\r")) "by")))
-                       word-end)
-                   sql pos)
-                  (= (match-beginning 0) pos)
-                  (<= (match-end 0) offset))
-         (setq token (replace-regexp-in-string
-                      "[ \t\n\r]+" " "
-                      (upcase (match-string 1 sql)))))
+                       (or "select" "from" "where" "having" "on" "join"
+                           "into" "update" "set" "values" "limit" "offset"
+                           "fetch" "for"
+                           (seq "group" (+ (any " \t\n\r")) "by")
+                           (seq "order" (+ (any " \t\n\r")) "by"))
+                       word-end)))
+         token)
+    (clutch-db-sql-scan-code
+     sql 0 limit
+     (lambda (pos _ch depth)
+       (when (zerop depth)
+         (when-let* ((end (gethash pos matches)))
+           (setq token (replace-regexp-in-string
+                        "[ \t\n\r]+" " "
+                        (upcase (substring sql pos end))))))
        nil))
     token))
 

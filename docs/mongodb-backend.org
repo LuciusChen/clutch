@@ -80,7 +80,7 @@ Supported helper families include:
 - generated document mutations: =insertOne=, =insertMany=, =updateOne=, =replaceOne=, and =deleteOne=
 - uncommon commands: =db.runCommand(...)= against the current database
 
-Database selection uses the shared =clutch-switch-schema= workflow.  Dedicated MongoDB Shell admin, index-management, database-switching, and multi-document mutation helpers are intentionally outside the basic console surface.
+Database selection uses the shared =clutch-switch-schema= workflow.  Dedicated MongoDB Shell admin, index-management, shell-shaped database-switching helpers, and multi-document mutation helpers are intentionally outside the basic console surface.
 
 Write helpers validate their documented argument shape before calling =mongodb.el=.  =insertOne= accepts one document, =insertMany= accepts one document array, and =deleteOne= requires one explicit filter document.
 
@@ -106,7 +106,7 @@ MongoDB SQL Interface is different: it is a JDBC SQL surface selected with =:sur
 
 ** Live Tests
 
-MongoDB live coverage is tagged =:mongodb-live=.  The live runner starts or reuses a local MongoDB container and uses the native protocol:
+MongoDB live coverage is tagged =:mongodb-live=.  The live runner starts or reuses a local MongoDB container and uses the native protocol; it verifies switching the active database, querying the target database, and restoring the original database:
 
 #+begin_src sh
 ./test/run-ci.sh native-live

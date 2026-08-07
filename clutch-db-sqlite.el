@@ -113,9 +113,15 @@ Use \":memory:\" for a transient in-memory database."
 ;;;; Query helpers
 
 (defun clutch-db-sqlite--select-p (sql)
-  "Return non-nil for row-yielding SQL statements."
-  (let ((case-fold-search t))
-    (or (string-match-p "\\`\\s-*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\)" sql)
+  "Return non-nil for row-yielding SQL statements.
+Leading comments are stripped first: routing a commented SELECT to
+`sqlite-execute' would run it and discard the rows.  Whitespace is matched
+explicitly because `\\s-' resolves against the caller's syntax table, and
+`sql-mode' classifies newline as a comment ending rather than whitespace."
+  (let ((case-fold-search t)
+        (trimmed (clutch-db-sql-strip-leading-comments sql)))
+    (or (string-match-p "\\`[ \t\r\n\f]*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\|VALUES\\)"
+                        trimmed)
         (clutch-db-sql-has-top-level-clause-p sql "RETURNING"))))
 
 (defun clutch-db-sqlite--run-select (handle sql &optional values)
@@ -167,23 +173,17 @@ Return a `clutch-db-result'."
   ((conn clutch-db-sqlite-conn) function)
   "Call FUNCTION inside a SQLite transaction on CONN."
   (let ((handle (clutch-db-sqlite-conn-handle conn)))
-    (clutch-db--translate-library-error sqlite-error
-      (sqlite-transaction handle))
-    (condition-case original-error
-        (prog1 (funcall function)
-          (clutch-db--translate-library-error sqlite-error
-            (sqlite-commit handle)))
-      ((error quit)
-       (let (rollback-error)
-         (condition-case err
-             (clutch-db--translate-library-error sqlite-error
-               (sqlite-rollback handle))
-           (error (setq rollback-error err)))
-         (if rollback-error
-             (user-error "SQLite batch failed (%s); rollback also failed (%s)"
-                         (error-message-string original-error)
-                         (error-message-string rollback-error))
-           (signal (car original-error) (cdr original-error))))))))
+    (clutch-db--call-with-transaction-boundary
+     (lambda ()
+       (clutch-db--translate-library-error sqlite-error
+         (sqlite-transaction handle)))
+     function
+     (lambda ()
+       (clutch-db--translate-library-error sqlite-error
+         (sqlite-commit handle)))
+     (lambda ()
+       (clutch-db--translate-library-error sqlite-error
+         (sqlite-rollback handle))))))
 
 (cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)
                                           base-sql page-num page-size

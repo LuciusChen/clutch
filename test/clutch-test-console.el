@@ -93,6 +93,13 @@
                    "oracle-b"
                    (:backend oracle :host "db" :port 1521 :sid "SID2")
                    different)
+                  (ssh-transport
+                   "prod-direct"
+                   (:backend mysql :profile-entry "mysql/prod")
+                   "prod-ssh"
+                   (:backend mysql :profile-entry "mysql/prod"
+                    :ssh-host "bastion-prod")
+                   different)
                   (url-password
                    "prod"
                    (:backend mysql
@@ -270,6 +277,44 @@
         (should (eq (clutch-test-console--face-at-match "db>" output)
                     'minibuffer-prompt))))))
 
+(ert-deftest clutch-test-repl-ddl-success-does-not-revert-non-file-buffer ()
+  "Successful DDL should submit schema refresh without reverting the REPL."
+  (clutch-test--with-isolated-metadata-caches
+    (with-temp-buffer
+      (clutch-repl-mode)
+      (let ((conn (list 'fake-conn))
+            (clutch--metadata-state-changed-hook
+             '(clutch--refresh-schema-status-ui))
+            (clutch-db--foreground-connections (make-hash-table :test 'eq))
+            executed
+            submitted)
+        (unwind-protect
+            (progn
+              (setq-local clutch-connection conn)
+              (should-not buffer-file-name)
+              (should-not (local-variable-p 'revert-buffer-function))
+              (cl-letf (((symbol-function 'clutch--run-db-query)
+                         (lambda (actual-conn sql)
+                           (setq executed (list actual-conn sql))
+                           (make-clutch-db-result :affected-rows 0)))
+                        ((symbol-function 'clutch-db-eager-schema-refresh-p)
+                         (lambda (_conn) nil))
+                        ((symbol-function 'clutch-db-refresh-schema-async)
+                         (lambda (actual-conn &rest _args)
+                           (setq submitted actual-conn)
+                           t))
+                        ((symbol-function 'clutch--refresh-connection-render-state)
+                         #'ignore))
+                (let ((outcome
+                       (clutch--execute-statement
+                        "CREATE TABLE users (id INT)" conn nil)))
+                  (should (clutch-db-result-p
+                           (plist-get outcome :result)))))
+              (should (equal executed
+                             (list conn "CREATE TABLE users (id INT)")))
+              (should (eq submitted conn)))
+          (setq-local clutch-connection nil))))))
+
 (ert-deftest clutch-test-repl-dead-query-retains-reconnect-anchor ()
   "REPL errors should retire a dead session without dropping its anchor."
   (with-temp-buffer
@@ -341,6 +386,29 @@
         (when-let* ((buf (get-buffer result-buffer-name)))
           (kill-buffer buf))))))
 
+
+;;;; REPL — input completeness
+
+(ert-deftest clutch-test-console-repl-input-completeness ()
+  "REPL input executes only when a top-level semicolon ends it.
+A semicolon inside an open string literal used to execute the fragment
+before it, sending half a statement with an unterminated literal."
+  (with-temp-buffer
+    (should (clutch-repl--input-complete-p "SELECT 1;"))
+    (should (clutch-repl--input-complete-p "SELECT 'a;b';  \n"))
+    (should-not (clutch-repl--input-complete-p "SELECT 1"))
+    (should-not (clutch-repl--input-complete-p
+                 "INSERT INTO t VALUES ('line one;"))
+    ;; Trailing text after the semicolon keeps accumulating; execution
+    ;; splits multi-statement input only once it is complete.
+    (should-not (clutch-repl--input-complete-p "SELECT 1; SELECT 2"))
+    (should (clutch-repl--input-complete-p "SELECT 1; SELECT 2;"))
+    ;; An open parenthesis means the statement cannot be complete yet.
+    (should-not (clutch-repl--input-complete-p "SELECT f(1;"))
+    ;; The connection's dialect decides where a literal ends.
+    (setq-local clutch--conn-sql-product 'mysql)
+    (should-not (clutch-repl--input-complete-p "SELECT 'it\\';"))
+    (should (clutch-repl--input-complete-p "SELECT 'it\\'s';"))))
 
 (provide 'clutch-test-console)
 

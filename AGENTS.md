@@ -84,7 +84,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Mutation Workflow Convergence
 
-- **One staged-mutation vocabulary everywhere**: Footer, transient labels, help text, and `README.org` must use the same staged-edit / staged-delete / staged-insert terminology.
+- **One staged-mutation vocabulary everywhere**: Footer, transient labels, help text, and `README.md` must use the same staged-edit / staged-delete / staged-insert terminology.
 - **Identity must converge fully**: If pending state becomes row-identity-based, every lookup and render path must use the same row identity model.
 - **Preview must show real execution payload**: A command named `Preview execution` must preview what would actually run.
 - **Nearby workflows should share helpers**: Insert and edit flows should reuse completion, temporal helpers, and validation rules when semantics match.
@@ -97,7 +97,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - The SQLite backend depends on built-in `sqlite-*` functions and is covered by the package baseline.
 - The JDBC path depends on `clutch-jdbc-agent`, whose published baseline is **Java 17+**.
 - Do not silently raise any baseline. If a change requires a higher Emacs or Java version, update:
-  - `README.org`
+  - `README.md`
   - relevant release/version metadata
   - a postmortem explaining why the higher baseline is justified
 
@@ -110,7 +110,8 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Documentation and Release Records
 
-- Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.org` in the same change.
+- Any change to key bindings, defaults, export behavior, or user-visible workflow must update `README.md` in the same change.
+- `README.md` is the canonical repository landing page. Keep it in GitHub-flavored Markdown and do not regenerate a parallel Org README.
 - Every release-relevant change must update `CHANGELOG.md` in the same change. This includes user-visible bug fixes, backend/protocol support, configuration or dependency changes, public API changes, and behavior that affects documented usage. Pure test refactors, comment-only edits, mechanical formatting, and internal cleanup with no release-note value do not need a changelog entry; when skipping the changelog for a non-trivial commit, state why in the final summary or commit rationale.
 - Changelog release sections are version-based. Use `## VERSION - Unreleased` while a release is still in development, and replace `Unreleased` with the release date only when cutting the release or tag. Do not date unreleased feature branches.
 - Merging or committing to `main` does not by itself create a release. Accumulate related fixes and small changes under the existing next-version `Unreleased` section; do not create or bump a version for every commit. Cut, date, and tag that version only when intentionally publishing a release.
@@ -119,10 +120,14 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - If code and docs diverge, treat code as source of truth and fix docs immediately.
 - Keep each semantic Markdown/Org paragraph on one source line; rendered documents already wrap naturally, so source-width wrapping only obscures paragraph boundaries.
 - When documentation feels hard to read, improve the information structure: use a table, shorter bullets, a clearer heading, or a focused rewrite. Avoid changes whose only effect is different source line breaks.
+- For substantial `README.md` changes, make the opening quickly explain what Clutch is, who it serves, what problem it solves, and what the reader should do next. Keep the primary installation and Quick Start paths easy to find.
+- Describe capabilities through concrete user outcomes before implementation details. Avoid vague promotional claims, feature dumping, and unnecessary badges or calls to action.
+- Never invent commands, capabilities, compatibility, metrics, benchmarks, or trust signals. Verify them from code, manifests, tests, workflows, or release records, and report anything that remains unverified.
+- For documentation-only work, do not modify product code, configuration, CI, or dependencies merely to make a documentation claim true unless explicitly requested.
 - `clutch-jdbc-agent-version` and `clutch-jdbc-agent-sha256` are a pair. If one changes, review whether the other must change in the same commit.
 - Do not assume a release asset is immutable just because the version string is unchanged. If the jar bytes change, update `clutch-jdbc-agent-sha256` immediately.
 - Prefer bumping the agent version for released jar content changes. Replacing a GitHub release asset in place is an exceptional repair path, not normal workflow.
-- Any release-asset change affecting JDBC startup or installation must update `README.org` and, when the tradeoff is non-obvious, add or update a postmortem.
+- Any release-asset change affecting JDBC startup or installation must update `README.md` and, when the tradeoff is non-obvious, add or update a postmortem.
 - The `postmortem/` directory records design decisions and lessons learned. Read relevant records before significant changes.
 - Postmortems are historical decision records, not current product documentation. Do not rewrite old postmortems just to match current behavior; when a later design supersedes an older record, write a new postmortem and optionally add a short "Superseded by NNN" note at the top of the older file.
 - Write a postmortem when:
@@ -157,7 +162,7 @@ These rules keep the package compatible with MELPA submission requirements (`pac
 - `clutch.el` is the package entry file.  It is the only file that should carry package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`, and `;; Author:`.
 - `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pgsql.el`, `mongodb.el`, and `redis.el` are documented but not listed.
 - Split implementation files must not carry `;; Package-Requires:` headers, but they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
-- Keep the MELPA checklist attribution in the main package file when AI tools materially assist the package: `;; Assisted-by: OpenAI Codex:gpt-5.5`
+- Keep the MELPA checklist attribution in the main package file when AI tools materially assist the package: `;; Assisted-by: OpenAI Codex:gpt-5.6-sol, Claude code:fable-5`
 - Last line: `;;; file.el ends here`
 
 ### Naming
@@ -232,7 +237,7 @@ This command should return no matches.  Clutch may hold a public `mongodb-conn` 
 Also check that Clutch user docs do not duplicate detailed MongoDB protocol capability prose:
 
 ```bash
-rg -n "OP_MSG|wire compression|BSON wrappers|SASLprep|server selection|load-balanced|serviceId|lsid|endSessions|speculative SCRAM" README.org docs PRD.md
+rg -n "OP_MSG|wire compression|BSON wrappers|SASLprep|server selection|load-balanced|serviceId|lsid|endSessions|speculative SCRAM" README.md docs PRD.md
 ```
 
 This command should return no matches.  Clutch docs may say that ordinary MongoDB uses the external `mongodb.el` native client, then link to `mongodb.el` for protocol details.
@@ -240,7 +245,7 @@ This command should return no matches.  Clutch docs may say that ordinary MongoD
 Also check that MongoDB SQL Interface has not reappeared as a second backend or driver:
 
 ```bash
-rg -n "mongodb[-_]sql(|[-_]interface)" clutch*.el test/*.el README.org docs
+rg -n "mongodb[-_]sql(|[-_]interface)" clutch*.el test/*.el README.md docs
 ```
 
 This command should return no matches.  Prose may say "MongoDB SQL Interface" as the product name, but symbols and configuration examples must use `:backend mongodb :surface sql-interface`.
@@ -248,7 +253,7 @@ This command should return no matches.  Prose may say "MongoDB SQL Interface" as
 Also check that user-facing documentation does not recommend the internal JDBC driver key as configuration:
 
 ```bash
-rg -n ":driver +'?mongodb|:driver +mongodb" README.org docs PRD.md
+rg -n ":driver +'?mongodb|:driver +mongodb" README.md docs PRD.md
 ```
 
 This command should return no matches.  `:driver 'mongodb` may appear only as internal JDBC connection state or in tests that reject old public config.

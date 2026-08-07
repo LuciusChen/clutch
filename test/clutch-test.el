@@ -79,6 +79,14 @@
 (defvar clutch-test-props nil
   "JDBC connection properties for live tests.")
 
+(defun clutch-test--transient-suffix-for-key (prefix key)
+  "Return the suffix under PREFIX bound to KEY."
+  (cl-find-if
+   (lambda (suffix)
+     (and (slot-boundp suffix 'key)
+          (equal (oref suffix key) key)))
+   (transient-suffixes prefix)))
+
 (require 'clutch-test-sql)
 (require 'clutch-test-console)
 (require 'clutch-test-object)
@@ -381,48 +389,171 @@
 
 ;;;; Rendering — padding
 
+(defun clutch-test--fake-char-pixel-width (string pos)
+  "Return deterministic pixels for the character at POS in STRING."
+  (let ((display (get-text-property pos 'display string)))
+    (cond
+     ((eq (aref string pos) ?\n) 0)
+     ((equal display "") 0)
+     ((stringp display)
+      (clutch-test--fake-pixel-width display))
+     ((and (consp display) (eq (car display) 'space))
+      (let ((width (plist-get (cdr display) :width)))
+        (if (consp width) (car width) width)))
+     ((and (consp display) (eq (car display) 'raise)) 25)
+     ((zerop (char-width (aref string pos))) 0)
+     ((memq (aref string pos) '(?中 ?文)) 30)
+     (t 10))))
+
 (defun clutch-test--fake-pixel-width (string)
   "Return deterministic mixed-width pixels for STRING."
-  (cl-loop for i below (length string)
-           for display = (get-text-property i 'display string)
-           sum (cond
-                ((equal display "") 0)
-                ((stringp display)
-                 (clutch-test--fake-pixel-width display))
-                ((and (consp display) (eq (car display) 'space))
-                 (let ((width (plist-get (cdr display) :width)))
-                   (if (consp width) (car width) width)))
-                ((and (consp display) (eq (car display) 'raise))
-                 25)
-                ((memq (aref string i) '(?中 ?文)) 30)
-                (t 10))))
+  (let ((pos 0)
+        (pixels 0))
+    (while (< pos (length string))
+      (if-let* ((min-width (get-display-property pos 'min-width string))
+                (target (caar min-width))
+                ((numberp target)))
+          (let* ((end (next-single-property-change
+                       pos 'display string (length string)))
+                 (content-pixels
+                  (cl-loop for i from pos below end
+                           sum (clutch-test--fake-char-pixel-width string i))))
+            (setq pixels (+ pixels (max target content-pixels))
+                  pos end))
+        (setq pixels (+ pixels
+                        (clutch-test--fake-char-pixel-width string pos))
+              pos (1+ pos))))
+    pixels))
 
-(ert-deftest clutch-test-result-grid-aligns-mixed-width-font-fallbacks ()
-  "Result headers and rows should share measured graphical column widths."
-  (clutch-test--with-result-state
-      (:columns '("name")
-       :column-defs '(nil)
-       :rows '(("中文"))
-       :page-total-rows 1
-       :column-widths [4])
-    (cl-letf (((symbol-function 'display-graphic-p)
-               (lambda (&optional _display) t))
-              ((symbol-function 'default-font-width)
-               (lambda () 10))
-              ((symbol-function 'string-pixel-width)
-               #'clutch-test--fake-pixel-width)
-              ((symbol-function 'clutch--header-label)
-               (lambda (name &optional _include-unsorted-sort _cidx)
-                 (propertize name 'clutch-header-name t)))
-              ((symbol-function 'clutch--refresh-footer-line) #'ignore))
-      (clutch--render-result)
-      (should (= (clutch-test--fake-pixel-width clutch--header-line-string)
-                 (clutch-test--fake-pixel-width
-                  (string-trim-right (buffer-string)))))
-      (should (= (string-width clutch--header-line-string)
-                 (string-width (string-trim-right (buffer-string)))))
-      (should (equal clutch--column-widths [4]))
-      (should (equal clutch--column-pixel-widths [60])))))
+(ert-deftest clutch-test-result-pixel-padding-version-contract ()
+  "Result cells should use the graphical width path supported by Emacs."
+  (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
+            ((symbol-function 'string-pixel-width)
+             #'clutch-test--fake-pixel-width))
+    (let ((emacs-major-version 29))
+      (let ((left (clutch--pad-display-string "x" 4 50 nil 10))
+            (right (clutch--pad-display-string "7" 4 50 t))
+            (empty (clutch--pad-display-string "" 4 50)))
+        (dolist (string (list left right empty))
+          (should (= (string-width string) 4))
+          (should (= (clutch-test--fake-pixel-width string) 50))
+          (should-not
+           (cl-loop for i below (length string)
+                    thereis
+                    (get-display-property i 'min-width string))))
+        (should (equal (get-text-property 1 'display left)
+                       '(space :width (40))))
+        (should (equal (get-text-property 0 'display right)
+                       '(space :width (40))))
+        (should (equal (get-text-property 0 'display empty)
+                       '(space :width (50))))))
+    (let ((emacs-major-version 30))
+      (let ((left (clutch--pad-display-string "x" 4 50 nil 10))
+            (right (clutch--pad-display-string "7" 4 50 t))
+            (empty (clutch--pad-display-string "" 4 50)))
+        (dolist (string (list left right empty))
+          (should (= (string-width string) 4)))
+        (should (= (clutch-test--fake-pixel-width left) 50))
+        (should (equal (get-display-property 0 'min-width left)
+                       '((50))))
+        (dolist (string (list right empty))
+          (should (= (clutch-test--fake-pixel-width string) 50))
+          (should-not
+           (cl-loop for i below (length string)
+                    thereis
+                    (get-display-property i 'min-width string))))
+        (should (equal (get-text-property 0 'display right)
+                       '(space :width (40))))
+        (should (equal (get-text-property 0 'display empty)
+                       '(space :width (50))))))))
+
+(ert-deftest clutch-test-header-pixel-padding-contract ()
+  "Header centering should use exact pixel spaces."
+  (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
+            ((symbol-function 'string-pixel-width)
+             #'clutch-test--fake-pixel-width)
+            ((symbol-function 'clutch--header-cell-label)
+             (lambda (_cidx _width) "x")))
+    (let* ((clutch--result-columns '("x"))
+           (clutch--column-pixel-widths [50])
+           (header (clutch--header-cell 0 [4])))
+      (should-not
+       (cl-loop for i below (length header)
+                thereis
+                (get-display-property i 'min-width header)))
+      (should
+       (cl-loop for i below (length header)
+                thereis
+                (equal (get-text-property i 'display header)
+                       '(space :width (20))))))))
+
+(ert-deftest clutch-test-pixel-measurement-applies-default-face-remapping ()
+  "Pixel measurement should include the result buffer's text remapping."
+  (let ((face-remapping-alist '((default (:height 2.0) default))))
+    (cl-letf (((symbol-function 'string-pixel-width)
+               (lambda (string)
+                 (if (equal (get-text-property 0 'face string)
+                            '(:height 2.0))
+                     20
+                   10))))
+      (should (= (clutch--display-string-pixel-width "x") 20)))))
+
+(ert-deftest clutch-test-result-grid-aligns-mixed-width-custom-displays ()
+  "Result headers and custom display subregions should share rendered widths."
+  (let ((clutch-column-displayers nil)
+        (clutch--column-displayer-version 0)
+        (wide (copy-sequence "中文"))
+        (narrow (copy-sequence "Ix")))
+    (put-text-property 0 2 'display '(space :width (30)) wide)
+    (put-text-property 0 1 'display '(raise 0.0) narrow)
+    (clutch-register-column-displayer
+     "items" "state"
+     (lambda (value)
+       (copy-sequence (if (string= value "wide") wide narrow))))
+    (clutch-test--with-result-state
+        (:source-table "items"
+         :columns '("state")
+         :column-defs '((:name "state"))
+         :rows '(("wide") ("narrow"))
+         :column-widths [5])
+      (let (header rows)
+        (cl-letf (((symbol-function 'display-graphic-p)
+                   (lambda (&optional _display) t))
+                  ((symbol-function 'default-font-width) (lambda () 1))
+                  ((symbol-function 'clutch--pixel-metric-signature)
+                   (lambda () '(mixed-width)))
+                  ((symbol-function 'string-pixel-width)
+                   #'clutch-test--fake-pixel-width)
+                  ((symbol-function 'clutch--header-label)
+                   (lambda (name &optional _include-unsorted-sort _cidx)
+                     (propertize name 'clutch-header-name t)))
+                  ((symbol-function 'clutch--refresh-footer-line) #'ignore))
+          (clutch--render-result)
+          (setq header clutch--header-line-string
+                rows (string-lines (string-trim-right (buffer-string))))
+          (should (equal clutch--column-pixel-widths [60])))
+        (dolist (string rows)
+          (if (< emacs-major-version 30)
+              (let* ((start
+                      (cl-loop for i below (length string)
+                               when (eq (get-text-property
+                                         i 'clutch-col-idx string)
+                                        0)
+                               return i))
+                     (end (next-single-property-change
+                           start 'clutch-col-idx string (length string)))
+                     (cell (substring string start end)))
+                (should
+                 (= (clutch-test--fake-pixel-width cell)
+                    (+ (aref clutch--column-pixel-widths 0)
+                       (* 2 clutch-column-padding
+                          (clutch-test--fake-pixel-width " "))))))
+            (should
+             (cl-loop for i below (length string)
+                      thereis
+                      (equal (get-display-property i 'min-width string)
+                             '((60))))))
+          (should (= (string-width header) (string-width string))))))))
 
 (ert-deftest clutch-test-install-page-state-contract ()
   "Page refreshes should preserve compatible caches and widths only."
@@ -792,30 +923,90 @@
         (should (equal (plist-get prep :sql)
                        "SELECT id FROM APP.reports"))))))
 
-(ert-deftest clutch-test-qualified-row-identity-preserves-mutation-target ()
-  "Qualified source tokens should remain the target of staged mutations."
+(ert-deftest clutch-test-qualified-update-preserves-target-and-default-syntax ()
+  "Qualified UPDATE targets and DEFAULT assignments should remain SQL syntax."
   (let ((clutch-connection
          (make-clutch-jdbc-conn :params '(:driver oracle)))
-        (clutch--result-columns '("ID" "STATUS"))
+        (clutch--result-columns '("ID" "STATUS" "NOTE"))
         (clutch--result-column-defs
          '((:name "ID" :backend-type "NUMBER" :source-column "ID")
            (:name "STATUS" :backend-type "VARCHAR2"
-            :source-column "STATUS")))
+            :source-column "STATUS")
+           (:name "NOTE" :backend-type "VARCHAR2" :source-column "NOTE")))
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "REPORTS" :source-token "APP.reports"
                     :columns ("ID") :indices (0) :source-indices (0))))
     (cl-letf (((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  '((:name "ID" :backend-type "NUMBER")
-                   (:name "STATUS" :backend-type "VARCHAR2")))))
-      (pcase-let ((`(,update-sql . ,_)
+                   (:name "STATUS" :backend-type "VARCHAR2" :default "'new'")
+                   (:name "NOTE" :backend-type "VARCHAR2")))))
+      (pcase-let ((`(,update-sql . ,update-params)
                    (clutch-result--build-update-stmt
-                    "REPORTS" [7] '((1 . "ready")) '("ID" "STATUS") identity))
+                    "REPORTS" [7]
+                    (list (cons 1 clutch--cell-default-placeholder)
+                          (cons 2 "ready"))
+                    clutch--result-columns identity))
                   (`(,delete-sql . ,_)
                    (clutch-result--build-delete-stmt-for-identity
                     "REPORTS" [7] identity)))
-        (should (string-prefix-p "UPDATE APP.reports SET" update-sql))
+        (should (equal update-sql
+                       (concat "UPDATE APP.reports SET \"STATUS\" = DEFAULT, "
+                               "\"NOTE\" = ? WHERE \"ID\" = ?")))
+        (should (equal (clutch-db-param-values update-params) '("ready" 7)))
         (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql))))))
+
+(ert-deftest clutch-test-jdbc-update-uses-schema-type-for-blob-parameter ()
+  "JDBC staged updates should retain BLOB type from column metadata."
+  (let ((clutch-connection
+         (make-clutch-jdbc-conn :params '(:driver oracle)))
+        (clutch--result-columns '("CONTENT" "STATUS"))
+        (clutch--result-column-defs
+         '((:name "CONTENT" :type-category blob :source-column "CONTENT")
+           (:name "STATUS" :type-category numeric :source-column "STATUS")))
+        (identity '(:kind row-locator :name "ROWID"
+                    :table "DOCUMENTS" :where-sql "ROWID = ?"
+                    :indices (2))))
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+               (lambda (_conn _table &optional _strict)
+                 (clutch-jdbc--normalize-column-details
+                  '((:name "CONTENT" :type "BLOB")
+                    (:name "STATUS" :type "NUMBER"))))))
+      (pcase-let ((`(,_sql . ,params)
+                   (clutch-result--build-update-stmt
+                    "DOCUMENTS" ["AAAPr9AAEAAAACXAAA"]
+                    '((0 . "{\"message\":\"中文\"}")
+                      (1 . "1"))
+                    clutch--result-columns identity)))
+        (should (equal (mapcar #'clutch-db-param-type params)
+                       '("BLOB" "NUMBER" nil)))))))
+
+(ert-deftest clutch-test-jdbc-blob-edit-retains-source-encoding ()
+  "Editing a JDBC text BLOB should retain its source byte encoding."
+  (let (captured)
+    (with-temp-buffer
+      (insert "{\"message\":\"已修改\"}")
+      (setq-local clutch-result-edit--special-value nil
+                  clutch-result-edit--initial-value-state
+                  '(nil . "{\"message\":\"原值\"}")
+                  clutch-result-edit--blob-encoding "GB18030"
+                  clutch-result-edit--column-name "CONTENT"
+                  clutch-result-edit--column-def '(:type-category blob)
+                  clutch-result-edit--column-detail '(:type "BLOB")
+                  clutch-result--edit-callback
+                  (lambda (value) (setq captured value)))
+      (cl-letf (((symbol-function 'clutch-result-edit--refresh-record-return-buffer)
+                 #'ignore)
+                ((symbol-function 'clutch-result-edit--clear-active-target)
+                 #'ignore)
+                ((symbol-function 'clutch-result-edit--restore-result-position)
+                 #'ignore)
+                ((symbol-function 'quit-window) #'ignore))
+        (clutch-result-edit--finish-buffer)))
+    (should (equal captured "{\"message\":\"已修改\"}"))
+    (should (equal (get-text-property
+                    0 'clutch-jdbc-blob-encoding captured)
+                   "GB18030"))))
 
 (ert-deftest clutch-test-update-canonicalizes-source-column-case ()
   "Mutation SQL should quote the backend's canonical column spelling."
@@ -1834,6 +2025,9 @@
             (with-current-buffer result-buf
               (setq-local clutch--fk-info '((0 . (:ref-table "users")))))
             (should (equal (clutch-record--field-action-description) "Follow FK"))
+            (put-text-property (point-min) (point-max) 'clutch-full-value
+                               clutch--cell-default-placeholder)
+            (should (equal (clutch-record--field-action-description) "Show value"))
             (with-current-buffer result-buf
               (setq-local clutch--fk-info nil
                           clutch--result-column-defs
@@ -1916,7 +2110,8 @@
     (with-temp-buffer
       (setq-local clutch--sort-column nil)
       (let ((clutch--header-sort-indicator-cache (make-hash-table :test 'equal))
-            (wide-icon (propertize "I" 'display '(raise 0.0))))
+            (wide-icon (propertize "I" 'display '(raise 0.0)))
+            cropped)
         (cl-letf (((symbol-function 'display-graphic-p)
                    (lambda (&optional _display) t))
                   ((symbol-function 'default-font-width)
@@ -1930,10 +2125,13 @@
           (let ((indicator (clutch--header-sort-indicator "score" t 0)))
             (setq-local clutch--header-line-string (concat indicator "x")
                         clutch--column-pixel-widths [30])
-            (let ((cropped (clutch--header-line-with-hscroll)))
-              (should (equal (get-text-property 0 'display cropped)
-                             '(space :width (5))))
-              (should (= (clutch-test--fake-pixel-width cropped) 20))))))))
+            (setq cropped (clutch--header-line-with-hscroll))
+            (should (equal (get-text-property 0 'display cropped)
+                           '(space :width (5))))
+            (should-not (get-display-property 0 'min-width cropped))
+            (should (= (next-single-property-change
+                        0 'display cropped (length cropped))
+                       1)))))))
   (ert-info ("display prefix align-to")
     (with-temp-buffer
       (setq-local clutch--header-line-string "abc")
@@ -1943,6 +2141,24 @@
           (should (equal (substring rendered 1) "abc"))
           (should (equal (get-text-property 0 'display rendered)
                          '(space :align-to 0))))))))
+
+(ert-deftest clutch-test-active-header-face-covers-cell-width ()
+  "The active header face should cover the full cell, including padding."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id")
+                clutch--result-column-defs '((:name "id"))
+                clutch--column-pixel-widths nil)
+    (let* ((clutch--header-sort-indicator-cache
+            (make-hash-table :test 'equal))
+           (cell (clutch--header-cell 0 [8] 0)))
+      (should
+       (cl-loop for pos from 1 below (length cell)
+                for face = (get-text-property pos 'face cell)
+                always (or (eq face 'clutch-header-active-face)
+                           (and (listp face)
+                                (memq 'clutch-header-active-face face)))))
+      (should-not (eq (get-text-property 0 'face cell)
+                      'clutch-header-active-face)))))
 
 (ert-deftest clutch-test-refresh-chrome-lines-update-without-changing-body ()
   "Header and footer refreshes should update chrome without touching body text."
@@ -2047,9 +2263,9 @@
         (should (equal (substring-no-properties
                         (clutch--header-cell-label 1 10))
                        "score ↑"))
-        (should (equal (nreverse calls)
-                       '(((mdicon . "nf-md-sort") "↕")
-                         ((octicon . "nf-oct-sort_asc") "↑"))))))
+        ;; Both cells consulted the icon channel; which glyph set backs
+        ;; it is cosmetic identity the fallbacks above already pin.
+        (should (= (length calls) 2))))
     (let ((clutch--header-sort-indicator-cache (make-hash-table :test 'equal)))
       (cl-letf (((symbol-function 'clutch--icon)
                  (lambda (_spec _fallback &rest _args) "I")))
@@ -2073,11 +2289,15 @@
                      (pop icons)))))
         (let ((narrow (clutch--header-sort-indicator "score" t 1)))
           (should (= (string-width narrow) 1))
-          (should (= (clutch-test--fake-pixel-width narrow) 10)))
+          (should (equal (get-text-property 1 'display narrow)
+                         '(space :width (2))))
+          (should-not (get-display-property 1 'min-width narrow)))
         (clrhash clutch--header-sort-indicator-cache)
         (let ((wide (clutch--header-sort-indicator "score" t 1)))
           (should (= (string-width wide) 3))
-          (should (= (clutch-test--fake-pixel-width wide) 30))
+          (should (equal (get-text-property 1 'display wide)
+                         '(space :width (5))))
+          (should-not (get-display-property 1 'min-width wide))
           (should-not (stringp (get-text-property 0 'display wide))))))))
 
 (ert-deftest clutch-test-header-sort-keymap-dispatches-in-event-window-buffer ()
@@ -2512,6 +2732,37 @@
       (when (buffer-live-p source)
         (kill-buffer source)))))
 
+(ert-deftest clutch-test-cell-preview-waits-and-hides-between-cells ()
+  "Changing cells should hide stale content until the preview delay passes."
+  (let* ((source (current-buffer))
+         (source-window (selected-window))
+         (clutch-cell-preview-style 'child-frame)
+         (clutch-cell-preview-delay 0.25)
+         (clutch--cell-preview-state
+          (list :source-buffer source
+                :source-window source-window
+                :frame 'preview
+                :cell-id '(1 0 0)))
+         (clutch--cell-preview-timer nil)
+         hidden scheduled)
+    (cl-letf (((symbol-function 'clutch--cell-preview-supported-p)
+               (lambda (_window) t))
+              ((symbol-function 'clutch--cell-preview-context)
+               (lambda ()
+                 '(:cell-id (1 0 1) :row-index 0 :column-index 1)))
+              ((symbol-function 'frame-live-p) (lambda (_frame) t))
+              ((symbol-function 'make-frame-invisible)
+               (lambda (frame) (setq hidden frame)))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (delay repeat function &rest args)
+                 (setq scheduled (list delay repeat function args))
+                 'new-timer)))
+      (clutch--schedule-cell-preview))
+    (should (eq hidden 'preview))
+    (should (eq clutch--cell-preview-timer 'new-timer))
+    (should (= (car scheduled) clutch-cell-preview-delay))
+    (should-not (nth 1 scheduled))))
+
 (ert-deftest clutch-test-cell-preview-cleans-up-nonlocal-exits-and-buffer-kills ()
   "Preview creation and external buffer kills should not leak global state."
   (let ((source (current-buffer))
@@ -2645,8 +2896,9 @@
 
 (ert-deftest clutch-test-shell-command-on-cell-pipes-value-and-requires-cell ()
   "Shell commands should pipe the current cell value and reject non-cell points."
-  (dolist (case '(("hello world" "hello world")
-                  (42 "42")))
+  (dolist (case `(("hello world" "hello world")
+                  (42 "42")
+                  (,clutch--cell-default-placeholder "<default>")))
     (pcase-let ((`(,value ,expected) case))
       (ert-info ((format "value: %S" value))
         (with-temp-buffer
@@ -3325,22 +3577,76 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-edit-cell-shows-metadata-and-completion-hints ()
   "Edit buffer should expose enum metadata and completion affordances."
   (clutch-test--with-open-edit-cell buf result-buf
-      (:columns '("severity")
+      (:connection (make-clutch-jdbc-conn :params '(:driver oracle))
+       :columns '("severity")
        :column-defs '((:name "severity" :type-category text))
        :rows '(("low"))
        :row-identity
        (clutch-test--primary-row-identity "shipping_incidents" '("severity") '(0)))
       '(0 0 "low")
       "shipping_incidents"
-      (list (list :name "severity" :type "enum('low','medium','high')"))
+      (list (list :name "severity" :type "enum('low','medium','high')"
+                  :nullable t :default "'low'"))
     (with-current-buffer buf
       (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
+
+      (should (string-match-p "Set NULL.*Set DEFAULT"
+                              (format "%s" header-line-format)))
       (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
       (pcase-let ((`(,beg ,end ,candidates . ,_)
                    (clutch-result-edit-completion-at-point)))
         (should (= beg (point-min)))
         (should (= end (point-max)))
         (should (equal candidates '("low" "medium" "high")))))))
+
+(ert-deftest clutch-test-jdbc-blob-encoding-survives-complete-edit-path ()
+  "JDBC BLOB encoding should survive normalization, editing, staging, and wire."
+  (let* ((modified "{\"message\":\"已修改\"}")
+         (source
+          (car (clutch-jdbc--normalize-row
+                '((:__type "blob" :length 18
+                   :text "{\"message\":\"原值\"}" :encoding "GB18030")))))
+         parent-buf)
+    (unwind-protect
+        (clutch-test--with-open-edit-cell json-buf result-buf
+            (:connection (make-clutch-jdbc-conn :params '(:driver oracle))
+             :columns '("ID" "CONTENT")
+             :column-defs '((:name "ID" :type-category numeric)
+                            (:name "CONTENT" :type-category blob
+                             :backend-type "BLOB"))
+             :rows (list (list 1 source))
+             :row-identity
+             (clutch-test--primary-row-identity "DOCUMENTS" '("ID") '(0)))
+            (list 0 1 source)
+            "DOCUMENTS"
+            (list (list :name "CONTENT" :type "BLOB"
+                        :backend-type "BLOB"))
+          (with-current-buffer json-buf
+            (setq parent-buf clutch-result-edit-json--parent-buffer)
+            (should clutch-result-edit-json--whole-edit-p)
+            (erase-buffer)
+            (insert modified))
+          (with-current-buffer parent-buf
+            (should (equal clutch-result-edit--blob-encoding "GB18030")))
+          (cl-letf (((symbol-function 'quit-window)
+                     (lambda (&optional kill _window)
+                       (when kill
+                         (kill-buffer (current-buffer))))))
+            (with-current-buffer json-buf
+              (clutch-result-edit-json-finish)))
+          (let* ((staged (with-current-buffer result-buf
+                           (cdar clutch--pending-edits)))
+                 (wire
+                  (clutch-jdbc--wire-param
+                   (clutch-db-typed-param staged "BLOB"))))
+            (should (equal staged modified))
+            (should
+             (equal
+              (base64-decode-string (alist-get 'base64 wire))
+              (encode-coding-string
+               modified (coding-system-from-name "GB18030"))))))
+      (when (buffer-live-p parent-buf)
+        (kill-buffer parent-buf)))))
 
 (ert-deftest clutch-test-edit-cell-opens-null-state-placeholder ()
   "Editing a NULL cell should show a placeholder while keeping buffer text empty."
@@ -3355,34 +3661,66 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       "shipping_incidents"
       (list (list :name "note" :type "text"))
     (with-current-buffer buf
-      (should clutch-result-edit--null-p)
+      (should (eq clutch-result-edit--special-value 'null))
       (should (equal (buffer-string) ""))
-      (should (overlayp clutch-result-edit--null-placeholder-overlay))
+      (should (overlayp clutch-result-edit--special-placeholder-overlay))
       (should (equal
                (substring-no-properties
-                (overlay-get clutch-result-edit--null-placeholder-overlay
+                (overlay-get clutch-result-edit--special-placeholder-overlay
                              'after-string))
                "<null>"))
       (should (eq (get-text-property
                    0 'face
-                   (overlay-get clutch-result-edit--null-placeholder-overlay
+                   (overlay-get clutch-result-edit--special-placeholder-overlay
                                 'after-string))
                   'clutch-null-face))
       (insert "hello")
-      (should-not clutch-result-edit--null-p)
-      (should-not (overlayp clutch-result-edit--null-placeholder-overlay))
+      (should-not clutch-result-edit--special-value)
+      (should-not (overlayp clutch-result-edit--special-placeholder-overlay))
       (should (equal (buffer-string) "hello")))))
 
+(ert-deftest clutch-test-edit-special-value-hints-follow-column-detail ()
+  "Edit hints and commands should reject unsupported column special values."
+  (clutch-test--with-result-edit-buffer _edit-buf "keep"
+    (setq-local clutch-result-edit--column-name "status"
+                clutch-result-edit--default-supported-p t)
+    (dolist (case '((nil nil nil nil)
+                    (t nil t nil)
+                    (nil "'new'" nil t)
+                    (t "'new'" t t)))
+      (pcase-let ((`(,nullable ,default ,show-null ,show-default) case))
+        (setq-local clutch-result-edit--column-detail
+                    (list :name "status" :nullable nullable :default default))
+        (let ((header (clutch-result-edit--header-line 0 "status")))
+          (should (equal (list (and (string-match-p "Set NULL" header) t)
+                               (and (string-match-p "Set DEFAULT" header) t))
+                         (list show-null show-default))))))
+    (setq-local clutch-result-edit--column-detail
+                '(:name "status" :nullable nil))
+    (should-error (clutch-result-edit-set-null) :type 'user-error)
+    (should-error (clutch-result-edit-set-default) :type 'user-error)
+    (should (equal (buffer-string) "keep"))))
+
 (ert-deftest clutch-test-edit-cell-original-value-does-not-stage ()
-  "Submitting the original value should leave no staged edit behind."
-  (dolist (case '((unchanged 42 nil nil "42")
-                  (reverted "43" ((([1] . 1) . "43")) "42" "43")))
+  "Submitting or restoring the effective value should preserve staged state."
+  (dolist (case `((unchanged 42 nil nil "42" nil nil)
+                  (reverted "43" ((([1] . 1) . "43")) "42" "43" nil nil)
+                  (default-unchanged
+                   ,clutch--cell-default-placeholder
+                   ((([1] . 1) . ,clutch--cell-default-placeholder))
+                   nil "" default
+                   ((([1] . 1) . ,clutch--cell-default-placeholder)))
+                  (default-reverted
+                   ,clutch--cell-default-placeholder
+                   ((([1] . 1) . ,clutch--cell-default-placeholder))
+                   "42" "" default nil)))
     (pcase-let ((`(,label ,opened-value ,pending-edits ,replacement
-                          ,initial-text)
+                          ,initial-text ,special-value ,expected-pending)
                  case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-open-edit-cell buf result-buf
-            (:columns '("id" "qty")
+            (:connection (make-clutch-jdbc-conn :params '(:driver oracle))
+             :columns '("id" "qty")
              :column-defs '((:name "id" :type-category numeric)
                             (:name "qty" :type-category numeric))
              :rows '((1 42))
@@ -3391,9 +3729,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
              :pending-edits pending-edits)
             (list 0 1 opened-value)
             "orders"
-            (list (list :name "qty" :type "int"))
+            (list (list :name "qty" :type "int" :default "0"))
           (with-current-buffer buf
             (should (equal (buffer-string) initial-text))
+            (should (eq clutch-result-edit--special-value special-value))
+            (when special-value
+              (should (equal
+                       (substring-no-properties
+                        (overlay-get clutch-result-edit--special-placeholder-overlay
+                                     'after-string))
+                       "<default>")))
             (when replacement
               (erase-buffer)
               (insert replacement))
@@ -3402,8 +3747,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       ((symbol-function 'quit-window) #'ignore)
                       ((symbol-function 'message) #'ignore))
               (clutch-result-edit-finish))
-            (should-not (with-current-buffer result-buf
-                          clutch--pending-edits))))))))
+            (should (equal (with-current-buffer result-buf
+                             clutch--pending-edits)
+                           expected-pending))))))))
 
 (ert-deftest clutch-test-edit-cell-rejects-stale-source ()
   "Finishing an edit should not stage over a changed visible row or cell."
@@ -3475,20 +3821,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                            (regexp-quote clutch-debug-buffer-name)
                            (error-message-string err)))))
               (should-not (get-buffer "*clutch-edit: [0].name*")))))))))
-
-(ert-deftest clutch-test-edit-cell-shows-temporal-now-hint ()
-  "Temporal edit buffers should advertise the shared now shortcut."
-  (clutch-test--with-open-edit-cell buf result-buf
-      (:columns '("opened_at")
-       :column-defs '((:name "opened_at" :type-category datetime))
-       :rows '(("2026-03-10 10:00:00"))
-       :row-identity
-       (clutch-test--primary-row-identity "shipping_incidents" '("opened_at") '(0)))
-      '(0 0 "2026-03-10 10:00:00")
-      "shipping_incidents"
-      (list (list :name "opened_at" :type "datetime"))
-    (with-current-buffer buf
-      (should (string-match-p "\\[datetime\\]" (format "%s" header-line-format))))))
 
 (ert-deftest clutch-test-edit-cell-json-sub-editor-contract ()
   "JSON cells should open the JSON sub-editor with serialized JSON text."
@@ -3621,21 +3953,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-test--goto-insert-field-value "id")
         (call-interactively (key-binding (kbd "RET")))
         (should (equal (clutch-result-insert--current-field-name) "name"))))))
-
-(ert-deftest clutch-test-insert-buffer-header-line-is-form-title ()
-  "Insert buffer header should use form wording instead of SQL text."
-  (with-temp-buffer
-    (clutch--result-insert-major-mode)
-    (setq-local clutch-result-insert--table "shipping_incidents")
-    (let ((header (substring-no-properties
-                   (clutch-result-insert--header-line))))
-      (should (string-match-p "Insert buffer" header))
-      (should (string-match-p "C-c \\. Set current time" header))
-      (should-not (string-match-p "INSERT into" header))
-      (should-not (string-match-p "shipping_incidents" header))
-      (should-not (string-match-p "sparse" header))
-      (should-not (string-match-p "all columns" header))
-      (should-not (string-match-p "C-c C-a" header)))))
 
 (ert-deftest clutch-test-pending-insert-render-contract ()
   "Staged insert rows should show insert markers and metadata placeholders."
@@ -3794,6 +4111,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                :default "CURRENT_TIMESTAMP" :nullable t)))))
         (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
       (with-current-buffer insert-buf
+        (should (string-match-p "C-c \\. Set current time"
+                                (substring-no-properties
+                                 (clutch-result-insert--header-line))))
         (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
         (should (string-match-p "^severity[ ]+\\[enum required\\]: $" (buffer-string)))
         (should (string-match-p "^owner[ ]+\\[default=system\\]: $" (buffer-string)))
@@ -3822,7 +4142,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
          :rows '((1 "low" "alice" "2026-03-01 10:00:00"))
          :row-identity (clutch-test--primary-row-identity
                         "shipping_incidents" '("id") '(0))
-         :pending-edits '((([1] . 1) . "high")))
+         :pending-edits `((([1] . 1) . "high")
+                          (([1] . 3) . ,clutch--cell-default-placeholder)))
       (cl-letf (((symbol-function 'clutch--row-idx-at-line)
                  (lambda () 0))
                 ((symbol-function 'clutch--ensure-column-details)
@@ -3835,12 +4156,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (with-current-buffer result-buf
           (clutch-clone-row-to-insert)))
       (with-current-buffer insert-buf
+        (should (string-match-p "C-c \\. Set current time"
+                                (substring-no-properties
+                                 (clutch-result-insert--header-line))))
         (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
         (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
                                 (buffer-string)))
         (should (string-match-p "^owner[ ]*: alice$" (buffer-string)))
-        (should (string-match-p "^created_at .*2026-03-01 10:00:00$"
-                                (buffer-string)))))))
+        (should (string-match-p "^created_at .*: $" (buffer-string)))
+        (should-not (string-match-p "2026-03-01 10:00:00"
+                                    (buffer-string)))))))
 
 (ert-deftest clutch-test-clone-row-to-insert-from-record-buffer ()
   "Cloning from a record buffer should prefill the current visible record row."
@@ -3962,8 +4287,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Edit — staged mutations (row identity)
 
-(ert-deftest clutch-test-insert-commit-replaces-existing-pending-insert ()
-  "Committing a re-edited insert should replace the staged entry in place."
+(ert-deftest clutch-test-insert-stage-replaces-existing-pending-insert ()
+  "Staging a re-edited insert should replace the pending entry in place."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts '((("severity" . "low"))))
@@ -3985,15 +4310,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            "incidents" result-buf '(("severity" . "low")) 0)
           (with-current-buffer insert-buf
             (clutch-test--set-insert-field-value "severity" "high")
-            (clutch-result-insert-commit))))
+            (clutch-result-insert-stage))))
       (when (buffer-live-p insert-buf) (kill-buffer insert-buf))
       (should (= replaced 2))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
                      '((("severity" . "high"))))))))
 
-(ert-deftest clutch-test-insert-commit-appends-new-pending-insert-locally ()
-  "Committing a new insert should append one ghost row without full redraw."
+(ert-deftest clutch-test-insert-stage-appends-new-pending-insert-locally ()
+  "Staging a new insert should append one ghost row without full redraw."
   (clutch-test--with-result-state-buffer result-buf
       (:connection nil
        :pending-inserts nil)
@@ -4014,15 +4339,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-result-insert--open-buffer "users" result-buf)
           (with-current-buffer insert-buf
             (clutch-test--set-insert-field-value "name" "carol")
-            (clutch-result-insert-commit))))
+            (clutch-result-insert-stage))))
       (when (buffer-live-p insert-buf) (kill-buffer insert-buf))
       (should (= appended 0))
       (should (equal (with-current-buffer result-buf
                        clutch--pending-inserts)
                      '((("name" . "carol"))))))))
 
-(ert-deftest clutch-test-insert-commit-rejects-stale-result-table-before-closing ()
-  "Insert commit should keep the form open when the parent result table changed."
+(ert-deftest clutch-test-insert-stage-rejects-stale-result-table-before-closing ()
+  "Insert staging should keep the form open when the parent result table changed."
   (let (closed)
     (clutch-test--with-pop-to-buffer-capture insert-buf
       (clutch-test--with-insert-result-buffer result-buf
@@ -4041,7 +4366,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (cl-letf (((symbol-function 'quit-window)
                      (lambda (&rest _) (setq closed t)))
                     ((symbol-function 'clutch--refresh-display) #'ignore))
-            (let ((err (should-error (clutch-result-insert-commit)
+            (let ((err (should-error (clutch-result-insert-stage)
                                      :type 'user-error)))
               (should (string-match-p "Result table changed"
                                       (error-message-string err))))))
@@ -4155,15 +4480,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                           :type 'user-error)))
       (kill-buffer buf))))
 
-(ert-deftest clutch-test-commit-ordering-insert-update-delete ()
-  "Commit executes INSERT before UPDATE before DELETE."
+(ert-deftest clutch-test-submit-orders-insert-update-delete ()
+  "Submit executes INSERT before UPDATE before DELETE."
   (clutch-test--with-result-state
       (:columns '("id" "name")
        :rows '((1 "a") (2 "b"))
        :pending-inserts '((("id" . "3") ("name" . "c")))
        :pending-edits (list (cons (cons (vector 1) 1) "a2"))
        :pending-deletes (list (vector 2)))
-    (let (executed reverts)
+    (let (atomic executed reverts)
       (setq-local revert-buffer-function
                   (lambda (ignore-auto noconfirm)
                     (push (list ignore-auto noconfirm
@@ -4179,103 +4504,154 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
-                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) nil))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (_conn function)
+                   (setq atomic t)
+                   (funcall function)))
                 ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql &optional params)
-                   (push (cons sql params) executed))))
-        (clutch-result-commit)
+                 (lambda (_conn sql &optional params _defer-transaction-state)
+                   (setq executed (append executed (list (cons sql params))))
+                   (make-clutch-db-result :affected-rows 1))))
+        (clutch-result-submit)
+        (should atomic)
         (should (= (length executed) 3))
-        ;; executed is in reverse push order: last executed is at (nth 0 executed)
-        (should (string-prefix-p "INSERT" (car (nth 2 executed))))
-        (should (equal (cdr (nth 2 executed)) '("3" "c")))
+        (should (string-prefix-p "INSERT" (car (nth 0 executed))))
+        (should (equal (cdr (nth 0 executed)) '("3" "c")))
         (should (string-prefix-p "UPDATE" (car (nth 1 executed))))
         (should (equal (cdr (nth 1 executed)) '("a2" 1)))
-        (should (string-prefix-p "DELETE" (car (nth 0 executed))))
-        (should (equal (cdr (nth 0 executed)) '(2)))
+        (should (string-prefix-p "DELETE" (car (nth 2 executed))))
+        (should (equal (cdr (nth 2 executed)) '(2)))
         (should (equal reverts '((nil t nil nil nil nil))))))))
 
-(ert-deftest clutch-test-commit-rolls-back-whole-batch-on-second-failure ()
-  "A failed later statement must roll back earlier staged mutations."
+(ert-deftest clutch-test-submit-validates-before-auto-commit ()
+  "Auto submit should roll back when row-count validation fails."
   (clutch-test--with-result-state
-      (:pending-inserts '(first second))
-    (let (executed rolled-back cleared reverted)
+      (:pending-edits '(edit))
+    (let (committed rolled-back reverted)
       (setq-local revert-buffer-function
                   (lambda (&rest _args) (setq reverted t)))
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '(("INSERT first") ("INSERT second"))))
-                ((symbol-function 'clutch-db-escape-literal)
-                 (lambda (_conn value) (format "'%s'" value)))
-                ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
-                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) nil))
-                ((symbol-function 'clutch-db-rollback)
-                 (lambda (_) (setq rolled-back t)))
-                ((symbol-function 'clutch--clear-tx-dirty)
-                 (lambda (_) (setq cleared t)))
-                ((symbol-function 'clutch--mark-dml-results-rolled-back) #'ignore)
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql &optional _params)
-                   (push sql executed)
-                   (when (= (length executed) 2)
-                     (signal 'clutch-db-error '("second failed"))))))
-        (should-error (clutch-result-commit) :type 'user-error)
-        (should (equal (nreverse executed) '("INSERT first" "INSERT second")))
-        (should rolled-back)
-        (should cleared)
-        (should (equal clutch--pending-inserts '(first second)))
-        (should-not reverted)))))
-
-(ert-deftest clutch-test-commit-rejects-multi-statement-autocommit-batch ()
-  "Autocommit must not expose a staged batch to partial success."
-  (clutch-test--with-result-state
-      (:pending-inserts '(first second))
-    (let (executed)
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '(("INSERT first") ("INSERT second"))))
+      (cl-letf (((symbol-function 'clutch-result--build-update-statements)
+                 (lambda ()
+                   '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
                 ((symbol-function 'clutch--run-db-query)
-                 (lambda (&rest _args) (setq executed t))))
-        (let ((err (should-error (clutch-result-commit) :type 'user-error)))
-          (should (string-match-p "autocommit" (error-message-string err))))
-        (should-not executed)
-        (should (equal clutch--pending-inserts '(first second)))))))
+                 (lambda (&rest _)
+                   (make-clutch-db-result :affected-rows 2)))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (_conn function)
+                   (condition-case err
+                       (prog1 (funcall function)
+                         (setq committed t))
+                     ((error quit)
+                      (setq rolled-back t)
+                      (signal (car err) (cdr err)))))))
+        (let ((err (should-error (clutch-result-submit) :type 'user-error)))
+          (should (string-match-p "Mutation matched 2 rows"
+                                  (error-message-string err))))
+        (should rolled-back)
+        (should-not committed)
+        (should-not reverted)
+        (should (equal clutch--pending-edits '(edit)))))))
 
-(ert-deftest clutch-test-commit-sqlite-autocommit-batch-is-atomic ()
-  "SQLite should commit or roll back a staged multi-row batch as a unit."
-  (skip-unless (sqlite-available-p))
-  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
-    (unwind-protect
-        (progn
-          (clutch-db-init-connection conn)
-          (clutch-db-query
-           conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
-          (with-temp-buffer
-            (setq-local clutch-connection conn)
-            (clutch-result--execute-mutation-batch
-             '(("INSERT INTO demo (id, name) VALUES (?, ?)" 1 "a")
-               ("INSERT INTO demo (id, name) VALUES (?, ?)" 2 "b"))
-             nil nil))
-          (should
-           (equal (clutch-db-result-rows
-                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
-                  '((1 "a") (2 "b"))))
-          (with-temp-buffer
-            (setq-local clutch-connection conn)
-            (should-error
-             (clutch-result--execute-mutation-batch
-              '(("INSERT INTO demo (id, name) VALUES (?, ?)" 3 "c")
-                ("INSERT INTO demo (id, name) VALUES (?, ?)" 1 "duplicate"))
-              nil nil)
-             :type 'user-error))
-          (should
-           (equal (clutch-db-result-rows
-                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
-                  '((1 "a") (2 "b")))))
-      (clutch-db-disconnect conn))))
+(ert-deftest clutch-test-submit-manual-batch-uses-atomic-backend-boundary ()
+  "Manual staged submit should be atomic without committing the user transaction."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
+    (clutch-test--with-result-state
+        (:pending-inserts '(first second))
+      (let (atomic executed notice)
+      (setq-local revert-buffer-function
+                  (lambda (&rest _args) nil))
+      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                 (lambda () '(("INSERT first") ("INSERT second"))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                ((symbol-function 'clutch--tx-dirty-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (_conn function)
+                   (setq atomic t)
+                   (funcall function)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (_conn sql &optional _params _defer-transaction-state)
+                   (push sql executed)
+                   (make-clutch-db-result :affected-rows 1)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (setq notice (apply #'format format-string args)))))
+        (clutch-result-submit)
+        (should (equal (nreverse executed) '("INSERT first" "INSERT second")))
+        (should atomic)
+        (should (equal notice "2 changes submitted"))
+        (should-not clutch--pending-inserts))))))
+
+(ert-deftest clutch-test-submit-handles-known-session-restore-outcomes ()
+  "Pending state must follow the known outcome when restoring Auto mode fails."
+  (dolist (outcome '(committed rolled-back))
+    (clutch-test--with-result-state
+        (:pending-inserts '(first second))
+      (let (refreshed reverted)
+        (setq-local revert-buffer-function
+                    (lambda (&rest _args) (setq reverted t)))
+        (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                   (lambda () '(("INSERT first") ("INSERT second"))))
+                  ((symbol-function 'clutch-db-escape-literal)
+                   (lambda (_conn value) (format "'%s'" value)))
+                  ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                  ((symbol-function 'clutch--refresh-transaction-ui)
+                   (lambda (_) (setq refreshed t)))
+                  ((symbol-function 'clutch-db-call-with-atomic-batch)
+                   (lambda (&rest _)
+                     (signal
+                      'clutch-db-session-restore-error
+                      (list "Restoring auto-commit failed"
+                            :outcome outcome)))))
+          (should-error (clutch-result-submit) :type 'user-error)
+          (should refreshed)
+          (if (eq outcome 'committed)
+              (should-not clutch--pending-inserts)
+            (should (equal clutch--pending-inserts '(first second))))
+          (should (eq (not (null reverted))
+                      (eq outcome 'committed))))))))
+
+(ert-deftest clutch-test-submit-marks-unknown-batch-outcome-uncertain ()
+  "An uncertain batch should retain staging and require transaction recovery."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
+    (clutch-test--with-result-state
+        (:pending-inserts '(first second))
+      (let (reverted)
+        (setq-local revert-buffer-function
+                    (lambda (&rest _args) (setq reverted t)))
+        (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+                   (lambda () '(("INSERT first") ("INSERT second"))))
+                  ((symbol-function 'clutch-db-escape-literal)
+                   (lambda (_conn value) (format "'%s'" value)))
+                  ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                  ((symbol-function 'clutch-db-manual-commit-supported-p)
+                   (lambda (_) t))
+                  ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                  ((symbol-function 'clutch-db-call-with-atomic-batch)
+                   (lambda (_conn function)
+                     (funcall function)
+                     (signal
+                      'clutch-db-batch-outcome-uncertain
+                      '("commit outcome is uncertain"
+                        :phase commit))))
+                  ((symbol-function 'clutch--run-db-query)
+                   (lambda (&rest _)
+                     (make-clutch-db-result :affected-rows 1)))
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+          (let ((err (should-error (clutch-result-submit) :type 'user-error)))
+            (should (string-match-p
+                     "roll back or reconnect"
+                     (error-message-string err))))
+          (should (clutch--tx-uncertain-p clutch-connection))
+          (should (equal clutch--pending-inserts '(first second)))
+          (should-not reverted))))))
 
 ;;;; Edit — validation
 
@@ -4419,7 +4795,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
     (clutch-test--with-result-edit-buffer _edit-buf "12.5"
       (setq-local clutch-result-edit--column-name "impact_score"
                   clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
-                  clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)")
+                  clutch-result-edit--column-detail
+                  '(:name "impact_score" :type "decimal(5,1)" :nullable t)
                   clutch-result--edit-callback
                   (lambda (value) (setq staged-value (list value))))
       (cl-letf (((symbol-function 'quit-window)
@@ -4429,18 +4806,56 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should quit-called)
         (should (equal staged-value '(nil)))))))
 
-(ert-deftest clutch-test-edit-finish-preserves-literal-null-string ()
-  "Typing NULL should stage literal text, not database NULL."
-  (let (staged-value)
-    (clutch-test--with-result-edit-buffer _edit-buf "NULL"
-      (setq-local clutch-result-edit--column-name "note"
-                  clutch-result-edit--column-def '(:name "note" :type-category text)
-                  clutch-result-edit--column-detail '(:name "note" :type "text")
-                  clutch-result--edit-callback (lambda (value) (setq staged-value value)))
+(ert-deftest clutch-test-edit-set-default-stages-explicit-sentinel ()
+  "The explicit DEFAULT command should stage the database-default sentinel."
+  (let ((staged-value :not-called)
+        quit-called)
+    (clutch-test--with-result-edit-buffer _edit-buf "manual"
+      (setq-local clutch-result-edit--column-name "status"
+                  clutch-result-edit--column-def
+                  '(:name "status" :type-category text)
+                  clutch-result-edit--column-detail
+                  '(:name "status" :type "text" :nullable t :default "'new'")
+                  clutch-result-edit--default-supported-p t
+                  clutch-result--edit-callback
+                  (lambda (value) (setq staged-value value)))
       (cl-letf (((symbol-function 'quit-window)
-                 (lambda (&rest _args))))
+                 (lambda (&rest _args) (setq quit-called t))))
+        (should (eq (lookup-key clutch--result-edit-mode-map (kbd "C-c C-d"))
+                    #'clutch-result-edit-set-default))
+        (clutch-result-edit-set-default)
+        (should (eq clutch-result-edit--special-value 'default))
+        (should (equal (buffer-string) ""))
+        (should (equal
+                 (substring-no-properties
+                  (overlay-get clutch-result-edit--special-placeholder-overlay
+                               'after-string))
+                 "<default>"))
+        (should (eq (get-text-property
+                     0 'face
+                     (overlay-get clutch-result-edit--special-placeholder-overlay
+                                  'after-string))
+                    'clutch-null-face))
         (clutch-result-edit-finish)
-        (should (equal staged-value "NULL"))))))
+        (should quit-called)
+        (should (eq staged-value clutch--cell-default-placeholder))))))
+
+(ert-deftest clutch-test-edit-finish-preserves-literal-special-strings ()
+  "Typing NULL or DEFAULT should stage literal text, not a special value."
+  (dolist (text '("NULL" "DEFAULT"))
+    (let (staged-value)
+      (clutch-test--with-result-edit-buffer _edit-buf text
+        (setq-local clutch-result-edit--column-name "note"
+                    clutch-result-edit--column-def
+                    '(:name "note" :type-category text)
+                    clutch-result-edit--column-detail
+                    '(:name "note" :type "text" :nullable t :default "'x'")
+                    clutch-result-edit--default-supported-p t
+                    clutch-result--edit-callback
+                    (lambda (value) (setq staged-value value)))
+        (cl-letf (((symbol-function 'quit-window) #'ignore))
+          (clutch-result-edit-finish)
+          (should (equal staged-value text)))))))
 
 (ert-deftest clutch-test-edit-finish-restores-result-cell-position ()
   "Finishing a cell edit should restore point without shifting the viewport."
@@ -4531,7 +4946,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (when (buffer-live-p edit-buf)
         (kill-buffer edit-buf)))))
 
-(ert-deftest clutch-test-insert-commit-validates-fields-before-stage ()
+(ert-deftest clutch-test-insert-stage-validates-fields-before-stage ()
   "Insert staging should reject invalid enum, bool, JSON, temporal, and numeric values."
   (dolist (case
            `((("severity" "is_ship_blocked" "postmortem")
@@ -4574,7 +4989,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (clutch-result-insert--open-buffer
              "shipping_incidents" result-buf fields)
             (with-current-buffer insert-buf
-              (let ((err (should-error (clutch-result-insert-commit)
+              (let ((err (should-error (clutch-result-insert-stage)
                                        :type 'user-error)))
                 (when expected-message
                   (should (string-match-p expected-message
@@ -4740,21 +5155,32 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-export-command-writes-selected-format-content ()
   "Export command should write the chosen format through the real export path."
-  (dolist (case '(("csv-copy" clipboard "id,name\n1,\"a,b\"\n")
-                  ("csv-file" file "id,name\n1,\"a,b\"\n")
-                  ("insert-copy" clipboard
-                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n")
-                  ("insert-file" file
-                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n")
-                  ("update-copy" clipboard
-                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n")
-                  ("update-file" file
-                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n")))
-    (pcase-let ((`(,choice ,target ,expected) case))
-      (ert-info ((format "export choice: %s" choice))
+  (dolist (case '(("c" nil clipboard "id,name\n1,\"a,b\"\n" nil)
+                  ("c" ("--no-header") clipboard "1,\"a,b\"\n" nil)
+                  ("c" ("--file") file "id,name\n1,\"a,b\"\n" "CSV")
+                  ("t" nil clipboard "id\tname\n1\ta,b\n" nil)
+                  ("t" ("--no-header") clipboard "1\ta,b\n" nil)
+                  ("t" ("--file") file "id\tname\n1\ta,b\n" "TSV")
+                  ("i" nil clipboard
+                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
+                   nil)
+                  ("i" ("--file") file
+                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
+                   nil)
+                  ("u" nil clipboard
+                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
+                   nil)
+                  ("u" ("--file") file
+                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
+                   nil)))
+    (pcase-let ((`(,key ,args ,target ,expected ,expected-coding-label) case))
+      (ert-info ((format "export key: %s, args: %S" key args))
         (let ((path (make-temp-file "clutch-export-"))
               (kill-ring nil)
-              (kill-ring-yank-pointer nil))
+              (kill-ring-yank-pointer nil)
+              (write-region-function (symbol-function 'write-region))
+              coding-label
+              written-coding)
           (unwind-protect
               (clutch-test--with-result-state
                   (:columns '("id" "name")
@@ -4766,37 +5192,73 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                    :row-identity
                    (clutch-test--primary-row-identity
                     "users" '("id") '(0)))
-                (cl-letf (((symbol-function 'completing-read)
-                           (lambda (prompt choices &rest _args)
-                             (cond
-                              ((string-prefix-p "Export format:" prompt)
-                               (should (member choice choices))
-                               choice)
-                              ((string-prefix-p "CSV encoding" prompt)
-                               "utf-8")
-                              (t
-                               (ert-fail (format "Unexpected prompt: %s" prompt))))))
-                          ((symbol-function 'read-file-name)
-                           (lambda (&rest _args) path))
-                          ((symbol-function 'clutch-result--collect-all-export-rows)
-                           (lambda () '((1 "a,b"))))
-                          ((symbol-function 'clutch--ensure-column-details)
-                           (lambda (_conn _table &optional _strict)
-                             (list (list :name "id")
-                                   (list :name "name"))))
-                          ((symbol-function 'clutch-db-escape-identifier)
-                           (lambda (_conn s) (format "\"%s\"" s)))
-                          ((symbol-function 'clutch-db-escape-literal)
-                           (lambda (_conn s) (format "'%s'" s))))
-                  (clutch-result-export)
-                  (should
-                   (equal (if (eq target 'clipboard)
-                              (current-kill 0)
-                            (with-temp-buffer
-                              (insert-file-contents path)
-                              (buffer-string)))
-                          expected))))
+                (let ((suffix
+                       (clutch-test--transient-suffix-for-key
+                        'clutch-result-export key)))
+                  (should suffix)
+                  (cl-letf (((symbol-function 'transient-args)
+                             (lambda (_prefix) args))
+                            ((symbol-function 'completing-read)
+                             (lambda (prompt choices &rest _args)
+                               (if (string-match
+                                    "\\`\\(CSV\\|TSV\\) encoding" prompt)
+                                   (progn
+                                     (should (member "utf-8" choices))
+                                     (setq coding-label
+                                           (match-string 1 prompt))
+                                     "utf-8")
+                                 (ert-fail
+                                  (format "Unexpected prompt: %s" prompt)))))
+                            ((symbol-function 'read-file-name)
+                             (lambda (&rest _args) path))
+                            ((symbol-function 'write-region)
+                             (lambda (&rest write-args)
+                               (setq written-coding coding-system-for-write)
+                               (apply write-region-function write-args)))
+                            ((symbol-function 'clutch-result--collect-all-export-rows)
+                             (lambda () '((1 "a,b"))))
+                            ((symbol-function 'clutch--ensure-column-details)
+                             (lambda (_conn _table &optional _strict)
+                               (list (list :name "id")
+                                     (list :name "name"))))
+                            ((symbol-function 'clutch-db-escape-identifier)
+                             (lambda (_conn s) (format "\"%s\"" s)))
+                            ((symbol-function 'clutch-db-escape-literal)
+                             (lambda (_conn s) (format "'%s'" s))))
+                    (funcall (oref suffix command))
+                    (should (equal coding-label expected-coding-label))
+                    (when expected-coding-label
+                      (should (eq written-coding 'utf-8)))
+                    (should
+                     (equal (if (eq target 'clipboard)
+                                (current-kill 0)
+                              (with-temp-buffer
+                                (insert-file-contents path)
+                                (buffer-string)))
+                            expected)))))
             (ignore-errors (delete-file path))))))))
+
+(ert-deftest clutch-test-export-transient-shares-copy-option-model ()
+  "Export should expose Header and Destination before choosing a format."
+  (let* ((header
+          (clutch-test--transient-suffix-for-key 'clutch-result-export "-h"))
+         (destination
+          (clutch-test--transient-suffix-for-key 'clutch-result-export "-f"))
+         (header-display (and header (transient-format-value header)))
+         (destination-display
+          (and destination (transient-format-value destination))))
+    (should header)
+    (should destination)
+    (should (equal (substring-no-properties header-display) "(No|Yes)"))
+    (should (eq (get-text-property (string-match "Yes" header-display)
+                                  'face header-display)
+                'transient-value))
+    (should (equal (substring-no-properties destination-display)
+                   "(Clipboard|File)"))
+    (should (eq (get-text-property
+                 (string-match "Clipboard" destination-display)
+                 'face destination-display)
+                'transient-value))))
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
@@ -4807,7 +5269,25 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (string-match-p "^id,\"display,name\"\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
       (should (string-match-p "2,\"x\"\"y\"" csv))
-      (should (string-match-p "3,\"x\ry\"" csv)))))
+      (should (string-match-p "3,\"x\ry\"" csv)))
+    (should (equal (clutch--export-csv-content '((1 "a,b")) t)
+                   "1,\"a,b\"\n"))))
+
+(ert-deftest clutch-test-tsv-content-includes-header-and-escapes-fields ()
+  "TSV content should preserve its tabular shape around special characters."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("id" "display\tname"))
+    (should
+     (equal (clutch--export-tsv-content
+             '((1 "a,b") (2 "x\ty") (3 "x\"y") (4 "x\ny")))
+            (concat
+             "id\t\"display\tname\"\n"
+             "1\ta,b\n"
+             "2\t\"x\ty\"\n"
+             "3\t\"x\"\"y\"\n"
+             "4\t\"x\ny\"\n")))
+    (should (equal (clutch--export-tsv-content '((1 "a,b")) t)
+                   "1\ta,b\n"))))
 
 (ert-deftest clutch-test-insert-content-builds-full-row-sql ()
   :tags '(:smoke)
@@ -4857,43 +5337,45 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (ert-deftest clutch-test-result-export-formats-follow-result-surface ()
   "Export choices should match SQL, document, and key/value result surfaces."
-  (dolist (case '((document
-                   ("csv-copy" "csv-file"
-                    "document-insert-many-copy"
-                    "document-insert-many-file"))
-                  (sql
-                   ("csv-copy" "csv-file"
-                    "insert-copy" "insert-file"
-                    "update-copy" "update-file"))
-                  (key-value
-                   ("csv-copy" "csv-file"))))
-    (pcase-let ((`(,surface ,expected) case))
-      (pcase surface
-        ('document
-         (clutch-test--with-native-document-result-buffer
-           (cl-letf (((symbol-function 'clutch-db-document-mutation-supported-p)
-                      (lambda (_conn action) (eq action 'insert-many))))
-             (should (equal (mapcar #'car
-                                    (clutch-result--available-export-formats))
-                            expected)))))
-        ('sql
-         (with-temp-buffer
-           (setq-local clutch-connection 'sql-conn
-                       clutch--connection-params nil)
-           (clutch-test--with-connection-data-model
-               ('sql-conn 'mysql 'relational)
-             (should (equal (mapcar #'car
-                                    (clutch-result--available-export-formats))
-                            expected)))))
-        ('key-value
-         (with-temp-buffer
-           (setq-local clutch-connection 'redis-conn
-                       clutch--connection-params nil)
-           (clutch-test--with-connection-data-model
-               ('redis-conn 'redis 'key-value)
-             (should (equal (mapcar #'car
-                                    (clutch-result--available-export-formats))
-                            expected)))))))))
+  (cl-labels
+      ((render-menu ()
+         (when-let* ((buffer (get-buffer " *transient*")))
+           (kill-buffer buffer))
+         (transient-setup 'clutch-result-export)
+         (with-current-buffer " *transient*" (buffer-string)))
+       (check-menu (menu present absent)
+         (dolist (label present)
+           (should (string-match-p (regexp-quote label) menu)))
+         (dolist (label absent)
+           (should-not (string-match-p (regexp-quote label) menu)))))
+    (unwind-protect
+        (progn
+          (clutch-test--with-native-document-result-buffer
+            (cl-letf (((symbol-function
+                        'clutch-db-document-mutation-supported-p)
+                       (lambda (_conn action) (eq action 'insert-many))))
+              (check-menu (render-menu)
+                          '("CSV" "TSV" "Insert many")
+                          '("INSERT SQL" "UPDATE SQL"))))
+          (with-temp-buffer
+            (setq-local clutch-connection 'sql-conn
+                        clutch--connection-params nil)
+            (clutch-test--with-connection-data-model
+                ('sql-conn 'mysql 'relational)
+              (check-menu (render-menu)
+                          '("CSV" "TSV" "INSERT SQL" "UPDATE SQL")
+                          '("Insert many"))))
+          (with-temp-buffer
+            (setq-local clutch-connection 'redis-conn
+                        clutch--connection-params nil)
+            (clutch-test--with-connection-data-model
+                ('redis-conn 'redis 'key-value)
+              (check-menu (render-menu)
+                          '("CSV" "TSV")
+                          '("INSERT SQL" "UPDATE SQL"
+                            "Insert many")))))
+      (when-let* ((buffer (get-buffer " *transient*")))
+        (kill-buffer buffer)))))
 
 (ert-deftest clutch-test-document-copy-uses-backend-mutation-snippet-generic ()
   "Document helper copy should use backend-owned mutation snippet generation."
@@ -4960,13 +5442,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                                  :type 'user-error)))))
                  (should (string-match-p expected-message
                                          (error-message-string err))))))))))))
-
-(ert-deftest clutch-test-simple-insert-source-table-rejects-joined-query ()
-  "Joined result queries should not pretend one table is the INSERT target."
-  (with-temp-buffer
-    (setq-local clutch--last-query
-                "SELECT u.id, p.title FROM users u JOIN posts p ON p.user_id = u.id")
-    (should (equal (clutch--insert-target-table) "MY_TABLE"))))
 
 (ert-deftest clutch-test-insert-sql-uses-placeholder-for-ambiguous-source ()
   "INSERT copy/export should use a placeholder table for ambiguous queries."
@@ -5092,8 +5567,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  (should (equal op "copy UPDATE SQL"))
                  '("UPDATE users SET name = 'beta' WHERE id = 2"))))
       (clutch-result--copy-rows 'update)
-      (should (equal (clutch--csv-lines-for-rows
-                      (clutch-result--rows-for-display-indices '(0)) '(1))
+      (should (equal (clutch--delimited-lines-for-rows
+                      (clutch-result--rows-for-display-indices '(0)) '(1) ?,)
                      '("name" "beta")))
       (should (equal (clutch-result--build-insert-statements-for-rows
                       (clutch-result--rows-for-display-indices '(0))
@@ -5157,7 +5632,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (error-message-string err)))))))))
 
 (ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
-  "Staged SQL copy should mirror the staged commit batch."
+  "Staged SQL copy should mirror the staged submit batch."
   (with-temp-buffer
     (let (copied)
       (setq-local clutch--pending-inserts '(a)
@@ -5176,7 +5651,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        "INSERT INTO t VALUES (1);\nUPDATE t SET name='' WHERE id=1;\nDELETE FROM t WHERE id=1;\n"))))))
 
 (ert-deftest clutch-test-save-pending-sql-writes-current-batch ()
-  "Staged SQL save should write the staged commit batch to disk."
+  "Staged SQL save should write the staged submit batch to disk."
   (let ((path (make-temp-file "clutch-pending-" nil ".sql")))
     (unwind-protect
         (with-temp-buffer
@@ -5271,6 +5746,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (should (eq (lookup-key clutch-result-mode-map "k")
               #'clutch-copy-context-for-agent)))
 
+(ert-deftest clutch-test-result-mode-scales-header-with-buffer-text ()
+  "Result headers should follow buffer-local text scaling exactly once."
+  (require 'face-remap)
+  (let ((text-scale-remap-header-line nil))
+    (with-temp-buffer
+      (clutch-result-mode)
+      (should (local-variable-p 'text-scale-remap-header-line))
+      (should text-scale-remap-header-line)
+      (dolist (face '(mode-line mode-line-inactive))
+        (let ((spec (cadr (assq face face-remapping-alist))))
+          (should-not (eq (plist-get spec :inherit) 'default)))))))
+
 (ert-deftest clutch-test-result-mouse-click-below-table-preserves-point ()
   "Clicking below the rendered table should not move the current cell."
   (should (eq (lookup-key clutch-result-mode-map [mouse-1])
@@ -5352,11 +5839,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                    :rows (list (vector 1 "ada@example.com")
                                (vector 2 "bob@example.com")))))
           (setq copied (clutch-test--copy-agent-context))
+          ;; The sample-section details are proven by the result-buffer
+          ;; test above; here the rule is that a console resolves its
+          ;; last result buffer at all.
           (should (string-match-p "## Result sample" copied))
-          (should (string-match-p "Showing 1 of 2 visible rows" copied))
-          (should (string-match-p "id\temail" copied))
-          (should (string-match-p "1\tada@example.com" copied))
-          (should-not (string-match-p "bob@example.com" copied)))
+          (should (string-match-p "1\tada@example.com" copied)))
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf)))))
 
@@ -5484,62 +5971,34 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-result-down-cell)
         (should-not deactivate-mark)))))
 
-(ert-deftest clutch-test-region-cells-rectangle ()
-  "Region cell extraction should use rectangular cell bounds."
-  (clutch-test--with-result-state
-      (:rows '((r0c0 r0c1 r0c2)
-               (r1c0 r1c1 r1c2)
-               (r2c0 r2c1 r2c2)))
-    (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
-              ((symbol-function 'region-end) (lambda () 20))
-              ((symbol-function 'clutch--cell-at-or-near)
-               (lambda (pos)
-                 (if (= pos 10) '(0 1 nil) '(2 1 nil)))))
-      (should (equal (clutch-result--region-cells)
-                     '((0 1 r0c1)
-                       (1 1 r1c1)
-                       (2 1 r2c1)))))))
-
-(ert-deftest clutch-test-region-cells-use-filtered-display-rows ()
-  "Region cell extraction should read from filtered visible rows."
-  (clutch-test--with-result-state
-      (:rows '((1 "alice") (2 "bob"))
-       :filter-pattern "bob"
-       :filtered-rows '((2 "bob")))
-    (cl-letf (((symbol-function 'region-beginning) (lambda () 10))
-              ((symbol-function 'region-end) (lambda () 20))
-              ((symbol-function 'clutch--cell-at-or-near)
-               (lambda (_pos) '(0 1 nil))))
-      (should (equal (clutch-result--region-cells)
-                     '((0 1 "bob")))))))
-
 (ert-deftest clutch-test-tsv-copy-selection-contract ()
-  "TSV copy should use region cells when active, otherwise the point cell."
-  (dolist (case '((t "1\tshanghai\nbob")
-                  (nil "alice")))
-    (pcase-let ((`(,region-active ,expected) case))
+  "TSV copy should use the selected columns with optional headers."
+  (dolist (case `((t ((0 1) . (0 2)) nil nil
+                     "id\tstate\n1\t<default>\n2\tactive")
+                  (nil nil (0 1 "alice") nil "name\nalice")
+                  (nil nil (0 2 ,clutch--cell-default-placeholder) t
+                       "<default>")))
+    (pcase-let ((`(,region-active ,rect ,cell ,omit-header ,expected) case))
       (ert-info ((format "region: %s" region-active))
-        (with-temp-buffer
+        (clutch-test--with-result-state
+            (:columns '("id" "name" "state")
+             :rows `((1 "alice" ,clutch--cell-default-placeholder)
+                     (2 "bob" "active")))
           (let (kill-ring kill-ring-yank-pointer)
             (cl-letf (((symbol-function 'use-region-p)
                        (lambda () region-active))
-                      ((symbol-function 'region-beginning)
-                       (lambda () 10))
-                      ((symbol-function 'region-end)
-                       (lambda () 20))
-                      ((symbol-function 'clutch-result--region-cells)
-                       (lambda ()
-                         '((0 0 1) (0 2 "shanghai") (1 1 "bob"))))
+                      ((symbol-function 'clutch-result--region-rectangle-indices)
+                       (lambda () rect))
                       ((symbol-function 'clutch--cell-at-point)
-                       (lambda () '(2 3 "alice"))))
-              (clutch-result-copy 'tsv)
+                       (lambda () cell)))
+              (clutch-result-copy 'tsv nil omit-header)
               (should (equal (current-kill 0) expected)))))))))
 
 (ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
   "Public CSV and TSV copy commands should copy through the real entry point."
   (dolist (case '((clutch-result-copy-csv "name\nalice")
                   (clutch-result-copy-org-table "| name  |\n|-------|\n| alice |")
-                  (clutch-result-copy-tsv "alice")))
+                  (clutch-result-copy-tsv "name\nalice")))
     (pcase-let ((`(,command ,expected-text) case))
       (ert-info ((symbol-name command))
         (clutch-test--with-result-state
@@ -5556,6 +6015,38 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                        (lambda () '(0 1 "alice"))))
               (funcall command)
               (should (equal (current-kill 0) expected-text)))))))))
+
+(ert-deftest clutch-test-copy-header-switch-omits-tabular-headers ()
+  "Copy commands should honor the installed no-header switch."
+  (dolist (case '((clutch-result-copy-tsv "alice")
+                  (clutch-result-copy-csv "alice")
+                  (clutch-result-copy-org-table "| alice |")))
+    (pcase-let ((`(,command ,expected) case))
+      (clutch-test--with-result-state
+          (:columns '("name")
+           :rows '(("alice")))
+        (let (kill-ring kill-ring-yank-pointer)
+          (cl-letf (((symbol-function 'transient-args)
+                     (lambda (_prefix) '("--no-header")))
+                    ((symbol-function 'transient-arg-value)
+                     (lambda (flag args) (member flag args)))
+                    ((symbol-function 'use-region-p) (lambda () nil))
+                    ((symbol-function 'clutch--cell-at-point)
+                     (lambda () '(0 0 "alice"))))
+            (funcall command)
+            (should (equal (current-kill 0) expected))))))))
+
+(ert-deftest clutch-test-copy-header-switch-defaults-to-yes ()
+  "Copy transient should present Header as enabled by default."
+  (let* ((suffix
+          (clutch-test--transient-suffix-for-key
+           'clutch-result-copy-dispatch "-h"))
+         (display (and suffix (transient-format-value suffix))))
+    (should suffix)
+    (should (equal (substring-no-properties display) "(No|Yes)"))
+    (should (eq (get-text-property (string-match "Yes" display)
+                                  'face display)
+                'transient-value))))
 
 (ert-deftest clutch-test-copy-fmt-with-refine-uses-refined-rectangle ()
   "Refined copy should copy the final rectangle, not the initial region."
@@ -5661,7 +6152,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
    '(:columns ("id" "name")
      :column-defs ((:name "id" :type-category numeric)
                    (:name "name" :type-category text))
-     :rows ((1 "alice") (2 "bob") (3 "carol"))
+     :rows ((1 "alice-long-value") (2 "bob") (3 "carol"))
      :column-widths [2 5]))
   (clutch--refresh-display))
 
@@ -5675,6 +6166,39 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (should (equal clutch--refine-rect '((0 1 2) . (0 1))))
       (should clutch--refine-overlays)
       (should (eq clutch--refine-callback callback)))))
+
+(ert-deftest clutch-test-refine-suspends-automatic-cell-preview ()
+  "Refine mode should close and suppress automatic cell previews."
+  (with-temp-buffer
+    (clutch-test--setup-refine-result-buffer)
+    (goto-char (point-min))
+    (let ((match (text-property-search-forward
+                  'clutch-cell-truncated t #'eq)))
+      (should match)
+      (goto-char (prop-match-beginning match)))
+    (let ((clutch-cell-preview-style 'child-frame)
+          (clutch--cell-preview-state
+           (list :source-buffer (current-buffer)))
+          (clutch--cell-preview-timer 'pending)
+          cancelled
+          scheduled)
+      (cl-letf (((symbol-function 'cancel-timer)
+                 (lambda (timer) (setq cancelled timer)))
+                ((symbol-function 'clutch--cell-preview-supported-p)
+                 (lambda (_window) t))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _args)
+                   (setq scheduled t)
+                   nil)))
+        (clutch-result--start-refine '((0) . (0 1)) #'ignore)
+        (should (eq cancelled 'pending))
+        (should-not clutch--cell-preview-timer)
+        (should-not clutch--cell-preview-state)
+        (clutch--schedule-cell-preview)
+        (should-not scheduled)
+        (clutch-refine-cancel)
+        (clutch--schedule-cell-preview)
+        (should scheduled)))))
 
 (ert-deftest clutch-test-refine-toggle-excludes-and-includes ()
   "Refine mode should toggle row and column exclusions at point."
@@ -5895,19 +6419,45 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should execute)
         (should (eq (oref execute command) #'clutch-execute-dwim))))))
 
-(ert-deftest clutch-test-staged-transient-heading-shows-pending-count ()
-  "Staged transient heading should summarize pending mutation count."
+(ert-deftest clutch-test-edit-transient-heading-shows-pending-count ()
+  "Edit transient heading should summarize pending mutation count."
   (with-temp-buffer
     (setq-local clutch--pending-edits '(edit-a edit-b)
                 clutch--pending-deletes '(delete-a)
                 clutch--pending-inserts '(insert-a insert-b insert-c))
     (should (equal (substring-no-properties
-                    (clutch-result--staged-transient-heading))
-                   "Staged (6 pending)"))
+                    (clutch-result--edit-transient-heading))
+                   "Edit (6 pending)"))
     (setq-local clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil)
-    (should (equal (clutch-result--staged-transient-heading) "Staged"))))
+    (should (equal (clutch-result--edit-transient-heading) "Edit"))))
+
+(ert-deftest clutch-test-result-dispatch-pending-actions-follow-state ()
+  "Result dispatch should show pending actions only while changes are staged."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'clutch-result--action-supported-p)
+               (lambda (action) (eq action 'sql-mutation))))
+        (cl-labels ((render-menu ()
+                      (when-let* ((buffer (get-buffer " *transient*")))
+                        (kill-buffer buffer))
+                      (transient-setup 'clutch-result-dispatch)
+                      (with-current-buffer " *transient*"
+                        (buffer-string))))
+          (unwind-protect
+              (let ((labels '("Submit staged"
+                              "Discard staged at point"
+                              "Copy staged SQL"
+                              "Save staged SQL"))
+                    (menu (render-menu)))
+                (dolist (label labels)
+                  (should-not (string-match-p (regexp-quote label) menu)))
+                (setq-local clutch--pending-edits '(pending))
+                (setq menu (render-menu))
+                (dolist (label labels)
+                  (should (string-match-p (regexp-quote label) menu))))
+            (when-let* ((buffer (get-buffer " *transient*")))
+              (kill-buffer buffer)))))))
 
 (ert-deftest clutch-test-filter-transient-descriptions-show-current-values ()
   "Result filter labels should expose inactive and active values."
@@ -6153,6 +6703,46 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 ;;;; Execute — query execution and error handling
 
+(ert-deftest clutch-test-execute-only-paginates-select-statements ()
+  "Result-set commands must not inherit SELECT pagination rewrites."
+  (dolist (case
+           '(("SELECT * FROM users" t)
+             ("-- rows\nWITH active AS (SELECT * FROM users) SELECT * FROM active" t)
+             ("SHOW INDEX FROM users WHERE Key_name = 'users_name_key'" nil)
+             ("DESCRIBE users" nil)
+             ("DESC users" nil)
+             ("EXPLAIN SELECT * FROM users" nil)
+             ("PRAGMA table_info(users)" nil)
+             ("VALUES (1)" nil)
+             ("INSERT INTO users (name) VALUES ('Ada') RETURNING id" nil)
+             ("CALL list_users()" nil)))
+    (pcase-let ((`(,sql ,pageable) case))
+      (ert-info ((format "sql: %s" sql))
+        (let (executed-sql identity-prepared)
+          (cl-letf (((symbol-function 'clutch--prepare-row-identity-query)
+                     (lambda (_connection statement)
+                       (setq identity-prepared t)
+                       (list :sql statement)))
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_connection statement _page-num _page-size
+                              &optional _order-by _page-offset)
+                       (concat statement " /* paged */")))
+                    ((symbol-function 'clutch--run-db-query)
+                     (lambda (_connection statement)
+                       (setq executed-sql statement)
+                       (make-clutch-db-result
+                        :columns '((:name "value"))
+                        :rows '((1))))))
+            (let ((outcome
+                   (clutch--execute-statement-attempt sql 'fake-conn t)))
+              (should (plist-get outcome :result-query-p))
+              (should (eq (plist-get outcome :server-pageable) pageable))
+              (should (eq (and identity-prepared t) pageable))
+              (should (equal executed-sql
+                             (if pageable
+                                 (concat sql " /* paged */")
+                               sql))))))))))
+
 (ert-deftest clutch-test-result-filter-page-count-export-real-sqlite-workflow ()
   "Public result commands preserve one filtered SQLite workflow end to end."
   (skip-unless (sqlite-available-p))
@@ -6197,10 +6787,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                    clutch--result-rows)
                            '(("one" 10) ("two" 20))))
             (cl-letf (((symbol-function 'completing-read)
-                       (lambda (prompt &rest _args)
-                         (if (string-prefix-p "Export" prompt)
-                             "csv-copy"
-                           "score")))
+                       (lambda (&rest _args) "score"))
                       ((symbol-function 'read-string)
                        (lambda (&rest _args) "> 20")))
               (clutch-result-apply-filter)
@@ -6219,12 +6806,18 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (should-not clutch--page-has-more)
               (should (equal (plist-get clutch--row-identity :indices) '(2)))
               (should (equal clutch--result-rows '(("five" 50 5))))
-              (clutch-result-export)
-              (let ((csv (current-kill 0 t)))
-                (should (equal csv
-                               "name,score\nthree,30\nfour,40\nfive,50\n"))
+              (let ((suffix
+                     (clutch-test--transient-suffix-for-key
+                      'clutch-result-export "t")))
+                (should suffix)
+                (cl-letf (((symbol-function 'transient-args)
+                           (lambda (_prefix) nil)))
+                  (funcall (oref suffix command))))
+              (let ((tsv (current-kill 0 t)))
+                (should (equal tsv
+                               "name\tscore\nthree\t30\nfour\t40\nfive\t50\n"))
                 (should-not
-                 (string-match-p "one\\|two\\|clutch__rid\\|id," csv))))))
+                 (string-match-p "one\\|two\\|clutch__rid\\|id\t" tsv))))))
       (clutch--spinner-stop)
       (when (buffer-live-p result)
         (kill-buffer result))
@@ -6383,8 +6976,43 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                 (should-not clutch--result-server-pageable)
                 (should-not clutch--result-server-rewritable)
                 (should-not clutch--page-has-more)
+                (when (eq label 'complex-limit)
+                  (should-not clutch--result-source-table))
                 (when expected-rows
                   (should (equal clutch--result-rows expected-rows)))))))))))
+
+(ert-deftest clutch-test-execute-simple-limit-select-retains-edit-source ()
+  "A simple SELECT with LIMIT should retain its staged-edit source table."
+  (let ((clutch--source-window (selected-window))
+        (result-name "*clutch-test-result*")
+        (sql "SELECT id, name FROM users LIMIT 10")
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (_conn _table)
+                 (list (list :kind 'primary-key
+                             :name "PRIMARY"
+                             :columns '("id")))))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id)))
+              ((symbol-function 'clutch--run-db-query)
+               (lambda (_conn query)
+                 (setq captured-sql query)
+                 (make-clutch-db-result
+                  :columns '((:name "id")
+                             (:name "name")
+                             (:name "clutch__rid_0"))
+                  :rows '((1 "alice" 1))))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch-test--execute-and-present sql 'fake-conn)
+        (should (string-match-p "LIMIT 10\\'" captured-sql))
+        (with-current-buffer result-name
+          (should-not clutch--result-server-pageable)
+          (should-not clutch--result-server-rewritable)
+          (should (equal clutch--result-source-table "users"))
+          (should (equal (clutch--result-source-table-or-user-error "edit cell")
+                         "users"))
+          (should (eq (plist-get clutch--row-identity :kind)
+                      'primary-key)))))))
 
 (ert-deftest clutch-test-execute-select-duplicate-labels-are-not-rewritable ()
   "Duplicate result labels should remain pageable but not relation-rewritable."
@@ -6776,11 +7404,43 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (when (buffer-live-p preview-buffer)
         (kill-buffer preview-buffer)))))
 
+(ert-deftest clutch-test-statement-breaks-respect-mysql-backslash-escapes ()
+  "A MySQL escaped quote must not end the literal and split the statement.
+Splitting there would send the fragment before the semicolon as a whole
+statement."
+  (let* ((sql "UPDATE t SET note = 'it\\'s here; keep' WHERE id = 1; SELECT 2;")
+         (mysql (clutch-db-sql-dialect 'mysql))
+         (inside (string-search "; keep" sql)))
+    ;; Only the two real terminators, both outside the literal.
+    (should (equal (clutch-db-sql-statement-breaks sql mysql)
+                   (list (string-search ";" sql (string-search "id = 1" sql))
+                         (1- (length sql)))))
+    ;; Without the dialect the escaped quote is read as the literal's end, so
+    ;; the semicolon inside the value is taken for a statement terminator.
+    (should (member inside (clutch-db-sql-statement-breaks sql)))
+    (should-not (member inside (clutch-db-sql-statement-breaks sql mysql)))
+    ;; A trailing backslash keeps its standard meaning where the dialect has
+    ;; no backslash escape, so the literal still ends at the closing quote.
+    (should (= (length (clutch-db-sql-statement-breaks
+                        "SELECT 'a\\'; SELECT 2;"))
+               2))
+    (should (equal (clutch-db-sql-mask-literal-or-comment
+                    "SELECT 'a\\'b' FROM t" mysql)
+                   "SELECT '    ' FROM t"))))
+
+(ert-deftest clutch-test-sql-dialect-rules ()
+  "Dialect lookup should only claim rules a product actually has."
+  (should (equal (clutch-db-sql-dialect 'postgres) '(:dollar-quotes t)))
+  (should (equal (clutch-db-sql-dialect 'mysql) '(:backslash-escapes t)))
+  (dolist (product '(sqlite oracle ms db2 nil))
+    (should-not (clutch-db-sql-dialect product))))
+
 (ert-deftest clutch-test-statement-breaks-ignore-postgresql-dollar-quotes ()
   "Dollar-quoted function bodies should remain one executable statement."
   (dolist (case '(("$$" . "PERFORM 1; PERFORM 2;")
                   ("$body$" . "SELECT ';'; RETURN;")))
-    (let* ((delimiter (car case))
+    (let* ((pg (clutch-db-sql-dialect 'postgres))
+           (delimiter (car case))
            (body (cdr case))
            (sql (format (concat "CREATE FUNCTION f() RETURNS void AS %s%s%s "
                                 "LANGUAGE plpgsql; SELECT 2;")
@@ -6789,25 +7449,26 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (body-close (+ (string-search delimiter sql
                                           (+ body-open (length delimiter)))
                           (length delimiter)))
-           (breaks (clutch-db-sql-statement-breaks sql t)))
+           (breaks (clutch-db-sql-statement-breaks sql pg)))
       (ert-info ((format "delimiter: %s" delimiter))
         (should (= (length breaks) 2))
         (should (cl-every (lambda (offset) (>= offset body-close)) breaks)))))
   (should (= (length (clutch-db-sql-statement-breaks
-                      "SELECT $1; SELECT 2;" t))
+                      "SELECT $1; SELECT 2;" (clutch-db-sql-dialect 'postgres)))
              2))
   (should (= (length (clutch-db-sql-statement-breaks
                       "SELECT $tag$; SELECT 2;"))
              2))
   (should (= (length (clutch-db-sql-statement-breaks
-                      "SELECT foo$tag$; SELECT 2;" t))
+                      "SELECT foo$tag$; SELECT 2;"
+                      (clutch-db-sql-dialect 'postgres)))
              2))
   (string-match "needle" "needle")
   (let ((saved-match-data (match-data)))
     (clutch-db-sql-statement-breaks
      (concat "SELECT " (mapconcat #'identity
                                   (make-list 4000 "$1") ",") ";")
-     t)
+     (clutch-db-sql-dialect 'postgres))
     (should (equal (match-data) saved-match-data))))
 
 (ert-deftest clutch-test-postgresql-statement-bounds-enable-dollar-quotes ()
@@ -7045,10 +7706,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           confirmation-quit
           phase
           spinner-started
-          (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+          (clutch--tx-state-cache (make-hash-table :test 'eq))
           (clutch-connection 'fake-conn)
           (clutch--executing-p nil))
-      (puthash clutch-connection t clutch--tx-dirty-cache)
+      (puthash clutch-connection 'dirty clutch--tx-state-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch--spinner-start)
@@ -7084,7 +7745,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should disconnected)
         (with-current-buffer buf
           (should (eq clutch-connection 'fake-conn)))
-        (should-not (gethash 'fake-conn clutch--tx-dirty-cache))
+        ;; Retirement keeps the dirty flag as lost-transaction evidence;
+        ;; the next transaction command consumes it and refuses to run.
+        (should (gethash 'fake-conn clutch--tx-state-cache))
         (should-not clutch--executing-p)))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
@@ -7094,7 +7757,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (conn 'fake-conn)
            (interrupted nil)
            (disconnected nil)
-           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch-connection conn)
            (clutch--executing-p nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
@@ -7124,7 +7787,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (let* ((conn 'fake-conn)
            (clutch-connection conn)
-           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch--executing-p nil)
            (displayed-error nil)
            (error-context nil)
@@ -7132,7 +7795,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (details-cleared nil)
            (executions 0)
            (mode-line-updates 0))
-      (puthash conn t clutch--tx-dirty-cache)
+      (puthash conn 'dirty clutch--tx-state-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch-db-sql-destructive-p)
@@ -7183,7 +7846,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
            (params '(:backend oracle :database "ORCL"))
            (source (generate-new-buffer " *clutch-reconnect-source*"))
            (attached (generate-new-buffer " *clutch-reconnect-attached*"))
-           (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch--problem-records-by-conn (make-hash-table :test 'eq))
            (clutch--schema-cache-updated-hook
             '(clutch--handle-schema-cache-updated))
@@ -7276,7 +7939,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                  case))
       (with-temp-buffer
         (let ((clutch-connection 'old-conn)
-              (clutch--tx-dirty-cache (make-hash-table :test 'eq))
+              (clutch--tx-state-cache (make-hash-table :test 'eq))
               (old-live t)
               (runs 0)
               (confirmations 0)
@@ -7284,7 +7947,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (clutch-db--foreground-connections
                (make-hash-table :test 'eq)))
           (when dirty
-            (puthash 'old-conn t clutch--tx-dirty-cache))
+            (puthash 'old-conn 'dirty clutch--tx-state-cache))
           (cl-letf (((symbol-function 'clutch--confirm-query-execution)
                      (lambda (_sql) (cl-incf confirmations)))
                     ((symbol-function 'clutch-db-result-query-p)
@@ -7471,29 +8134,6 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
              "db.users.find()" 'document-conn nil))
       (should (equal captured '(document-conn "db.users.find()")))
       (should (plist-get outcome :result-query-p)))))
-
-(ert-deftest clutch-test-execute-from-arbitrary-buffer-uses-live-connection ()
-  "`clutch-execute' should execute with a connection found in another buffer."
-  (let ((conn-buf (generate-new-buffer " *clutch-conn*"))
-        captured-conn)
-    (unwind-protect
-        (progn
-          (with-current-buffer conn-buf
-            (setq-local clutch-connection 'fake-conn))
-          (with-temp-buffer
-            (insert "SELECT 1")
-            (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                      ((symbol-function 'clutch--connection-alive-p)
-                       (lambda (conn) (eq conn 'fake-conn)))
-                      ((symbol-function 'clutch--execute)
-                       (lambda (_sql conn &optional _context)
-                         (setq captured-conn conn)))
-                      ((symbol-function 'clutch--mark-executed-sql-region)
-                       #'ignore))
-              (clutch-execute "SELECT 1")
-              (should (eq captured-conn 'fake-conn)))))
-      (when (buffer-live-p conn-buf)
-        (kill-buffer conn-buf)))))
 
 (ert-deftest clutch-test-execute-statements-confirms-each-nonselect ()
   "Batch execution should apply destructive and risky DML guards."

@@ -419,26 +419,24 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
        (signal 'clutch-db-error
                (list (error-message-string err)))))))
 
-(defun clutch-db-pg--rewrite-param-sql (sql)
-  "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form."
-  (let ((len (length sql))
-        (pos 0)
-        (index 1)
-        parts)
-    (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos t)))
-          (progn
-            (push (substring sql pos skip) parts)
-            (setq pos skip))
-        (let ((ch (aref sql pos)))
-          (if (= ch ??)
-              (progn
-                (push (format "$%d" index) parts)
-                (cl-incf index)
-                (cl-incf pos))
-            (push (string ch) parts)
-            (cl-incf pos)))))
-    (apply #'concat (nreverse parts))))
+(defun clutch-db-pg--rewrite-param-sql (sql &optional param-count)
+  "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form.
+`clutch-db-sql-map-placeholders' decides which question marks are
+placeholders, so jsonb's `?|' / `?&' operators pass through and `??'
+writes the bare `?' operator.  When PARAM-COUNT is non-nil, signal
+`clutch-db-error' if the placeholder count differs from it, since a bare
+`?' meant as an operator would otherwise bind parameters to the wrong
+positions."
+  (pcase-let ((`(,rewritten . ,count)
+               (clutch-db-sql-map-placeholders
+                sql (lambda (index) (format "$%d" (1+ index)))
+                (clutch-db-sql-dialect 'postgres))))
+    (when (and param-count (/= count param-count))
+      (signal 'clutch-db-error
+              (list (format
+                     "SQL has %d `?' placeholders but %d parameters; write `??' for the jsonb operator"
+                     count param-count))))
+    rewritten))
 
 (defun clutch-db-pg--array-type-name-p (type)
   "Return non-nil when PostgreSQL TYPE names an array type."
@@ -731,6 +729,24 @@ manual-commit mode via lazy BEGIN."
           (clutch-db-pg--set-manual-commit-enabled conn nil))
       (clutch-db-pg--set-manual-commit-enabled conn t))))
 
+(cl-defmethod clutch-db-call-with-atomic-batch
+    ((conn clutch-db-pg--connection) function)
+  "Call FUNCTION atomically in CONN's selected PostgreSQL transaction mode."
+  (if (clutch-db-manual-commit-p conn)
+      (clutch-db--call-with-sql-savepoint
+       conn function
+       (lambda ()
+         (unless (clutch-db-pg--tx-open-p conn)
+           (clutch-db-query conn "BEGIN"))))
+    (when (clutch-db-pg--tx-open-p conn)
+      (user-error
+       "Session already has an explicit transaction; switch to Manual mode or finish it before submitting"))
+    (clutch-db--call-with-transaction-boundary
+     (lambda () (clutch-db-query conn "BEGIN"))
+     function
+     (lambda () (clutch-db-commit conn))
+     (lambda () (clutch-db-rollback conn)))))
+
 (cl-defmethod clutch-db-schema-transaction-effect
     ((_conn clutch-db-pg--connection) _sql)
   "Return `dirty' because PostgreSQL DDL participates in transactions."
@@ -751,7 +767,8 @@ manual-commit mode via lazy BEGIN."
   (clutch-db-pg--run-query-with-transaction-state
    conn sql
    (lambda ()
-     (let* ((pg-sql (clutch-db-pg--rewrite-param-sql sql))
+     (let* ((pg-sql (clutch-db-pg--rewrite-param-sql
+                     sql (length params)))
             (typed-arguments (clutch-db-pg--typed-arguments params))
             (result (pgsql-exec-params
                      (clutch-db-pg--connection-client conn)
@@ -1178,6 +1195,11 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
          (lambda (row)
+           (unless (and (listp row)
+                        (= (length row) 3)
+                        (cl-every #'stringp row))
+             (signal 'pgsql-error
+                     '("Invalid PostgreSQL foreign-key metadata row")))
            (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
              (cons col-name
                    (list :ref-table ref-table :ref-column ref-column))))

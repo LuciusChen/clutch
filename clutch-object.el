@@ -106,6 +106,13 @@ Recoverable database liveness-check failures are warned once and treated as
 (defvar clutch--object-affixation-metadata-limit 64
   "Maximum object candidates to enrich during one affixation call.")
 
+(defvar clutch--object-affixation-metadata-seconds 0.05
+  "Seconds one affixation call may spend enriching object candidates.
+Backends may answer `clutch-db-object-entry-metadata' with a round trip per
+entry, so a candidate count alone does not bound how long completion blocks.
+Candidates left unenriched keep their discovered type and are enriched by a
+later call once earlier results are cached.")
+
 (defvar-local clutch-browser-current-object nil
   "Most recently selected database object for the current buffer.")
 
@@ -577,11 +584,14 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
                       (clutch--object-entry-group-title entry))))
                 (affixate (cands)
                   (let ((display-map (make-hash-table :test 'equal))
-                        (remaining clutch--object-affixation-metadata-limit))
+                        (remaining clutch--object-affixation-metadata-limit)
+                        (deadline (+ (float-time)
+                                     clutch--object-affixation-metadata-seconds)))
                     (dolist (cand cands)
                       (when-let* ((entry
                                    (or (gethash cand metadata-map)
                                        (and (> remaining 0)
+                                            (< (float-time) deadline)
                                             (gethash cand entry-map)
                                             (prog1 (metadata-entry cand)
                                               (setq remaining (1- remaining))))
@@ -1887,19 +1897,6 @@ When PREDICATE is non-nil, keep only action specs matching it."
       'clutch-target-object
     'clutch-object))
 
-(defun clutch--embark-command-label (cmd)
-  "Return Embark display label for clutch command CMD, or nil."
-  (if (eq cmd 'clutch-object-default-action)
-      "Default action"
-    (cl-loop for spec in clutch--object-action-registry
-             when (eq cmd (plist-get spec :command))
-             return (plist-get spec :label))))
-
-(defun clutch--embark-command-name-advice (orig cmd)
-  "Return a clutch-specific display name for CMD, delegating to ORIG otherwise."
-  (or (clutch--embark-command-label cmd)
-      (funcall orig cmd)))
-
 ;;;; Embark integration (optional)
 
 (defun clutch--embark-object-target ()
@@ -1914,7 +1911,7 @@ When PREDICATE is non-nil, keep only action specs matching it."
          (when-let* ((entry (clutch-object-at-point))
                      (bounds (bounds-of-thing-at-point 'symbol)))
            `(,(clutch--embark-target-type entry)
-             ,entry ,(car bounds) ,(cdr bounds))))
+             ,entry ,(car bounds) . ,(cdr bounds))))
         (_
          (when clutch-browser-current-object
            `(,(clutch--embark-target-type clutch-browser-current-object)
@@ -1952,7 +1949,8 @@ INCLUDE-JUMP-TARGET non-nil keeps the jump-target action."
     (dolist (spec (clutch--embark-action-specs predicate))
       (define-key map
                   (kbd (plist-get spec :key))
-                  (plist-get spec :command)))
+                  (cons (plist-get spec :label)
+                        (plist-get spec :command))))
     map))
 
 (defun clutch--embark-setup ()
@@ -1966,7 +1964,6 @@ INCLUDE-JUMP-TARGET non-nil keeps the jump-target action."
                  '(clutch-object . clutch-object-default-action))
     (add-to-list 'embark-default-action-overrides
                  '(clutch-target-object . clutch-object-default-action))
-    (advice-add 'embark--command-name :around #'clutch--embark-command-name-advice)
     (add-to-list 'embark-target-finders #'clutch--embark-object-target)
     (add-to-list 'embark-keymap-alist
                  '(clutch-object . clutch-embark-object-actions))

@@ -365,17 +365,19 @@ document connection."
               (plist-get case :expected-text)
               nil nil (plist-get case :title-suffix)))))))
 
-(ert-deftest clutch-test-copy-object-fqname-prompts-for-fqname ()
-  "Copy-fqname should use an fqname-specific prompt."
-  (let (prompt)
+(ert-deftest clutch-test-copy-object-fqname-copies-qualified-name ()
+  "Copy-fqname must place the qualified name on the kill ring."
+  (let (prompt killed)
     (cl-letf (((symbol-function 'clutch--resolve-object-entry)
                (lambda (arg &rest _)
                  (setq prompt arg)
                  '(:name "ORDERS" :type "TABLE" :schema "APP")))
-              ((symbol-function 'kill-new) #'ignore)
+              ((symbol-function 'kill-new)
+               (lambda (text) (setq killed text)))
               ((symbol-function 'message) #'ignore))
       (clutch-copy-object-fqname)
-      (should (equal prompt "Copy object fqname: ")))))
+      (should (equal prompt "Copy object fqname: "))
+      (should (equal killed "APP.ORDERS")))))
 
 ;;;; Object — describe and DDL
 
@@ -1376,7 +1378,13 @@ document connection."
   "Oracle JDBC browseable entries should not issue an extra empty-prefix search."
   (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
              (lambda (_conn)
-               '((:name "ORDERS" :type "TABLE")))))
+               '((:name "ORDERS" :type "TABLE"))))
+            ((symbol-function 'clutch-db-search-table-entries)
+             (lambda (&rest _args)
+               (ert-fail "browseable entries must not trigger a search")))
+            ((symbol-function 'clutch-db-list-table-entries)
+             (lambda (&rest _args)
+               (ert-fail "browseable entries must not list tables"))))
     (should (equal (clutch--browseable-object-entries 'fake-conn)
                    '((:name "ORDERS" :type "TABLE"))))))
 
@@ -1463,6 +1471,38 @@ document connection."
                           (:name "beta" :type "KEY" :schema "0")))
                        '(:name "alpha" :type "KEY" :schema "0")))))))
 
+(ert-deftest clutch-test-object-entry-reader-affixation-stops-at-time-budget ()
+  "Affixation should stop enriching once the metadata time budget is spent.
+Each Redis entry lookup is a synchronous round trip, so a candidate count
+alone does not bound how long completion blocks."
+  (let ((clutch--object-affixation-metadata-limit 100)
+        (clutch--object-affixation-metadata-seconds 0.05)
+        (clock 0.0)
+        metadata-calls)
+    (cl-letf (((symbol-function 'float-time)
+               (lambda (&optional _) clock))
+              ((symbol-function 'clutch-db-object-entry-metadata)
+               (lambda (_conn entry)
+                 (push (plist-get entry :name) metadata-calls)
+                 ;; Each lookup costs a round trip.
+                 (setq clock (+ clock 0.03))
+                 (plist-put (copy-sequence entry) :value-type "STRING")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (let* ((metadata (funcall collection "" nil 'metadata))
+                        (affixation-fn
+                         (alist-get 'affixation-function (cdr metadata)))
+                        (candidates (funcall collection "" nil t)))
+                   (funcall affixation-fn candidates)
+                   "alpha"))))
+      (clutch--object-entry-reader
+       'fake-conn "Object: "
+       (mapcar (lambda (name) (list :name name :type "KEY" :schema "0"))
+               '("alpha" "beta" "gamma" "delta" "epsilon")))
+      ;; Two lookups fit the 0.05s budget; the rest fall back to plain entries
+      ;; instead of blocking for the whole candidate list.
+      (should (equal (nreverse metadata-calls) '("alpha" "beta"))))))
+
 (ert-deftest clutch-test-object-entry-reader-metadata-errors-surface ()
   "Display metadata errors should surface through object completion."
   (cl-letf (((symbol-function 'clutch-db-object-entry-metadata)
@@ -1513,7 +1553,7 @@ document connection."
               ((symbol-function 'bounds-of-thing-at-point)
                (lambda (_thing) '(1 . 7))))
       (should (equal (clutch--embark-object-target)
-                     '(clutch-object (:name "orders" :type "TABLE") 1 7)))))
+                     '(clutch-object (:name "orders" :type "TABLE") 1 . 7)))))
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (setq-local major-mode 'sql-mode)
@@ -1638,7 +1678,13 @@ document connection."
                          (clutch--embark-action-specs))
                  '(describe show-definition index-insight explain-sample
                             show-validation show-stats jump-target copy-name
-                            copy-fqname))))
+                            copy-fqname)))
+  (let (bindings)
+    (map-keymap (lambda (key binding)
+                  (push (cons key binding) bindings))
+                (clutch--embark-actions-keymap))
+    (should (equal (alist-get ?d bindings)
+                   '("Describe object" . clutch-object-describe)))))
 
 (provide 'clutch-test-object)
 
