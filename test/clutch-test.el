@@ -200,6 +200,14 @@
     (pcase-let ((`(,value ,expected) case))
       (should (equal (clutch--json-value-to-string value) expected)))))
 
+(ert-deftest clutch-test-json-false-value-p-generic-only ()
+  "UI JSON false detection should only recognize the generic :false sentinel."
+  (should (clutch--json-false-value-p :false))
+  (should-not (clutch--json-false-value-p nil))
+  (should-not (clutch--json-false-value-p t))
+  (should-not (clutch--json-false-value-p
+               (make-symbol "clutch-jdbc-json-false"))))
+
 (ert-deftest clutch-test-dispatch-view-json-values ()
   "JSON dispatch should serialize non-strings and pass JSON strings through."
   (let (seen buffer-name)
