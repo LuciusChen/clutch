@@ -518,6 +518,31 @@ positions."
                      count param-count))))
     rewritten))
 
+(defun clutch-db-pg--rewrite-param-sql-inlining-null
+    (sql null-indices param-count)
+  "Rewrite SQL placeholders for PARAM-COUNT parameters, inlining NULL.
+Placeholders whose zero-based ordinal is in NULL-INDICES become the
+literal `NULL'; the remaining placeholders become `$N' in order, so
+prepared execution never binds an untyped nil.  This works around
+pg-el's inability to bind nil as SQL NULL before emarsden/pg-el PR #32
+merges."
+  (let ((non-null 0))
+    (pcase-let ((`(,rewritten . ,count)
+                 (clutch-db-sql-map-placeholders
+                  sql
+                  (lambda (index)
+                    (if (memq index null-indices)
+                        "NULL"
+                      (setq non-null (1+ non-null))
+                      (format "$%d" non-null)))
+                  (clutch-db-sql-dialect 'postgres))))
+      (when (/= count param-count)
+        (signal 'clutch-db-error
+                (list (format
+                       "SQL has %d `?' placeholders but %d parameters; write `??' for the jsonb operator"
+                       count param-count))))
+      rewritten)))
+
 (defun clutch-db-pg--array-type-name-p (type)
   "Return non-nil when PostgreSQL TYPE names an array type."
   (and (stringp type)
@@ -616,34 +641,6 @@ positions."
 (defun clutch-db-pg--typed-arguments (params)
   "Return PARAMS as pg-el typed arguments."
   (mapcar #'clutch-db-pg--typed-argument params))
-
-(defun clutch-db-pg--bind-with-null-params (conn statement-name typed-arguments)
-  "Bind TYPED-ARGUMENTS to STATEMENT-NAME on CONN, preserving nil as SQL NULL."
-  (let ((orig-format (symbol-function 'format))
-        (orig-encode (symbol-function 'encode-coding-string)))
-    (cl-letf (((symbol-function 'format)
-               (lambda (fmt &rest args)
-                 (if (and (string= fmt "%s")
-                          (= (length args) 1)
-                          (null (car args)))
-                     nil
-                   (apply orig-format fmt args))))
-              ((symbol-function 'encode-coding-string)
-               (lambda (string coding-system &optional nocopy)
-                 (if (null string)
-                     nil
-                   (funcall orig-encode string coding-system nocopy)))))
-      (pg-bind conn statement-name typed-arguments :portal ""))))
-
-(defun clutch-db-pg--exec-prepared-with-nulls (conn sql typed-arguments)
-  "Execute SQL with TYPED-ARGUMENTS on CONN, preserving nil parameters."
-  (let ((throw-on-input nil))
-    (let* ((statement-name (pg-prepare conn sql (make-list (length typed-arguments) nil)))
-           (portal-name (clutch-db-pg--bind-with-null-params
-                         conn statement-name typed-arguments))
-           (result (make-pgresult :connection conn :portal portal-name)))
-      (pg-describe-portal conn portal-name)
-      (pg-fetch conn result))))
 
 (defun clutch-db-pg--format-column-ddl (col)
   "Format a single column COL row as a DDL line."
@@ -838,15 +835,23 @@ manual-commit mode via lazy BEGIN."
    conn sql
    (lambda ()
      (let* ((pg-null-marker clutch-db-pg--null-marker)
-            (pg-sql (clutch-db-pg--rewrite-param-sql sql (length params)))
-            (typed-arguments (clutch-db-pg--typed-arguments params))
-            (result (if (cl-some
-                         (lambda (param)
-                           (null (clutch-db-param-value param)))
-                         params)
-                        (clutch-db-pg--exec-prepared-with-nulls
-                         conn pg-sql typed-arguments)
-                      (clutch-db-pg--exec-prepared conn pg-sql typed-arguments))))
+            (null-indices
+             (cl-loop for param in params
+                      for index from 0
+                      when (null (clutch-db-param-value param))
+                      collect index))
+            (pg-sql (if null-indices
+                        (clutch-db-pg--rewrite-param-sql-inlining-null
+                         sql null-indices (length params))
+                      (clutch-db-pg--rewrite-param-sql sql (length params))))
+            (typed-arguments
+             (clutch-db-pg--typed-arguments
+              (if null-indices
+                  (cl-remove-if (lambda (param)
+                                  (null (clutch-db-param-value param)))
+                                params)
+                params)))
+            (result (clutch-db-pg--exec-prepared conn pg-sql typed-arguments)))
        (clutch-db-pg--wrap-result result)))))
 
 (cl-defmethod clutch-db-interrupt-query ((conn pgcon))

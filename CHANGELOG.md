@@ -6,6 +6,7 @@
 
 - Preserved PostgreSQL boolean false values as `false` instead of displaying and exporting them as SQL NULL. The native pg-el boundary now assigns SQL NULL a distinct private marker during ordinary and prepared queries, normalizes it back to Clutch's NULL representation afterward, and carries false mutation parameters back to PostgreSQL without turning them into NULL.
 - Displayed and copied PostgreSQL boolean true as `true` to match `false`, instead of pg-el's raw `t` rendering. Result tables, cell previews, copy/export, and edit-buffer prefill now all use the same `true`/`false` spelling.
+- Set PostgreSQL columns to NULL through prepared statements again. Until pg-el can bind untyped nil as SQL NULL upstream, nil parameter placeholders are inlined as the `NULL` literal and the remaining parameters stay prepared, so writing NULL no longer crashes in pg-el's Bind path.
 - Kept simple single-table `SELECT ... LIMIT ...` results editable when a safe row identity is available. A top-level page tail still disables server-side pagination, filtering, sorting, and count rewrites, but no longer discards the independently verified source table used by staged edits and deletes.
 - Kept graphical Result Browser headers aligned with rows when `text-scale-mode` changes the buffer font. Result buffers now opt header lines into buffer-local scaling, avoid applying the default-face scale twice through mode-line inheritance, and measure column content with the same default-face remappings used by redisplay.
 
