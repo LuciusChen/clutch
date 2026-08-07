@@ -4308,7 +4308,7 @@ back out in Extended JSON instead of handing `json-encode' a record."
         (should observed-null-marker)
         (should (equal row '(:false t nil [1 nil])))
         (should (equal (mapcar #'clutch--format-value (cl-subseq row 0 3))
-                       '("false" "t" "NULL")))))))
+                       '("false" "true" "NULL")))))))
 
 (ert-deftest clutch-db-test-pg-prepared-false-and-null-contract ()
   "PostgreSQL prepared results and parameters should distinguish false and NULL."
