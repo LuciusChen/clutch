@@ -117,9 +117,7 @@ When nil, console persistence falls back to `clutch--console-name'.")
   (define-key map (kbd "C-c C-r") #'clutch-execute-region)
   (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
   (define-key map (kbd "C-c C-e") #'clutch-connect)
-  (define-key map (kbd "C-c C-m") #'clutch-commit)
-  (define-key map (kbd "C-c C-u") #'clutch-rollback)
-  (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
+  (clutch--install-transaction-keybindings map)
   (define-key map (kbd "C-c C-j") #'clutch-jump)
   (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
   (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
@@ -303,21 +301,42 @@ console window; (3) nil, meaning use the selected window."
           :params params
           :ad-hoc t)))
 
-(defun clutch--read-query-console-choice (names)
-  "Read a query console choice from NAMES; no match means new."
-  (clutch--read-saved-connection-choice "Console: " names))
+(defun clutch--query-console-targets ()
+  "Return `(DISPLAY . TARGET)' entries for saved and open consoles."
+  (let (matched-buffers)
+    (append
+     (cl-loop for (name . _) in clutch-connection-alist
+              for params = (clutch--saved-connection-params name)
+              for storage = (clutch--console-persistence-name name params)
+              for buffer = (clutch--find-console-buffer name storage)
+              do (when buffer
+                   (push buffer matched-buffers))
+              collect (cons name name))
+     (cl-loop for buffer in (buffer-list)
+              for target =
+              (unless (memq buffer matched-buffers)
+                (with-current-buffer buffer
+                  (when (and (clutch--query-buffer-p)
+                             clutch--console-name
+                             clutch--connection-params)
+                    (cons (buffer-name buffer)
+                          (list :name clutch--console-name
+                                :params clutch--connection-params
+                                :ad-hoc t)))))
+              when target collect target))))
 
 (defun clutch--read-query-console-target ()
-  "Read a saved connection name or an ad hoc connection target."
-  (let* ((names (mapcar #'car clutch-connection-alist))
+  "Read an open, saved, or new ad hoc query console target."
+  (let* ((targets (clutch--query-console-targets))
+         (names (mapcar #'car targets))
          (choice (if names
-                     (clutch--read-query-console-choice names)
-                   "")))
+                     (clutch--read-saved-connection-choice "Console: " names)
+                   ""))
+         (target (cdr (assoc choice targets))))
     (cond
      ((string= choice "")
       (clutch--ad-hoc-console-target))
-     ((member choice names)
-      choice)
+     (target target)
      (t
       (clutch--ad-hoc-console-target)))))
 
@@ -425,17 +444,6 @@ window rather than replacing the current window."
             (params (plist-get target :params)))
         (clutch--open-query-console
          name params params source-default-directory)))))
-
-;;;###autoload (autoload 'clutch-switch-console "clutch" nil t)
-(defun clutch-switch-console ()
-  "Switch to an open clutch query console using `completing-read'."
-  (interactive)
-  (let ((consoles (cl-loop for buf in (buffer-list)
-                            when (string-prefix-p "*clutch: " (buffer-name buf))
-                            collect (buffer-name buf))))
-    (if consoles
-        (switch-to-buffer (completing-read "Switch to console: " consoles nil t))
-      (user-error "No clutch consoles open.  Use M-x clutch-query-console"))))
 
 (defconst clutch--row-identity-hidden-prefix "clutch__rid_"
   "Prefix used for hidden row identity result columns.")
@@ -967,13 +975,16 @@ connection and signal `clutch-query-interrupted'."
              (row-identity-prep
               (and prepare-result-p
                    (or (plist-get result-context :row-identity-prep)
-                       (clutch--prepare-row-identity-query connection sql))))
+                       (and (clutch-db-sql-pageable-query-p sql)
+                            (clutch--prepare-row-identity-query
+                             connection sql)))))
              (identity-sql (or (plist-get row-identity-prep :sql) sql))
              (server-pageable
               (and prepare-result-p
                    (if (plist-member result-context :server-pageable)
                        (plist-get result-context :server-pageable)
-                     (not (clutch--sql-has-page-tail-p identity-sql)))))
+                     (and (clutch-db-sql-pageable-query-p identity-sql)
+                          (not (clutch--sql-has-page-tail-p identity-sql))))))
              (execution-sql
               (if server-pageable
                   (clutch-db-build-paged-sql
@@ -1023,7 +1034,7 @@ as required after a preceding statement in the same batch."
   (clutch--confirm-query-execution sql)
   (setq clutch--last-query sql)
   (let* ((manual-dirty-p
-          (and (clutch--tx-dirty-p connection)
+          (and (clutch--tx-unresolved-p connection)
                (clutch-db-manual-commit-p connection)))
          (outcome
           (clutch-db-with-foreground-connection connection
@@ -1051,7 +1062,7 @@ as required after a preceding statement in the same batch."
 
 (defun clutch--connection-loss-context (connection &optional context)
   "Add transaction-loss state for CONNECTION to a copy of CONTEXT."
-  (if (clutch--tx-dirty-p connection)
+  (if (clutch--tx-unresolved-p connection)
       (plist-put (copy-sequence context) :transaction-outcome 'unknown)
     context))
 
@@ -1079,7 +1090,7 @@ as required after a preceding statement in the same batch."
                         (clutch--debug-workflow-message summary))
                nil)))))
     (let ((transaction-lost (and (not interrupted)
-                                 (clutch--tx-dirty-p connection))))
+                                 (clutch--tx-unresolved-p connection))))
       (when clutch-debug-mode
         (clutch--remember-debug-event
          :connection connection
@@ -1236,7 +1247,7 @@ Return a plist with :message, :summary, and :display-summary."
   "Return non-nil when the current buffer has a top-level semicolon."
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
     (consp (clutch-db-sql-statement-breaks
-            text (eq clutch--conn-sql-product 'postgres)))))
+            text (clutch--buffer-sql-dialect)))))
 
 (defun clutch--preview-sql-buffer (sql &optional product)
   "Display SQL in the *clutch-preview* buffer using SQL PRODUCT."
@@ -1285,7 +1296,7 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (bounds (clutch-db-sql-semicolon-statement-bounds-at-offset
-                  text offset t (eq clutch--conn-sql-product 'postgres))))
+                  text offset t (clutch--buffer-sql-dialect))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
@@ -1340,7 +1351,7 @@ product is `postgres'."
                            (and base-position (+ base-position tend)))
                      stmts)))))
       (dolist (break (clutch-db-sql-statement-breaks
-                      sql (eq clutch--conn-sql-product 'postgres)))
+                      sql (clutch--buffer-sql-dialect)))
         (emit break)
         (setq start (1+ break)))
       (emit len))
@@ -1466,26 +1477,6 @@ Returns the connection or nil."
            when (clutch--connection-alive-p conn)
            return conn))
 
-;;;###autoload (autoload 'clutch-execute "clutch" nil t)
-(defun clutch-execute (sql)
-  "Execute SQL from any buffer.
-With an active region, execute the region.  Otherwise execute the
-current line.  Uses the connection from any `clutch-mode' buffer."
-  (interactive
-   (list (string-trim
-          (if (use-region-p)
-              (buffer-substring-no-properties (region-beginning) (region-end))
-            (buffer-substring-no-properties
-             (line-beginning-position) (line-end-position))))))
-  (when (string-empty-p sql)
-    (user-error "No SQL to execute"))
-  (let* ((conn (or clutch-connection
-                   (clutch--find-connection)
-                   (user-error "No active connection.  Use M-x clutch-mode then C-c C-e to connect")))
-         (beg (if (use-region-p) (region-beginning) (line-beginning-position)))
-         (end (if (use-region-p) (region-end) (line-end-position))))
-    (clutch--execute-and-mark sql beg end conn)))
-
 ;;;; Indirect edit buffer
 
 (defun clutch--string-at-point ()
@@ -1591,9 +1582,7 @@ to execute or \\[clutch-indirect-abort] to abort."
     (define-key map (kbd "RET") #'clutch-repl-send-input)
     (define-key map (kbd "<return>") #'clutch-repl-send-input)
     (define-key map (kbd "C-c C-e") #'clutch-connect)
-    (define-key map (kbd "C-c C-m") #'clutch-commit)
-    (define-key map (kbd "C-c C-u") #'clutch-rollback)
-    (define-key map (kbd "C-c C-a") #'clutch-toggle-auto-commit)
+    (clutch--install-transaction-keybindings map)
     (define-key map (kbd "C-c C-j") #'clutch-jump)
     (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
@@ -1658,13 +1647,24 @@ When CONTINUATION is non-nil, return the continuation prompt."
   (clutch-repl--ensure-process)
   (comint-send-input))
 
+(defun clutch-repl--input-complete-p (input)
+  "Return non-nil when INPUT ends with a top-level statement terminator.
+The trailing semicolon must sit outside string literals and comments under
+the connection's dialect, and outside parentheses, so a line ending inside
+an open literal keeps accumulating instead of executing a fragment."
+  (let ((end (string-match ";[ \t\r\n]*\\'" input)))
+    (and end
+         (memq end (clutch-db-sql-statement-breaks
+                    input (clutch--buffer-sql-dialect)))
+         t)))
+
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
-Accumulates input until a semicolon is found, then executes."
+Accumulates input until a top-level semicolon ends it, then executes."
   (let ((combined (concat clutch-repl--pending-input
                           (unless (string-empty-p clutch-repl--pending-input) "\n")
                           input)))
-    (if (string-match-p ";\\s-*$" combined)
+    (if (clutch-repl--input-complete-p combined)
         (progn
           (setq clutch-repl--pending-input "")
           (clutch-repl--execute-and-print (string-trim combined)))
@@ -1885,7 +1885,7 @@ Key bindings:
               (or (clutch--dispatch-transaction-controls-inapt-p)
                   (and clutch-connection
                        (clutch-db-manual-commit-p clutch-connection)
-                       (clutch--tx-dirty-p clutch-connection))))
+                       (clutch--tx-unresolved-p clutch-connection))))
   (interactive)
   (call-interactively #'clutch-toggle-auto-commit))
 

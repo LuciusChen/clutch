@@ -63,11 +63,43 @@
 (declare-function mongodb-connection-username "mongodb" (conn))
 (declare-function mongodb-list-collection-docs "mongodb" (client database &optional filter options))
 (declare-function mongodb-list-collections "mongodb" (client database &optional filter options))
+(declare-function mongodb-list-databases "mongodb" (client))
 (declare-function mongodb-list-indexes "mongodb" (client database collection))
 (declare-function mongodb-live-p "mongodb" (conn))
 (declare-function mongodb-object-id "mongodb" (hex))
 (declare-function mongodb-update "mongodb" (client database collection filter update &optional multi upsert))
 (declare-function mongodb-conn-database "mongodb" (conn))
+;; BSON scalar wrapper accessors used to render decoded values.
+(declare-function mongodb-object-id-p "mongodb" (value))
+(declare-function mongodb-object-id-hex "mongodb" (value))
+(declare-function mongodb-datetime-p "mongodb" (value))
+(declare-function mongodb-datetime-millis "mongodb" (value))
+(declare-function mongodb-timestamp-p "mongodb" (value))
+(declare-function mongodb-timestamp-seconds "mongodb" (value))
+(declare-function mongodb-timestamp-increment "mongodb" (value))
+(declare-function mongodb-decimal128-p "mongodb" (value))
+(declare-function mongodb-decimal128-value "mongodb" (value))
+(declare-function mongodb-binary-p "mongodb" (value))
+(declare-function mongodb-binary-subtype "mongodb" (value))
+(declare-function mongodb-binary-data "mongodb" (value))
+(declare-function mongodb-regex-p "mongodb" (value))
+(declare-function mongodb-regex-pattern "mongodb" (value))
+(declare-function mongodb-regex-options "mongodb" (value))
+(declare-function mongodb-code-p "mongodb" (value))
+(declare-function mongodb-code-code "mongodb" (value))
+(declare-function mongodb-code-scope "mongodb" (value))
+(declare-function mongodb-symbol-p "mongodb" (value))
+(declare-function mongodb-symbol-value "mongodb" (value))
+(declare-function mongodb-db-pointer-p "mongodb" (value))
+(declare-function mongodb-db-pointer-namespace "mongodb" (value))
+(declare-function mongodb-db-pointer-object-id "mongodb" (value))
+(declare-function mongodb-int32-p "mongodb" (value))
+(declare-function mongodb-int32-value "mongodb" (value))
+(declare-function mongodb-int64-p "mongodb" (value))
+(declare-function mongodb-int64-value "mongodb" (value))
+(declare-function mongodb-undefined-p "mongodb" (value))
+(declare-function mongodb-min-key-p "mongodb" (value))
+(declare-function mongodb-max-key-p "mongodb" (value))
 
 ;;;; Configuration
 
@@ -154,6 +186,7 @@ Emacs result contract from materializing an unbounded collection."
     mongodb-insert
     mongodb-list-collection-docs
     mongodb-list-collections
+    mongodb-list-databases
     mongodb-list-indexes
     mongodb-live-p
     mongodb-object-id
@@ -1051,18 +1084,28 @@ CHAIN contains parsed cursor helper calls, when present."
        (or (null value)
            (cl-every #'clutch-mongodb--alist-p value))))
 
+(defun clutch-mongodb--scalar-number (value)
+  "Return VALUE's number when it is a bare or int-wrapped BSON number.
+mongodb.el keeps int64 values in their `mongodb-int64' wrapper so a
+small value cannot re-encode as int32; cells still display them as
+numbers."
+  (cond
+   ((numberp value) value)
+   ((mongodb-int64-p value) (mongodb-int64-value value))
+   ((mongodb-int32-p value) (mongodb-int32-value value))))
+
 (defun clutch-mongodb--scalar-p (value)
   "Return non-nil when VALUE can be displayed as a scalar cell."
   (or (null value)
       (stringp value)
-      (numberp value)
+      (clutch-mongodb--scalar-number value)
       (eq value t)
       (eq value :false)))
 
 (defun clutch-mongodb--column-category (value)
   "Return Clutch type category for MongoDB VALUE."
   (cond
-   ((numberp value) 'numeric)
+   ((clutch-mongodb--scalar-number value) 'numeric)
    ((clutch-mongodb--scalar-p value) 'text)
    (t 'json)))
 
@@ -1077,6 +1120,14 @@ CHAIN contains parsed cursor helper calls, when present."
    ((mongodb-document-p value) "object")
    ((clutch-mongodb--alist-p value) "object")
    ((listp value) "array")
+   ((mongodb-int64-p value) "long")
+   ((mongodb-int32-p value) "int")
+   ((mongodb-object-id-p value) "objectId")
+   ((mongodb-datetime-p value) "date")
+   ((mongodb-timestamp-p value) "timestamp")
+   ((mongodb-decimal128-p value) "decimal")
+   ((mongodb-binary-p value) "binData")
+   ((mongodb-regex-p value) "regex")
    (t "value")))
 
 (defun clutch-mongodb--field-type-category (values)
@@ -1087,7 +1138,7 @@ CHAIN contains parsed cursor helper calls, when present."
                         '("array" "object")))
               values)
     'json)
-   ((and values (cl-every #'numberp values)) 'numeric)
+   ((and values (cl-every #'clutch-mongodb--scalar-number values)) 'numeric)
    (t 'text)))
 
 (defun clutch-mongodb--display-value (value)
@@ -1095,15 +1146,58 @@ CHAIN contains parsed cursor helper calls, when present."
   (cond
    ((eq value :false) "false")
    ((eq value t) "true")
+   ((clutch-mongodb--scalar-number value))
    ((clutch-mongodb--scalar-p value) value)
    (t (clutch-mongodb--json-encode-text value))))
+
+(defun clutch-mongodb--bson-scalar-json (value)
+  "Return the Extended JSON alist for BSON scalar wrapper VALUE, or nil.
+mongodb.el decodes non-scalar BSON types to wrapper structs; results
+display them in their Extended JSON spelling."
+  (cond
+   ((mongodb-object-id-p value)
+    `(("$oid" . ,(mongodb-object-id-hex value))))
+   ((mongodb-datetime-p value)
+    `(("$date" . ,(mongodb-datetime-millis value))))
+   ((mongodb-timestamp-p value)
+    `(("$timestamp" . (("t" . ,(mongodb-timestamp-seconds value))
+                       ("i" . ,(mongodb-timestamp-increment value))))))
+   ((mongodb-decimal128-p value)
+    `(("$numberDecimal" . ,(mongodb-decimal128-value value))))
+   ((mongodb-binary-p value)
+    `(("$binary" . (("subType" . ,(format "%02x"
+                                          (mongodb-binary-subtype value)))
+                    ("bytes" . ,(base64-encode-string
+                                 (mongodb-binary-data value) t))))))
+   ((mongodb-regex-p value)
+    `(("$regularExpression" . (("pattern" . ,(mongodb-regex-pattern value))
+                               ("options" . ,(or (mongodb-regex-options value)
+                                                 ""))))))
+   ((mongodb-code-p value)
+    (if (mongodb-code-scope value)
+        `(("$code" . ,(mongodb-code-code value))
+          ("$scope" . ,(mongodb-code-scope value)))
+      `(("$code" . ,(mongodb-code-code value)))))
+   ((mongodb-symbol-p value)
+    `(("$symbol" . ,(mongodb-symbol-value value))))
+   ((mongodb-db-pointer-p value)
+    `(("$dbPointer" . (("$ref" . ,(mongodb-db-pointer-namespace value))
+                       ("$id" . ,(mongodb-db-pointer-object-id value))))))
+   ((mongodb-undefined-p value) '(("$undefined" . t)))
+   ((mongodb-min-key-p value) '(("$minKey" . 1)))
+   ((mongodb-max-key-p value) '(("$maxKey" . 1)))))
 
 (defun clutch-mongodb--json-encodable (value)
   "Return VALUE recursively normalized for `json-encode'."
   (cond
    ((eq value :false) json-false)
    ((mongodb-document-p value)
-    (clutch-mongodb--json-encodable (mongodb-document-elements value)))
+    (let ((elements (mongodb-document-elements value)))
+      (if elements
+          (clutch-mongodb--json-encodable elements)
+        ;; nil would render as null and a list as []; an empty hash
+        ;; table is the one value `json-encode' prints as {}.
+        (make-hash-table :test 'equal))))
    ((clutch-mongodb--alist-p value)
     (mapcar (lambda (pair)
               (cons (car pair)
@@ -1113,7 +1207,16 @@ CHAIN contains parsed cursor helper calls, when present."
     (vconcat (mapcar #'clutch-mongodb--json-encodable (append value nil))))
    ((listp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable value)))
-   (t value)))
+   ((and (floatp value) (isnan value))
+    '(("$numberDouble" . "NaN")))
+   ((and (floatp value) (= value 1.0e+INF))
+    '(("$numberDouble" . "Infinity")))
+   ((and (floatp value) (= value -1.0e+INF))
+    '(("$numberDouble" . "-Infinity")))
+   ((clutch-mongodb--scalar-number value))
+   (t (if-let* ((scalar (clutch-mongodb--bson-scalar-json value)))
+          (clutch-mongodb--json-encodable scalar)
+        value))))
 
 (defun clutch-mongodb--json-encode-text (value)
   "Return VALUE encoded as JSON text for MongoDB result display."
@@ -1357,13 +1460,14 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (defun clutch-mongodb--profile-value-key (value)
   "Return a stable hash key for sampled profile VALUE."
-  (cond
-   ((eq value :false) "false")
-   ((eq value t) "true")
-   ((null value) "null")
-   ((stringp value) (concat "s:" value))
-   ((numberp value) (format "n:%s" value))
-   (t (clutch-mongodb--json-encode-text value))))
+  (let ((number (clutch-mongodb--scalar-number value)))
+    (cond
+     ((eq value :false) "false")
+     ((eq value t) "true")
+     ((null value) "null")
+     ((stringp value) (concat "s:" value))
+     (number (format "n:%s" number))
+     (t (clutch-mongodb--json-encode-text value)))))
 
 (defun clutch-mongodb--profile-top-values (stat)
   "Return top sampled scalar values for profile STAT."
@@ -1392,17 +1496,17 @@ FIELDS is an optional list of top-level field names for update snippets."
                             (1+ (plist-get stat :present)))))
     (push value (plist-get stat :values))
     (puthash type (1+ (or (gethash type types) 0)) types)
-    (when (numberp value)
+    (when-let* ((number (clutch-mongodb--scalar-number value)))
       (setq stat
             (plist-put stat :numeric-min
                        (if (numberp (plist-get stat :numeric-min))
-                           (min (plist-get stat :numeric-min) value)
-                         value)))
+                           (min (plist-get stat :numeric-min) number)
+                         number)))
       (setq stat
             (plist-put stat :numeric-max
                        (if (numberp (plist-get stat :numeric-max))
-                           (max (plist-get stat :numeric-max) value)
-                         value))))
+                           (max (plist-get stat :numeric-max) number)
+                         number))))
     (when (clutch-mongodb--scalar-p value)
       (let* ((examples (plist-get stat :examples))
              (key (clutch-mongodb--profile-value-key value))
@@ -1633,7 +1737,14 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 
 (cl-defmethod clutch-db-list-schemas ((conn clutch-mongodb-conn))
   "Return database names visible to MongoDB CONN."
-  (list (clutch-mongodb-conn-database conn)))
+  (clutch-mongodb--with-mongodb-errors
+    (sort
+     (delete-dups
+      (seq-filter
+       (lambda (database)
+         (and (stringp database) (not (string-empty-p database))))
+       (mongodb-list-databases (clutch-mongodb-conn-client conn))))
+     #'string-collate-lessp)))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-mongodb-conn))
   "Return the current MongoDB database name for CONN."
@@ -1646,6 +1757,12 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
         (plist-put (copy-sequence (clutch-mongodb-conn-params conn))
                    :database schema))
   schema)
+
+(cl-defmethod clutch-db-update-namespace-params
+    ((conn clutch-mongodb-conn) params)
+  "Store MongoDB CONN's current database in a copy of connection PARAMS."
+  (plist-put (copy-sequence params)
+             :database (clutch-mongodb-conn-database conn)))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-mongodb-conn))
   "Return collection names for CONN's current MongoDB database."

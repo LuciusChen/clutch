@@ -118,7 +118,7 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
                          :auth-database "admin"
                          :user "reporter" :pass-entry "atlas-sql"))
 
-        ;; DuckDB (local embedded database through generic JDBC URL)
+        ;; DuckDB (file-backed local database through a generic JDBC URL)
         ("duckdb" . (:backend jdbc
                       :url "jdbc:duckdb:/path/to/analytics.duckdb"
                       :driver-class "org.duckdb.DuckDBDriver"
@@ -135,7 +135,19 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
                         :rpc-timeout 15))))
 #+end_src
 
-JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.org::*Password Management][Password Management]] for details.
+JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.md#password-management][Password Management]] for details.
+
+** Snowflake-specific Notes
+
+Each logical Clutch JDBC connection owns two underlying Snowflake JDBC connections: a primary session for foreground SQL and a metadata session for schema and object introspection.  Authentication happens per underlying connection, so an interactive authenticator such as =externalbrowser= can run twice during one logical connect (for example, by opening two browser SSO tabs); the same applies to per-connection MFA or push flows.  This is expected behavior from the two-session runtime model, not an authentication retry.
+
+If connection-token caching is permitted by your organization, an =ACCOUNTADMIN= can run =ALTER ACCOUNT SET ALLOW_ID_TOKEN = TRUE;= so Snowflake stores a connection token in the operating-system keystore and reuses it for subsequent connections while it remains valid.  Consult your security team before enabling this account-level option.  Snowflake JDBC connection caching also requires JNA on the agent classpath (JNA on macOS/Linux, plus JNA Platform on Windows), and Snowflake JDBC 3.12.18 and later no longer bundle those classes.  Clutch's Snowflake installer currently downloads only the JDBC driver, so place the JNA jar or jars recommended for that driver version in the =drivers/= subdirectory of =clutch-jdbc-agent-dir= before connecting.  See Snowflake's official [[https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use#using-connection-caching-to-minimize-the-number-of-prompts-for-authentication-optional][connection-caching]] and [[https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-download#add-the-jna-classes-to-your-classpath][JNA classpath]] guidance.
+
+** DuckDB-specific Notes
+
+=C-c C-l= / =clutch-switch-schema= lists schemas in DuckDB's current file-backed catalog and switches the primary JDBC session with =USE catalog.schema=.  Clutch stores the raw catalog and schema names so reconnect and metadata scope remain synchronized; SQL quoting is applied only when executing the switch.
+
+Pure in-memory URLs and attached catalogs are not listed.  An in-memory database and DuckDB =ATTACH= state are local to the primary JDBC session, while Clutch intentionally uses a separate JDBC metadata session.  Until the sidecar has an explicit shared-session contract, use a file-backed database for the shared metadata workflow and query attached objects with qualified =catalog.schema.table= names.
 
 ** Oracle-specific Notes
 
@@ -183,11 +195,12 @@ JDBC connections use the same =:pass-entry= auth-source integration as other bac
 
 - Oracle JDBC connections use manual commit by default, matching DataGrip's safer query-console behavior.
 - Customize that default globally with =clutch-jdbc-oracle-manual-commit=, or override per connection with =:manual-commit t= / =:manual-commit nil=.
-- Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction.
+- Use =C-c C-m= to commit and =C-c C-u= to roll back the current transaction from the Query Console, an attached Result Browser, or its Record view.
 - Use =C-c C-a= to toggle between manual-commit and auto-commit at any time. The toggle is blocked when there are uncommitted changes (matching DataGrip's behavior); commit or roll back first, then switch.
+- In Manual mode, =C-c C-c= wraps each staged Result Browser submission in a JDBC savepoint. A failed later statement rolls this submission back without discarding earlier user work in the outer transaction. Drivers that report no savepoint support fail before staged DML begins.
 - Native MySQL supports the same commands by toggling the session autocommit flag.
 - Native PostgreSQL supports the same commands through a clutch-managed manual mode with lazy =BEGIN=; transactional DDL counts as pending work there too.
-- The console header-line always shows the current commit mode: =Tx: Auto=, =Tx: Manual=, or =Tx: Manual*= (uncommitted changes present).
+- The console header-line always shows the current commit mode: =Tx: Auto=, =Tx: Manual=, =Tx: Manual*= (uncommitted changes present), or =Tx: Uncertain= after failed batch recovery or any unknown commit outcome. Uncertain state blocks further queries, commit, and transaction-mode changes until rollback or reconnect. Recovery makes the session usable; it does not prove that an earlier uncertain commit failed, so retained work must be verified before retry.
 - Open DML result buffers show a status banner in their header-line after each transaction event:
   - Commit: =✓ Transaction committed= (green)
   - Rollback: =⚠ Transaction rolled back — changes not persisted= (orange)

@@ -2,7 +2,7 @@
 
 This document describes the wire protocol and runtime model used by `clutch-db-jdbc.el` and [`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent).
 
-It is intentionally narrower than the user-facing JDBC section in `README.org`. `README.org` explains how to install and use the JDBC backend; this file documents how the Elisp side and JVM sidecar talk to each other.
+It is intentionally narrower than the user-facing JDBC section in `README.md`. `README.md` explains how to install and use the JDBC backend; this file documents how the Elisp side and JVM sidecar talk to each other.
 
 ## Runtime model
 
@@ -15,7 +15,7 @@ Each logical JDBC connection in clutch maps to one logical session in the agent.
 
 This split exists to keep metadata traffic from contending with foreground SQL, especially on Oracle.
 
-Runtime schema switching updates both sessions together so one clutch connection still presents one effective schema/database context.
+The agent's `set-current-schema` operation, currently used by Oracle, updates both sessions together so one logical Clutch connection still presents one effective schema.  Product-specific namespace paths remain explicit: DuckDB switches the primary session with `USE` and synchronizes catalog/schema metadata parameters, while ClickHouse reconnects with a different database.
 
 The stdin reader is intentionally not blocked by one long-running request. Each decoded request is submitted to a request pool.  The dispatcher then serializes most operations per `conn-id`, so one JDBC connection still sees one foreground operation at a time.
 
@@ -26,9 +26,10 @@ The stdin reader is intentionally not blocked by one long-running request. Each 
 - Request transport: stdin
 - Response transport: stdout
 - Format: one complete JSON object per line
-- Process stderr: reserved for startup failures and JVM/driver diagnostics
+- Process stderr: startup failures, JVM/agent diagnostics, and quarantined third-party Java console output
 
 The agent emits an initial ready response on startup before normal RPC traffic begins.
+Before loading any third-party driver code, the agent retains a dedicated operating-system stdout handle for protocol responses and redirects Java's global `System.out` to UTF-8 stderr. This keeps unconditional driver messages, including Snowflake external-browser login status, out of the JSON stream while preserving them in Clutch's captured diagnostics.
 
 ## Message shape
 
@@ -79,7 +80,10 @@ Connection lifecycle:
 - `commit`
 - `rollback`
 - `set-auto-commit`
-- `set-current-schema`
+- `create-savepoint`
+- `rollback-savepoint`
+- `release-savepoint`
+- `set-current-schema` (currently used by Oracle to update both JDBC sessions)
 
 Execution and cursor flow:
 
@@ -136,6 +140,14 @@ The connect response returns:
 
 Connection-scoped operations use that `conn-id`.  Cursor operations use the `cursor-id` returned by execution, while `ping` checks the agent process itself.
 
+Savepoint operations translate the standard JDBC `Connection` API without embedding SQL dialects in the Elisp client:
+
+- `create-savepoint` accepts `conn-id` and returns an opaque `savepoint-id`. It rejects auto-commit sessions and checks `DatabaseMetaData.supportsSavepoints()` before creating the savepoint.
+- `rollback-savepoint` accepts both ids, rolls back to that savepoint, and releases it.
+- `release-savepoint` accepts both ids and releases the savepoint after successful work.
+
+Successful commit, rollback, an auto-commit transition, and disconnect invalidate savepoint handles. Unknown or stale handles fail explicitly. Clutch uses these primitives to keep one Manual-mode staged submission atomic inside the user's outer transaction; statement order and staged state remain Elisp-owned.
+
 `cancel` accepts:
 
 - `conn-id`
@@ -160,6 +172,18 @@ The current Elisp client closes cursor state implicitly by fetching until the ag
 `execute-params` accepts the same fields plus:
 
 - `values`, an array of values bound to the statement placeholders
+
+Ordinary values keep their existing prepared-binding behavior. A binary value uses the reserved envelope `{"__clutch_jdbc_param":"binary","jdbc-type":"BLOB","base64":"eyJzdGF0dXMiOiJyZWFkeSJ9"}`. The marker must be exactly `binary`; maps without that marker remain ordinary structured values.
+
+Binary-envelope fields have exact semantics:
+
+- `jdbc-type` is the declared JDBC type retained from result or schema metadata.
+- `base64` is the base64 encoding of the exact bytes; `""` means a non-null zero-byte value.
+- A JSON `null` `base64` means a typed SQL `NULL`, not an empty value.
+- Non-empty BLOB types bind through length-bearing `PreparedStatement.setBinaryStream`; a non-null zero-byte BLOB uses an explicitly managed empty `Blob`; RAW/BINARY-family types bind through `setBytes`; typed nulls use the corresponding JDBC null type.
+- A malformed envelope, invalid base64, or unsupported binary type fails protocol validation before JDBC execution.
+
+The envelope is deliberately limited to binary parameters. Clutch does not send type tags for ordinary values, and the agent does not claim a portable general-purpose JDBC type system. When a text-like BLOB result reports an encoding, Clutch retains that encoding across editing and converts the edited text back to those bytes; new text without source encoding uses UTF-8.
 
 `fetch` accepts:
 
@@ -193,6 +217,10 @@ Generic JDBC rows contain:
 `comment` is populated from `DatabaseMetaData.getTables(...).REMARKS` when the driver returns a non-blank value.  It may be `null`, and backend-specific paths may omit it.  In particular, Oracle's direct SQL table discovery intentionally keeps the smaller `name`/`type`/`schema`/`source_schema` row shape.
 
 `search-tables` returns table entry objects with the same logical fields.  The Elisp side treats `comment` as optional; absence means unknown or unsupported, not an empty comment.
+
+## Column metadata payload
+
+`get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one. Clutch retains the exact `type` as backend metadata so staged binary mutations can select the narrow binary parameter envelope without guessing from edited text.
 
 ## Error semantics
 
@@ -240,7 +268,7 @@ If `clutch-jdbc-agent-java-executable` or `JAVA_HOME` points to an older Java, t
 
 ## Relationship to README
 
-Use `README.org` for:
+Use `README.md` for:
 
 - installation
 - driver setup

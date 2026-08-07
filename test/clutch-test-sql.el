@@ -652,6 +652,49 @@ ORDER BY id"
      #'number-to-string)
     "SELECT \"?\", `?`, [?], 42")))
 
+(ert-deftest clutch-test-substitute-params-honors-dialect-literals ()
+  "Substitution must read literals with the backend's dialect.
+Without the dialect a MySQL escaped quote ends the literal early, so the
+rest of the statement is scanned as if it were still inside a string and
+the real placeholders are missed."
+  (let ((sql "INSERT INTO t VALUES ('a\\'b', ?, ?)"))
+    (should
+     (equal
+      (clutch-db-substitute-params
+       sql '(1 2) #'number-to-string (clutch-db-sql-dialect 'mysql))
+      "INSERT INTO t VALUES ('a\\'b', 1, 2)"))
+    ;; Standard rules misread the literal and find no placeholders, which
+    ;; surfaces as the existing count error rather than silent misbinding.
+    (should-error
+     (clutch-db-substitute-params sql '(1 2) #'number-to-string)
+     :type 'clutch-db-error)))
+
+(ert-deftest clutch-test-map-placeholders-spares-question-mark-operators ()
+  "`??' escapes a literal question mark; `?|' / `?&' pass through."
+  (pcase-let ((`(,sql . ,count)
+               (clutch-db-sql-map-placeholders
+                "SELECT ?, '?', d ?| x, d ?& y, d ?? 'k', $$?$$, ?"
+                (lambda (index) (format "<%d>" index))
+                (clutch-db-sql-dialect 'postgres))))
+    (should (= count 2))
+    (should (equal sql
+                   "SELECT <0>, '?', d ?| x, d ?& y, d ? 'k', $$?$$, <1>"))))
+
+(ert-deftest clutch-test-mask-blanks-dollar-quoted-bodies ()
+  "Masking with a dollar-quote dialect must blank dollar-quoted bodies.
+Keywords inside a function body are literal text, not clauses."
+  (let* ((sql "SELECT $$WHERE 'x;$$ FROM t")
+         (masked (clutch-db-sql-mask-literal-or-comment
+                  sql (clutch-db-sql-dialect 'postgres))))
+    (should (= (length masked) (length sql)))
+    (should-not (string-match-p "WHERE" masked))
+    (should (string-match-p "FROM t" masked)))
+  ;; Without the dialect the body's quote still opens a literal, so the
+  ;; masked text differs but stays the same length.
+  (should (= (length (clutch-db-sql-mask-literal-or-comment
+                      "SELECT $$WHERE 'x;$$ FROM t"))
+             (length "SELECT $$WHERE 'x;$$ FROM t"))))
+
 (ert-deftest clutch-test-mask-literal-or-comment ()
   "Mask string literals and comments but preserve identifiers."
   (let ((masked (clutch-db-sql-mask-literal-or-comment
@@ -828,6 +871,38 @@ ORDER BY id"
                                           "id = 1")
                    "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))))
 
+;;;; SQL parsing — candidate match collection
+
+(ert-deftest clutch-test-db-sql-code-match-positions ()
+  "Candidate collection should report every match start with its end.
+Structure is not interpreted here; callers confirm depth and literals through
+`clutch-db-sql-scan-code'."
+  (let* ((sql "SELECT a FROM t WHERE b = 'from x' GROUP  BY a")
+         (matches (clutch-db-sql-code-match-positions
+                   sql 0 nil "\\bfrom\\b\\|\\bgroup\\s-+by\\b")))
+    ;; Case-insensitive, and the literal occurrence is still reported.
+    (should (equal (sort (hash-table-keys matches) #'<)
+                   (list (string-match "FROM" sql)
+                         (string-match "from x" sql)
+                         (string-match "GROUP" sql))))
+    ;; Values are match ends, so callers can recover the matched text.
+    (should (equal (substring sql
+                              (string-match "GROUP" sql)
+                              (gethash (string-match "GROUP" sql) matches))
+                   "GROUP  BY")))
+  ;; END excludes a match that would extend past it, and START skips earlier
+  ;; matches entirely.
+  (let ((sql "FROM a FROM b"))
+    (should (equal (hash-table-keys
+                    (clutch-db-sql-code-match-positions sql 0 4 "\\bfrom\\b"))
+                   '(0)))
+    (should (equal (hash-table-keys
+                    (clutch-db-sql-code-match-positions sql 0 3 "\\bfrom\\b"))
+                   nil))
+    (should (equal (hash-table-keys
+                    (clutch-db-sql-code-match-positions sql 1 nil "\\bfrom\\b"))
+                   '(7)))))
+
 ;;;; SQL parsing — LIMIT detection and paging SQL
 
 (ert-deftest clutch-test-db-sql-has-top-level-limit-p ()
@@ -928,6 +1003,24 @@ ORDER BY id"
                  (exit-fn (plist-get (cdddr capf) :exit-function)))
             (funcall exit-fn accepted 'exact)
             (should (equal (buffer-string) expected))))))))
+
+(ert-deftest clutch-test-sql-capfs-precede-late-global-fallbacks ()
+  "SQL CAPFs should take priority over generic global fallbacks."
+  (let ((fallback (lambda ()
+                    (list (point-min) (point)
+                          '("select-from-fallback") :exclusive 'no))))
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-mode)
+          (insert "sele")
+          (add-hook 'completion-at-point-functions fallback)
+          (let ((completion-in-region-function
+                 (lambda (start end collection &optional predicate)
+                   (all-completions
+                    (buffer-substring-no-properties start end)
+                    collection predicate))))
+            (should (equal (completion-at-point) '("SELECT")))))
+      (remove-hook 'completion-at-point-functions fallback))))
 
 ;;;; Completion — identifiers and columns
 

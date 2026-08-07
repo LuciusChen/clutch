@@ -34,7 +34,7 @@ Run clutch native adapter live tests from the `clutch` checkout:
 ./test/run-native-live-tests.sh
 ```
 
-The runner starts or reuses local Docker/OrbStack containers and executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT runs skip those live tags unless credentials are provided.
+The runner starts or reuses local Podman containers on Linux or Docker/OrbStack containers on macOS, then executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT runs skip those live tags unless credentials are provided.
 
 MongoDB backend details live in [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
 
@@ -46,7 +46,18 @@ Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and MariaDB
 
 ## SSH Tunnels
 
-For saved clutch connections, `:ssh-host` starts a local SSH forward through the named host in `~/.ssh/config` before the native backend connects by default. The database `:host` / `:port` remain the remote endpoint as seen from the bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally. This transport layer only rewrites structured `:host` / `:port` connection params.  Opaque `:url` profiles, including JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level transport support. Add `:ssh-tunnel direct-first` when the same `:host` / `:port` may be directly reachable on some machines; clutch tries that route briefly and falls back to SSH when the TCP endpoint is not reachable or the direct database connection fails.
+For saved clutch connections, `:ssh-host` always starts a local SSH forward through the named host in `~/.ssh/config` before the native backend connects. The database `:host` / `:port` remain the remote endpoint as seen from the bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally. This transport layer only rewrites structured `:host` / `:port` connection params. Opaque `:url` profiles, including JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level transport support.
+
+When one database is reachable both directly and through SSH, define two named connections that share one profile:
+
+```elisp
+(setq clutch-connection-alist
+      '(("prod" . (:backend mysql :profile-entry "mysql/prod"))
+        ("prod-ssh" . (:backend mysql :profile-entry "mysql/prod"
+                        :ssh-host "bastion-prod"))))
+```
+
+From a local buffer, select `prod` for the direct route and `prod-ssh` for the tunnel. Clutch does not probe the endpoint or fall back between routes, so database connection timeouts retain their normal single-route meaning. Existing explicit and inferred TRAMP forwarding rules remain unchanged.
 
 This SSH path is intentionally OpenSSH-first:
 
@@ -189,6 +200,7 @@ Each parameter is a value/type pair. `pgsql-null` is SQL NULL, while Lisp `nil` 
 - In clutch, `C-c C-a` enables a clutch-managed manual mode
 - Manual mode uses lazy `BEGIN`: the first foreground statement opens the transaction
 - `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
+- Transaction state comes directly from pgsql.el's latest PostgreSQL `ReadyForQuery` status
 - Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains accurate for native PostgreSQL
 
 ### Interrupts and Timeouts
@@ -220,7 +232,7 @@ Each parameter is a value/type pair. `pgsql-null` is SQL NULL, while Lisp `nil` 
 
 - SQLite does not use `:host`, `:port`, or `:user`
 - Network timeout settings do not apply
-- `:ssh-host`, `:ssh-tunnel`, and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
+- `:ssh-host` and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
 - Schema/database switching is not part of the SQLite path
 
 ## Shared Native-Backend Notes

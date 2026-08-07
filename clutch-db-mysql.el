@@ -44,6 +44,7 @@
 (declare-function mysql-escape-identifier "mysql" (identifier))
 (declare-function mysql-escape-literal "mysql" (string))
 (declare-function mysql-execute "mysql" (stmt &rest params))
+(declare-function mysql-in-transaction-p "mysql" (conn))
 (declare-function mysql-live-p "mysql" (conn))
 (declare-function mysql-prepare "mysql" (conn sql))
 (declare-function mysql-query "mysql" (conn sql))
@@ -101,9 +102,6 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 (defvar clutch-db-mysql--methods-installed nil
   "Non-nil when MySQL generic methods were installed.")
 
-(defvar clutch-db-mysql--set-read-idle-timeout-function nil
-  "Function used to update a mysql.el connection read-idle-timeout.")
-
 (defun clutch-db-mysql--timeout-error-message (err recovered)
   "Return a user-facing timeout message for ERR.
 RECOVERED is non-nil when the MySQL wire connection was resynchronized."
@@ -112,10 +110,12 @@ RECOVERED is non-nil when the MySQL wire connection was resynchronized."
               "; interrupted running query and restored MySQL connection"
             "; disconnected MySQL connection because timeout recovery failed")))
 
-(defun clutch-db-mysql--handle-query-timeout (conn err)
-  "Recover or close CONN after MySQL query timeout ERR, then signal error."
+(defun clutch-db-mysql--handle-query-timeout (conn err &optional stmt)
+  "Recover or close CONN after MySQL query timeout ERR, then signal error.
+STMT is released only once recovery has resynchronized the wire."
   (let ((recovered (clutch-db-interrupt-query conn)))
-    (unless recovered
+    (if recovered
+        (when stmt (ignore-errors (mysql-stmt-close stmt)))
       (ignore-errors (mysql-disconnect conn)))
     (signal 'clutch-db-error
             (list (clutch-db-mysql--timeout-error-message err recovered)))))
@@ -128,10 +128,6 @@ RECOVERED is non-nil when the MySQL wire connection was resynchronized."
   (unless clutch-db-mysql--methods-installed
     (signal 'clutch-db-error
             (list "MySQL backend was loaded before mysql.el was available. Restart Emacs after installing mysql.el."))))
-
-(defun clutch-db-mysql--set-read-idle-timeout (conn value)
-  "Set MySQL CONN read idle timeout to VALUE."
-  (funcall clutch-db-mysql--set-read-idle-timeout-function conn value))
 
 (defun clutch-db-mysql--apply-timeout-defaults (params)
   "Return PARAMS with MySQL timeout defaults filled in."
@@ -351,14 +347,6 @@ Return nil when TEXT has no Syntax section."
      (signal 'clutch-db-error
              (list (format "Init failed: %s" (error-message-string err)))))))
 
-(cl-defmethod clutch-db--restore-connection-timeouts ((conn mysql-conn) params)
-  "Restore MySQL CONN timeout state from PARAMS."
-  (let* ((params (clutch-db-mysql--apply-timeout-defaults
-                  (clutch-db--normalize-connect-params 'mysql params)))
-         (read-idle-timeout (plist-get params :read-idle-timeout)))
-    (when read-idle-timeout
-      (clutch-db-mysql--set-read-idle-timeout conn read-idle-timeout))))
-
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
   "MySQL schema refresh should not block connect."
   nil)
@@ -386,6 +374,25 @@ Return nil when TEXT has no Syntax section."
 AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
   (mysql-set-autocommit conn auto-commit))
 
+(cl-defmethod clutch-db-call-with-atomic-batch
+  ((conn mysql-conn) function)
+  "Call FUNCTION atomically in the selected MySQL transaction mode on CONN."
+  (clutch-db--translate-library-error mysql-error
+    (if (clutch-db-manual-commit-p conn)
+        (clutch-db--call-with-sql-savepoint
+         conn function
+         (lambda ()
+           (unless (mysql-in-transaction-p conn)
+             (clutch-db-query conn "START TRANSACTION"))))
+      (when (mysql-in-transaction-p conn)
+        (user-error
+         "Session already has an explicit transaction; switch to Manual mode or finish it before submitting"))
+      (clutch-db--call-with-transaction-boundary
+       (lambda () (clutch-db-query conn "START TRANSACTION"))
+       function
+       (lambda () (clutch-db-commit conn))
+       (lambda () (clutch-db-rollback conn))))))
+
 (cl-defmethod clutch-db-schema-transaction-effect ((_conn mysql-conn) _sql)
   "Return `clear' because MySQL DDL commits the current transaction."
   'clear)
@@ -406,7 +413,9 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
   "Return MySQL HELP metadata for SYMBOL on CONN, or nil when unknown."
   (clutch-db--translate-library-error mysql-error
     (let* ((result (mysql-query
-                    conn (format "HELP '%s'" (upcase (format "%s" symbol)))))
+                    conn (format "HELP %s"
+                                 (mysql-escape-literal
+                                  (upcase (format "%s" symbol))))))
            (row (car (mysql-result-rows result)))
            (desc (nth 1 row)))
       (when (stringp desc)
@@ -414,9 +423,11 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
 
 (cl-defmethod clutch-db-execute-params ((conn mysql-conn) sql params)
   "Execute parameterized SQL on MySQL CONN with PARAMS."
-  (let (stmt result pending-error)
+  (let (stmt result pending-error timeout-error)
     (condition-case err
         (setq stmt (mysql-prepare conn sql))
+      (mysql-timeout
+       (setq timeout-error err))
       (mysql-error
        (setq pending-error err)))
     (when stmt
@@ -426,13 +437,20 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
                     (clutch-db-mysql--wrap-result
                      (apply #'mysql-execute
                             stmt (clutch-db-param-values params))))
+            (mysql-timeout
+             (setq timeout-error err))
             (mysql-error
              (setq pending-error err)))
-        (condition-case err
-            (mysql-stmt-close stmt)
-          (mysql-error
-           (unless pending-error
-             (setq pending-error err))))))
+        ;; A timed-out statement leaves its response on the wire; closing it
+        ;; here would desynchronize the session before recovery can drain it.
+        (unless timeout-error
+          (condition-case err
+              (mysql-stmt-close stmt)
+            (mysql-error
+             (unless pending-error
+               (setq pending-error err)))))))
+    (when timeout-error
+      (clutch-db-mysql--handle-query-timeout conn timeout-error stmt))
     (if pending-error
         (signal 'clutch-db-error
                 (list (error-message-string pending-error)))
@@ -482,6 +500,10 @@ when non-nil."
   "Switch MySQL CONN to SCHEMA."
   (clutch-db--translate-library-error mysql-error
     (mysql-select-database conn schema)))
+
+(cl-defmethod clutch-db-update-namespace-params ((conn mysql-conn) params)
+  "Store MySQL CONN's current database in a copy of connection PARAMS."
+  (plist-put (copy-sequence params) :database (clutch-db-database conn)))
 
 (cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
   "Return table/view entry plists for the current MySQL database on CONN."
@@ -807,13 +829,6 @@ ORDER BY ORDINAL_POSITION"
   "Return \"MySQL\" as the display name."
   "MySQL")
 
- ;; Build the setter after mysql.el is loaded; otherwise byte-compilation of
- ;; this optional adapter can expand mysql.el's struct setter too early.
- (setq clutch-db-mysql--set-read-idle-timeout-function
-       (eval
-        '(lambda (conn value)
-           (setf (mysql-conn-read-idle-timeout conn) value))
-        t))
  (setq clutch-db-mysql--methods-installed t))
 
 (provide 'clutch-db-mysql)

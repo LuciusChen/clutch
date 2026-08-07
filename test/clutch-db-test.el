@@ -88,7 +88,8 @@
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (conn result))
 (declare-function clutch-db-pg--make-connection "clutch-db-pg" (&rest args))
 (declare-function clutch-db-pg--connection-client "clutch-db-pg" (conn))
-(declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg" (sql))
+(declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg"
+                  (sql &optional param-count))
 (declare-function clutch-db-pg--typed-arguments "clutch-db-pg" (params))
 (declare-function clutch-db-pg-connect "clutch-db-pg" (params))
 (declare-function clutch-db-sqlite-connect "clutch-db-sqlite" (params))
@@ -354,6 +355,24 @@ authinfo, and PARAMS are explicit connection parameters."
   (should (equal (clutch-db-pg--rewrite-param-sql
                   "SELECT \"?\", ?")
                  "SELECT \"?\", $1")))
+
+(ert-deftest clutch-db-test-pg-param-rewrite-spares-jsonb-operators ()
+  "PostgreSQL rewriting must leave jsonb operators and dollar bodies alone.
+A rewritten operator shifts every later parameter to the wrong position,
+and a `?' inside a dollar-quoted function body is part of the body."
+  (require 'clutch-db-pg)
+  (should (equal (clutch-db-pg--rewrite-param-sql
+                  "SELECT * FROM t WHERE d ?| x AND d ?& y AND d ?? 'k' AND id = ?"
+                  1)
+                 "SELECT * FROM t WHERE d ?| x AND d ?& y AND d ? 'k' AND id = $1"))
+  (should (equal (clutch-db-pg--rewrite-param-sql
+                  "CREATE FUNCTION f() AS $body$ SELECT '?'; $body$ WHERE a = ? OR b IN (?, ?)"
+                  3)
+                 "CREATE FUNCTION f() AS $body$ SELECT '?'; $body$ WHERE a = $1 OR b IN ($2, $3)"))
+  ;; A bare `?' meant as the jsonb operator makes the counts disagree, which
+  ;; must fail loudly instead of binding parameters to the wrong slots.
+  (should-error (clutch-db-pg--rewrite-param-sql "SELECT d ? 'k' FROM t" 0)
+                :type 'clutch-db-error))
 
 (ert-deftest clutch-db-test-normalize-connect-params-rejects-removed-read-timeout ()
   "Removed connection timeout aliases should fail before reaching adapters."
@@ -1146,6 +1165,194 @@ authinfo, and PARAMS are explicit connection parameters."
         (should (equal calls '("ROLLBACK")))
         (should (eq (pgsql-transaction-status client) 'idle))))))
 
+(ert-deftest clutch-db-test-native-atomic-batches-use-explicit-transactions ()
+  "Native Auto batches should commit or roll back without changing Auto mode."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-client
+    (dolist (case `((,(make-mysql-conn :status-flags #x0002)
+                     "START TRANSACTION")
+                    (,(clutch-db-test--make-pg-connection :database "test")
+                     "BEGIN")))
+      (pcase-let ((`(,conn ,begin-sql) case))
+        (let (events)
+          (cl-letf (((symbol-function 'clutch-db-query)
+                     (lambda (_conn sql)
+                       (push sql events)))
+                    ((symbol-function 'clutch-db-commit)
+                     (lambda (_) (push 'commit events)))
+                    ((symbol-function 'clutch-db-rollback)
+                     (lambda (_) (push 'rollback events))))
+            (should
+             (eq (clutch-db-call-with-atomic-batch
+                  conn
+                  (lambda ()
+                    (push 'body events)
+                    'done))
+                 'done))
+            (should (equal (nreverse events)
+                           (list begin-sql 'body 'commit)))
+            (setq events nil)
+            (let ((err
+                   (should-error
+                    (clutch-db-call-with-atomic-batch
+                     conn
+                     (lambda ()
+                       (push 'body events)
+                       (signal 'clutch-db-error '("statement failed"))))
+                    :type 'clutch-db-error)))
+              (should (string-match-p "statement failed"
+                                      (error-message-string err))))
+            (should (equal (nreverse events)
+                           (list begin-sql 'body 'rollback)))))))))
+
+(ert-deftest clutch-db-test-native-manual-atomic-batches-use-savepoints ()
+  "Native Manual batches should use savepoints without ending the transaction."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (let ((mysql-conn (make-mysql-conn :status-flags 0))
+        (pg-conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-set-auto-commit pg-conn nil)
+    (clutch-db-test--with-pgsql-client
+      (dolist (case `((,mysql-conn "START TRANSACTION")
+                      (,pg-conn "BEGIN")))
+        (pcase-let ((`(,conn ,begin-sql) case))
+          (let (events)
+            (cl-letf (((symbol-function 'clutch-db-query)
+                       (lambda (_conn sql)
+                         (push sql events))))
+              (should
+               (eq (clutch-db-call-with-atomic-batch
+                    conn
+                    (lambda ()
+                      (push 'body events)
+                      'done))
+                   'done))
+              (setq events (nreverse events))
+              (should (equal (car events) begin-sql))
+              (should (string-match-p
+                       "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
+                       (nth 1 events)))
+              (should (eq (nth 2 events) 'body))
+              (should
+               (equal (nth 3 events)
+                      (replace-regexp-in-string
+                       "\\`SAVEPOINT " "RELEASE SAVEPOINT " (nth 1 events))))))))
+      (let ((explicit-mysql (make-mysql-conn :status-flags #x0001))
+            (explicit-pg (clutch-db-test--make-pg-connection :database "test")))
+        (clutch-db-set-auto-commit explicit-pg nil)
+        (setf (plist-get (clutch-db-pg--connection-client explicit-pg)
+                         :transaction-status)
+              'in-transaction)
+        (dolist (conn (list explicit-mysql explicit-pg))
+          (let (events)
+            (cl-letf (((symbol-function 'clutch-db-query)
+                       (lambda (_conn sql)
+                         (push sql events))))
+              (should-error
+               (clutch-db-call-with-atomic-batch
+                conn
+                (lambda ()
+                  (push 'body events)
+                  (signal 'clutch-db-error '("statement failed"))))
+               :type 'clutch-db-error)
+              (setq events (nreverse events))
+              (should (string-match-p
+                       "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
+                       (car events)))
+              (should (eq (nth 1 events) 'body))
+              (should
+               (equal (nth 2 events)
+                      (replace-regexp-in-string
+                       "\\`SAVEPOINT " "ROLLBACK TO SAVEPOINT " (car events))))
+              (should
+               (equal (nth 3 events)
+                      (replace-regexp-in-string
+                       "\\`SAVEPOINT " "RELEASE SAVEPOINT " (car events)))))))))))
+
+(ert-deftest clutch-db-test-transaction-boundary-marks-failed-recovery-uncertain ()
+  "A failed rollback should surface as an uncertain batch outcome."
+  (let (events)
+    (let ((err
+           (should-error
+            (clutch-db--call-with-transaction-boundary
+             (lambda () (push 'open events))
+             (lambda ()
+               (push 'body events)
+               (signal 'clutch-db-error '("statement failed")))
+             (lambda () (push 'finish events))
+             (lambda ()
+               (push 'recover events)
+               (signal 'clutch-db-error '("rollback failed"))))
+            :type 'clutch-db-batch-outcome-uncertain)))
+      (should (string-match-p "statement failed"
+                              (error-message-string err)))
+      (should (string-match-p "rollback failed"
+                              (error-message-string err)))
+      (should (eq (plist-get (cddr err) :phase) 'recovery)))
+    (should (equal (nreverse events) '(open body recover)))))
+
+(ert-deftest clutch-db-test-transaction-boundary-does-not-rollback-commit-error ()
+  "A COMMIT error is uncertain and must not trigger a misleading rollback."
+  (let (events)
+    (let ((err
+           (should-error
+            (clutch-db--call-with-transaction-boundary
+             (lambda () (push 'open events))
+             (lambda ()
+               (push 'body events)
+               'done)
+             (lambda ()
+               (push 'commit events)
+               (signal 'clutch-db-error '("commit response lost")))
+             (lambda () (push 'rollback events)))
+            :type 'clutch-db-batch-outcome-uncertain)))
+      (should (string-match-p "commit outcome is uncertain"
+                              (error-message-string err)))
+      (should (eq (plist-get (cddr err) :phase) 'commit)))
+    (should (equal (nreverse events) '(open body commit)))))
+
+(ert-deftest clutch-db-test-savepoint-boundary-recovers-release-error ()
+  "A failed savepoint release may still be made safe by rollback-to-savepoint."
+  (let (events)
+    (let ((err
+           (should-error
+            (clutch-db--call-with-savepoint-boundary
+             (lambda () (push 'open events))
+             (lambda ()
+               (push 'body events)
+               'done)
+             (lambda ()
+               (push 'release events)
+               (signal 'clutch-db-error '("release failed")))
+             (lambda () (push 'recover events)))
+            :type 'clutch-db-error)))
+      (should (string-match-p "release failed"
+                              (error-message-string err))))
+    (should (equal (nreverse events) '(open body release recover)))))
+
+(ert-deftest clutch-db-test-native-atomic-batches-preserve-explicit-transactions ()
+  "An Auto submission must not commit a transaction opened explicitly with SQL."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (let ((mysql-conn (make-mysql-conn :status-flags #x0003))
+        (pg-conn (clutch-db-test--make-pg-connection :database "test")))
+    (setf (plist-get (clutch-db-pg--connection-client pg-conn)
+                     :transaction-status)
+          'in-transaction)
+    (clutch-db-test--with-pgsql-client
+      (dolist (conn (list mysql-conn pg-conn))
+        (let (executed)
+          (cl-letf (((symbol-function 'clutch-db-query)
+                     (lambda (&rest _) (setq executed t))))
+            (let ((err
+                   (should-error
+                    (clutch-db-call-with-atomic-batch conn #'ignore)
+                    :type 'user-error)))
+              (should (string-match-p "explicit transaction"
+                                      (error-message-string err))))
+            (should-not executed)))))))
+
 (ert-deftest clutch-db-test-native-pg-transaction-control-allows-leading-comments ()
   "Native PostgreSQL should not inject lazy BEGIN before commented transaction control."
   (require 'clutch-db-pg)
@@ -1256,6 +1463,18 @@ authinfo, and PARAMS are explicit connection parameters."
                     :type 'clutch-db-error)
       (should-error (clutch-db-column-details conn "orders")
                     :type 'clutch-db-error))))
+
+(ert-deftest clutch-db-test-pg-foreign-keys-reject-malformed-response ()
+  "PostgreSQL foreign-key metadata should reject contaminated result rows."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-test--with-pgsql-results
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client _sql)
+                   (clutch-db-test--make-pg-result
+                    :rows '(("90000556" "attname"))))))
+        (should-error (clutch-db-foreign-keys conn "task")
+                      :type 'clutch-db-error)))))
 
 (defun clutch-db-test--assert-row-identity-skips-lower-priority
     (conn table pk-columns unique-fn locator-fn locator-value)
@@ -2458,6 +2677,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         sample-collections)
     (cl-letf (((symbol-function 'mongodb-list-collections)
                (lambda (_client _database) '("users" "orders")))
+              ((symbol-function 'mongodb-list-databases)
+               (lambda (_client) '("app" "analytics")))
               ((symbol-function 'mongodb-find)
                (lambda (_client _database collection _filter _projection limit
                                  &rest _)
@@ -2468,7 +2689,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  '((("name" . "users")
                     ("type" . "collection"))))))
       (let ((conn (clutch-db-test--make-mongodb-conn)))
-        (should (equal (clutch-db-list-schemas conn) '("app")))
+        (should (equal (clutch-db-list-schemas conn)
+                       '("analytics" "app")))
         (should (equal (clutch-db-list-tables conn) '("users" "orders")))
         (should (equal (clutch-db-list-table-entries conn)
                        '((:name "users" :schema "app" :type "COLLECTION")
@@ -2878,16 +3100,19 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                    ("get-columns" `(:columns ((:name "id" :type "UInt64"
                                                :nullable ,clutch-jdbc--json-false)
                                               (:name "user_id" :type "UInt64"
-                                               :nullable t))))
+                                               :nullable t
+                                               :default "0"))))
                    (_ (ert-fail (format "unexpected op: %s" op)))))))
       (should
        (equal (clutch-db-column-details conn "events")
-              '((:name "id" :type "UInt64" :nullable nil
-                 :primary-key t :foreign-key nil :comment nil)
-                (:name "user_id" :type "UInt64" :nullable t
+              '((:name "id" :type "UInt64" :backend-type "UInt64"
+                 :nullable nil
+                 :primary-key t :foreign-key nil :comment nil :default nil)
+                (:name "user_id" :type "UInt64" :backend-type "UInt64"
+                 :nullable t
                  :primary-key nil
                  :foreign-key (:ref-table "users" :ref-column "id")
-                 :comment nil))))
+                 :comment nil :default "0"))))
       (dolist (call calls)
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
@@ -6514,7 +6739,7 @@ It does so without touching the agent process."
     (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 71))
               ((symbol-function 'clutch-jdbc--recv-response)
-               (lambda (_id timeout &optional _op)
+               (lambda (_id timeout &optional _op _conn)
                  (setq captured-timeout timeout)
                  '(:ok t :result (:columns nil)))))
       (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")))

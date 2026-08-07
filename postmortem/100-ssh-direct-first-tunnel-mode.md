@@ -1,6 +1,6 @@
 # 100 -- SSH Tunnel Mode Belongs to the Connection Profile
 
-Superseded by [`101 -- Direct-First Requires Database Connection Success`](101-direct-first-db-connect-fallback.md).
+Superseded by [`164 -- Connection Entries Own Their Transport`](164-explicit-connection-transport.md). Postmortems 101 and 163 document the interim direct-first design.
 
 ## Background
 

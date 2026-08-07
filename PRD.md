@@ -17,7 +17,7 @@ The product is for developers, data engineers, analysts, and researchers who pre
 
 ## Supported surfaces
 
-The authoritative support-level definitions and current backend matrix live in [`docs/backend-support.org`](docs/backend-support.org). User configuration and installation instructions live in [`README.org`](README.org).
+The authoritative support-level definitions and current backend matrix live in [`docs/backend-support.org`](docs/backend-support.org). User configuration and installation instructions live in [`README.md`](README.md).
 
 | Surface | Product requirement |
 |---|---|
@@ -79,7 +79,7 @@ Diagnostics must remain a leaf over the backend contract. It stores redacted pro
 
 Clutch targets Emacs 29.1 or newer. The JDBC sidecar targets Java 17 or newer. Raising either baseline requires an explicit release note, documentation update, and design rationale.
 
-Changes to user-visible workflows, defaults, supported backends, public configuration, or dependencies must update `README.org` and `CHANGELOG.md` in the same release change. The pinned JDBC agent version and SHA-256 must describe the exact published jar bytes.
+Changes to user-visible workflows, defaults, supported backends, public configuration, or dependencies must update `README.md` and `CHANGELOG.md` in the same release change. The pinned JDBC agent version and SHA-256 must describe the exact published jar bytes.
 
 ## Non-goals
 
