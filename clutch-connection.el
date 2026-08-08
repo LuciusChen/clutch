@@ -2656,22 +2656,23 @@ signal that nothing was committed."
      "Transaction state is uncertain; roll back or reconnect instead of committing"))
   (unless (clutch-db-manual-commit-p clutch-connection)
     (user-error "Connection is in autocommit mode"))
-  (condition-case err
-      (let ((outcome (clutch-db-commit clutch-connection)))
-        (if (eq outcome 'rolled-back)
-            (progn
-              (clutch--mark-dml-results-rolled-back clutch-connection)
-              (clutch--clear-tx-state clutch-connection)
-              (user-error
-               "Transaction had already failed and was rolled back; nothing was committed"))
-          (clutch--mark-dml-results-committed clutch-connection)
+  (let ((outcome
+         (condition-case err
+             (clutch-db-commit clutch-connection)
+           ((error quit)
+            (clutch--set-tx-uncertain clutch-connection)
+            (user-error
+             "%s; commit outcome is uncertain, roll back or reconnect"
+             (clutch--humanize-db-error (error-message-string err)))))))
+    (if (eq outcome 'rolled-back)
+        (progn
+          (clutch--mark-dml-results-rolled-back clutch-connection)
           (clutch--clear-tx-state clutch-connection)
-          (message "Transaction committed")))
-    ((error quit)
-     (clutch--set-tx-uncertain clutch-connection)
-     (user-error
-      "%s; commit outcome is uncertain, roll back or reconnect"
-      (clutch--humanize-db-error (error-message-string err))))))
+          (user-error
+           "Transaction had already failed and was rolled back; nothing was committed"))
+      (clutch--mark-dml-results-committed clutch-connection)
+      (clutch--clear-tx-state clutch-connection)
+      (message "Transaction committed"))))
 
 ;;;###autoload
 (defun clutch-rollback ()

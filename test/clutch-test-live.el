@@ -20,6 +20,7 @@
 (defvar clutch-test-url)
 (defvar clutch-test-display-name)
 (defvar clutch-test-props)
+(defvar clutch-test-driver-class nil)
 (defvar clutch--result-server-pageable)
 (defvar clutch--result-server-rewritable)
 
@@ -38,9 +39,30 @@
       (setq params (plist-put params :password clutch-test-password)))
     (when clutch-test-display-name
       (setq params (plist-put params :display-name clutch-test-display-name)))
+    (when clutch-test-driver-class
+      (setq params (plist-put params :driver-class clutch-test-driver-class)))
     (when clutch-test-props
       (setq params (plist-put params :props clutch-test-props)))
     params))
+
+(ert-deftest clutch-test-live-connect-params-pass-driver-options ()
+  :tags '(:clutch-live)
+  "Generic JDBC live params should pass an optional driver class."
+  (let ((clutch-test-url "jdbc:duckdb:/tmp/clutch-test.duckdb")
+        (clutch-test-host nil)
+        (clutch-test-port nil)
+        (clutch-test-user nil)
+        (clutch-test-password nil)
+        (clutch-test-database nil)
+        (clutch-test-display-name "DuckDB")
+        (clutch-test-driver-class "org.duckdb.DuckDBDriver")
+        (clutch-test-props nil))
+    (let ((params (clutch-test--live-connect-params)))
+      (should (equal (plist-get params :driver-class)
+                     "org.duckdb.DuckDBDriver")))
+    (let ((clutch-test-driver-class nil))
+      (should-not
+       (plist-member (clutch-test--live-connect-params) :driver-class)))))
 
 (defun clutch-test--clickhouse-live-p ()
   "Return non-nil when live tests target ClickHouse."
@@ -197,6 +219,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (caar (clutch-db-result-rows
                        (clutch-db-query
                         conn "SELECT current_catalog(), current_schema()"))))
+          (should (member original (clutch-db-list-schemas conn)))
           (clutch-db-query conn "CREATE SCHEMA \"odd.schema\"")
           (unwind-protect
               (progn
@@ -682,6 +705,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   "A failed Manual submission should preserve earlier work and undo its own prefix."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
+  (unless (clutch-test-live-backend-capability-p :manual-savepoint)
+    (ert-skip (clutch-test-capability-skip-message :manual-savepoint)))
   (clutch-test--with-conn conn
     (unless (clutch-db-manual-commit-supported-p conn)
       (ert-skip "This regression requires manual-commit support"))

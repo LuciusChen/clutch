@@ -194,6 +194,8 @@ PostgreSQL connections accept `:sslmode` with `disable`, `prefer`, `require`, an
 
 Each parameter is a value/type pair. `pgsql-null` is SQL NULL, while Lisp `nil` is PostgreSQL boolean false. See the [`pgsql.el` README](https://github.com/LuciusChen/pgsql.el) for protocol usage and its public API; Clutch keeps the returned client opaque and owns the query-console, metadata, rendering, and manual-transaction workflow.
 
+PostgreSQL array text with explicit bounds, such as `[0:2]={1,2,3}`, is sent unchanged, so the server receives the requested lower bound. Result decoding normalizes arrays to Lisp vectors and therefore does not preserve explicit bound metadata; inspect bounds with `array_lower` when they matter instead of relying on an edit round trip through a result cell.
+
 ### Transaction Control in clutch
 
 - PostgreSQL does not expose a session autocommit toggle like MySQL
