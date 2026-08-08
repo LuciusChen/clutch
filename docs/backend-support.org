@@ -22,7 +22,7 @@ MongoDB SQL Interface is not another backend.  It is the optional =:surface sql-
 
 * DuckDB Boundary
 
-DuckDB belongs with SQL-first databases, not with document/basic support.  Its data model, query language, metadata, and mutation behavior are close to the core clutch SQL workflow.  The current integration is through the generic JDBC backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC driver.  =clutch-switch-schema= lists and switches schemas only in the current file-backed catalog.  Pure in-memory URLs and attached catalogs are deliberately excluded because those databases or =ATTACH= state belong to one JDBC session while Clutch's metadata sidecar uses a separate session; use qualified =catalog.schema.table= names for attached catalogs.
+DuckDB belongs with SQL-first databases, not with document/basic support.  Its data model, query language, metadata, and mutation behavior are close to the core clutch SQL workflow.  The current integration is through the generic JDBC backend with a =jdbc:duckdb:...= URL and the auto-installable DuckDB JDBC driver.  =clutch-switch-schema= lists and switches schemas only in the current file-backed catalog.  Pure in-memory URLs and attached catalogs are deliberately excluded because those databases or =ATTACH= state belong to one JDBC session while Clutch's metadata sidecar uses a separate session; use qualified =catalog.schema.table= names for attached catalogs.  The current DuckDB JDBC driver does not expose savepoints, so Manual-mode staged submission is rejected before any staged DML runs; switch the connection to Auto mode to submit that batch.
 
 * Redis And Similar Systems
 

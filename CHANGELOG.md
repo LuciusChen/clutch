@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept DuckDB's default `main` schema visible in schema switching by filtering `duckdb_schemas()` to the current catalog instead of excluding schemas DuckDB marks as internal; the `system` and `temp` catalogs remain hidden.
 - Preserved PostgreSQL boolean false values as `false` instead of displaying and exporting them as SQL NULL. The native pg-el boundary now assigns SQL NULL a distinct private marker during ordinary and prepared queries, normalizes it back to Clutch's NULL representation afterward, and carries false mutation parameters back to PostgreSQL without turning them into NULL.
 - Displayed and copied PostgreSQL boolean true as `true` to match `false`, instead of pg-el's raw `t` rendering. Result tables, cell previews, copy/export, and edit-buffer prefill now all use the same `true`/`false` spelling.
 - Stopped JDBC boolean false from leaking Clutch's private JSON false sentinel into results. The JDBC row boundary now normalizes decoded JSON false — including values nested in lists and vectors — to the generic `:false`, so false cells display and copy as `false` and edit back as a real boolean instead of a literal sentinel string.

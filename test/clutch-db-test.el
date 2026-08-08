@@ -3824,6 +3824,24 @@ back out in Extended JSON instead of handing `json-encode' a record."
       (should (equal (clutch-db-list-schemas conn)
                      '("APP_USER" "ANALYTICS" "SALES"))))))
 
+(ert-deftest clutch-db-test-jdbc-duckdb-list-schemas-keeps-default-main ()
+  "DuckDB schema listing should keep `main' in the current catalog."
+  (let ((conn (make-clutch-jdbc-conn
+               :driver 'jdbc
+               :params '(:driver jdbc
+                         :url "jdbc:duckdb:/tmp/clutch-test.duckdb")))
+        captured-sql)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-clutch-db-result :rows '(("main") ("reporting"))))))
+      (should (equal (clutch-db-list-schemas conn) '("main" "reporting")))
+      (should
+       (equal captured-sql
+              (concat "SELECT schema_name FROM duckdb_schemas() "
+                      "WHERE database_name = current_catalog() "
+                      "ORDER BY schema_name"))))))
+
 (ert-deftest clutch-db-test-jdbc-duckdb-switches-current-catalog-schema ()
   "DuckDB JDBC should switch a schema within the current catalog."
   (let ((conn (make-clutch-jdbc-conn
@@ -4333,25 +4351,32 @@ back out in Extended JSON instead of handing `json-encode' a record."
   "PostgreSQL prepared results and parameters should distinguish false and NULL."
   (require 'clutch-db-pg)
   (let ((conn (clutch-db-test--make-pgcon :database "test"))
+        observed-sql
         observed-arguments
         observed-null-marker)
     (cl-letf (((symbol-function 'pg-exec-prepared)
-               (lambda (context _sql arguments &rest _options)
-                 (setq observed-arguments arguments
+               (lambda (context sql arguments &rest _options)
+                 (setq observed-sql sql
+                       observed-arguments arguments
                        observed-null-marker pg-null-marker)
                  (make-pgresult
                   :connection context
                   :attributes `(("boolean_false" ,clutch-db-pg--oid-bool 1)
-                                ("sql_null" 25 -1))
-                  :tuples `((nil ,pg-null-marker))))))
+                                ("sql_null" 25 -1)
+                                ("boolean_true" ,clutch-db-pg--oid-bool 1))
+                  :tuples `((nil ,pg-null-marker t))))))
       (let ((result
              (clutch-db-execute-params
-              conn "SELECT ?::bool, NULL::text"
-              (list (clutch-db-typed-param :false "bool")))))
+              conn "SELECT ?::bool, ?::text, ?::bool"
+              (list (clutch-db-typed-param :false "bool")
+                    (clutch-db-typed-param nil "text")
+                    (clutch-db-typed-param t "bool")))))
         (should observed-null-marker)
-        (should (equal observed-arguments '(("false"))))
+        (should (equal observed-sql
+                       "SELECT $1::bool, NULL::text, $2::bool"))
+        (should (equal observed-arguments '(("false") (t))))
         (should (equal (clutch-db-result-rows result)
-                       '((:false nil))))))))
+                       '((:false nil t))))))))
 
 ;;;; Unit tests — SQL building (paged queries)
 
@@ -5408,6 +5433,19 @@ Skips if `clutch-db-test-pg-password' is nil."
  clutch-db-test--with-pg
  (:db-live :pg-live)
  "PostgreSQL")
+
+(ert-deftest clutch-db-test-pg-live-prepared-false-null-true-contract ()
+  :tags '(:db-live :pg-live)
+  "PostgreSQL prepared parameters should preserve false, NULL, and true."
+  (clutch-db-test--with-pg conn
+    (let ((result
+           (clutch-db-execute-params
+            conn "SELECT ?::bool, ?::text, ?::bool"
+            (list (clutch-db-typed-param :false "bool")
+                  (clutch-db-typed-param nil "text")
+                  (clutch-db-typed-param t "bool")))))
+      (should (equal (clutch-db-result-rows result)
+                     '((:false nil t)))))))
 
 (ert-deftest clutch-db-test-pg-live-authinfo-profile-provides-backend ()
   :tags '(:db-live :pg-live)

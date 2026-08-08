@@ -104,7 +104,9 @@
         (clutch-test-url "jdbc:duckdb:/tmp/clutch-test.duckdb"))
     (should (eq (clutch-test-live-backend-id) 'duckdb))
     (should (clutch-test-live-backend-capability-p :result-workflow))
-    (should (clutch-test-live-backend-capability-p :updateable-workflow)))
+    (should (clutch-test-live-backend-capability-p :updateable-workflow))
+    (should-not
+     (clutch-test-live-backend-capability-p :manual-savepoint)))
   (let ((clutch-test-backend 'clickhouse)
         (clutch-test-url nil))
     (should (eq (clutch-test-live-backend-id) 'clickhouse))
@@ -113,6 +115,11 @@
      (clutch-test-live-backend-capability-p :updateable-workflow)))
   (should (clutch-test-live-backend-capability-p :object-describe 'mysql))
   (should (clutch-test-live-backend-capability-p :ctid-row-identity 'pg))
+  (dolist (backend '(mysql pg sqlserver oracle))
+    (should
+     (clutch-test-live-backend-capability-p :manual-savepoint backend)))
+  (should-not
+   (clutch-test-live-backend-capability-p :manual-savepoint 'jdbc))
   (should-not (clutch-test-live-backend-capability-p :result-workflow
                                                      'mongodb))
   (should (string-match-p

@@ -15,21 +15,21 @@
   '((:id mysql
      :backend mysql
      :display-name "MySQL"
-     :capabilities (:result-workflow :updateable-workflow :object-describe
-                    :duplicate-column-join))
+     :capabilities (:result-workflow :updateable-workflow :manual-savepoint
+                    :object-describe :duplicate-column-join))
     (:id pg
      :backend pg
      :display-name "PostgreSQL"
-     :capabilities (:result-workflow :updateable-workflow :object-describe
-                    :ctid-row-identity))
+     :capabilities (:result-workflow :updateable-workflow :manual-savepoint
+                    :object-describe :ctid-row-identity))
     (:id sqlserver
      :backend sqlserver
      :display-name "SQL Server"
-     :capabilities (:result-workflow :updateable-workflow))
+     :capabilities (:result-workflow :updateable-workflow :manual-savepoint))
     (:id oracle
      :backend oracle
      :display-name "Oracle"
-     :capabilities (:result-workflow :updateable-workflow
+     :capabilities (:result-workflow :updateable-workflow :manual-savepoint
                     :uppercase-identifiers))
     (:id clickhouse
      :backend clickhouse
