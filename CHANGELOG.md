@@ -12,7 +12,8 @@
 
 ### Fixed
 
-- Allowed PostgreSQL array parameters with explicit dimension bounds, such as `[0:2]={1,2,3}`, by passing them through as native array syntax instead of rejecting them; `pgsql.el` parses dimension-prefixed array results on read.
+- Kept DuckDB's default `main` schema visible in schema switching by filtering `duckdb_schemas()` to the current catalog instead of excluding schemas DuckDB marks as internal; the `system` and `temp` catalogs remain hidden.
+- Allowed PostgreSQL array parameters with explicit dimension bounds, such as `[0:2]={1,2,3}`, by passing them through as native array syntax instead of rejecting them. Result decoding still normalizes arrays to vectors and does not preserve explicit bound metadata.
 - Kept native PostgreSQL responses synchronized through completion input, server errors, and cancellation so later queries and metadata can reuse the connection safely.
 - Preserved PostgreSQL boolean false values as `false` instead of displaying and exporting them as SQL NULL. The native pgsql.el boundary assigns SQL NULL `pgsql-null`, normalizes it back to Clutch's NULL representation afterward, and carries false mutation parameters back to PostgreSQL without turning them into NULL.
 - Displayed and copied PostgreSQL boolean true as `true` to match `false`, instead of pgsql.el's raw `t` rendering. Result tables, cell previews, copy/export, and edit-buffer prefill now all use the same `true`/`false` spelling.

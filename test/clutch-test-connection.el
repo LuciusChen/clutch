@@ -1887,10 +1887,12 @@ and the ssh -N process has no owner yet at that point."
               ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
       (let ((err (should-error (clutch-commit) :type 'user-error)))
         (should (string-match-p "nothing was committed"
-                                (error-message-string err))))
+                                (error-message-string err)))
+        (should-not (string-match-p "outcome is uncertain"
+                                    (error-message-string err))))
       (should rolled-back)
       (should-not committed)
-      (should-not (clutch--tx-dirty-p clutch-connection)))))
+      (should-not (clutch--tx-state clutch-connection)))))
 
 (ert-deftest clutch-test-session-teardown-step-matrix ()
   "Each teardown kind should run exactly the steps it documents.
