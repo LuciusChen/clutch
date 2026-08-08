@@ -1941,13 +1941,15 @@ current database."
    ((and (clutch-jdbc--duckdb-conn-p conn)
          (not (member (plist-get (clutch-jdbc-conn-params conn) :url)
                       '("jdbc:duckdb:" "jdbc:duckdb::memory:"))))
+    ;; DuckDB marks the default `main' schema as internal, so filter by
+    ;; catalog instead; `system' and `temp' databases remain hidden.
     (cl-loop
      for row in
      (clutch-db-result-rows
       (clutch-db-query
        conn
        (concat "SELECT schema_name FROM duckdb_schemas() "
-               "WHERE NOT internal AND database_name = current_catalog() "
+               "WHERE database_name = current_catalog() "
                "ORDER BY schema_name")))
      for schema = (car row)
      when (and (stringp schema) (not (string-empty-p schema)))
