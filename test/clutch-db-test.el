@@ -1650,10 +1650,14 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                      :params '(:driver oracle :schema "CLUTCH"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
                (lambda (_op _params &optional _timeout-seconds)
-                 '(:columns ((:name "PK_MAIN" :type "CHAR" :nullable :json-false)
-                             (:name "TYPE" :type "VARCHAR2" :nullable :json-false)
-                             (:name "ACTION" :type "VARCHAR2" :nullable :json-false)
-                             (:name "mixedCase" :type "VARCHAR2" :nullable :json-false))))))
+                 `(:columns ((:name "PK_MAIN" :type "CHAR"
+                             :nullable ,clutch-jdbc--json-false)
+                             (:name "TYPE" :type "VARCHAR2"
+                             :nullable ,clutch-jdbc--json-false)
+                             (:name "ACTION" :type "VARCHAR2"
+                             :nullable ,clutch-jdbc--json-false)
+                             (:name "mixedCase" :type "VARCHAR2"
+                             :nullable ,clutch-jdbc--json-false))))))
       (let ((ddl (clutch-db-object-definition
                   conn '(:name "APP_EVENT_DATA" :type "TABLE"))))
         (should (string-match-p "CREATE TABLE APP_EVENT_DATA" ddl))
@@ -3194,10 +3198,12 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
               ((symbol-function 'message)
                (lambda (&rest _args) nil)))
       (should (clutch-jdbc--dispatch-async-response
-               '(:id 77 :ok :json-false :error "metadata blew up")))
+               `(:id 77 :ok ,clutch-jdbc--json-false :error "metadata blew up")))
       (should (equal remembered
-                     '(conn-77 get-tables
-                               (:id 77 :ok :json-false :error "metadata blew up"))))
+                     `(conn-77 get-tables
+                               (:id 77 :ok
+                                ,clutch-jdbc--json-false
+                                :error "metadata blew up"))))
       (should (equal errback-message "metadata blew up")))))
 
 (ert-deftest clutch-db-test-jdbc-dispatch-async-response-skips-disconnected-conn ()
@@ -3423,6 +3429,19 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
              ((1 "str" nil t) (1 "str" nil t))))
     (pcase-let ((`(,row ,expected) case))
       (should (equal (clutch-jdbc--normalize-row row) expected)))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-maps-json-false-sentinel ()
+  "JDBC JSON false sentinels should become the generic :false in rows."
+  (let* ((sentinel clutch-jdbc--json-false)
+         (row (list sentinel t nil :false
+                    (list :flag sentinel
+                          :nested (list sentinel "x"))
+                    (vector sentinel 7)))
+         (expected (list :false t nil :false
+                         (list :flag :false
+                               :nested (list :false "x"))
+                         (vector :false 7))))
+    (should (equal (clutch-jdbc--normalize-row row) expected))))
 
 ;;;; Unit tests — registered JDBC driver support
 
