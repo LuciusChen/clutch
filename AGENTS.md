@@ -286,7 +286,7 @@ Default ERT runs skip live tests when credentials are unset. For changes touchin
 ./test/run-ci.sh native-live
 ```
 
-The native live runner starts or reuses local containers, preferring Podman on Linux and OrbStack-backed Docker on macOS. It runs both UI-level `:clutch-live` tests and backend-level `:pg-live` / `:mysql-live` / `:mongodb-live` / `:redis-live` tests. JDBC live tests remain separate because they require external credentials.
+The native live runner starts or reuses local containers, preferring Podman on Linux and OrbStack-backed Docker on macOS. Its baseline runs UI PostgreSQL/MySQL plus backend PostgreSQL/MySQL/cross-SQL and native MongoDB/Redis. Setting `CLUTCH_TEST_JDBC_AGENT_JAR` to an exact release-candidate jar expands the same run with UI Oracle JDBC, SQL Server JDBC, ClickHouse JDBC, and generic JDBC via DuckDB, plus backend `:oracle-live` / `:mssql-live` / `:clickhouse-live` tests; this explicit gate remains until that agent version is published and pinned. Set `CLUTCH_TEST_JDBC_AGENT_DIR` as well to reuse the isolated agent/driver cache. MongoDB SQL Interface and other service-specific JDBC endpoints remain in the separately configured `db-live` suite because a community `mongod` container does not provide that surface.
 
 ### 3. Byte-compile with zero warnings
 
