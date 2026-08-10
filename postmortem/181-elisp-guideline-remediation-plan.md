@@ -1,6 +1,6 @@
 # 181 — Elisp guideline remediation plan
 
-> **Status:** Phases 0 and 1 are complete on `plan/elisp-live-remediation`.
+> **Status:** Phases 0 through 2 are complete on `plan/elisp-live-remediation`.
 > Later phases remain planned work. No dates or effort estimates are part of the
 > plan.
 
@@ -20,6 +20,15 @@
   byte compilation, package lint, checkdoc, and 13 architecture tests.
 - Oracle/JDBC completion remains unchanged and issue-specific Oracle live
   reproduction remains unavailable, so it is still outside Phase 1.
+- The Phase 2 fail-first macro tests reproduced the lexical-capture defect: the
+  database-error handler received the condition object where a caller's
+  connection expression named `err` was expected. The successful path and
+  unrelated programmer-error propagation already behaved correctly.
+- Phase 2 now uses a fresh uninterned condition symbol and supplies an Edebug
+  form specification. The focused tests pass 3/3, the object module passes
+  62/62, the complete non-live gate passes with 544 main and 220 backend ERT
+  tests, and the post-fix Podman baseline remains 55 expected results, seven
+  expected skips, and no unexpected results.
 
 ## Purpose and evidence boundary
 

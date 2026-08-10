@@ -1357,14 +1357,15 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
 
 (defmacro clutch--with-object-error-capture (buffer conn entry op &rest body)
   "Execute BODY; on clutch-db-error, record to BUFFER/CONN/ENTRY/OP and re-signal."
-  (declare (indent 4))
-  `(condition-case err
-       (progn
-         ,@body
-         (clutch--clear-connection-problem-capture ,conn))
-     (clutch-db-error
-      (clutch--remember-object-operation-error ,buffer ,conn ,entry ,op err)
-      (signal (car err) (cdr err)))))
+  (declare (indent 4) (debug (form form form form body)))
+  (let ((err (make-symbol "err")))
+    `(condition-case ,err
+         (progn
+           ,@body
+           (clutch--clear-connection-problem-capture ,conn))
+       (clutch-db-error
+        (clutch--remember-object-operation-error ,buffer ,conn ,entry ,op ,err)
+        (signal (car ,err) (cdr ,err))))))
 
 ;;;###autoload
 (defun clutch-describe-refresh (&optional ignore-auto _noconfirm)
