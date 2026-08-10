@@ -633,7 +633,7 @@ merges."
         (type (clutch-db-param-type param)))
     (cond
      ((eq value :false) (cons "false" nil))
-     ((and (not (null value))
+     ((and value
            (clutch-db-pg--array-type-name-p type))
       (cons (clutch-db-pg--array-literal-string value type) nil))
      (t (cons value nil)))))
@@ -889,7 +889,7 @@ when non-nil."
 (cl-defmethod clutch-db-value-to-typed-literal
     ((conn pgcon) value type fallback-format-fn)
   "Render VALUE as a PostgreSQL literal for CONN using TYPE metadata."
-  (if (and (not (null value))
+  (if (and value
            (clutch-db-pg--array-type-name-p type))
       (clutch-db-escape-literal
        conn

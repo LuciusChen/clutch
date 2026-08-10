@@ -1876,7 +1876,7 @@ Header controls tabular copy formats and defaults to Yes."
                      (when (and (not (bobp))
                                 (eq (char-after) ?\;))
                        (backward-char))
-                     (when (not (eobp))
+                     (unless (eobp)
                        (sql-from-bounds (clutch--dwim-bounds-at-point))))))))
     (let ((sql
            (cond

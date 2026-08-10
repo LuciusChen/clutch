@@ -47,7 +47,7 @@
   "Return a space-joined string of constraint annotations for COL plist."
   (string-join
    (delq nil
-         (list (when (not (plist-get col :nullable))
+         (list (unless (plist-get col :nullable)
                  (propertize "NOT NULL" 'face 'font-lock-keyword-face))
                (when (plist-get col :primary-key)
                  (propertize "PK" 'face 'font-lock-builtin-face))
@@ -527,9 +527,9 @@ not treat schema qualifiers in `schema.table' as aliases."
                        (xref-make-buffer-location (current-buffer) pos)))
     (when-let* ((table (clutch--xref-source-table-at-point))
                 ((string-equal (downcase identifier) (downcase table))))
-	      (user-error
-	       "%s is already a source table in this statement; xref jumps SQL aliases only; use C-c C-d or C-c C-j for table lookup"
-	       table))))
+      (user-error
+       "%s is already a source table in this statement; xref jumps SQL aliases only; use C-c C-d or C-c C-j for table lookup"
+       table))))
 
 (cl-defmethod xref-backend-references ((_backend (eql 'clutch)) _identifier)
   "Not yet implemented."
@@ -1273,7 +1273,7 @@ control backend column loading."
 
 (defun clutch--completion-empty-column-bounds ()
   "Return point bounds for empty-slot column completion, or nil."
-  (when (not (clutch--completion-table-context-p (point)))
+  (unless (clutch--completion-table-context-p (point))
     (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
                  (sql (buffer-substring-no-properties beg end))
                  (offset (- (point) beg))

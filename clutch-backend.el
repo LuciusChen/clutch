@@ -1742,31 +1742,31 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
 
 (defvar clutch-backend--registry
   '((mysql  . (:require clutch-db-mysql
-	       :aliases (mariadb)
-	       :connect-fn clutch-db-mysql-connect
-	       :normalize-fn clutch-db-mysql--normalize-connect-params
-	       :display-name "MySQL"
-	       :default-port 3306
-	       :support-level core
-	       :data-model relational
-	       :update-default t
-	       :sql-product mysql))
+               :aliases (mariadb)
+               :connect-fn clutch-db-mysql-connect
+               :normalize-fn clutch-db-mysql--normalize-connect-params
+               :display-name "MySQL"
+               :default-port 3306
+               :support-level core
+               :data-model relational
+               :update-default t
+               :sql-product mysql))
     (pg     . (:require clutch-db-pg
-	       :aliases (postgres postgresql)
-	       :connect-fn clutch-db-pg-connect
-	       :normalize-fn clutch-db-pg--normalize-connect-params
-	       :display-name "PostgreSQL"
-	       :default-port 5432
-	       :support-level core
-	       :data-model relational
-	       :update-default t
-	       :sql-product postgres))
+               :aliases (postgres postgresql)
+               :connect-fn clutch-db-pg-connect
+               :normalize-fn clutch-db-pg--normalize-connect-params
+               :display-name "PostgreSQL"
+               :default-port 5432
+               :support-level core
+               :data-model relational
+               :update-default t
+               :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
-	       :connect-fn clutch-db-sqlite-connect
-	       :display-name "SQLite"
-	       :support-level core
-	       :data-model relational
-	       :sql-product sqlite))
+               :connect-fn clutch-db-sqlite-connect
+               :display-name "SQLite"
+               :support-level core
+               :data-model relational
+               :sql-product sqlite))
     (mongodb . (:require clutch-mongodb
                 :aliases (mongo)
                 :connect-fn clutch-mongodb-connect
