@@ -1799,6 +1799,12 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
           (clutch-mongodb--profile-stats-for-docs
            (clutch-mongodb--sample-documents conn collection))))
 
+(cl-defmethod clutch-db-list-columns-async
+    ((conn clutch-mongodb-conn) collection callback &optional errback)
+  "Fetch field paths for COLLECTION on CONN when the main thread is idle."
+  (clutch-db--schedule-idle-metadata-call
+   conn callback errback #'clutch-db-list-columns nil collection))
+
 (cl-defmethod clutch-db-column-details ((conn clutch-mongodb-conn) collection)
   "Return sampled column details for MongoDB COLLECTION on CONN."
   (clutch-mongodb--column-details-for-docs

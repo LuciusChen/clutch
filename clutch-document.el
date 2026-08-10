@@ -334,14 +334,17 @@ after a helper call."
     collection))
 
 (defun clutch-mongodb--collection-columns (schema collection)
-  "Return field names for COLLECTION using SCHEMA and lazy metadata loading."
+  "Return cached field names for COLLECTION from SCHEMA.
+Defer missing metadata when the connection is idle."
   (or (clutch--cached-columns schema collection)
-      (and clutch-connection
-           schema
-           (not (clutch-db-busy-p clutch-connection))
-           (clutch--safe-completion-call
-            (lambda ()
-              (clutch--ensure-columns clutch-connection schema collection))))))
+      (when (and clutch-connection
+                 schema
+                 (not (clutch-db-busy-p clutch-connection)))
+        (clutch--safe-completion-call
+         (lambda ()
+           (clutch--ensure-columns-async
+            clutch-connection schema collection)))
+        nil)))
 
 (defun clutch-mongodb--field-candidates (&optional field-path-p)
   "Return MongoDB field candidates.

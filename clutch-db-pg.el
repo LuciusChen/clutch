@@ -761,6 +761,10 @@ No special init needed — encoding is set in startup message.")
   "PostgreSQL schema refresh should not block connect."
   nil)
 
+(cl-defmethod clutch-db-completion-deferred-columns-p ((_conn pgcon))
+  "PostgreSQL completion should hydrate uncached columns when idle."
+  t)
+
 ;;;; Transaction methods
 
 (cl-defmethod clutch-db-manual-commit-p ((conn pgcon))

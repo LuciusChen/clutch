@@ -351,6 +351,10 @@ Return nil when TEXT has no Syntax section."
   "MySQL schema refresh should not block connect."
   nil)
 
+(cl-defmethod clutch-db-completion-deferred-columns-p ((_conn mysql-conn))
+  "MySQL completion should hydrate uncached columns when idle."
+  t)
+
 ;;;; Transaction methods
 
 (cl-defmethod clutch-db-manual-commit-p ((conn mysql-conn))

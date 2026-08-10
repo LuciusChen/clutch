@@ -9,6 +9,7 @@
 (eval-and-compile
   (require 'clutch-test-common)
   (require 'clutch-document)
+  (require 'clutch-mongodb)
   (require 'clutch-redis))
 
 (defvar tramp-rpc-use-controlmaster)
@@ -2343,6 +2344,75 @@ replacement connection would run the statement against an empty transaction."
                      t)))
           (clutch-mongodb-complete-at-point)
           (should (equal (buffer-string) "db.users.find()")))))))
+
+(ert-deftest clutch-test-mongodb-completion-defers-uncached-field-sampling ()
+  "Installed MongoDB CAPF should defer uncached field metadata sampling."
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((schema (make-hash-table :test 'equal))
+           (conn (make-clutch-mongodb-conn :database "test"))
+           (sync-samples 0)
+           (scheduled nil))
+      (puthash "orders" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-live-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-list-columns)
+                 (lambda (&rest _args)
+                   (cl-incf sync-samples)
+                   '("status")))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (delay repeat function &rest args)
+                   (push (list delay repeat function args) scheduled)
+                   'fake-timer))
+                ((symbol-function 'completion-in-region)
+                 (lambda (&rest _args) t)))
+        (with-temp-buffer
+          (clutch-mongodb-mode)
+          (setq-local clutch-connection conn)
+          (should (memq #'clutch-mongodb-completion-at-point
+                        completion-at-point-functions))
+          (insert "db.orders.find({st")
+          (completion-at-point)
+          (should (= sync-samples 0))
+          (should (= (length scheduled) 1))
+          (pcase-let ((`((,delay ,repeat ,_function ,_args)) scheduled))
+            (should (numberp delay))
+            (should (<= 0 delay 0.1))
+            (should-not repeat)))))))
+
+(ert-deftest clutch-test-mongodb-completion-keeps-cached-fields-and-operators ()
+  "Installed MongoDB CAPF should preserve cached fields and operators."
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((schema (make-hash-table :test 'equal))
+           (conn (make-clutch-mongodb-conn :database "test"))
+           (captured nil))
+      (puthash "orders" '("status" "userId") schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-list-columns)
+                 (lambda (&rest _args)
+                   (ert-fail "cached completion sampled documents synchronously")))
+                ((symbol-function 'clutch-db-list-columns-async)
+                 (lambda (&rest _args)
+                   (ert-fail "cached completion queued field metadata")))
+                ((symbol-function 'completion-in-region)
+                 (lambda (beg end collection &optional predicate)
+                   (setq captured
+                         (all-completions
+                          (buffer-substring-no-properties beg end)
+                          collection predicate))
+                   t)))
+        (with-temp-buffer
+          (clutch-mongodb-mode)
+          (setq-local clutch-connection conn)
+          (insert "db.orders.find({st")
+          (completion-at-point)
+          (should (equal captured '("status")))
+          (erase-buffer)
+          (insert "db.orders.aggregate([{$")
+          (completion-at-point)
+          (should (member "$match" captured)))))))
 
 (ert-deftest clutch-test-mongodb-explain-query-at-point-uses-current-helper ()
   "MongoDB explain command should explain the current helper at point."

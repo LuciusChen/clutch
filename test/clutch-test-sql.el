@@ -1045,6 +1045,63 @@ Structure is not interpreted here; callers confirm depth and literals through
           (should (equal (buffer-string)
                          "select * from users GROUP BY ")))))))
 
+(ert-deftest clutch-test-native-sql-capf-defers-uncached-column-metadata ()
+  "Native SQL CAPF should defer uncached column metadata for PG and MySQL."
+  (dolist (backend '(pg mysql))
+    (ert-info ((format "backend: %s" backend))
+      (clutch-test--with-isolated-metadata-caches
+        (let ((schema (make-hash-table :test 'equal))
+              (clutch-connection nil)
+              (deferred-requests 0))
+          (puthash "users" nil schema)
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection 'fake-conn)
+            (insert "select nam from users")
+            (goto-char (point-min))
+            (search-forward "nam")
+            (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                       (lambda (&optional _conn) schema))
+                      ((symbol-function 'clutch-db-completion-deferred-columns-p)
+                       (lambda (_conn) backend))
+                      ((symbol-function 'clutch-db-busy-p)
+                       (lambda (_conn) nil))
+                      ((symbol-function 'clutch-db-live-p)
+                       (lambda (_conn) t))
+                      ((symbol-function 'clutch--ensure-columns)
+                       (lambda (&rest _args)
+                         (ert-fail
+                          "uncached native completion called synchronous column metadata")))
+                      ((symbol-function 'clutch-db-list-columns)
+                       (lambda (&rest _args)
+                         (ert-fail
+                          "uncached native completion called synchronous column listing")))
+                      ((symbol-function 'clutch-db-list-columns-async)
+                       (lambda (_conn table _callback &optional _errback)
+                         (should (equal table "users"))
+                         (cl-incf deferred-requests)
+                         t)))
+              (should-not (completion-at-point))
+              (should (= deferred-requests 1))
+              (puthash "users" '("name" "id") schema)
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection 'fake-conn)
+                (insert "select nam from users")
+                (goto-char (point-min))
+                (search-forward "nam")
+                (let (captured)
+                  (cl-letf ((completion-in-region-function
+                             (lambda (start end collection &optional predicate)
+                               (setq captured
+                                     (all-completions
+                                      (buffer-substring-no-properties start end)
+                                      collection predicate))
+                               t)))
+                    (should (completion-at-point)))
+                  (should (equal captured '("name")))
+                  (should (= deferred-requests 1)))))))))))
+
 (ert-deftest clutch-test-completion-at-point-uses-current-columns-at-empty-sql-slots ()
   "CAPF should complete visible columns at empty SQL expression positions."
   (dolist (sql '("select | from users u join orders o on u.id = o.user_id"
