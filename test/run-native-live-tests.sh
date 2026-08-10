@@ -518,7 +518,7 @@ if ((jdbc_live_enabled)); then
   wait_clickhouse
   prepare_jdbc_runtime
 else
-  log "JDBC container matrix disabled; set CLUTCH_TEST_JDBC_AGENT_JAR to a release-candidate jar"
+  log "JDBC container matrix disabled; set CLUTCH_TEST_JDBC_AGENT_JAR to an exact agent jar"
 fi
 
 run_clutch_live_pg
