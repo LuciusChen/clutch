@@ -856,9 +856,9 @@ Refresh the affected row and footer in place when possible."
                  (plist-member target-row :original)
                  (plist-member target-row :original-state))
       (user-error "Missing edit target row; reopen the edit buffer"))
-    (when (not (equal identity-vec expected-identity))
+    (unless (equal identity-vec expected-identity)
       (user-error "Edited row changed; reopen the edit buffer"))
-    (when (not (equal (nth cidx row) original))
+    (unless (equal (nth cidx row) original)
       (user-error "Edited row changed; reopen the edit buffer"))
     (if (equal new-state original-state)
         (setq clutch--pending-edits

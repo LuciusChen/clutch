@@ -2060,7 +2060,7 @@ The header-line should track body hscroll exactly."
              clutch--column-pixel-metric
              (not (timerp clutch--column-width-refresh-timer)))
     (let ((metric (clutch--pixel-metric-signature)))
-      (when (not (equal metric clutch--column-pixel-metric))
+      (unless (equal metric clutch--column-pixel-metric)
         (setq clutch--column-width-refresh-timer
               (run-at-time 0 nil #'clutch--run-column-width-refresh
                            (current-buffer)))))))
@@ -2305,9 +2305,7 @@ Preserves point position (row + column) across the render."
          (pixel-metric (clutch--pixel-metric-signature))
          (scan-cols (clutch--pixel-layout-scan-columns widths pixel-metric))
          (base-pixel-widths
-          (and scan-cols
-               (not (null clutch--column-pixel-widths))
-               clutch--column-pixel-widths))
+          (and scan-cols clutch--column-pixel-widths))
          (render-state (clutch--prepare-pixel-layout
                         widths rows (clutch--build-render-state)
                         base-pixel-widths nil pixel-metric scan-cols))

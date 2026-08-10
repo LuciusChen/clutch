@@ -1848,8 +1848,8 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
      `(("collection" . ,collection)
        ("configured" . ,(if validator t :false))
        ("validationAction" . ,validation-action)
-	   ("validationLevel" . ,validation-level)
-	   ("validator" . ,validator)))))
+       ("validationLevel" . ,validation-level)
+       ("validator" . ,validator)))))
 
 (defun clutch-mongodb--collection-stats (conn collection)
   "Return collection storage statistics for MongoDB COLLECTION on CONN."
