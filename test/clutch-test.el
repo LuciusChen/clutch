@@ -6433,15 +6433,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should execute)
         (should (eq (oref execute command) #'clutch-execute-dwim))))))
 
-(ert-deftest clutch-test-edit-transient-heading-shows-pending-count ()
-  "Edit transient heading should summarize pending mutation count."
+(ert-deftest clutch-test-edit-transient-heading-shows-staged-count ()
+  "Edit transient heading should summarize staged mutation count."
   (with-temp-buffer
     (setq-local clutch--pending-edits '(edit-a edit-b)
                 clutch--pending-deletes '(delete-a)
                 clutch--pending-inserts '(insert-a insert-b insert-c))
     (should (equal (substring-no-properties
                     (clutch-result--edit-transient-heading))
-                   "Edit (6 pending)"))
+                   "Edit (6 staged)"))
     (setq-local clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil)

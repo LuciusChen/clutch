@@ -378,7 +378,7 @@ so callers cannot apply WHERE before hidden identity columns are injected."
     (if (zerop count)
         "Edit"
       (concat "Edit ("
-              (propertize (format "%d pending" count) 'face 'warning)
+              (propertize (format "%d staged" count) 'face 'warning)
               ")"))))
 
 (defun clutch-result--confirm-discard-pending (prompt cancel-message)
