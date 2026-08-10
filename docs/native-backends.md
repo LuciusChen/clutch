@@ -34,7 +34,7 @@ Run clutch native adapter live tests from the `clutch` checkout:
 ./test/run-native-live-tests.sh
 ```
 
-The runner starts or reuses local Podman containers on Linux or Docker/OrbStack containers on macOS, then executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`.  Default ERT runs skip those live tags unless credentials are provided.
+The runner starts or reuses local Podman containers on Linux or Docker/OrbStack containers on macOS, then executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`. Default ERT runs skip those live tags unless credentials are provided. Setting `CLUTCH_TEST_JDBC_AGENT_JAR` to an exact locally built or release-candidate jar extends the run with container-backed Oracle, SQL Server, ClickHouse, and DuckDB coverage; `CLUTCH_TEST_JDBC_AGENT_DIR` optionally selects its isolated runtime directory. The JDBC extension is disabled when no candidate jar is supplied, so the gate never silently substitutes the published pin.
 
 MongoDB backend details live in [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
 

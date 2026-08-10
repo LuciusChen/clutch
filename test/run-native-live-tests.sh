@@ -170,12 +170,18 @@ start_mysql() {
 
 start_mongo() {
   if container_running_p "$mongo_name"; then
-    log "Reusing MongoDB container $mongo_name"
-    return
+    if ctr inspect --format '{{json .Config.Labels}}' "$mongo_name" 2>/dev/null \
+        | grep -Fq '"io.clutch.test.enable-test-commands":"true"'; then
+      log "Reusing MongoDB container $mongo_name"
+      return
+    fi
+    log "Replacing MongoDB container $mongo_name without test commands"
+    ctr rm -f "$mongo_name" >/dev/null
   fi
   log "Starting MongoDB container $mongo_name on 127.0.0.1:$mongo_port"
   run_container \
     --name "$mongo_name" \
+    --label io.clutch.test.enable-test-commands=true \
     -p "127.0.0.1:${mongo_port}:27017" \
     "$mongo_image" \
     --setParameter enableTestCommands=1

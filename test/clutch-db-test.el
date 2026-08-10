@@ -2123,6 +2123,17 @@ pins the RPC op, prefix param, and connection-scoped timeout."
             (should (equal scheduled '(0 nil)))
             (should (equal callback-result expected))))))))
 
+(ert-deftest clutch-db-test-native-completion-deferred-columns-dispatches-by-adapter ()
+  "PostgreSQL and MySQL adapters should advertise deferred column completion."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (should
+   (clutch-db-completion-deferred-columns-p
+    (make-mysql-conn :host "127.0.0.1" :port 3306)))
+  (should
+   (clutch-db-completion-deferred-columns-p
+    (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432))))
+
 (ert-deftest clutch-db-test-native-schema-refresh-accepts-idle-delay ()
   "Native schema refresh should honor the caller's idle delay."
   (require 'clutch-db-mysql)
@@ -6771,6 +6782,34 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
       (should (clutch-db-result-p result))
       (should (= (length (clutch-db-result-rows result)) 1))
       (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-release-invalidates-later-savepoints ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "Releasing a SQL Server savepoint should invalidate later local handles."
+  (clutch-db-test--with-mssql conn
+    (clutch-db-set-auto-commit conn nil)
+    (let* ((conn-id (clutch-jdbc-conn-conn-id conn))
+           (timeout (clutch-jdbc--conn-rpc-timeout conn))
+           (outer (plist-get
+                   (clutch-jdbc--rpc
+                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                   :savepoint-id))
+           (inner (plist-get
+                   (clutch-jdbc--rpc
+                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                   :savepoint-id)))
+      (clutch-jdbc--rpc
+       "release-savepoint"
+       `((conn-id . ,conn-id) (savepoint-id . ,outer))
+       timeout)
+      (let ((err
+             (should-error
+              (clutch-jdbc--rpc
+               "release-savepoint"
+               `((conn-id . ,conn-id) (savepoint-id . ,inner))
+               timeout)
+              :type 'clutch-db-error)))
+        (should (string-match-p "Unknown savepoint id" (cadr err)))))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-result-workflow ()
   :tags '(:db-live :jdbc-live :mssql-live)
