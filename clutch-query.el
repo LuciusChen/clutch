@@ -90,8 +90,7 @@ Dynamically bound by `clutch--execute-and-mark'.")
 (declare-function clutch-result--check-pending-changes "clutch-result" ())
 (declare-function clutch-result--display-select
                   "clutch-result"
-                  (connection sql result elapsed row-identity-prep
-                              server-pageable result-context source-buffer))
+                  (connection sql result elapsed &rest keyword-args))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
@@ -1156,10 +1155,10 @@ as required after a preceding statement in the same batch."
       (if (plist-get outcome :result-query-p)
           (clutch-result--display-select
            connection sql result elapsed
-           (plist-get outcome :row-identity-prep)
-           (plist-get outcome :server-pageable)
-           (plist-get outcome :result-context)
-           (plist-get outcome :source-buffer))
+           :row-identity-prep (plist-get outcome :row-identity-prep)
+           :server-pageable (plist-get outcome :server-pageable)
+           :result-context (plist-get outcome :result-context)
+           :source-buffer (plist-get outcome :source-buffer))
         (clutch-result--display result sql elapsed))
       result)))
 

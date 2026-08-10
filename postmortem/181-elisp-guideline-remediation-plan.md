@@ -1,8 +1,8 @@
 # 181 — Elisp guideline remediation plan
 
-> **Status:** Phases 0 through 4 are complete on `plan/elisp-live-remediation`.
-> Later phases remain planned work. No dates or effort estimates are part of the
-> plan.
+> **Status:** Phases 0 through 5 are complete on `plan/elisp-live-remediation`.
+> All planned phases have implementation or recorded keep decisions; Oracle's
+> issue-specific live reproduction remains an explicit external hold.
 
 ## Execution evidence
 
@@ -47,6 +47,17 @@
   220 backend, and 13 architecture ERT tests plus byte compilation,
   package-lint, and checkdoc; Podman live passes 55 tests with seven expected
   backend-specific skips and no unexpected results.
+- Phase 5 used a whole-repository Emacs reader inventory, complete caller scans,
+  and an independently verified AgentKnot artifact.  Result lifecycle option
+  tails now use explicit keywords; multi-read object contexts bind each key
+  once; SQL and MongoDB completion use order-preserving `cl-loop`
+  accumulation.  The five result-lifecycle focused tests pass 5/5 and the
+  SQL/object/connection modules pass 252/252 on the host (the sandbox-only
+  socket-bind denial was reproduced and cleared without changing the test).
+  The final complete non-live gate passes 544 main, 220 backend, and 13
+  architecture ERT tests plus byte compilation, package-lint, and checkdoc.
+  The final Podman live gate passes 55 tests with seven expected skips, no
+  unexpected results, and automatic container cleanup.
 
 ## Purpose and evidence boundary
 
@@ -71,7 +82,7 @@ The relevant historical records are `postmortem/028-context-bounded-schema-hints
 | MongoDB documentation ownership is split but currently overlaps | `docs/backend-support.org` owns support levels and the one-backend/SQL-Interface boundary; `docs/mongodb-backend.org` owns Clutch's native query and object workflow but also contains driver-level claims about URLs, SRV, sessions, pooling, and TLS; `README.md` is the landing page and links to the backend guide; `postmortem/104`, `109`, `110`, and `131` define the intended boundary. | Documentation ownership and capability-claim risk; no MongoDB protocol implementation belongs in Clutch. | Phase 3 keeps Clutch-specific workflow facts in Clutch docs, points protocol semantics to `mongodb.el`, and audits public examples for `:backend mongodb :surface sql-interface` rather than an invented second backend or internal JDBC configuration. |
 | Staged and pending vocabulary diverges | `clutch-edit.el` and `clutch-result.el` mostly use “stage”/“staged”, while `docs/interactive-client.org` still says “Submit all pending changes” and “Discard pending change”; `clutch-result.el:367-403` and `clutch-ui.el:1707-1717` use pending-oriented internal names/status, and `clutch-result.el:3784-3794` uses staged transient labels. `postmortem/001`, `004`, `028`, `035`, `115`, `159`, and `177` establish the staged two-step and transaction semantics. | User-visible terminology consistency; internal state names are not automatically defects. | Phase 3 defines one user vocabulary—stage/staged edit, staged deletion, staged insert, submit staged changes, discard staged change—and retains “pending” only where it describes non-mutation runtime state or a literal data value unless a reviewed UI contract requires otherwise. |
 | Deterministic style findings existed, but the scan had to distinguish code from display text | Phase 4 found and converted hard-tab indentation in `clutch-sql.el`, the MySQL/PostgreSQL/SQLite registry entries in `clutch-backend.el`, and `clutch-mongodb.el`. Every retained source tab is inside a keybinding/help docstring where it separates display columns. The six reviewed `(when (not ...))` forms were pure guards, and the three reviewed `(not (null ...))` forms occurred only in condition positions. | Completed mechanical style cleanup; retained docstring tabs are an intentional display contract. | Static rescans, the complete non-live gate, and the full Podman native-live gate passed. |
-| Structural guideline findings are candidates, not automatic defects | A current arity inventory includes `clutch-result--init-state` (11 args including its optional tail), `clutch-result--display-select` (8), `clutch-record--render-field` (11), `clutch--start-table-metadata-request` (8 including its optional tail), `clutch--completion-column-values` (5), and `clutch--eldoc-metadata-plan` (5). Repeated accessors appear in context/render paths, manual accumulation appears in `clutch--completion-column-candidates` and MongoDB field collection, and several untouched macros lack debug specs. A syntax-aware source-span inventory identifies longer functions such as `clutch-result-edit--open-cell`, `clutch-mongodb--execute-collection-method`, `clutch--object-entry-reader`, `clutch--agent-context-text`, and `clutch-completion-at-point`. | Possible maintainability work; arity may be a generic/callback contract, a stable lifecycle context, or a local implementation detail. | Phase 5 triages each candidate for ownership, duplication, measurable complexity, and test value. No refactor follows from a count alone, and untouched test macros do not receive touch-only metadata edits. |
+| Structural guideline findings required ownership triage, not automatic refactors | A whole-repository reader inventory covered every production definition with more than four parameters and measured the named long-function spans. Caller scans separated generic/method contracts, callback/provenance tuples, hot render geometry, result lifecycle options, repeated context access, and manual completion accumulation. | Completed Phase 5 triage: generic/callback/render and cohesive long-function candidates are recorded keep decisions; the result lifecycle and three local shapes were simplified in place. | Keyword tails, bound context keys, and `cl-loop` accumulation were applied without a context wrapper, struct, generic change, or compatibility shim. Focused, complete non-live, and full Podman gates passed. |
 
 ## Verification policy shared by all phases
 
@@ -313,6 +324,61 @@ Use this sequence only for a Phase 5 candidate that survives ownership review.
 4. Use a closure or `cl-labels` for a local helper that captures one operation's context. Do not export a callback or add positional arguments merely to avoid a small local closure.
 5. Sequence compatibility deliberately: inventory and update all in-repository callers and tests with the definition in one reviewable change, run the focused suite, then remove the obsolete positional form. If a genuinely external public caller prevents an atomic migration, introduce a documented, tested compatibility boundary with an explicit removal condition; never add a silent fallback or duplicate lookup. Internal private APIs should not retain a permanent compatibility shim.
 6. Re-run byte compilation to catch callback/keyword arity mistakes, run the full non-live suite, and follow every behavioral migration with `./test/run-ci.sh native-live` plus any configured JDBC live gate.
+
+### Phase 5 review — syntax-aware whole-repository inventory
+
+The controller ran an Emacs `read` inventory over every production
+`clutch*.el` form and used `rg` to enumerate source and test callers.  The scan
+covered every definition with more than four required/optional/keyword
+parameters, not only the candidates named in the initial report.  The wider
+results fall into four ownership classes:
+
+- Backend generics and their methods, including paging and document-mutation
+  dispatch, are shared contracts and remain positional until that generic is
+  intentionally redesigned with every implementation.
+- Metadata, query, and diagnostic callback/event functions carry one explicit
+  lifecycle or provenance tuple.  They remain unchanged because wrapping that
+  tuple would add accessors without removing a second owner.
+- UI geometry and row/cell rendering functions pass hot-path coordinates and
+  render state.  They remain unchanged pending evidence that an existing
+  render-state object should own another invariant; parameter count alone does
+  not establish that evidence.
+- The result-page lifecycle and three local accumulation/context shapes had
+  concrete caller readability or manual-state issues and were accepted for
+  in-place simplification without compatibility shims.
+
+AgentKnot orchestration
+`orchestration_c5393976-260b-424e-a46e-3d1b83d13e7d` independently reviewed
+the named Phase 5 candidates from base `f452d8f`.  Its artifact
+`23b29a388a8c0bc99d36d073d721fa32f762de2888c219c4aa3a6d115a7615a8`
+was hash/base verified and previewed without application.  It classified 11
+named functions as keep and the object-context/SQL-accumulation/MongoDB-
+accumulation shapes as simplify in place.  The controller agreed with those
+three simplifications but resolved one review disagreement: the result
+lifecycle's actual calls contained anonymous `nil`/boolean/context tails, so a
+keyword-tail migration was accepted as a smaller change than either keeping
+the positional form or introducing a context wrapper.
+
+| Candidate | Caller and ownership evidence | Final decision |
+|---|---|---|
+| `clutch-result--install-page-state`, `clutch-result--init-state`, `clutch-result--display-select` | Two, one, and two production call sites respectively, plus direct result tests and two display stubs.  The core page/result identity arguments are stable, but the optional row-identity, paging, rewritability, context, and source-buffer tail was an order-sensitive lifecycle payload. | **SIMPLIFY-IN-PLACE — completed.** Keep four/five core arguments positional and use `cl-defun` keyword tails.  All source/test callers changed atomically; no struct, wrapper, or compatibility path was added. |
+| `clutch-record--render-field` | One owning render-loop call; field, row identity, edit, FK, expansion, and width values are all consumed independently. | **KEEP.** A one-use context object would only rename the same data flow. |
+| `clutch--start-table-metadata-request` | Three production callers share its ticket/status/stale-callback/diagnostic/install lifecycle. | **KEEP.** This is an intentional callback boundary, not duplicated request ownership. |
+| `clutch--completion-column-values` and `clutch--eldoc-metadata-plan` | Two and one production callers; the latter also has a direct pure-plan contract test.  Their five inputs are distinct cache/backend decision inputs and the definitions span only 18 and 22 lines in the reader inventory. | **KEEP.** A context plist would add indirection to small pure/policy functions. |
+| `clutch-result-edit--open-cell` | One caller function at two source sites; the body owns one edit-buffer initialization and callback lifecycle. | **KEEP.** Its reader span is not evidence for a second owner or duplicated rule. |
+| `clutch-mongodb--execute-collection-method` | One production evaluator caller with indirect backend tests; method branches validate and call different public `mongodb-` APIs. | **KEEP.** A dispatch table would scatter the narrow adapter boundary. |
+| `clutch--object-entry-reader` | Five production call sites, direct object-reader tests, and test stubs share one `completing-read` metadata/affixation state. | **KEEP.** Its local closures correctly own one bounded completion session. |
+| `clutch--agent-context-text` | One production wrapper call with public command coverage; its local functions render sections from one connection/SQL/result context. | **KEEP.** Extracting them would create one-use rendering APIs. |
+| `clutch-completion-at-point` | One command caller, two hook references, and direct SQL/connection tests; it owns CAPF precedence and final return shape while delegating scans. | **KEEP.** Splitting by line count would obscure context precedence. |
+| Multi-read object command context plists | Several object commands repeatedly read connection, params, product, and source buffer from the same existing command context. | **SIMPLIFY-IN-PLACE — completed.** Bind each used key once in the consumer; retain the existing plist boundary and add no accessor layer. |
+| `clutch--completion-column-candidates` accumulation | One production caller flattened per-table cached column lists with `dolist` plus a mutable accumulator. | **SIMPLIFY-IN-PLACE — completed.** `cl-loop append` now states the ordered flattening invariant while copying cached lists. |
+| `clutch-mongodb--field-candidates` accumulation | Two production callers; nested loops filtered strings, optionally prefixed field paths, then reversed a manual push accumulator. | **SIMPLIFY-IN-PLACE — completed.** Nested `cl-loop` collection preserves collection/field order without mutable accumulator state. |
+
+Untouched production/test macros and all remaining high-arity generic,
+diagnostic, callback, geometry, and rendering definitions are explicitly
+classified **KEEP** for this pass.  They should be reconsidered only when a
+behavioral slice identifies duplicated ownership or an order-related defect,
+not in a touch-only metadata/signature sweep.
 
 ## Completion condition
 

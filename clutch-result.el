@@ -418,9 +418,9 @@ Signal `user-error' if the user declines."
             rows)
           has-more)))
 
-(defun clutch-result--install-page-state
-    (columns rows elapsed page-num &optional row-identity-prep
-             page-offset page-has-more)
+(cl-defun clutch-result--install-page-state
+    (columns rows elapsed page-num
+             &key row-identity-prep page-offset page-has-more)
   "Install buffer-local state for a rendered result page.
 COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the page.  ROW-IDENTITY-PREP
 describes hidden row identity columns, PAGE-OFFSET overrides the derived SQL
@@ -486,11 +486,10 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
     (clutch-result--clear-staged-state)
     column-names))
 
-(defun clutch-result--init-state (conn sql columns rows elapsed
-                                       &optional row-identity-prep
-                                       page-offset page-has-more
-                                       server-pageable server-rewritable
-                                       source-table)
+(cl-defun clutch-result--init-state
+    (conn sql columns rows elapsed
+          &key row-identity-prep page-offset page-has-more
+          server-pageable server-rewritable source-table)
   "Initialize buffer-local state for a fresh query result.
 CONN is the connection, SQL the original query, COLUMNS and ROWS
 the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
@@ -509,10 +508,14 @@ Returns column names."
               clutch--page-total-rows (and (not server-pageable)
                                            (length rows)))
   (clutch-result--install-page-state
-   columns rows elapsed 0 row-identity-prep page-offset page-has-more))
+   columns rows elapsed 0
+   :row-identity-prep row-identity-prep
+   :page-offset page-offset
+   :page-has-more page-has-more))
 
-(defun clutch-result--display-select
-    (connection sql result elapsed row-identity-prep server-pageable
+(cl-defun clutch-result--display-select
+    (connection sql result elapsed
+                &key row-identity-prep server-pageable
                 result-context source-buffer)
   "Display SELECT RESULT for SQL on CONNECTION in a result buffer.
 ROW-IDENTITY-PREP, SERVER-PAGEABLE, RESULT-CONTEXT, SOURCE-BUFFER, and ELAPSED
@@ -551,8 +554,12 @@ are produced by the query execution layer."
       (setq col-names
             (clutch-result--init-state
              connection sql raw-columns rows elapsed
-             row-identity-prep 0 has-more
-             server-pageable server-rewritable source-table))
+             :row-identity-prep row-identity-prep
+             :page-offset 0
+             :page-has-more has-more
+             :server-pageable server-pageable
+             :server-rewritable server-rewritable
+             :source-table source-table))
       (if-let* ((identity-error
                  (plist-get row-identity-prep :identity-error)))
         (clutch--remember-buffer-query-error-details
@@ -613,7 +620,10 @@ PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination."
              (has-more (cdr page)))
         (clutch-result--install-page-state
          (clutch-db-result-columns result) rows elapsed
-         page-num row-identity-prep offset has-more)
+         page-num
+         :row-identity-prep row-identity-prep
+         :page-offset offset
+         :page-has-more has-more)
         (when (and clutch--sort-column (null clutch--order-by))
           (setq clutch--local-sort-original-rows
                 (copy-sequence clutch--result-rows))
@@ -763,7 +773,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (if columns
         (clutch-result--display-select
          (clutch-db-result-connection result) sql result elapsed
-         nil nil nil (current-buffer))
+         :source-buffer (current-buffer))
       (with-current-buffer buf
         (clutch-result-mode)
         (setq-local clutch--last-query sql)
