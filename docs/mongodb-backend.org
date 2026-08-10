@@ -2,16 +2,7 @@
 
 * MongoDB Backend
 
-The =mongodb= backend is Clutch's ordinary MongoDB backend.  The default document surface connects through the external =mongodb.el= native protocol package and uses supported MongoDB Shell / MQL helper syntax in query buffers, not SQL and not arbitrary JavaScript evaluation.
-
-This is =Basic document support=.  It covers connection setup, helper-based query execution, database/collection metadata, top-level document key display, and read-only result grids.  It does not expose relational row editing, relationship metadata, SQL completion, or the generic manual-commit UI used by core SQL backends.
-
-MongoDB SQL Interface is an optional JDBC surface of the same backend:
-
-- =(:backend mongodb ...)= connects to ordinary MongoDB deployments.
-- =(:backend mongodb :surface sql-interface ...)= connects to MongoDB SQL Interface JDBC endpoints.
-
-The manual connection prompt shows one =mongodb= backend for MongoDB.  See [[file:backend-support.org][docs/backend-support.org]] for the project-wide support-level policy, and see the =mongodb.el= repository's =docs/native-client.org= for native protocol capabilities.
+The =mongodb= backend is Clutch's ordinary MongoDB backend.  This guide focuses on Clutch-owned native document query, object, and read-only result workflows.  Support levels and the one-backend boundary, including the =:surface sql-interface= distinction, are defined in [[file:backend-support.org][docs/backend-support.org]].  The default document surface delegates native protocol operations to the external =mongodb.el= package and uses supported MongoDB Shell / MQL helper syntax in query buffers, not SQL and not arbitrary JavaScript.
 
 ** Requirements
 
@@ -43,15 +34,6 @@ MongoDB SQL Interface endpoints require the JDBC sidecar and MongoDB JDBC driver
                                 :user "root"
                                 :pass-entry "local-mongodb-auth"))
 
-        ("local-mongodb-tls" . (:backend mongodb
-                               :host "127.0.0.1"
-                               :port 27017
-                               :database "app"
-                               :tls t))
-
-        ("local-mongodb-socket" . (:backend mongodb
-                                  :url "mongodb://%2Ftmp%2Fmongodb-27017.sock/app"))
-
         ("atlas-sql" . (:backend mongodb
                          :surface sql-interface
                          :url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
@@ -60,11 +42,11 @@ MongoDB SQL Interface endpoints require the JDBC sidecar and MongoDB JDBC driver
                          :pass-entry "atlas-sql"))))
 #+end_src
 
-Structured params connect to one =host:port= through =mongodb.el=.  The native document surface accepts a single-host =mongodb://...= URL and the structured =:host=, =:port=, =:database=, =:user=, =:password=, =:pass-entry=, =:auth-database=, =:auth-mechanism=, =:tls=, and =:tls-verify= parameters. =mongodb+srv://=, seed discovery, SOCKS proxies, connection pools, sessions, transactions, and read/write concern routing are not supported by the native client.  Use the JDBC SQL Interface surface when its driver provides a required deployment feature.
+Clutch passes native connection parameters to =mongodb.el= after resolving saved credentials.  Native connection URLs and protocol options are owned by =mongodb.el=; consult its [[https://github.com/LuciusChen/mongodb.el][documentation]] for the supported native connection surface rather than this guide.
 
-Use =:password= only when the password is already available in memory.  For saved connections, prefer =:pass-entry= and let Clutch resolve it through =auth-source-pass= / =auth-source= before opening the native connection. Unauthenticated local MongoDB connections do not need =:user=, =:password=, or =:pass-entry=.
+Use =:password= only when the password is already available in memory.  For saved connections, prefer =:pass-entry= and let Clutch resolve it through =auth-source-pass= / =auth-source= before opening the native connection.  Unauthenticated local MongoDB connections do not need =:user=, =:password=, or =:pass-entry=.
 
-SSH tunnels and TRAMP forwarding work with structured =:host= / =:port= MongoDB params because those transports only rewrite the TCP endpoint before calling =mongodb.el=.  Clutch does not rewrite opaque =mongodb://= URLs for SSH/TRAMP; URL parsing, TLS, and effective database semantics remain owned by =mongodb.el=.
+Clutch-managed SSH tunnels and TRAMP forwarding require structured =:host= / =:port= parameters because Clutch rewrites that endpoint before connecting.  Clutch does not rewrite opaque =:url= values; use structured parameters when a saved MongoDB connection needs Clutch-managed forwarding.
 
 ** Query Buffers
 
@@ -106,7 +88,7 @@ MongoDB SQL Interface is different: it is a JDBC SQL surface selected with =:sur
 
 ** Live Tests
 
-MongoDB live coverage is tagged =:mongodb-live=.  The live runner starts or reuses a local MongoDB container and uses the native protocol; it verifies switching the active database, querying the target database, and restoring the original database:
+MongoDB live coverage is tagged =:mongodb-live=.  The live runner starts or reuses a local MongoDB container and exercises the native document surface; it verifies switching the active database, querying the target database, and restoring the original database:
 
 #+begin_src sh
 ./test/run-ci.sh native-live

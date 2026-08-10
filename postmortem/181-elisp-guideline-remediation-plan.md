@@ -1,6 +1,6 @@
 # 181 — Elisp guideline remediation plan
 
-> **Status:** Phases 0 through 2 are complete on `plan/elisp-live-remediation`.
+> **Status:** Phases 0 through 3 are complete on `plan/elisp-live-remediation`.
 > Later phases remain planned work. No dates or effort estimates are part of the
 > plan.
 
@@ -29,6 +29,16 @@
   62/62, the complete non-live gate passes with 544 main and 220 backend ERT
   tests, and the post-fix Podman baseline remains 55 expected results, seven
   expected skips, and no unexpected results.
+- Phase 3 makes `docs/backend-support.org` the owner of MongoDB support levels
+  and the one-backend/SQL-Interface boundary. The MongoDB workflow guide now
+  points native URI and protocol-option semantics to `mongodb.el`, removes an
+  unsupported Unix-socket example, and retains Clutch-owned credential and
+  forwarding behavior.
+- User-visible staged mutation wording is consistent in the interactive guide
+  and Edit transient heading. Internal `clutch--pending-*` state, asynchronous
+  timer wording, public symbol names, and literal sample values remain
+  unchanged. The focused heading test and all 35 MongoDB unit tests pass; the
+  complete non-live and Podman gates retain the Phase 2 pass counts.
 
 ## Purpose and evidence boundary
 
