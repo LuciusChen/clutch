@@ -1,8 +1,10 @@
 # 181 — Elisp guideline remediation plan
 
-> **Status:** Phases 0 through 5 are complete on `plan/elisp-live-remediation`.
-> All planned phases have implementation or recorded keep decisions; Oracle's
-> issue-specific live reproduction remains an explicit external hold.
+> **Status:** Phases 0 through 5 and the containerized JDBC follow-up are
+> complete on `plan/elisp-live-remediation`. Oracle/JDBC is now reproduced and
+> verified locally; publishing the coordinated agent 0.2.20 artifact and then
+> updating Clutch's version/checksum pin remains a release step, not a live-test
+> evidence gap.
 
 ## Execution evidence
 
@@ -18,8 +20,9 @@
   cache hydration for each of PostgreSQL, MySQL, and MongoDB.
 - The complete non-live gate passed: 541 main ERT tests, 220 backend ERT tests,
   byte compilation, package lint, checkdoc, and 13 architecture tests.
-- Oracle/JDBC completion remains unchanged and issue-specific Oracle live
-  reproduction remains unavailable, so it is still outside Phase 1.
+- Oracle/JDBC completion remains unchanged. Its real container-backed
+  low-privilege completion and metadata paths now pass with the coordinated
+  agent fix; no completion change was justified by that evidence.
 - The Phase 2 fail-first macro tests reproduced the lexical-capture defect: the
   database-error handler received the condition object where a caller's
   connection expression named `err` was expected. The successful path and
@@ -72,11 +75,11 @@ The relevant historical records are `postmortem/028-context-bounded-schema-hints
 | Finding or contract | Current evidence | Classification and owner | Planned treatment |
 |---|---|---|---|
 | Product and architecture contract | `PRD.md` requires bounded metadata, honest capability gates, staged SQL mutations, explicit external protocol boundaries, and public-path verification; `docs/architecture.md` assigns SQL completion to `clutch-sql.el`, MongoDB query-buffer behavior to `clutch-document.el`, metadata lifecycle to `clutch-schema.el`, and backend protocol translation to adapters. | Source-of-truth contract; workflow owner, not a reason to add a new framework. | Every phase stays within the named owner and records any out-of-scope boundary instead of compensating in another layer. |
-| Native-live baseline | `test/run-ci.sh:native-live` invokes `test/run-native-live-tests.sh`; the runner selects Podman on available Linux hosts, and runs UI MySQL/PostgreSQL, backend PostgreSQL/MySQL/cross-SQL, native MongoDB, and native Redis coverage. `test/clutch-test-live.el` and tagged sections of `test/clutch-db-test.el` exercise real paths. | Shared regression gate owned by the test runner and live suites. | Phase 0 preserves the already established full Podman baseline; every later phase runs it as regression protection and never weakens tags or substitutes a partial suite. |
+| Native-live baseline | `test/run-ci.sh:native-live` invokes `test/run-native-live-tests.sh`; the runner selects Podman on available Linux hosts. Its default remains UI PostgreSQL/MySQL, backend PostgreSQL/MySQL/cross-SQL, and native MongoDB/Redis until agent 0.2.20 is pinned; `CLUTCH_TEST_JDBC_AGENT_JAR` expands the same run with UI Oracle/SQL Server/ClickHouse/DuckDB and backend Oracle/SQL Server/ClickHouse. | Shared regression gate owned by the test runner and live suites. | Phase 0 preserved the original native matrix; the JDBC follow-up adds an exact-candidate gate without weakening existing tags or pretending that published agent 0.2.19 contains the coordinated fix. |
 | SQL CAPF can load uncached columns synchronously | `clutch-sql.el:1109-1119` makes `clutch--completion-column-values` call `clutch--ensure-columns` whenever `clutch-db-completion-sync-columns-p` is non-nil; `clutch-sql.el:1296-1382` reaches that path from `clutch-completion-at-point`. `clutch-schema.el:532-549` calls the backend's synchronous `clutch-db-list-columns`. | Behavioral latency/re-entrancy defect in the SQL completion workflow. The generic contract is in `clutch-backend.el:1128-1132`; the hot path is owned by `clutch-sql.el` and the metadata lifecycle by `clutch-schema.el`. | Phase 0 reproduces it, and Phase 1 changes only the PostgreSQL/MySQL/MongoDB CAPF column-miss behavior. The existing cache-hit and table-name behavior remains covered. |
 | Native PostgreSQL and MySQL backend calls are real remote metadata work | `clutch-db-pg.el:965-974` queries `information_schema.columns`; `clutch-db-mysql.el:529-536` runs `SHOW COLUMNS`; both adapters install idle metadata methods at `clutch-db-pg.el:922` and `clutch-db-mysql.el:481`. `docs/native-backends.md` already says native MySQL/PostgreSQL CAPF paths are cache-first, which is the contract the reproducer must compare with the implementation. | Same Phase 1 behavioral defect; adapter query implementations are not themselves the initial owner. | Keep query text, protocol adapters, and unrelated Eldoc/schema-refresh behavior out of the first slice unless the red reproducer proves they own the failure. |
 | Native MongoDB field CAPF can sample metadata synchronously | `clutch-document.el:325-337` defines `clutch-mongodb--collection-columns`; on a cache miss it calls `clutch--ensure-columns` through `clutch--safe-completion-call`, and `clutch-document.el:428-444` invokes it through `clutch-mongodb-completion-at-point`. `clutch-mongodb.el:1796-1800` samples documents in `clutch-db-list-columns`. | Behavioral document-CAPF latency defect owned by `clutch-document.el` plus the minimal MongoDB adapter metadata boundary needed for deferred work. | Phase 1 tests the public completion dispatch and prevents an uncached field completion from synchronously sampling documents; it does not expand the MongoDB parser or protocol surface. |
-| Oracle table search is a different path | Oracle/JDBC deliberately returns nil from `clutch-db-completion-sync-columns-p` at `clutch-db-jdbc.el:1389-1392`, while `clutch-db-complete-tables` uses `search-tables` at `clutch-db-jdbc.el:2129-2136` and `clutch-db-complete-columns` uses `search-columns` at `clutch-db-jdbc.el:2183-2194`. Unit coverage exists at `test/clutch-db-test.el:3355-3375`; an Oracle live low-privilege completion test exists near `test/clutch-db-test.el:6538`. | Separate Oracle/JDBC behavior with a separate evidence requirement, not part of the native CAPF defect. | Phase 1 explicitly does not change Oracle synchronous `search-tables`/`search-columns`; Oracle work is blocked until an Oracle live reproduction of that specific issue is available. Existing generic or low-privilege tests are not silently treated as that reproduction. |
+| Oracle table search is a different path | Oracle/JDBC deliberately returns nil from `clutch-db-completion-sync-columns-p` at `clutch-db-jdbc.el:1389-1392`, while `clutch-db-complete-tables` uses `search-tables` at `clutch-db-jdbc.el:2129-2136` and `clutch-db-complete-columns` uses `search-columns` at `clutch-db-jdbc.el:2183-2194`. Unit coverage exists at `test/clutch-db-test.el:3355-3375`; the Oracle live low-privilege completion test is part of the new container gate. | Separate Oracle/JDBC behavior with a separate evidence requirement, not part of the native CAPF defect. | Containerized Oracle verified the real path without reproducing a correctness failure, so Phase 1's decision not to change Oracle completion stands. |
 | Completion/re-entrancy history already identifies the risk | `postmortem/028` records synchronous metadata on high-frequency paths; `postmortem/084` establishes cache-first native CAPF/Eldoc policy; `postmortem/086` documents `accept-process-output`/idle-timer response contamination and the earlier PG-specific change. | Historical rationale and a warning against timing patches or broad async abstractions. | Use a fail-first test and the existing metadata lifecycle; do not fix the issue by hiding errors, adding worker threads, or changing external protocol code without evidence. |
 | Object error-capture macro has incomplete hygiene metadata and confirmed capture | `clutch-object.el:1358-1367` defines `clutch--with-object-error-capture` with `(declare (indent 4))` but no Edebug debug specification and binds the literal handler variable `err`; callers are `clutch-object.el:1381`, `1421`, `1445`, and `1495`. A batch evaluator probe confirmed that passing a caller connection expression named `err` causes the handler to observe the `clutch-db-error` object instead of the outer connection. Existing public behavior tests are in `test/clutch-test-object.el` around the definition/describe failure and stale-problem-clearing tests, but this capture case has no permanent ERT. | Confirmed error-boundary macro defect owned by `clutch-object.el`; this is a focused hygiene/behavior issue, not a reason to catch more conditions. | Phase 2 adds a fail-first macro/public-workflow test for lexical capture, exact re-signaling, success clearing, and non-`clutch-db-error` propagation, then supplies only the needed hygienic expansion and debug metadata. |
 | MongoDB documentation ownership is split but currently overlaps | `docs/backend-support.org` owns support levels and the one-backend/SQL-Interface boundary; `docs/mongodb-backend.org` owns Clutch's native query and object workflow but also contains driver-level claims about URLs, SRV, sessions, pooling, and TLS; `README.md` is the landing page and links to the backend guide; `postmortem/104`, `109`, `110`, and `131` define the intended boundary. | Documentation ownership and capability-claim risk; no MongoDB protocol implementation belongs in Clutch. | Phase 3 keeps Clutch-specific workflow facts in Clutch docs, points protocol semantics to `mongodb.el`, and audits public examples for `:backend mongodb :surface sql-interface` rather than an invented second backend or internal JDBC configuration. |
@@ -88,7 +91,7 @@ The relevant historical records are `postmortem/028-context-bounded-schema-hints
 
 **Every behavioral fix must be preceded by a reproducer and followed by `./test/run-ci.sh native-live`.** “Preceded” means the reproducer fails for the intended root cause before the production change; “followed” means the full native Podman suite is run after the change, not only a mocked unit test. Focused tests must exercise the public or dispatch path when the defect is in CAPF dispatch, object commands, callbacks, or lifecycle behavior.
 
-**Static documentation/style findings use static evidence plus live as regression protection.** A clean `rg`, byte-compile, or documentation review proves the static condition; `native-live` and any available JDBC live run only protect unrelated runtime behavior from collateral changes and do not turn an unverified documentation claim or an absent Oracle reproduction into evidence.
+**Static documentation/style findings use static evidence plus live as regression protection.** A clean `rg`, byte-compile, or documentation review proves the static condition; `native-live` protects runtime behavior from collateral changes but does not turn an unverified documentation claim into evidence. Oracle claims require the runner's real Oracle path, not a JDBC mock or a skipped credential-gated test.
 
 The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with the mandatory focused baseline also available as `./test/run-ci.sh main db`. Quality checks remain part of `all`: byte compilation, package lint, checkdoc, and architecture checks. Live gates must never print or commit credentials, URLs containing credentials, logs, or runtime state.
 
@@ -102,7 +105,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 - Use `CLUTCH_TEST_CONTAINER_RUNTIME=podman ./test/run-ci.sh native-live` on the established Linux baseline, or the runner's documented Podman selection when that variable is not needed. Record the command/result without recording credentials.
 - Turn the already observed issue-specific live probes into repeatable test evidence through the real CAPF paths: an uncached PostgreSQL/MySQL SQL identifier or column context must show whether `clutch-completion-at-point`/`completion-at-point` performs synchronous column metadata work, and an uncached MongoDB field/key context must show whether `clutch-mongodb-completion-at-point` samples collection fields synchronously.
 - Keep the reproduction bounded to one statement/collection and one cache miss. Capture call counts, busy state, and the returned CAPF shape rather than relying on timing alone; a timeout or sleep is not a root-cause proof.
-- Keep Oracle synchronous `search-tables` out of this reproduction. Its evidence must be collected through an Oracle live environment separately, not inferred from native containers or a JDBC mock.
+- Keep Oracle synchronous `search-tables` out of the native CAPF reproduction. Its evidence is collected by the later Oracle container slice, not inferred from PostgreSQL/MySQL/MongoDB or a JDBC mock.
 
 **Dependencies**
 
@@ -130,7 +133,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 **Podman/JDBC live gate**
 
 - The required native gate is `CLUTCH_TEST_CONTAINER_RUNTIME=podman ./test/run-ci.sh native-live` on Linux, and it must remain the full runner rather than a selected tag. On macOS, use the repository's OrbStack-backed Docker rule instead of claiming a Podman result.
-- The JDBC gate is `./test/run-ci.sh db-live` only when the configured JDBC live credentials/endpoints are available; absent credentials must be reported as blocked/skipped, never as a pass. Do not use a skipped Oracle suite as evidence for the Oracle hold.
+- The initial JDBC gate was `./test/run-ci.sh db-live` when credentials were available. The follow-up adds self-contained Oracle, SQL Server, ClickHouse, and DuckDB coverage to `native-live`; separately configured product services such as MongoDB SQL Interface still remain in `db-live`.
 
 ### Phase 1 — Fix only the PostgreSQL/MySQL/MongoDB CAPF synchronous column-metadata defect
 
@@ -139,7 +142,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 - Change the cache-miss behavior reached by `clutch-sql.el:1109-1119` and `clutch-sql.el:1296-1382` for native PostgreSQL and MySQL so the public SQL CAPF does not synchronously issue `clutch-db-list-columns` during typing. Preserve cached candidates, statement scoping, qualification/annotation, `:exclusive 'no`, keyword priority, and the existing public completion dispatch.
 - Change the native MongoDB field/field-path path at `clutch-document.el:325-337`, `clutch-document.el:350-377`, and `clutch-document.el:428-444` so an uncached field completion does not synchronously invoke sampled `clutch-db-list-columns`. Reuse the existing metadata lifecycle where it is sufficient; if MongoDB lacks the needed async method, add only the minimal adapter-bound deferred metadata operation required by this defect, not a general MongoDB async framework.
 - Keep `clutch-schema.el:532-549` as the explicit/synchronous metadata owner for workflows that intentionally request metadata. Do not change Eldoc, explicit schema refresh, result detail commands, SQLite's in-process synchronous path, table-name completion, or the MongoDB helper parser in this phase unless the reproducer proves one of those is the direct owner of the CAPF defect.
-- Keep Oracle/JDBC synchronous table search separate: do not change `clutch-db-jdbc.el:1389-1392`, `2129-2136`, or `2183-2194`, and do not reinterpret Oracle `search-tables` unit coverage as a native CAPF fix. Oracle work remains blocked until a live Oracle reproduction of synchronous `search-tables` behavior is available.
+- Keep Oracle/JDBC synchronous table search separate: do not change `clutch-db-jdbc.el:1389-1392`, `2129-2136`, or `2183-2194`, and do not reinterpret Oracle `search-tables` unit coverage as a native CAPF fix. The later Oracle container reproduction determines whether this separate path has a real defect.
 
 **Dependencies**
 
@@ -152,7 +155,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 - A focused ERT test fails before the fix and passes afterward for each native backend family in scope: PostgreSQL, MySQL, and MongoDB. The tests invoke `completion-at-point` or the installed buffer-local CAPF, not only a private candidate helper.
 - On an uncached column/field miss, CAPF returns without a synchronous metadata round trip and leaves a bounded, observable path for later cache hydration or honestly returns no uncached candidates; it does not manufacture candidates or swallow an internal failure as success.
 - A cache hit still returns the same candidates and annotations, and a busy connection still avoids re-entrant work. Existing table-context and empty-prefix SQL completion contracts remain intact.
-- The Oracle `search-tables`/`search-columns` path is byte-for-byte out of scope for this phase's intent and remains covered only by its existing tests until an Oracle live reproduction is available.
+- The Oracle `search-tables`/`search-columns` path is byte-for-byte out of scope for this phase's intent; its later live reproduction must not be retroactively claimed as native CAPF evidence.
 - The post-fix native-live run passes for real PostgreSQL, MySQL, and native MongoDB connections, demonstrating that the change is not merely a mock-specific result.
 
 **Focused checks**
@@ -168,7 +171,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 **Podman/JDBC live gate**
 
 - Run the full native gate as `CLUTCH_TEST_CONTAINER_RUNTIME=podman ./test/run-ci.sh native-live` and require the complete Podman UI/backend matrix, including native MongoDB, after the fix. The focused ERT does not replace this gate.
-- Run `./test/run-ci.sh db-live` when JDBC credentials are configured as a no-regression gate for untouched JDBC behavior. Oracle CAPF/search-table work remains blocked if the issue-specific Oracle live reproduction is still absent, even if unrelated JDBC live tests pass.
+- Run `./test/run-ci.sh db-live` when additional JDBC services are configured as a no-regression gate. The later containerized Oracle slice closes the Oracle evidence gap independently.
 
 ### Phase 2 — Fix and test `clutch--with-object-error-capture` hygiene
 
@@ -203,7 +206,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 **Podman/JDBC live gate**
 
 - Run `CLUTCH_TEST_CONTAINER_RUNTIME=podman ./test/run-ci.sh native-live` after the macro fix as the full native regression gate; object/error changes must not be validated only against SQLite mocks.
-- Run `./test/run-ci.sh db-live` when configured, including Oracle/JDBC object metadata tests where available. If JDBC live credentials are unavailable, record that limitation and do not call the JDBC gate passed.
+- Run the expanded `native-live` gate, including Oracle/JDBC metadata coverage. Run `./test/run-ci.sh db-live` as well when an additional service-specific JDBC endpoint is configured.
 
 ### Phase 3 — Reconcile MongoDB documentation ownership and staged/pending user vocabulary
 
@@ -312,7 +315,7 @@ The full non-live gate for a code-bearing phase is `./test/run-ci.sh all`, with 
 **Podman/JDBC live gate**
 
 - Run `CLUTCH_TEST_CONTAINER_RUNTIME=podman ./test/run-ci.sh native-live` after every accepted production refactor; a static arity or function-length result never replaces the full native gate.
-- Run `./test/run-ci.sh db-live` when configured for any changed backend or generic contract. If no JDBC live environment exists, record that as a remaining risk and do not promote a static refactor to evidence of JDBC correctness.
+- Run `./test/run-ci.sh db-live` when additional service-specific JDBC endpoints are configured. The self-contained JDBC matrix in `native-live` is mandatory for changed Oracle, SQL Server, ClickHouse, or generic JDBC contracts.
 
 ## Safe migration approach for long positional argument lists
 
@@ -380,6 +383,36 @@ classified **KEEP** for this pass.  They should be reconsidered only when a
 behavioral slice identifies duplicated ownership or an order-related defect,
 not in a touch-only metadata/signature sweep.
 
+### Containerized JDBC follow-up
+
+The original Oracle hold was caused by runner scope, not by an unavailable
+database: the repository already had Oracle live ERT and a documented
+`gvenzl/oracle-free` container path. The runner now provisions Oracle, SQL
+Server, and ClickHouse alongside the native containers, installs their JDBC
+drivers in an isolated runtime directory, and uses DuckDB to verify the generic
+JDBC surface. `CLUTCH_TEST_JDBC_AGENT_JAR` permits exact live validation of an
+unpublished local agent build without weakening the production checksum policy.
+
+The first Oracle run exposed a real `clutch-jdbc-agent` defect: Oracle supports
+savepoints but raises `SQLFeatureNotSupportedException` for explicit
+`releaseSavepoint`. The coordinated agent 0.2.20 branch has a fail-first Java
+test and normalizes only that optional cleanup; broader release and rollback
+errors still surface. A second run exposed a test-fixture defect where staged
+column keys ignored Oracle's declared uppercase metadata capability; a focused
+ERT now fixes that fixture through the shared backend matrix.
+
+Final local live evidence with the rebuilt candidate agent is 116 passed, 35
+capability skips, and zero unexpected results across six UI targets and eight
+backend slices. Oracle contributes 9 UI passes and 16 backend passes, including
+low-privilege completion, schema metadata, transaction, row-identity, cancel,
+and diagnostic paths. SQL Server contributes 10 + 4, ClickHouse 7 + 3, and
+generic JDBC/DuckDB 10 UI passes. All seven containers were removed afterward.
+
 ## Completion condition
 
-The plan is complete only when each accepted behavioral change has a fail-first reproducer and post-fix native-live evidence, each static/documentation change has static proof plus live regression protection, Oracle synchronous `search-tables` remains explicitly blocked until its own live reproduction exists, and every Phase 5 structural candidate has a recorded keep/simplify/refactor decision rather than an automatic rewrite.
+The remediation work is complete when each accepted behavioral change has a
+fail-first reproducer and post-fix native-live evidence, each static or
+documentation change has static proof plus live regression protection, every
+Phase 5 structural candidate has a recorded keep/simplify/refactor decision,
+and the exact agent 0.2.20 release artifact is published and pinned by version
+and checksum before the expanded JDBC runner becomes the default release gate.

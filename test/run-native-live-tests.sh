@@ -13,10 +13,31 @@ mongo_name="${CLUTCH_TEST_MONGO_CONTAINER:-clutch-mongo-live}"
 mongo_port="${CLUTCH_TEST_MONGO_PORT:-57017}"
 redis_name="${CLUTCH_TEST_REDIS_CONTAINER:-clutch-redis-live}"
 redis_port="${CLUTCH_TEST_REDIS_PORT:-56379}"
+oracle_name="${CLUTCH_TEST_ORACLE_CONTAINER:-clutch-oracle-live}"
+oracle_port="${CLUTCH_TEST_ORACLE_PORT:-51521}"
+mssql_name="${CLUTCH_TEST_MSSQL_CONTAINER:-clutch-mssql-live}"
+mssql_port="${CLUTCH_TEST_MSSQL_PORT:-51433}"
+clickhouse_name="${CLUTCH_TEST_CLICKHOUSE_CONTAINER:-clutch-clickhouse-live}"
+clickhouse_port="${CLUTCH_TEST_CLICKHOUSE_PORT:-58123}"
 pg_image="${CLUTCH_TEST_PG_IMAGE:-docker.io/library/postgres:16}"
 mysql_image="${CLUTCH_TEST_MYSQL_IMAGE:-docker.io/library/mysql:8.0}"
 mongo_image="${CLUTCH_TEST_MONGO_IMAGE:-docker.io/library/mongo:7}"
 redis_image="${CLUTCH_TEST_REDIS_IMAGE:-docker.io/library/redis:7-alpine}"
+oracle_image="${CLUTCH_TEST_ORACLE_IMAGE:-docker.io/gvenzl/oracle-free:slim-faststart}"
+mssql_image="${CLUTCH_TEST_MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
+clickhouse_image="${CLUTCH_TEST_CLICKHOUSE_IMAGE:-docker.io/clickhouse/clickhouse-server:latest}"
+
+oracle_password="Clutch_test1!"
+mssql_password="Clutch_test1!"
+clickhouse_password="Clutch_test1!"
+jdbc_agent_dir="${CLUTCH_TEST_JDBC_AGENT_DIR:-}"
+jdbc_agent_jar="${CLUTCH_TEST_JDBC_AGENT_JAR:-}"
+jdbc_live_enabled=0
+duckdb_path=""
+
+if [[ -n "$jdbc_agent_jar" ]]; then
+  jdbc_live_enabled=1
+fi
 
 started=()
 temp_paths=()
@@ -173,6 +194,49 @@ start_redis() {
   started+=("$redis_name")
 }
 
+start_oracle() {
+  if container_running_p "$oracle_name"; then
+    log "Reusing Oracle container $oracle_name"
+    return
+  fi
+  log "Starting Oracle container $oracle_name on 127.0.0.1:$oracle_port"
+  run_container \
+    --name "$oracle_name" \
+    -e ORACLE_PASSWORD="$oracle_password" \
+    -p "127.0.0.1:${oracle_port}:1521" \
+    "$oracle_image"
+  started+=("$oracle_name")
+}
+
+start_mssql() {
+  if container_running_p "$mssql_name"; then
+    log "Reusing SQL Server container $mssql_name"
+    return
+  fi
+  log "Starting SQL Server container $mssql_name on 127.0.0.1:$mssql_port"
+  run_container \
+    --name "$mssql_name" \
+    -e ACCEPT_EULA=Y \
+    -e MSSQL_SA_PASSWORD="$mssql_password" \
+    -p "127.0.0.1:${mssql_port}:1433" \
+    "$mssql_image"
+  started+=("$mssql_name")
+}
+
+start_clickhouse() {
+  if container_running_p "$clickhouse_name"; then
+    log "Reusing ClickHouse container $clickhouse_name"
+    return
+  fi
+  log "Starting ClickHouse container $clickhouse_name on 127.0.0.1:$clickhouse_port"
+  run_container \
+    --name "$clickhouse_name" \
+    -e CLICKHOUSE_PASSWORD="$clickhouse_password" \
+    -p "127.0.0.1:${clickhouse_port}:8123" \
+    "$clickhouse_image"
+  started+=("$clickhouse_name")
+}
+
 wait_pg() {
   log "Waiting for PostgreSQL readiness"
   for _ in {1..120}; do
@@ -225,6 +289,47 @@ wait_redis() {
   return 1
 }
 
+wait_oracle() {
+  log "Waiting for Oracle readiness"
+  for _ in {1..240}; do
+    if ctr exec "$oracle_name" healthcheck.sh >/dev/null 2>&1; then
+      log "Oracle ready: $(container_summary "$oracle_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "Oracle container did not become ready" >&2
+  return 1
+}
+
+wait_mssql() {
+  log "Waiting for SQL Server readiness"
+  for _ in {1..240}; do
+    if ctr logs "$mssql_name" 2>&1 \
+        | grep -F "SQL Server is now ready for client connections" >/dev/null; then
+      log "SQL Server ready: $(container_summary "$mssql_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "SQL Server container did not become ready" >&2
+  return 1
+}
+
+wait_clickhouse() {
+  log "Waiting for ClickHouse readiness"
+  for _ in {1..120}; do
+    if ctr exec "$clickhouse_name" clickhouse-client \
+        --password "$clickhouse_password" --query "SELECT 1" >/dev/null 2>&1; then
+      log "ClickHouse ready: $(container_summary "$clickhouse_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "ClickHouse container did not become ready" >&2
+  return 1
+}
+
 emacs_load_args=(
   --batch -Q
   -L "$repo/../mongodb.el"
@@ -236,7 +341,29 @@ emacs_load_args=(
   -L "$HOME/.emacs.d/straight/repos/mysql.el"
   -L "$HOME/.emacs.d/straight/repos/pg-el"
   --eval "(setq load-prefer-newer t)"
+  --eval "(when (getenv \"CLUTCH_TEST_RUNTIME_JDBC_AGENT_JAR\") (setq clutch-jdbc-agent-sha256 nil))"
 )
+
+prepare_jdbc_runtime() {
+  if [[ -z "$jdbc_agent_dir" ]]; then
+    jdbc_agent_dir="$(mktemp -d "${TMPDIR:-/tmp}/clutch-jdbc-live.XXXXXX")"
+    temp_paths+=("$jdbc_agent_dir")
+  fi
+  duckdb_path="$(mktemp "${TMPDIR:-/tmp}/clutch-duckdb-live.XXXXXX.duckdb")"
+  temp_paths+=("$duckdb_path")
+  rm -f "$duckdb_path"
+  export CLUTCH_TEST_RUNTIME_JDBC_DIR="$jdbc_agent_dir"
+  if [[ -n "$jdbc_agent_jar" ]]; then
+    export CLUTCH_TEST_RUNTIME_JDBC_AGENT_JAR="$jdbc_agent_jar"
+  fi
+  log "Preparing JDBC agent and container-backed drivers"
+  "$emacs_bin" "${emacs_load_args[@]}" \
+    -l clutch-db-jdbc \
+    --eval '(setq clutch-jdbc-agent-dir (getenv "CLUTCH_TEST_RUNTIME_JDBC_DIR"))' \
+    --eval '(let ((source (getenv "CLUTCH_TEST_RUNTIME_JDBC_AGENT_JAR"))) (when source (make-directory clutch-jdbc-agent-dir t) (copy-file source (clutch-jdbc--agent-jar) t)))' \
+    --eval '(clutch-jdbc-ensure-agent)' \
+    --eval "(dolist (driver '(oracle sqlserver clickhouse duckdb)) (clutch-jdbc-install-driver driver))"
+}
 
 run_ert_live() {
   local label="$1"
@@ -263,6 +390,38 @@ run_clutch_live_pg() {
     "Running UI live tests against PostgreSQL" \
     clutch-test-live \
     "(setq clutch-test-backend 'pg clutch-test-host \"127.0.0.1\" clutch-test-port ${pg_port} clutch-test-user \"postgres\" clutch-test-password \"test\" clutch-test-database \"postgres\" clutch-test-url nil clutch-test-display-name nil clutch-test-props nil)" \
+    "'(tag :clutch-live)"
+}
+
+run_clutch_live_oracle() {
+  run_ert_live \
+    "Running UI live tests against Oracle JDBC" \
+    clutch-test-live \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-test-backend 'oracle clutch-test-host \"127.0.0.1\" clutch-test-port ${oracle_port} clutch-test-user \"system\" clutch-test-password \"${oracle_password}\" clutch-test-database \"freepdb1\" clutch-test-url nil clutch-test-display-name nil clutch-test-props nil)" \
+    "'(tag :clutch-live)"
+}
+
+run_clutch_live_mssql() {
+  run_ert_live \
+    "Running UI live tests against SQL Server JDBC" \
+    clutch-test-live \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-test-backend 'sqlserver clutch-test-host \"127.0.0.1\" clutch-test-port ${mssql_port} clutch-test-user \"sa\" clutch-test-password \"${mssql_password}\" clutch-test-database \"master\" clutch-test-url nil clutch-test-display-name nil clutch-test-props '((\"trustServerCertificate\" . \"true\")))" \
+    "'(tag :clutch-live)"
+}
+
+run_clutch_live_clickhouse() {
+  run_ert_live \
+    "Running UI live tests against ClickHouse JDBC" \
+    clutch-test-live \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-test-backend 'clickhouse clutch-test-host \"127.0.0.1\" clutch-test-port ${clickhouse_port} clutch-test-user \"default\" clutch-test-password \"${clickhouse_password}\" clutch-test-database \"default\" clutch-test-url nil clutch-test-display-name nil clutch-test-props nil)" \
+    "'(tag :clutch-live)"
+}
+
+run_clutch_live_duckdb() {
+  run_ert_live \
+    "Running UI live tests against generic JDBC with DuckDB" \
+    clutch-test-live \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-test-backend 'jdbc clutch-test-host nil clutch-test-port nil clutch-test-user nil clutch-test-password nil clutch-test-database nil clutch-test-url \"jdbc:duckdb:${duckdb_path}\" clutch-test-display-name \"DuckDB\" clutch-test-driver-class \"org.duckdb.DuckDBDriver\" clutch-test-props nil)" \
     "'(tag :clutch-live)"
 }
 
@@ -306,6 +465,30 @@ run_db_live_redis() {
     "'(tag :redis-live)"
 }
 
+run_db_live_oracle() {
+  run_ert_live \
+    "Running backend live tests against Oracle JDBC" \
+    clutch-db-test \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-db-test-jdbc-oracle-host \"127.0.0.1\" clutch-db-test-jdbc-oracle-port ${oracle_port} clutch-db-test-jdbc-oracle-user \"system\" clutch-db-test-jdbc-oracle-password \"${oracle_password}\" clutch-db-test-jdbc-oracle-service \"freepdb1\")" \
+    "'(tag :oracle-live)"
+}
+
+run_db_live_mssql() {
+  run_ert_live \
+    "Running backend live tests against SQL Server JDBC" \
+    clutch-db-test \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-db-test-jdbc-mssql-host \"127.0.0.1\" clutch-db-test-jdbc-mssql-port ${mssql_port} clutch-db-test-jdbc-mssql-user \"sa\" clutch-db-test-jdbc-mssql-password \"${mssql_password}\" clutch-db-test-jdbc-mssql-database \"master\")" \
+    "'(tag :mssql-live)"
+}
+
+run_db_live_clickhouse() {
+  run_ert_live \
+    "Running backend live tests against ClickHouse JDBC" \
+    clutch-db-test \
+    "(setq clutch-jdbc-agent-dir (getenv \"CLUTCH_TEST_RUNTIME_JDBC_DIR\") clutch-db-test-jdbc-clickhouse-host \"127.0.0.1\" clutch-db-test-jdbc-clickhouse-port ${clickhouse_port} clutch-db-test-jdbc-clickhouse-user \"default\" clutch-db-test-jdbc-clickhouse-password \"${clickhouse_password}\" clutch-db-test-jdbc-clickhouse-database \"default\")" \
+    "'(tag :clickhouse-live)"
+}
+
 select_container_runtime
 require_orbstack_docker
 show_container_environment
@@ -313,15 +496,39 @@ start_pg
 start_mysql
 start_mongo
 start_redis
+if ((jdbc_live_enabled)); then
+  start_oracle
+  start_mssql
+  start_clickhouse
+fi
 wait_pg
 wait_mysql
 wait_mongo
 wait_redis
+if ((jdbc_live_enabled)); then
+  wait_oracle
+  wait_mssql
+  wait_clickhouse
+  prepare_jdbc_runtime
+else
+  log "JDBC container matrix disabled; set CLUTCH_TEST_JDBC_AGENT_JAR to a release-candidate jar"
+fi
 
 run_clutch_live_pg
 run_clutch_live_mysql
+if ((jdbc_live_enabled)); then
+  run_clutch_live_oracle
+  run_clutch_live_mssql
+  run_clutch_live_clickhouse
+  run_clutch_live_duckdb
+fi
 run_db_live_pg
 run_db_live_mysql
 run_db_live_cross_sql
 run_db_live_mongodb
 run_db_live_redis
+if ((jdbc_live_enabled)); then
+  run_db_live_oracle
+  run_db_live_mssql
+  run_db_live_clickhouse
+fi

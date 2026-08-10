@@ -64,6 +64,22 @@
       (should-not
        (plist-member (clutch-test--live-connect-params) :driver-class)))))
 
+(defun clutch-test--live-column-name (name)
+  "Return NAME using the live backend's metadata identifier case."
+  (if (clutch-test-live-backend-capability-p :uppercase-identifiers)
+      (upcase name)
+    name))
+
+(ert-deftest clutch-test-live-column-name-follows-backend-metadata-case ()
+  :tags '(:clutch-live)
+  "Synthetic live rows should use the backend's metadata identifier case."
+  (let ((clutch-test-backend 'oracle)
+        (clutch-test-url nil))
+    (should (equal (clutch-test--live-column-name "name") "NAME")))
+  (let ((clutch-test-backend 'mysql)
+        (clutch-test-url nil))
+    (should (equal (clutch-test--live-column-name "name") "name"))))
+
 (defun clutch-test--clickhouse-live-p ()
   "Return non-nil when live tests target ClickHouse."
   (clutch-test-live-backend-capability-p :clickhouse-engine))
@@ -663,7 +679,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
             (clutch-test--live-create-table-sql
              table '((id int primary) (name string))))
            (select-sql (format "SELECT id, name FROM %s ORDER BY id" table))
-           (result-name (format " *clutch-auto-batch-live-%d*" (emacs-pid))))
+           (result-name (format " *clutch-auto-batch-live-%d*" (emacs-pid)))
+           (id-column (clutch-test--live-column-name "id"))
+           (name-column (clutch-test--live-column-name "name")))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
@@ -673,8 +691,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (with-current-buffer result-name
                 (setq-local
                  clutch--pending-inserts
-                 '((("id" . "1") ("name" . "one"))
-                   (("id" . "2") ("name" . "two"))))
+                 `(((,id-column . "1") (,name-column . "one"))
+                   ((,id-column . "2") (,name-column . "two"))))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
@@ -683,8 +701,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (should-not (clutch-db-manual-commit-p conn))
                 (setq-local
                  clutch--pending-inserts
-                 '((("id" . "3") ("name" . "three"))
-                   (("id" . "1") ("name" . "duplicate"))))
+                 `(((,id-column . "3") (,name-column . "three"))
+                   ((,id-column . "1") (,name-column . "duplicate"))))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
@@ -717,7 +735,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
              table '((id int primary) (name string))))
            (select-sql (format "SELECT id, name FROM %s ORDER BY id" table))
            (insert-sql (format "INSERT INTO %s (id, name) VALUES (?, ?)" table))
-           (result-name (format " *clutch-manual-batch-live-%d*" (emacs-pid))))
+           (result-name (format " *clutch-manual-batch-live-%d*" (emacs-pid)))
+           (id-column (clutch-test--live-column-name "id"))
+           (name-column (clutch-test--live-column-name "name")))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
@@ -729,8 +749,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (with-current-buffer result-name
                 (setq-local
                  clutch--pending-inserts
-                 '((("id" . "2") ("name" . "batch-prefix"))
-                   (("id" . "1") ("name" . "duplicate"))))
+                 `(((,id-column . "2") (,name-column . "batch-prefix"))
+                   ((,id-column . "1") (,name-column . "duplicate"))))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
@@ -746,8 +766,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                   '(("1" "earlier"))))
                 (setq-local
                  clutch--pending-inserts
-                 '((("id" . "2") ("name" . "batch-prefix"))
-                   (("id" . "3") ("name" . "fixed"))))
+                 `(((,id-column . "2") (,name-column . "batch-prefix"))
+                   ((,id-column . "3") (,name-column . "fixed"))))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
