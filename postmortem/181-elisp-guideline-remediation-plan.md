@@ -1,6 +1,25 @@
 # 181 — Elisp guideline remediation plan
 
-> **Status:** This is an execution plan, not a claim that any remediation is complete. The isolated task creates this plan only; it does not change implementation, tests, documentation, or CI configuration. No dates or effort estimates are part of the plan.
+> **Status:** Phases 0 and 1 are complete on `plan/elisp-live-remediation`.
+> Later phases remain planned work. No dates or effort estimates are part of the
+> plan.
+
+## Execution evidence
+
+- The pre-fix Podman baseline passed with 55 expected results, seven expected
+  skips, and no unexpected results. Targeted live probes confirmed synchronous
+  CAPF metadata calls for native PostgreSQL, MySQL, and MongoDB.
+- The Phase 1 fix makes native SQL completion advertise deferred column loading
+  through a backend capability and gives MongoDB a minimal idle metadata method.
+  Cache-hit completion behavior remains covered by ERT.
+- The post-fix Podman baseline again passed with 55 expected results, seven
+  expected skips, and no unexpected results. Targeted real-connection probes
+  recorded zero synchronous CAPF metadata calls and one successful deferred
+  cache hydration for each of PostgreSQL, MySQL, and MongoDB.
+- The complete non-live gate passed: 541 main ERT tests, 220 backend ERT tests,
+  byte compilation, package lint, checkdoc, and 13 architecture tests.
+- Oracle/JDBC completion remains unchanged and issue-specific Oracle live
+  reproduction remains unavailable, so it is still outside Phase 1.
 
 ## Purpose and evidence boundary
 

@@ -1132,6 +1132,13 @@ backend should preserve the current dirty state.")
   "Most backends can synchronously load column metadata during completion."
   t)
 
+(cl-defgeneric clutch-db-completion-deferred-columns-p (conn)
+  "Return non-nil when CONN defers uncached completion column metadata.")
+
+(cl-defmethod clutch-db-completion-deferred-columns-p ((_conn t))
+  "Backends use their ordinary synchronous or direct completion path by default."
+  nil)
+
 (cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback
                                                    idle-delay)
   "Start an asynchronous schema refresh for CONN.

@@ -1110,13 +1110,18 @@ appropriate."
   "Return raw column names for TABLE on CONN in completion context.
 SCHEMA supplies cached columns.  PREFIX is passed to direct backend completion
 when SYNC-COLUMNS-P is nil."
-  (if sync-columns-p
+  (if (clutch-db-completion-deferred-columns-p conn)
       (or (clutch--cached-columns schema table)
-          (and schema (clutch--ensure-columns conn schema table)))
-    (or (clutch--cached-columns schema table)
-        (clutch--safe-completion-call
-         (lambda ()
-           (clutch-db-complete-columns conn table prefix))))))
+          (when schema
+            (clutch--ensure-columns-async conn schema table)
+            nil))
+    (if sync-columns-p
+        (or (clutch--cached-columns schema table)
+            (and schema (clutch--ensure-columns conn schema table)))
+      (or (clutch--cached-columns schema table)
+          (clutch--safe-completion-call
+           (lambda ()
+             (clutch-db-complete-columns conn table prefix)))))))
 
 (defun clutch--completion-column-candidates (conn schema tables prefix
                                                   sync-columns-p)
