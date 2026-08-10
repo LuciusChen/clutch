@@ -59,20 +59,33 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
-- **Public naming**: `clutch-` for the clutch package. External protocol packages keep their own public namespaces (`mysql-` / upstream `pg-`). No double dash for public API.
+- **Public naming**: Use `clutch-` for every public top-level Clutch symbol, including functions, variables, faces, and other API. External protocol packages keep their own public namespaces (`mysql-` / upstream `pg-`). No double dash for public API.
 - **Private naming**: `clutch--` inside the clutch repo. Never call private symbols across subsystem boundaries. Files split from the same subsystem (e.g., `clutch-query.el`, `clutch-object.el`, `clutch-edit.el`, `clutch-schema.el` all belong to the `clutch` subsystem) may call each other's `clutch--` symbols, but must add `declare-function` / `defvar` declarations for byte-compilation.
-- **Predicates**: Multi-word predicate names end in `-p`.
-- **Unused args**: Prefix with `_`.
+- **Lisp case**: Use lowercase words separated by hyphens, not `snake_case` or `camelCase`.
+- **Predicates**: Single-word predicate names end in `p`; multi-word names end in `-p`.
+- **Faces**: Preserve Clutch's established public `clutch-...-face` customization names and use that convention consistently for new faces. Do not rename public faces solely to follow the shared no-suffix preference.
+- **Unused bindings**: Prefix unused lexical variables and arguments with `_`.
+- **Emacs indentation is authoritative**: Indent new and modified code with spaces, do not introduce hard tabs, and do not manually align code against Emacs's indentation rules.
+- **Keep conventional layout**: Keep trailing closing parentheses together, separate unrelated top-level forms with a blank line, and keep lines near 80 characters where feasible without splitting clear strings, URLs, or forms unnaturally.
 - **Prefer flat control flow**: Avoid deep `let` → `if` → `let` nesting. Use `if-let*`, `when-let*`, `pcase`, and `pcase-let`.
+- **Use direct conditional idioms**: Use `when` for a single positive branch and `unless` for a single negated branch. Do not add a redundant `progn` where the surrounding form already accepts a body.
+- **Use precise boolean and numeric idioms**: Use `not` for boolean negation and `null` when specifically testing for the empty list. Prefer chained comparisons such as `(< lower value upper)` and `(1+ value)` / `(1- value)` over reconstructed equivalents.
 - **Prefer destructuring over repeated accessors**: Use `pcase-let` to destructure lists and plists instead of multiple `nth` or `plist-get` calls on the same object. For example, prefer `(pcase-let ((\`(,a ,b ,c) row)) ...)` over `(let ((a (nth 0 row)) (b (nth 1 row)) (c (nth 2 row))) ...)`.
 - **Prefer `cl-loop` for non-trivial accumulation**: Use it instead of `dolist` + manual accumulators or over-clever folds.
+- **Do not use `mapcar` for discarded results**: Use `dolist` for multi-form side effects and `seq-do` when applying one existing function for side effects.
 - **Use the right error type**: `user-error` for user-caused problems; `error` for programmer bugs; `condition-case` for recoverable failures.
 - **Do not wrap stdlib errors without semantics**: Use `user-error` directly unless the wrapper adds behavior that the builtin does not provide and the docstring names that behavior.
 - **Prefer idiomatic primitives**: Use `vconcat` to build vectors from lists, not `apply #'vector`. Predicates returning non-nil need no `(not (null ...))` wrapper — the return value itself suffices.
 - **State placement**: `defvar-local` for buffer state, plain `defvar` for shared state, `defcustom` for user options. Major modes must make their state buffer-local.
 - **Mode definitions**: Read-only UI buffers derive from `special-mode`; editing buffers derive from the right parent (`sql-mode`, `comint-mode`, etc.). Register buffer-local hooks in the mode body with LOCAL=`t`.
 - **Rendering discipline**: Use text properties for data-bearing annotations and overlays only for ephemeral visuals. Build render buffers from cached data, not by reparsing displayed text.
+- **Function signatures**: Avoid more than three or four positional parameters. When argument order becomes hard to remember, use `cl-defun` keyword arguments or pass a clearly documented plist/alist instead.
 - **Function design**: Keep functions short, separate pure computation from display mutation, and keep interactive commands thin.
+- **Function references**: Use `#'function-name` when passing a function value in executable code so the byte-compiler can validate it. Plain quoting remains appropriate when the symbol is data.
+- **Long-lived registrations use named functions**: Hooks, keymaps, advice, customizable callbacks, and similar registrations should normally reference a named function. Use lambdas for genuinely local behavior, and do not wrap an existing function in a lambda that only forwards its arguments.
+- **Use macros only for syntax**: Do not write a macro when a function can express the behavior. Design the intended call form first, keep the macro as a thin syntax layer, and move computation or runtime behavior into ordinary testable functions.
+- **Write hygienic macros**: Prefer backquote/unquote to manual `list`/`cons` assembly, prevent variable capture with `make-symbol` or `cl-gensym`, and do not evaluate arguments more times than the macro contract promises.
+- **Declare macro tooling metadata**: Every new or modified macro must declare an Edebug `debug` specification. Add an `indent` declaration whenever its body should not be indented like an ordinary function call. Do not expand unrelated changes merely to retrofit untouched test helpers.
 
 ## Completion and Object Workflow
 
@@ -180,11 +193,14 @@ These rules keep the package compatible with MELPA submission requirements (`pac
 
 - Every public `defun`, `defmacro`, `defcustom`, and `defvar` must have a docstring.
 - Docstring first line must be a complete sentence ending with a period.
-- Argument names in docstrings should be UPPERCASED.
+- Function and macro docstrings should begin with a concise imperative summary where practical.
+- Argument names in docstrings should be UPPERCASED and described in the order they are used.
+- Do not indent docstring continuation lines merely to align them with the opening quote; that indentation is visible in help output.
 - Run checkdoc across every distributable `clutch*.el` file, not only the main entry file.
 
 ### Common pitfalls
 
+- Load library dependencies with `require`, not `load` or `load-library`, so loading is feature-based and idempotent.
 - `cl-lib` functions require `(require 'cl-lib)` — do not rely on transitive loading.
 - Avoid `eval-when-compile` for runtime-needed dependencies.
 - Compatibility shims must stay in the `clutch--` namespace.  When an upstream function exists, prefer a prefixed `defalias` over defining an unprefixed replacement.
