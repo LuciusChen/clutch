@@ -2201,6 +2201,49 @@ pins the RPC op, prefix param, and connection-scoped timeout."
           (should (equal callback-result '("id" "name")))
           (should (= query-count 1)))))))
 
+(ert-deftest clutch-db-test-idle-metadata-calls-serialize-per-connection ()
+  "Idle metadata calls for one connection should not run reentrantly."
+  (let ((conn 'fake-conn)
+        (clutch-db--idle-metadata-connections (make-hash-table :test 'eq))
+        timers
+        results
+        (active 0)
+        (max-active 0))
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn &rest args)
+                 (setq timers (append timers (list (cons fn args))))
+                 'fake-timer))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-busy-p)
+               (lambda (_conn) nil)))
+      (cl-labels ((run-next-timer ()
+                    (pcase-let ((`(,fn . ,args) (pop timers)))
+                      (apply fn args)))
+                  (second-call (_conn)
+                    (cl-incf active)
+                    (setq max-active (max max-active active))
+                    (cl-decf active)
+                    'second)
+                  (first-call (_conn)
+                    (cl-incf active)
+                    (setq max-active (max max-active active))
+                    (run-next-timer)
+                    (cl-decf active)
+                    'first))
+        (clutch-db--schedule-idle-metadata-call
+         conn (lambda (value) (push value results)) nil #'first-call)
+        (clutch-db--schedule-idle-metadata-call
+         conn (lambda (value) (push value results)) nil #'second-call)
+        (run-next-timer)
+        (while timers
+          (run-next-timer))
+        (should (= max-active 1))
+        (should (equal (sort results
+                             (lambda (a b)
+                               (string< (symbol-name a) (symbol-name b))))
+                       '(first second)))))))
+
 (ert-deftest clutch-db-test-jdbc-list-columns-async-maps-column-names ()
   "JDBC async column-name preheat should normalize the returned names."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
@@ -5555,6 +5598,24 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
   (ignore-errors
     (mongodb-drop-database (clutch-mongodb-conn-client conn) database)))
 
+(defun clutch-db-test--mongodb-live-set-find-failpoint (conn mode &optional data)
+  "Set MongoDB find-command failpoint MODE with optional DATA through CONN."
+  (mongodb-command
+   (clutch-mongodb-conn-client conn)
+   "admin"
+   (mongodb-document
+    `(("configureFailPoint" . "failCommand")
+      ("mode" . ,mode)
+      ,@(when data
+          `(("data" . ,(mongodb-document data))))))))
+
+(defun clutch-db-test--mongodb-live-wait-for (predicate)
+  "Wait until MongoDB live PREDICATE returns non-nil."
+  (with-timeout
+      (5 (ert-fail "MongoDB live metadata callback did not finish"))
+    (while (not (funcall predicate))
+      (sit-for 0.05))))
+
 (defun clutch-db-test--visible-result-column-indexes (result)
   "Return non-hidden column indexes for RESULT."
   (cl-loop for column in (clutch-db-result-columns result)
@@ -5853,6 +5914,88 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
         (clutch-db-test--mongodb-live-drop-collection conn collection)
         (clutch-db-test--mongodb-live-drop-collection
          conn validation-collection)))))
+
+(ert-deftest clutch-db-test-mongodb-live-idle-metadata-serializes-one-client ()
+  :tags '(:db-live :mongodb-live)
+  "Idle metadata calls should serialize while one MongoDB find is blocked."
+  (clutch-db-test--with-mongodb conn
+    (let ((first (clutch-db-test--mongodb-live-collection "metadata_first"))
+          (second (clutch-db-test--mongodb-live-collection "metadata_second"))
+          results
+          errors)
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             conn
+             (format
+              (concat "db.getCollection(%S).insertOne({_id: 1, first: true});"
+                      "db.getCollection(%S).insertOne({_id: 1, second: true})")
+              first second))
+            (clutch-db-test--mongodb-live-set-find-failpoint
+             conn
+             (mongodb-document '(("times" . 1)))
+             '(("failCommands" . ["find"])
+               ("blockConnection" . t)
+               ("blockTimeMS" . 500)))
+            (cl-letf (((symbol-function 'run-with-idle-timer)
+                       (lambda (secs _repeat fn &rest args)
+                         (apply #'run-at-time secs nil fn args))))
+              (clutch-db-list-columns-async
+               conn first
+               (lambda (columns) (push (cons first columns) results))
+               (lambda (message) (push message errors)))
+              (clutch-db-list-columns-async
+               conn second
+               (lambda (columns) (push (cons second columns) results))
+               (lambda (message) (push message errors)))
+              (clutch-db-test--mongodb-live-wait-for
+               (lambda () (= (+ (length results) (length errors)) 2))))
+            (should-not errors)
+            (should (= (length results) 2)))
+        (ignore-errors
+          (clutch-db-test--mongodb-live-set-find-failpoint conn "off"))
+        (clutch-db-test--mongodb-live-drop-collection conn first)
+        (clutch-db-test--mongodb-live-drop-collection conn second)))))
+
+(ert-deftest clutch-db-test-mongodb-live-failed-column-load-waits-for-refresh ()
+  :tags '(:db-live :mongodb-live)
+  "Failed deferred column metadata should not retry before schema refresh."
+  (clutch-db-test--with-mongodb conn
+    (let ((collection (clutch-db-test--mongodb-live-collection "metadata_retry")))
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             conn
+             (format "db.getCollection(%S).insertOne({_id: 1, value: 2})"
+                     collection))
+            (let ((clutch--schema-cache (make-hash-table :test 'eq))
+                  (clutch--table-metadata-cache (make-hash-table :test 'eq))
+                  (clutch--metadata-ticket-counter 0)
+                  (clutch--metadata-state-changed-hook nil)
+                  (schema (make-hash-table :test 'equal)))
+                (puthash collection nil schema)
+                (puthash conn schema clutch--schema-cache)
+                (clutch-db-test--mongodb-live-set-find-failpoint
+                 conn
+                 (mongodb-document '(("times" . 2)))
+                 '(("failCommands" . ["find"])
+                   ("errorCode" . 13)))
+                (cl-letf (((symbol-function 'run-with-idle-timer)
+                           (lambda (secs _repeat fn &rest args)
+                             (apply #'run-at-time secs nil fn args))))
+                  (should (clutch--ensure-columns-async conn schema collection))
+                  (clutch-db-test--mongodb-live-wait-for
+                   (lambda ()
+                     (eq (plist-get
+                          (clutch--metadata-status
+                           conn collection :columns-status)
+                          :state)
+                         'failed)))
+                  (should-not
+                   (clutch--ensure-columns-async conn schema collection)))))
+        (ignore-errors
+          (clutch-db-test--mongodb-live-set-find-failpoint conn "off"))
+        (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-set-current-schema ()
   :tags '(:db-live :mongodb-live)
@@ -6233,6 +6376,33 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
                            conn (format "SELECT COUNT(*) FROM %s" tbl))))
               (should (equal (caar (clutch-db-result-rows result)) "0"))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-live-rollback-invalidates-later-savepoints ()
+  :tags '(:db-live :jdbc-live :oracle-live)
+  "Rolling back an Oracle savepoint should invalidate later local handles."
+  (clutch-db-test--with-oracle conn
+    (let* ((conn-id (clutch-jdbc-conn-conn-id conn))
+           (timeout (clutch-jdbc--conn-rpc-timeout conn))
+           (outer (plist-get
+                   (clutch-jdbc--rpc
+                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                   :savepoint-id))
+           (inner (plist-get
+                   (clutch-jdbc--rpc
+                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                   :savepoint-id)))
+      (clutch-jdbc--rpc
+       "rollback-savepoint"
+       `((conn-id . ,conn-id) (savepoint-id . ,outer))
+       timeout)
+      (let ((err
+             (should-error
+              (clutch-jdbc--rpc
+               "release-savepoint"
+               `((conn-id . ,conn-id) (savepoint-id . ,inner))
+               timeout)
+              :type 'clutch-db-error)))
+        (should (string-match-p "Unknown savepoint id" (cadr err)))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-toggle-auto-commit ()
   :tags '(:db-live :jdbc-live :oracle-live)

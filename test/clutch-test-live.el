@@ -289,6 +289,37 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 	          (should (equal (mapcar #'downcase pk-cols) '("id"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-completion-does-not-cache-unknown-table ()
+  :tags '(:clutch-live :native-columns-live)
+  "Deferred native completion should not cache a parsed nonexistent table."
+  (clutch-test--with-conn conn
+    (unless (clutch-db-completion-deferred-columns-p conn)
+      (ert-skip "Live backend does not defer column completion"))
+    (clutch-test--with-isolated-metadata-caches
+      (let ((schema (make-hash-table :test 'equal))
+            (table (format "clutch_missing_%d" (emacs-pid)))
+            (missing (make-symbol "missing"))
+            scheduled)
+        (dolist (known-table (clutch-db-list-tables conn))
+          (puthash known-table nil schema))
+        (puthash conn schema clutch--schema-cache)
+        (puthash conn (list :state 'ready) clutch--schema-status-cache)
+        (cl-letf (((symbol-function 'run-with-idle-timer)
+                   (lambda (_secs _repeat fn &rest args)
+                     (setq scheduled (cons fn args))
+                     'fake-timer)))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (insert (format "select * from %s where nam" table))
+            (goto-char (point-min))
+            (search-forward "nam")
+            (completion-at-point)))
+        (when scheduled
+          (apply (car scheduled) (cdr scheduled)))
+        (should-not scheduled)
+        (should (eq (gethash table schema missing) missing))))))
+
 (ert-deftest clutch-test-live-object-describe-uses-real-table-and-index-metadata ()
   :tags '(:clutch-live)
   "Object describe should render real table/index metadata from the backend."

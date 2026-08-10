@@ -59,8 +59,16 @@
   socket-bind denial was reproduced and cleared without changing the test).
   The final complete non-live gate passes 544 main, 220 backend, and 13
   architecture ERT tests plus byte compilation, package-lint, and checkdoc.
-  The final Podman live gate passes 55 tests with seven expected skips, no
-  unexpected results, and automatic container cleanup.
+  The Phase 5 Podman live gate at that point passed 55 tests with seven
+  expected skips, no unexpected results, and automatic container cleanup.
+- The final convergence gate adds the deferred-metadata regressions described
+  in postmortem 182 and the Oracle nested-savepoint regression. The complete
+  non-live gate now passes 546 main and 221 backend ERT tests. The exact
+  candidate Podman matrix passes 121 tests with 39 expected capability skips
+  and no unexpected results; its original native slices account for 61 passes
+  and seven skips, while the Oracle/SQL Server/ClickHouse/DuckDB extension uses
+  the locally built agent 0.2.20 candidate. Source and runtime jar SHA-256
+  values matched, and every started container was removed automatically.
 
 ## Purpose and evidence boundary
 

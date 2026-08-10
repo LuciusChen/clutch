@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept deferred native column completion inside the schema metadata lifecycle. PostgreSQL, MySQL, and MongoDB no longer query or cache columns for a parsed table absent from the refreshed schema; a failed background load waits for an explicit schema refresh instead of retrying on every keystroke, and idle metadata calls on one native connection are serialized so MongoDB cannot start a second command on an already busy client.
 - Kept DuckDB's default `main` schema visible in schema switching by filtering `duckdb_schemas()` to the current catalog instead of excluding schemas DuckDB marks as internal; the `system` and `temp` catalogs remain hidden.
 - Preserved PostgreSQL boolean false values as `false` instead of displaying and exporting them as SQL NULL. The native pg-el boundary now assigns SQL NULL a distinct private marker during ordinary and prepared queries, normalizes it back to Clutch's NULL representation afterward, and carries false mutation parameters back to PostgreSQL without turning them into NULL.
 - Displayed and copied PostgreSQL boolean true as `true` to match `false`, instead of pg-el's raw `t` rendering. Result tables, cell previews, copy/export, and edit-buffer prefill now all use the same `true`/`false` spelling.
