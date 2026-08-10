@@ -1409,10 +1409,13 @@ or starting another schema refresh."
   (interactive)
   (let* ((source-buffer (current-buffer))
          (context (clutch--command-connection-context))
+         (context-connection (plist-get context :connection))
+         (params (plist-get context :params))
+         (product (plist-get context :product))
          (entry (or entry
                     (clutch--resolve-object-entry "Show definition: ")))
          (conn (or clutch-connection
-                   (plist-get context :connection)
+                   context-connection
                    (user-error "No active connection")))
          (name (clutch--object-display-name entry))
          (type (clutch--object-type-string entry)))
@@ -1423,13 +1426,11 @@ or starting another schema refresh."
       (let ((text (clutch-db-object-definition conn entry)))
         (unless text
           (user-error "DDL/source unavailable for %s %s" type name))
-        (when (clutch-db-native-document-surface-p
-               conn (plist-get context :params))
+        (when (clutch-db-native-document-surface-p conn params)
           (setq text (clutch--json-metadata-text text)))
         (clutch--remember-current-object entry)
-        (clutch--show-object-text-buffer conn entry text
-                                         (plist-get context :params)
-                                         (plist-get context :product))))))
+        (clutch--show-object-text-buffer
+         conn entry text params product)))))
 
 ;;;###autoload
 (defun clutch-object-describe (&optional entry)
@@ -1437,17 +1438,18 @@ or starting another schema refresh."
   (interactive)
   (let* ((source-buffer (current-buffer))
          (context (clutch--command-connection-context))
+         (context-connection (plist-get context :connection))
+         (params (plist-get context :params))
+         (product (plist-get context :product))
          (entry (or entry
                     (clutch--resolve-object-entry "Describe object: ")))
          (conn (or clutch-connection
-                   (plist-get context :connection)
+                   context-connection
                    (user-error "No active connection"))))
     (clutch--remember-current-object entry)
     (clutch--with-object-error-capture source-buffer conn entry "describe"
       (clutch--refresh-object-describe-metadata conn entry)
-      (clutch--show-object-describe-buffer conn entry
-                                           (plist-get context :params)
-                                           (plist-get context :product)))))
+      (clutch--show-object-describe-buffer conn entry params product))))
 
 (defun clutch--object-browse-query (conn entry &optional params)
   "Return a query-console browse query for ENTRY on CONN."
@@ -1461,7 +1463,9 @@ or starting another schema refresh."
 (defun clutch--document-object-action-context (entry action-id)
   "Return native document context for ENTRY and ACTION-ID."
   (let* ((context (clutch--command-connection-context))
-         (conn (or (plist-get context :connection)
+         (context-connection (plist-get context :connection))
+         (params (plist-get context :params))
+         (conn (or context-connection
                    clutch-connection
                    (user-error "No active connection")))
          (type (clutch--object-type-string entry))
@@ -1469,8 +1473,7 @@ or starting another schema refresh."
     (unless (clutch--document-collection-entry-p entry)
       (user-error "%s %s does not support %s"
                   type (clutch--object-display-name entry) (downcase label)))
-    (unless (clutch-db-native-document-surface-p
-             conn (plist-get context :params))
+    (unless (clutch-db-native-document-surface-p conn params)
       (user-error "%s requires a native document database connection" label))
     (unless (clutch-db-object-action-supported-p conn entry action-id)
       (user-error "%s %s does not support %s"
@@ -1491,7 +1494,9 @@ or starting another schema refresh."
          (spec (clutch--object-action-spec action-id))
          (context (clutch--document-object-action-context entry action-id))
          (conn (plist-get context :connection))
-         (source-buffer (plist-get context :source-buffer)))
+         (source-buffer (plist-get context :source-buffer))
+         (params (plist-get context :params))
+         (product (plist-get context :product)))
     (clutch--remember-current-object entry)
     (clutch--with-object-error-capture source-buffer conn entry
         (symbol-name action-id)
@@ -1502,8 +1507,7 @@ or starting another schema refresh."
         (clutch--show-object-text-buffer
          conn entry
          (clutch--json-metadata-text text)
-         (plist-get context :params)
-         (plist-get context :product)
+         params product
          (plist-get spec :title-suffix))))))
 
 ;;;###autoload
@@ -1536,6 +1540,8 @@ or starting another schema refresh."
 When ENTRY is nil, use the current table-like object."
   (interactive)
   (let* ((context (clutch--command-connection-context))
+         (context-connection (plist-get context :connection))
+         (params (plist-get context :params))
          (entry (or entry
                     (clutch--resolve-object-entry "Browse object: " t)))
          (type (clutch--object-type-string entry)))
@@ -1544,10 +1550,9 @@ When ENTRY is nil, use the current table-like object."
                   type (clutch--object-display-name entry)))
     (clutch--remember-current-object entry)
     (let* ((conn (or clutch-connection
-                     (plist-get context :connection)
+                     context-connection
                      (user-error "No active connection")))
-           (sql (clutch--object-browse-query conn entry
-                                             (plist-get context :params)))
+           (sql (clutch--object-browse-query conn entry params))
            (console (or (and (clutch--query-buffer-p)
                              (eq clutch-connection conn)
                              (current-buffer))

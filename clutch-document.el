@@ -353,15 +353,18 @@ path expressions."
   (let* ((schema (clutch--schema-for-connection clutch-connection))
          (collections (if-let* ((collection (clutch-mongodb--current-collection)))
                           (list collection)
-                        (and (hash-table-p schema) (hash-table-keys schema))))
-         fields)
-    (when (hash-table-p schema)
-      (dolist (collection collections)
-        (dolist (field (clutch-mongodb--collection-columns schema collection))
-          (when (stringp field)
-            (push (if field-path-p (concat "$" field) field)
-                  fields)))))
-    (clutch-mongodb--unique-candidates (nreverse fields))))
+                        (and (hash-table-p schema) (hash-table-keys schema)))))
+    (clutch-mongodb--unique-candidates
+     (when (hash-table-p schema)
+       (cl-loop for collection in collections
+                append
+                (cl-loop for field
+                         in (clutch-mongodb--collection-columns
+                             schema collection)
+                         when (stringp field)
+                         collect (if field-path-p
+                                     (concat "$" field)
+                                   field)))))))
 
 (defun clutch-mongodb--completion-context (beg end)
   "Return the MongoDB completion context plist for BEG and END."

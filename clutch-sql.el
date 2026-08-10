@@ -1128,12 +1128,12 @@ when SYNC-COLUMNS-P is nil."
   "Return column completion candidates for TABLES on CONN.
 SCHEMA supplies cached columns.  PREFIX and SYNC-COLUMNS-P control backend
 loading."
-  (let (all)
-    (dolist (tbl tables)
-      (when-let* ((cols (clutch--completion-column-values
-                         conn schema tbl prefix sync-columns-p)))
-        (setq all (nconc all (copy-sequence cols)))))
-    (clutch--sql-identifier-completion-candidates all)))
+  (clutch--sql-identifier-completion-candidates
+   (cl-loop for table in tables
+            for columns = (clutch--completion-column-values
+                           conn schema table prefix sync-columns-p)
+            when columns
+            append (copy-sequence columns))))
 
 (defun clutch--completion-qualified-empty-prefix-bounds ()
   "Return point bounds for completion after a qualifier dot, or nil."

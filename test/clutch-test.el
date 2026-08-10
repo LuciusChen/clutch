@@ -1596,7 +1596,11 @@
       (clutch-test--with-result-buffer (result-name)
         (pcase-let ((`(,sql ,prep ,context) case))
           (clutch-result--display-select
-           'fake-conn sql result 0 prep t context (current-buffer))
+           'fake-conn sql result 0
+           :row-identity-prep prep
+           :server-pageable t
+           :result-context context
+           :source-buffer (current-buffer))
           (with-current-buffer result-name
             (should (equal clutch--result-source-table "orders")))))))
   (let* ((source-win (selected-window))
@@ -1629,8 +1633,9 @@
           (with-temp-buffer
             (select-window source-win)
             (clutch-result--display-select
-             'fake-conn "SELECT name FROM users" result 0 nil t nil
-             (current-buffer)))
+             'fake-conn "SELECT name FROM users" result 0
+             :server-pageable t
+             :source-buffer (current-buffer)))
           (with-current-buffer result-name
             (should (equal clutch--column-pixel-widths [100]))))
       (when (window-live-p result-win)
@@ -1691,10 +1696,12 @@
              :buffer other :connection conn :problem other-problem)
             (clutch-result--display-select
              conn "SELECT * FROM users" result 0
+             :row-identity-prep
              '(:sql "SELECT * FROM users"
                :table "users"
                :identity-status unsupported)
-             t nil (current-buffer))
+             :server-pageable t
+             :source-buffer (current-buffer))
             (with-current-buffer result-name
               (should-not clutch--buffer-error-details))
             (let ((entry (gethash conn clutch--problem-records-by-conn)))
@@ -1718,8 +1725,7 @@
                 clutch--dml-result t)
     (clutch-result--init-state
      'fake-conn "SELECT name FROM users"
-     '((:name "name" :type-category text)) '(("alice")) nil
-     nil 0 nil nil nil nil)
+     '((:name "name" :type-category text)) '(("alice")) nil)
     (should-not clutch--result-source-table)
     (should-not clutch--result-server-pageable)
     (should-not clutch--result-server-rewritable)
