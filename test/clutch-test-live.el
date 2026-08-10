@@ -293,8 +293,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   :tags '(:clutch-live :native-columns-live)
   "Deferred native completion should not cache a parsed nonexistent table."
   (clutch-test--with-conn conn
-    (unless (clutch-db-completion-deferred-columns-p conn)
-      (ert-skip "Live backend does not defer column completion"))
+    (unless (memq clutch-test-backend '(pg mysql))
+      (ert-skip "Live backend is not a deferred native SQL adapter"))
+    (should (clutch-db-completion-deferred-columns-p conn))
     (clutch-test--with-isolated-metadata-caches
       (let ((schema (make-hash-table :test 'equal))
             (table (format "clutch_missing_%d" (emacs-pid)))

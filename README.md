@@ -435,7 +435,7 @@ Default ERT runs intentionally skip live tests when database credentials are not
 ./test/run-ci.sh native-live
 ```
 
-The native live runner starts or reuses local containers and covers MySQL, PostgreSQL, ordinary MongoDB native protocol, and Redis native protocol connections against real databases. Other JDBC live suites remain environment-driven and are skipped by default. MongoDB SQL Interface JDBC live tests require a SQL Interface endpoint; ordinary MongoDB work uses the default `mongodb` document surface. Contributor release gates are listed in `AGENTS.md` §Pre-Commit Checklist.
+The native live runner starts or reuses local containers and covers MySQL, PostgreSQL, ordinary MongoDB native protocol, and Redis native protocol connections against real databases. Set `CLUTCH_TEST_JDBC_AGENT_JAR` to an exact locally built or release-candidate agent jar to extend the same run with Oracle, SQL Server, ClickHouse, and DuckDB; `CLUTCH_TEST_JDBC_AGENT_DIR` can select the isolated runtime directory where that candidate and the container-backed drivers are prepared. Without an explicit candidate jar, the JDBC extension stays disabled rather than testing a different published artifact. MongoDB SQL Interface JDBC live tests still require a separate SQL Interface endpoint; ordinary MongoDB work uses the default `mongodb` document surface. Contributor release gates are listed in `AGENTS.md` §Pre-Commit Checklist.
 
 ## Roadmap
 
