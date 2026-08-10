@@ -21,6 +21,73 @@
          (clutch--object-warmup-generations (make-hash-table :test 'eq)))
      ,@body))
 
+;;;; Object — error boundary
+
+(ert-deftest clutch-test-object-error-capture-keeps-caller-err-on-success ()
+  "Object error capture should not shadow a caller connection named `err'."
+  (let ((err 'outer-conn)
+        (entry '(:name "USERS" :type "TABLE"))
+        cleared
+        body-ran)
+    (cl-letf (((symbol-function 'clutch--clear-connection-problem-capture)
+               (lambda (conn)
+                 (setq cleared conn)))
+              ((symbol-function 'clutch--remember-object-operation-error)
+               (lambda (&rest _args)
+                 (ert-fail "Successful object operation recorded an error"))))
+      (clutch--with-object-error-capture
+          'source-buffer err entry "describe"
+        (setq body-ran t)))
+    (should body-ran)
+    (should (eq cleared 'outer-conn))))
+
+(ert-deftest clutch-test-object-error-capture-records-and-resignals-exact-error ()
+  "Object errors should retain caller context and original condition data."
+  (let ((err 'outer-conn)
+        (entry '(:name "USERS" :type "TABLE"))
+        recorded
+        raised)
+    (cl-letf (((symbol-function 'clutch--clear-connection-problem-capture)
+               (lambda (&rest _args)
+                 (ert-fail "Failed object operation cleared problem capture")))
+              ((symbol-function 'clutch--remember-object-operation-error)
+               (lambda (buffer conn actual-entry op condition)
+                 (setq recorded
+                       (list buffer conn actual-entry op condition)))))
+      (setq raised
+            (condition-case condition
+                (clutch--with-object-error-capture
+                    'source-buffer err entry "describe"
+                  (signal 'clutch-db-error '("metadata boom" (:code 7))))
+              (clutch-db-error condition))))
+    (should (equal raised
+                   '(clutch-db-error "metadata boom" (:code 7))))
+    (should (equal recorded
+                   (list 'source-buffer 'outer-conn entry "describe" raised)))))
+
+(ert-deftest clutch-test-object-error-capture-propagates-programmer-errors ()
+  "Object error capture should not convert non-database failures."
+  (let ((err 'outer-conn)
+        (entry '(:name "USERS" :type "TABLE"))
+        recorded
+        cleared
+        raised)
+    (cl-letf (((symbol-function 'clutch--clear-connection-problem-capture)
+               (lambda (&rest _args)
+                 (setq cleared t)))
+              ((symbol-function 'clutch--remember-object-operation-error)
+               (lambda (&rest _args)
+                 (setq recorded t))))
+      (setq raised
+            (condition-case condition
+                (clutch--with-object-error-capture
+                    'source-buffer err entry "describe"
+                  (signal 'wrong-type-argument '(integerp "bad")))
+              (wrong-type-argument condition))))
+    (should (equal raised '(wrong-type-argument integerp "bad")))
+    (should-not recorded)
+    (should-not cleared)))
+
 ;;;; Object — browse and actions
 
 (defun clutch-test-object--render-action-menu (entry &optional conn supported-actions)
