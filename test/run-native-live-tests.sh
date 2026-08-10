@@ -177,7 +177,8 @@ start_mongo() {
   run_container \
     --name "$mongo_name" \
     -p "127.0.0.1:${mongo_port}:27017" \
-    "$mongo_image"
+    "$mongo_image" \
+    --setParameter enableTestCommands=1
   started+=("$mongo_name")
 }
 

@@ -603,11 +603,13 @@ message after its failed state is recorded."
 
 (defun clutch--ensure-columns-async (conn schema table)
   "Queue an async column-name fetch for TABLE in SCHEMA on CONN when needed."
-  (let ((state (plist-get
+  (let ((columns (if schema (gethash table schema 'missing) 'missing))
+        (state (plist-get
                 (clutch--metadata-status conn table :columns-status)
                 :state)))
-    (unless (or (clutch--cached-columns schema table)
-                (memq state '(queued loading)))
+    (unless (or (eq columns 'missing)
+                columns
+                (memq state '(queued loading failed)))
       (let ((started
              (clutch--start-table-metadata-request
               conn table table :columns-status "list-columns"

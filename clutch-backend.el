@@ -244,6 +244,9 @@ AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   "Connections currently reserved by foreground Clutch commands.
 Values are nesting counts.")
 
+(defvar clutch-db--idle-metadata-connections (make-hash-table :test 'eq)
+  "Connections currently executing an idle metadata call.")
+
 (defun clutch-db--foreground-busy-p (conn)
   "Return non-nil when CONN is reserved by foreground Clutch work."
   (and conn (gethash conn clutch-db--foreground-connections)))
@@ -1197,14 +1200,18 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
       ((run ()
          (if (clutch-db-live-p conn)
              (if (or (clutch-db-busy-p conn)
-                     (clutch-db--foreground-busy-p conn))
+                     (clutch-db--foreground-busy-p conn)
+                     (gethash conn clutch-db--idle-metadata-connections))
                  (run-with-idle-timer 0.1 nil #'run)
-               (condition-case err
-                   (when callback
-                     (funcall callback (apply fn conn args)))
-                 (error
-                  (when errback
-                    (funcall errback (error-message-string err))))))
+               (puthash conn t clutch-db--idle-metadata-connections)
+               (unwind-protect
+                   (condition-case err
+                       (when callback
+                         (funcall callback (apply fn conn args)))
+                     (error
+                      (when errback
+                        (funcall errback (error-message-string err)))))
+                 (remhash conn clutch-db--idle-metadata-connections)))
            (when errback
              (funcall errback "Connection closed")))))
     (run-with-idle-timer (or initial-delay 0) nil #'run)))
