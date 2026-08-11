@@ -67,7 +67,7 @@ Joined, grouped, derived, or otherwise ambiguous result sets remain read-only un
 | Backend | Support level | Requirements and notes |
 |---|---|---|
 | MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
-| PostgreSQL | Core SQL support | Requires current [pg-el](https://github.com/emarsden/pg-el) with `pgcon-transaction-status` |
+| PostgreSQL | Core SQL support | Requires current [pg-el](https://github.com/emarsden/pg-el) with `pgcon-transaction-status` and [protocol-level SQL NULL parameter binding](https://github.com/emarsden/pg-el/pull/32) |
 | SQLite | Core SQL support | Uses Emacs 29.1+ built-in `sqlite-*` functions; no external dependency |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |

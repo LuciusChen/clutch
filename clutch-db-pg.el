@@ -518,31 +518,6 @@ positions."
                      count param-count))))
     rewritten))
 
-(defun clutch-db-pg--rewrite-param-sql-inlining-null
-    (sql null-indices param-count)
-  "Rewrite SQL placeholders for PARAM-COUNT parameters, inlining NULL.
-Placeholders whose zero-based ordinal is in NULL-INDICES become the
-literal `NULL'; the remaining placeholders become `$N' in order, so
-prepared execution never binds an untyped nil.  This works around
-pg-el's inability to bind nil as SQL NULL before emarsden/pg-el PR #32
-merges."
-  (let ((non-null 0))
-    (pcase-let ((`(,rewritten . ,count)
-                 (clutch-db-sql-map-placeholders
-                  sql
-                  (lambda (index)
-                    (if (memq index null-indices)
-                        "NULL"
-                      (setq non-null (1+ non-null))
-                      (format "$%d" non-null)))
-                  (clutch-db-sql-dialect 'postgres))))
-      (when (/= count param-count)
-        (signal 'clutch-db-error
-                (list (format
-                       "SQL has %d `?' placeholders but %d parameters; write `??' for the jsonb operator"
-                       count param-count))))
-      rewritten)))
-
 (defun clutch-db-pg--array-type-name-p (type)
   "Return non-nil when PostgreSQL TYPE names an array type."
   (and (stringp type)
@@ -839,22 +814,8 @@ manual-commit mode via lazy BEGIN."
    conn sql
    (lambda ()
      (let* ((pg-null-marker clutch-db-pg--null-marker)
-            (null-indices
-             (cl-loop for param in params
-                      for index from 0
-                      when (null (clutch-db-param-value param))
-                      collect index))
-            (pg-sql (if null-indices
-                        (clutch-db-pg--rewrite-param-sql-inlining-null
-                         sql null-indices (length params))
-                      (clutch-db-pg--rewrite-param-sql sql (length params))))
-            (typed-arguments
-             (clutch-db-pg--typed-arguments
-              (if null-indices
-                  (cl-remove-if (lambda (param)
-                                  (null (clutch-db-param-value param)))
-                                params)
-                params)))
+            (pg-sql (clutch-db-pg--rewrite-param-sql sql (length params)))
+            (typed-arguments (clutch-db-pg--typed-arguments params))
             (result (clutch-db-pg--exec-prepared conn pg-sql typed-arguments)))
        (clutch-db-pg--wrap-result result)))))
 

@@ -1,5 +1,7 @@
 # 179 — pg-el untyped nil prepared-parameter workaround
 
+> Superseded by [183](183-retire-pg-el-null-parameter-workaround.md) after emarsden/pg-el PR #32 merged.
+
 ## Context
 
 pg-el's prepared Bind path cannot send an untyped `nil` argument as SQL NULL. The length calculation calls `(string-bytes nil)` and signals `wrong-type-argument stringp nil`, and the wire NULL length 0xFFFFFFFF cannot be emitted bytewise by `pg--send-uint` because `(% -1 256)` is still -1. Typed arguments such as `(nil . "bool")` are handled by pg-el and intentionally serialize as boolean false, so Clutch cannot use a typed nil to mean SQL NULL.

@@ -4427,8 +4427,8 @@ back out in Extended JSON instead of handing `json-encode' a record."
                     (clutch-db-typed-param t "bool")))))
         (should observed-null-marker)
         (should (equal observed-sql
-                       "SELECT $1::bool, NULL::text, $2::bool"))
-        (should (equal observed-arguments '(("false") (t))))
+                       "SELECT $1::bool, $2::text, $3::bool"))
+        (should (equal observed-arguments '(("false") (nil) (t))))
         (should (equal (clutch-db-result-rows result)
                        '((:false nil t))))))))
 
