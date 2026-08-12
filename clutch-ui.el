@@ -430,7 +430,7 @@ not enforce `min-width' consistently across supported Emacs versions."
   "Return the current graphical font metric signature, or nil."
   (when (display-graphic-p)
     (let* ((cell-width (default-font-width))
-           (samples '("m" "i" "W" "中" "あ" "한" "m中あ한"))
+           (samples '("m" "i" "W" "中" "あ" "한" "m中あ한" "…"))
            (pixel-widths (mapcar #'clutch--display-string-pixel-width samples)))
       (unless (cl-loop for sample in samples
                        for pixels in pixel-widths

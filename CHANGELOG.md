@@ -13,6 +13,7 @@
 - Set PostgreSQL columns to NULL through prepared statements again. Current pg-el binds untyped nil as protocol-level SQL NULL, so Clutch now sends every value through the ordinary prepared-parameter path without rewriting NULL placeholders into SQL literals.
 - Kept simple single-table `SELECT ... LIMIT ...` results editable when a safe row identity is available. A top-level page tail still disables server-side pagination, filtering, sorting, and count rewrites, but no longer discards the independently verified source table used by staged edits and deletes.
 - Kept graphical Result Browser headers aligned with rows when `text-scale-mode` changes the buffer font. Result buffers now opt header lines into buffer-local scaling, avoid applying the default-face scale twice through mode-line inheritance, and measure column content with the same default-face remappings used by redisplay.
+- Kept graphical Result Browser columns aligned when the truncation ellipsis is wider than one logical cell in the active font or its fallback. The font-metric probe now includes the same `…` glyph emitted by truncated cells, so Clutch automatically selects its pixel-aware layout before the extra glyph width can shift later columns.
 
 ## 0.4.0 - 2026-07-31
 

@@ -513,6 +513,18 @@
                    10))))
       (should (= (clutch--display-string-pixel-width "x") 20)))))
 
+(ert-deftest clutch-test-pixel-metric-detects-wide-truncation-ellipsis ()
+  "Pixel layout should detect an ellipsis wider than one logical cell."
+  (cl-letf (((symbol-function 'display-graphic-p)
+             (lambda (&optional _display) t))
+            ((symbol-function 'default-font-width) (lambda () 10))
+            ((symbol-function 'clutch--display-string-pixel-width)
+             (lambda (string)
+               (if (equal string "…")
+                   20
+                 (* 10 (string-width string))))))
+    (should (clutch--pixel-metric-signature))))
+
 (ert-deftest clutch-test-result-grid-aligns-mixed-width-custom-displays ()
   "Result headers and custom display subregions should share rendered widths."
   (let ((clutch-column-displayers nil)
