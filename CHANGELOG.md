@@ -1,16 +1,26 @@
 # Changelog
 
-## 0.4.1 - Unreleased
+## 0.5.0 - Unreleased
+
+### Breaking Changes
+
+- Native PostgreSQL now requires [`pgsql.el`](https://github.com/LuciusChen/pgsql.el) instead of `pg.el` / `pg-el`. Install `pgsql` from MELPA (or from a source checkout) before using `:backend pg`.
+
+### Changed
+
+- Replaced PostgreSQL protocol workarounds in the Clutch adapter with `pgsql.el` public APIs for connections, prepared values, result metadata, transaction status, errors, escaping, and cancellation; protocol framing, authentication, TLS, type decoding, and synchronization now stay in the protocol package.
 
 ### Fixed
 
 - Pinned clutch-jdbc-agent 0.2.20 and its verified release checksum. Oracle drivers that reject optional explicit savepoint release no longer break staged-batch cleanup; rollback and release also invalidate every later opaque savepoint handle so Clutch cannot reuse database state that JDBC has already discarded.
 - Kept deferred native column completion inside the schema metadata lifecycle. PostgreSQL, MySQL, and MongoDB no longer query or cache columns for a parsed table absent from the refreshed schema; a failed background load waits for an explicit schema refresh instead of retrying on every keystroke, and idle metadata calls on one native connection are serialized so MongoDB cannot start a second command on an already busy client.
 - Kept DuckDB's default `main` schema visible in schema switching by filtering `duckdb_schemas()` to the current catalog instead of excluding schemas DuckDB marks as internal; the `system` and `temp` catalogs remain hidden.
-- Preserved PostgreSQL boolean false values as `false` instead of displaying and exporting them as SQL NULL. The native pg-el boundary now assigns SQL NULL a distinct private marker during ordinary and prepared queries, normalizes it back to Clutch's NULL representation afterward, and carries false mutation parameters back to PostgreSQL without turning them into NULL.
-- Displayed and copied PostgreSQL boolean true as `true` to match `false`, instead of pg-el's raw `t` rendering. Result tables, cell previews, copy/export, and edit-buffer prefill now all use the same `true`/`false` spelling.
+- Allowed PostgreSQL array parameters with explicit dimension bounds, such as `[0:2]={1,2,3}`, by passing them through as native array syntax instead of rejecting them. Result decoding still normalizes arrays to vectors and does not preserve explicit bound metadata.
+- Kept native PostgreSQL responses synchronized through completion input, server errors, and cancellation so later queries and metadata can reuse the connection safely.
+- Preserved PostgreSQL boolean false values as `false` instead of displaying and exporting them as SQL NULL. The native pgsql.el boundary assigns SQL NULL `pgsql-null`, normalizes it back to Clutch's NULL representation afterward, and carries false mutation parameters back to PostgreSQL without turning them into NULL.
+- Displayed and copied PostgreSQL boolean true as `true` to match `false`, instead of pgsql.el's raw `t` rendering. Result tables, cell previews, copy/export, and edit-buffer prefill now all use the same `true`/`false` spelling.
 - Stopped JDBC boolean false from leaking Clutch's private JSON false sentinel into results. The JDBC row boundary now normalizes decoded JSON false — including values nested in lists and vectors — to the generic `:false`, so false cells display and copy as `false` and edit back as a real boolean instead of a literal sentinel string.
-- Set PostgreSQL columns to NULL through prepared statements again. Current pg-el binds untyped nil as protocol-level SQL NULL, so Clutch now sends every value through the ordinary prepared-parameter path without rewriting NULL placeholders into SQL literals.
+- Sorted numeric result columns by exact decimal and exponent magnitude, including arbitrarily large values and deterministic infinity/NaN ordering, without lossy float conversion.
 - Kept simple single-table `SELECT ... LIMIT ...` results editable when a safe row identity is available. A top-level page tail still disables server-side pagination, filtering, sorting, and count rewrites, but no longer discards the independently verified source table used by staged edits and deletes.
 - Kept graphical Result Browser headers aligned with rows when `text-scale-mode` changes the buffer font. Result buffers now opt header lines into buffer-local scaling, avoid applying the default-face scale twice through mode-line inheritance, and measure column content with the same default-face remappings used by redisplay.
 - Kept graphical Result Browser columns aligned when the truncation ellipsis is wider than one logical cell in the active font or its fallback. The font-metric probe now includes the same `…` glyph emitted by truncated cells, so Clutch automatically selects its pixel-aware layout before the extra glyph width can shift later columns.
@@ -48,7 +58,6 @@
 - Native MongoDB now requires mongodb.el's public connection host, port, and username accessors. Update mongodb.el when Clutch reports a missing public API instead of relying on configured parameters that may not describe the effective endpoint.
 - Reduced the native MongoDB console to common reads, generated single-document mutations, `runCommand`, and `ObjectId` / `ISODate`.  Database switching now uses `clutch-switch-schema`; dedicated admin/index helpers, database aggregation, multi-document mutations, cursor `batchSize` / `comment`, and numeric/timestamp constructor aliases were removed.
 - Generated Redis hash Browse now requires Redis 6.2 or newer because bounded sampling uses `HRANDFIELD`.  On older servers, issue `HSCAN` or `HGETALL` manually instead.
-- Native PostgreSQL now requires current pg-el with `pgcon-transaction-status`; update pg-el if Clutch reports that the accessor is unavailable.
 
 ### Added
 
@@ -87,11 +96,9 @@
 - Kept SQL identifier and keyword completion ahead of global fallback CAPFs regardless of package load order, without depending on Corfu-specific hook reordering.
 - Returned point-local Embark object targets with scalar bounds, so `embark-act` on a Query Console table name no longer passes a one-element list as the target end position. Non-default object action labels now use standard keymap menu items instead of advising an Embark private function.
 - Reorganized the result dispatch into two balanced workflow rows, kept staged mutation actions together under Edit, and hid pending-only actions until changes are staged without changing any command keys.
-- Removed Clutch's duplicate PostgreSQL transaction-state tracking and explicit-array-bound rejection now that pg-el exposes `ReadyForQuery` status and parses dimension-prefixed array values upstream.
 - Allowed the native live-test runner to continue under Podman instead of exiting during the macOS-only OrbStack guard.
 - Extended the active column-header background across the full cell width instead of highlighting only the label text.
 - Suppressed automatic child-frame cell previews while refining a rectangular result selection.
-- Prevented completion input from aborting native PostgreSQL responses and contaminating later queries or foreign-key metadata caches; malformed PostgreSQL foreign-key rows now fail at the adapter boundary.
 - Made staged SQL mutations fail closed: hidden row-identity columns are verified at their injected trailing positions, computed or uncertain projections are read-only, writable identifiers are reconciled with canonical backend metadata, and multi-statement batches cannot partially commit.  SQLite batches use a real transaction; unsupported autocommit and already-dirty manual transactions fail before execution.
 - Kept SQL highlighting enabled when query consoles are created, with dialect state local to each console, object definition, and preview buffer. Connection binding and rebinding select or reset the product deterministically, including Oracle, SQL Server, DB2, and Redshift mappings, without changing the user's global `sql-product` default.
 - Updated the JDBC agent pin to 0.2.14. The agent now poisons connections whose timed-out driver work does not stop, serializes each metadata session, redacts embedded JDBC URL credentials, validates exact protocol integers, bounds large response cells, and avoids an unconditional liveness round trip before every query. It also recognizes Oracle `ORA-12592` as a fatal JDBC connection failure, replaces only an affected metadata session, limits recovery to one retry, and invalidates any replacement whose schema cannot be restored. Fatal primary-session responses explicitly invalidate only their local JDBC handle. After a configurable idle interval, the agent validates the primary session before statement creation; only a query-console, REPL, or batch statement proven not to have started may reconnect and run once in auto-commit or a clean manual transaction. Dirty manual transactions, partially completed batches, staged mutations, and failures after statement preparation or execution are never replayed. Manual-commit connection setup now fails rather than silently continuing in auto-commit when a driver lacks that capability. Metadata recovery treats an unsupported `Connection.isValid` probe as unavailable while still replacing sessions after concrete connection failures. Column metadata now includes optional default expressions from standard JDBC `COLUMN_DEF` and Oracle `DATA_DEFAULT`.

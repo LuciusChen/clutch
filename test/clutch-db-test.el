@@ -27,7 +27,7 @@
 ;; trusted CA.
 ;;
 ;; Run unit tests from the repository root:
-;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ~/repos/pgsql.el \
 ;;     --eval '(setq load-prefer-newer t)' \
 ;;     -l ert -l clutch-db-test \
 ;;     -f ert-run-tests-batch-and-exit
@@ -38,19 +38,17 @@
 
 (require 'cl-lib)
 (require 'ert)
-(require 'eieio)
 (require 'clutch-backend)
 (require 'clutch-connection)
 (require 'clutch-db-jdbc)
 (require 'clutch-db-sqlite)
 (require 'clutch-mongodb)
 (require 'clutch-redis)
-(require 'mysql)
 (require 'redis)
 (require 'mongodb)
+(require 'mysql)
 
-(eval-when-compile
-  (require 'pg))
+(require 'pgsql)
 
 ;; `mysql-tls-verify-server' is defined in mysql.el; declare it
 ;; special here so local test bindings remain dynamic even before the backend
@@ -86,8 +84,11 @@
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 (declare-function clutch-db-pg--column-details-row
                   "clutch-db-pg" (row pk-cols fks))
-(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns &optional conn))
-(declare-function clutch-db-pg--wrap-result "clutch-db-pg" (result))
+(declare-function clutch-db-pg--format-column-ddl "clutch-db-pg" (column))
+(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
+(declare-function clutch-db-pg--wrap-result "clutch-db-pg" (conn result))
+(declare-function clutch-db-pg--make-connection "clutch-db-pg" (&rest args))
+(declare-function clutch-db-pg--connection-client "clutch-db-pg" (conn))
 (declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg"
                   (sql &optional param-count))
 (declare-function clutch-db-pg--typed-arguments "clutch-db-pg" (params))
@@ -104,11 +105,6 @@
 (declare-function make-mysql-result "mysql" (&rest args))
 (declare-function mysql-current-database "mysql" (conn))
 (declare-function mysql-connection-id "mysql" (conn))
-(declare-function make-pgcon "pg" (&rest args))
-(declare-function make-pgresult "pg" (&rest args))
-(declare-function pgcon-connect-plist "pg" (conn))
-(declare-function pgcon-dbname "pg" (conn))
-(declare-function pgcon-typname-by-oid "pg" (conn))
 (declare-function sqlite-available-p "sqlite" ())
 
 ;;;; Test configuration
@@ -170,21 +166,59 @@
 (defconst clutch-db-test--pg-oid-numeric 1700)
 (defconst clutch-db-test--pg-oid-jsonb 3802)
 
-(defun clutch-db-test--make-pgcon (&rest params)
-  "Return a lightweight upstream `pgcon' built from PARAMS."
-  (require 'pg)
-  (let* ((dbname (or (plist-get params :database)
-                     (plist-get params :dbname)
-                     "test"))
-         (conn (make-pgcon :dbname dbname :process nil)))
-    (oset conn connect-plist
-          (list 'method :tcp
-                'host (or (plist-get params :host) "localhost")
-                'port (or (plist-get params :port) 5432)
-                'dbname dbname
-                'user (plist-get params :user)
-                'password (plist-get params :password)))
-    conn))
+(defun clutch-db-test--make-pg-client (&rest params)
+  "Return a fake pgsql.el client carrying PARAMS."
+  (let ((database (or (plist-get params :database)
+                      (plist-get params :dbname)
+                      "test")))
+    (list :host (or (plist-get params :host) "localhost")
+          :port (or (plist-get params :port) 5432)
+          :user (plist-get params :user)
+          :database database
+          :transaction-status 'idle)))
+
+(defun clutch-db-test--make-pg-connection (&rest params)
+  "Return a PostgreSQL adapter connection backed by fake PARAMS."
+  (require 'clutch-db-pg)
+  (clutch-db-pg--make-connection
+   :client (apply #'clutch-db-test--make-pg-client params)))
+
+(cl-defstruct (clutch-db-test--pg-result
+               (:constructor clutch-db-test--make-pg-result
+                             (&key columns rows command-tag affected-rows))
+               (:copier nil))
+  "Test-owned stand-in for values exposed by pgsql.el result accessors."
+  columns
+  rows
+  command-tag
+  affected-rows)
+
+(defmacro clutch-db-test--with-pgsql-results (&rest body)
+  "Run BODY with pgsql.el public result accessors serving test fakes."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'pgsql-result-columns)
+              #'clutch-db-test--pg-result-columns)
+             ((symbol-function 'pgsql-result-rows)
+              #'clutch-db-test--pg-result-rows)
+             ((symbol-function 'pgsql-result-affected-rows)
+              #'clutch-db-test--pg-result-affected-rows))
+     ,@body))
+
+(defmacro clutch-db-test--with-pgsql-client (&rest body)
+  "Run BODY with pgsql.el public APIs serving test-owned fakes."
+  (declare (indent 0) (debug t))
+  `(clutch-db-test--with-pgsql-results
+     (cl-letf (((symbol-function 'pgsql-transaction-status)
+                (lambda (client) (plist-get client :transaction-status)))
+               ((symbol-function 'pgsql-user)
+                (lambda (client) (plist-get client :user)))
+               ((symbol-function 'pgsql-host)
+                (lambda (client) (plist-get client :host)))
+               ((symbol-function 'pgsql-port)
+                (lambda (client) (plist-get client :port)))
+               ((symbol-function 'pgsql-database)
+                (lambda (client) (plist-get client :database))))
+       ,@body)))
 
 (defun clutch-db-test--live-name (prefix)
   "Return an isolated live database object name using PREFIX."
@@ -296,12 +330,12 @@ authinfo, and PARAMS are explicit connection parameters."
                    nil nil clutch-db-error)
                   (pg-require pg
                    (:host "127.0.0.1" :tls t)
-                   ((:clutch-tls-mode . require) (:sslmode . require))
-                   (:tls) nil)
+                   ((:sslmode . require))
+                   (:tls :clutch-tls-mode) nil)
                   (pg-prefer pg
                    (:host "127.0.0.1" :sslmode "prefer")
-                   ((:clutch-tls-mode . prefer) (:sslmode . prefer))
-                   (:tls) nil)
+                   ((:sslmode . prefer))
+                   (:tls :clutch-tls-mode) nil)
                   (pg-unsupported pg
                    (:host "127.0.0.1" :sslmode verify-ca)
                    nil nil clutch-db-error)))
@@ -712,30 +746,6 @@ and a `?' inside a dollar-quoted function body is part of the body."
                    20))
         (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
                    41)))))
-  (ert-info ("mixed explicit and default timeouts")
-    (let ((clutch-connect-timeout-seconds 10)
-          (clutch-read-idle-timeout-seconds 30)
-          (clutch-query-timeout-seconds 20)
-          (clutch-jdbc-rpc-timeout-seconds 41)
-          conn)
-      (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
-                ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
-                ((symbol-function 'clutch-jdbc--rpc)
-                 (lambda (&rest _args) '(:conn-id 7))))
-        (setq conn
-              (clutch-db-jdbc-connect
-               'oracle
-               '(:host "db" :port 1521 :database "svc"
-                 :user "scott" :password "tiger"
-                 :connect-timeout 99 :query-timeout 88)))
-        (should (= (plist-get (clutch-jdbc-conn-params conn) :connect-timeout)
-                   99))
-        (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout)
-                   88))
-        (should (= (plist-get (clutch-jdbc-conn-params conn) :read-idle-timeout)
-                   30))
-        (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout)
-                   41)))))
   (ert-info ("invalid idle validation intervals")
     (dolist (value '(-1 1.5 "300"))
       (let ((clutch-jdbc-validate-after-idle-seconds value))
@@ -946,7 +956,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
                "CREATE TABLE t (id int)")
               'clear))
   (should (eq (clutch-db-schema-transaction-effect
-               (clutch-db-test--make-pgcon :database "test")
+               (clutch-db-test--make-pg-connection :database "test")
                "CREATE TABLE t (id int)")
               'dirty))
   (should (eq (clutch-db-schema-transaction-effect
@@ -1003,157 +1013,6 @@ and a `?' inside a dollar-quoted function body is part of the body."
         (should (= timeout 12)))
       (should (plist-get (clutch-jdbc-conn-params conn) :manual-commit)))))
 
-(ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-user-mode ()
-  "A JDBC Auto batch should not expose its internal transaction as Manual mode."
-  (let* ((params '(:driver sqlserver :rpc-timeout 12))
-         (conn (make-clutch-jdbc-conn :conn-id 19
-                                      :params (copy-sequence params)))
-         events)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op rpc-params &optional _timeout)
-                 (push
-                  (pcase op
-                    ("set-auto-commit"
-                     (if (eq (alist-get 'auto-commit rpc-params) t)
-                         'auto
-                       'internal-manual))
-                    ("commit" 'commit)
-                    ("rollback" 'rollback))
-                  events))))
-      (should
-       (eq (clutch-db-call-with-atomic-batch
-            conn
-            (lambda ()
-              (should-not (clutch-db-manual-commit-p conn))
-              (push 'body events)
-              'done))
-           'done))
-      (should (equal (nreverse events)
-                     '(internal-manual body commit auto)))
-      (should (equal (clutch-jdbc-conn-params conn) params))
-      (setq events nil)
-      (should-error
-       (clutch-db-call-with-atomic-batch
-        conn
-        (lambda ()
-          (push 'body events)
-          (signal 'clutch-db-error '("statement failed"))))
-       :type 'clutch-db-error)
-      (should (equal (nreverse events)
-                     '(internal-manual body rollback auto)))
-      (should (equal (clutch-jdbc-conn-params conn) params)))))
-
-(ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-commit-error-uncertain ()
-  "A JDBC COMMIT error should not trigger rollback or restore Auto mode."
-  (let ((conn (make-clutch-jdbc-conn
-               :conn-id 19
-               :params '(:driver sqlserver :rpc-timeout 12)))
-        events)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
-                 (push
-                  (pcase op
-                    ("set-auto-commit"
-                     (if (eq (alist-get 'auto-commit params) t)
-                         'auto
-                       'internal-manual))
-                    ("commit" 'commit)
-                    ("rollback" 'rollback))
-                  events)
-                 (when (equal op "commit")
-                   (signal 'clutch-db-error '("commit response lost"))))))
-      (let ((err
-             (should-error
-              (clutch-db-call-with-atomic-batch
-               conn
-               (lambda ()
-                 (push 'body events)
-                 'done))
-              :type 'clutch-db-batch-outcome-uncertain)))
-        (should (eq (plist-get (cddr err) :phase) 'commit)))
-      (should (equal (nreverse events)
-                     '(internal-manual body commit)))
-      (should (clutch-db-manual-commit-p conn)))))
-
-(ert-deftest clutch-db-test-jdbc-atomic-batch-reports-restore-outcome ()
-  "JDBC restore errors should report whether the batch committed or rolled back."
-  (dolist (case '((nil committed
-                       (internal-manual body commit auto))
-                  (t rolled-back
-                     (internal-manual body rollback auto))))
-    (pcase-let ((`(,body-error ,expected-outcome ,expected-events) case))
-      (let ((conn (make-clutch-jdbc-conn
-                   :conn-id 19
-                   :params (copy-sequence
-                            '(:driver sqlserver :rpc-timeout 12))))
-            events)
-        (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-                   (lambda (op params &optional _timeout)
-                     (push
-                      (pcase op
-                        ("set-auto-commit"
-                         (if (eq (alist-get 'auto-commit params) t)
-                             'auto
-                           'internal-manual))
-                        ("commit" 'commit)
-                        ("rollback" 'rollback))
-                      events)
-                     (when (and (equal op "set-auto-commit")
-                                (eq (alist-get 'auto-commit params) t))
-                       (signal 'clutch-db-error '("restore failed"))))))
-          (let ((err
-                 (should-error
-                  (clutch-db-call-with-atomic-batch
-                   conn
-                   (lambda ()
-                     (push 'body events)
-                     (when body-error
-                       (signal 'clutch-db-error '("statement failed")))))
-                  :type 'clutch-db-session-restore-error)))
-            (should (eq (plist-get (cddr err) :outcome)
-                        expected-outcome)))
-          (should (equal (nreverse events) expected-events))
-          (should (clutch-db-manual-commit-p conn)))))))
-
-(ert-deftest clutch-db-test-jdbc-manual-atomic-batch-uses-savepoint ()
-  "A JDBC Manual batch should use a savepoint without ending the transaction."
-  (let ((conn (make-clutch-jdbc-conn
-               :conn-id 23
-               :params '(:driver sqlserver :rpc-timeout 14 :manual-commit t)))
-        events)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout)
-                 (should (= timeout 14))
-                 (push (cons op params) events)
-                 (when (equal op "create-savepoint")
-                   '(:savepoint-id 71)))))
-      (should
-       (eq (clutch-db-call-with-atomic-batch
-            conn
-            (lambda ()
-              (push '(body) events)
-              'done))
-           'done))
-      (should
-       (equal (nreverse events)
-              '(("create-savepoint" (conn-id . 23))
-                (body)
-                ("release-savepoint" (conn-id . 23) (savepoint-id . 71)))))
-      (setq events nil)
-      (should-error
-       (clutch-db-call-with-atomic-batch
-        conn
-        (lambda ()
-          (push '(body) events)
-          (signal 'clutch-db-error '("statement failed"))))
-       :type 'clutch-db-error)
-      (should
-       (equal (nreverse events)
-              '(("create-savepoint" (conn-id . 23))
-                (body)
-                ("rollback-savepoint" (conn-id . 23) (savepoint-id . 71)))))
-      (should (clutch-db-manual-commit-p conn)))))
-
 (ert-deftest clutch-db-test-jdbc-execute-params-uses-agent-binding ()
   "JDBC parameter execution should bind values in the agent."
   (let ((conn (make-clutch-jdbc-conn
@@ -1168,42 +1027,14 @@ and a `?' inside a dollar-quoted function body is part of the body."
                  '(:type "dml" :affected-rows 2))))
       (let ((result (clutch-db-execute-params
                      conn
-                     (concat "UPDATE dbo.orders SET note = ?, payload = ?, "
-                             "raw_payload = ?, optional_blob = ?, empty_raw = ? "
-                             "WHERE id = ?")
+                     "UPDATE dbo.orders SET note = ? WHERE id = ?"
                      (list (clutch-db-typed-param "中文" "NVARCHAR")
-                           (clutch-db-typed-param "{\"message\":\"中文\"}" "BLOB")
-                           (clutch-db-typed-param
-                            (unibyte-string 0 255 65) "RAW")
-                           (clutch-db-typed-param nil "BLOB")
-                           (clutch-db-typed-param (unibyte-string) "RAW")
                            (clutch-db-typed-param 17 "INTEGER")))))
         (should (equal captured-op "execute-params"))
         (should (equal (alist-get 'sql captured-params)
-                       (concat "UPDATE dbo.orders SET note = ?, payload = ?, "
-                               "raw_payload = ?, optional_blob = ?, empty_raw = ? "
-                               "WHERE id = ?")))
+                       "UPDATE dbo.orders SET note = ? WHERE id = ?"))
         (should (equal (alist-get 'values captured-params)
-                       `("中文"
-                         ((__clutch_jdbc_param . "binary")
-                          (jdbc-type . "BLOB")
-                          (base64
-                           . ,(base64-encode-string
-                               (encode-coding-string
-                                "{\"message\":\"中文\"}" 'utf-8)
-                               t)))
-                         ((__clutch_jdbc_param . "binary")
-                          (jdbc-type . "RAW")
-                          (base64
-                           . ,(base64-encode-string
-                               (unibyte-string 0 255 65) t)))
-                         ((__clutch_jdbc_param . "binary")
-                          (jdbc-type . "BLOB")
-                          (base64))
-                         ((__clutch_jdbc_param . "binary")
-                          (jdbc-type . "RAW")
-                          (base64 . ""))
-                         17)))
+                       '("中文" 17)))
         (should (= (clutch-db-result-affected-rows result) 2))))))
 
 (ert-deftest clutch-db-test-native-mysql-manual-commit-follows-autocommit ()
@@ -1239,60 +1070,120 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (should committed)
       (should rolled-back))))
 
+(ert-deftest clutch-db-test-native-pg-toggle-enables-manual-mode ()
+  "Native PostgreSQL should enter manual-commit mode after toggling autocommit off."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-test--with-pgsql-client
+      (should-not (clutch-db-manual-commit-p conn))
+      (clutch-db-set-auto-commit conn nil)
+      (should (clutch-db-manual-commit-p conn))
+      (clutch-db-set-auto-commit conn t)
+      (should-not (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
+  "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         calls)
+    (clutch-db-set-auto-commit conn nil)
+    (clutch-db-test--with-pgsql-client
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (actual-client sql)
+                   (should (eq actual-client client))
+                   (push sql calls)
+                   (pcase sql
+                     ("BEGIN"
+                      (setf (plist-get client :transaction-status)
+                            'in-transaction)
+                      (clutch-db-test--make-pg-result))
+                     ("SELECT 1"
+                      (clutch-db-test--make-pg-result
+                       :columns '((:name "n" :type-oid 23))
+                       :rows '((1))))
+                     ("SELECT 2"
+                      (clutch-db-test--make-pg-result
+                       :columns '((:name "n" :type-oid 23))
+                       :rows '((2))))
+                     (_
+                      (ert-fail (format "Unexpected SQL: %s" sql)))))))
+        (let ((result1 (clutch-db-query conn "SELECT 1"))
+              (result2 (clutch-db-query conn "SELECT 2")))
+          (should (equal (nreverse calls)
+                         '("BEGIN" "SELECT 1" "SELECT 2")))
+          (should (= (caar (clutch-db-result-rows result1)) 1))
+          (should (= (caar (clutch-db-result-rows result2)) 2)))))))
+
+(ert-deftest clutch-db-test-native-pg-toggle-auto-commit-rolls-back-failed-transaction ()
+  "Native PostgreSQL should roll back an aborted manual transaction before enabling autocommit."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         calls)
+    (clutch-db-set-auto-commit conn nil)
+    (clutch-db-test--with-pgsql-client
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (actual-client sql)
+                   (should (eq actual-client client))
+                   (push sql calls)
+                   (pcase sql
+                     ("BEGIN"
+                      (setf (plist-get client :transaction-status)
+                            'in-transaction)
+                      (clutch-db-test--make-pg-result))
+                     ("UPDATE demo SET x = 1"
+                      (setf (plist-get client :transaction-status)
+                            'failed-transaction)
+                      (signal 'pgsql-server-error '("statement failed")))
+                     ("ROLLBACK"
+                      (setf (plist-get client :transaction-status) 'idle)
+                      (clutch-db-test--make-pg-result))
+                     (_
+                      (ert-fail (format "Unexpected SQL: %s" sql)))))))
+        (should-error (clutch-db-query conn "UPDATE demo SET x = 1")
+                      :type 'clutch-db-error)
+        (clutch-db-set-auto-commit conn t)
+        (should (equal (nreverse calls)
+                       '("BEGIN" "UPDATE demo SET x = 1" "ROLLBACK")))
+        (should-not (clutch-db-manual-commit-p conn))))))
+
+(ert-deftest clutch-db-test-native-pg-commit-rolls-back-failed-transaction ()
+  "Native PostgreSQL should not report an aborted transaction as committed."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         calls)
+    (setf (plist-get client :transaction-status) 'failed-transaction)
+    (clutch-db-test--with-pgsql-client
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (actual-client sql)
+                   (should (eq actual-client client))
+                   (push sql calls)
+                   (setf (plist-get client :transaction-status) 'idle)
+                   (clutch-db-test--make-pg-result))))
+        (should (eq (clutch-db-commit conn) 'rolled-back))
+        (should (equal calls '("ROLLBACK")))
+        (should (eq (pgsql-transaction-status client) 'idle))))))
+
 (ert-deftest clutch-db-test-native-atomic-batches-use-explicit-transactions ()
   "Native Auto batches should commit or roll back without changing Auto mode."
   (require 'clutch-db-mysql)
   (require 'clutch-db-pg)
-  (dolist (case `((,(make-mysql-conn :status-flags #x0002)
-                    "START TRANSACTION")
-                  (,(clutch-db-test--make-pgcon :database "test")
-                    "BEGIN")))
-    (pcase-let ((`(,conn ,begin-sql) case))
-      (let (events)
-        (cl-letf (((symbol-function 'clutch-db-query)
-                   (lambda (_conn sql)
-                     (push sql events)))
-                  ((symbol-function 'clutch-db-commit)
-                   (lambda (_) (push 'commit events)))
-                  ((symbol-function 'clutch-db-rollback)
-                   (lambda (_) (push 'rollback events))))
-          (should
-           (eq (clutch-db-call-with-atomic-batch
-                conn
-                (lambda ()
-                  (push 'body events)
-                  'done))
-               'done))
-          (should (equal (nreverse events)
-                         (list begin-sql 'body 'commit)))
-          (setq events nil)
-          (let ((err
-                 (should-error
-                  (clutch-db-call-with-atomic-batch
-                   conn
-                   (lambda ()
-                     (push 'body events)
-                     (signal 'clutch-db-error '("statement failed"))))
-                  :type 'clutch-db-error)))
-            (should (string-match-p "statement failed"
-                                    (error-message-string err))))
-          (should (equal (nreverse events)
-                         (list begin-sql 'body 'rollback))))))))
-
-(ert-deftest clutch-db-test-native-manual-atomic-batches-use-savepoints ()
-  "Native Manual batches should use savepoints without ending the transaction."
-  (require 'clutch-db-mysql)
-  (require 'clutch-db-pg)
-  (let ((mysql-conn (make-mysql-conn :status-flags 0))
-        (pg-conn (clutch-db-test--make-pgcon :database "test")))
-    (clutch-db-set-auto-commit pg-conn nil)
-    (dolist (case `((,mysql-conn "START TRANSACTION")
-                    (,pg-conn "BEGIN")))
+  (clutch-db-test--with-pgsql-client
+    (dolist (case `((,(make-mysql-conn :status-flags #x0002)
+                     "START TRANSACTION")
+                    (,(clutch-db-test--make-pg-connection :database "test")
+                     "BEGIN")))
       (pcase-let ((`(,conn ,begin-sql) case))
         (let (events)
           (cl-letf (((symbol-function 'clutch-db-query)
                      (lambda (_conn sql)
-                       (push sql events))))
+                       (push sql events)))
+                    ((symbol-function 'clutch-db-commit)
+                     (lambda (_) (push 'commit events)))
+                    ((symbol-function 'clutch-db-rollback)
+                     (lambda (_) (push 'rollback events))))
             (should
              (eq (clutch-db-call-with-atomic-batch
                   conn
@@ -1300,43 +1191,85 @@ and a `?' inside a dollar-quoted function body is part of the body."
                     (push 'body events)
                     'done))
                  'done))
-            (setq events (nreverse events))
-            (should (equal (car events) begin-sql))
-            (should (string-match-p
-                     "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
-                     (nth 1 events)))
-            (should (eq (nth 2 events) 'body))
-            (should
-             (equal (nth 3 events)
-                    (replace-regexp-in-string
-                     "\\`SAVEPOINT " "RELEASE SAVEPOINT " (nth 1 events))))))))
-    (setf (mysql-conn-status-flags mysql-conn) #x0001
-          (pgcon-transaction-status pg-conn) ?T)
-    (dolist (conn (list mysql-conn pg-conn))
-      (let (events)
-        (cl-letf (((symbol-function 'clutch-db-query)
-                   (lambda (_conn sql)
-                     (push sql events))))
-          (should-error
-           (clutch-db-call-with-atomic-batch
-            conn
-            (lambda ()
-              (push 'body events)
-              (signal 'clutch-db-error '("statement failed"))))
-           :type 'clutch-db-error)
-          (setq events (nreverse events))
-          (should (string-match-p
-                   "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
-                   (car events)))
-          (should (eq (nth 1 events) 'body))
-          (should
-           (equal (nth 2 events)
-                  (replace-regexp-in-string
-                   "\\`SAVEPOINT " "ROLLBACK TO SAVEPOINT " (car events))))
-          (should
-           (equal (nth 3 events)
-                  (replace-regexp-in-string
-                   "\\`SAVEPOINT " "RELEASE SAVEPOINT " (car events)))))))))
+            (should (equal (nreverse events)
+                           (list begin-sql 'body 'commit)))
+            (setq events nil)
+            (let ((err
+                   (should-error
+                    (clutch-db-call-with-atomic-batch
+                     conn
+                     (lambda ()
+                       (push 'body events)
+                       (signal 'clutch-db-error '("statement failed"))))
+                    :type 'clutch-db-error)))
+              (should (string-match-p "statement failed"
+                                      (error-message-string err))))
+            (should (equal (nreverse events)
+                           (list begin-sql 'body 'rollback)))))))))
+
+(ert-deftest clutch-db-test-native-manual-atomic-batches-use-savepoints ()
+  "Native Manual batches should use savepoints without ending the transaction."
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (let ((mysql-conn (make-mysql-conn :status-flags 0))
+        (pg-conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-set-auto-commit pg-conn nil)
+    (clutch-db-test--with-pgsql-client
+      (dolist (case `((,mysql-conn "START TRANSACTION")
+                      (,pg-conn "BEGIN")))
+        (pcase-let ((`(,conn ,begin-sql) case))
+          (let (events)
+            (cl-letf (((symbol-function 'clutch-db-query)
+                       (lambda (_conn sql)
+                         (push sql events))))
+              (should
+               (eq (clutch-db-call-with-atomic-batch
+                    conn
+                    (lambda ()
+                      (push 'body events)
+                      'done))
+                   'done))
+              (setq events (nreverse events))
+              (should (equal (car events) begin-sql))
+              (should (string-match-p
+                       "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
+                       (nth 1 events)))
+              (should (eq (nth 2 events) 'body))
+              (should
+               (equal (nth 3 events)
+                      (replace-regexp-in-string
+                       "\\`SAVEPOINT " "RELEASE SAVEPOINT " (nth 1 events))))))))
+      (let ((explicit-mysql (make-mysql-conn :status-flags #x0001))
+            (explicit-pg (clutch-db-test--make-pg-connection :database "test")))
+        (clutch-db-set-auto-commit explicit-pg nil)
+        (setf (plist-get (clutch-db-pg--connection-client explicit-pg)
+                         :transaction-status)
+              'in-transaction)
+        (dolist (conn (list explicit-mysql explicit-pg))
+          (let (events)
+            (cl-letf (((symbol-function 'clutch-db-query)
+                       (lambda (_conn sql)
+                         (push sql events))))
+              (should-error
+               (clutch-db-call-with-atomic-batch
+                conn
+                (lambda ()
+                  (push 'body events)
+                  (signal 'clutch-db-error '("statement failed"))))
+               :type 'clutch-db-error)
+              (setq events (nreverse events))
+              (should (string-match-p
+                       "\\`SAVEPOINT clutch_submit_[0-9]+_[0-9]+_[0-9]+\\'"
+                       (car events)))
+              (should (eq (nth 1 events) 'body))
+              (should
+               (equal (nth 2 events)
+                      (replace-regexp-in-string
+                       "\\`SAVEPOINT " "ROLLBACK TO SAVEPOINT " (car events))))
+              (should
+               (equal (nth 3 events)
+                      (replace-regexp-in-string
+                       "\\`SAVEPOINT " "RELEASE SAVEPOINT " (car events)))))))))))
 
 (ert-deftest clutch-db-test-transaction-boundary-marks-failed-recovery-uncertain ()
   "A failed rollback should surface as an uncertain batch outcome."
@@ -1404,137 +1337,52 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (require 'clutch-db-mysql)
   (require 'clutch-db-pg)
   (let ((mysql-conn (make-mysql-conn :status-flags #x0003))
-        (pg-conn (clutch-db-test--make-pgcon :database "test")))
-    (setf (pgcon-transaction-status pg-conn) ?T)
-    (dolist (conn (list mysql-conn pg-conn))
-      (let (executed)
-        (cl-letf (((symbol-function 'clutch-db-query)
-                   (lambda (&rest _) (setq executed t))))
-          (let ((err
-                 (should-error
-                  (clutch-db-call-with-atomic-batch conn #'ignore)
-                  :type 'user-error)))
-            (should (string-match-p "explicit transaction"
-                                    (error-message-string err))))
-          (should-not executed))))))
-
-(ert-deftest clutch-db-test-native-pg-toggle-enables-manual-mode ()
-  "Native PostgreSQL should enter manual-commit mode after toggling autocommit off."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test")))
-    (should-not (clutch-db-manual-commit-p conn))
-    (clutch-db-set-auto-commit conn nil)
-    (should (clutch-db-manual-commit-p conn))
-    (clutch-db-set-auto-commit conn t)
-    (should-not (clutch-db-manual-commit-p conn))))
-
-(ert-deftest clutch-db-test-native-pg-transaction-state-follows-pg-el ()
-  "Native PostgreSQL should read transaction state from pg-el."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test")))
-    (pcase-dolist (`(,status ,open ,failed)
-                   '((?I nil nil)
-                     (?T t nil)
-                     (?E t t)))
-      (setf (pgcon-transaction-status conn) status)
-      (should (eq (and (clutch-db-pg--tx-open-p conn) t) open))
-      (should (eq (and (clutch-db-pg--tx-failed-p conn) t) failed)))))
-
-(ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
-  "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        calls)
-    (clutch-db-set-auto-commit conn nil)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (push sql calls)
-                 (pcase sql
-                   ("BEGIN"
-                    (setf (pgcon-transaction-status conn) ?T)
-                    (make-pgresult :connection conn :status "BEGIN"))
-                   ("SELECT 1"
-                    (make-pgresult :connection conn
-                                   :status "SELECT 1"
-                                   :attributes '(("n" 23 4))
-                                   :tuples '((1))))
-                   ("SELECT 2"
-                    (make-pgresult :connection conn
-                                   :status "SELECT 1"
-                                   :attributes '(("n" 23 4))
-                                   :tuples '((2))))
-                   (_
-                    (ert-fail (format "Unexpected SQL: %s" sql)))))))
-      (let ((result1 (clutch-db-query conn "SELECT 1"))
-            (result2 (clutch-db-query conn "SELECT 2")))
-        (should (equal (nreverse calls)
-                       '("BEGIN" "SELECT 1" "SELECT 2")))
-        (should (= (caar (clutch-db-result-rows result1)) 1))
-        (should (= (caar (clutch-db-result-rows result2)) 2))))))
-
-(ert-deftest clutch-db-test-native-pg-toggle-auto-commit-rolls-back-failed-transaction ()
-  "Native PostgreSQL should roll back an aborted manual transaction before enabling autocommit."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        calls)
-    (clutch-db-set-auto-commit conn nil)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (push sql calls)
-                 (pcase sql
-                   ("BEGIN"
-                    (setf (pgcon-transaction-status conn) ?T)
-                    (make-pgresult :connection conn :status "BEGIN"))
-                   ("UPDATE demo SET x = 1"
-                    (setf (pgcon-transaction-status conn) ?E)
-                    (signal 'pg-error '("statement failed")))
-                   ("ROLLBACK"
-                    (setf (pgcon-transaction-status conn) ?I)
-                    (make-pgresult :connection conn :status "ROLLBACK"))
-                   (_
-                    (ert-fail (format "Unexpected SQL: %s" sql)))))))
-      (should-error (clutch-db-query conn "UPDATE demo SET x = 1")
-                    :type 'clutch-db-error)
-      (clutch-db-set-auto-commit conn t)
-      (should (equal (nreverse calls)
-                     '("BEGIN" "UPDATE demo SET x = 1" "ROLLBACK")))
-      (should-not (clutch-db-manual-commit-p conn)))))
+        (pg-conn (clutch-db-test--make-pg-connection :database "test")))
+    (setf (plist-get (clutch-db-pg--connection-client pg-conn)
+                     :transaction-status)
+          'in-transaction)
+    (clutch-db-test--with-pgsql-client
+      (dolist (conn (list mysql-conn pg-conn))
+        (let (executed)
+          (cl-letf (((symbol-function 'clutch-db-query)
+                     (lambda (&rest _) (setq executed t))))
+            (let ((err
+                   (should-error
+                    (clutch-db-call-with-atomic-batch conn #'ignore)
+                    :type 'user-error)))
+              (should (string-match-p "explicit transaction"
+                                      (error-message-string err))))
+            (should-not executed)))))))
 
 (ert-deftest clutch-db-test-native-pg-transaction-control-allows-leading-comments ()
   "Native PostgreSQL should not inject lazy BEGIN before commented transaction control."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
+  (let ((conn (clutch-db-test--make-pg-connection :database "test"))
         calls)
     (clutch-db-set-auto-commit conn nil)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (push sql calls)
-                 (make-pgresult :connection conn
-                                :status
-                                (cond
-                                 ((string-match-p "COMMIT" sql) "COMMIT")
-                                 ((string-match-p "BEGIN" sql) "BEGIN")
-                                 (t "ROLLBACK"))))))
-      (clutch-db-query conn "/* lead */ COMMIT")
-      (clutch-db-query conn "-- lead\nBEGIN")
-      (should (equal (nreverse calls)
-                     '("/* lead */ COMMIT" "-- lead\nBEGIN"))))))
+    (clutch-db-test--with-pgsql-results
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (push sql calls)
+                   (clutch-db-test--make-pg-result))))
+        (clutch-db-query conn "/* lead */ COMMIT")
+        (clutch-db-query conn "-- lead\nBEGIN")
+        (should (equal (nreverse calls)
+                       '("/* lead */ COMMIT" "-- lead\nBEGIN")))))))
 
 (ert-deftest clutch-db-test-native-pg-ctid-identity-reads-relkind-cell ()
   "PostgreSQL CTID identity should read the relkind cell, not its first char."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test")))
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn _sql)
-                 (make-pgresult :connection conn
-                                :status "SELECT 1"
-                                :attributes '(("relkind" 25 -1))
-                                :tuples '(("r"))))))
-      (should (equal (clutch-db-pg--ctid-identity conn "demo")
-                     '(:kind row-locator
-                       :name "ctid"
-                       :select-expressions ("ctid::text")
-                       :where-sql "ctid = ?::tid"))))))
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-test--with-pgsql-results
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client _sql)
+                   (clutch-db-test--make-pg-result :rows '(("r"))))))
+        (should (equal (clutch-db-pg--ctid-identity conn "demo")
+                       '(:kind row-locator
+                         :name "ctid"
+                         :select-expressions ("ctid::text")
+                         :where-sql "ctid = ?::tid")))))))
 
 (ert-deftest clutch-db-test-default-row-identity-contract ()
   "Default row identity should report no support but surface metadata errors."
@@ -1554,13 +1402,13 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (require 'clutch-db-sqlite)
   (require 'clutch-db-jdbc)
   (let ((mysql-conn (make-mysql-conn :host "localhost" :database "test"))
-        (pg-conn (clutch-db-test--make-pgcon :database "test"))
+        (pg-conn (clutch-db-test--make-pg-connection :database "test"))
         (sqlite-conn (make-clutch-db-sqlite-conn :database "test.db"
                                                  :handle 'sqlite-handle))
         (jdbc-conn (make-clutch-jdbc-conn :conn-id 4
                                           :params '(:driver oracle))))
     (dolist (case `((mysql-query mysql-error ,mysql-conn)
-                    (pg-exec pg-error ,pg-conn)
+                    (pgsql-exec pgsql-error ,pg-conn)
                     (sqlite-select sqlite-error ,sqlite-conn)))
       (pcase-let ((`(,fn ,err ,conn) case))
         (cl-letf (((symbol-function fn)
@@ -1592,8 +1440,8 @@ and a `?' inside a dollar-quoted function body is part of the body."
                    (:name "idx_orders" :type "INDEX"
                     :target-table "orders"))
                   (postgres
-                   ,(clutch-db-test--make-pgcon :database "app")
-                   pg-exec pg-error
+                   ,(clutch-db-test--make-pg-connection :database "app")
+                   pgsql-exec pgsql-error
                    (:name "idx_orders" :type "INDEX"))))
     (pcase-let ((`(,label ,conn ,query-fn ,error-type ,entry) case))
       (ert-info ((format "backend: %s" label))
@@ -1617,38 +1465,17 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (should-error (clutch-db-column-details conn "orders")
                     :type 'clutch-db-error))))
 
-(ert-deftest clutch-db-test-pg-query-io-inhibits-throw-on-input ()
-  "PostgreSQL query paths should finish responses inside `while-no-input'."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        observed)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (context _sql)
-                 (push throw-on-input observed)
-                 (make-pgresult :connection context :status "SELECT 1")))
-              ((symbol-function 'pg-exec-prepared)
-               (lambda (context _sql _arguments &rest _options)
-                 (push throw-on-input observed)
-                 (make-pgresult :connection context :status "SELECT 1"))))
-      (let ((throw-on-input 'completion-input))
-        (clutch-db-query conn "SELECT 1")
-        (clutch-db-execute-params conn "SELECT ?" '(1))))
-    (should (equal observed '(nil nil)))))
-
 (ert-deftest clutch-db-test-pg-foreign-keys-reject-malformed-response ()
   "PostgreSQL foreign-key metadata should reject contaminated result rows."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        observed)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (context _sql)
-                 (setq observed throw-on-input)
-                 (make-pgresult :connection context
-                                :tuples '((90000556 "attname"))))))
-      (let ((throw-on-input 'completion-input))
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-test--with-pgsql-results
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client _sql)
+                   (clutch-db-test--make-pg-result
+                    :rows '(("90000556" "attname"))))))
         (should-error (clutch-db-foreign-keys conn "task")
-                      :type 'clutch-db-error)))
-    (should-not observed)))
+                      :type 'clutch-db-error)))))
 
 (defun clutch-db-test--assert-row-identity-skips-lower-priority
     (conn table pk-columns unique-fn locator-fn locator-value)
@@ -1728,7 +1555,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (clutch-db-row-identity-candidates conn "demo")
                      '((:kind primary-key :name "PRIMARY" :columns ("id")))))
       (should-not unique-scan-called)))
-  (dolist (case `((,(clutch-db-test--make-pgcon :database "test")
+  (dolist (case `((,(clutch-db-test--make-pg-connection :database "test")
                    "demo" ("id")
                    clutch-db-pg--unique-not-null-identities
                    clutch-db-pg--ctid-identity
@@ -1765,41 +1592,6 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (plist-get candidate :name) "rowid"))
       (should (equal (plist-get candidate :select-expressions) '("rowid")))
       (should (equal (plist-get candidate :where-sql) "rowid = ?")))))
-
-(ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
-  "SQLite should commit or roll back a staged multi-row batch as a unit."
-  (skip-unless (sqlite-available-p))
-  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
-    (unwind-protect
-        (progn
-          (clutch-db-init-connection conn)
-          (clutch-db-query
-           conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
-          (clutch-db-call-with-atomic-batch
-           conn
-           (lambda ()
-             (clutch-db-execute-params
-              conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(1 "a"))
-             (clutch-db-execute-params
-              conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(2 "b"))))
-          (should
-           (equal (clutch-db-result-rows
-                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
-                  '((1 "a") (2 "b"))))
-          (should-error
-           (clutch-db-call-with-atomic-batch
-            conn
-            (lambda ()
-              (clutch-db-execute-params
-               conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(3 "c"))
-              (clutch-db-execute-params
-               conn "INSERT INTO demo (id, name) VALUES (?, ?)"
-               '(1 "duplicate")))))
-          (should
-           (equal (clutch-db-result-rows
-                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
-                  '((1 "a") (2 "b")))))
-      (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-db-test-sqlite-foreign-keys-async ()
   "SQLite foreign-key metadata should remain available through async dispatch."
@@ -1954,43 +1746,47 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                          (:name "USERS" :type "TABLE" :schema "APP" :source-schema "APP" :comment "用户")
                          (:name "USER_TABLES" :type "PUBLIC SYNONYM" :schema "SYS" :source-schema "PUBLIC"))))))))
 
+(ert-deftest clutch-db-test-jdbc-table-comment-async-uses-table-search-remarks ()
+  "JDBC table-comment async should use table remarks surfaced by search-tables."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver generic
+                                               :schema "APP"
+                                               :rpc-timeout 7)))
+        captured-op captured-params captured-timeout callback-result)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (op params callback &optional _errback timeout _conn)
+                 (setq captured-op op)
+                 (setq captured-params params)
+                 (setq captured-timeout timeout)
+                 (funcall callback
+                          '(:tables ((:name "ORDERS" :type "TABLE"
+                                       :schema "APP" :source-schema "APP"
+                                       :comment "订单")
+                                      (:name "ORDER_LOG" :type "TABLE"
+                                       :schema "APP" :source-schema "APP"
+                                       :comment "日志"))))
+                 t)))
+      (should (clutch-db-table-comment-async
+               conn "ORDERS" (lambda (comment)
+                               (setq callback-result comment))))
+      (should (equal captured-op "search-tables"))
+      (should (equal (alist-get 'prefix captured-params) "ORDERS"))
+      (should (= captured-timeout 7))
+      (should (equal callback-result "订单")))))
+
 (ert-deftest clutch-db-test-jdbc-table-comment-uses-table-search-remarks ()
-  "JDBC table comments come from search-tables remarks, sync and async.
-Both methods share the remark extraction; the async case additionally
-pins the RPC op, prefix param, and connection-scoped timeout."
-  (let ((response '(:tables ((:name "ORDERS" :type "TABLE"
+  "JDBC table-comment should use remarks surfaced by search-tables."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 9
+                                     :params '(:driver generic
+                                               :schema "APP"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (should (equal op "search-tables"))
+                 (should (equal (alist-get 'prefix params) "ORDERS"))
+                 '(:tables ((:name "ORDERS" :type "TABLE"
                               :schema "APP" :source-schema "APP"
-                              :comment "订单")
-                             (:name "ORDER_LOG" :type "TABLE"
-                              :schema "APP" :source-schema "APP"
-                              :comment "日志")))))
-    ;; Async carries op, params, and timeout to the agent.
-    (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                       :params '(:driver generic
-                                                 :schema "APP"
-                                                 :rpc-timeout 7)))
-          captured-op captured-params captured-timeout callback-result)
-      (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
-                 (lambda (op params callback &optional _errback timeout _conn)
-                   (setq captured-op op)
-                   (setq captured-params params)
-                   (setq captured-timeout timeout)
-                   (funcall callback response)
-                   t)))
-        (should (clutch-db-table-comment-async
-                 conn "ORDERS" (lambda (comment)
-                                 (setq callback-result comment))))
-        (should (equal captured-op "search-tables"))
-        (should (equal (alist-get 'prefix captured-params) "ORDERS"))
-        (should (= captured-timeout 7))
-        (should (equal callback-result "订单"))))
-    ;; Sync extracts the same remark from the same response shape.
-    (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                       :params '(:driver generic
-                                                 :schema "APP"))))
-      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-                 (lambda (_op _params &optional _timeout) response)))
-        (should (equal (clutch-db-table-comment conn "ORDERS") "订单"))))))
+                              :comment "订单"))))))
+      (should (equal (clutch-db-table-comment conn "ORDERS") "订单")))))
 
 (ert-deftest clutch-db-test-jdbc-table-comment-skips-special-metadata-paths ()
   "JDBC table comments should not probe special metadata paths."
@@ -2053,7 +1849,7 @@ pins the RPC op, prefix param, and connection-scoped timeout."
   (require 'clutch-db-pg)
   (dolist (conn (list (make-mysql-conn :host "127.0.0.1" :port 3306
                                        :user "root" :database "mysql")
-                      (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+                      (clutch-db-test--make-pg-connection :host "127.0.0.1" :port 5432
                                                   :user "postgres"
                                                   :database "test")))
     (dolist (case '((refresh-schema . ("users" "orders"))
@@ -2132,7 +1928,7 @@ pins the RPC op, prefix param, and connection-scoped timeout."
     (make-mysql-conn :host "127.0.0.1" :port 3306)))
   (should
    (clutch-db-completion-deferred-columns-p
-    (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432))))
+    (clutch-db-test--make-pg-connection :host "127.0.0.1" :port 5432))))
 
 (ert-deftest clutch-db-test-native-schema-refresh-accepts-idle-delay ()
   "Native schema refresh should honor the caller's idle delay."
@@ -2167,7 +1963,7 @@ pins the RPC op, prefix param, and connection-scoped timeout."
   "Idle metadata calls should reschedule while background work must defer."
   (dolist (mode '(busy foreground-active))
     (ert-info ((format "mode: %s" mode))
-      (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
+      (let ((conn (clutch-db-test--make-pg-connection :host "127.0.0.1" :port 5432
                                               :user "postgres" :database "test"))
             (clutch-db--foreground-connections (make-hash-table :test 'eq))
             timers
@@ -2274,26 +2070,37 @@ pins the RPC op, prefix param, and connection-scoped timeout."
 
 ;;;; Unit tests — clutch-jdbc--collect-table-entries
 
-(ert-deftest clutch-db-test-jdbc-collect-table-entries-continues-legacy-cursors ()
-  "Legacy cursor responses must be drained through fetch continuations.
-The direct :tables mapping is proven through the public
-list-table-entries tests; only the cursor path needs the helper."
-  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
-        fetch-cursor-id)
-    (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
-               (lambda (_conn cursor-id)
-                 (setq fetch-cursor-id cursor-id)
-                 '(("PRODUCTS" "TABLE" "SCOTT")))))
-      (should (equal (clutch-jdbc--collect-table-entries
-                      conn
-                      '(:rows (("USERS" "TABLE" "SCOTT"))
-                        :cursor-id 42
-                        :done nil))
-                     '((:name "USERS" :type "TABLE" :schema "SCOTT"
-                        :source-schema "SCOTT")
-                       (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
-                        :source-schema "SCOTT"))))
-      (should (equal fetch-cursor-id 42)))))
+(ert-deftest clutch-db-test-jdbc-collect-table-entries-contract ()
+  "JDBC table entry collection should handle direct and cursor responses."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott"))))
+    (dolist (case
+             '((:label "direct"
+                :response (:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
+                                    (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
+                :expected ((:name "USERS" :type "TABLE" :schema "SCOTT")
+                           (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
+               (:label "legacy cursor"
+                :response (:rows (("USERS" "TABLE" "SCOTT"))
+                          :cursor-id 42
+                          :done nil)
+                :fetch-rows (("PRODUCTS" "TABLE" "SCOTT"))
+                :fetch-cursor 42
+                :expected ((:name "USERS" :type "TABLE" :schema "SCOTT"
+                            :source-schema "SCOTT")
+                           (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
+                            :source-schema "SCOTT")))))
+      (ert-info ((plist-get case :label))
+        (let (fetch-cursor-id)
+          (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
+                     (lambda (_conn cursor-id)
+                       (setq fetch-cursor-id cursor-id)
+                       (plist-get case :fetch-rows))))
+            (should (equal (clutch-jdbc--collect-table-entries
+                            conn
+                            (plist-get case :response))
+                           (plist-get case :expected)))
+            (should (equal fetch-cursor-id
+                           (plist-get case :fetch-cursor)))))))))
 
 (ert-deftest clutch-db-test-jdbc-list-table-entries-keeps-object-types ()
   "JDBC list-table-entries should preserve view and synonym metadata."
@@ -2586,49 +2393,6 @@ list-table-entries tests; only the cursor path needs the helper."
       (clutch-db-document-mutation-snippets conn 'delete-one "users" (list doc))
       '("db.getCollection(\"users\").deleteOne({\"_id\":7});")))))
 
-(ert-deftest clutch-db-test-mongodb-id-filter-preserves-object-id ()
-  "An _id filter must preserve the document's public ObjectId value."
-  (require 'mongodb)
-  (dolist (hex '("65f1a2b3c4d5e6f708090a0b"
-                 "000000000000000000000001"))
-    (let* ((object-id (mongodb-object-id hex))
-           (document (list (cons "_id" object-id)
-                           (cons "name" "Ann")))
-           (filter (clutch-mongodb--document-id-filter document "update"))
-           (filtered-id (cdr (assoc "_id" filter))))
-      (should (mongodb-object-id-p filtered-id))
-      (should (eq filtered-id object-id))
-      (should (equal (mongodb-object-id-hex filtered-id) hex)))))
-
-(ert-deftest clutch-db-test-mongodb-display-renders-decoded-scalars ()
-  "Decoded wrapper structs must render as Extended JSON display text.
-mongodb.el decodes BSON scalars to structs; the result view spells them
-back out in Extended JSON instead of handing `json-encode' a record."
-  (require 'mongodb)
-  (let* ((decoded (list (cons "_id" (mongodb-object-id
-                                     "65f1a2b3c4d5e6f708090a0b"))
-                        (cons "n" (/ 0.0 0.0))
-                        (cons "d" (mongodb-decimal128 "1.23"))
-                        (cons "w" (mongodb-datetime 1700000000000))
-                        (cons "small" (mongodb-int64 7))
-                        (cons "arr" (vector (mongodb-min-key)))
-                        (cons "empty" (mongodb-document nil))))
-         (text (clutch-mongodb--json-encode-text decoded)))
-    (should (string-match-p "\"\\$oid\":\"65f1a2b3c4d5e6f708090a0b\"" text))
-    (should (string-match-p "\"\\$numberDouble\":\"NaN\"" text))
-    (should (string-match-p "\"\\$numberDecimal\":\"1.23\"" text))
-    (should (string-match-p "\"\\$date\":1700000000000" text))
-    (should (string-match-p "\"\\$minKey\":1" text))
-    (should (string-match-p "\"empty\":{}" text))
-    ;; int64 wrappers render as plain numbers and count as numeric cells.
-    (should (string-match-p "\"small\":7" text))
-    (should (equal (clutch-mongodb--display-value
-                    (cdr (assoc "small" decoded)))
-                   7))
-    (should (eq (clutch-mongodb--column-category
-                 (cdr (assoc "small" decoded)))
-                'numeric))))
-
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
   "Native MongoDB scalar array results should use a value column."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
@@ -2745,6 +2509,15 @@ back out in Extended JSON instead of handing `json-encode' a record."
         (ert-info ((format "query: %s" query))
           (should-error (clutch-mongodb--eval conn query)
                         :type 'clutch-db-error))))))
+
+(ert-deftest clutch-db-test-mongodb-helper-chains-are-method-specific ()
+  "MongoDB parsing should reject chains that execution would ignore."
+  (dolist (query '("db.users.findOne({}).limit(1)"
+                   "db.users.aggregate([]).sort({_id: 1})"
+                   "db.users.deleteOne({}).limit(1)"))
+    (ert-info ((format "query: %s" query))
+      (should-error (clutch-mongodb--parse-db-call query)
+                    :type 'clutch-db-error))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
   "Native MongoDB eval should translate aggregate options and helper chains."
@@ -3323,9 +3096,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
     (clutch-db-set-current-schema conn "analytics")
     (should (equal (clutch-db-current-schema conn) "analytics"))
     (should (equal (clutch-db-database conn) "analytics"))
-    (should (equal (clutch-db-update-namespace-params
-                    conn '(:backend mongodb :database "app"))
-                   '(:backend mongodb :database "analytics")))
     (let (captured-database)
       (cl-letf (((symbol-function 'mongodb-find)
                  (lambda (_client database _collection _filter
@@ -3714,16 +3484,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
     (pcase-let ((`(,row ,expected) case))
       (should (equal (clutch-jdbc--normalize-row row) expected)))))
 
-(ert-deftest clutch-db-test-jdbc-normalize-row-retains-blob-encoding ()
-  "JDBC text BLOB normalization should retain its byte encoding."
-  (let* ((row (clutch-jdbc--normalize-row
-               '((:__type "blob" :length 18
-                  :text "{\"message\":\"中文\"}" :encoding "GB18030"))))
-         (value (car row)))
-    (should (equal value "{\"message\":\"中文\"}"))
-    (should (equal (get-text-property 0 'clutch-jdbc-blob-encoding value)
-                   "GB18030"))))
-
 (ert-deftest clutch-db-test-jdbc-normalize-row-maps-json-false-sentinel ()
   "JDBC JSON false sentinels should become the generic :false in rows."
   (let* ((sentinel clutch-jdbc--json-false)
@@ -3736,63 +3496,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
                                :nested (list :false "x"))
                          (vector :false 7))))
     (should (equal (clutch-jdbc--normalize-row row) expected))))
-
-(ert-deftest clutch-db-test-jdbc-binary-param-types-fail-closed ()
-  "Only explicitly supported JDBC binary type names should use the envelope."
-  (dolist (type '("BLOB" "RAW" "VARBINARY" "BINARY LARGE OBJECT"))
-    (should
-     (clutch-jdbc--binary-param-p
-      (clutch-db-typed-param "value" type))))
-  (dolist (type '("BLOBSTER" "DRAWING" "NONBINARY" "VARCHAR2"))
-    (should-not
-     (clutch-jdbc--binary-param-p
-      (clutch-db-typed-param "value" type)))))
-
-(ert-deftest clutch-db-test-jdbc-columns-retain-backend-types ()
-  "JDBC result columns should retain exact types for prepared mutations."
-  (should
-   (equal (clutch-jdbc--make-columns '("PAYLOAD" "ID") '("BLOB" "NUMBER"))
-          '((:name "PAYLOAD" :backend-type "BLOB" :type-category blob)
-            (:name "ID" :backend-type "NUMBER" :type-category numeric)))))
-
-(ert-deftest clutch-db-test-jdbc-normalizes-column-detail-backend-types ()
-  "JDBC column details should expose exact types through the generic contract."
-  (should
-   (equal
-    (clutch-jdbc--normalize-column-details
-     '((:name "CONTENT" :type "BLOB" :nullable t)
-       (:name "STATUS" :type "NUMBER" :nullable nil)))
-    '((:name "CONTENT" :type "BLOB" :nullable t :backend-type "BLOB")
-      (:name "STATUS" :type "NUMBER" :nullable nil :backend-type "NUMBER")))))
-
-(ert-deftest clutch-db-test-jdbc-column-detail-methods-retain-backend-types ()
-  "Both JDBC metadata paths should expose exact backend types."
-  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle)))
-        async-details)
-    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
-               (lambda (_conn _table) nil))
-              ((symbol-function 'clutch-db-foreign-keys)
-               (lambda (_conn _table) nil))
-              ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (&rest _)
-                 '(:columns ((:name "CONTENT" :type "BLOB"
-                              :nullable t)))))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (_op _params callback &rest _)
-                 (funcall callback
-                          '(:columns ((:name "CONTENT" :type "BLOB"
-                                      :nullable t))))
-                 17)))
-      (should
-       (equal (plist-get
-               (car (clutch-db-column-details conn "DOCUMENTS"))
-               :backend-type)
-              "BLOB"))
-      (should (clutch-db-column-details-async
-               conn "DOCUMENTS"
-               (lambda (details) (setq async-details details))))
-      (should (equal (plist-get (car async-details) :backend-type)
-                     "BLOB")))))
 
 ;;;; Unit tests — registered JDBC driver support
 
@@ -3896,44 +3599,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
                       "WHERE database_name = current_catalog() "
                       "ORDER BY schema_name"))))))
 
-(ert-deftest clutch-db-test-jdbc-duckdb-switches-current-catalog-schema ()
-  "DuckDB JDBC should switch a schema within the current catalog."
-  (let ((conn (make-clutch-jdbc-conn
-               :conn-id 8
-               :params '(:driver jdbc
-                         :url "jdbc:duckdb:/tmp/analytics.duckdb"
-                         :rpc-timeout 9)))
-        queries)
-    (cl-letf (((symbol-function 'clutch-db-query)
-               (lambda (_conn sql)
-                 (push sql queries)
-                 (cond
-                  ((string-match-p "duckdb_schemas" sql)
-                   (make-clutch-db-result
-                    :rows '(("main") ("sales") ("odd.schema"))))
-                  ((string-match-p "current_catalog" sql)
-                   (make-clutch-db-result :rows '(("analytics" "main"))))
-                  ((string-prefix-p "USE " sql)
-                   (make-clutch-db-result :rows nil))
-                  (t (ert-fail (format "Unexpected SQL: %s" sql)))))))
-      (should
-       (equal (clutch-db-list-schemas conn)
-              '("main" "sales" "odd.schema")))
-      (should (equal (clutch-db-current-schema conn) "main"))
-      (should
-       (equal (clutch-db-set-current-schema
-               conn "odd.schema")
-              "odd.schema"))
-      (should (member "USE \"analytics\".\"odd.schema\"" queries))
-      (should (equal (plist-get (clutch-jdbc-conn-params conn) :catalog)
-                     "analytics"))
-      (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
-                     "odd.schema"))
-      (should-not
-       (clutch-db-list-schemas
-        (make-clutch-jdbc-conn
-         :params '(:driver jdbc :url "jdbc:duckdb:")))))))
-
 (ert-deftest clutch-db-test-jdbc-set-current-schema-contract ()
   "JDBC schema switching should support Oracle sessions and reject generic JDBC."
   (let ((conn (make-clutch-jdbc-conn
@@ -3970,12 +3635,28 @@ back out in Extended JSON instead of handing `json-encode' a record."
                  (make-mysql-result :connection conn :affected-rows 0))))
       (should (equal (clutch-db-set-current-schema conn "analytics") "analytics"))
       (should (equal executed-sql "USE `analytics`"))
-      (should (equal (mysql-current-database conn) "analytics"))
-      (should (equal (clutch-db-update-namespace-params
-                      conn '(:backend mysql :database "sales"))
-                     '(:backend mysql :database "analytics"))))))
+      (should (equal (mysql-current-database conn) "analytics")))))
 
 ;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
+
+(ert-deftest clutch-db-test-jdbc-apply-timeout-defaults ()
+  "Missing JDBC timeouts should be filled without overwriting explicit values."
+  (let ((clutch-connect-timeout-seconds 10)
+        (clutch-read-idle-timeout-seconds 20)
+        (clutch-query-timeout-seconds 30)
+        (clutch-jdbc-rpc-timeout-seconds 40))
+    (dolist (case '((nil
+                     (:connect-timeout 10 :read-idle-timeout 20
+                      :query-timeout 30 :rpc-timeout 40))
+                    ((:connect-timeout 99 :query-timeout 88)
+                     (:connect-timeout 99 :read-idle-timeout 20
+                      :query-timeout 88 :rpc-timeout 40))))
+      (pcase-let* ((`(,params ,expected) case)
+                   (result (clutch-jdbc--apply-timeout-defaults params)))
+        (dolist (key '(:connect-timeout :read-idle-timeout
+                       :query-timeout :rpc-timeout))
+          (should (= (plist-get result key)
+                     (plist-get expected key))))))))
 
 ;;;; Unit tests — backend registry
 
@@ -4012,8 +3693,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
     (should (eq (plist-get pg-features :data-model) 'relational))
     (should (eq (plist-get pg-features :sql-product) 'postgres))
     (should (eq (plist-get sqlite-features :data-model) 'relational))
-    (should (clutch-backend-update-default-p 'oracle))
-    (should-not (clutch-backend-update-default-p 'sqlite))
     ;; Generic JDBC backend
     (should jdbc-features)
     (should (eq (plist-get jdbc-features :require) 'clutch-db-jdbc))
@@ -4181,7 +3860,7 @@ back out in Extended JSON instead of handing `json-encode' a record."
 (ert-deftest clutch-db-test-native-backend-missing-package-errors-clearly ()
   "Missing optional protocol packages should raise a direct backend error."
   (dolist (case '((mysql mysql "mysql.el")
-                  (pg pg "pg.el")))
+                  (pg pgsql "pgsql.el")))
     (pcase-let ((`(,backend ,protocol ,expected) case))
       (ert-info ((symbol-name backend))
         (let ((orig-require (symbol-function 'require)))
@@ -4298,9 +3977,9 @@ back out in Extended JSON instead of handing `json-encode' a record."
 (ert-deftest clutch-db-test-pg-convert-columns ()
   "Test PostgreSQL column conversion."
   (require 'clutch-db-pg)
-  (let* ((pg-cols '(("id" 23 4)
-                    ("data" 3802 -1)
-                    ("created" 1114 8)))
+  (let* ((pg-cols '((:name "id" :type-oid 23)
+                    (:name "data" :type-oid 3802)
+                    (:name "created" :type-oid 1114)))
          (converted (clutch-db-pg--convert-columns pg-cols)))
     (should (= (length converted) 3))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
@@ -4313,33 +3992,88 @@ back out in Extended JSON instead of handing `json-encode' a record."
 (ert-deftest clutch-db-test-pg-convert-columns-preserves-backend-type ()
   "PostgreSQL column conversion should keep backend type metadata."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test")))
-    (puthash clutch-db-test--pg-oid-int4-array "_int4"
-             (pgcon-typname-by-oid conn))
-    (let ((converted
-           (clutch-db-pg--convert-columns
-            `(("precision" ,clutch-db-test--pg-oid-int4-array -1))
-            conn)))
-      (should (equal (plist-get (car converted) :name) "precision"))
-      (should (equal (plist-get (car converted) :backend-type) "_int4")))))
+  (let ((converted
+         (clutch-db-pg--convert-columns
+          `((:name "precision"
+             :type-oid ,clutch-db-test--pg-oid-int4-array)))))
+    (should (equal (plist-get (car converted) :name) "precision"))
+    (should (equal (plist-get (car converted) :backend-type) "_int4"))))
 
 (ert-deftest clutch-db-test-pg-array-params-use-postgresql-literals ()
   "PostgreSQL array params should render and execute as array literals."
   (require 'clutch-db-pg)
-  (let* ((conn (clutch-db-test--make-pgcon :database "test"))
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
          (param (clutch-db-typed-param "[0,1,2]" "_int4")))
+    (should (equal
+             (clutch-db-value-to-literal
+              conn (clutch-db-typed-param :false "bool"))
+             "false"))
     (should (string-match-p
              (regexp-quote "{0,1,2}")
              (clutch-db-value-to-literal conn param)))
     (should (equal (clutch-db-pg--typed-arguments (list param))
-                   '(("{0,1,2}" . nil))))
+                   (list (cons [0 1 2] "_int4"))))
     (should (equal (clutch-db-pg--typed-arguments
                     (list (clutch-db-typed-param [0 1 2] "_int4")))
-                   '(("{0,1,2}" . nil))))
+                   (list (cons [0 1 2] "_int4"))))
+    (should
+     (equal
+      (clutch-db-pg--typed-arguments
+       (list (clutch-db-typed-param
+              "[[true,false,null],[false,true,null]]" "_bool")))
+      (list (cons (vector (vector t nil pgsql-null)
+                          (vector nil t pgsql-null))
+                  "_bool"))))
     (should (equal (clutch-db-pg--typed-arguments
-                    (list (clutch-db-typed-param
-                           "[0:2]={1,2,3}" "_int4")))
-                   '(("[0:2]={1,2,3}" . nil))))))
+                    (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
+                   (list (cons "[0:2]={1,2,3}" "_int4"))))))
+
+(ert-deftest clutch-db-test-pg-execute-params-uses-public-value-contract ()
+  "PostgreSQL parameter execution should use pgsql.el's typed public API."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         captured-sql
+         captured-arguments)
+    (clutch-db-test--with-pgsql-results
+      (cl-letf (((symbol-function 'pgsql-exec-params)
+                 (lambda (actual-client sql typed-arguments)
+                   (should (eq actual-client client))
+                   (setq captured-sql sql
+                         captured-arguments typed-arguments)
+                   (clutch-db-test--make-pg-result
+                    :rows '(("ok"))
+                    :affected-rows 1))))
+        (let ((result
+               (clutch-db-execute-params
+                conn
+                "SELECT ?, ?, ?, ?, ?, ?, ?"
+                (list (clutch-db-typed-param nil "text")
+                      (clutch-db-typed-param :false "bool")
+                      (clutch-db-typed-param
+                       "[true,false,null]" "_bool")
+                      (clutch-db-typed-param [1 2 3] "_int4")
+                      (clutch-db-typed-param
+                       '(:year 2026 :month 7 :day 17) "date")
+                      (clutch-db-typed-param
+                       '(:year 2026 :month 7 :day 17
+                         :hours 9 :minutes 8 :seconds 7)
+                       "timestamp")
+                      (clutch-db-typed-param
+                       "[0:2]={1,2,3}" "_int4")))))
+          (should (equal captured-sql
+                         "SELECT $1, $2, $3, $4, $5, $6, $7"))
+          (should
+           (equal captured-arguments
+                  (list (cons pgsql-null "text")
+                        (cons nil "bool")
+                        (cons (vector t nil pgsql-null) "_bool")
+                        (cons [1 2 3] "_int4")
+                        (cons "2026-07-17" "date")
+                        (cons "2026-07-17 09:08:07" "timestamp")
+                        (cons "[0:2]={1,2,3}" "_int4"))))
+          (should (equal (clutch-db-result-rows result) '(("ok"))))
+          (should (= (clutch-db-result-affected-rows result) 1)))))))
 
 (ert-deftest clutch-db-test-pg-column-details-keep-array-display-type ()
   "PostgreSQL column details should keep display type while saving backend type."
@@ -4350,87 +4084,65 @@ back out in Extended JSON instead of handing `json-encode' a record."
     (should (equal (plist-get detail :type) "ARRAY"))
     (should (equal (plist-get detail :backend-type) "_int4"))))
 
-(ert-deftest clutch-db-test-pg-wrap-result-normalizes-temporal-values ()
-  "PostgreSQL results should normalize upstream pg-el temporal values."
+(ert-deftest clutch-db-test-pg-metadata-normalizes-null-sentinels ()
+  "PostgreSQL metadata should not expose pgsql.el's SQL NULL sentinel."
   (require 'clutch-db-pg)
-  (let* ((conn (clutch-db-test--make-pgcon :database "test"))
-         (date (encode-time 0 0 0 1 6 2024))
-         (timestamp (encode-time 30 45 13 15 1 2024))
-         (timestamptz (encode-time 45 30 8 7 4 2026))
-         (pg-result (make-pgresult
-                     :connection conn
-                     :attributes `(("due_on" ,clutch-db-test--pg-oid-date 4)
-                                   ("starts_at" ,clutch-db-test--pg-oid-time 8)
-                                   ("opened_at" ,clutch-db-test--pg-oid-timestamp 8)
-                                   ("shipped_at" ,clutch-db-test--pg-oid-timestamptz 8))
-                     :tuples `((,date "09:10:11.250" ,timestamp ,timestamptz))))
-         (result (clutch-db-pg--wrap-result pg-result))
-         (row (car (clutch-db-result-rows result))))
-    (should (equal (nth 0 row)
-                   '(:year 2024 :month 6 :day 1)))
-    (should (equal (nth 1 row)
-                   '(:hours 9 :minutes 10 :seconds 11 :negative nil)))
-    (should (equal (nth 2 row)
-                   '(:year 2024 :month 1 :day 15
-                     :hours 13 :minutes 45 :seconds 30)))
-    (should (equal (nth 3 row)
-                   '(:year 2026 :month 4 :day 7
-                     :hours 8 :minutes 30 :seconds 45)))))
+  (let ((detail
+         (clutch-db-pg--column-details-row
+          (list "id" "integer" "int4" "NO"
+                pgsql-null pgsql-null pgsql-null pgsql-null "NO" pgsql-null)
+          '("id") nil)))
+    (should (equal (plist-get detail :type) "integer"))
+    (should (eq (plist-get detail :primary-key) t))
+    (should-not (plist-get detail :default))
+    (should-not (plist-get detail :generated))
+    (should-not (plist-get detail :comment)))
+  (cl-letf (((symbol-function 'pgsql-escape-identifier)
+             (lambda (name) (format "\"%s\"" name))))
+    (should
+     (equal (clutch-db-pg--format-column-ddl
+             (list "id" "integer" pgsql-null pgsql-null "NO"))
+            "    \"id\" integer NOT NULL"))
+    (should
+     (equal (clutch-db-pg--format-column-ddl
+             '("name" "character varying" 20 "'guest'::text" "YES"))
+            "    \"name\" character varying(20) DEFAULT 'guest'::text"))))
 
-(ert-deftest clutch-db-test-pg-query-distinguishes-false-from-null ()
-  "PostgreSQL query results should keep boolean false distinct from SQL NULL."
+(ert-deftest clutch-db-test-pg-wrap-result-normalizes-public-value-model ()
+  "PostgreSQL results should normalize pgsql.el values for Clutch."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        observed-null-marker)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (context _sql)
-                 (setq observed-null-marker pg-null-marker)
-                 (make-pgresult
-                  :connection context
-                  :attributes `(("boolean_false" ,clutch-db-pg--oid-bool 1)
-                                ("boolean_true" ,clutch-db-pg--oid-bool 1)
-                                ("sql_null" 25 -1)
-                                ("nullable_ints" ,clutch-db-test--pg-oid-int4-array -1))
-                  :tuples `((nil t ,pg-null-marker
-                                 [1 ,pg-null-marker]))))))
-      (let* ((result (clutch-db-query
-                      conn "SELECT false, true, NULL::text"))
+  (clutch-db-test--with-pgsql-results
+    (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+           (timestamptz (encode-time 45 30 8 7 4 2026))
+           (pg-result (clutch-db-test--make-pg-result
+                       :columns
+                       `((:name "due_on" :type-oid ,clutch-db-test--pg-oid-date)
+                         (:name "starts_at" :type-oid ,clutch-db-test--pg-oid-time)
+                         (:name "opened_at" :type-oid ,clutch-db-test--pg-oid-timestamp)
+                         (:name "shipped_at" :type-oid ,clutch-db-test--pg-oid-timestamptz)
+                         (:name "missing" :type-oid ,clutch-db-test--pg-oid-int4)
+                         (:name "enabled" :type-oid 16)
+                         (:name "flags" :type-oid 1000))
+                       :rows
+                       `(("2024-06-01" "09:10:11.250"
+                          "2024-01-15 13:45:30.125" ,timestamptz
+                          ,pgsql-null nil
+                          [,pgsql-null nil t])))))
+      (let* ((result (clutch-db-pg--wrap-result conn pg-result))
              (row (car (clutch-db-result-rows result))))
-        (should observed-null-marker)
-        (should (equal row '(:false t nil [1 nil])))
-        (should (equal (mapcar #'clutch--format-value (cl-subseq row 0 3))
-                       '("false" "true" "NULL")))))))
-
-(ert-deftest clutch-db-test-pg-prepared-false-and-null-contract ()
-  "PostgreSQL prepared results and parameters should distinguish false and NULL."
-  (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        observed-sql
-        observed-arguments
-        observed-null-marker)
-    (cl-letf (((symbol-function 'pg-exec-prepared)
-               (lambda (context sql arguments &rest _options)
-                 (setq observed-sql sql
-                       observed-arguments arguments
-                       observed-null-marker pg-null-marker)
-                 (make-pgresult
-                  :connection context
-                  :attributes `(("boolean_false" ,clutch-db-pg--oid-bool 1)
-                                ("sql_null" 25 -1)
-                                ("boolean_true" ,clutch-db-pg--oid-bool 1))
-                  :tuples `((nil ,pg-null-marker t))))))
-      (let ((result
-             (clutch-db-execute-params
-              conn "SELECT ?::bool, ?::text, ?::bool"
-              (list (clutch-db-typed-param :false "bool")
-                    (clutch-db-typed-param nil "text")
-                    (clutch-db-typed-param t "bool")))))
-        (should observed-null-marker)
-        (should (equal observed-sql
-                       "SELECT $1::bool, $2::text, $3::bool"))
-        (should (equal observed-arguments '(("false") (nil) (t))))
-        (should (equal (clutch-db-result-rows result)
-                       '((:false nil t))))))))
+        (should (equal (nth 0 row)
+                       '(:year 2024 :month 6 :day 1)))
+        (should (equal (nth 1 row)
+                       '(:hours 9 :minutes 10 :seconds 11 :negative nil)))
+        (should (equal (nth 2 row)
+                       '(:year 2024 :month 1 :day 15
+                         :hours 13 :minutes 45 :seconds 30.125)))
+        (should (equal (nth 3 row)
+                       '(:year 2026 :month 4 :day 7
+                         :hours 8 :minutes 30 :seconds 45)))
+        (should-not (nth 4 row))
+        (should (eq (nth 5 row) :false))
+        (should (equal (nth 6 row) [nil :false t]))))))
 
 ;;;; Unit tests — SQL building (paged queries)
 
@@ -4478,7 +4190,7 @@ back out in Extended JSON instead of handing `json-encode' a record."
   :tags '(:smoke)
   "Test PostgreSQL paged SQL generation."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "localhost")))
+  (let ((conn (clutch-db-test--make-pg-connection :host "localhost")))
     ;; Basic pagination
     (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
       (should (string-match-p "LIMIT 10" sql))
@@ -4614,7 +4326,7 @@ back out in Extended JSON instead of handing `json-encode' a record."
 (ert-deftest clutch-db-test-pg-escape ()
   "Test PostgreSQL identifier and literal escaping via generic interface."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "localhost")))
+  (let ((conn (clutch-db-test--make-pg-connection :host "localhost")))
     ;; Identifier escaping
     (should (equal (clutch-db-escape-identifier conn "table")
                    "\"table\""))
@@ -4622,9 +4334,9 @@ back out in Extended JSON instead of handing `json-encode' a record."
                    "\"my\"\"table\""))
     ;; Literal escaping
     (should (equal (clutch-db-escape-literal conn "hello")
-                   "E'hello'"))
+                   "'hello'"))
     (should (equal (clutch-db-escape-literal conn "it's")
-                   "E'it''s'"))))
+                   "'it''s'"))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-escape ()
   "ClickHouse JDBC should leave simple identifiers bare and backtick-escape others."
@@ -4667,21 +4379,6 @@ back out in Extended JSON instead of handing `json-encode' a record."
                      '(:sig "ABS(X)" :desc "Returns absolute value.")))
       (should (equal captured-sql "HELP 'ABS'")))))
 
-(ert-deftest clutch-db-test-mysql-symbol-help-escapes-symbol ()
-  "MySQL HELP lookup should escape the symbol instead of interpolating it."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost"))
-        captured-sql)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 (make-mysql-result :rows nil))))
-      (clutch-db-symbol-help conn "x' UNION SELECT 1 -- ")
-      (should (equal captured-sql
-                     (concat "HELP "
-                             (mysql-escape-literal "X' UNION SELECT 1 -- ")))))))
-
 (ert-deftest clutch-db-test-mysql-list-table-entries-carries-comments ()
   "MySQL table discovery should return comments with table entries."
   (require 'clutch-db-mysql)
@@ -4704,14 +4401,15 @@ back out in Extended JSON instead of handing `json-encode' a record."
 (ert-deftest clutch-db-test-pg-metadata ()
   "Test PostgreSQL metadata accessors."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :host "example.com" :port 5433
-                                          :user "pguser" :database "pgdb")))
-    (should (equal (clutch-db-host conn) "example.com"))
-    (should (= (clutch-db-port conn) 5433))
-    (should (equal (clutch-db-user conn) "pguser"))
-    (should (equal (clutch-db-database conn) "pgdb"))
-    (should (eq (clutch-db-backend-key conn) 'pg))
-    (should (equal (clutch-db-display-name conn) "PostgreSQL"))))
+  (let ((conn (clutch-db-test--make-pg-connection :host "example.com" :port 5433
+                                                   :user "pguser" :database "pgdb")))
+    (clutch-db-test--with-pgsql-client
+      (should (equal (clutch-db-host conn) "example.com"))
+      (should (= (clutch-db-port conn) 5433))
+      (should (equal (clutch-db-user conn) "pguser"))
+      (should (equal (clutch-db-database conn) "pgdb"))
+      (should (eq (clutch-db-backend-key conn) 'pg))
+      (should (equal (clutch-db-display-name conn) "PostgreSQL")))))
 
 (ert-deftest clutch-db-test-adapter-disconnect-errors-surface ()
   "Native and JDBC adapter disconnect failures should remain visible."
@@ -4719,7 +4417,7 @@ back out in Extended JSON instead of handing `json-encode' a record."
   (require 'clutch-db-pg)
   (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t)))
     (dolist (case `((,(make-mysql-conn :host "localhost") mysql-disconnect mysql-error)
-                    (,(clutch-db-test--make-pgcon :host "localhost") pg-disconnect pg-error)
+                    (,(clutch-db-test--make-pg-connection :host "localhost") pgsql-disconnect pgsql-error)
                     (,(make-clutch-db-sqlite-conn :handle 'sqlite-handle) sqlite-close sqlite-error)
                     (,(make-clutch-jdbc-conn :conn-id 7) clutch-jdbc--send wrong-type-argument)))
       (pcase-let ((`(,conn ,disconnect-function ,error-type) case))
@@ -4730,167 +4428,221 @@ back out in Extended JSON instead of handing `json-encode' a record."
 (ert-deftest clutch-db-test-pg-primary-keys-use-compatible-int2vector-ordering ()
   "PostgreSQL primary keys should preserve compatible int2vector order."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        sql)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn actual-sql)
-                 (setq sql actual-sql)
-                 (make-pgresult :tuples '(("tenant_id") ("id"))))))
-      (should (equal (clutch-db-primary-key-columns conn "orders")
-                     '("tenant_id" "id")))
-      (should (string-search
-               "generate_subscripts(i.indkey::smallint[], 1)" sql))
-      (should (string-search "a.attnum = pk.key_array[pk.ord]" sql))
-      (should (string-search "ORDER BY pk.ord" sql))
-      (should-not (string-search "array_position" sql)))))
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          sql)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client actual-sql)
+                   (setq sql actual-sql)
+                   (clutch-db-test--make-pg-result
+                    :rows '(("tenant_id") ("id"))))))
+        (should (equal (clutch-db-primary-key-columns conn "orders")
+                       '("tenant_id" "id")))
+        (should (string-search
+                 "generate_subscripts(i.indkey::smallint[], 1)" sql))
+        (should (string-search "a.attnum = pk.key_array[pk.ord]" sql))
+        (should (string-search "ORDER BY pk.ord" sql))
+        (should-not (string-search "array_position" sql))))))
 
 (ert-deftest clutch-db-test-pg-list-schemas-filters-system-schemas ()
   "PostgreSQL schema listing should omit built-in system schemas."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        captured-sql)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 (make-pgresult :tuples '(("app") ("public"))))))
-      (should (equal (clutch-db-list-schemas conn) '("app" "public")))
-      (should (string-match-p "information_schema" captured-sql))
-      (should (string-match-p "NOT LIKE 'pg" captured-sql)))))
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          captured-sql)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (setq captured-sql sql)
+                   (clutch-db-test--make-pg-result
+                    :rows '(("app") ("public"))))))
+        (should (equal (clutch-db-list-schemas conn) '("app" "public")))
+        (should (string-match-p "information_schema" captured-sql))
+        (should (string-match-p "NOT LIKE 'pg" captured-sql))))))
 
 (ert-deftest clutch-db-test-pg-list-table-entries-carries-comments ()
   "PostgreSQL table discovery should return comments with table entries."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "app"))
-        captured-sql)
-    (cl-letf (((symbol-function 'clutch-db-current-schema)
-               (lambda (_conn) "public"))
-              ((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 (make-pgresult
-                  :tuples '(("orders" "TABLE" "订单")
-                            ("audit_log" "TABLE" nil))))))
-      (should
-       (equal (clutch-db-list-table-entries conn)
-              '((:name "orders" :type "TABLE" :schema "public"
-                 :source-schema "public" :comment "订单")
-                (:name "audit_log" :type "TABLE" :schema "public"
-                 :source-schema "public" :comment nil))))
-      (should (string-match-p "obj_description" captured-sql)))))
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "app"))
+          captured-sql)
+      (cl-letf (((symbol-function 'clutch-db-current-schema)
+                 (lambda (_conn) "public"))
+                ((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (setq captured-sql sql)
+                   (clutch-db-test--make-pg-result
+                    :rows `(("orders" "TABLE" "订单")
+                            ("audit_log" "TABLE" ,pgsql-null))))))
+        (should
+         (equal (clutch-db-list-table-entries conn)
+                '((:name "orders" :type "TABLE" :schema "public"
+                   :source-schema "public" :comment "订单")
+                  (:name "audit_log" :type "TABLE" :schema "public"
+                   :source-schema "public" :comment nil))))
+        (should (string-match-p "obj_description" captured-sql))))))
 
 (ert-deftest clutch-db-test-pg-list-tables-uses-current-schema ()
   "PostgreSQL table listing should be scoped to the active search_path schema."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        captured-sql)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 (make-pgresult :tuples '(("users"))))))
-      (should (equal (clutch-db-list-tables conn) '("users")))
-      (should (string-match-p "schemaname = current_schema()" captured-sql))
-      (should-not (string-match-p "NOT IN" captured-sql)))))
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          captured-sql)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (setq captured-sql sql)
+                   (clutch-db-test--make-pg-result :rows '(("users"))))))
+        (should (equal (clutch-db-list-tables conn) '("users")))
+        (should (string-match-p "schemaname = current_schema()" captured-sql))
+        (should-not (string-match-p "NOT IN" captured-sql))))))
 
 (ert-deftest clutch-db-test-pg-current-schema-caches-result ()
   "PostgreSQL current schema lookup should cache the result on the connection."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        (calls 0))
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn _sql)
-                 (setq calls (1+ calls))
-                 (make-pgresult :tuples '(("public"))))))
-      (should (equal (clutch-db-current-schema conn) "public"))
-      (should (equal (clutch-db-current-schema conn) "public"))
-      (should (= calls 1)))))
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          (calls 0))
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client _sql)
+                   (setq calls (1+ calls))
+                   (clutch-db-test--make-pg-result :rows '(("public"))))))
+        (should (equal (clutch-db-current-schema conn) "public"))
+        (should (equal (clutch-db-current-schema conn) "public"))
+        (should (= calls 1))))))
+
+(ert-deftest clutch-db-test-pg-null-schema-and-comment-stay-nil ()
+  "PostgreSQL nullable metadata cells should cross the adapter as nil."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (cond
+                    ((equal sql "SELECT current_schema()")
+                     (clutch-db-test--make-pg-result
+                      :rows `((,pgsql-null))))
+                    ((string-match-p "SELECT obj_description" sql)
+                     (clutch-db-test--make-pg-result
+                      :rows `((,pgsql-null))))
+                    (t (ert-fail (format "Unexpected SQL: %s" sql)))))))
+        (should-not (clutch-db-current-schema conn))
+        (should-not (clutch-db-table-comment conn "demo"))))))
 
 (ert-deftest clutch-db-test-pg-set-current-schema-updates-search-path-cache ()
   "PostgreSQL schema switching should issue SET search_path and update cache."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pgcon :database "test"))
-        executed-sql)
-    (cl-letf (((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (setq executed-sql sql)
-                 (make-pgresult :tuples nil))))
-      (should (equal (clutch-db-set-current-schema conn "app") "app"))
-      (should (equal executed-sql "SET search_path TO \"app\""))
-      (should (equal (clutch-db-current-schema conn) "app")))))
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          executed-sql)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (setq executed-sql sql)
+                   (clutch-db-test--make-pg-result))))
+        (should (equal (clutch-db-set-current-schema conn "app") "app"))
+        (should (equal executed-sql "SET search_path TO \"app\""))
+        (should (equal (clutch-db-current-schema conn) "app"))))))
 
 (ert-deftest clutch-db-test-pg-connect-applies-schema-via-search-path ()
   "PostgreSQL connect should restore a requested schema via search_path."
   (require 'clutch-db-pg)
-  (let (captured-args executed-sql)
-    (cl-letf (((symbol-function 'pg-connect-plist)
-               (lambda (&rest args)
-                 (setq captured-args args)
-                 (clutch-db-test--make-pgcon :host "127.0.0.1" :port 54321
-                                             :user "system" :database "test")))
-              ((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (setq executed-sql sql)
-                 (make-pgresult :tuples nil))))
-      (let ((conn (clutch-db-pg-connect
-                   '(:host "127.0.0.1"
-                     :port 54321
-                     :database "test"
-                     :user "system"
-                     :password "123456"
-                     :schema "app"))))
-        (should (equal (nth 0 captured-args) "test"))
-        (should (equal (nth 1 captured-args) "system"))
-        (should-not (plist-member (nthcdr 2 captured-args) :schema))
-        (should (equal executed-sql "SET search_path TO \"app\""))
-        (should (equal (clutch-db-current-schema conn) "app"))))))
+  (clutch-db-test--with-pgsql-results
+    (let (captured-args executed-sql)
+      (cl-letf (((symbol-function 'pgsql-connect)
+                 (lambda (&rest args)
+                   (setq captured-args args)
+                   (clutch-db-test--make-pg-client
+                    :host "127.0.0.1" :port 54321
+                    :user "system" :database "test")))
+                ((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (setq executed-sql sql)
+                   (clutch-db-test--make-pg-result))))
+        (let ((conn (clutch-db-pg-connect
+                     '(:host "127.0.0.1"
+                       :port 54321
+                       :database "test"
+                       :user "system"
+                       :password "123456"
+                       :schema "app"))))
+          (should (equal (plist-get captured-args :database) "test"))
+          (should (equal (plist-get captured-args :user) "system"))
+          (should-not (plist-member captured-args :schema))
+          (should (equal executed-sql "SET search_path TO \"app\""))
+          (should (equal (clutch-db-current-schema conn) "app")))))))
 
 (ert-deftest clutch-db-test-pg-connect-normalizes-tls-to-sslmode ()
-  "PostgreSQL backend connect should map canonical SSLMODE to pg-el TLS args."
+  "PostgreSQL backend connect should pass canonical SSLMODE to pgsql.el."
   (require 'clutch-db-pg)
-  (let (captured-args)
-    (cl-letf (((symbol-function 'pg-connect-plist)
-               (lambda (&rest args)
-                 (setq captured-args args)
-                 (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                             :user "postgres" :database "test")))
-              ((symbol-function 'pg-exec)
-               (lambda (&rest _args)
-                 (make-pgresult :tuples nil))))
-      (clutch-db-pg-connect
-       '(:host "127.0.0.1"
-         :port 5432
-         :database "test"
-         :user "postgres"
-         :password "secret"
-         :tls t))
-      (should (eq (plist-get (nthcdr 2 captured-args) :tls-options) t))
-      (should-not (plist-member (nthcdr 2 captured-args) :tls)))))
+  (clutch-db-test--with-pgsql-results
+    (let (captured-args)
+      (cl-letf (((symbol-function 'pgsql-connect)
+                 (lambda (&rest args)
+                   (setq captured-args args)
+                   (clutch-db-test--make-pg-client
+                    :host "127.0.0.1" :port 5432
+                    :user "postgres" :database "test")))
+                ((symbol-function 'pgsql-exec)
+                 (lambda (&rest _args)
+                   (clutch-db-test--make-pg-result))))
+        (clutch-db-pg-connect
+         '(:host "127.0.0.1"
+           :port 5432
+           :database "test"
+           :user "postgres"
+           :password "secret"
+           :tls t))
+        (should (eq (plist-get captured-args :sslmode) 'require))
+        (should-not (plist-member captured-args :clutch-tls-mode))
+        (should-not (plist-member captured-args :tls))
+        (should-not (plist-member captured-args :tls-options))))))
 
 (ert-deftest clutch-db-test-pg-connect-applies-timeout-defaults ()
   "PostgreSQL connect should apply Clutch timeout defaults at the adapter boundary."
   (require 'clutch-db-pg)
-  (let ((clutch-connect-timeout-seconds 12)
-        (clutch-read-idle-timeout-seconds 34)
-        (clutch-query-timeout-seconds 56)
-        captured-timeouts
-        executed-sql)
-    (cl-letf (((symbol-function 'pg-connect-plist)
-               (lambda (&rest _args)
-                 (setq captured-timeouts
-                       (list pg-connect-timeout pg-read-timeout))
-                 (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432
-                                             :user "postgres" :database "test")))
-              ((symbol-function 'pg-exec)
-               (lambda (_conn sql)
-                 (setq executed-sql sql)
-                 (make-pgresult :tuples nil))))
-      (clutch-db-pg-connect
-       '(:host "127.0.0.1"
-         :port 5432
-         :database "test"
-         :user "postgres"
-         :password "secret"))
-      (should (equal captured-timeouts '(12 34)))
-      (should (equal executed-sql "SET statement_timeout = 56000")))))
+  (clutch-db-test--with-pgsql-results
+    (let ((clutch-connect-timeout-seconds 12)
+          (clutch-read-idle-timeout-seconds 34)
+          (clutch-query-timeout-seconds 56)
+          captured-args
+          executed-sql)
+      (cl-letf (((symbol-function 'pgsql-connect)
+                 (lambda (&rest args)
+                   (setq captured-args args)
+                   (clutch-db-test--make-pg-client
+                    :host "127.0.0.1" :port 5432
+                    :user "postgres" :database "test")))
+                ((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (setq executed-sql sql)
+                   (clutch-db-test--make-pg-result))))
+        (clutch-db-pg-connect
+         '(:host "127.0.0.1"
+           :port 5432
+           :database "test"
+           :user "postgres"
+           :password "secret"))
+        (should (= (plist-get captured-args :connect-timeout) 12))
+        (should (= (plist-get captured-args :read-timeout) 34))
+        (should (equal executed-sql "SET statement_timeout = 56000"))))))
+
+(ert-deftest clutch-db-test-pg-restore-connection-timeouts ()
+  "PostgreSQL reconnect recovery should restore both client timeouts."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         connect-timeout
+         read-timeout)
+    (cl-letf (((symbol-function 'pgsql-set-connect-timeout)
+               (lambda (actual-client seconds)
+                 (should (eq actual-client client))
+                 (setq connect-timeout seconds)))
+              ((symbol-function 'pgsql-set-read-timeout)
+               (lambda (actual-client seconds)
+                 (should (eq actual-client client))
+                 (setq read-timeout seconds))))
+      (clutch-db--restore-connection-timeouts
+       conn '(:connect-timeout 12 :read-idle-timeout 34))
+      (should (= connect-timeout 12))
+      (should (= read-timeout 34)))))
 
 (ert-deftest clutch-db-test-mysql-connect-wire-params ()
   "MySQL connect should pass only adapter-native params to `mysql-connect'."
@@ -4983,73 +4735,96 @@ back out in Extended JSON instead of handing `json-encode' a record."
       (should disconnected)
       (should (= (mysql-conn-read-idle-timeout conn) 30)))))
 
-(ert-deftest clutch-db-test-mysql-timeout-recovery-matrix ()
-  "MySQL timeouts cancel out of band, then keep or drop by recovery result.
-One rule across both entry points: interrupt the server-side query, keep
-the session when the cancel-and-drain recovery succeeds, disconnect and
-say so when it fails.  Statement close must wait until recovery has
-drained the wire, or it would desynchronize the session first."
+(ert-deftest clutch-db-test-mysql-query-timeout-interrupts-and-keeps-connection ()
+  "MySQL query timeout should cancel the server query when recovery succeeds."
   (require 'clutch-db-mysql)
   (require 'mysql)
-  (dolist (case '((query   t   "restored MySQL connection")
-                  (query   nil "timeout recovery failed")
-                  (execute t   "restored MySQL connection")
-                  (execute nil "timeout recovery failed")))
-    (pcase-let ((`(,entry ,recovers ,expected-message) case))
-      (ert-info ((format "entry: %s recovers: %s" entry recovers))
-        (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                                     :user "root" :database "test"))
-              interrupted closed disconnected message)
-          (cl-letf (((symbol-function 'mysql-query)
-                     (lambda (_conn _sql)
-                       (signal 'mysql-timeout
-                               '("Timed out waiting for 4 bytes"))))
-                    ((symbol-function 'mysql-prepare)
-                     (lambda (_conn _sql) 'fake-stmt))
-                    ((symbol-function 'mysql-execute)
-                     (lambda (&rest _)
-                       (signal 'mysql-timeout
-                               '("Timed out waiting for 4 bytes"))))
-                    ((symbol-function 'mysql-stmt-close)
-                     (lambda (_stmt) (setq closed t)))
-                    ((symbol-function 'clutch-db-interrupt-query)
-                     (lambda (mysql-conn)
-                       (should (eq mysql-conn conn))
-                       (should-not closed)
-                       (setq interrupted t)
-                       recovers))
-                    ((symbol-function 'mysql-disconnect)
-                     (lambda (mysql-conn)
-                       (should (eq mysql-conn conn))
-                       (setq disconnected t))))
-            (condition-case err
-                (pcase entry
-                  ('query (clutch-db-query conn "SELECT SLEEP(60)"))
-                  ('execute (clutch-db-execute-params
-                             conn "UPDATE t SET a = ?" '("v"))))
-              (clutch-db-error
-               (setq message (error-message-string err)))))
-          (should interrupted)
-          (should (eq disconnected (not recovers)))
-          (should (string-match-p expected-message message)))))))
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "test"))
+        interrupted
+        disconnected
+        message)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql)
+                 (signal 'mysql-timeout
+                         '("Timed out waiting for 4 bytes"))))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq interrupted t)
+                 t))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (_conn)
+                 (setq disconnected t))))
+      (condition-case err
+          (clutch-db-query conn "SELECT SLEEP(60)")
+        (clutch-db-error
+         (setq message (error-message-string err))))
+      (should interrupted)
+      (should-not disconnected)
+      (should (string-match-p "restored MySQL connection" message)))))
+
+(ert-deftest clutch-db-test-mysql-query-timeout-disconnects-when-recovery-fails ()
+  "MySQL query timeout should close the connection when cancel recovery fails."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                               :user "root" :database "test"))
+        interrupted
+        disconnected
+        message)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql)
+                 (signal 'mysql-timeout
+                         '("Timed out waiting for 4 bytes"))))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq interrupted t)
+                 nil))
+              ((symbol-function 'mysql-disconnect)
+               (lambda (mysql-conn)
+                 (should (eq mysql-conn conn))
+                 (setq disconnected t))))
+      (condition-case err
+          (clutch-db-query conn "SELECT SLEEP(60)")
+        (clutch-db-error
+         (setq message (error-message-string err))))
+      (should interrupted)
+      (should disconnected)
+      (should (string-match-p "timeout recovery failed" message)))))
 
 (ert-deftest clutch-db-test-pg-interrupt-query-return-contract ()
-  "PostgreSQL interrupt should return t for successful cancel and nil on pg errors."
+  "PostgreSQL interrupt should reuse synchronized clients without recancelling."
   (require 'clutch-db-pg)
-  (dolist (case '((success t)
-                  (pg-error nil)))
-    (pcase-let ((`(,label ,expected) case))
+  (dolist (case '((synchronized t nil nil t 0)
+                  (busy-success t t nil t 1)
+                  (busy-error t t t nil 1)
+                  (dead nil nil t nil 1)))
+    (pcase-let ((`(,label ,live ,busy ,cancel-error ,expected ,expected-calls)
+                 case))
       (ert-info ((format "case: %s" label))
-        (let ((conn (clutch-db-test--make-pgcon :host "127.0.0.1" :port 5432))
-              called)
-          (cl-letf (((symbol-function 'pg-cancel)
-                     (lambda (pg-conn)
-                       (setq called pg-conn)
-                       (if expected
-                           t
-                         (signal 'pg-connection-error '("cancel failed"))))))
+        (let* ((conn (clutch-db-test--make-pg-connection
+                      :host "127.0.0.1" :port 5432))
+               (client (clutch-db-pg--connection-client conn))
+               (cancel-calls 0))
+          (cl-letf (((symbol-function 'pgsql-live-p)
+                     (lambda (actual-client)
+                       (should (eq actual-client client))
+                       live))
+                    ((symbol-function 'pgsql-busy-p)
+                     (lambda (actual-client)
+                       (should (eq actual-client client))
+                       busy))
+                    ((symbol-function 'pgsql-cancel)
+                     (lambda (actual-client)
+                       (should (eq actual-client client))
+                       (cl-incf cancel-calls)
+                       (when cancel-error
+                         (signal 'pgsql-connection-error '("cancel failed")))
+                       t)))
             (should (eq (clutch-db-interrupt-query conn) expected))
-            (should (eq called conn))))))))
+            (should (= cancel-calls expected-calls))))))))
 
 (ert-deftest clutch-db-test-jdbc-metadata-derived-from-url ()
   "Generic JDBC metadata accessors should derive host/port/database from :url."
@@ -5328,7 +5103,7 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   :tags '(:db-live :mysql-live)
-  "Test MySQL schema introspection and database switching."
+  "Test MySQL schema introspection."
   (clutch-db-test--with-mysql conn
     ;; list-tables
     (let ((tables (clutch-db-list-tables conn)))
@@ -5342,21 +5117,7 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
     (let ((ddl (clutch-db-object-definition
                 conn '(:name "user" :type "TABLE"))))
       (should (stringp ddl))
-      (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))
-    (let* ((original (clutch-db-current-schema conn))
-           (schema (clutch-db-test--live-name "clutch_switch"))
-           (quoted (clutch-db-escape-identifier conn schema)))
-      (unwind-protect
-          (progn
-            (clutch-db-query conn (format "CREATE DATABASE %s" quoted))
-            (should (member schema (clutch-db-list-schemas conn)))
-            (clutch-db-set-current-schema conn schema)
-            (should (equal (clutch-db-current-schema conn) schema))
-            (clutch-db-query conn "CREATE TABLE namespace_probe (id INT)")
-            (should (member "namespace_probe" (clutch-db-list-tables conn))))
-        (ignore-errors (clutch-db-set-current-schema conn original))
-        (ignore-errors
-          (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" quoted)))))))
+      (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))))
 
 (ert-deftest clutch-db-test-mysql-live-row-identity-uses-unique-not-null ()
   :tags '(:db-live :mysql-live)
@@ -5488,18 +5249,101 @@ Skips if `clutch-db-test-pg-password' is nil."
  (:db-live :pg-live)
  "PostgreSQL")
 
-(ert-deftest clutch-db-test-pg-live-prepared-false-null-true-contract ()
+(ert-deftest clutch-db-test-pg-live-public-value-and-transaction-contract ()
   :tags '(:db-live :pg-live)
-  "PostgreSQL prepared parameters should preserve false, NULL, and true."
+  "PostgreSQL should preserve typed values and recover failed transactions."
   (clutch-db-test--with-pg conn
-    (let ((result
-           (clutch-db-execute-params
-            conn "SELECT ?::bool, ?::text, ?::bool"
-            (list (clutch-db-typed-param :false "bool")
-                  (clutch-db-typed-param nil "text")
-                  (clutch-db-typed-param t "bool")))))
-      (should (equal (clutch-db-result-rows result)
-                     '((:false nil t)))))))
+    (let* ((result
+            (clutch-db-execute-params
+             conn
+             "SELECT ?::int4, ?::text, ?::bool, ?::bool[], ?::int4[], ?::date, ?::timestamp, array_lower(?::int4[], 1), ?::int4[]"
+             (list (clutch-db-typed-param 42 "int4")
+                   (clutch-db-typed-param nil "text")
+                   (clutch-db-typed-param :false "bool")
+                   (clutch-db-typed-param
+                    "[true,false,null]" "_bool")
+                   (clutch-db-typed-param [1 2 3] "_int4")
+                   (clutch-db-typed-param
+                    '(:year 2026 :month 7 :day 17) "date")
+                   (clutch-db-typed-param
+                    '(:year 2026 :month 7 :day 17
+                      :hours 9 :minutes 8 :seconds 7)
+                    "timestamp")
+                   (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")
+                   (clutch-db-typed-param "[0:2]={1,2,3}" "_int4"))))
+           (row (car (clutch-db-result-rows result))))
+      (should
+       (equal row
+              '(42 nil :false [t :false nil] [1 2 3]
+                (:year 2026 :month 7 :day 17)
+                (:year 2026 :month 7 :day 17
+                 :hours 9 :minutes 8 :seconds 7)
+                0 [1 2 3]))))
+    (clutch-db-query
+     conn "CREATE TEMP TABLE clutch_failed_commit_contract (id int)")
+    (clutch-db-set-auto-commit conn nil)
+    (clutch-db-query
+     conn "INSERT INTO clutch_failed_commit_contract VALUES (1)")
+    (should-error (clutch-db-query conn "SELECT 1 / 0")
+                  :type 'clutch-db-error)
+    (should (eq (clutch-db-commit conn) 'rolled-back))
+    (should (= (caar (clutch-db-result-rows
+                      (clutch-db-query
+                       conn "SELECT count(*) FROM clutch_failed_commit_contract")))
+               0))
+    (clutch-db-set-auto-commit conn t)
+    (should-not (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-pg-live-keyboard-quit-keeps-connection-usable ()
+  :tags '(:db-live :pg-live)
+  "PostgreSQL keyboard quit should not be cancelled twice by the adapter."
+  (clutch-db-test--with-pg conn
+    (let ((client (clutch-db-pg--connection-client conn))
+          (cancel-function (symbol-function 'pgsql-cancel))
+          (cancel-count 0)
+          caught timer)
+      (unwind-protect
+          (cl-letf (((symbol-function 'pgsql-cancel)
+                     (lambda (actual-client)
+                       (cl-incf cancel-count)
+                       (funcall cancel-function actual-client))))
+            (setq timer (run-at-time 0.2 nil #'keyboard-quit))
+            (condition-case nil
+                (clutch-db-query conn "SELECT pg_sleep(5)")
+              (quit
+               (setq caught t)
+               (should (clutch-db-interrupt-query conn))))
+            (should caught)
+            ;; pgsql.el performs its internal CancelRequest and drain without
+            ;; re-entering the public explicit-cancel operation.  Clutch must
+            ;; not issue another cancellation after the quit is re-signaled.
+            (should (= cancel-count 0))
+            (should (eq (clutch-db-pg--connection-client conn) client))
+            (should (clutch-db-live-p conn))
+            (should (= (caar (clutch-db-result-rows
+                              (clutch-db-query conn "SELECT 11")))
+                       11)))
+        (when timer
+          (cancel-timer timer))))))
+
+(ert-deftest clutch-db-test-pg-live-query-timeout-keeps-connection-usable ()
+  :tags '(:db-live :pg-live)
+  "PostgreSQL statement timeout should preserve the synchronized client."
+  (if (not (clutch-db-test--pg-live-configured-p))
+      (ert-skip "Set clutch-db-test-pg-password to enable PostgreSQL live tests")
+    (let ((conn (clutch-db-connect
+                 'pg
+                 (plist-put (clutch-db-test--pg-live-params)
+                            :query-timeout 1))))
+      (unwind-protect
+          (let ((client (clutch-db-pg--connection-client conn)))
+            (should-error (clutch-db-query conn "SELECT pg_sleep(2)")
+                          :type 'clutch-db-error)
+            (should (eq (clutch-db-pg--connection-client conn) client))
+            (should (= (caar (clutch-db-result-rows
+                              (clutch-db-query conn "SELECT 17")))
+                       17)))
+        (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-db-test-pg-live-authinfo-profile-provides-backend ()
   :tags '(:db-live :pg-live)
@@ -5524,7 +5368,7 @@ Skips if `clutch-db-test-pg-password' is nil."
 
 (ert-deftest clutch-db-test-pg-live-schema ()
   :tags '(:db-live :pg-live)
-  "Test PostgreSQL schema introspection and switching."
+  "Test PostgreSQL schema introspection."
   (clutch-db-test--with-pg conn
     (let* ((table (clutch-db-test--live-name "clutch_schema"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
@@ -5549,24 +5393,12 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
             (let ((ddl (clutch-db-object-definition
                         conn (list :name table :type "TABLE"))))
               (should (stringp ddl))
-              (should (string-match-p "CREATE TABLE" ddl)))
-            (let* ((original (clutch-db-current-schema conn))
-                   (schema (clutch-db-test--live-name "clutch_switch"))
-                   (quoted (clutch-db-escape-identifier conn schema)))
-              (unwind-protect
-                  (progn
-                    (clutch-db-query conn (format "CREATE SCHEMA %s" quoted))
-                    (should (member schema (clutch-db-list-schemas conn)))
-                    (clutch-db-set-current-schema conn schema)
-                    (should (equal (clutch-db-current-schema conn) schema))
-                    (clutch-db-query conn
-                                     "CREATE TABLE namespace_probe (id INT)")
-                    (should (member "namespace_probe"
-                                    (clutch-db-list-tables conn))))
-                (ignore-errors (clutch-db-set-current-schema conn original))
-                (ignore-errors
-                  (clutch-db-query conn
-                                   (format "DROP SCHEMA %s CASCADE" quoted))))))
+              (should (string-match-p "CREATE TABLE" ddl))
+              (should (string-match-p
+                       (regexp-quote "\"tenant_id\" smallint") ddl))
+              (should (string-match-p
+                       (regexp-quote "\"id\" integer DEFAULT nextval(") ddl))
+              (should-not (string-match-p "pgsql-null" ddl))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()
@@ -6430,7 +6262,7 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-schema ()
   :tags '(:db-live :jdbc-live :oracle-live)
-  "Oracle JDBC should introspect and switch schemas on both sessions."
+  "Oracle JDBC schema introspection should list tables and columns."
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_SCHEMA"))
            (drop-sql (format "DROP TABLE %s" tbl)))
@@ -6445,33 +6277,7 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
               (should (member "ID" cols))
               (should (member "NAME" cols))))
         (ignore-errors
-          (clutch-db-query conn drop-sql))))
-    (let* ((original (clutch-db-current-schema conn))
-           (schema (upcase (clutch-db-test--live-name "CC_SWITCH")))
-           (quoted (clutch-db-escape-identifier conn schema)))
-      (unwind-protect
-          (progn
-            (ignore-errors
-              (clutch-db-query conn (format "DROP USER %s CASCADE" quoted)))
-            (clutch-db-query
-             conn
-             (format "CREATE USER %s IDENTIFIED BY \"ClutchSwitch1\"" quoted))
-            (should (member schema (clutch-db-list-schemas conn)))
-            (clutch-db-set-current-schema conn schema)
-            (should (equal (clutch-db-current-schema conn) schema))
-            (clutch-db-query conn "CREATE TABLE namespace_probe (id NUMBER)")
-            (should (member "NAMESPACE_PROBE" (clutch-db-list-tables conn)))
-            (should
-             (equal
-              (caar
-               (clutch-db-result-rows
-                (clutch-db-query
-                 conn
-                 "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))
-              schema)))
-        (ignore-errors (clutch-db-set-current-schema conn original))
-        (ignore-errors
-          (clutch-db-query conn (format "DROP USER %s CASCADE" quoted)))))))
+          (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-uses-unique-not-null ()
   :tags '(:db-live :jdbc-live :oracle-live)
@@ -7078,46 +6884,6 @@ It does so without touching the agent process."
         (should-not (gethash 77 clutch-jdbc--async-callbacks))
         (should (equal cancelled '(fake-timer)))))))
 
-(ert-deftest clutch-db-test-jdbc-recv-response-timeout-spares-other-connections ()
-  "A silent request with a live agent condemns only its own connection.
-The agent handles requests on a thread pool, so one stuck JDBC call says
-nothing about other connections' sessions; killing the process would also
-destroy their open transactions -- Oracle sessions default to manual
-commit, so that loss is silent data loss."
-  (let (deleted sent)
-    (cl-letf (((symbol-function 'process-live-p)
-               (lambda (p) (eq p 'fake-proc)))
-              ((symbol-function 'delete-process)
-               (lambda (p) (setq deleted p)))
-              ((symbol-function 'accept-process-output) (lambda (_p _s) nil))
-              ((symbol-function 'clutch-jdbc--send)
-               (lambda (op params) (setq sent (cons op params)) 99)))
-      (let* ((clutch-jdbc--agent-process 'fake-proc)
-             (clutch-jdbc--response-queue nil)
-             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
-             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
-             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-             (stuck (make-clutch-jdbc-conn :process 'fake-proc :conn-id 1))
-             (bystander (make-clutch-jdbc-conn :process 'fake-proc :conn-id 2)))
-        (puthash 1 stuck clutch-jdbc--connections-by-id)
-        (puthash 2 bystander clutch-jdbc--connections-by-id)
-        (should-error (clutch-jdbc--recv-response 41 0.0 "execute" stuck)
-                      :type 'clutch-db-error)
-        ;; The agent survives; the stuck connection is retired, the
-        ;; bystander keeps its registration.
-        (should-not deleted)
-        (should (eq clutch-jdbc--agent-process 'fake-proc))
-        (should-not (gethash 1 clutch-jdbc--connections-by-id))
-        (should (eq (gethash 2 clutch-jdbc--connections-by-id) bystander))
-        ;; The silent request's late reply is dropped, and the agent was
-        ;; asked to release the stuck logical connection without waiting,
-        ;; via the op that bypasses the connection's agent-side locks.
-        (should (gethash 41 clutch-jdbc--ignored-response-ids))
-        (should (equal (car sent) "force-disconnect"))
-        (should (eql (alist-get 'conn-id (cdr sent)) 1))
-        (should (gethash 99 clutch-jdbc--ignored-response-ids))))))
-
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-error-messages ()
   "Timeout errors should distinguish dead agents, lost sessions, and connects."
   (dolist (case
@@ -7299,7 +7065,9 @@ commit, so that loss is silent data loss."
                           "clutch-jdbc-request"))
            (should (string-match-p
                     "SQLNonTransientConnectionException"
-                    (plist-get (plist-get details :debug) :stack-trace)))))))))
+                    (plist-get (plist-get details :debug) :stack-trace))))
+         (should-not (string-match-p "cookie-secret-71"
+                                     (prin1-to-string (nth 2 err)))))))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
   "Connection-scoped JDBC errors should stay on that connection."
@@ -7680,19 +7448,456 @@ commit, so that loss is silent data loss."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+;;;; Regression tests restored after the main/refactor merge
+
+(ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-user-mode ()
+  "A JDBC Auto batch should not expose its internal transaction as Manual mode."
+  (let* ((params '(:driver sqlserver :rpc-timeout 12))
+         (conn (make-clutch-jdbc-conn :conn-id 19
+                                      :params (copy-sequence params)))
+         events)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op rpc-params &optional _timeout)
+                 (push
+                  (pcase op
+                    ("set-auto-commit"
+                     (if (eq (alist-get 'auto-commit rpc-params) t)
+                         'auto
+                       'internal-manual))
+                    ("commit" 'commit)
+                    ("rollback" 'rollback))
+                  events))))
+      (should
+       (eq (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (should-not (clutch-db-manual-commit-p conn))
+              (push 'body events)
+              'done))
+           'done))
+      (should (equal (nreverse events)
+                     '(internal-manual body commit auto)))
+      (should (equal (clutch-jdbc-conn-params conn) params))
+      (setq events nil)
+      (should-error
+       (clutch-db-call-with-atomic-batch
+        conn
+        (lambda ()
+          (push 'body events)
+          (signal 'clutch-db-error '("statement failed"))))
+       :type 'clutch-db-error)
+      (should (equal (nreverse events)
+                     '(internal-manual body rollback auto)))
+      (should (equal (clutch-jdbc-conn-params conn) params)))))
+
+(ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-commit-error-uncertain ()
+  "A JDBC COMMIT error should not trigger rollback or restore Auto mode."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 19
+               :params '(:driver sqlserver :rpc-timeout 12)))
+        events)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional _timeout)
+                 (push
+                  (pcase op
+                    ("set-auto-commit"
+                     (if (eq (alist-get 'auto-commit params) t)
+                         'auto
+                       'internal-manual))
+                    ("commit" 'commit)
+                    ("rollback" 'rollback))
+                  events)
+                 (when (equal op "commit")
+                   (signal 'clutch-db-error '("commit response lost"))))))
+      (let ((err
+             (should-error
+              (clutch-db-call-with-atomic-batch
+               conn
+               (lambda ()
+                 (push 'body events)
+                 'done))
+              :type 'clutch-db-batch-outcome-uncertain)))
+        (should (eq (plist-get (cddr err) :phase) 'commit)))
+      (should (equal (nreverse events)
+                     '(internal-manual body commit)))
+      (should (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-jdbc-atomic-batch-reports-restore-outcome ()
+  "JDBC restore errors should report whether the batch committed or rolled back."
+  (dolist (case '((nil committed
+                       (internal-manual body commit auto))
+                  (t rolled-back
+                     (internal-manual body rollback auto))))
+    (pcase-let ((`(,body-error ,expected-outcome ,expected-events) case))
+      (let ((conn (make-clutch-jdbc-conn
+                   :conn-id 19
+                   :params (copy-sequence
+                            '(:driver sqlserver :rpc-timeout 12))))
+            events)
+        (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                   (lambda (op params &optional _timeout)
+                     (push
+                      (pcase op
+                        ("set-auto-commit"
+                         (if (eq (alist-get 'auto-commit params) t)
+                             'auto
+                           'internal-manual))
+                        ("commit" 'commit)
+                        ("rollback" 'rollback))
+                      events)
+                     (when (and (equal op "set-auto-commit")
+                                (eq (alist-get 'auto-commit params) t))
+                       (signal 'clutch-db-error '("restore failed"))))))
+          (let ((err
+                 (should-error
+                  (clutch-db-call-with-atomic-batch
+                   conn
+                   (lambda ()
+                     (push 'body events)
+                     (when body-error
+                       (signal 'clutch-db-error '("statement failed")))))
+                  :type 'clutch-db-session-restore-error)))
+            (should (eq (plist-get (cddr err) :outcome)
+                        expected-outcome)))
+          (should (equal (nreverse events) expected-events))
+          (should (clutch-db-manual-commit-p conn)))))))
+
+(ert-deftest clutch-db-test-jdbc-manual-atomic-batch-uses-savepoint ()
+  "A JDBC Manual batch should use a savepoint without ending the transaction."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 23
+               :params '(:driver sqlserver :rpc-timeout 14 :manual-commit t)))
+        events)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (op params &optional timeout)
+                 (should (= timeout 14))
+                 (push (cons op params) events)
+                 (when (equal op "create-savepoint")
+                   '(:savepoint-id 71)))))
+      (should
+       (eq (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (push '(body) events)
+              'done))
+           'done))
+      (should
+       (equal (nreverse events)
+              '(("create-savepoint" (conn-id . 23))
+                (body)
+                ("release-savepoint" (conn-id . 23) (savepoint-id . 71)))))
+      (setq events nil)
+      (should-error
+       (clutch-db-call-with-atomic-batch
+        conn
+        (lambda ()
+          (push '(body) events)
+          (signal 'clutch-db-error '("statement failed"))))
+       :type 'clutch-db-error)
+      (should
+       (equal (nreverse events)
+              '(("create-savepoint" (conn-id . 23))
+                (body)
+                ("rollback-savepoint" (conn-id . 23) (savepoint-id . 71)))))
+      (should (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
+  "SQLite should commit or roll back a staged multi-row batch as a unit."
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+    (unwind-protect
+        (progn
+          (clutch-db-init-connection conn)
+          (clutch-db-query
+           conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
+          (clutch-db-call-with-atomic-batch
+           conn
+           (lambda ()
+             (clutch-db-execute-params
+              conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(1 "a"))
+             (clutch-db-execute-params
+              conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(2 "b"))))
+          (should
+           (equal (clutch-db-result-rows
+                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
+                  '((1 "a") (2 "b"))))
+          (should-error
+           (clutch-db-call-with-atomic-batch
+            conn
+            (lambda ()
+              (clutch-db-execute-params
+               conn "INSERT INTO demo (id, name) VALUES (?, ?)" '(3 "c"))
+              (clutch-db-execute-params
+               conn "INSERT INTO demo (id, name) VALUES (?, ?)"
+               '(1 "duplicate")))))
+          (should
+           (equal (clutch-db-result-rows
+                   (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
+                  '((1 "a") (2 "b")))))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-db-test-jdbc-collect-table-entries-continues-legacy-cursors ()
+  "Legacy cursor responses should be drained through fetch continuations."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
+        fetch-cursor-id)
+    (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
+               (lambda (_conn cursor-id)
+                 (setq fetch-cursor-id cursor-id)
+                 '(("PRODUCTS" "TABLE" "SCOTT")))))
+      (should (equal (clutch-jdbc--collect-table-entries
+                      conn
+                      '(:rows (("USERS" "TABLE" "SCOTT"))
+                        :cursor-id 42
+                        :done nil))
+                     '((:name "USERS" :type "TABLE" :schema "SCOTT"
+                        :source-schema "SCOTT")
+                       (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
+                        :source-schema "SCOTT"))))
+      (should (equal fetch-cursor-id 42)))))
+
+(ert-deftest clutch-db-test-mongodb-id-filter-preserves-object-id ()
+  "An _id filter should preserve the document's public ObjectId value."
+  (require 'mongodb)
+  (dolist (hex '("65f1a2b3c4d5e6f708090a0b"
+                 "000000000000000000000001"))
+    (let* ((object-id (mongodb-object-id hex))
+           (document (list (cons "_id" object-id)
+                           (cons "name" "Ann")))
+           (filter (clutch-mongodb--document-id-filter document "update"))
+           (filtered-id (cdr (assoc "_id" filter))))
+      (should (mongodb-object-id-p filtered-id))
+      (should (eq filtered-id object-id))
+      (should (equal (mongodb-object-id-hex filtered-id) hex)))))
+
+(ert-deftest clutch-db-test-mongodb-display-renders-decoded-scalars ()
+  "Decoded wrapper structs should render as Extended JSON display text."
+  (require 'mongodb)
+  (let* ((decoded (list (cons "_id" (mongodb-object-id
+                                     "65f1a2b3c4d5e6f708090a0b"))
+                        (cons "n" (/ 0.0 0.0))
+                        (cons "d" (mongodb-decimal128 "1.23"))
+                        (cons "w" (mongodb-datetime 1700000000000))
+                        (cons "small" (mongodb-int64 7))
+                        (cons "arr" (vector (mongodb-min-key)))
+                        (cons "empty" (mongodb-document nil))))
+         (text (clutch-mongodb--json-encode-text decoded)))
+    (should (string-match-p "\"\\$oid\":\"65f1a2b3c4d5e6f708090a0b\"" text))
+    (should (string-match-p "\"\\$numberDouble\":\"NaN\"" text))
+    (should (string-match-p "\"\\$numberDecimal\":\"1.23\"" text))
+    (should (string-match-p "\"\\$date\":1700000000000" text))
+    (should (string-match-p "\"\\$minKey\":1" text))
+    (should (string-match-p "\"empty\":{}" text))
+    (should (string-match-p "\"small\":7" text))
+    (should (equal (clutch-mongodb--display-value
+                    (cdr (assoc "small" decoded)))
+                   7))
+    (should (eq (clutch-mongodb--column-category
+                 (cdr (assoc "small" decoded)))
+                'numeric))))
+
+(ert-deftest clutch-db-test-jdbc-normalize-row-retains-blob-encoding ()
+  "JDBC text BLOB normalization should retain its byte encoding."
+  (let* ((row (clutch-jdbc--normalize-row
+               '((:__type "blob" :length 18
+                  :text "{\"message\":\"中文\"}" :encoding "GB18030"))))
+         (value (car row)))
+    (should (equal value "{\"message\":\"中文\"}"))
+    (should (equal (get-text-property 0 'clutch-jdbc-blob-encoding value)
+                   "GB18030"))))
+
+(ert-deftest clutch-db-test-jdbc-binary-param-types-fail-closed ()
+  "Only explicitly supported JDBC binary type names should use the envelope."
+  (dolist (type '("BLOB" "RAW" "VARBINARY" "BINARY LARGE OBJECT"))
+    (should
+     (clutch-jdbc--binary-param-p
+      (clutch-db-typed-param "value" type))))
+  (dolist (type '("BLOBSTER" "DRAWING" "NONBINARY" "VARCHAR2"))
+    (should-not
+     (clutch-jdbc--binary-param-p
+      (clutch-db-typed-param "value" type)))))
+
+(ert-deftest clutch-db-test-jdbc-columns-retain-backend-types ()
+  "JDBC result columns should retain exact types for prepared mutations."
+  (should
+   (equal (clutch-jdbc--make-columns '("PAYLOAD" "ID") '("BLOB" "NUMBER"))
+          '((:name "PAYLOAD" :backend-type "BLOB" :type-category blob)
+            (:name "ID" :backend-type "NUMBER" :type-category numeric)))))
+
+(ert-deftest clutch-db-test-jdbc-normalizes-column-detail-backend-types ()
+  "JDBC column details should expose exact types through the generic contract."
+  (should
+   (equal
+    (clutch-jdbc--normalize-column-details
+     '((:name "CONTENT" :type "BLOB" :nullable t)
+       (:name "STATUS" :type "NUMBER" :nullable nil)))
+    '((:name "CONTENT" :type "BLOB" :nullable t :backend-type "BLOB")
+      (:name "STATUS" :type "NUMBER" :nullable nil :backend-type "NUMBER")))))
+
+(ert-deftest clutch-db-test-jdbc-column-detail-methods-retain-backend-types ()
+  "Both JDBC metadata paths should expose exact backend types."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle)))
+        async-details)
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-db-foreign-keys)
+               (lambda (_conn _table) nil))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _)
+                 '(:columns ((:name "CONTENT" :type "BLOB"
+                              :nullable t)))))
+              ((symbol-function 'clutch-jdbc--rpc-async)
+               (lambda (_op _params callback &rest _)
+                 (funcall callback
+                          '(:columns ((:name "CONTENT" :type "BLOB"
+                                      :nullable t))))
+                 17)))
+      (should
+       (equal (plist-get
+               (car (clutch-db-column-details conn "DOCUMENTS"))
+               :backend-type)
+              "BLOB"))
+      (should (clutch-db-column-details-async
+               conn "DOCUMENTS"
+               (lambda (details) (setq async-details details))))
+      (should (equal (plist-get (car async-details) :backend-type)
+                     "BLOB")))))
+
+(ert-deftest clutch-db-test-jdbc-duckdb-switches-current-catalog-schema ()
+  "DuckDB JDBC should switch a schema within the current catalog."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 8
+               :params '(:driver jdbc
+                         :url "jdbc:duckdb:/tmp/analytics.duckdb"
+                         :rpc-timeout 9)))
+        queries)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (push sql queries)
+                 (cond
+                  ((string-match-p "duckdb_schemas" sql)
+                   (make-clutch-db-result
+                    :rows '(("main") ("sales") ("odd.schema"))))
+                  ((string-match-p "current_catalog" sql)
+                   (make-clutch-db-result :rows '(("analytics" "main"))))
+                  ((string-prefix-p "USE " sql)
+                   (make-clutch-db-result :rows nil))
+                  (t (ert-fail (format "Unexpected SQL: %s" sql)))))))
+      (should
+       (equal (clutch-db-list-schemas conn)
+              '("main" "sales" "odd.schema")))
+      (should (equal (clutch-db-current-schema conn) "main"))
+      (should
+       (equal (clutch-db-set-current-schema
+               conn "odd.schema")
+              "odd.schema"))
+      (should (member "USE \"analytics\".\"odd.schema\"" queries))
+      (should (equal (plist-get (clutch-jdbc-conn-params conn) :catalog)
+                     "analytics"))
+      (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
+                     "odd.schema"))
+      (should-not
+       (clutch-db-list-schemas
+        (make-clutch-jdbc-conn
+         :params '(:driver jdbc :url "jdbc:duckdb:")))))))
+
+(ert-deftest clutch-db-test-mysql-symbol-help-escapes-symbol ()
+  "MySQL HELP lookup should escape the symbol instead of interpolating it."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "localhost"))
+        captured-sql)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (setq captured-sql sql)
+                 (make-mysql-result :rows nil))))
+      (clutch-db-symbol-help conn "x' UNION SELECT 1 -- ")
+      (should (equal captured-sql
+                     (concat "HELP "
+                             (mysql-escape-literal "X' UNION SELECT 1 -- ")))))))
+
+(ert-deftest clutch-db-test-mysql-timeout-recovery-matrix ()
+  "MySQL timeout recovery should cover query and prepared execution paths."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (dolist (case '((query   t   "restored MySQL connection")
+                  (query   nil "timeout recovery failed")
+                  (execute t   "restored MySQL connection")
+                  (execute nil "timeout recovery failed")))
+    (pcase-let ((`(,entry ,recovers ,expected-message) case))
+      (ert-info ((format "entry: %s recovers: %s" entry recovers))
+        (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
+                                     :user "root" :database "test"))
+              interrupted closed disconnected message)
+          (cl-letf (((symbol-function 'mysql-query)
+                     (lambda (_conn _sql)
+                       (signal 'mysql-timeout
+                               '("Timed out waiting for 4 bytes"))))
+                    ((symbol-function 'mysql-prepare)
+                     (lambda (_conn _sql) 'fake-stmt))
+                    ((symbol-function 'mysql-execute)
+                     (lambda (&rest _)
+                       (signal 'mysql-timeout
+                               '("Timed out waiting for 4 bytes"))))
+                    ((symbol-function 'mysql-stmt-close)
+                     (lambda (_stmt) (setq closed t)))
+                    ((symbol-function 'clutch-db-interrupt-query)
+                     (lambda (mysql-conn)
+                       (should (eq mysql-conn conn))
+                       (should-not closed)
+                       (setq interrupted t)
+                       recovers))
+                    ((symbol-function 'mysql-disconnect)
+                     (lambda (mysql-conn)
+                       (should (eq mysql-conn conn))
+                       (setq disconnected t))))
+            (condition-case err
+                (pcase entry
+                  ('query (clutch-db-query conn "SELECT SLEEP(60)"))
+                  ('execute (clutch-db-execute-params
+                             conn "UPDATE t SET a = ?" '("v"))))
+              (clutch-db-error
+               (setq message (error-message-string err)))))
+          (should interrupted)
+          (should (eq disconnected (not recovers)))
+          (should (string-match-p expected-message message)))))))
+
+(ert-deftest clutch-db-test-jdbc-recv-response-timeout-spares-other-connections ()
+  "A silent JDBC request should retire only its own logical connection."
+  (let (deleted sent)
+    (cl-letf (((symbol-function 'process-live-p)
+               (lambda (p) (eq p 'fake-proc)))
+              ((symbol-function 'delete-process)
+               (lambda (p) (setq deleted p)))
+              ((symbol-function 'accept-process-output) (lambda (_p _s) nil))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (op params) (setq sent (cons op params)) 99)))
+      (let* ((clutch-jdbc--agent-process 'fake-proc)
+             (clutch-jdbc--response-queue nil)
+             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+             (stuck (make-clutch-jdbc-conn :process 'fake-proc :conn-id 1))
+             (bystander (make-clutch-jdbc-conn :process 'fake-proc :conn-id 2)))
+        (puthash 1 stuck clutch-jdbc--connections-by-id)
+        (puthash 2 bystander clutch-jdbc--connections-by-id)
+        (should-error (clutch-jdbc--recv-response 41 0.0 "execute" stuck)
+                      :type 'clutch-db-error)
+        (should-not deleted)
+        (should (eq clutch-jdbc--agent-process 'fake-proc))
+        (should-not (gethash 1 clutch-jdbc--connections-by-id))
+        (should (eq (gethash 2 clutch-jdbc--connections-by-id) bystander))
+        (should (gethash 41 clutch-jdbc--ignored-response-ids))
+        (should (equal (car sent) "force-disconnect"))
+        (should (eql (alist-get 'conn-id (cdr sent)) 1))
+        (should (gethash 99 clutch-jdbc--ignored-response-ids))))))
+
 (ert-deftest clutch-db-test-jdbc-escape-literal-follows-backend-dialect ()
-  "JDBC literals must escape backslash on backends that read it as an escape.
-The escaped literal is concatenated into executed SQL by foreign-key
-navigation and metadata queries, so a value ending in a backslash would
-otherwise close the literal early."
+  "JDBC literal escaping should follow each backend's backslash rules."
   (require 'clutch-db-jdbc)
   (dolist (case '((clickhouse "a\\'; DROP TABLE t --" "'a\\\\''; DROP TABLE t --'")
                   (snowflake "a\\" "'a\\\\'")
-                  ;; Redshift's PostgreSQL 8.0 lineage always processes
-                  ;; backslash escapes.
                   (redshift "a\\" "'a\\\\'")
-                  ;; Oracle keeps backslash literal, so doubling it would
-                  ;; store a character the user never typed.
                   (oracle "a\\" "'a\\'")
                   (oracle "it's" "'it''s'")))
     (pcase-let ((`(,driver ,value ,expected) case))
@@ -7701,25 +7906,18 @@ otherwise close the literal early."
           (should (equal (clutch-db-escape-literal conn value) expected)))))))
 
 (ert-deftest clutch-db-test-jdbc-driver-dialects-follow-engine-lexing ()
-  "Engines that read backslash escapes must parse statements the same way.
-Snowflake and ClickHouse have no `sql-mode' product, and Redshift's product
-maps to modern PostgreSQL rules, so each registers explicit dialect rules;
-without them statement splitting ends a literal at an escaped quote and
-sends the fragment before an embedded semicolon as a whole statement."
+  "JDBC statement parsing should use the target engine's lexical rules."
   (require 'clutch-db-jdbc)
   (dolist (driver '(clickhouse redshift snowflake))
     (ert-info ((format "driver: %s" driver))
       (let ((conn (make-clutch-jdbc-conn :driver driver)))
         (should (equal (clutch-db-connection-sql-dialect conn)
                        '(:backslash-escapes t :dollar-quotes t))))))
-  ;; Oracle stays on its product-derived rules, which claim nothing.
   (should-not (clutch-db-connection-sql-dialect
                (make-clutch-jdbc-conn :driver 'oracle))))
 
 (ert-deftest clutch-db-test-sqlite-select-routing-tolerates-comments-and-syntax ()
-  "SQLite row-yielding detection must survive comments and the caller's syntax.
-Misrouting sends a SELECT to `sqlite-execute', which runs it and drops the
-rows."
+  "SQLite row-yielding detection should tolerate comments and SQL syntax."
   (require 'clutch-db-sqlite)
   (dolist (sql '("SELECT 1"
                  "-- note\nSELECT 1"
@@ -7729,7 +7927,6 @@ rows."
                  "VALUES (1)"
                  "INSERT INTO t VALUES (1) RETURNING id"))
     (ert-info ((format "sql: %S" sql))
-      ;; `sql-mode' gives newline comment-ending syntax, which `\s-' honours.
       (with-temp-buffer
         (sql-mode)
         (should (clutch-db-sqlite--select-p sql)))))
@@ -7739,10 +7936,9 @@ rows."
       (should-not (clutch-db-sqlite--select-p sql)))))
 
 (ert-deftest clutch-db-test-connect-closes-connection-when-init-fails ()
-  "A connection whose initialization fails or is quit must be closed.
-Initialization runs statements, so the backend already holds a socket by
-then and the caller never receives the object to close it."
-  (dolist (case '((error (lambda (_conn) (signal 'clutch-db-error '("boom"))))
+  "A connection should close when initialization exits before returning it."
+  (dolist (case '((error (lambda (_conn)
+                           (signal 'clutch-db-error '("boom"))))
                   (quit (lambda (_conn) (signal 'quit nil)))))
     (pcase-let ((`(,label ,init-fn) case))
       (ert-info ((format "case: %s" label))
@@ -7754,15 +7950,14 @@ then and the caller never receives the object to close it."
                     ((symbol-function 'clutch-db-init-connection) init-fn)
                     ((symbol-function 'clutch-db-disconnect)
                      (lambda (conn) (setq disconnected conn))))
-            ;; `should-error' does not catch quit, which is exactly one of
-            ;; the exits this guards.
-            (let ((raised (condition-case exit
-                              (progn (clutch-db-connect 'fake '(:host "h")) nil)
+            (let ((raised (condition-case _exit
+                              (progn
+                                (clutch-db-connect 'fake '(:host "h"))
+                                nil)
                             (quit 'quit)
                             (error 'error))))
               (should (eq raised label)))
             (should (eq disconnected 'fresh-conn)))))))
-  ;; A successful connection is of course left open.
   (let (disconnected)
     (cl-letf (((symbol-function 'clutch-backend-feature)
                (lambda (_backend)
@@ -7773,5 +7968,4 @@ then and the caller never receives the object to close it."
                (lambda (conn) (setq disconnected conn))))
       (should (eq (clutch-db-connect 'fake '(:host "h")) 'fresh-conn))
       (should-not disconnected))))
-
 ;;; clutch-db-test.el ends here

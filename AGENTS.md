@@ -41,9 +41,9 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 
 ## Architecture and Implementation
 
-- **Interface / implementation separation**: `mysql`, upstream `pg`, `mongodb`, and `redis` are external protocol libraries with no UI. `clutch.el` depends on `clutch-backend.el`, not protocol layers directly.
-- **External dependency boundaries stay explicit**: Protocol packages are backend-specific optional dependencies. `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are loaded only when users connect to the corresponding backend; missing protocol packages must produce clear connection-time errors. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
-- **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `mongodb--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
+- **Interface / implementation separation**: `mysql.el`, `pgsql.el`, `mongodb.el`, and `redis.el` are external protocol libraries with no UI. `clutch.el` depends on `clutch-backend.el`, not protocol layers directly.
+- **External dependency boundaries stay explicit**: Protocol packages are backend-specific optional dependencies. `mysql.el`, `pgsql.el`, `mongodb.el`, and `redis.el` are loaded only when users connect to the corresponding backend; missing protocol packages must produce clear connection-time errors. `ob-clutch` is a separate optional package and must not drift back into the `clutch` repo.
+- **No external private APIs**: Do not call another package's double-dash symbols such as `mysql--*`, `pgsql--*`, `mongodb--*`, `nerd-icons--*`, or `tramp-rpc--*`. If clutch needs behavior that only exists behind an external private helper, add or request a public API in that package and depend on the version that provides it. Optional integrations must warn clearly when the installed package is too old for the public interface.
 - **MongoDB is one backend**: User configuration must use `:backend mongodb` for MongoDB.  The ordinary document surface uses native `mongodb.el`; MongoDB SQL Interface is only `:surface sql-interface` on the same backend.  Do not add a second public SQL-specific MongoDB backend, driver, feature, or manual chooser entry.
 - **MongoDB protocol belongs in `mongodb.el`**: Clutch owns query-console syntax, completion, result rendering, saved connections, and auth-source/pass resolution.  BSON, wire messages, auth, sessions, server selection, cursors, and pooling belong in `mongodb.el` behind public `mongodb-` APIs.
 - **MongoDB helper syntax stays basic**: Clutch's native MongoDB query adapter may translate a documented, small set of `db.*` helper forms into public `mongodb-` calls, but it must not grow toward full `mongosh` compatibility. Do not add arbitrary JavaScript evaluation, broad BSON constructor emulation, regex literal parsing, change-stream helpers, or long-tail cursor options without first moving the responsibility into a separate package/API and updating the support-level contract.
@@ -59,7 +59,7 @@ Elisp best practices distilled from llm.el, magit, consult, eglot, vertico/margi
 - **Favor incremental modularization**: Move the smallest coherent slice first, then reload, byte-compile, and rerun focused tests before attempting the next extraction.
 - **No behavioral side effects on load**: Loading a file must not alter Emacs editing behavior (no modes enabled, no hooks fired). Package-level registration side effects are allowed: fringe bitmaps, `auto-mode-alist` entries, backend registrations, Embark action registrations, and `kill-emacs-hook` cleanup.
 - **Reuse Emacs infrastructure**: Use `completing-read`, `special-mode`, `text-property-search-forward`, standard hooks, and other stock primitives.
-- **Public naming**: Use `clutch-` for every public top-level Clutch symbol, including functions, variables, faces, and other API. External protocol packages keep their own public namespaces (`mysql-` / upstream `pg-`). No double dash for public API.
+- **Public naming**: Use `clutch-` for every public top-level Clutch symbol, including functions, variables, faces, and other API. External protocol packages keep their own public namespaces (`mysql-`, `pgsql-`, `mongodb-`, and `redis-`). No double dash for public API.
 - **Private naming**: `clutch--` inside the clutch repo. Never call private symbols across subsystem boundaries. Files split from the same subsystem (e.g., `clutch-query.el`, `clutch-object.el`, `clutch-edit.el`, `clutch-schema.el` all belong to the `clutch` subsystem) may call each other's `clutch--` symbols, but must add `declare-function` / `defvar` declarations for byte-compilation.
 - **Lisp case**: Use lowercase words separated by hyphens, not `snake_case` or `camelCase`.
 - **Predicates**: Single-word predicate names end in `p`; multi-word names end in `-p`.
@@ -173,7 +173,7 @@ These rules keep the package compatible with MELPA submission requirements (`pac
   - Description must NOT contain "for Emacs" or the package name — both are redundant.
   - Keep the description under 60 characters.
 - `clutch.el` is the package entry file.  It is the only file that should carry package metadata such as `;; Package-Requires:`, `;; URL:`, `;; Version:`, and `;; Author:`.
-- `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pg.el`, `mongodb.el`, and `redis.el` are documented but not listed.
+- `;; Package-Requires:` in `clutch.el` must list all direct required dependencies with minimum versions, including the declared Emacs baseline. Lazy optional backend protocol packages such as `mysql.el`, `pgsql.el`, `mongodb.el`, and `redis.el` are documented but not listed.
 - Split implementation files must not carry `;; Package-Requires:` headers, but they must carry formal license metadata, preferably `;; SPDX-License-Identifier:`.
 - Keep the MELPA checklist attribution in the main package file when AI tools materially assist the package: `;; Assisted-by: OpenAI Codex:gpt-5.6-sol, Claude code:fable-5`
 - Last line: `;;; file.el ends here`
@@ -221,7 +221,7 @@ Read every changed line before committing.
 Also check that clutch does not depend on external private APIs:
 
 ```bash
-rg -n -P "(?<![A-Za-z0-9-])(mysql|mongodb|nerd-icons|tramp-rpc)--[A-Za-z0-9-]+" clutch*.el test/*.el
+rg -n -P "(?<![A-Za-z0-9-])(mysql|pgsql|mongodb|nerd-icons|tramp-rpc)--[A-Za-z0-9-]+" clutch*.el test/*.el
 ```
 
 This command should return no matches. Internal `clutch--*` and backend-local `clutch-foo--*` symbols are allowed inside this repo.

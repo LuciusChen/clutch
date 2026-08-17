@@ -1867,6 +1867,34 @@ and the ssh -N process has no owner yet at that point."
             (should called)
             (should-not (clutch--tx-dirty-p clutch-connection))))))))
 
+(ert-deftest clutch-test-commit-reports-backend-rollback ()
+  "A failed backend transaction should be reported as rolled back, not committed."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        committed
+        rolled-back)
+    (puthash clutch-connection 'dirty clutch--tx-state-cache)
+    (cl-letf (((symbol-function 'clutch--ensure-transaction-connection) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-commit)
+               (lambda (_conn) 'rolled-back))
+              ((symbol-function 'clutch--mark-dml-results-committed)
+               (lambda (_conn) (setq committed t)))
+              ((symbol-function 'clutch--mark-dml-results-rolled-back)
+               (lambda (_conn) (setq rolled-back t)))
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (let ((err (should-error (clutch-commit) :type 'user-error)))
+        (should (string-match-p "nothing was committed"
+                                (error-message-string err)))
+        (should-not (string-match-p "outcome is uncertain"
+                                    (error-message-string err))))
+      (should rolled-back)
+      (should-not committed)
+      (should-not (clutch--tx-state clutch-connection)))))
+
 (ert-deftest clutch-test-session-teardown-step-matrix ()
   "Each teardown kind should run exactly the steps it documents.
 The three session-end paths differ only in these steps, so a new step added
@@ -2062,7 +2090,6 @@ replacement connection would run the statement against an empty transaction."
                 (lambda (text)
                   (string-match-p message-pattern text))
                 messages)))))))))
-
 (defun clutch-test--make-dml-result-buf (conn)
   "Create a temporary DML result buffer associated with CONN for testing."
   (let ((buf (generate-new-buffer " *clutch-dml-test*")))

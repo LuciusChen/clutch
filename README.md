@@ -67,7 +67,7 @@ Joined, grouped, derived, or otherwise ambiguous result sets remain read-only un
 | Backend | Support level | Requirements and notes |
 |---|---|---|
 | MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
-| PostgreSQL | Core SQL support | Requires current [pg-el](https://github.com/emarsden/pg-el) with `pgcon-transaction-status` and [protocol-level SQL NULL parameter binding](https://github.com/emarsden/pg-el/pull/32) |
+| PostgreSQL | Core SQL support | Requires [`pgsql`](https://melpa.org/#/pgsql), available from MELPA |
 | SQLite | Core SQL support | Uses Emacs 29.1+ built-in `sqlite-*` functions; no external dependency |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |
@@ -84,7 +84,7 @@ The SQLite Quick Start has no optional dependency. For other backends, install o
 | Backend | Extra Emacs package |
 |---|---|
 | `:backend mysql` | [mysql.el](https://github.com/LuciusChen/mysql.el) |
-| `:backend pg` | [pg.el / pg-el](https://github.com/emarsden/pg-el) |
+| `:backend pg` | [`pgsql`](https://melpa.org/#/pgsql) |
 | `:backend mongodb` | [mongodb.el](https://github.com/LuciusChen/mongodb.el) |
 | `:backend redis` | [redis.el](https://github.com/LuciusChen/redis.el) |
 | `:backend sqlite` | None; Emacs 29.1+ provides SQLite |
@@ -99,7 +99,7 @@ For source checkouts, add Clutch and each native protocol checkout you use to `l
 ```emacs-lisp
 (add-to-list 'load-path "/path/to/clutch")
 (add-to-list 'load-path "/path/to/mysql.el")   ; only for :backend mysql
-(add-to-list 'load-path "/path/to/pg-el")      ; only for :backend pg
+(add-to-list 'load-path "/path/to/pgsql.el")   ; only for :backend pg
 (add-to-list 'load-path "/path/to/mongodb.el") ; only for :backend mongodb
 (add-to-list 'load-path "/path/to/redis.el")   ; only for :backend redis
 (require 'clutch)
@@ -133,7 +133,7 @@ MariaDB 10.11 has been live-validated through the native `mysql` backend, includ
 Current Clutch releases keep native protocol clients and Org-Babel integration in separate packages. If you are upgrading from a checkout that bundled them:
 
 - Install [mysql.el](https://github.com/LuciusChen/mysql.el) separately for `:backend mysql`.
-- Install current [pg-el](https://github.com/emarsden/pg-el) separately for `:backend pg`.
+- Install [`pgsql`](https://melpa.org/#/pgsql) from MELPA for `:backend pg`.
 - Install [mongodb.el](https://github.com/LuciusChen/mongodb.el) separately for `:backend mongodb`.
 - Install [redis.el](https://github.com/LuciusChen/redis.el) separately for `:backend redis`.
 - Install [ob-clutch](https://github.com/LuciusChen/ob-clutch) separately for Org-Babel source blocks.

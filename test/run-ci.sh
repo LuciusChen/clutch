@@ -15,7 +15,20 @@ add_load_path() {
 add_load_path "$repo/../mongodb.el"
 add_load_path "$repo/../redis.el"
 add_load_path "$repo/../mysql.el"
-add_load_path "$repo/../pg-el"
+
+pgsql_el_dir="${PGSQL_EL_DIR:-}"
+if [[ -z "$pgsql_el_dir" ]]; then
+  for candidate in \
+    "$HOME/repos/pgsql.el" \
+    "$repo/../pgsql.el" \
+    "$HOME/.emacs.d/straight/repos/pgsql.el"; do
+    if [[ -d "$candidate" ]]; then
+      pgsql_el_dir="$candidate"
+      break
+    fi
+  done
+fi
+add_load_path "$pgsql_el_dir"
 add_load_path "$repo"
 add_load_path "$repo/test"
 

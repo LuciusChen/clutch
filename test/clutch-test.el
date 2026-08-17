@@ -21,7 +21,7 @@
 ;;   docker run -d -p 127.0.0.1:56379:6379 redis:7-alpine
 ;;
 ;; Run unit tests from the repository root:
-;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ../pg-el \
+;;   emacs --batch -Q -L . -L test -L ../mysql.el -L ~/repos/pgsql.el \
 ;;     --eval '(setq load-prefer-newer t)' \
 ;;     -l ert -l clutch-test \
 ;;     -f ert-run-tests-batch-and-exit
@@ -54,9 +54,9 @@
 
 (declare-function make-mysql-conn "mysql" (&rest args))
 
-(declare-function make-pgcon "pg" (&rest args))
-
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
+
+(declare-function clutch-db-pg--make-connection "clutch-db-pg" (&rest args))
 
 (defvar clutch-test-backend 'mysql)
 
@@ -5502,7 +5502,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-pg-array-mutation-builders-use-array-literals ()
   "PostgreSQL array mutations should render JSON-style edits as array literals."
   (require 'clutch-db-pg)
-  (let ((conn (make-pgcon :dbname "test" :process nil)))
+  (require 'pgsql)
+  (let ((conn (clutch-db-pg--make-connection :client 'fake-pgsql-client)))
     (clutch-test--with-result-state
         (:connection conn
          :source-table "models"
@@ -5521,16 +5522,16 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (:name "precision" :type "ARRAY"
                       :backend-type "_int4")))))
         (should (equal (clutch-result--pending-sql-statements)
-                       '("UPDATE \"models\" SET \"precision\" = E'{0,1,2}' WHERE \"id\" = 1")))
+                       '("UPDATE \"models\" SET \"precision\" = '{0,1,2}' WHERE \"id\" = 1")))
         (should (equal
                  (clutch-result--render-statements
                   (list (clutch-result-insert--build-sql
                          conn "models" '(("precision" . "[0,1,2]")))))
-                 '("INSERT INTO \"models\" (\"precision\") VALUES (E'{0,1,2}')")))
+                 '("INSERT INTO \"models\" (\"precision\") VALUES ('{0,1,2}')")))
         (should (equal
                  (clutch-result--build-insert-statements-for-rows
                   '((1 [0 1 2])) '(1) "models")
-                 '("INSERT INTO \"models\" (\"precision\") VALUES (E'{0,1,2}');")))))))
+                 '("INSERT INTO \"models\" (\"precision\") VALUES ('{0,1,2}');")))))))
 
 (ert-deftest clutch-test-copy-update-uses-selection ()
   "UPDATE copy should generate SQL from the active row/column selection."
@@ -5703,8 +5704,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 
 (defun clutch-test--copy-agent-context ()
   "Run `clutch-copy-context-for-agent' with deterministic metadata."
-  (let ((clutch--table-metadata-cache (make-hash-table :test 'equal))
-        (clutch--object-cache (make-hash-table :test 'equal))
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--object-cache (make-hash-table :test 'eq))
         copied)
     (cl-letf (((symbol-function 'clutch--ensure-connection)
                #'ignore)
@@ -6693,6 +6694,45 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should-not clutch--local-sort-column-index)
         (should-not clutch--sort-column)
         (should (= refreshed 3))))))
+
+(ert-deftest clutch-test-local-numeric-sort-keeps-exact-decimal-order ()
+  "Local numeric sorting should not use text order or floating point."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("amount")
+                clutch--result-column-defs
+                '((:name "amount" :type-category numeric))
+                clutch--local-sort-original-rows
+                '(("12345678901234567890.12345678901234567891")
+                  ("10")
+                  (nil)
+                  ("2")
+                  ("12345678901234567890.12345678901234567890"))
+                clutch--filter-pattern nil)
+    (clutch-result--sort-local-page "amount" nil)
+    (should
+     (equal clutch--result-rows
+            '((nil)
+              ("2")
+              ("10")
+              ("12345678901234567890.12345678901234567890")
+              ("12345678901234567890.12345678901234567891"))))))
+
+(ert-deftest clutch-test-local-numeric-sort-orders-floats-and-sentinels ()
+  "Local numeric sorting should order exponent floats, infinity, and NaN."
+  (with-temp-buffer
+    (setq-local clutch--result-columns '("label" "amount")
+                clutch--result-column-defs
+                '((:name "label" :type-category text)
+                  (:name "amount" :type-category numeric))
+                clutch--local-sort-original-rows
+                (list (list 'two 2)
+                      (list 'nan 0.0e+NaN)
+                      (list 'negative -1e+20)
+                      (list 'infinity 1.0e+INF))
+                clutch--filter-pattern nil)
+    (clutch-result--sort-local-page "amount" nil 1)
+    (should (equal (mapcar #'car clutch--result-rows)
+                   '(negative two infinity nan)))))
 
 ;;;; Execute — query execution and error handling
 

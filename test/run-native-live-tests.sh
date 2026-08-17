@@ -337,19 +337,36 @@ wait_clickhouse() {
   return 1
 }
 
+pgsql_el_dir="${PGSQL_EL_DIR:-}"
+if [[ -z "$pgsql_el_dir" ]]; then
+  for candidate in \
+    "$HOME/repos/pgsql.el" \
+    "$repo/../pgsql.el" \
+    "$HOME/.emacs.d/straight/repos/pgsql.el"; do
+    if [[ -d "$candidate" ]]; then
+      pgsql_el_dir="$candidate"
+      break
+    fi
+  done
+fi
+
 emacs_load_args=(
   --batch -Q
+  --eval "(require 'package)"
+  --eval "(package-initialize)"
   -L "$repo/../mongodb.el"
   -L "$repo/../redis.el"
   -L "$repo/../mysql.el"
-  -L "$repo/../pg-el"
   -L "$repo"
   -L "$repo/test"
   -L "$HOME/.emacs.d/straight/repos/mysql.el"
-  -L "$HOME/.emacs.d/straight/repos/pg-el"
   --eval "(setq load-prefer-newer t)"
   --eval "(when (getenv \"CLUTCH_TEST_RUNTIME_JDBC_AGENT_JAR\") (setq clutch-jdbc-agent-sha256 nil))"
 )
+
+if [[ -n "$pgsql_el_dir" ]]; then
+  emacs_load_args+=(-L "$pgsql_el_dir")
+fi
 
 prepare_jdbc_runtime() {
   if [[ -z "$jdbc_agent_dir" ]]; then
