@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 - Unreleased
+
+### Fixed
+
+- Kept repeated `n` / `M-n` result-row navigation in the last data cell instead of falling back into the non-data row-number gutter, where further row navigation stopped working.
+
 ## 0.5.0 - 2026-08-17
 
 ### Breaking Changes

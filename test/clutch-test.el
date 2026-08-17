@@ -1351,6 +1351,31 @@
       (clutch--goto-cell 1 99)
       (should (= (point) (+ row1 3))))))
 
+(ert-deftest clutch-test-down-cell-stays-in-last-result-cell ()
+  "Repeated row navigation should stop in the last result cell."
+  (dolist (case '((0 ((1 "alpha" "oslo")))
+                  (2 ((1 "alpha" "oslo")
+                      (2 "bravo" "rome")))
+                  (1 ((1 "alpha" "oslo")
+                      (2 "bravo" "rome")
+                      (3 "charlie" "paris")
+                      (4 "delta" "lima")
+                      (5 "echo" "tokyo")))))
+    (pcase-let ((`(,cidx ,rows) case))
+      (ert-info ((format "%d rows, column %d" (length rows) cidx))
+        (with-temp-buffer
+          (clutch-test--setup-rendered-result rows)
+          (clutch--goto-cell 0 cidx)
+          (dotimes (ridx (1- (length rows)))
+            (clutch-result-down-cell)
+            (should (= (get-text-property (point) 'clutch-row-idx)
+                       (1+ ridx)))
+            (should (= (get-text-property (point) 'clutch-col-idx) cidx)))
+          (let ((last-point (point)))
+            (dotimes (_ 2)
+              (clutch-result-down-cell)
+              (should (= (point) last-point)))))))))
+
 ;;;; Rendering — row and separator rendering
 
 (ert-deftest clutch-test-refresh-display-preserves-visible-row-position ()
