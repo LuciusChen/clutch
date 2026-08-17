@@ -833,7 +833,8 @@ If the result has columns, shows a table; otherwise shows DML summary."
   "Move to the same column in the next row."
   (interactive)
   (when-let* ((cidx (clutch--col-idx-at-point))
-              (ridx (get-text-property (point) 'clutch-row-idx)))
+              (ridx (get-text-property (point) 'clutch-row-idx))
+              ((< (1+ ridx) (length clutch--row-start-positions))))
     (clutch--goto-cell (1+ ridx) cidx))
   (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
