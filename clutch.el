@@ -4,7 +4,7 @@
 ;; Author: Lucius Chen <chenyh572@gmail.com>
 ;; Assisted-by: OpenAI Codex:gpt-5.6-sol, Claude code:fable-5
 ;; Maintainer: Lucius Chen <chenyh572@gmail.com>
-;; Version: 0.4.0
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
 ;; Keywords: comm, data, tools
 ;; URL: https://github.com/LuciusChen/clutch
