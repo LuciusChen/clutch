@@ -1,6 +1,6 @@
 # 176 — Header-Line `min-width` After Emacs 31
 
-> Superseded by [postmortem 178](178-result-header-text-scale-alignment.md): scaled result buffers use exact header padding on every supported Emacs version, while `min-width` remains limited to non-empty left-aligned result-body content from Emacs 30 onward.
+> Superseded by [postmortem 178](178-result-header-text-scale-alignment.md) for scaled headers and by [postmortem 184](184-explicit-result-padding-under-horizontal-scroll.md) for result bodies. Both grid layers now use exact pixel padding on every supported Emacs version.
 
 ## Context
 
@@ -47,4 +47,4 @@ The repository CI passed 529 UI/workflow tests, 205 backend tests, and 13 archit
 
 ## Removal Condition
 
-When Clutch raises its minimum supported Emacs version to 30.1, delete the Emacs 29 result-body compatibility branch and its tests. When the minimum reaches Emacs 31.1, also delete the header explicit-padding branch and its version test.
+Superseded by postmortems 178 and 184. There is no remaining version-specific padding branch to remove; any future representation change requires graphical validation of both stationary and horizontally scrolled grids.

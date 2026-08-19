@@ -369,6 +369,7 @@ Common entry points:
 - `C-c C-c` executes the region or statement at point
 - Standard completion completes SQL identifiers at point, including empty column positions; `C-c TAB` invokes it explicitly
 - `M-.` jumps SQL aliases to their statement definition; object lookup uses `C-c C-d` / `C-c C-j`
+- In Result Browser buffers, `{` and `}` jump to the first and last visible data columns; Clutch's own row-number column replaces native display line numbers there
 - `C-c ?` opens the transient menu
 - Stateful transient entries highlight their current choice; unavailable actions stay visible but inapt when their surrounding context is still useful
 - `C-c C-j` starts the object workflow

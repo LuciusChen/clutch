@@ -342,8 +342,9 @@ When RIGHT-ALIGN is non-nil, pad on the left instead of the right."
 
 (defun clutch--display-string-pixel-width (string)
   "Return the rendered pixel width of STRING.
-The final newline makes redisplay settle a trailing `min-width'
-specification before `string-pixel-width' reports the widest line."
+The final newline makes redisplay settle trailing display specifications,
+including `min-width' supplied by custom cell content, before
+`string-pixel-width' reports the widest line."
   (let ((measured (concat string "\n")))
     ;; The call shape must also work on Emacs 29-30, where
     ;; `string-pixel-width' cannot receive the originating buffer.  Apply the
@@ -380,32 +381,19 @@ point-navigation model while tightening graphical alignment."
 (defun clutch--pad-display-string (string width pixel-width &optional right-align
                                           string-pixel-width)
   "Pad STRING to WIDTH text cells for result display.
-On graphical displays, pad to PIXEL-WIDTH actual pixels.  RIGHT-ALIGN pads
-before STRING.  STRING-PIXEL-WIDTH reuses an existing measurement when non-nil.
-Non-empty left-aligned cells use `min-width' on Emacs 30 and later.  Emacs 29,
-right-aligned values, and empty cells use exact display spaces."
+On graphical displays, pad to PIXEL-WIDTH actual pixels with explicit display
+spaces.  RIGHT-ALIGN pads before STRING.  STRING-PIXEL-WIDTH reuses an existing
+measurement when non-nil."
   (if pixel-width
       (let* ((cells (max 0 (- width (string-width string))))
-             (explicit-p (or (< emacs-major-version 30)
-                             right-align
-                             (string-empty-p string)))
              (content-pixels
-              (and explicit-p
-                   (or string-pixel-width
-                       (clutch--display-string-pixel-width string))))
-             (padding (and content-pixels
-                           (max 0 (- pixel-width content-pixels)))))
-        (if explicit-p
-            (let ((pad-string (clutch--pixel-padding-string cells padding)))
-              (if right-align
-                  (concat pad-string string)
-                (concat string pad-string)))
-          (let ((content (copy-sequence string))
-                (logical-padding (make-string cells ?\s)))
-            (add-display-text-property
-             0 (length content) 'min-width `((,pixel-width)) content)
-            (put-text-property 0 cells 'display "" logical-padding)
-            (concat content logical-padding))))
+              (or string-pixel-width
+                  (clutch--display-string-pixel-width string)))
+             (padding (max 0 (- pixel-width content-pixels)))
+             (pad-string (clutch--pixel-padding-string cells padding)))
+        (if right-align
+            (concat pad-string string)
+          (concat string pad-string)))
     (clutch--string-pad string width right-align)))
 
 (defun clutch--center-display-string (string width pixel-width)

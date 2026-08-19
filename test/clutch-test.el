@@ -440,47 +440,27 @@
               pos (1+ pos))))
     pixels))
 
-(ert-deftest clutch-test-result-pixel-padding-version-contract ()
-  "Result cells should use the graphical width path supported by Emacs."
+(ert-deftest clutch-test-result-pixel-padding-contract ()
+  "Result cells should use exact graphical padding on every Emacs version."
   (cl-letf (((symbol-function 'default-font-width) (lambda () 10))
             ((symbol-function 'string-pixel-width)
              #'clutch-test--fake-pixel-width))
-    (let ((emacs-major-version 29))
-      (let ((left (clutch--pad-display-string "x" 4 50 nil 10))
-            (right (clutch--pad-display-string "7" 4 50 t))
-            (empty (clutch--pad-display-string "" 4 50)))
-        (dolist (string (list left right empty))
-          (should (= (string-width string) 4))
-          (should (= (clutch-test--fake-pixel-width string) 50))
-          (should-not
-           (cl-loop for i below (length string)
-                    thereis
-                    (get-display-property i 'min-width string))))
-        (should (equal (get-text-property 1 'display left)
-                       '(space :width (40))))
-        (should (equal (get-text-property 0 'display right)
-                       '(space :width (40))))
-        (should (equal (get-text-property 0 'display empty)
-                       '(space :width (50))))))
-    (let ((emacs-major-version 30))
-      (let ((left (clutch--pad-display-string "x" 4 50 nil 10))
-            (right (clutch--pad-display-string "7" 4 50 t))
-            (empty (clutch--pad-display-string "" 4 50)))
-        (dolist (string (list left right empty))
-          (should (= (string-width string) 4)))
-        (should (= (clutch-test--fake-pixel-width left) 50))
-        (should (equal (get-display-property 0 'min-width left)
-                       '((50))))
-        (dolist (string (list right empty))
-          (should (= (clutch-test--fake-pixel-width string) 50))
-          (should-not
-           (cl-loop for i below (length string)
-                    thereis
-                    (get-display-property i 'min-width string))))
-        (should (equal (get-text-property 0 'display right)
-                       '(space :width (40))))
-        (should (equal (get-text-property 0 'display empty)
-                       '(space :width (50))))))))
+    (let ((left (clutch--pad-display-string "x" 4 50 nil 10))
+          (right (clutch--pad-display-string "7" 4 50 t))
+          (empty (clutch--pad-display-string "" 4 50)))
+      (dolist (string (list left right empty))
+        (should (= (string-width string) 4))
+        (should (= (clutch-test--fake-pixel-width string) 50))
+        (should-not
+         (cl-loop for i below (length string)
+                  thereis
+                  (get-display-property i 'min-width string))))
+      (should (equal (get-text-property 1 'display left)
+                     '(space :width (40))))
+      (should (equal (get-text-property 0 'display right)
+                     '(space :width (40))))
+      (should (equal (get-text-property 0 'display empty)
+                     '(space :width (50)))))))
 
 (ert-deftest clutch-test-header-pixel-padding-contract ()
   "Header centering should use exact pixel spaces."
@@ -560,26 +540,24 @@
                 rows (string-lines (string-trim-right (buffer-string))))
           (should (equal clutch--column-pixel-widths [60])))
         (dolist (string rows)
-          (if (< emacs-major-version 30)
-              (let* ((start
-                      (cl-loop for i below (length string)
-                               when (eq (get-text-property
-                                         i 'clutch-col-idx string)
-                                        0)
-                               return i))
-                     (end (next-single-property-change
-                           start 'clutch-col-idx string (length string)))
-                     (cell (substring string start end)))
-                (should
-                 (= (clutch-test--fake-pixel-width cell)
-                    (+ (aref clutch--column-pixel-widths 0)
-                       (* 2 clutch-column-padding
-                          (clutch-test--fake-pixel-width " "))))))
+          (let* ((start
+                  (cl-loop for i below (length string)
+                           when (eq (get-text-property
+                                     i 'clutch-col-idx string)
+                                    0)
+                           return i))
+                 (end (next-single-property-change
+                       start 'clutch-col-idx string (length string)))
+                 (cell (substring string start end)))
             (should
-             (cl-loop for i below (length string)
+             (= (clutch-test--fake-pixel-width cell)
+                (+ (aref clutch--column-pixel-widths 0)
+                   (* 2 clutch-column-padding
+                      (clutch-test--fake-pixel-width " ")))))
+            (should-not
+             (cl-loop for i below (length cell)
                       thereis
-                      (equal (get-display-property i 'min-width string)
-                             '((60))))))
+                      (get-display-property i 'min-width cell))))
           (should (= (string-width header) (string-width string))))))))
 
 (ert-deftest clutch-test-install-page-state-contract ()
@@ -764,6 +742,45 @@
               (should (= hscroll 47))))
         (when (buffer-live-p buf)
           (kill-buffer buf))))))
+
+(ert-deftest clutch-test-result-edge-column-navigation-keeps-current-row ()
+  "Brace commands should reach visible edge columns without leaving the row."
+  (clutch-test--with-result-state
+      (:columns '("rid-left" "first" "last" "rid-right")
+       :column-defs '((:name "rid-left" :hidden t)
+                      (:name "first")
+                      (:name "last")
+                      (:name "rid-right" :hidden t))
+       :rows '((1 "a" "b" 10) (2 "c" "d" 20))
+       :column-widths [8 5 5 9]
+       :render t)
+    (should (eq (lookup-key clutch-result-mode-map "{")
+                #'clutch-result-first-column))
+    (should (eq (lookup-key clutch-result-mode-map "}")
+                #'clutch-result-last-column))
+    (goto-char (aref clutch--row-start-positions 1))
+    (call-interactively (key-binding (kbd "{")))
+    (should (= (get-text-property (point) 'clutch-row-idx) 1))
+    (should (= (get-text-property (point) 'clutch-col-idx) 1))
+    (end-of-line)
+    (call-interactively (key-binding (kbd "}")))
+    (should (= (get-text-property (point) 'clutch-row-idx) 1))
+    (should (= (get-text-property (point) 'clutch-col-idx) 2))))
+
+(ert-deftest clutch-test-result-mode-keeps-native-line-numbers-off ()
+  "Result mode refreshes should retain ownership of the row-number gutter."
+  (let ((global-was-on (bound-and-true-p global-display-line-numbers-mode)))
+    (unwind-protect
+        (with-temp-buffer
+          (global-display-line-numbers-mode 1)
+          (clutch-result-mode)
+          (should-not display-line-numbers-mode)
+          (should-not display-line-numbers)
+          (display-line-numbers-mode 1)
+          (clutch-result-mode)
+          (should-not display-line-numbers-mode)
+          (should-not display-line-numbers))
+      (global-display-line-numbers-mode (if global-was-on 1 -1)))))
 
 (ert-deftest clutch-test-row-identity-prep-augments-row-preserving-selects ()
   "Row-preserving SELECTs should receive hidden identity expressions."
