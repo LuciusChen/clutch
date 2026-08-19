@@ -1,6 +1,6 @@
 # 174 — `min-width` Redisplay Version Boundary
 
-> Superseded in part by [postmortem 176](176-header-line-min-width-after-emacs-31.md): later Emacs redisplay fixes and a terminated carrier make header-line `min-width` reliable from Emacs 31.1.
+> Superseded by [postmortem 184](184-explicit-result-padding-under-horizontal-scroll.md). The Emacs 29/30 body split was insufficient once horizontal scrolling could start inside a cell.
 
 ## Context
 
@@ -41,7 +41,7 @@ A second graphical run reproduced issue #27's short NULL-column case with column
 
 ## Removal Condition
 
-When Clutch raises its minimum supported Emacs version from 29.1 to 30.1 or later, delete the Emacs 29 result-body compatibility branch and its tests, leaving `min-width` as the sole graphical body-cell path. Do not delete the header-line explicit-padding path merely because the baseline changes; replace it only after a real graphical test proves a different header representation preserves pixel alignment.
+Superseded by postmortem 184. Result bodies and headers now use explicit pixel padding on every supported Emacs version; raising the baseline to Emacs 30 does not restore the body `min-width` path.
 
 ## Testing Lesson
 

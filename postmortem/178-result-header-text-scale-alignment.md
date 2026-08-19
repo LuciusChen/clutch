@@ -1,5 +1,7 @@
 # 178 — Result Header Alignment Under Text Scaling
 
+> Superseded in part by [postmortem 184](184-explicit-result-padding-under-horizontal-scroll.md): non-empty left-aligned result-body cells also use exact pixel padding now.
+
 ## Context
 
 Result Browser rows followed `text-scale-mode`, but the header line did not. Setting Emacs's buffer-local `text-scale-remap-header-line` option made the header scale, yet its borders still diverged from the rows because Clutch measured column content outside the result buffer's default-face remappings. The result mode also remapped `mode-line` and `mode-line-inactive` by inheriting `default`; once header-line scaling was enabled, that inheritance could apply the same scale again in the mode-line-like redisplay path used by the header.
@@ -32,4 +34,4 @@ The first Emacs 30 graphical run produced an eager macro-expansion cycle in `map
 
 ## Removal Conditions
 
-When Clutch raises its minimum Emacs version to 30.1, remove the Emacs 29 exact-padding branch for result-body content and its version test. When the baseline reaches a public Emacs 31.1 or later, replace the manual default-face remap application with the buffer argument to `string-pixel-width`. Keep exact padding for headers, right-aligned values, and empty cells unless real scaled GUI validation proves a simpler representation reliable across the new supported range.
+Postmortem 184 removed the Emacs 29/30 result-body branch instead of preserving `min-width` on newer versions. When the baseline reaches a public Emacs 31.1 or later, replace the manual default-face remap application with the buffer argument to `string-pixel-width`. Any future padding representation still needs real scaled and horizontally scrolled GUI validation.

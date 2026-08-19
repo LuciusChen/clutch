@@ -954,6 +954,8 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map "g" #'clutch-result-rerun)
     (define-key map "e" #'clutch-result-export)
     (define-key map "C" #'clutch-result-goto-column)
+    (define-key map "{" #'clutch-result-first-column)
+    (define-key map "}" #'clutch-result-last-column)
     (define-key map "n" #'clutch-result-down-cell)
     (define-key map "p" #'clutch-result-up-cell)
     (define-key map "N" #'clutch-result-next-page)
@@ -1005,6 +1007,8 @@ Navigate:
   \\[clutch-result-up-cell]	Up in same column
   \\[clutch-result-open-record]	Open record view for row
   \\[clutch-result-goto-column]	Jump to visible column by name
+  \\[clutch-result-first-column]	First visible data column
+  \\[clutch-result-last-column]	Last visible data column
 Pages:
   \\[clutch-result-next-page]	Next data page
   \\[clutch-result-prev-page]	Previous data page
@@ -1031,6 +1035,7 @@ Edit:
   \\[clutch-result-widen-column]	Widen column
   \\[clutch-result-narrow-column]	Narrow column
   \\[clutch-result-rerun]	Re-execute the query"
+  (display-line-numbers-mode -1)
   (setq truncate-lines t)
   (hl-line-mode 1)
   (setq-local scroll-step 1)
@@ -3408,7 +3413,8 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
 (defun clutch-result--goto-col-idx (col-idx)
   "Move point to COL-IDX in the current row, preserving the row position.
 When point is at line-end or a border, scan backward to find the row."
-  (let ((ridx (or (get-text-property (point) 'clutch-row-idx)
+  (let ((ridx (or (clutch--row-idx-at-line)
+                   (get-text-property (point) 'clutch-row-idx)
                    (and (not (bolp))
                         (get-text-property (1- (point)) 'clutch-row-idx))
                    (save-excursion
@@ -3424,6 +3430,22 @@ When point is at line-end or a border, scan backward to find the row."
                           'clutch-col-idx col-idx #'eq)))
         (goto-char (prop-match-beginning found))))
     (clutch--center-column-in-window col-idx)))
+
+;;;###autoload
+(defun clutch-result-first-column ()
+  "Move point to the first visible data column in the current row."
+  (interactive)
+  (if-let* ((cidx (car (clutch--visible-columns))))
+      (clutch-result--goto-col-idx cidx)
+    (user-error "No visible result columns")))
+
+;;;###autoload
+(defun clutch-result-last-column ()
+  "Move point to the last visible data column in the current row."
+  (interactive)
+  (if-let* ((cidx (car (last (clutch--visible-columns)))))
+      (clutch-result--goto-col-idx cidx)
+    (user-error "No visible result columns")))
 
 ;;;###autoload
 (defun clutch-result-column-info ()
@@ -3845,7 +3867,9 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("<backtab>" "Prev cell" clutch-result-prev-cell)
     ("n" "Down row"          clutch-result-down-cell)
     ("p" "Up row"            clutch-result-up-cell)
-    ("C" "Go to column"      clutch-result-goto-column)]
+    ("C" "Go to column"      clutch-result-goto-column)
+    ("{" "First column"      clutch-result-first-column)
+    ("}" "Last column"       clutch-result-last-column)]
    ["Pages"
     ("N" "Next page"         clutch-result-next-page)
     ("P" "Prev page"         clutch-result-prev-page)
