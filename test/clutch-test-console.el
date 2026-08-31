@@ -261,7 +261,7 @@
                  (lambda (conn _sql)
                    (setq captured-conn conn)
                    (make-clutch-db-result :affected-rows 3)))
-                ((symbol-function 'clutch--require-risky-dml-confirmation)
+                ((symbol-function 'clutch--confirm-high-risk-query)
                  (lambda (sql) (setq confirmed sql)))
                 ((symbol-function 'clutch-repl--output)
                  (lambda (text) (setq output text))))

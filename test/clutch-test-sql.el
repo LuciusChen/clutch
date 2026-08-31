@@ -93,10 +93,12 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
         (dolist (sql rejected)
           (should-not (funcall predicate sql)))))))
 
-(ert-deftest clutch-test-risky-dml-reason ()
-  "Risky DML should detect UPDATE/DELETE without effective WHERE."
+(ert-deftest clutch-test-high-risk-query-reason ()
+  "High-risk SQL should include TRUNCATE and unbounded UPDATE/DELETE."
   (dolist (sql '("UPDATE users SET name='x'"
                  "DELETE FROM users"
+                 "TRUNCATE TABLE users"
+                 "-- clear all rows\nTRUNCATE users"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x'"
                  "UPDATE users SET name='x' WHERE 1=1"
                  "DELETE FROM users WHERE 1=1"
@@ -112,7 +114,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE id=5 OR 1=1"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1)"
                  "UPDATE users SET name='x' WHERE 1=1 AND TRUE"))
-    (should (clutch--risky-dml-reason sql)))
+    (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
@@ -122,7 +124,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "DELETE FROM users WHERE status='active'"
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))
-    (should-not (clutch--risky-dml-reason sql))))
+    (should-not (clutch--high-risk-query-reason sql))))
 
 ;;;; SQL parsing — statement bounds
 

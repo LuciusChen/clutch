@@ -213,6 +213,8 @@ SELECT * FROM users LIMIT 10;
 
 Press `C-c C-c` to execute. If a region is selected, the selected SQL runs; otherwise the statement at point runs. Select a region first when exact execution boundaries matter. Results appear in a split result buffer below.
 
+By default, `TRUNCATE` and `UPDATE` or `DELETE` without an effective `WHERE` require entering the exact token `YES`. Customize `clutch-high-risk-query-confirmation` to use an ordinary `yes-or-no` prompt or to disable this high-risk confirmation. Other destructive SQL keeps its ordinary confirmation prompt, and each statement asks at most once.
+
 #### 4. Control transactions
 
 For native MySQL and PostgreSQL, and for JDBC connections that run in manual-commit mode, clutch uses the same transaction keys:
