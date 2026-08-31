@@ -1324,6 +1324,30 @@
         (should (= header-count 0))
         (should (= row-count 0))))))
 
+(ert-deftest clutch-test-result-cursor-ui-does-not-leak-mode-line-position ()
+  "Result cursor updates should not alter another buffer's position display."
+  (let ((original (default-value 'mode-line-position))
+        (other (generate-new-buffer " *clutch-mode-line-position-test*")))
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-test--setup-rendered-result)
+          (clutch--goto-cell 1 2)
+          (setq clutch--last-cell-position nil)
+          (let ((this-command 'clutch-result-next-cell))
+            (run-hook-wrapped
+             'post-command-hook
+             (lambda (function)
+               (when (eq function #'clutch--sync-result-cursor-ui)
+                 (funcall function))
+               nil)))
+          (should (equal clutch--last-cell-position '(1 . 2)))
+          (should (equal (default-value 'mode-line-position) original))
+          (with-current-buffer other
+            (should (equal mode-line-position original))))
+      (setq-default mode-line-position original)
+      (when (buffer-live-p other)
+        (kill-buffer other)))))
+
 (ert-deftest clutch-test-scroll-command-clamps-point-below-table ()
   "Scrolling past the table should leave point on the last rendered row."
   (save-window-excursion

@@ -7,6 +7,7 @@
 - Kept repeated `n` / `M-n` result-row navigation in the last data cell instead of falling back into the non-data row-number gutter, where further row navigation stopped working.
 - Kept graphical result headers aligned with rows after `C` column jumps and horizontal Tab paging. Result-body cells now use the same explicit pixel-padding representation as headers on every supported Emacs version, so a horizontal-scroll position inside a cell cannot make Emacs crop the two grid layers differently.
 - Kept Result Browser row numbering and data-edge navigation inside the grid. Native line numbers now stay disabled across query refreshes, while `{` and `}` move to the first and last visible data columns without entering the virtual row-number prefix or moving beyond the final cell.
+- Kept Result Browser cursor details inside its own footer instead of overwriting Emacs's shared `mode-line-position` and leaking query row/column text into unrelated buffers.
 
 ## 0.5.0 - 2026-08-17
 
