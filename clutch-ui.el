@@ -2126,43 +2126,14 @@ DML result banners are semantic outcomes and are always preserved."
     (clutch--refresh-footer-line)
     (unless (or footer-only clutch--dml-result)
       (clutch--refresh-header-line)
-      (clutch--update-position-indicator))))
+      (clutch--remember-current-cell))))
 
-(defun clutch--position-indicator-parts (ridx cidx)
-  "Return a formatted mode-line position string for RIDX and CIDX."
-  (let* ((page-offset (or clutch--page-offset
-                          (* clutch--page-current clutch-result-max-rows)))
-         (global-row  (+ page-offset ridx))
-         (rows        (clutch--result-display-rows))
-         (row-count   (length rows))
-         (ncols       (length clutch--result-columns))
-         (col-name    (when cidx (nth cidx clutch--result-columns)))
-         (parts       nil))
-    (push (format "R-%d/%s • Col-%d/%d%s"
-                  (1+ global-row)
-                  (if clutch--page-total-rows
-                      (number-to-string clutch--page-total-rows)
-                    (number-to-string row-count))
-                  (if cidx (1+ cidx) 0) ncols
-                  (if col-name (format " [%s]" col-name) ""))
-          parts)
-    (push (format "pg %d" (1+ clutch--page-current)) parts)
-    (when clutch--query-elapsed
-      (push (clutch--format-elapsed clutch--query-elapsed) parts))
-    (when clutch--filter-pattern
-      (push (format "/:%s" clutch--filter-pattern) parts))
-    (when clutch--where-filter
-      (push (format "W:%s" clutch--where-filter) parts))
-    (format " %s" (string-join parts (clutch--status-separator)))))
-
-(defun clutch--update-position-indicator ()
-  "Update mode-line with current cursor position in the result grid."
+(defun clutch--remember-current-cell ()
+  "Remember the current result cell for cursor recovery."
   (let ((cidx (clutch--col-idx-at-point))
         (ridx (get-text-property (point) 'clutch-row-idx)))
     (when (and ridx cidx)
-      (setq clutch--last-cell-position (cons ridx cidx)))
-    (setq mode-line-position
-          (when ridx (clutch--position-indicator-parts ridx cidx)))))
+      (setq clutch--last-cell-position (cons ridx cidx)))))
 
 (defun clutch--clamp-point-to-result-grid ()
   "Move point back onto the result grid after scrolling past the last row."
@@ -2212,7 +2183,7 @@ be clamped to the result grid."
                              scroll-down scroll-up
                              scroll-down-command scroll-up-command
                              mwheel-scroll))))
-        (clutch--update-position-indicator)
+        (clutch--remember-current-cell)
         (clutch--update-row-highlight)
         (clutch--refresh-footer-cursor)
         (force-mode-line-update)
