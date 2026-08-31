@@ -7194,22 +7194,54 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (when (buffer-live-p source)
         (kill-buffer source)))))
 
-(ert-deftest clutch-test-require-risky-dml-confirmation-contract ()
-  "Risky DML should proceed only when the user types YES."
+(ert-deftest clutch-test-high-risk-query-typed-confirmation-contract ()
+  "Typed high-risk confirmation should proceed only for the exact token YES."
   (dolist (case '(("NO" cancel)
                   ("YES" accept)))
     (pcase-let ((`(,answer ,expected) case))
       (ert-info ((format "answer: %s" answer))
-        (cl-letf (((symbol-function 'clutch--risky-dml-reason)
-                   (lambda (_sql) "no WHERE"))
-                  ((symbol-function 'read-string)
-                   (lambda (&rest _args) answer)))
-          (if (eq expected 'accept)
-              (should (null (clutch--require-risky-dml-confirmation
-                             "UPDATE users SET x=1")))
-            (should-error (clutch--require-risky-dml-confirmation
-                           "UPDATE users SET x=1")
-                          :type 'user-error)))))))
+        (let ((clutch-high-risk-query-confirmation 'typed))
+          (cl-letf (((symbol-function 'clutch--high-risk-query-reason)
+                     (lambda (_sql) "no WHERE"))
+                    ((symbol-function 'read-string)
+                     (lambda (&rest _args) answer)))
+            (if (eq expected 'accept)
+                (should (clutch--confirm-high-risk-query
+                         "UPDATE users SET x=1"))
+              (should-error (clutch--confirm-high-risk-query
+                             "UPDATE users SET x=1")
+                            :type 'user-error))))))))
+
+(ert-deftest clutch-test-truncate-requires-typed-confirmation-by-default ()
+  "TRUNCATE should require one typed confirmation by default."
+  (should (eq (default-value 'clutch-high-risk-query-confirmation) 'typed))
+  (let (typed-prompts)
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (prompt &rest _args)
+                 (push prompt typed-prompts)
+                 "YES"))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (&rest _args)
+                 (ert-fail "TRUNCATE used a simple confirmation"))))
+      (should-not (clutch--confirm-query-execution
+                   "TRUNCATE TABLE users"))
+      (should (= (length typed-prompts) 1)))))
+
+(ert-deftest clutch-test-high-risk-query-confirmation-is-customizable ()
+  "High-risk confirmation should support simple and disabled policies."
+  (dolist (policy '(yes-or-no nil))
+    (let ((clutch-high-risk-query-confirmation policy)
+          (simple-prompts 0))
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _args)
+                   (ert-fail "Non-typed policy requested typed confirmation")))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _args)
+                   (cl-incf simple-prompts)
+                   t)))
+        (should-not (clutch--confirm-query-execution
+                     "TRUNCATE TABLE users"))
+        (should (= simple-prompts (if policy 1 0)))))))
 
 (ert-deftest clutch-test-preview-execution-sql-uses-result-pending-batch ()
   "Preview in result mode should show generated SQL for staged result changes."
@@ -8235,7 +8267,7 @@ statement."
       (should (plist-get outcome :result-query-p)))))
 
 (ert-deftest clutch-test-execute-statements-confirms-each-nonselect ()
-  "Batch execution should apply destructive and risky DML guards."
+  "Batch execution should apply destructive and high-risk guards."
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn)
     (let (queries risky-sqls yes-prompts)
@@ -8243,8 +8275,10 @@ statement."
                  (lambda (_conn sql)
                    (push sql queries)
                    (make-clutch-db-result :affected-rows 1)))
-                ((symbol-function 'clutch--require-risky-dml-confirmation)
-                 (lambda (sql) (push sql risky-sqls)))
+                ((symbol-function 'clutch--confirm-high-risk-query)
+                 (lambda (sql)
+                   (push sql risky-sqls)
+                   (string-prefix-p "UPDATE" sql)))
                 ((symbol-function 'clutch-db-sql-schema-affecting-p)
                  (lambda (_sql) nil))
                 ((symbol-function 'yes-or-no-p)
@@ -8274,7 +8308,7 @@ statement."
                  (lambda (_conn) nil))
                 ((symbol-function 'clutch--refresh-schema-cache-async)
                  (lambda (conn) (setq refreshed conn)))
-                ((symbol-function 'clutch--require-risky-dml-confirmation)
+                ((symbol-function 'clutch--confirm-high-risk-query)
                  #'ignore)
                 ((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
                 ((symbol-function 'message) #'ignore))

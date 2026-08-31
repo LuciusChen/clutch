@@ -2,6 +2,10 @@
 
 ## 0.5.1 - Unreleased
 
+### Changed
+
+- Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
+
 ### Fixed
 
 - Kept repeated `n` / `M-n` result-row navigation in the last data cell instead of falling back into the non-data row-number gutter, where further row navigation stopped working.

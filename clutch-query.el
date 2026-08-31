@@ -56,6 +56,17 @@ cleaned up in the pasted region only."
   :type 'boolean
   :group 'clutch)
 
+(defcustom clutch-high-risk-query-confirmation 'typed
+  "How to confirm SQL that can affect every row in a table.
+This applies to TRUNCATE and UPDATE or DELETE without an effective WHERE
+condition.  The value `typed' requires entering the exact token YES;
+`yes-or-no' uses an ordinary confirmation prompt; nil disables confirmation
+for these queries.  Other destructive SQL keeps its ordinary confirmation."
+  :type '(choice (const :tag "Require typing YES" typed)
+                 (const :tag "Use an ordinary yes-or-no prompt" yes-or-no)
+                 (const :tag "Do not confirm" nil))
+  :group 'clutch)
+
 ;; Direct workflow loads must not reverse-load the composition root.
 (defvar clutch-result-max-rows 500
   "Direct-load fallback for the shared result row budget defined in clutch.el.")
@@ -898,32 +909,49 @@ unique.  Arbitrary query results are displayed as result sets instead."
                       (cl-every #'true-p parts)))))))
     (true-p expr)))
 
-(defun clutch--risky-dml-reason (sql)
-  "Return a confirmation reason for risky DML SQL, or nil."
+(defun clutch--high-risk-query-reason (sql)
+  "Return a confirmation reason for high-risk SQL, or nil."
   (let ((normalized (clutch-db-sql-normalize sql))
+        (leading-op (clutch-db-sql-leading-keyword sql))
         (main-op (clutch-db-sql-main-op-keyword sql)))
-    (when (member main-op '("UPDATE" "DELETE"))
+    (cond
+     ((equal leading-op "TRUNCATE") "TRUNCATE removes all rows")
+     ((member main-op '("UPDATE" "DELETE"))
       (if-let* ((where (clutch--risky-dml-where-condition normalized)))
           (and (clutch--risky-dml-trivially-true-expression-p where)
                "WHERE is always true")
-        "no WHERE"))))
+        "no WHERE")))))
 
-(defun clutch--require-risky-dml-confirmation (sql)
-  "Require explicit typed confirmation for risky DML SQL."
-  (when-let* ((reason (clutch--risky-dml-reason sql)))
-    (let ((token (read-string
-                  (format "High-risk DML (%s). Type YES to continue: " reason))))
-      (unless (string= token "YES")
-        (user-error "Query cancelled")))))
+(defun clutch--confirm-high-risk-query (sql)
+  "Apply the configured high-risk confirmation to SQL.
+Return non-nil when SQL is high-risk, including when confirmation is disabled."
+  (when-let* ((reason (clutch--high-risk-query-reason sql)))
+    (let ((preview (truncate-string-to-width (string-trim sql) 80)))
+      (pcase clutch-high-risk-query-confirmation
+        ('typed
+         (unless (string= (read-string
+                           (format "High-risk query (%s):\n  %s\n\nType YES to continue: "
+                                   reason preview))
+                          "YES")
+           (user-error "Query cancelled")))
+        ('yes-or-no
+         (unless (yes-or-no-p
+                  (format "Execute high-risk query (%s)?\n  %s\n\nProceed? "
+                          reason preview))
+           (user-error "Query cancelled")))
+        ('nil nil)
+        (_ (user-error "Invalid `clutch-high-risk-query-confirmation': %S"
+                       clutch-high-risk-query-confirmation))))
+    t))
 
 (defun clutch--confirm-query-execution (sql)
   "Prompt for any confirmation required before executing SQL."
-  (when (clutch-db-sql-destructive-p sql)
-    (unless (yes-or-no-p
-             (format "Execute destructive query?\n  %s\n\nProceed? "
-                     (truncate-string-to-width (string-trim sql) 80)))
-      (user-error "Query cancelled")))
-  (clutch--require-risky-dml-confirmation sql))
+  (unless (clutch--confirm-high-risk-query sql)
+    (when (clutch-db-sql-destructive-p sql)
+      (unless (yes-or-no-p
+               (format "Execute destructive query?\n  %s\n\nProceed? "
+                       (truncate-string-to-width (string-trim sql) 80)))
+        (user-error "Query cancelled")))))
 
 (defun clutch--note-schema-affecting-query (sql connection)
   "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
