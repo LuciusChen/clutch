@@ -693,12 +693,12 @@ Check TOP's SELECT modifier position and FETCH's FIRST/NEXT count syntax.
 Preserve the established LIMIT and OFFSET checks across dialects.
 Quoted text, comments and nested queries do not contribute clauses."
   (let* ((gap (concat "\\(?:"
-                      (rx (or (any " \t\r\n")
+                      (rx (or (in " \t\r\n")
                               (seq "/*"
-                                   (* (or (not (any "*"))
-                                          (seq (+ "*") (not (any "*/")))))
+                                   (* (or (not (in "*"))
+                                          (seq (+ "*") (not (in "*/")))))
                                    (+ "*") "/")
-                              (seq "--" (* (not (any "\n"))) "\n")))
+                              (seq "--" (* (not (in "\n"))) "\n")))
                       "\\)"))
          (pattern
           (concat "\\b\\(?:LIMIT\\b\\|OFFSET\\b\\|FETCH" gap "+"
