@@ -290,21 +290,21 @@ String literals and comments are ignored via masking."
                 (string-match
                  (rx word-start
                      (or (seq (group (or "from" "join" "update" "into"))
-                              (+ (any " \t\n\r"))
-                              (group (+ (any alnum "_$#.`\""))))
-                         (seq (or (seq "truncate" (+ (any " \t\n\r")) "table")
-                                  (seq "alter" (+ (any " \t\n\r")) "table")
-                                  (seq "drop" (+ (any " \t\n\r")) "table"))
-                              (+ (any " \t\n\r"))
-                              (group (+ (any alnum "_$#.`\""))))
-                         (seq "create" (+ (any " \t\n\r"))
+                              (+ (in " \t\n\r"))
+                              (group (+ (in alnum "_$#.`\""))))
+                         (seq (or (seq "truncate" (+ (in " \t\n\r")) "table")
+                                  (seq "alter" (+ (in " \t\n\r")) "table")
+                                  (seq "drop" (+ (in " \t\n\r")) "table"))
+                              (+ (in " \t\n\r"))
+                              (group (+ (in alnum "_$#.`\""))))
+                         (seq "create" (+ (in " \t\n\r"))
                               (? (seq (or "unique" "fulltext" "spatial")
-                                      (+ (any " \t\n\r"))))
+                                      (+ (in " \t\n\r"))))
                               "index"
                               (*? anything)
                               word-start "on"
-                              (+ (any " \t\n\r"))
-                              (group (+ (any alnum "_$#.`\""))))))
+                              (+ (in " \t\n\r"))
+                              (group (+ (in alnum "_$#.`\""))))))
                  masked pos)
                 (< (match-beginning 0) end))
       (let* ((dml-match (match-string 1 text))
@@ -503,8 +503,8 @@ not treat schema qualifiers in `schema.table' as aliases."
         (while (string-match
                 (rx word-start
                     (or "from" "join" "update" "into")
-                    (+ (any " \t\n\r"))
-                    (group (+ (any alnum "_$#.`\""))))
+                    (+ (in " \t\n\r"))
+                    (group (+ (in alnum "_$#.`\""))))
                 masked pos)
           (let ((table-beg (match-beginning 1))
                 (table-end (match-end 1)))
@@ -1207,8 +1207,8 @@ control backend column loading."
                        (or "select" "from" "where" "having" "on" "join"
                            "into" "update" "set" "values" "limit" "offset"
                            "fetch" "for"
-                           (seq "group" (+ (any " \t\n\r")) "by")
-                           (seq "order" (+ (any " \t\n\r")) "by"))
+                           (seq "group" (+ (in " \t\n\r")) "by")
+                           (seq "order" (+ (in " \t\n\r")) "by"))
                        word-end)))
          token)
     (clutch-db-sql-scan-code
