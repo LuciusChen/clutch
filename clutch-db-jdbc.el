@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.20"
+(defcustom clutch-jdbc-agent-version "0.2.21"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "6f9f2cd76f9524e6bf3e9c9f22988a83d3ae8e223aeb2b6f97407af492540b28"
+  "ecf6eda8c1a7205d68635c55c8071eae1b8477a85bbf7b72570bfcc4cd216666"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1514,7 +1514,7 @@ Recurses into lists and vectors so nested JSON cell values are normalized."
 (defun clutch-jdbc--normalize-row (row)
   "Convert JDBC-specific value representations in ROW to generic forms.
 Blob plists with :text content become plain strings.
-Clob plists become their :preview string.
+Complete Clob plists become strings; incomplete ones stay explicit previews.
 JDBC JSON false sentinels become `:false'."
   (mapcar (lambda (val)
             (clutch-jdbc--normalize-json-false
@@ -1530,7 +1530,14 @@ JDBC JSON false sentinels become `:false'."
                  text))
               ((and (listp val)
                     (equal (plist-get val :__type) "clob"))
-               (plist-get val :preview))
+               (let ((preview (or (plist-get val :preview) ""))
+                     (length (plist-get val :length)))
+                 ;; JDBC lengths count UTF-16 units, not Emacs characters.
+                 (if (equal length (cl-loop for char across preview
+                                            sum (if (> char #xffff) 2 1)))
+                     preview
+                   (make-clutch-db-value-preview
+                    :type 'clob :length length :text preview))))
               (t val))))
           row))
 
@@ -1711,7 +1718,7 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
      base-sql page-num page-size order-by
      (lambda (name) (clutch-db-escape-identifier conn name))
      page-offset))
-   ((clutch-db-sql-has-top-level-limit-p base-sql)
+   ((clutch-db-sql-has-top-level-row-limit-p base-sql)
     base-sql)
    (t
     (let* ((trimmed (string-trim-right

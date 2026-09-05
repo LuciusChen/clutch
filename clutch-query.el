@@ -823,21 +823,16 @@ same-named projection with Clutch's hidden values."
 
 ;;;; SQL pagination helpers
 
-(defun clutch--sql-has-page-tail-p (sql)
-  "Return non-nil if SQL has a top-level LIMIT or OFFSET clause."
-  (or (clutch-db-sql-has-top-level-limit-p sql)
-      (clutch-db-sql-has-top-level-offset-p sql)))
-
 (defun clutch--server-rewritable-result-p (sql columns)
   "Return non-nil when SQL result COLUMNS are safe for derived-table rewrites.
 The check is intentionally conservative: the SQL must be a simple single-table
-SELECT without its own LIMIT/OFFSET, and the actual result labels must be
+SELECT without its own row limit, and the actual result labels must be
 unique.  Arbitrary query results are displayed as result sets instead."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (table (clutch-db-sql-source-table analysis-sql))
          (seen (make-hash-table :test 'equal)))
     (and table
-         (not (clutch--sql-has-page-tail-p analysis-sql))
+         (not (clutch-db-sql-has-top-level-row-limit-p analysis-sql))
          (clutch--row-identity-augmentable-sql-p analysis-sql table)
          (cl-loop for name in (clutch-db-result-column-names columns)
                   for key = (downcase name)
@@ -1011,7 +1006,7 @@ connection and signal `clutch-query-interrupted'."
                    (if (plist-member result-context :server-pageable)
                        (plist-get result-context :server-pageable)
                      (and (clutch-db-sql-pageable-query-p identity-sql)
-                          (not (clutch--sql-has-page-tail-p identity-sql))))))
+                          (not (clutch-db-sql-has-top-level-row-limit-p identity-sql))))))
              (execution-sql
               (if server-pageable
                   (clutch-db-build-paged-sql

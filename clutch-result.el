@@ -440,8 +440,6 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
          (column-names (clutch-db-result-column-names column-defs))
          (existing-widths clutch--column-widths)
          (offset (or page-offset (* page-num clutch-result-max-rows)))
-         (existing-offset (or clutch--page-offset
-                              (* clutch--page-current clutch-result-max-rows)))
          (same-columns (and (vectorp existing-widths)
                             (equal column-names clutch--result-columns)
                             (= (length existing-widths)
@@ -449,9 +447,6 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
          (same-render-shape
           (and same-columns
                (equal column-defs clutch--result-column-defs)))
-         (same-cache-page
-          (and same-render-shape
-               (= offset existing-offset)))
          (column-widths
           (if same-columns
               existing-widths
@@ -475,10 +470,8 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
                 clutch--column-pixel-widths nil
                 clutch--column-pixel-metric nil
                 clutch--column-pixel-logical-widths nil
-                clutch--cell-render-cache
-                (and same-cache-page clutch--cell-render-cache)
-                clutch--cell-render-cache-signature
-                (and same-cache-page clutch--cell-render-cache-signature)
+                clutch--cell-render-cache nil
+                clutch--cell-render-cache-signature nil
                 clutch--char-pixel-width-cache
                 (and same-render-shape clutch--char-pixel-width-cache)
                 clutch--char-pixel-width-cache-signature
@@ -854,8 +847,9 @@ If the result has columns, shows a table; otherwise shows DML summary."
 
 (defun clutch-result--rows-for-display-indices (indices)
   "Return visible result rows at display INDICES."
-  (let ((rows (clutch--result-display-rows)))
-    (mapcar (lambda (ridx) (nth ridx rows)) indices)))
+  (let ((rows (vconcat (clutch--result-display-rows))))
+    (mapcar (lambda (ridx) (and (< ridx (length rows)) (aref rows ridx)))
+            indices)))
 
 (defun clutch-result--discard-pending-at (ridx cidx)
   "Discard the staged change for RIDX and CIDX in the current result buffer."
@@ -1212,15 +1206,16 @@ follow the server's total ordering."
 
 (defun clutch-result--client-filter-rows (rows input)
   "Return ROWS whose visible values contain INPUT."
-  (let ((pattern (downcase input))
+  (let ((pattern (regexp-quote (downcase input)))
         (col-indices (clutch--visible-columns)))
     (cl-loop for row in rows
+             for values = (vconcat row)
              when (cl-some
                    (lambda (cidx)
-                     (when (< cidx (length row))
-                       (when-let* ((val (elt row cidx)))
+                     (when (< cidx (length values))
+                       (when-let* ((val (aref values cidx)))
                          (string-match-p
-                          (regexp-quote pattern)
+                          pattern
                           (downcase (clutch--format-value val))))))
                    col-indices)
              collect row)))
@@ -2174,16 +2169,18 @@ Without region: use current cell."
 (defun clutch-result--compute-aggregate (row-indices col-indices)
   "Compute aggregate stats for ROW-INDICES across COL-INDICES."
   (let* ((rows (length row-indices))
-         (display-rows (clutch--result-display-rows))
+         (display-rows (vconcat (clutch--result-display-rows)))
          (cells (* rows (length col-indices)))
          (count 0)
-        (sum 0.0)
-        min-val
-        max-val)
+         (sum 0.0)
+         min-val
+         max-val)
     (dolist (ridx row-indices)
-      (let ((row (nth ridx display-rows)))
+      (let ((row (vconcat (and (< ridx (length display-rows))
+                               (aref display-rows ridx)))))
         (dolist (cidx col-indices)
-          (let ((num (clutch-result--parse-number (nth cidx row))))
+          (let ((num (clutch-result--parse-number
+                      (and (< cidx (length row)) (aref row cidx)))))
             (when num
               (setq count (1+ count)
                     sum (+ sum num))
@@ -2427,7 +2424,8 @@ When QUIET is non-nil, suppress informational fallback messages."
 When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
-     ((or (null val) (clutch--cell-placeholder-value val))
+     ((or (null val) (clutch--cell-placeholder-value val)
+          (clutch-db-value-preview-p val))
       (list :kind "Value"
             :content (clutch--view-format-value val)
             :setup #'clutch--setup-plain-view-buffer))
@@ -2912,12 +2910,12 @@ Selects JSON, XML, or binary string view based on column type and content."
                                col-names ", ")))
     (cl-loop for row in rows
              for vals = (cl-mapcar
-                          (lambda (cidx col-name)
-                            (clutch-result--typed-param-for-column
-                             table col-name (nth cidx row) cidx))
-                          col-indices col-names)
+                         (lambda (cidx col-name)
+                           (clutch-result--typed-param-for-column
+                            table col-name (nth cidx row) cidx))
+                         col-indices col-names)
              collect (format "INSERT INTO %s (%s) VALUES (%s);"
-                             (clutch-db-escape-identifier conn table)
+                             (clutch-db-sql-target-table conn table clutch--last-query)
                              cols
                              (mapconcat
                               (lambda (param)
@@ -3051,6 +3049,10 @@ rectangle and inactive regions fall back to the current cell."
 (defun clutch-result--copy-lines (kind rows col-indices &optional omit-header)
   "Return copy output lines for KIND using ROWS and COL-INDICES.
 When OMIT-HEADER is non-nil, omit headers from tabular formats."
+  (unless (memq kind '(csv tsv))
+    (dolist (row rows)
+      (dolist (cidx col-indices)
+        (clutch-db-require-complete-value (nth cidx row)))))
   (let ((lines
          (pcase kind
            ('tsv (clutch--delimited-lines-for-rows rows col-indices ?\t))
@@ -3135,7 +3137,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
 
 (defun clutch--delimited-escape (val delimiter)
   "Return VAL escaped for text separated by DELIMITER."
-  (let ((s (clutch--format-value val)))
+  (let ((s (clutch--format-value (clutch-db-require-complete-value val))))
     (if (or (string-match-p "[\"\r\n]" s)
             (string-match-p (regexp-quote (char-to-string delimiter)) s))
         (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
@@ -3149,7 +3151,11 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
            (lambda (val) (clutch--delimited-escape val delimiter))
            col-names separator)
           (cl-loop for row in rows
-                   for vals = (mapcar (lambda (i) (nth i row)) col-indices)
+                   for values = (vconcat row)
+                   for vals = (mapcar (lambda (i)
+                                        (and (< i (length values))
+                                             (aref values i)))
+                                      col-indices)
                    collect
                    (mapconcat
                     (lambda (val) (clutch--delimited-escape val delimiter))
@@ -3316,32 +3322,45 @@ When OMIT-HEADER is non-nil, omit the column header."
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
-(defun clutch-result--collect-all-export-rows ()
-  "Return all rows for current result by auto-paging when needed."
+(defun clutch-result--map-export-batches (function)
+  "Call FUNCTION with each bounded export batch, auto-paging when needed.
+Call it once with nil for an empty result.  Each batch has its own list
+spine, so consumers may collect batches without mutating cached rows."
   (clutch--ensure-connection)
   (let* ((plan (clutch-result--current-query-plan))
-         (effective-sql (plist-get plan :sql)))
-    (if (or (null effective-sql)
-            (not (clutch-result--server-pageable-p)))
-        clutch--result-rows
-      (let* ((row-identity-prep (plist-get plan :row-identity-prep))
-             (identity-sql (plist-get row-identity-prep :sql)))
-        (if (or (null clutch--base-query)
-                (and (null clutch--order-by)
-                     (clutch-db-sql-has-top-level-limit-p effective-sql)))
-            (clutch-db-result-rows
-             (clutch--run-db-query clutch-connection identity-sql))
-          (cl-loop with page-size = clutch-result-max-rows
-                   for page-num from 0
-                   for paged-sql = (clutch-db-build-paged-sql
-                                    clutch-connection identity-sql page-num
-                                    page-size clutch--order-by)
-                   for result = (clutch--run-db-query
-                                  clutch-connection paged-sql)
-                   for batch = (clutch-db-result-rows result)
-                   append batch into rows
-                   until (< (length batch) page-size)
-                   finally return rows))))))
+         (effective-sql (plist-get plan :sql))
+         (page-size clutch-result-max-rows))
+    (cl-labels ((emit (rows)
+                  (if rows
+                      (cl-loop for tail on rows
+                               by (lambda (rest) (nthcdr page-size rest))
+                               do (funcall function (seq-take tail page-size)))
+                    (funcall function nil))))
+      (if (or (null effective-sql)
+              (not (clutch-result--server-pageable-p)))
+          (emit clutch--result-rows)
+        (let* ((row-identity-prep (plist-get plan :row-identity-prep))
+               (identity-sql (plist-get row-identity-prep :sql)))
+          (if (or (null clutch--base-query)
+                  (and (null clutch--order-by)
+                       (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
+              (emit (clutch-db-result-rows
+                     (clutch--run-db-query clutch-connection identity-sql)))
+            (cl-loop for page-num from 0
+                     for paged-sql = (clutch-db-build-paged-sql
+                                      clutch-connection identity-sql page-num
+                                      page-size clutch--order-by)
+                     for result = (clutch--run-db-query
+                                   clutch-connection paged-sql)
+                     for batch = (clutch-db-result-rows result)
+                     do (emit batch)
+                     until (< (length batch) page-size))))))))
+
+(defun clutch-result--collect-all-export-rows ()
+  "Return all rows for current result by auto-paging when needed."
+  (let (batches)
+    (clutch-result--map-export-batches (lambda (batch) (push batch batches)))
+    (apply #'nconc (nreverse batches))))
 
 (defun clutch--export-insert-content (rows)
   "Return INSERT statement export text for ROWS using current result metadata."
@@ -3376,34 +3395,86 @@ When OMIT-HEADER is non-nil, omit the column header."
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
 
+(cl-defun clutch-result--write-export-file
+    (kind spec path &key coding omit-header)
+  "Write KIND using SPEC to PATH with CODING and OMIT-HEADER.
+Format one batch at a time, following symbolic links in PATH.
+Filename-specific write handlers receive the complete encoded output once.
+Replace the destination only after successful completion.
+Return the exported row count."
+  (let* ((target (file-truename path))
+         (temporary (make-nearby-temp-file (concat target ".clutch-")))
+         transformed
+         (row-count 0)
+         (first t)
+         (coding (or coding coding-system-for-write 'utf-8-unix)))
+    (unwind-protect
+        (progn
+          (cl-labels
+              ((write-batch (rows)
+                 (let ((text (if (memq kind '(csv tsv))
+                                 (funcall (plist-get spec :content)
+                                          rows (or omit-header (not first)))
+                               (funcall (plist-get spec :content) rows)))
+                       (coding-system-for-write
+                        (if (and (not first)
+                                 (eq (coding-system-base coding)
+                                     'utf-8-with-signature))
+                            (coding-system-change-eol-conversion
+                             'utf-8 (let ((eol (coding-system-eol-type coding)))
+                                      (and (integerp eol) eol)))
+                          coding)))
+                   (write-region text nil temporary (not first) 'silent)
+                   (cl-incf row-count (length rows))
+                   (setq first nil))))
+            (if (eq kind 'document-insert-many)
+                (write-batch (clutch-result--collect-all-export-rows))
+              (clutch-result--map-export-batches #'write-batch)))
+          (unless (eq (find-file-name-handler target 'write-region)
+                      (find-file-name-handler temporary 'write-region))
+            (setq transformed
+                  (make-nearby-temp-file
+                   (expand-file-name "clutch-" (file-name-directory target))
+                   nil (concat "-" (file-name-nondirectory target))))
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert-file-contents-literally temporary)
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region (point-min) (point-max) transformed nil 'silent))))
+          (let ((output (or transformed temporary)))
+            (when (file-exists-p target)
+              (set-file-modes output (file-modes target)))
+            (rename-file output target t))
+          row-count)
+      (when (file-exists-p temporary)
+        (delete-file temporary))
+      (when (and transformed (file-exists-p transformed))
+        (delete-file transformed)))))
+
 (defun clutch--export-result (kind destination &optional omit-header)
   "Export result rows as KIND to DESTINATION.
 When OMIT-HEADER is non-nil, omit headers from delimited formats."
   (let* ((spec (or (cdr (assq kind clutch--result-export-kinds))
                    (user-error "Unsupported export kind: %s" kind)))
-         (rows (clutch-result--collect-all-export-rows))
-         (coding (when (and (eq destination 'file)
-                            (eq (plist-get spec :file-coding) 'delimited))
-                   (clutch--read-delimited-export-coding-system kind)))
-         (text (if (memq kind '(csv tsv))
-                   (funcall (plist-get spec :content) rows omit-header)
-                 (funcall (plist-get spec :content) rows)))
-         (row-count (length rows))
-         (row-suffix (if (= (length rows) 1) "" "s")))
+         (content (plist-get spec :content)))
     (pcase destination
       ('clipboard
-       (kill-new text)
-       (message (plist-get spec :copy-message) row-count row-suffix))
+       (let ((rows (clutch-result--collect-all-export-rows)))
+         (kill-new (if (memq kind '(csv tsv))
+                       (funcall content rows omit-header)
+                     (funcall content rows)))
+         (message (plist-get spec :copy-message)
+                  (length rows) (if (= (length rows) 1) "" "s"))))
       ('file
-       (let* ((path (read-file-name (plist-get spec :file-prompt)
+       (let* ((coding (when (eq (plist-get spec :file-coding) 'delimited)
+                        (clutch--read-delimited-export-coding-system kind)))
+              (path (read-file-name (plist-get spec :file-prompt)
                                     nil nil nil
                                     (plist-get spec :default-file)))
-              (coding-system-for-write (or coding coding-system-for-write)))
-         (with-temp-buffer
-           (insert text)
-           (write-region (point-min) (point-max) path nil 'silent))
+              (row-count (clutch-result--write-export-file
+                          kind spec path :coding coding :omit-header omit-header)))
          (apply #'message (plist-get spec :file-message)
-                (append (list row-count row-suffix path)
+                (append (list row-count (if (= row-count 1) "" "s") path)
                         (when coding (list coding))))))
       (_
        (user-error "Unsupported export destination: %s" destination)))))

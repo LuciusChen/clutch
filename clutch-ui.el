@@ -245,6 +245,11 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
 → JSON strings."
   (cond
    ((clutch--cell-placeholder-value val))
+   ((clutch-db-value-preview-p val)
+    (format "<%s preview; %s total> %s"
+            (upcase (symbol-name (clutch-db-value-preview-type val)))
+            (clutch-db-value-preview-length val)
+            (clutch-db-value-preview-text val)))
    ((null val) "NULL")
    ((eq val t) "true")
    ((eq val :false) "false")
@@ -640,26 +645,29 @@ the visible prefix is known."
         (used 0)
         (pos 0)
         (len (length text))
-        parts
         truncated)
     (while (and (< pos len) (not truncated))
       (let* ((char (aref text pos))
-             (piece (if (= char ?\n) "↵" (char-to-string char)))
-             (piece-width (string-width piece)))
+             (char (if (= char ?\n) ?↵ char))
+             (piece-width (char-width char)))
+        ;; `string-width' gives some isolated zero-width marks a column.
+        (when (zerop piece-width)
+          (setq piece-width (string-width (char-to-string char))))
         (if (> (+ used piece-width) limit)
             (setq truncated t)
-          (push piece parts)
           (setq used (+ used piece-width)
                 pos (1+ pos)))))
-    (if (and (not truncated) (= pos len))
-        (cons (string-join (nreverse parts) "") nil)
-      (cons (if (>= width 1)
-                (concat (truncate-string-to-width
-                         (string-join (nreverse parts) "")
-                         (1- width) nil nil "")
-                        "…")
-              "")
-            t))))
+    (let ((prefix (string-replace "\n" "↵"
+                                  (substring-no-properties text 0 pos))))
+      (if (and (not truncated) (= pos len))
+          (cons prefix nil)
+        (cons (if (>= width 1)
+                  (concat (truncate-string-to-width
+                           prefix
+                           (1- width) nil nil "")
+                          "…")
+                "")
+              t)))))
 
 (defun clutch--xml-like-string-p (val)
   "Return non-nil when string VAL appears to contain XML text.
@@ -708,6 +716,25 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
       (and (null val) clutch--null-cell-display-text)
       (clutch--format-value val)))
 
+(defun clutch--capped-string-width (text limit)
+  "Return the display width of TEXT, stopping once LIMIT is reached.
+Measure growing prefixes so long values do not require a full scan.  Keep
+static compositions intact and honor the current display table."
+  (let ((end (min (length text) 32))
+        (width 0))
+    (while (and (< width limit)
+                (progn
+                  (when (and (> end 0)
+                             (get-text-property (1- end) 'composition text))
+                    (setq end (or (next-single-property-change
+                                   (1- end) 'composition text)
+                                  (length text))))
+                  (setq width (string-width (substring text 0 end)))
+                  (< end (length text)))
+                (< width limit))
+      (setq end (min (length text) (* 2 end))))
+    (min limit width)))
+
 (defun clutch--compute-column-widths (col-names rows column-defs
                                                 &optional max-width)
   "Compute display width for each column.
@@ -719,26 +746,34 @@ Returns a vector of integers."
   (let* ((ncols (length col-names))
          (max-w (or max-width clutch-column-width-max))
          (widths (make-vector ncols 0))
-         (sample (seq-take rows 50)))
-    (dotimes (i ncols)
-      (if (and (eq (plist-get (nth i column-defs) :type-category) 'blob)
-               (<= max-w clutch-column-width-max)
-               (not (seq-some (lambda (row)
-                                (clutch--blob-text-display-value-p (nth i row)))
-                              sample)))
-          (aset widths i 10)
-        (let ((header-w (string-width (nth i col-names)))
-              (data-w 0))
-          (dolist (row sample)
-            (let ((formatted (clutch--column-width-sample (nth i row))))
-              (setq data-w (max data-w (string-width formatted)))))
-          (aset widths i (max 5 (min max-w (max header-w data-w)))))))
+         (sample (mapcar #'vconcat (seq-take rows 50))))
+    (cl-loop for name in col-names
+             for i from 0
+             for defs = column-defs then (cdr defs)
+             do
+             (if (and (eq (plist-get (car defs) :type-category) 'blob)
+                      (<= max-w clutch-column-width-max)
+                      (not (seq-some (lambda (row)
+                                       (clutch--blob-text-display-value-p
+                                        (and (< i (length row)) (aref row i))))
+                                     sample)))
+                 (aset widths i 10)
+               (let ((width (clutch--capped-string-width name max-w)))
+                 (cl-loop for row in sample
+                          while (< width max-w)
+                          for formatted = (clutch--column-width-sample
+                                           (and (< i (length row)) (aref row i)))
+                          do (setq width
+                                   (max width (clutch--capped-string-width
+                                               formatted max-w))))
+                 (aset widths i (max 5 width)))))
     widths))
 
 (defun clutch--visible-columns ()
   "Return the column indices rendered in the result buffer."
   (cl-loop for i below (length clutch--result-columns)
-           unless (plist-get (nth i clutch--result-column-defs) :hidden)
+           for defs = clutch--result-column-defs then (cdr defs)
+           unless (plist-get (car defs) :hidden)
            collect i))
 
 (defun clutch--column-names-for-indices (indices)
@@ -1484,16 +1519,16 @@ are precomputed row/cell state from RENDER-STATE."
         (setq face nil)))
     (when face
       (add-face-text-property 0 (length padded) face 'append padded))
-    (setq body (concat pad-str padded pad-str))
-    (add-text-properties 0 (length body)
+    (setq body (concat (propertize "│" 'face 'clutch-border-face)
+                       pad-str padded pad-str))
+    (add-text-properties 1 (length body)
                          `(clutch-row-idx ,ridx
-                           clutch-col-idx ,cidx
-                           clutch-full-value ,(if edited (cdr edited) val))
+                                          clutch-col-idx ,cidx
+                                          clutch-full-value ,(if edited (cdr edited) val))
                          body)
     (when (get-text-property 0 'clutch-cell-truncated content)
-      (put-text-property 0 (length body) 'clutch-cell-truncated t body))
-    (concat (propertize "│" 'face 'clutch-border-face)
-            body)))
+      (put-text-property 1 (length body) 'clutch-cell-truncated t body))
+    body))
 
 (defun clutch--render-row (row ridx visible-cols widths render-state
                                &optional column-specs identity-values)
@@ -1507,25 +1542,26 @@ Returns a propertized string."
                       (clutch--row-render-identity row render-state)))
         (specs (or column-specs
                    (clutch--visible-column-specs visible-cols widths))))
-    (concat (mapconcat
-             (lambda (spec)
-               (let* ((cidx (aref spec 0))
-                      (width (aref spec 1))
-                      (col-def (aref spec 2))
-                      (numericp (aref spec 3))
-                      (val (and (< cidx (length row-vector))
-                                (aref row-vector cidx)))
-                      (edited (clutch--render-edit-entry-for-identity
-                               identity cidx render-state))
-                      (face (clutch--cell-face
-                             val edited cidx
-                             (clutch--active-edit-cell-p
-                              ridx cidx render-state))))
-                 (clutch--render-cell-value
-                  val ridx cidx width col-def numericp edited face
-                  render-state)))
-             specs "")
-          (propertize "│" 'face 'clutch-border-face))))
+    (apply #'concat
+           (nconc (mapcar
+                   (lambda (spec)
+                     (let* ((cidx (aref spec 0))
+                            (width (aref spec 1))
+                            (col-def (aref spec 2))
+                            (numericp (aref spec 3))
+                            (val (and (< cidx (length row-vector))
+                                      (aref row-vector cidx)))
+                            (edited (clutch--render-edit-entry-for-identity
+                                     identity cidx render-state))
+                            (face (clutch--cell-face
+                                   val edited cidx
+                                   (clutch--active-edit-cell-p
+                                    ridx cidx render-state))))
+                       (clutch--render-cell-value
+                        val ridx cidx width col-def numericp edited face
+                        render-state)))
+                   specs)
+                  (list (propertize "│" 'face 'clutch-border-face))))))
 
 (defun clutch--render-row-line (row ridx visible-cols widths nw render-state
                                     &optional column-specs)
@@ -2065,18 +2101,14 @@ The header-line should track body hscroll exactly."
 ROW-POSITIONS stores line starts keyed by rendered row index.
 VISIBLE-COLS, WIDTHS, and NW are precomputed table layout values.
 RENDER-STATE contains render lookup tables for staged UI state."
-  (let ((pos (point))
-        (column-specs (clutch--visible-column-specs visible-cols widths))
-        lines)
+  (let ((column-specs (clutch--visible-column-specs visible-cols widths)))
     (cl-loop for row in rows
              for ridx from 0
              for line = (clutch--render-row-line
                          row ridx visible-cols widths nw render-state
                          column-specs)
-             do (aset row-positions ridx pos)
-             do (cl-incf pos (length line))
-             do (push line lines))
-    (insert (mapconcat #'identity (nreverse lines) ""))))
+             do (aset row-positions ridx (point))
+             do (insert line))))
 
 (defun clutch--insert-pending-insert-rows (visible-cols widths nw nrows row-positions
                                                         render-state)

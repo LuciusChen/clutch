@@ -218,13 +218,27 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
 
 ;;;; Result struct
 
+(cl-defstruct clutch-db-value-preview
+  "An incomplete result value, with TYPE, original LENGTH and preview TEXT.
+This value may be displayed, but must not be used as complete database data."
+  type length text)
+
+(defun clutch-db-require-complete-value (value)
+  "Return VALUE, or reject an incomplete result preview."
+  (when (clutch-db-value-preview-p value)
+    (user-error "%s value is only a preview (%s total); complete content is unavailable"
+                (upcase (symbol-name (clutch-db-value-preview-type value)))
+                (clutch-db-value-preview-length value)))
+  value)
+
 (cl-defstruct clutch-db-result
   "A database query result.
 CONNECTION is the backend connection object.
 COLUMNS is a list of plists.  Required keys are :name STR and
 :type-category SYM, where :type-category is one of: numeric, blob, json,
 text, date, time, datetime, other.  Backends may add :backend-type metadata.
-ROWS is a list of lists (one per row).
+ROWS is a list of lists (one per row).  Incomplete values use
+`clutch-db-value-preview' and cannot be treated as complete write/export data.
 AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
   connection columns rows affected-rows last-insert-id warnings)
 
@@ -673,13 +687,31 @@ START defaults to 0."
   "Return non-nil when SQL has top-level PATTERN starting at START."
   (clutch-db-sql-find-top-level-clause sql pattern start))
 
-(defun clutch-db-sql-has-top-level-limit-p (sql)
-  "Return non-nil when SQL has a top-level LIMIT clause."
-  (clutch-db-sql-has-top-level-clause-p sql "LIMIT"))
-
-(defun clutch-db-sql-has-top-level-offset-p (sql)
-  "Return non-nil when SQL has a top-level OFFSET clause."
-  (clutch-db-sql-has-top-level-clause-p sql "OFFSET"))
+(defun clutch-db-sql-has-top-level-row-limit-p (sql)
+  "Return non-nil when SQL has a top-level row-limit clause.
+Check TOP's SELECT modifier position and FETCH's FIRST/NEXT count syntax.
+Preserve the established LIMIT and OFFSET checks across dialects.
+Quoted text, comments and nested queries do not contribute clauses."
+  (let* ((gap (concat "\\(?:"
+                      (rx (or (any " \t\r\n")
+                              (seq "/*"
+                                   (* (or (not (any "*"))
+                                          (seq (+ "*") (not (any "*/")))))
+                                   (+ "*") "/")
+                              (seq "--" (* (not (any "\n"))) "\n")))
+                      "\\)"))
+         (pattern
+          (concat "\\b\\(?:LIMIT\\b\\|OFFSET\\b\\|FETCH" gap "+"
+                  "\\(?:FIRST\\|NEXT\\)" gap "+"
+                  "\\(?:[0-9]+\\b\\|ROWS?\\b\\|[?@$(:]\\)"
+                  "\\|SELECT" gap "+\\(?:\\(?:ALL\\|DISTINCT\\)" gap "+\\)?"
+                  "TOP\\b" gap "*\\(?:[0-9]+\\b\\|(\\)\\)"))
+         (positions (clutch-db-sql-code-match-positions sql 0 nil pattern)))
+    (unless (zerop (hash-table-count positions))
+      (clutch-db-sql-scan-code
+       sql 0 nil
+       (lambda (pos _char depth)
+         (and (zerop depth) (gethash pos positions)))))))
 
 (defun clutch-db-sql-starts-with-keyword-p (sql keywords)
   "Return non-nil for SQL with one of KEYWORDS as the leading token."
@@ -844,6 +876,15 @@ relations return nil."
   (when-let* ((token (clutch-db-sql--source-table-token sql simple-only)))
     (clutch-db-sql-table-name token)))
 
+(defun clutch-db-sql-target-table (conn table sql)
+  "Return a SQL reference to TABLE on CONN, retaining its source from SQL.
+Only reuse SQL's relation when it is a simple query of that same TABLE."
+  (or (when-let* ((token (and sql (clutch-db-sql--source-table-token sql t)))
+                  ((equal table (clutch-db-sql-table-name token)))
+                  ((clutch-db-sql-table-schema token)))
+        token)
+      (clutch-db-escape-identifier conn table)))
+
 (defun clutch-db-sql-destructive-p (sql)
   "Return non-nil if SQL is a destructive operation."
   (clutch-db-sql-starts-with-keyword-p
@@ -875,19 +916,18 @@ Leaves nested ORDER BY clauses inside subqueries or window functions intact."
 
 (defun clutch-db-sql-derived-table-body (sql)
   "Return SQL normalized for derived-table wrapping.
-Top-level ORDER BY is removed when there is no top-level LIMIT/OFFSET because
+Top-level ORDER BY is removed when there is no top-level row limit because
 it is invalid inside derived tables on some dialects and cannot change the
 derived row set.  Limited result sets keep their tail clauses so wrapping
 targets the user's visible result set."
   (let ((normalized (clutch-db-sql-normalize sql)))
-    (if (or (clutch-db-sql-has-top-level-limit-p normalized)
-            (clutch-db-sql-has-top-level-offset-p normalized))
+    (if (clutch-db-sql-has-top-level-row-limit-p normalized)
         normalized
       (clutch-db-sql-strip-top-level-order-by normalized))))
 
 (defun clutch-db-sql-count-derived-table-body (sql)
   "Return SQL normalized for COUNT(*) derived-table wrapping.
-Top-level ORDER BY is removed when there is no top-level LIMIT/OFFSET because
+Top-level ORDER BY is removed when there is no top-level row limit because
 it cannot affect the row count.  Limited result sets keep their tail clauses so
 counts target the user's visible result set."
   (clutch-db-sql-derived-table-body sql))
@@ -913,7 +953,7 @@ CONN supplies the dialect-specific derived-table alias syntax."
 PAGE-NUM is zero-based and PAGE-SIZE is the row count per page.
 ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name.
 PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
-  (if (clutch-db-sql-has-top-level-limit-p base-sql)
+  (if (clutch-db-sql-has-top-level-row-limit-p base-sql)
       base-sql
     (let* ((trimmed (string-trim-right
                      (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
