@@ -124,50 +124,49 @@ explicitly because `\\s-' resolves against the caller's syntax table, and
                         trimmed)
         (clutch-db-sql-has-top-level-clause-p sql "RETURNING"))))
 
-(defun clutch-db-sqlite--run-select (handle sql &optional values)
-  "Execute a SELECT-like SQL on HANDLE with optional VALUES.
+(defun clutch-db-sqlite--run-select (conn sql &optional values)
+  "Execute a SELECT-like SQL on CONN with optional VALUES.
 Return a `clutch-db-result'."
-  (let* ((raw      (sqlite-select handle sql values 'full))
+  (let* ((raw      (sqlite-select (clutch-db-sqlite-conn-handle conn)
+                                  sql values 'full))
          (col-names (car raw))
          (rows     (cdr raw))
          (cols     (clutch-db-sqlite--columns-from-names col-names rows)))
     (make-clutch-db-result
-     :connection handle :columns cols :rows rows
+     :connection conn :columns cols :rows rows
      :affected-rows nil :last-insert-id nil :warnings nil)))
 
-(defun clutch-db-sqlite--run-dml (handle sql &optional values)
-  "Execute a DML SQL on HANDLE with optional VALUES.
+(defun clutch-db-sqlite--run-dml (conn sql &optional values)
+  "Execute a DML SQL on CONN with optional VALUES.
 Return a `clutch-db-result'."
   (make-clutch-db-result
-   :connection handle :columns nil :rows nil
-   :affected-rows (sqlite-execute handle sql values)
+   :connection conn :columns nil :rows nil
+   :affected-rows (sqlite-execute (clutch-db-sqlite-conn-handle conn) sql values)
    :last-insert-id nil :warnings nil))
 
 ;;;; Query methods
 
 (cl-defmethod clutch-db-query ((conn clutch-db-sqlite-conn) sql)
   "Execute SQL on SQLite CONN, returning a `clutch-db-result'."
-  (let ((handle (clutch-db-sqlite-conn-handle conn)))
-    (setf (clutch-db-sqlite-conn-busy conn) t)
-    (unwind-protect
-        (clutch-db--translate-library-error sqlite-error
-          (if (clutch-db-sqlite--select-p sql)
-              (clutch-db-sqlite--run-select handle sql)
-            (clutch-db-sqlite--run-dml handle sql)))
-      (setf (clutch-db-sqlite-conn-busy conn) nil))))
+  (setf (clutch-db-sqlite-conn-busy conn) t)
+  (unwind-protect
+      (clutch-db--translate-library-error sqlite-error
+        (if (clutch-db-sqlite--select-p sql)
+            (clutch-db-sqlite--run-select conn sql)
+          (clutch-db-sqlite--run-dml conn sql)))
+    (setf (clutch-db-sqlite-conn-busy conn) nil)))
 
 (cl-defmethod clutch-db-execute-params ((conn clutch-db-sqlite-conn) sql params)
   "Execute parameterized SQL on SQLite CONN with PARAMS."
-  (let ((handle (clutch-db-sqlite-conn-handle conn)))
-    (setf (clutch-db-sqlite-conn-busy conn) t)
-    (unwind-protect
-        (clutch-db--translate-library-error sqlite-error
-          (if (clutch-db-sqlite--select-p sql)
-              (clutch-db-sqlite--run-select
-               handle sql (clutch-db-param-values params))
-            (clutch-db-sqlite--run-dml
-             handle sql (clutch-db-param-values params))))
-      (setf (clutch-db-sqlite-conn-busy conn) nil))))
+  (setf (clutch-db-sqlite-conn-busy conn) t)
+  (unwind-protect
+      (clutch-db--translate-library-error sqlite-error
+        (if (clutch-db-sqlite--select-p sql)
+            (clutch-db-sqlite--run-select
+             conn sql (clutch-db-param-values params))
+          (clutch-db-sqlite--run-dml
+           conn sql (clutch-db-param-values params))))
+    (setf (clutch-db-sqlite-conn-busy conn) nil)))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
   ((conn clutch-db-sqlite-conn) function)

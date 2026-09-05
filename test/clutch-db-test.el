@@ -3472,17 +3472,35 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
 ;;;; Unit tests — row normalization
 
 (ert-deftest clutch-db-test-jdbc-normalize-row ()
-  "JDBC row normalization should unwrap CLOB/BLOB previews and keep scalars."
+  "JDBC row normalization unwraps complete values and keeps scalars."
   (dolist (case
            '((("text"
-               (:__type "clob" :length 1000 :preview "hello clob")
+               (:__type "clob" :length 10 :preview "hello clob")
                42)
               ("text" "hello clob" 42))
-             (((:__type "clob" :length 0)) (nil))
+             (((:__type "clob" :length 0)) (""))
+             (((:__type "clob" :length 2 :preview "😀")) ("😀"))
+             (((:__type "clob" :length 6 :preview "中😀é文")) ("中😀é文"))
+             (((:__type "clob" :length 4 :preview "𐀀􏿿")) ("𐀀􏿿"))
              (((:__type "blob" :length 5 :text "hello")) ("hello"))
              ((1 "str" nil t) (1 "str" nil t))))
     (pcase-let ((`(,row ,expected) case))
       (should (equal (clutch-jdbc--normalize-row row) expected)))))
+
+(ert-deftest clutch-db-test-jdbc-clob-preview-boundary ()
+  "CLOB completeness uses UTF-16 units, including the preview boundary."
+  (dolist (text (list (make-string 256 ?a)
+                      (make-string 128 ?😀)
+                      (concat (make-string 254 ?中) "😀")))
+    (dolist (size '(256 257 258))
+      (let ((value (car (clutch-jdbc--normalize-row
+                         (list (list :__type "clob" :length size
+                                     :preview text))))))
+        (if (= size 256)
+            (should (equal value text))
+          (should (clutch-db-value-preview-p value))
+          (should (= (clutch-db-value-preview-length value) size))
+          (should (equal (clutch-db-value-preview-text value) text)))))))
 
 (ert-deftest clutch-db-test-jdbc-normalize-row-maps-json-false-sentinel ()
   "JDBC JSON false sentinels should become the generic :false in rows."
@@ -7968,4 +7986,73 @@ It does so without touching the agent process."
                (lambda (conn) (setq disconnected conn))))
       (should (eq (clutch-db-connect 'fake '(:host "h")) 'fresh-conn))
       (should-not disconnected))))
+(ert-deftest clutch-db-test-sqlite-result-keeps-adapter-connection ()
+  "Every SQLite execution result keeps the opaque adapter connection."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:"))))
+    (unwind-protect
+        (progn
+          (dolist (sql '("CREATE TABLE audit (id INTEGER)" "SELECT 1"))
+            (should (eq (clutch-db-result-connection
+                         (clutch-db-query conn sql)) conn)))
+          (dolist (sql '("INSERT INTO audit VALUES (?)" "SELECT ?"))
+            (should (eq (clutch-db-result-connection
+                         (clutch-db-execute-params conn sql '(42))) conn))))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-db-test-sql-row-limits-survive-rewrites ()
+  "LIMIT, TOP, FETCH and OFFSET retain the user's bounded result set."
+  (let ((conn (make-clutch-jdbc-conn :driver 'sqlserver)))
+    (dolist (sql '("SELECT * FROM t LIMIT 10"
+                   "select * from t limit 10"
+                   "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"
+                   "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 20"
+                   "SELECT TOP 1 id FROM audit ORDER BY id DESC"
+                   "SELECT ALL TOP 2 id FROM audit"
+                   "SELECT DISTINCT TOP (2) id FROM audit ORDER BY id DESC"
+                   "SELECT /* pagination */ TOP (2) id FROM audit ORDER BY id DESC"
+                   "SELECT DISTINCT /* count */ TOP/* count */(2) id FROM audit"
+                   "SELECT id FROM audit ORDER BY id DESC FETCH FIRST 1 ROW ONLY"
+                   "SELECT id FROM audit FETCH /* count */ NEXT 2 ROWS ONLY"
+                   "SELECT id FROM audit FETCH FIRST ROW ONLY"
+                   "SELECT -- page\nTOP (2) id FROM audit"
+                   "SELECT id FROM audit ORDER BY id OFFSET 2 ROWS FETCH NEXT 1 ROW ONLY"))
+      (should (equal (clutch-db-sql-derived-table-body sql) sql))
+      (should (equal (clutch-db-build-paged-sql conn sql 0 501) sql))
+      (should (string-match-p (regexp-quote sql)
+                              (clutch-db-build-count-sql conn sql))))
+    (dolist (sql '("SELECT * FROM (SELECT * FROM t LIMIT 5) AS s"
+                   "(SELECT id FROM a LIMIT 1) UNION ALL (SELECT id FROM b)"
+                   "WITH x AS (SELECT * FROM t LIMIT 3) SELECT * FROM x"
+                   "SELECT * FROM t"
+                   "SELECT * FROM t WHERE limitation = 1"
+                   "SELECT 'TOP LIMIT FETCH OFFSET' FROM audit"
+                   "SELECT id, top, fetch FROM audit ORDER BY id"
+                   "SELECT top FROM audit"
+                   "SELECT id FROM top"
+                   "SELECT id AS top FROM audit"
+                   "SELECT id FROM audit AS top"
+                   "SELECT fetch FROM audit"
+                   "SELECT fetch FIRST FROM audit"
+                   "SELECT /* first */ id, /* second */ top(2) FROM audit"
+                   "SELECT id FROM audit /* TOP 1 */"
+                   "SELECT id FROM (SELECT id FROM audit LIMIT 1) q"))
+      (should-not (clutch-db-sql-has-top-level-row-limit-p sql)))))
+
+(ert-deftest clutch-db-test-row-limit-identifiers-keep-pagination ()
+  "Ordinary identifiers must retain paging and SQL rewrite capabilities."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:"))))
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE top(id INTEGER, top TEXT, fetch TEXT)")
+          (clutch-db-query conn "INSERT INTO top VALUES(1,'a','x'),(2,'b','y'),(3,'c','z')")
+          (dolist (query '("SELECT id, top FROM top ORDER BY id"
+                           "SELECT id AS top, fetch FROM top ORDER BY id"))
+            (should (= (length (clutch-db-result-rows
+                                (clutch-db-query conn
+                                                 (clutch-db-build-paged-sql
+                                                  conn query 0 2 nil)))) 2))))
+      (clutch-db-disconnect conn))))
+
 ;;; clutch-db-test.el ends here

@@ -561,7 +561,7 @@
           (should (= (string-width header) (string-width string))))))))
 
 (ert-deftest clutch-test-install-page-state-contract ()
-  "Page refreshes should preserve compatible caches and widths only."
+  "New query results should discard values and preserve compatible font caches."
   (with-temp-buffer
     (clutch-result-mode)
     (let ((cell-cache (make-hash-table :test 'equal))
@@ -575,7 +575,7 @@
                   clutch--char-pixel-width-cache char-cache
                   clutch--char-pixel-width-cache-signature 'char-signature)
       (clutch-result--install-page-state columns '((2 "bob")) 0.1 0)
-      (should (eq clutch--cell-render-cache cell-cache))
+      (should-not clutch--cell-render-cache)
       (should (eq clutch--char-pixel-width-cache char-cache))
       (clutch-result--install-page-state columns '((3 "eve")) 0.1 1)
       (should-not clutch--cell-render-cache)
@@ -585,10 +585,10 @@
       (should-not clutch--cell-render-cache)
       (should-not clutch--char-pixel-width-cache)))
   (dolist (case '((same ("id" "name")
-                         ((:name "id" :type-category numeric)
-                          (:name "name" :type-category text))
-                         ((100 "a much longer customer name"))
-                         [12 7])
+                        ((:name "id" :type-category numeric)
+                         (:name "name" :type-category text))
+                        ((100 "a much longer customer name"))
+                        [12 7])
                   (changed ("id" "email")
                            ((:name "id" :type-category numeric)
                             (:name "email" :type-category text))
@@ -5316,6 +5316,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                (apply write-region-function write-args)))
                             ((symbol-function 'clutch-result--collect-all-export-rows)
                              (lambda () '((1 "a,b"))))
+                            ((symbol-function 'clutch-result--map-export-batches)
+                             (lambda (function) (funcall function '((1 "a,b")))))
                             ((symbol-function 'clutch--ensure-column-details)
                              (lambda (_conn _table &optional _strict)
                                (list (list :name "id")
@@ -6190,25 +6192,34 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                "| sh    |      1 | a\\vertb |\n"
                                "| Tokyo |    200 | x\\ny    |")))))))
 
-(ert-deftest clutch-test-copy-csv-unified-entry-uses-selection ()
-  "Unified CSV copy should use either the active region or current cell."
-  (dolist (case '((t ((0 1) 1 2) nil "c1,c2\na1,a2\nb1,b2")
-                  (nil nil (0 1 a1) "c1\na1")))
-    (pcase-let ((`(,region-active ,rect ,cell ,expected) case))
+(ert-deftest clutch-test-copy-delimited-unified-entry-uses-selection ()
+  "CSV/TSV copy uses the selection without validating each value twice."
+  (dolist (case '((t ((0 1) 1 2) nil "c1,c2\na1,a2\nb1,b2" 6)
+                  (nil nil (0 1 a1) "c1\na1" 2)))
+    (pcase-let ((`(,region-active ,rect ,cell ,expected ,max-checks) case))
       (clutch-test--with-result-state
           (:columns '("c0" "c1" "c2")
-           :rows '((a0 a1 a2)
-                   (b0 b1 b2)
-                   (c0 c1 c2)))
-        (let (kill-ring kill-ring-yank-pointer)
-          (cl-letf (((symbol-function 'use-region-p)
-                     (lambda () region-active))
-                    ((symbol-function 'clutch-result--region-rectangle-indices)
-                     (lambda () rect))
-                    ((symbol-function 'clutch--cell-at-point)
-                     (lambda () cell)))
-            (clutch-result-copy 'csv)
-            (should (equal (current-kill 0) expected))))))))
+                    :rows '((a0 a1 a2)
+                            (b0 b1 b2)
+                            (c0 c1 c2)))
+        (dolist (kind '(csv tsv))
+          (let ((checks 0)
+                (check (symbol-function 'clutch-db-require-complete-value))
+                kill-ring kill-ring-yank-pointer)
+            (cl-letf (((symbol-function 'clutch-db-require-complete-value)
+                       (lambda (value) (cl-incf checks) (funcall check value)))
+                      ((symbol-function 'use-region-p)
+                       (lambda () region-active))
+                      ((symbol-function 'clutch-result--region-rectangle-indices)
+                       (lambda () rect))
+                      ((symbol-function 'clutch--cell-at-point)
+                       (lambda () cell)))
+              (clutch-result-copy kind)
+              (should (equal (current-kill 0)
+                             (if (eq kind 'tsv)
+                                 (subst-char-in-string ?, ?\t expected)
+                               expected)))
+              (should (<= checks max-checks)))))))))
 
 (ert-deftest clutch-test-copy-insert-unified-entry-uses-selection ()
   "Unified INSERT copy should use either the active region or current cell."
@@ -6926,6 +6937,280 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-db-disconnect conn))
       (should-not clutch--spinner-timer))))
 
+(ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
+  "Column sizing should stop measuring once the display cap is reached."
+  (let ((measure (symbol-function 'string-width))
+        (long (make-string 1048576 ?x)))
+    (cl-letf (((symbol-function 'string-width)
+               (lambda (text &rest args)
+                 (should (< (length text) 128))
+                 (apply measure text args))))
+      (should (equal (clutch--compute-column-widths
+                      '("value") (make-list 50 (list long))
+                      '((:name "value" :type-category text)) 30)
+                     [30])))))
+
+(ert-deftest clutch-test-capped-width-preserves-display-width ()
+  "Capped measurement should preserve Unicode, controls and compositions."
+  (with-temp-buffer
+    (dolist (text (list "" "abc" "中文" "á🙂" "a\tb\nc"
+                        (concat (make-string 80 ?\u0301) "x")
+                        (compose-string (make-string 80 ?x) 0 80 ?z)))
+      (dotimes (limit 40)
+        (should (= (clutch--capped-string-width text limit)
+                   (min limit (string-width text))))))
+    (setq-local buffer-display-table (make-display-table))
+    (aset buffer-display-table ?x [?a ?b ?c])
+    (should (= (clutch--capped-string-width "xxxx" 8) 8))))
+
+(ert-deftest clutch-test-cell-prefix-preserves-isolated-mark-width ()
+  "Prefix scanning must honor the buffer's isolated combining-mark width."
+  (let ((measure (symbol-function 'string-width)))
+    (dolist (isolated-width '(0 1))
+      (cl-letf (((symbol-function 'string-width)
+                 (lambda (text &rest args)
+                   (if (equal text "́") isolated-width
+                     (apply measure text args)))))
+        (should (equal (clutch--cell-visible-prefix "á" 1)
+                       (if (zerop isolated-width) '("á") '("…" . t))))))))
+
+(defun clutch-test--check-file-export (suffix)
+  "Check encoding, batching and destination preservation with SUFFIX."
+  (let* ((dir (make-temp-file "clutch-export-test-" t))
+         (path (expand-file-name (concat "out.csv" suffix) dir))
+         (rows '((1 "中文,a") (2 "x\ny") (3 "z"))))
+    (unwind-protect
+        (with-temp-buffer
+          (auto-compression-mode 1)
+          (setq-local clutch--result-columns '("id" "name"))
+          (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                    ((symbol-function 'clutch-result--collect-all-export-rows)
+                     (lambda () (ert-fail "File export collected all rows"))))
+            (dolist (coding '(utf-8-with-signature utf-8 gb18030))
+              (cl-letf (((symbol-function 'clutch--read-delimited-export-coding-system)
+                         (lambda (_) coding))
+                        ((symbol-function 'clutch-result--map-export-batches)
+                         (lambda (function)
+                           (funcall function (seq-take rows 2))
+                           (funcall function (last rows)))))
+                (clutch--export-result 'csv 'file))
+              (unless (string-empty-p suffix)
+                (should (equal (with-temp-buffer
+                                 (set-buffer-multibyte nil)
+                                 (insert-file-contents-literally path nil 0 2)
+                                 (buffer-string))
+                               (unibyte-string #x1f #x8b))))
+              (should (equal (with-temp-buffer
+                               (set-buffer-multibyte nil)
+                               (let ((coding-system-for-read 'no-conversion))
+                                 (insert-file-contents path))
+                               (buffer-string))
+                             (encode-coding-string (clutch--export-csv-content rows)
+                                                   coding))))
+            (let ((before (with-temp-buffer
+                            (insert-file-contents-literally path)
+                            (buffer-string))))
+              (dolist (exit '(error quit incomplete))
+                (cl-letf (((symbol-function 'clutch--read-delimited-export-coding-system)
+                           (lambda (_) 'utf-8))
+                          ((symbol-function 'clutch-result--map-export-batches)
+                           (lambda (function)
+                             (funcall function (list (car rows)))
+                             (pcase exit
+                               ('error (error "Second page failed"))
+                               ('quit (signal 'quit nil))
+                               ('incomplete
+                                (funcall function
+                                         (list (list 2 (make-clutch-db-value-preview
+                                                        :type 'clob :length 100
+                                                        :text "preview")))))))))
+                  (should (eq (condition-case err (clutch--export-result 'csv 'file)
+                                (error (car err)) (quit 'quit))
+                              (pcase exit ('incomplete 'user-error) (_ exit))))
+                  (should (equal before (with-temp-buffer
+                                          (insert-file-contents-literally path)
+                                          (buffer-string)))))))
+            (should (equal (directory-files dir nil "\\`[^.]")
+                           (list (file-name-nondirectory path))))))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-test-streamed-export-preserves-content-and-file ()
+  "Check ordinary-file encoding, batching and failure preservation."
+  (clutch-test--check-file-export ""))
+
+(ert-deftest clutch-test-file-export-preserves-compression ()
+  "Check gzip encoding, batching and failure preservation."
+  (skip-unless (executable-find "gzip"))
+  (clutch-test--check-file-export ".gz"))
+
+(ert-deftest clutch-test-export-handler-writes-once-and-preserves-failures ()
+  "A non-appending handler sees complete bytes and cannot damage the target."
+  (let* ((dir (make-temp-file "clutch-export-handler-" t))
+         (path (expand-file-name "out.clutch-test" dir))
+         (rows '(("中文,a") ("last")))
+         (calls 0)
+         outcome handler)
+    (setq handler
+          (lambda (operation &rest args)
+            (let ((inhibit-file-name-handlers
+                   (cons handler (and (eq inhibit-file-name-operation operation)
+                                      inhibit-file-name-handlers)))
+                  (inhibit-file-name-operation operation))
+              (if (not (eq operation 'write-region))
+                  (apply operation args)
+                (cl-incf calls)
+                (should-not (nth 3 args))
+                (let ((bytes (if (stringp (car args)) (car args)
+                               (buffer-substring-no-properties
+                                (car args) (cadr args)))))
+                  (write-region (concat "encoded:" bytes) nil
+                                (nth 2 args) nil 'silent))
+                (pcase outcome
+                  ('file-error (signal 'file-error '("Transform failed")))
+                  ('quit (signal 'quit nil)))))))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local clutch--result-columns '("value"))
+          (dolist (result '(success file-error quit))
+            (setq outcome result calls 0)
+            (write-region "old\n" nil path nil 'silent)
+            (set-file-modes path #o640)
+            (let ((file-name-handler-alist
+                   (cons (cons "\\.clutch-test\\'" handler)
+                         file-name-handler-alist)))
+              (cl-letf (((symbol-function 'clutch-result--map-export-batches)
+                         (lambda (function)
+                           (funcall function (list (car rows)))
+                           (funcall function (cdr rows)))))
+                (should (eq (condition-case err
+                                (progn
+                                  (clutch-result--write-export-file
+                                   'csv (cdr (assq 'csv clutch--result-export-kinds))
+                                   path :coding 'utf-8-with-signature)
+                                  'success)
+                              (file-error (car err))
+                              (quit 'quit))
+                            result))))
+            (should (= calls 1))
+            (should (equal (with-temp-buffer
+                             (set-buffer-multibyte nil)
+                             (insert-file-contents-literally path)
+                             (buffer-string))
+                           (if (eq result 'success)
+                               (concat "encoded:"
+                                       (encode-coding-string
+                                        (clutch--export-csv-content rows)
+                                        'utf-8-with-signature))
+                             "old\n")))
+            (should (= (file-modes path) #o640))
+            (should (equal (directory-files dir nil "\\`[^.]")
+                           '("out.clutch-test")))))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-test-streamed-export-preserves-symlinks ()
+  "Export follows relative link chains and preserves their targets on failure."
+  (dolist (existing '(t nil))
+    (dolist (outcome '(success error quit incomplete))
+      (let* ((dir (make-temp-file "clutch-export-link-" t))
+             (target-dir (expand-file-name "data" dir))
+             (target (expand-file-name "real.csv" target-dir))
+             (link (expand-file-name "export.csv" dir))
+             (middle (expand-file-name "current.csv" dir)))
+        (unwind-protect
+            (with-temp-buffer
+              (make-directory target-dir)
+              (when existing
+                (write-region "old\n" nil target nil 'silent)
+                (set-file-modes target #o640))
+              (make-symbolic-link "data/real.csv" middle)
+              (make-symbolic-link "current.csv" link)
+              (setq-local clutch--result-columns '("value"))
+              (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) link))
+                        ((symbol-function 'clutch--read-delimited-export-coding-system)
+                         (lambda (_) 'utf-8))
+                        ((symbol-function 'clutch-result--map-export-batches)
+                         (lambda (function)
+                           (funcall function '(("new")))
+                           (pcase outcome
+                             ('error (error "Second page failed"))
+                             ('quit (signal 'quit nil))
+                             ('incomplete
+                              (funcall function
+                                       (list (list (make-clutch-db-value-preview
+                                                    :type 'clob :length 1000
+                                                    :text "preview")))))
+                             (_ (funcall function '(("last"))))))))
+                (should (eq (condition-case err
+                                (progn (clutch--export-result 'csv 'file) 'success)
+                              (error (car err))
+                              (quit 'quit))
+                            (if (eq outcome 'incomplete) 'user-error outcome))))
+              (should (equal (file-symlink-p link) "current.csv"))
+              (should (equal (file-symlink-p middle) "data/real.csv"))
+              (if (or existing (eq outcome 'success))
+                  (should (equal (with-temp-buffer
+                                   (insert-file-contents target)
+                                   (buffer-string))
+                                 (if (eq outcome 'success)
+                                     "value\nnew\nlast\n"
+                                   "old\n")))
+                (should-not (file-exists-p target)))
+              (when existing
+                (should (= (file-modes target) #o640)))
+              (should (equal (directory-files dir nil "\\`[^.]")
+                             '("current.csv" "data" "export.csv")))
+              (should (equal (directory-files target-dir nil "\\`[^.]")
+                             (when (or existing (eq outcome 'success))
+                               '("real.csv")))))
+          (delete-directory dir t))))))
+
+(ert-deftest clutch-test-file-export-pages-through-sqlite ()
+  "Paged file output should equal complete formatting for every SQL format."
+  (require 'clutch-db-sqlite)
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (path (make-temp-file "clutch-export-pages-")))
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE items(id INTEGER PRIMARY KEY, body TEXT)")
+          (clutch-db-query conn "INSERT INTO items VALUES (1, '中文,a'), (2, 'x'), (3, NULL), (4, ''), (5, 'z')")
+          (clutch-test--with-result-state
+              (:connection conn :base-query "SELECT id, body FROM items ORDER BY id"
+               :last-query "SELECT id, body FROM items ORDER BY id"
+               :server-pageable t :columns '("id" "body")
+               :column-defs '((:name "id" :type-category numeric)
+                              (:name "body" :type-category text)))
+            (setq-local clutch--result-source-table "items"
+                        clutch--row-identity
+                        (clutch-test--primary-row-identity "items" '("id") '(0)))
+            (let ((clutch-result-max-rows 2)
+                  (rows (clutch-db-result-rows
+                         (clutch-db-query conn clutch--base-query))))
+              (dolist (kind '(csv tsv insert update))
+                (dolist (omit-header '(nil t))
+                  (let* ((spec (cdr (assq kind clutch--result-export-kinds)))
+                         (content (plist-get spec :content))
+                         (expected (if (memq kind '(csv tsv))
+                                       (funcall content rows omit-header)
+                                     (funcall content rows)))
+                         (calls 0)
+                         (format-batch (symbol-function content)))
+                    (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                              ((symbol-function 'clutch--read-delimited-export-coding-system)
+                               (lambda (_) 'utf-8))
+                              ((symbol-function content)
+                               (lambda (batch &rest args)
+                                 (should (<= (length batch) 2))
+                                 (cl-incf calls)
+                                 (apply format-batch batch args))))
+                      (clutch--export-result kind 'file omit-header))
+                    (should (= calls 3))
+                    (should (equal expected (with-temp-buffer
+                                              (insert-file-contents path)
+                                              (buffer-string))))))))))
+      (delete-file path)
+      (clutch-db-disconnect conn))))
+
 (ert-deftest clutch-test-collect-all-export-rows-contract ()
   "Export row collection should page, reuse local rows, and reconnect when needed."
   (dolist (case '(("plain limit"
@@ -7275,7 +7560,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-preview-execution-sql)
         (should (equal captured
                        (mapconcat #'identity
-                                  '("INSERT INTO `users` (`id`, `name`, `note`) VALUES ('3', 'cat', NULL);"
+                                  '("INSERT INTO `users` (`id`, `name`, `note`) VALUES ('3', 'cat', 'NULL');"
                                     "UPDATE `users` SET `name` = 'lynx' WHERE `id` = 1;"
                                     "DELETE FROM `users` WHERE `id` = 2;")
                                   "\n")))))))
@@ -7938,7 +8223,7 @@ statement."
                 ((symbol-function 'clutch--prepare-row-identity-query)
                  (lambda (&rest _args)
                    (list :sql "SELECT SLEEP(60)")))
-                ((symbol-function 'clutch--sql-has-page-tail-p)
+                ((symbol-function 'clutch-db-sql-has-top-level-row-limit-p)
                  (lambda (_sql) t))
                 ((symbol-function 'clutch--connection-alive-p)
                  (lambda (_conn) nil))
@@ -8338,6 +8623,151 @@ statement."
     (pcase-let ((`(,label ,value ,expected) case))
       (ert-info ((format "case: %s" label))
         (should (equal (clutch-db-format-temporal value) expected))))))
+
+(ert-deftest clutch-test-clone-preserves-qualified-relation-and-values ()
+  "Clone/stage/execute preserves source schema and literal value semantics."
+  (require 'clutch-db-sqlite)
+  (dolist (value '("NULL" "null" "" nil))
+    (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+          result-buf insert-buf)
+      (unwind-protect
+          (progn
+            (dolist (sql '("ATTACH DATABASE ':memory:' AS other"
+                           "CREATE TABLE main.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"
+                           "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"))
+              (clutch-db-query conn sql))
+            (clutch-db-execute-params
+             conn "INSERT INTO other.audit (payload) VALUES (?)" (list value))
+            (with-temp-buffer
+              (clutch-mode)
+              (setq-local clutch-connection conn)
+              (let ((source (current-buffer)))
+                (clutch-test--execute-and-present "SELECT * FROM other.audit" conn)
+                (setq result-buf
+                      (buffer-local-value 'clutch--last-result-buffer source)))
+              (with-current-buffer result-buf
+                (clutch--goto-cell 0 0)
+                (clutch-clone-row-to-insert))
+              (setq insert-buf (get-buffer "*clutch-insert: audit*"))
+              (with-current-buffer insert-buf (clutch-result-insert-stage))
+              (with-current-buffer result-buf
+                (clutch-result--submit-mutation-batch
+                 (clutch-result--build-pending-insert-statements) nil nil)
+                (setq clutch--pending-inserts nil)))
+            (should (equal (clutch-db-result-rows
+                            (clutch-db-query conn "SELECT payload FROM other.audit ORDER BY id"))
+                           (list (list value) (list value))))
+            (should-not (clutch-db-result-rows
+                         (clutch-db-query conn "SELECT * FROM main.audit"))))
+        (dolist (buf (list insert-buf result-buf))
+          (when (buffer-live-p buf) (kill-buffer buf)))
+        (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-test-json-cancel-retains-null-on-clone ()
+  "Opening and cancelling a JSON editor preserves SQL NULL on submission."
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        result-buf insert-buf json-buf)
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT, payload JSON DEFAULT '{\"fallback\":true}')")
+          (clutch-db-query conn "INSERT INTO items(name,payload) VALUES('kept',NULL)")
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (let ((source (current-buffer)))
+              (clutch-test--execute-and-present "SELECT * FROM items" conn)
+              (setq result-buf (buffer-local-value 'clutch--last-result-buffer source)))
+            (with-current-buffer result-buf
+              (clutch--goto-cell 0 0)
+              (clutch-clone-row-to-insert))
+            (setq insert-buf (get-buffer "*clutch-insert: items*"))
+            (with-current-buffer insert-buf
+              (goto-char (plist-get (clutch-result-insert--field-state "payload") :value-marker))
+              (should (equal (assoc "payload" (clutch-result-insert--parse-fields)) '("payload")))
+              (setq json-buf (clutch-result-insert-edit-json-field)))
+            (with-current-buffer json-buf (clutch-result-insert-json-cancel))
+            (with-current-buffer insert-buf
+              (clutch-result-insert-stage))
+            (with-current-buffer result-buf
+              (clutch-result--submit-mutation-batch
+               (clutch-result--build-pending-insert-statements) nil nil)
+              (setq clutch--pending-inserts nil)))
+          (let ((rows (clutch-db-result-rows
+                       (clutch-db-query conn "SELECT name,payload FROM items ORDER BY id"))))
+            (should (equal rows '(("kept" nil) ("kept" nil))))))
+      (dolist (buf (list json-buf insert-buf result-buf))
+        (when (buffer-live-p buf) (kill-buffer buf)))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-jdbc-preview-cannot-be-written-or-exported ()
+  "A legacy agent's incomplete preview never becomes writable text."
+  (require 'clutch-db-jdbc)
+  (let* ((preview (make-string 256 ?a))
+         (value (car (clutch-jdbc--normalize-row
+                      (list (list :__type "clob" :length 1000 :preview preview)))))
+         (clutch--result-columns '("body"))
+         (clutch--result-column-defs '((:name "body" :type-category text))))
+    (should-not (stringp value))
+    (should (= (clutch-db-value-preview-length value) 1000))
+    (should (equal (clutch-db-value-preview-text value) preview))
+    (should (string-match-p "CLOB preview; 1000 total"
+                            (plist-get (clutch--view-spec value nil) :content)))
+    (should-error (clutch-result--editable-field-string
+                   value '(:type-category text) '(:type "CLOB"))
+                  :type 'user-error)
+    (dolist (format '(csv tsv org-table insert))
+      (should-error (clutch-result--copy-lines format (list (list value)) '(0))
+                    :type 'user-error))
+    (dolist (export '(clutch--export-csv-content clutch--export-tsv-content))
+      (should-error (funcall export (list (list value))) :type 'user-error))))
+
+(ert-deftest clutch-test-insert-explicit-values-survive-validation-and-reopen ()
+  "NULL, empty text, default and literal text remain distinct in the form."
+  (clutch-test--with-pop-to-buffer-capture insert-buf
+    (clutch-test--with-insert-result-buffer result-buf
+        (:columns '("payload")
+                  :column-defs '((:name "payload" :type-category text))
+                  :connection 'fake-conn :source-table "audit")
+      (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                 (lambda (&rest _)
+                   '((:name "payload" :type "text" :nullable t :default "fallback")))))
+        (clutch-result-insert--open-buffer "audit" result-buf)
+        (dolist (case '((clutch-result-insert-set-null (("payload")))
+                        (clutch-result-insert-set-empty (("payload" . "")))
+                        (clutch-result-insert-set-default nil)))
+          (with-current-buffer insert-buf
+            (clutch-test--goto-insert-field-value "payload")
+            (funcall (car case))
+            (clutch-result-insert--run-idle-validation insert-buf "payload")
+            (should (equal (clutch-result-insert--parse-fields) (cadr case))))
+          (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
+          (with-current-buffer insert-buf
+            (should (equal (clutch-result-insert--parse-fields) (cadr case)))))
+        (with-current-buffer insert-buf
+          (clutch-test--goto-insert-field-value "payload")
+          (clutch-result-insert-set-null)
+          (insert "NULL")
+          (should (equal (clutch-result-insert--parse-fields)
+                         '(("payload" . "NULL")))))))))
+
+(ert-deftest clutch-test-clone-skips-generated-previews-before-conversion ()
+  "Omitted generated columns do not prevent cloning the writable fields."
+  (let ((clutch-connection 'fake-conn)
+        (clutch--result-columns '("id" "generated_body" "name"))
+        (clutch--result-column-defs
+         '((:name "id") (:name "generated_body") (:name "name")))
+        (clutch--row-identity
+         (clutch-test--primary-row-identity "audit" '("id") '(0))))
+    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+               (lambda (&rest _)
+                 '((:name "id" :primary-key t)
+                   (:name "generated_body" :generated t)
+                   (:name "name" :type "text")))))
+      (should (equal (clutch-result-insert--clone-fields-from-row-values
+                      "audit" (list 1 (make-clutch-db-value-preview
+                                       :type 'clob :length 1000 :text "preview")
+                                    "kept"))
+                     '(("name" . "kept")))))))
 
 (provide 'clutch-test)
 

@@ -24,7 +24,7 @@ Run the standalone MySQL protocol live suite from the [`mysql.el`](https://githu
 
 ```sh
 emacs -Q --batch -L . -l ert -l test/mysql-test.el \
-  --eval '(setq mysql-test-password "test")' \
+  --eval '(setq mysql-test-password "test" mysql-test-port 55306)' \
   --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
 ```
 

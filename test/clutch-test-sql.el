@@ -905,27 +905,6 @@ Structure is not interpreted here; callers confirm depth and literals through
                     (clutch-db-sql-code-match-positions sql 1 nil "\\bfrom\\b"))
                    '(7)))))
 
-;;;; SQL parsing — LIMIT detection and paging SQL
-
-(ert-deftest clutch-test-db-sql-has-top-level-limit-p ()
-  "Test LIMIT clause detection."
-  (should (clutch-db-sql-has-top-level-limit-p "SELECT * FROM t LIMIT 10"))
-  (should (clutch-db-sql-has-top-level-limit-p "select * from t limit 10"))
-  (should (clutch-db-sql-has-top-level-limit-p
-           "SELECT * FROM t WHERE x=1 LIMIT 5 OFFSET 10"))
-  (should (clutch-db-sql-has-top-level-limit-p
-           "(SELECT id FROM a) UNION ALL (SELECT id FROM b) LIMIT 20"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "SELECT * FROM (SELECT * FROM t LIMIT 5) AS s"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "(SELECT id FROM a LIMIT 1) UNION ALL (SELECT id FROM b)"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "WITH x AS (SELECT * FROM t LIMIT 3) SELECT * FROM x"))
-  (should-not (clutch-db-sql-has-top-level-limit-p "SELECT * FROM t"))
-  (should-not (clutch-db-sql-has-top-level-limit-p
-               "SELECT * FROM t WHERE limitation = 1")))
-
-
 ;;;; Completion — SQL keywords
 
 (ert-deftest clutch-test-sql-keyword-completion-contract ()

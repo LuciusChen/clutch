@@ -19,8 +19,8 @@ add_load_path "$repo/../mysql.el"
 pgsql_el_dir="${PGSQL_EL_DIR:-}"
 if [[ -z "$pgsql_el_dir" ]]; then
   for candidate in \
-    "$HOME/repos/pgsql.el" \
     "$repo/../pgsql.el" \
+    "$HOME/repos/pgsql.el" \
     "$HOME/.emacs.d/straight/repos/pgsql.el"; do
     if [[ -d "$candidate" ]]; then
       pgsql_el_dir="$candidate"
@@ -31,6 +31,12 @@ fi
 add_load_path "$pgsql_el_dir"
 add_load_path "$repo"
 add_load_path "$repo/test"
+
+for path in "${load_paths[@]}"; do
+  if git -C "$path" rev-parse --show-toplevel >/dev/null 2>&1; then
+    printf 'Dependency: %s @ %s\n' "$path" "$(git -C "$path" rev-parse --short HEAD)"
+  fi
+done
 
 if [[ -n "${CLUTCH_EXTRA_LOAD_PATH:-}" ]]; then
   IFS=: read -r -a extra_paths <<<"$CLUTCH_EXTRA_LOAD_PATH"

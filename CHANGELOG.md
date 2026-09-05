@@ -5,9 +5,18 @@
 ### Changed
 
 - Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
+- Removed unused `clutch-db-sql-has-top-level-limit-p` and `clutch-db-sql-has-top-level-offset-p` helpers. Use `clutch-db-sql-has-top-level-row-limit-p` when guarding bounded-query rewrites.
 
 ### Fixed
 
+- Pinned clutch-jdbc-agent 0.2.21 and its verified release checksum. Structured BLOB text retains its original whitespace and encoding, and CLOB preview truncation no longer splits a Unicode surrogate pair into invalid JSON.
+- Bounded column sizing for long values and reduced repeated list traversal in local aggregation, filtering, and CSV/TSV formatting and copying. Full table rendering now copies fewer intermediate strings while preserving cell properties and Unicode behavior.
+- Released value-dependent pixel-render caches on every newly installed query result, while retaining compatible font measurements and cache reuse within the current result.
+- Collected pageable export rows in linear time. CSV, TSV, INSERT and UPDATE file exports now format and write one batch at a time, preserve the selected encoding and a single BOM, and replace the destination only after success. Exports follow symbolic links without replacing the links themselves and preserve filename-based transformations such as gzip compression.
+- Preserved schema-qualified INSERT targets when cloning, submitting, or exporting result rows. Literal `NULL`, SQL NULL, and empty strings remain distinct through insert forms and staged-insert reopening; explicit insert commands select NULL, empty text, or the server default. Cancelling a JSON child editor leaves the parent insert field's value and state intact.
+- Kept incomplete JDBC CLOB values marked as previews and rejected lossy edits, clones, and exports before writing data. Completeness uses JDBC UTF-16 lengths, so complete short CLOBs, including emoji and empty text, remain usable as text.
+- Preserved TOP, FETCH and OFFSET clauses in query pagination, filtering, counting, and full-result export so rewrites retain the original bounded row set. TOP and FETCH detection respects clause context, keeping ordinary column, table and alias names pageable.
+- Kept the SQLite adapter connection on SELECT, DML and parameterized results, preserving the result buffer's live connection context.
 - Kept repeated `n` / `M-n` result-row navigation in the last data cell instead of falling back into the non-data row-number gutter, where further row navigation stopped working.
 - Kept graphical result headers aligned with rows after `C` column jumps and horizontal Tab paging. Result-body cells now use the same explicit pixel-padding representation as headers on every supported Emacs version, so a horizontal-scroll position inside a cell cannot make Emacs crop the two grid layers differently.
 - Kept Result Browser row numbering and data-edge navigation inside the grid. Native line numbers now stay disabled across query refreshes, while `{` and `}` move to the first and last visible data columns without entering the virtual row-number prefix or moving beyond the final cell.
