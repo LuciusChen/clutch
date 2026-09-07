@@ -1495,8 +1495,19 @@ TRAMP methods are ignored for inference."
     (params &optional source-default-directory)
   "Return PARAMS prepared according to Clutch connection rules.
 When PARAMS has no explicit transport, SOURCE-DEFAULT-DIRECTORY may provide a
-TRAMP origin according to `clutch-tramp-context-policy'."
-  (clutch--prepare-connection-origin-params params source-default-directory))
+TRAMP origin according to `clutch-tramp-context-policy'.  Local SQLite files
+are resolved against SOURCE-DEFAULT-DIRECTORY, or `default-directory'."
+  (let ((prepared (clutch--prepare-connection-origin-params
+                   params source-default-directory)))
+    (when-let* (((eq (plist-get prepared :backend) 'sqlite))
+                ((not (file-remote-p (or source-default-directory
+                                         default-directory))))
+                (database (plist-get prepared :database)))
+      (setq prepared
+            (plist-put (copy-sequence prepared) :database
+                       (clutch--normalize-sqlite-database-file
+                        database source-default-directory))))
+    prepared))
 
 (defun clutch--carry-current-connection-origin (params)
   "Return PARAMS with the current buffer's inferred origin preserved.
@@ -2284,11 +2295,12 @@ NAME as `:pass-entry' when no explicit password source is configured."
   (when-let* ((params (clutch--saved-connection-params name)))
     (copy-sequence params)))
 
-(defun clutch--normalize-sqlite-database-file (file)
-  "Return canonical SQLite database FILE for connection identity."
-  (if (string= file ":memory:")
+(defun clutch--normalize-sqlite-database-file (file &optional directory)
+  "Return SQLite FILE resolved against DIRECTORY for connection identity.
+DIRECTORY defaults to `default-directory'.  Preserve special database names."
+  (if (member file '(":memory:" ""))
       file
-    (expand-file-name file)))
+    (expand-file-name file directory)))
 
 (defun clutch--read-sqlite-file-params ()
   "Read an ad hoc SQLite database file and return connection params."

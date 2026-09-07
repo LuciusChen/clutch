@@ -2314,6 +2314,51 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  "\"name\":\"email_idx\""
                  (clutch-db-object-definition conn email-entry)))))))
 
+(ert-deftest clutch-db-test-mongodb-grid-keeps-sparse-typed-source-documents ()
+  "Grid indexing preserves missing/null, BSON values and first duplicate keys."
+  (let* ((docs (list (list '("score" . 1) '("score" . 999)
+                           '("nullable" . 2) (cons "wrapped" (mongodb-int64 7)))
+                     '(("_id" . 2) ("nullable") ("nested" . []) ("flag" . :false))
+                     (list '("score" . 3) '("nested" . (("v" . 1)))
+                           (cons "wrapped" (mongodb-int64 8)) '("flag" . t))))
+         (original (copy-tree docs))
+         (result (clutch-mongodb--result-from-docs nil docs))
+         (columns (clutch-db-result-columns result)))
+    (should (equal (clutch-db-result-column-names columns)
+                   '("_id" "score" "nullable" "wrapped" "nested" "flag"
+                     "clutch__document")))
+    (should (equal (mapcar (lambda (col) (plist-get col :type-category)) columns)
+                   '(numeric numeric text numeric json text json)))
+    (should (equal (mapcar (lambda (row) (butlast row)) (clutch-db-result-rows result))
+                   '((nil 1 2 7 nil nil)
+                     (2 nil nil nil "[]" "false")
+                     (nil 3 nil 8 "{\"v\":1}" "true"))))
+    (cl-mapc (lambda (doc row) (should (eq doc (car (last row)))))
+             docs (clutch-db-result-rows result))
+    (should (equal docs original))))
+
+(ert-deftest clutch-db-test-mongodb-grid-bounds-field-traversal ()
+  "Wide grids avoid repeatedly scanning growing key and document lists."
+  (let* ((width 128)
+         (row (cl-loop for i below width collect (cons (format "f%d" i) i)))
+         (docs (make-list 20 row))
+         (lookup (symbol-function 'assoc))
+         (contains (symbol-function 'member))
+         (visited 0))
+    (cl-letf (((symbol-function 'assoc)
+               (lambda (key alist &rest args)
+                 (cl-incf visited (length alist))
+                 (apply lookup key alist args)))
+              ((symbol-function 'member)
+               (lambda (item list)
+                 (cl-incf visited (length list))
+                 (funcall contains item list))))
+      (let ((result (clutch-mongodb--result-from-docs nil docs)))
+        (should (= (length (clutch-db-result-columns result)) (1+ width)))
+        (should (equal (butlast (car (clutch-db-result-rows result)))
+                       (number-sequence 0 (1- width))))))
+    (should (<= visited (* 8 width (length docs))))))
+
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   :tags '(:smoke)
   "Native MongoDB query results should flatten top-level document keys."
@@ -4614,7 +4659,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (should-not (plist-member captured-args :tls-options))))))
 
 (ert-deftest clutch-db-test-pg-connect-applies-timeout-defaults ()
-  "PostgreSQL connect should apply Clutch timeout defaults at the adapter boundary."
+  "PostgreSQL connect applies timeout defaults and preserves explicit values."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
     (let ((clutch-connect-timeout-seconds 12)
@@ -4632,35 +4677,18 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (lambda (_client sql)
                    (setq executed-sql sql)
                    (clutch-db-test--make-pg-result))))
-        (clutch-db-pg-connect
-         '(:host "127.0.0.1"
-           :port 5432
-           :database "test"
-           :user "postgres"
-           :password "secret"))
-        (should (= (plist-get captured-args :connect-timeout) 12))
-        (should (= (plist-get captured-args :read-timeout) 34))
-        (should (equal executed-sql "SET statement_timeout = 56000"))))))
-
-(ert-deftest clutch-db-test-pg-restore-connection-timeouts ()
-  "PostgreSQL reconnect recovery should restore both client timeouts."
-  (require 'clutch-db-pg)
-  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
-         (client (clutch-db-pg--connection-client conn))
-         connect-timeout
-         read-timeout)
-    (cl-letf (((symbol-function 'pgsql-set-connect-timeout)
-               (lambda (actual-client seconds)
-                 (should (eq actual-client client))
-                 (setq connect-timeout seconds)))
-              ((symbol-function 'pgsql-set-read-timeout)
-               (lambda (actual-client seconds)
-                 (should (eq actual-client client))
-                 (setq read-timeout seconds))))
-      (clutch-db--restore-connection-timeouts
-       conn '(:connect-timeout 12 :read-idle-timeout 34))
-      (should (= connect-timeout 12))
-      (should (= read-timeout 34)))))
+        (dolist (case '((nil 12 34 56000)
+                        ((:connect-timeout 7 :read-idle-timeout 23
+                                           :query-timeout 9) 7 23 9000)))
+          (pcase-let ((`(,overrides ,connect ,read ,statement-ms) case))
+            (clutch-db-pg-connect
+             (append overrides '(:host "127.0.0.1" :port 5432
+                                       :database "test" :user "postgres"
+                                       :password "secret")))
+            (should (= (plist-get captured-args :connect-timeout) connect))
+            (should (= (plist-get captured-args :read-timeout) read))
+            (should (equal executed-sql
+                           (format "SET statement_timeout = %d" statement-ms)))))))))
 
 (ert-deftest clutch-db-test-mysql-connect-wire-params ()
   "MySQL connect should pass only adapter-native params to `mysql-connect'."
@@ -5099,6 +5127,38 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
               (quit nil)
               (error nil)))
           (ignore-errors (clutch-db-interrupt-query conn)))))))
+
+(ert-deftest clutch-db-test-mysql-live-manual-batch-preserves-select-lock ()
+  :tags '(:db-live :mysql-live)
+  "An empty Manual batch preserves locks acquired by a result-set query."
+  (clutch-db-test--with-mysql conn
+    (clutch-db-test--with-mysql watcher
+      (let ((table (clutch-db-test--live-name "clutch_eof_lock")))
+        (unwind-protect
+            (progn
+              (clutch-db-query conn
+                               (format "CREATE TABLE %s(id INT PRIMARY KEY, value INT) ENGINE=InnoDB" table))
+              (clutch-db-query conn (format "INSERT INTO %s VALUES(1,0)" table))
+              (clutch-db-query watcher "SET innodb_lock_wait_timeout=1")
+              (clutch-db-set-auto-commit conn nil)
+              (dolist (prepared '(nil t))
+                (clutch-db-rollback conn)
+                (let ((sql (format "SELECT * FROM %s WHERE id=1 FOR UPDATE" table)))
+                  (if prepared (clutch-db-execute-params conn sql nil)
+                    (clutch-db-query conn sql)))
+                (clutch-db-call-with-atomic-batch conn #'ignore)
+                (let ((err (should-error
+                            (clutch-db-query watcher
+                                             (format "UPDATE %s SET value=1 WHERE id=1" table))
+                            :type 'clutch-db-error)))
+                  (should (string-match-p "1205" (error-message-string err))))
+                (clutch-db-rollback conn)
+                (should (= (clutch-db-result-affected-rows
+                            (clutch-db-query watcher
+                                             (format "UPDATE %s SET value=value+1 WHERE id=1" table)))
+                           1))))
+          (clutch-db-rollback conn)
+          (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-db-test-mysql-live-timeout-recovers-connection ()
   :tags '(:db-live :mysql-live)

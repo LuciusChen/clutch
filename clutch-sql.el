@@ -29,11 +29,8 @@
 (defvar clutch-connection)
 (defvar clutch--sql-keywords)
 
-(defvar-local clutch--tables-in-buffer-cache nil
-  "Cached result for `clutch--tables-in-buffer' in the current buffer.")
-
 (defvar-local clutch--tables-in-query-cache nil
-  "Cached result for `clutch--tables-in-query' in the current buffer.")
+  "Cached statement bounds, table names and aliases in the current buffer.")
 
 (defconst clutch--schema-inline-table-limit 3
   "Maximum number of statement tables for synchronous schema hints.")
@@ -88,74 +85,6 @@
            "  "))
       header)))
 
-(defun clutch--tables-in-buffer (schema)
-  "Return table names from SCHEMA that appear in the current buffer."
-  (let ((tick (buffer-chars-modified-tick)))
-    (if (and clutch--tables-in-buffer-cache
-             (eq (plist-get clutch--tables-in-buffer-cache :schema) schema)
-             (= (plist-get clutch--tables-in-buffer-cache :tick) tick))
-        (plist-get clutch--tables-in-buffer-cache :tables)
-      (let ((seen (make-hash-table :test 'equal))
-            text
-            tables)
-        (cl-labels
-            ((identifier-start-p (ch)
-               (and ch
-                    (or (memq (char-syntax ch) '(?w ?_))
-                        (memq ch '(?_ ?$ ?#)))))
-             (identifier-char-p (ch)
-               (and ch
-                    (or (identifier-start-p ch)
-                        (= ch ?.))))
-             (record-token (token)
-               (unless (string-empty-p token)
-                 (puthash token t seen)
-                 (puthash (downcase token) t seen)
-                 (when (string-match "\\.\\([^.]+\\)\\'" token)
-                   (puthash (match-string 1 token) t seen)
-                   (puthash (downcase (match-string 1 token)) t seen)))))
-          (save-excursion
-            (goto-char (point-min))
-            (while (not (eobp))
-              (cond
-               ((memq (char-after) '(?\" ?`))
-                (let ((quote (char-after))
-                      (beg (1+ (point))))
-                  (forward-char)
-                  (while (and (not (eobp))
-                              (/= (char-after) quote))
-                    (forward-char))
-                  (record-token (buffer-substring-no-properties beg (point)))
-                  (unless (eobp)
-                    (forward-char))))
-               ((identifier-start-p (char-after))
-                (let ((beg (point)))
-                  (while (identifier-char-p (char-after))
-                    (forward-char))
-                  (record-token (buffer-substring-no-properties
-                                 beg (point)))))
-               (t
-                (forward-char))))))
-        (maphash (lambda (tbl _cols)
-                   (when (and
-                          (stringp tbl)
-                          (if (string-match-p
-                               "\\`[[:alnum:]_$#]+\\(?:\\.[[:alnum:]_$#]+\\)*\\'"
-                               tbl)
-                              (gethash (downcase tbl) seen)
-                           (let ((case-fold-search t))
-                             (unless text
-                               (setq text
-                                     (buffer-substring-no-properties
-                                      (point-min) (point-max))))
-                             (string-match-p (regexp-quote tbl) text))))
-                     (push tbl tables)))
-                 schema)
-        (setq tables (nreverse tables))
-        (setq clutch--tables-in-buffer-cache
-              (list :schema schema :tick tick :tables tables))
-        tables))))
-
 (defun clutch--statement-bounds ()
   "Return (BEG . END) for the SQL statement surrounding point."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
@@ -182,9 +111,7 @@ BOUNDS, when non-nil, is the already computed statement range."
           :beg beg
           :end end
           :statement-tables statement-tables
-          :statement-aliases aliases
-          :tables (or statement-tables
-                      (clutch--tables-in-buffer schema)))))
+          :statement-aliases aliases)))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -534,13 +461,6 @@ not treat schema qualifiers in `schema.table' as aliases."
 (cl-defmethod xref-backend-references ((_backend (eql 'clutch)) _identifier)
   "Not yet implemented."
   nil)
-
-(defun clutch--tables-in-query (schema)
-  "Return known table names for SCHEMA in the current statement.
-This scans FROM/JOIN/UPDATE clauses in the SQL statement around point,
-bounded by semicolons or blank lines.  Falls back to
-`clutch--tables-in-buffer' when none are found."
-  (plist-get (clutch--tables-in-query-cache-entry schema) :tables))
 
 (defun clutch--identifier-match (identifier candidates)
   "Return canonical match for IDENTIFIER from string CANDIDATES, or nil.

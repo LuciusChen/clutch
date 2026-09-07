@@ -390,44 +390,6 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
 
 ;;;; SQL parsing — table and alias extraction
 
-(ert-deftest clutch-test-tables-in-buffer-caches-until-buffer-changes ()
-  "Table lookup in the buffer should reuse cached results until text changes."
-  (with-temp-buffer
-    (insert "SELECT * FROM users")
-    (let ((schema (make-hash-table :test 'equal))
-          first-cache)
-      (puthash "users" t schema)
-      (puthash "posts" t schema)
-      (should (equal (clutch--tables-in-buffer schema) '("users")))
-      (setq first-cache clutch--tables-in-buffer-cache)
-      (should (equal (clutch--tables-in-buffer schema) '("users")))
-      (should (eq clutch--tables-in-buffer-cache first-cache))
-      (goto-char (point-max))
-      (insert " JOIN posts")
-      (should (equal (clutch--tables-in-buffer schema) '("users" "posts")))
-      (should-not (eq clutch--tables-in-buffer-cache first-cache)))))
-
-(ert-deftest clutch-test-tables-in-buffer-fallback-contract ()
-  "Whole-buffer table fallback should avoid substring leaks and honor quoting."
-  (dolist (case '(("identifier scan"
-                   "SELECT * FROM app.Users JOIN `order_items` oi ON oi.user_id = Users.id"
-                   ("users" "order_items" "app.Users" "items")
-                   ("app.Users" "order_items" "users"))
-                  ("quoted non-identifier"
-                   "SELECT * FROM `order-items`"
-                   ("order-items" "items")
-                   ("order-items"))))
-    (pcase-let ((`(,label ,sql ,schema-tables ,expected) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (insert sql)
-          (let ((schema (make-hash-table :test 'equal)))
-            (dolist (table schema-tables)
-              (puthash table t schema))
-            (should (equal (sort (clutch--tables-in-buffer schema)
-                                 #'string<)
-                           expected))))))))
-
 (ert-deftest clutch-test-tables-in-query-caches-within-statement ()
   "Statement table lookup should reuse cached results until statement or text changes."
   (with-temp-buffer
@@ -438,20 +400,22 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
       (puthash "posts" t schema)
       (puthash "logs" t schema)
       (goto-char (point-min))
-      (should (equal (sort (copy-sequence (clutch--tables-in-query schema)) #'string<)
+      (should (equal (sort (copy-sequence
+                           (clutch--tables-in-current-statement schema)) #'string<)
                      '("posts" "users")))
       (setq first-cache clutch--tables-in-query-cache)
       (search-forward "users.id")
-      (should (equal (sort (copy-sequence (clutch--tables-in-query schema)) #'string<)
+      (should (equal (sort (copy-sequence
+                           (clutch--tables-in-current-statement schema)) #'string<)
                      '("posts" "users")))
       (should (eq clutch--tables-in-query-cache first-cache))
       (goto-char (point-max))
-      (should (equal (clutch--tables-in-query schema) '("logs")))
+      (should (equal (clutch--tables-in-current-statement schema) '("logs")))
       (setq second-cache clutch--tables-in-query-cache)
       (should-not (eq second-cache first-cache))
       (goto-char (point-max))
       (insert " WHERE level = 'error'")
-      (should (equal (clutch--tables-in-query schema) '("logs")))
+      (should (equal (clutch--tables-in-current-statement schema) '("logs")))
       (should-not (eq clutch--tables-in-query-cache second-cache)))))
 
 (ert-deftest clutch-test-tables-in-query-cache-hit-skips-statement-rescan ()
@@ -461,12 +425,12 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
     (let ((schema (make-hash-table :test 'equal)))
       (puthash "users" t schema)
       (goto-char (point-min))
-      (should (equal (clutch--tables-in-query schema) '("users")))
+      (should (equal (clutch--tables-in-current-statement schema) '("users")))
       (search-forward "active")
       (cl-letf (((symbol-function 'clutch--statement-bounds)
                  (lambda ()
                    (ert-fail "Warm cache hit rescanned statement bounds"))))
-        (should (equal (clutch--tables-in-query schema) '("users")))))))
+        (should (equal (clutch--tables-in-current-statement schema) '("users")))))))
 
 (ert-deftest clutch-test-tables-in-query-cache-respects-buffer-restriction ()
   "A warm statement cache should not cross a changed buffer restriction."
@@ -476,12 +440,12 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
       (puthash "users" t schema)
       (puthash "logs" t schema)
       (goto-char (point-min))
-      (should (equal (clutch--tables-in-query schema) '("users" "logs")))
+      (should (equal (clutch--tables-in-current-statement schema) '("users" "logs")))
       (search-forward "JOIN")
       (narrow-to-region (match-beginning 0) (point-max))
-      (should (equal (clutch--tables-in-query schema) '("logs")))
+      (should (equal (clutch--tables-in-current-statement schema) '("logs")))
       (widen)
-      (should (equal (clutch--tables-in-query schema) '("users" "logs"))))))
+      (should (equal (clutch--tables-in-current-statement schema) '("users" "logs"))))))
 
 (ert-deftest clutch-test-tables-in-query-cache-does-not-cross-blank-line ()
   "A cached statement should end before its blank-line separator."
@@ -491,9 +455,9 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
       (puthash "users" t schema)
       (puthash "logs" t schema)
       (goto-char (point-min))
-      (should (equal (clutch--tables-in-query schema) '("users")))
+      (should (equal (clutch--tables-in-current-statement schema) '("users")))
       (goto-char (plist-get clutch--tables-in-query-cache :end))
-      (should (equal (clutch--tables-in-query schema) '("logs"))))))
+      (should (equal (clutch--tables-in-current-statement schema) '("logs"))))))
 
 (ert-deftest clutch-test-table-scan-does-not-consume-join-as-previous-table-alias ()
   "JOIN should not be consumed as the previous table's optional alias.
@@ -1335,6 +1299,10 @@ Structure is not interpreted here; callers confirm depth and literals through
             (puthash conn '(:state ready) clutch--schema-status-cache)
             (dolist (case
                      '((short "x" nil preserve (:exact ("xaccounts")) nil)
+                       (no-from "select * from users;\nselect users" nil preserve
+                                (:exact ("users")) nil)
+                       (no-source "select user_r" nil preserve
+                                  (:exact ("user_roles")) nil)
                        (from "select * from or" nil preserve
                              (:exact ("orders")) nil)
                        (qualified
@@ -1347,7 +1315,7 @@ Structure is not interpreted here; callers confirm depth and literals through
                         "ord" preserve (:members ("ORDER BY" "order_id")) nil)
                        (lowercase "select con from APP_CONFIG" "con" lower
                                   (:members ("concat" "constraint" "config_id" "config_name")
-                                   :absent ("CONFIG_ID" "CONFIG_NAME"))
+                                            :absent ("CONFIG_ID" "CONFIG_NAME"))
                                   nil)))
               (pcase-let ((`(,label ,sql ,needle ,style ,expected ,company) case))
                 (ert-info ((format "case: %s" label))

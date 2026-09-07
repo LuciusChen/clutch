@@ -3399,15 +3399,26 @@ spine, so consumers may collect batches without mutating cached rows."
     (kind spec path &key coding omit-header)
   "Write KIND using SPEC to PATH with CODING and OMIT-HEADER.
 Format one batch at a time, following symbolic links in PATH.
-Filename-specific write handlers receive the complete encoded output once.
+PATH's filename-specific handlers receive the complete encoded output once.
 Replace the destination only after successful completion.
 Return the exported row count."
-  (let* ((target (file-truename path))
-         (temporary (make-nearby-temp-file (concat target ".clutch-")))
+  (let* ((path (expand-file-name path))
+         (target (file-truename path))
          transformed
          (row-count 0)
          (first t)
-         (coding (or coding coding-system-for-write 'utf-8-unix)))
+         (coding (or coding coding-system-for-write 'utf-8-unix))
+         (append-coding
+          (if-let* ((base (alist-get (coding-system-base coding)
+                                     '((utf-8-with-signature . utf-8)
+                                       (utf-16 . utf-16be)
+                                       (utf-16be-with-signature . utf-16be)
+                                       (utf-16le-with-signature . utf-16le)))))
+              (coding-system-change-eol-conversion
+               base (let ((eol (coding-system-eol-type coding)))
+                      (and (integerp eol) eol)))
+            coding))
+         (temporary (make-nearby-temp-file (concat target ".clutch-"))))
     (unwind-protect
         (progn
           (cl-labels
@@ -3417,25 +3428,19 @@ Return the exported row count."
                                           rows (or omit-header (not first)))
                                (funcall (plist-get spec :content) rows)))
                        (coding-system-for-write
-                        (if (and (not first)
-                                 (eq (coding-system-base coding)
-                                     'utf-8-with-signature))
-                            (coding-system-change-eol-conversion
-                             'utf-8 (let ((eol (coding-system-eol-type coding)))
-                                      (and (integerp eol) eol)))
-                          coding)))
+                        (if first coding append-coding)))
                    (write-region text nil temporary (not first) 'silent)
                    (cl-incf row-count (length rows))
                    (setq first nil))))
             (if (eq kind 'document-insert-many)
                 (write-batch (clutch-result--collect-all-export-rows))
               (clutch-result--map-export-batches #'write-batch)))
-          (unless (eq (find-file-name-handler target 'write-region)
+          (unless (eq (find-file-name-handler path 'write-region)
                       (find-file-name-handler temporary 'write-region))
             (setq transformed
                   (make-nearby-temp-file
                    (expand-file-name "clutch-" (file-name-directory target))
-                   nil (concat "-" (file-name-nondirectory target))))
+                   nil (concat "-" (file-name-nondirectory path))))
             (with-temp-buffer
               (set-buffer-multibyte nil)
               (insert-file-contents-literally temporary)

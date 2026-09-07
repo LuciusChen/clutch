@@ -177,6 +177,20 @@
       :tramp "/ssh:devbox:/workspace/"))
    :type 'user-error))
 
+(ert-deftest clutch-test-prepare-sqlite-path-before-connection ()
+  "SQLite preparation resolves local file identity without changing inputs."
+  (dolist (file '("app.db" "./app.db" ":memory:" "" "/tmp/app.db"))
+    (let* ((params (list :backend 'sqlite :database file))
+           (before (copy-tree params))
+           (prepared (clutch-prepare-connection-params params "/tmp/project/")))
+      (should (equal params before))
+      (should (equal (plist-get prepared :database)
+                     (if (member file '(":memory:" "")) file
+                       (expand-file-name file "/tmp/project/"))))))
+  (should (equal (clutch-prepare-connection-params
+                  '(:backend pg :database "app") "/tmp/project/")
+                 '(:backend pg :database "app"))))
+
 (ert-deftest clutch-test-build-conn-leaves-timeout-defaults-to-backends ()
   "Connection building should not synthesize backend timeout defaults.
 The globals are bound to non-default values so a backend that received
