@@ -995,25 +995,16 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
               (filename (plist-get spec :filename))
               (dest (expand-file-name filename (clutch-jdbc--drivers-dir))))
     (unless (file-exists-p dest)
-      (let ((install-driver (clutch-jdbc--driver-install-symbol driver))
-            (label (clutch-jdbc--driver-install-label driver)))
+      (let ((label (clutch-jdbc--driver-install-label driver)))
         (cond
-       ((plist-get spec :maven)
-        (user-error
-         "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
-         label install-driver))
-       ((plist-get spec :url)
-        (user-error
-         "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
-         label install-driver))
-       ((plist-get spec :manual)
-        (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
-                    label
-                    (plist-get spec :manual) dest)))))))
-
-(defun clutch-jdbc--driver-install-symbol (driver)
-  "Return the public install command symbol for internal DRIVER."
-  driver)
+         ((or (plist-get spec :maven) (plist-get spec :url))
+          (user-error
+           "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
+           label driver))
+         ((plist-get spec :manual)
+          (user-error "%s driver requires manual download.\nURL: %s\nPlace as: %s"
+                      label
+                      (plist-get spec :manual) dest)))))))
 
 (defun clutch-jdbc--driver-install-label (driver)
   "Return a user-facing driver label for DRIVER."

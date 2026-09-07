@@ -370,6 +370,7 @@ Common entry points:
 
 - `C-c C-c` executes the region or statement at point
 - Standard completion completes SQL identifiers at point, including empty column positions; `C-c TAB` invokes it explicitly
+- SQL table/alias context is cached per statement and refreshed after edits or scope changes; incomplete statements do not scan other statements to infer source tables.
 - `M-.` jumps SQL aliases to their statement definition; object lookup uses `C-c C-d` / `C-c C-j`
 - In Result Browser buffers, `{` and `}` jump to the first and last visible data columns; Clutch's own row-number column replaces native display line numbers there
 - `C-c ?` opens the transient menu
@@ -378,9 +379,9 @@ Common entry points:
 - `RET` opens record view from a result row
 - Pressing `s` cycles sorting for the result column at point; simple table results use server-side `ORDER BY`, while UNION, grouped, derived, and other non-rewritable results sort the current page locally. Use `C` to jump to another visible column first, or click a result header to cycle it
 - `i`, `d`, and `C-c C-c` stage and submit row changes in result buffers
-- Insert forms use `C-c C-n` for SQL NULL, `C-c C-e` for an empty string, and `C-c C-d` to omit a field and use its server default. Typing `NULL` inserts literal text; cloning preserves SQL NULL and empty strings as distinct values. Opening and cancelling a JSON child editor preserves the insert field's value and state. Clones and INSERT exports retain the source schema.
+- Insert forms use `C-c C-n` for SQL NULL, `C-c C-e` for an empty string, and `C-c C-d` to omit a field and use its server default. Typing `NULL` inserts literal text; cloning preserves SQL NULL and empty strings as distinct values. Single-row CSV/TSV imports replace a field's previous special state with the imported value. Opening and cancelling a JSON child editor preserves the insert field's value and state. Clones and INSERT exports retain the source schema.
 - JDBC CLOBs longer than the returned preview remain explicitly marked as incomplete. They can be viewed, but editing, cloning a copied incomplete field, and exporting that value are blocked to prevent data loss. Complete short CLOBs, including emoji and empty text, remain usable as ordinary text.
-- CSV, TSV, INSERT and UPDATE file exports write in batches and replace the destination only after the export succeeds. Symbolic links are preserved and their final target receives the output. Filename-based transformations such as `.gz` compression run on the complete encoded output and may hold it in memory. A failed or cancelled export preserves the existing file. CSV/TSV still default to UTF-8 with one BOM for Excel. Clipboard exports and native document `insertMany` helpers retain their complete output in memory; backends may also materialize a bounded or nonpageable query before formatting begins.
+- CSV, TSV, INSERT and UPDATE file exports write in batches and replace the destination only after the export succeeds. Symbolic links are preserved and their final target receives the output; the selected filename determines transformations such as `.gz` compression, even if the link target has a different extension. These transformations run on the complete encoded output and may hold it in memory. A failed or cancelled export preserves the existing file. CSV/TSV default to UTF-8 with one BOM for Excel; custom UTF-16 exports retain their byte order and line endings without adding BOMs between batches. Clipboard exports and native document `insertMany` helpers retain their complete output in memory; backends may also materialize a bounded or nonpageable query before formatting begins.
 - Explicit SQL row limits (`LIMIT`, `OFFSET`, `TOP`, `FETCH`) remain part of the query during pagination and export. Ordinary column, table and alias names such as `top` or `fetch` do not disable pagination.
 - `C-c '` edits the current result cell or record-view field; JSON columns and text values containing JSON objects or arrays open in a JSON editor, and `C-c C-c` stages or `C-c C-k` cancels the edit directly when that JSON editor opened automatically. In ordinary edit buffers, nullable columns offer `C-c C-n` for database `NULL`, while columns with a usable default offer `C-c C-d` for database `DEFAULT`
 - `C-c C-k` discards the staged change at point from a result cell or record-view field
@@ -409,6 +410,8 @@ For the sidecar wire protocol and agent internals, see [docs/jdbc-agent-protocol
 ### Org-Babel Integration
 
 Org-Babel integration lives in the separate [ob-clutch](https://github.com/LuciusChen/ob-clutch) package and supports saved clutch connections plus MySQL, PostgreSQL, SQLite, and generic JDBC-backed `clutch` source blocks. For setup, block examples, header arguments, and connection caching, see [docs/org-babel.org](docs/org-babel.org).
+
+Local SQLite filenames are resolved against the command's source directory during connection preparation. With the matching `ob-clutch` cache fix, relative `:database app.db` headers in different directories open different databases; `:memory:` remains an in-memory connection.
 
 ### Timeouts, Interrupts, and Customization
 

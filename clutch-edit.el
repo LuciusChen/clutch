@@ -2272,7 +2272,7 @@ immediately."
       (cl-loop for col in columns
                for value in (car data-rows)
                for field = (clutch-result-insert--field-state col)
-               when field do (setf (plist-get field :value) value))
+               when field do (clutch-result-insert--set-field-prop field :value value))
       (clutch-result-insert--populate-buffer)
       (message "Imported %s row from %s into the insert form"
                (clutch--message-count 1)

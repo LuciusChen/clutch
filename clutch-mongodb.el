@@ -1413,11 +1413,13 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (defun clutch-mongodb--ordered-keys (docs)
   "Return stable top-level keys for DOCS, keeping _id first when present."
-  (let ((keys nil))
+  (let ((keys nil)
+        (seen (make-hash-table :test 'equal)))
     (dolist (doc docs)
       (dolist (pair doc)
         (let ((key (car pair)))
-          (unless (member key keys)
+          (unless (gethash key seen)
+            (puthash key t seen)
             (push key keys)))))
     (setq keys (nreverse keys))
     (if (member "_id" keys)
@@ -1601,17 +1603,6 @@ FIELDS is an optional list of top-level field names for update snippets."
                                              stat))))))
     field))
 
-(defun clutch-mongodb--columns-for-docs (keys docs)
-  "Return Clutch column plists for KEYS sampled from DOCS."
-  (mapcar
-   (lambda (key)
-     (let ((values (cl-loop for doc in docs
-                            for pair = (assoc key doc)
-                            when pair collect (cdr pair))))
-       (list :name key
-             :type-category (clutch-mongodb--field-type-category values))))
-   keys))
-
 (defun clutch-mongodb--column-details-for-docs (docs)
   "Return Clutch column-detail plists sampled from MongoDB DOCS."
   (mapcar
@@ -1629,25 +1620,40 @@ FIELDS is an optional list of top-level field names for update snippets."
 (defun clutch-mongodb--result-from-docs (conn docs)
   "Return a Clutch result for CONN from MongoDB document list DOCS."
   (let* ((keys (clutch-mongodb--ordered-keys docs))
+         (indices (make-hash-table :test 'equal))
+         (missing (make-symbol "missing"))
+         (columns (vconcat (mapcar (lambda (key)
+                                     (list :name key :type-category 'numeric))
+                                   keys)))
          (source-column (list :name clutch-mongodb--source-document-column
                               :type-category 'json
                               :hidden t
-                              :document-source t))
-         (columns (append (clutch-mongodb--columns-for-docs keys docs)
-                          (list source-column)))
-         (rows (mapcar
-                (lambda (doc)
-                  (append
-                   (mapcar
-                    (lambda (key)
-                      (clutch-mongodb--display-value (cdr (assoc key doc))))
-                    keys)
-                   (list doc)))
-                docs)))
+                              :document-source t)))
+    (cl-loop for key in keys for i from 0 do (puthash key i indices))
     (make-clutch-db-result
      :connection conn
-     :columns columns
-     :rows rows)))
+     :rows
+     (mapcar
+      (lambda (doc)
+        (let ((row (make-vector (length columns) missing)))
+          (dolist (pair doc)
+            (let* ((i (gethash (car pair) indices))
+                   (column (aref columns i))
+                   (current (plist-get column :type-category)))
+              ;; Like assoc, retain the first occurrence of a duplicate key.
+              (when (eq (aref row i) missing)
+                (unless (eq current 'json)
+                  (cond
+                   ((member (clutch-mongodb--value-type-name (cdr pair))
+                            '("array" "object"))
+                    (setf (plist-get column :type-category) 'json))
+                   ((not (clutch-mongodb--scalar-number (cdr pair)))
+                    (setf (plist-get column :type-category) 'text))))
+                (aset row i (clutch-mongodb--display-value (cdr pair))))))
+          (nconc (mapcar (lambda (value) (unless (eq value missing) value)) row)
+                 (list doc))))
+      docs)
+     :columns (append columns (list source-column)))))
 
 (defun clutch-mongodb--result-from-value (conn value)
   "Return a Clutch result for CONN from arbitrary MongoDB VALUE."

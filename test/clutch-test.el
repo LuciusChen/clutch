@@ -6974,19 +6974,25 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal (clutch--cell-visible-prefix "á" 1)
                        (if (zerop isolated-width) '("á") '("…" . t))))))))
 
-(defun clutch-test--check-file-export (suffix)
-  "Check encoding, batching and destination preservation with SUFFIX."
+(defun clutch-test--check-file-export (suffix &optional target-suffix)
+  "Check encoding, batching and destination preservation with SUFFIX.
+When TARGET-SUFFIX is non-nil, export through a link to that suffix."
   (let* ((dir (make-temp-file "clutch-export-test-" t))
          (path (expand-file-name (concat "out.csv" suffix) dir))
-         (rows '((1 "中文,a") (2 "x\ny") (3 "z"))))
+         (target (when target-suffix (concat "target.csv" target-suffix)))
+         (rows '((1 "中文,a") (2 "x\ny") (3 "z\uFEFF😀"))))
     (unwind-protect
         (with-temp-buffer
           (auto-compression-mode 1)
+          (when target (make-symbolic-link target path))
           (setq-local clutch--result-columns '("id" "name"))
           (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
                     ((symbol-function 'clutch-result--collect-all-export-rows)
                      (lambda () (ert-fail "File export collected all rows"))))
-            (dolist (coding '(utf-8-with-signature utf-8 gb18030))
+            (dolist (coding '(utf-8-with-signature utf-8 gb18030
+                                                   utf-16 utf-16-dos utf-16le utf-16be
+                                                   utf-16le-with-signature
+                                                   utf-16be-with-signature-dos))
               (cl-letf (((symbol-function 'clutch--read-delimited-export-coding-system)
                          (lambda (_) coding))
                         ((symbol-function 'clutch-result--map-export-batches)
@@ -7030,8 +7036,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   (should (equal before (with-temp-buffer
                                           (insert-file-contents-literally path)
                                           (buffer-string)))))))
+            (when target (should (equal (file-symlink-p path) target)))
             (should (equal (directory-files dir nil "\\`[^.]")
-                           (list (file-name-nondirectory path))))))
+                           (append (list (file-name-nondirectory path))
+                                   (when target (list target)))))))
       (delete-directory dir t))))
 
 (ert-deftest clutch-test-streamed-export-preserves-content-and-file ()
@@ -7042,6 +7050,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Check gzip encoding, batching and failure preservation."
   (skip-unless (executable-find "gzip"))
   (clutch-test--check-file-export ".gz"))
+
+(ert-deftest clutch-test-export-symlink-keeps-selected-filename-handler ()
+  "The selected name controls compression even across differently named links."
+  (skip-unless (executable-find "gzip"))
+  (clutch-test--check-file-export ".gz" "")
+  (clutch-test--check-file-export "" ".gz"))
 
 (ert-deftest clutch-test-export-handler-writes-once-and-preserves-failures ()
   "A non-appending handler sees complete bytes and cannot damage the target."
@@ -8625,43 +8639,46 @@ statement."
         (should (equal (clutch-db-format-temporal value) expected))))))
 
 (ert-deftest clutch-test-clone-preserves-qualified-relation-and-values ()
-  "Clone/stage/execute preserves source schema and literal value semantics."
+  "Clone/import/stage/execute preserves the source schema and submitted values."
   (require 'clutch-db-sqlite)
   (dolist (value '("NULL" "null" "" nil))
-    (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
-          result-buf insert-buf)
-      (unwind-protect
-          (progn
-            (dolist (sql '("ATTACH DATABASE ':memory:' AS other"
-                           "CREATE TABLE main.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"
-                           "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"))
-              (clutch-db-query conn sql))
-            (clutch-db-execute-params
-             conn "INSERT INTO other.audit (payload) VALUES (?)" (list value))
-            (with-temp-buffer
-              (clutch-mode)
-              (setq-local clutch-connection conn)
-              (let ((source (current-buffer)))
-                (clutch-test--execute-and-present "SELECT * FROM other.audit" conn)
-                (setq result-buf
-                      (buffer-local-value 'clutch--last-result-buffer source)))
-              (with-current-buffer result-buf
-                (clutch--goto-cell 0 0)
-                (clutch-clone-row-to-insert))
-              (setq insert-buf (get-buffer "*clutch-insert: audit*"))
-              (with-current-buffer insert-buf (clutch-result-insert-stage))
-              (with-current-buffer result-buf
-                (clutch-result--submit-mutation-batch
-                 (clutch-result--build-pending-insert-statements) nil nil)
-                (setq clutch--pending-inserts nil)))
-            (should (equal (clutch-db-result-rows
-                            (clutch-db-query conn "SELECT payload FROM other.audit ORDER BY id"))
-                           (list (list value) (list value))))
-            (should-not (clutch-db-result-rows
-                         (clutch-db-query conn "SELECT * FROM main.audit"))))
-        (dolist (buf (list insert-buf result-buf))
-          (when (buffer-live-p buf) (kill-buffer buf)))
-        (clutch-db-disconnect conn)))))
+    (dolist (import '(nil "payload\nreplacement\n"))
+      (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+            result-buf insert-buf)
+        (unwind-protect
+            (progn
+              (dolist (sql '("ATTACH DATABASE ':memory:' AS other"
+                             "CREATE TABLE main.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"
+                             "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"))
+                (clutch-db-query conn sql))
+              (clutch-db-execute-params
+               conn "INSERT INTO other.audit (payload) VALUES (?)" (list value))
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (let ((source (current-buffer)))
+                  (clutch-test--execute-and-present "SELECT * FROM other.audit" conn)
+                  (setq result-buf
+                        (buffer-local-value 'clutch--last-result-buffer source)))
+                (with-current-buffer result-buf
+                  (clutch--goto-cell 0 0)
+                  (clutch-clone-row-to-insert))
+                (setq insert-buf (get-buffer "*clutch-insert: audit*"))
+                (with-current-buffer insert-buf
+                  (when import (clutch-result-insert-import-delimited import))
+                  (clutch-result-insert-stage))
+                (with-current-buffer result-buf
+                  (clutch-result--submit-mutation-batch
+                   (clutch-result--build-pending-insert-statements) nil nil)
+                  (setq clutch--pending-inserts nil)))
+              (should (equal (clutch-db-result-rows
+                              (clutch-db-query conn "SELECT payload FROM other.audit ORDER BY id"))
+                             (list (list value) (list (if import "replacement" value)))))
+              (should-not (clutch-db-result-rows
+                           (clutch-db-query conn "SELECT * FROM main.audit"))))
+          (dolist (buf (list insert-buf result-buf))
+            (when (buffer-live-p buf) (kill-buffer buf)))
+          (clutch-db-disconnect conn))))))
 
 (ert-deftest clutch-test-json-cancel-retains-null-on-clone ()
   "Opening and cancelling a JSON editor preserves SQL NULL on submission."
@@ -8742,7 +8759,12 @@ statement."
             (should (equal (clutch-result-insert--parse-fields) (cadr case))))
           (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
           (with-current-buffer insert-buf
-            (should (equal (clutch-result-insert--parse-fields) (cadr case)))))
+            (should (equal (clutch-result-insert--parse-fields) (cadr case)))
+            (clutch-result-insert-import-delimited "payload\nimported\n")
+            (should (equal (clutch-result-insert--parse-fields)
+                           '(("payload" . "imported"))))
+            (should-not (plist-get (clutch-result-insert--field-state "payload")
+                                   :special-value))))
         (with-current-buffer insert-buf
           (clutch-test--goto-insert-field-value "payload")
           (clutch-result-insert-set-null)

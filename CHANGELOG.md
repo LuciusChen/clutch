@@ -9,6 +9,12 @@
 
 ### Fixed
 
+- Removed an unused whole-buffer table-name scan from SQL completion; current-statement table/alias caching and completion candidates are preserved.
+- Cleared stale NULL/default field state on single-row CSV/TSV import, including cloned rows; submitted values now match the imported text.
+- Preserved UTF-16 byte order and line endings with a single BOM across export batches, and selected compression from the requested filename even when a symbolic link points to a differently named target.
+- Resolved local SQLite filenames against the command source directory before connection caching, preserving special in-memory and temporary database names.
+- Indexed MongoDB document grids in linear field traversal while preserving sparse fields, type categories, duplicate-key lookup behavior and original source documents.
+- Kept native MySQL Manual-mode staged batches inside transactions opened by result-set queries when using the corresponding mysql.el EOF-status fix.
 - Pinned clutch-jdbc-agent 0.2.21 and its verified release checksum. Structured BLOB text retains its original whitespace and encoding, and CLOB preview truncation no longer splits a Unicode surrogate pair into invalid JSON.
 - Bounded column sizing for long values and reduced repeated list traversal in local aggregation, filtering, and CSV/TSV formatting and copying. Full table rendering now copies fewer intermediate strings while preserving cell properties and Unicode behavior.
 - Released value-dependent pixel-render caches on every newly installed query result, while retaining compatible font measurements and cache reuse within the current result.
