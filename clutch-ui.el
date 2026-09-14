@@ -1699,14 +1699,22 @@ Returns a list of propertized strings (may be empty)."
            (let ((icon (clutch--footer-icon '(codicon . "nf-cod-filter") "W:"
                                             'font-lock-warning-face)))
              (concat icon
-                     (propertize clutch--where-filter
-                                 'face 'font-lock-warning-face))))
+                     (propertize
+                      (truncate-string-to-width clutch--where-filter 32 nil nil "…")
+                      'face 'font-lock-warning-face
+                      'help-echo clutch--where-filter))))
          (when clutch--filter-pattern
            (let ((icon (clutch--footer-icon '(codicon . "nf-cod-search") "/:"
                                             'font-lock-string-face)))
              (concat icon
-                     (propertize clutch--filter-pattern
-                                 'face 'font-lock-string-face)))))))
+                     (propertize
+                      (format "%d/%d page matches: %s"
+                              (length clutch--filtered-rows)
+                              (length clutch--result-rows)
+                              (truncate-string-to-width
+                               clutch--filter-pattern 32 nil nil "…"))
+                      'face 'font-lock-string-face
+                      'help-echo clutch--filter-pattern)))))))
 
 (defun clutch--footer-sort-part ()
   "Build footer part for the active server or current-page sort."
@@ -1724,9 +1732,10 @@ Returns a list of propertized strings (may be empty)."
             (hi 'font-lock-keyword-face))
         (concat (clutch--footer-icon icon "↕" hi)
                 (propertize (format "%s[%s]%s"
-                                    (upcase direction) column
+                                    (upcase direction)
+                                    (truncate-string-to-width column 32 nil nil "…")
                                     (if local-p " page" ""))
-                            'face hi))))))
+                            'face hi 'help-echo column))))))
 
 (defun clutch--footer-pending-part ()
   "Build footer part for staged edits, deletions, or insertions."
@@ -1781,15 +1790,15 @@ records one-row lookahead."
   (let ((hi 'font-lock-keyword-face))
     (delq nil
           (list
+           (clutch--transaction-header-line-segment
+            (plist-get clutch--connection-render-state :transaction-state))
+           (clutch--footer-pending-part)
            (concat (clutch--footer-icon '(mdicon . "nf-md-sigma") "Σ" hi)
                    (clutch--footer-row-summary
                     row-count page-num page-size total-rows
                     page-offset page-has-more))
-           (clutch--transaction-header-line-segment
-            (plist-get clutch--connection-render-state :transaction-state))
            (clutch--footer-sort-part)
-           (clutch--footer-mutation-capability-part)
-           (clutch--footer-pending-part)))))
+           (clutch--footer-mutation-capability-part)))))
 
 (defun clutch--footer-timing-part ()
   "Return the dynamic footer timing segment for the current result buffer."
@@ -2141,7 +2150,7 @@ RENDER-STATE contains render lookup tables for staged UI state."
 
 (defun clutch--refresh-footer-line ()
   "Rebuild the mode-line footer format without touching the table body."
-  (let ((rows (clutch--result-display-rows)))
+  (let ((rows clutch--result-rows))
     (setq clutch--footer-base-string
           (clutch--render-footer
            (length rows) clutch--page-current
@@ -2317,6 +2326,12 @@ Preserves point position (row + column) across the render."
                               render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
                                         row-positions render-state)
+    (when (and clutch--filter-pattern (null rows)
+               (null clutch--pending-inserts))
+      (insert (propertize
+               (substitute-command-keys
+                "No matches on this page.  \\[clutch-result-filter] to change or clear filter.\n")
+               'face 'shadow)))
     (if save-ridx
         (clutch--goto-cell save-ridx save-cidx)
       (goto-char (point-min)))))
@@ -2402,6 +2417,7 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
          (old-count (and (vectorp clutch--row-start-positions)
                          (length clutch--row-start-positions))))
     (if (or (not old-count)
+            (and (zerop old-count) clutch--filter-pattern)
             (/= old-count ridx))
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
@@ -2450,6 +2466,7 @@ renumbering later rendered rows."
                         (< ridx old-count)
                         (aref clutch--row-start-positions ridx))))
     (if (or (not line-pos)
+            (and (= old-count 1) clutch--filter-pattern)
             (not (= ridx (1- old-count))))
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))

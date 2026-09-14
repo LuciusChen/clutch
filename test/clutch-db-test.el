@@ -660,7 +660,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
   "JDBC reverse-reference lookup should map RPC rows to object entries."
   (let (captured-op captured-params)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout-seconds)
+               (lambda (_conn op params &optional _timeout-seconds)
                  (setq captured-op op
                        captured-params params)
                  '(:objects ((:name "SALES_ORDERS" :schema "APP"
@@ -688,7 +688,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                 ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
                 ((symbol-function 'clutch-jdbc--rpc)
-                 (lambda (op params &optional timeout-seconds)
+                 (lambda (_conn op params &optional timeout-seconds)
                    (setq captured-op op
                          captured-params params
                          captured-timeout timeout-seconds)
@@ -724,7 +724,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                 ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
                 ((symbol-function 'clutch-jdbc--rpc)
-                 (lambda (_op params &optional timeout-seconds)
+                 (lambda (_conn _op params &optional timeout-seconds)
                    (setq captured-params params
                          captured-timeout timeout-seconds)
                    '(:conn-id 7))))
@@ -779,7 +779,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
         (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                   ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
                   ((symbol-function 'clutch-jdbc--rpc)
-                   (lambda (_op params &optional _timeout-seconds)
+                   (lambda (_conn _op params &optional _timeout-seconds)
                      (setq captured-params params)
                      '(:conn-id 8))))
           (clutch-db-jdbc-connect
@@ -796,7 +796,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
               ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op params &optional _timeout-seconds)
+               (lambda (_conn _op params &optional _timeout-seconds)
                  (setq captured-params params)
                  '(:conn-id 10))))
       (setq conn
@@ -978,7 +978,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
                      :params `(:driver oracle :rpc-timeout ,timeout)))
               captured-op captured-params captured-timeout)
           (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-                     (lambda (rpc-op params &optional timeout-seconds)
+                     (lambda (_conn rpc-op params &optional timeout-seconds)
                        (setq captured-op rpc-op
                              captured-params params
                              captured-timeout timeout-seconds)
@@ -994,7 +994,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
                                      :params '(:driver oracle :rpc-timeout 12 :manual-commit t)))
         calls)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout-seconds)
+               (lambda (_conn op params &optional timeout-seconds)
                  (push (list op params timeout-seconds) calls)
                  `(:conn-id ,(alist-get 'conn-id params)
                    :auto-commit ,(alist-get 'auto-commit params)))))
@@ -1649,7 +1649,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   (let ((conn (make-clutch-jdbc-conn :conn-id 4
                                      :params '(:driver oracle :schema "CLUTCH"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op _params &optional _timeout-seconds)
+               (lambda (_conn _op _params &optional _timeout-seconds)
                  `(:columns ((:name "PK_MAIN" :type "CHAR"
                              :nullable ,clutch-jdbc--json-false)
                              (:name "TYPE" :type "VARCHAR2"
@@ -1780,7 +1780,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                      :params '(:driver generic
                                                :schema "APP"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
+               (lambda (_conn op params &optional _timeout)
                  (should (equal op "search-tables"))
                  (should (equal (alist-get 'prefix params) "ORDERS"))
                  '(:tables ((:name "ORDERS" :type "TABLE"
@@ -2074,21 +2074,28 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   "JDBC table entry collection should handle direct and cursor responses."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott"))))
     (dolist (case
-             '((:label "direct"
-                :response (:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
-                                    (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
-                :expected ((:name "USERS" :type "TABLE" :schema "SCOTT")
-                           (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
-               (:label "legacy cursor"
-                :response (:rows (("USERS" "TABLE" "SCOTT"))
-                          :cursor-id 42
-                          :done nil)
-                :fetch-rows (("PRODUCTS" "TABLE" "SCOTT"))
-                :fetch-cursor 42
-                :expected ((:name "USERS" :type "TABLE" :schema "SCOTT"
-                            :source-schema "SCOTT")
-                           (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
-                            :source-schema "SCOTT")))))
+             '((:label "alternate direct payload"
+                       :response (:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
+                                           (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
+                       :expected ((:name "USERS" :type "TABLE" :schema "SCOTT")
+                                  (:name "ORDERS" :type "TABLE" :schema "SCOTT")))
+               (:label "complete first batch"
+                       :response (:rows (("USERS" "TABLE" "SCOTT")) :done t)
+                       :expected ((:name "USERS" :type "TABLE" :schema "SCOTT"
+                                         :source-schema "SCOTT")))
+               (:label "empty result"
+                       :response (:rows nil :done t)
+                       :expected nil)
+               (:label "cursor continuation"
+                       :response (:rows (("USERS" "TABLE" "SCOTT"))
+                                        :cursor-id 42
+                                        :done nil)
+                       :fetch-rows (("PRODUCTS" "TABLE" "SCOTT"))
+                       :fetch-cursor 42
+                       :expected ((:name "USERS" :type "TABLE" :schema "SCOTT"
+                                         :source-schema "SCOTT")
+                                  (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
+                                         :source-schema "SCOTT")))))
       (ert-info ((plist-get case :label))
         (let (fetch-cursor-id)
           (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
@@ -2107,17 +2114,19 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver oracle :user "scott"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op _params &optional _timeout)
-                 '(:tables ((:name "USERS" :type "TABLE" :schema "SCOTT")
-                            (:name "USER_VIEW" :type "VIEW" :schema "SCOTT")
-                            (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
-                                    :target-schema "APP" :target-name "USERS"))))))
+               (lambda (_conn _op _params &optional _timeout)
+                 '(:rows (("USERS" "TABLE" "SCOTT" "SCOTT")
+                          ("USER_VIEW" "VIEW" "SCOTT" "SCOTT")
+                          ("USER_SYM" "SYNONYM" "SCOTT" "APP"))
+                         :done t))))
       (should
        (equal (clutch-db-list-table-entries conn)
-              '((:name "USERS" :type "TABLE" :schema "SCOTT")
-                (:name "USER_VIEW" :type "VIEW" :schema "SCOTT")
+              '((:name "USERS" :type "TABLE" :schema "SCOTT"
+                       :source-schema "SCOTT")
+                (:name "USER_VIEW" :type "VIEW" :schema "SCOTT"
+                       :source-schema "SCOTT")
                 (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
-                        :target-schema "APP" :target-name "USERS")))))))
+                       :source-schema "APP")))))))
 
 (ert-deftest clutch-db-test-jdbc-conn-catalog-clickhouse-defaults-to-database ()
   "ClickHouse JDBC metadata should use :database as the default catalog."
@@ -3194,7 +3203,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                                                :database "default")))
         calls)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
+               (lambda (_conn op params &optional _timeout)
                  (push (cons op params) calls)
                  (pcase op
                    ("get-primary-keys" '(:primary-keys ("id")))
@@ -3235,7 +3244,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                (lambda (&rest _)
                  (ert-fail "JDBC backend should not read schema cache")))
               ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
+               (lambda (_conn op params &optional _timeout)
                  (setq captured-op op)
                  (should (equal (alist-get 'prefix params) "US"))
                  '(:tables ((:name "USERS") (:name "USER_ROLES"))))))
@@ -3470,7 +3479,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
               ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op params &optional _timeout-seconds)
+               (lambda (_conn _op params &optional _timeout-seconds)
                  (setq captured-params params)
                  '(:conn-id 1))))
       (clutch-db-jdbc-connect
@@ -3503,7 +3512,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
               ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
               ((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op params &optional _timeout-seconds)
+               (lambda (_conn _op params &optional _timeout-seconds)
                  (setq captured-params params)
                  '(:conn-id 12))))
       (clutch-db-jdbc-connect
@@ -3639,7 +3648,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                :conn-id 7
                :params '(:driver oracle :user "app_user" :rpc-timeout 9))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_op _params &optional _timeout-seconds)
+               (lambda (_conn _op _params &optional _timeout-seconds)
                  '(:schemas ("SYS" "SYSTEM" "APP_USER" "ANALYTICS" "SALES")))))
       (should (equal (clutch-db-list-schemas conn)
                      '("APP_USER" "ANALYTICS" "SALES"))))))
@@ -3669,7 +3678,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                :params '(:driver oracle :user "app_user" :rpc-timeout 9)))
         captured-op captured-params captured-timeout)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout-seconds)
+               (lambda (_conn op params &optional timeout-seconds)
                  (setq captured-op op
                        captured-params params
                        captured-timeout timeout-seconds)
@@ -4478,7 +4487,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
   "Native and JDBC adapter disconnect failures should remain visible."
   (require 'clutch-db-mysql)
   (require 'clutch-db-pg)
-  (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t)))
+  (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_) t)))
     (dolist (case `((,(make-mysql-conn :host "localhost") mysql-disconnect mysql-error)
                     (,(clutch-db-test--make-pg-connection :host "localhost") pgsql-disconnect pgsql-error)
                     (,(make-clutch-db-sqlite-conn :handle 'sqlite-handle) sqlite-close sqlite-error)
@@ -6306,20 +6315,20 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
            (timeout (clutch-jdbc--conn-rpc-timeout conn))
            (outer (plist-get
                    (clutch-jdbc--rpc
-                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                    conn "create-savepoint" `((conn-id . ,conn-id)) timeout)
                    :savepoint-id))
            (inner (plist-get
                    (clutch-jdbc--rpc
-                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                    conn "create-savepoint" `((conn-id . ,conn-id)) timeout)
                    :savepoint-id)))
       (clutch-jdbc--rpc
-       "rollback-savepoint"
+       conn "rollback-savepoint"
        `((conn-id . ,conn-id) (savepoint-id . ,outer))
        timeout)
       (let ((err
              (should-error
               (clutch-jdbc--rpc
-               "release-savepoint"
+               conn "release-savepoint"
                `((conn-id . ,conn-id) (savepoint-id . ,inner))
                timeout)
               :type 'clutch-db-error)))
@@ -6440,7 +6449,7 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (while (not (eq t (plist-get cancel-result :cancelled)))
           (setq cancel-result
                 (clutch-jdbc--rpc
-                 "cancel"
+                 conn "cancel"
                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
                  (clutch-jdbc--conn-rpc-timeout conn)))
           (unless (eq t (plist-get cancel-result :cancelled))
@@ -6676,20 +6685,20 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
            (timeout (clutch-jdbc--conn-rpc-timeout conn))
            (outer (plist-get
                    (clutch-jdbc--rpc
-                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                    conn "create-savepoint" `((conn-id . ,conn-id)) timeout)
                    :savepoint-id))
            (inner (plist-get
                    (clutch-jdbc--rpc
-                    "create-savepoint" `((conn-id . ,conn-id)) timeout)
+                    conn "create-savepoint" `((conn-id . ,conn-id)) timeout)
                    :savepoint-id)))
       (clutch-jdbc--rpc
-       "release-savepoint"
+       conn "release-savepoint"
        `((conn-id . ,conn-id) (savepoint-id . ,outer))
        timeout)
       (let ((err
              (should-error
               (clutch-jdbc--rpc
-               "release-savepoint"
+               conn "release-savepoint"
                `((conn-id . ,conn-id) (savepoint-id . ,inner))
                timeout)
               :type 'clutch-db-error)))
@@ -7048,7 +7057,7 @@ It does so without touching the agent process."
           (condition-case err
               (progn
                 (clutch-jdbc--rpc
-                 "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
+                 nil "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
                 (should nil))
             (clutch-db-error
              (should (string-match-p "diag-token-2038" (cadr err)))
@@ -7060,20 +7069,21 @@ It does so without touching the agent process."
 
 (ert-deftest clutch-db-test-jdbc-rpc-uses-connection-timeout-by-default ()
   "Connection-scoped JDBC RPCs should inherit the connection RPC timeout."
-  (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+  (let* ((conn (make-clutch-jdbc-conn :process 'proc :conn-id 7
                                       :params '(:driver jdbc :rpc-timeout 0.25)))
+         (clutch-jdbc--agent-process 'proc)
          (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
          captured-timeout)
     (puthash 7 conn clutch-jdbc--connections-by-id)
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
               ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 71))
               ((symbol-function 'clutch-jdbc--recv-response)
                (lambda (_id timeout &optional _op _conn)
                  (setq captured-timeout timeout)
                  '(:ok t :result (:columns nil)))))
-      (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")))
+      (clutch-jdbc--rpc conn "get-columns" '((conn-id . 7) (table . "items")))
       (should (= captured-timeout 0.25))
-      (clutch-jdbc--rpc "get-columns" '((conn-id . 7) (table . "items")) 0.1)
+      (clutch-jdbc--rpc conn "get-columns" '((conn-id . 7) (table . "items")) 0.1)
       (should (= captured-timeout 0.1)))))
 
 (ert-deftest clutch-db-test-jdbc-send-encodes-debug-and-boolean-values ()
@@ -7122,7 +7132,7 @@ It does so without touching the agent process."
                    :debug ,debug))))
       (condition-case err
           (progn
-            (clutch-jdbc--rpc "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
+            (clutch-jdbc--rpc nil "connect" '((url . "jdbc:clickhouse://127.0.0.1:8123/testdb")))
             (should nil))
         (clutch-db-error
          (should (string-match-p "summary-71" (cadr err)))
@@ -7150,14 +7160,17 @@ It does so without touching the agent process."
 (ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
   "Connection-scoped JDBC errors should stay on that connection."
   (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+        (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+        (clutch-jdbc--agent-process 'proc)
         (conn (make-clutch-jdbc-conn :process 'proc :conn-id 11 :params '(:driver oracle)))
         (diag '(:category "query"
-                :op "execute"
-                :request-id 88
-                :conn-id 11
-                :raw-message "reason-88"
-                :context (:generated-sql "SELECT * FROM hidden_table"))))
-    (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                          :op "execute"
+                          :request-id 88
+                          :conn-id 11
+                          :raw-message "reason-88"
+                          :context (:generated-sql "SELECT * FROM hidden_table"))))
+    (puthash 11 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
               ((symbol-function 'clutch-jdbc--send) (lambda (&rest _args) 88))
               ((symbol-function 'clutch-jdbc--recv-response)
                (lambda (&rest _args)
@@ -7306,16 +7319,19 @@ It does so without touching the agent process."
 
 (ert-deftest clutch-db-test-jdbc-interrupt-query-contract ()
   "JDBC interrupt should cancel only busy requests and preserve agent ownership."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 7
+  (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc--agent-process 'fake-proc)
+        (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         (clutch-jdbc--response-queue
          '((:id 99 :ok t :result (:cancelled t :request-id 41))))
         captured-op captured-params)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
     (puthash conn 41 clutch-jdbc--busy-request-ids)
-    (cl-letf (((symbol-function 'clutch-jdbc--send)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--send)
                (lambda (op params)
                  (setq captured-op op
                        captured-params params)
@@ -7325,22 +7341,23 @@ It does so without touching the agent process."
       (should (= (alist-get 'conn-id captured-params) 7))
       (should-not (gethash conn clutch-jdbc--busy-request-ids))
       (should (gethash 41 clutch-jdbc--ignored-response-ids))))
-  (let ((conn (make-clutch-jdbc-conn :conn-id 7
+  (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc-cancel-timeout-seconds 0.1)
         (clutch-jdbc--agent-process 'fake-proc)
+        (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         (clutch-jdbc--response-queue nil)
         deleted-proc
         send-called)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
     (puthash conn 41 clutch-jdbc--busy-request-ids)
-    (cl-letf (((symbol-function 'clutch-jdbc--send)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--send)
                (lambda (_op _params)
                  (setq send-called t)
                  99))
-              ((symbol-function 'process-live-p)
-               (lambda (_proc) t))
               ((symbol-function 'accept-process-output)
                (lambda (_proc _secs) nil))
               ((symbol-function 'delete-process)
@@ -7351,12 +7368,14 @@ It does so without touching the agent process."
       (should (eq clutch-jdbc--agent-process 'fake-proc))
       (should-not deleted-proc)
       (should (gethash 99 clutch-jdbc--ignored-response-ids))))
-  (let ((conn (make-clutch-jdbc-conn :conn-id 7
+  (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
+        (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         send-called)
-    (cl-letf (((symbol-function 'clutch-jdbc--send)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--send)
                (lambda (&rest _args)
                  (setq send-called t)
                  (error "Cancel should not be sent"))))
@@ -7369,13 +7388,16 @@ It does so without touching the agent process."
   (dolist (result `((:cancelled ,clutch-jdbc--json-false :request-id 41)
                     (:cancelled t :request-id 42)
                     nil))
-    (let ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver jdbc)))
+    (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7 :params '(:driver jdbc)))
           (clutch-jdbc--agent-process 'fake-proc)
+          (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
           (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
           (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
           (clutch-jdbc--response-queue `((:id 99 :ok t :result ,result))))
+      (puthash 7 conn clutch-jdbc--connections-by-id)
       (puthash conn 41 clutch-jdbc--busy-request-ids)
-      (cl-letf (((symbol-function 'clutch-jdbc--send)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'clutch-jdbc--send)
                  (lambda (_op _params) 99)))
         (should-not (clutch-db-interrupt-query conn))))))
 
@@ -7390,7 +7412,7 @@ It does so without touching the agent process."
                    :expect-send nil
                    :expect-agent-process nil)))
     (ert-info ((format "case: %s" (plist-get case :label)))
-      (let* ((conn (make-clutch-jdbc-conn :conn-id 7
+      (let* ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                           :params '(:driver jdbc :rpc-timeout 12)))
              (other-conn (make-clutch-jdbc-conn :conn-id 8
                                                 :params '(:driver jdbc)))
@@ -7535,7 +7557,7 @@ It does so without touching the agent process."
                                       :params (copy-sequence params)))
          events)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op rpc-params &optional _timeout)
+               (lambda (_conn op rpc-params &optional _timeout)
                  (push
                   (pcase op
                     ("set-auto-commit"
@@ -7575,7 +7597,7 @@ It does so without touching the agent process."
                :params '(:driver sqlserver :rpc-timeout 12)))
         events)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional _timeout)
+               (lambda (_conn op params &optional _timeout)
                  (push
                   (pcase op
                     ("set-auto-commit"
@@ -7613,7 +7635,7 @@ It does so without touching the agent process."
                             '(:driver sqlserver :rpc-timeout 12))))
             events)
         (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-                   (lambda (op params &optional _timeout)
+                   (lambda (_conn op params &optional _timeout)
                      (push
                       (pcase op
                         ("set-auto-commit"
@@ -7647,7 +7669,7 @@ It does so without touching the agent process."
                :params '(:driver sqlserver :rpc-timeout 14 :manual-commit t)))
         events)
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (op params &optional timeout)
+               (lambda (_conn op params &optional timeout)
                  (should (= timeout 14))
                  (push (cons op params) events)
                  (when (equal op "create-savepoint")
@@ -7713,25 +7735,6 @@ It does so without touching the agent process."
                    (clutch-db-query conn "SELECT id, name FROM demo ORDER BY id"))
                   '((1 "a") (2 "b")))))
       (clutch-db-disconnect conn))))
-
-(ert-deftest clutch-db-test-jdbc-collect-table-entries-continues-legacy-cursors ()
-  "Legacy cursor responses should be drained through fetch continuations."
-  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle :user "scott")))
-        fetch-cursor-id)
-    (cl-letf (((symbol-function 'clutch-jdbc--fetch-all)
-               (lambda (_conn cursor-id)
-                 (setq fetch-cursor-id cursor-id)
-                 '(("PRODUCTS" "TABLE" "SCOTT")))))
-      (should (equal (clutch-jdbc--collect-table-entries
-                      conn
-                      '(:rows (("USERS" "TABLE" "SCOTT"))
-                        :cursor-id 42
-                        :done nil))
-                     '((:name "USERS" :type "TABLE" :schema "SCOTT"
-                        :source-schema "SCOTT")
-                       (:name "PRODUCTS" :type "TABLE" :schema "SCOTT"
-                        :source-schema "SCOTT"))))
-      (should (equal fetch-cursor-id 42)))))
 
 (ert-deftest clutch-db-test-mongodb-id-filter-preserves-object-id ()
   "An _id filter should preserve the document's public ObjectId value."
@@ -8114,5 +8117,92 @@ It does so without touching the agent process."
                                                  (clutch-db-build-paged-sql
                                                   conn query 0 2 nil)))) 2))))
       (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-db-test-jdbc-stale-handle-cannot-use-reused-id ()
+  "Public JDBC operations must reject retired handles before any RPC."
+  (let* ((old (make-clutch-jdbc-conn :process 'old-agent :conn-id 7
+                                     :params '(:driver oracle :user "APP")))
+         (current (make-clutch-jdbc-conn :process 'current-agent :conn-id 7
+                                         :params '(:driver oracle :user "APP")))
+         (clutch-jdbc--agent-process 'current-agent)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         sent)
+    (puthash 7 current clutch-jdbc--connections-by-id)
+    (puthash old 17 clutch-jdbc--busy-request-ids)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (op _params) (push op sent) 99))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (&rest _)
+                 '(:ok t :result (:type "query" :columns ("marker")
+                                        :col-types ("VARCHAR") :rows (("NEW")) :done t)))))
+      (dolist (operation
+               (list (lambda () (clutch-db-query old "SELECT marker FROM probe"))
+                     (lambda () (clutch-db-execute-params old "SELECT ?" '(1)))
+                     (lambda () (clutch-db-commit old))
+                     (lambda () (clutch-db-rollback old))
+                     (lambda () (clutch-db-set-auto-commit old t))
+                     (lambda () (clutch-db-interrupt-query old))
+                     (lambda () (clutch-db-list-table-entries old))
+                     (lambda () (clutch-db-column-details old "users"))
+                     (lambda () (clutch-db-list-columns-async old "users" #'ignore))))
+        (should-error (funcall operation) :type 'clutch-db-error)
+        (should-not sent))
+      (should (= (gethash old clutch-jdbc--busy-request-ids) 17))
+      (should-not (gethash 17 clutch-jdbc--ignored-response-ids))
+      (should (equal (clutch-db-result-rows
+                      (clutch-db-query current "SELECT marker FROM probe"))
+                     '(("NEW"))))
+      (should (equal sent '("execute"))))))
+
+(ert-deftest clutch-db-test-jdbc-scoped-metadata-retains-current-owner ()
+  "A schema-scoped metadata view should use the original live RPC owner."
+  (let* ((conn (make-clutch-jdbc-conn :process 'agent :conn-id 7
+                                      :params '(:driver oracle :schema "APP")))
+         (view (clutch-jdbc--metadata-conn-for-scope conn "REPORTING"))
+         (clutch-jdbc--agent-process 'agent)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         sent-params owner)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (_op params) (setq sent-params params) 99))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (_id _timeout _op request-owner)
+                 (setq owner request-owner)
+                 '(:ok t :result (:columns ((:name "ID")))))))
+      (should (equal (clutch-db-list-columns view "USERS") '("ID")))
+      (should (eq owner conn))
+      (should (equal (alist-get 'schema sent-params) "REPORTING"))
+      (should (equal (clutch-jdbc--conn-schema conn) "APP")))))
+
+(ert-deftest clutch-db-test-jdbc-stale-disconnect-preserves-current-owner ()
+  "Disconnecting an old handle must leave a new owner of its id untouched."
+  (let* ((old (make-clutch-jdbc-conn :process 'old-agent :conn-id 7))
+         (current (make-clutch-jdbc-conn :process 'current-agent :conn-id 7))
+         (clutch-jdbc--agent-process 'current-agent)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         sent)
+    (puthash 7 current clutch-jdbc--connections-by-id)
+    (puthash current 21 clutch-jdbc--busy-request-ids)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (&rest _) (setq sent t) 99))
+              ((symbol-function 'clutch-jdbc--recv-response-nonfatal) #'ignore))
+      (clutch-db-disconnect old)
+      (clutch-jdbc--release-stuck-connection old)
+      (should-not sent)
+      (should (clutch-db-live-p current))
+      (should (= (gethash current clutch-jdbc--busy-request-ids) 21)))))
 
 ;;; clutch-db-test.el ends here

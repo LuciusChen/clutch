@@ -536,11 +536,11 @@ Fetches from the backend if not yet cached.  Returns column list."
         (status (clutch--metadata-status conn table :columns-status)))
     (unless (eq cols 'missing)
       (or cols
-          (unless (eq (plist-get status :state) 'failed)
+          (unless (memq (plist-get status :state) '(ready failed))
             (condition-case err
                 (let ((col-names (clutch-db-list-columns conn table)))
                   (puthash table col-names schema)
-                  (clutch--clear-metadata-status conn table :columns-status)
+                  (clutch--set-metadata-status conn table :columns-status 'ready)
                   col-names)
               (clutch-db-error
                (clutch--set-metadata-status
@@ -580,8 +580,8 @@ message after its failed state is recorded."
                 (clutch--metadata-debug-table-event
                  conn op "success" backend table
                  (format "Loaded %s for %s" op table))
-                (funcall install value)
                 (clutch--clear-metadata-status conn key status-property)
+                (funcall install value)
                 (clutch--notify-metadata-state-changed conn)))
             (lambda (message)
               (when (clutch--metadata-callback-current-p
@@ -609,7 +609,7 @@ message after its failed state is recorded."
                 :state)))
     (unless (or (eq columns 'missing)
                 columns
-                (memq state '(queued loading failed)))
+                (memq state '(queued loading ready failed)))
       (let ((started
              (clutch--start-table-metadata-request
               conn table table :columns-status "list-columns"
@@ -617,7 +617,9 @@ message after its failed state is recorded."
               (lambda (columns)
                 (when-let* ((live-schema
                              (gethash conn clutch--schema-cache)))
-                  (puthash table columns live-schema))))))
+                  (puthash table columns live-schema)
+                  (clutch--set-metadata-status
+                   conn table :columns-status 'ready))))))
         (unless started
           (clutch--ensure-columns conn schema table)
           (clutch--notify-metadata-state-changed conn)))
@@ -815,8 +817,6 @@ Returns a string or nil."
               #'clutch-db-foreign-keys-async
               (lambda (fks)
                 (clutch--set-table-metadata conn table :foreign-keys fks)
-                (clutch--clear-metadata-status
-                 conn table :foreign-keys-status)
                 (run-hook-with-args
                  'clutch--table-metadata-updated-hook
                  conn table 'foreign-keys))

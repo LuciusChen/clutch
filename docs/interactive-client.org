@@ -39,7 +39,7 @@ Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-
 | ===            | Widen current column                          |
 | =-=            | Narrow current column                         |
 | =W=            | WHERE filter (press again to clear)           |
-| =/=            | Client-side fuzzy filter (empty to clear)     |
+| =/=            | Client-side substring filter (empty to clear)     |
 | =s=            | Cycle current-column sort: unsorted / ASC / DESC |
 | =C=            | Jump to visible column                        |
 | ={= / =}=      | First visible data column / last visible data column |
@@ -63,7 +63,9 @@ Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-
 | =f=            | Toggle fullscreen                             |
 | =C-c ?=        | Transient menu                                |
 
-The =e= exporter uses the same Transient interaction model as =c=. Header defaults to Yes for CSV and TSV, while Destination defaults to Clipboard and can be switched to File before choosing a format. For pageable queries the exporter retrieves every page rather than stopping at the displayed row limit; explicit SQL =LIMIT=, =OFFSET=, =TOP= and =FETCH= clauses remain part of the query. Ordinary column, table and alias names such as =top= or =fetch= do not disable pagination. CSV and TSV files prompt for an encoding and default to UTF-8 with BOM for spreadsheet compatibility.
+The =e= exporter uses the same Transient interaction model as =c=. Copy identifies the current-cell or selected-cell scope; Export identifies all result rows and explicitly notes when a local filter is ignored. Export does not adopt the selection or the =/= filter. Header defaults to Yes for CSV and TSV, while Destination defaults to Clipboard and can be switched to File before choosing a format. For pageable queries the exporter retrieves every page rather than stopping at the displayed row limit; SQL =WHERE= and explicit =LIMIT=, =OFFSET=, =TOP= and =FETCH= clauses remain part of the query. Ordinary column, table and alias names such as =top= or =fetch= do not disable pagination. CSV and TSV files prompt for an encoding and default to UTF-8 with BOM for spreadsheet compatibility.
+
+The =/= filter searches only the loaded page. The footer preserves the unfiltered page range and total, and separately reports how many page rows match. A zero-match page explains how to change or clear the filter. Transaction state and staged counts precede row statistics and sorting so long secondary labels do not hide them first; long sort/filter expressions are shortened with full hover text.
 
 File exports prompt for their destination before fetching rows. CSV, TSV, INSERT and UPDATE output is formatted and written in batches, with one header and one BOM when selected. Symbolic links are preserved and output goes to their final target. Filename-based transformations such as =.gz= compression run once on the complete encoded output and may hold it in memory. The destination is replaced only after success; errors and =C-g= preserve an existing file. Clipboard output and native document =insertMany= helpers still require the complete output in memory. Bounded or nonpageable backend queries may also materialize their result before formatting.
 

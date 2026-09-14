@@ -1903,12 +1903,16 @@ header from tabular formats."
   (interactive)
   (clutch-result--copy-fmt 'document-update-one-set))
 
+(defun clutch-result--copy-scope-description ()
+  "Describe the data scope for the current copy menu."
+  (if (use-region-p) "Copy selected cells" "Copy current cell"))
+
 (transient-define-prefix clutch-result-copy-dispatch ()
   "Copy result buffer data.
 Enable --refine to exclude rows/columns interactively before copying
 \(requires an active region set with \\<global-map>\\[set-mark-command] or mouse).
 Header controls tabular copy formats and defaults to Yes."
-  ["Options"
+  [:description clutch-result--copy-scope-description
    :pad-keys t
    ("-r" "Refine selection" "--refine"
     :class clutch--transient-yes-no-switch
@@ -3249,12 +3253,18 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
   (interactive)
   (clutch-result--export-kind 'document-insert-many))
 
+(defun clutch-result--export-scope-description ()
+  "Describe the data scope for the current export menu."
+  (if clutch--filter-pattern
+      "Export all result rows (ignores local filter)"
+    "Export all result rows"))
+
 ;;;###autoload (autoload 'clutch-result-export "clutch-result" nil t)
 (transient-define-prefix clutch-result-export ()
   "Export all rows from the current result.
 Header applies to CSV and TSV and defaults to Yes.  Destination defaults
 to Clipboard; switch it to File before choosing an export format."
-  ["Options"
+  [:description clutch-result--export-scope-description
    :pad-keys t
    ("-h" "Header" "--no-header"
     :class clutch--transient-yes-no-switch

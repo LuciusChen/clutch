@@ -1672,9 +1672,10 @@ and the ssh -N process has no owner yet at that point."
             (clutch-toggle-auto-commit))
           (with-current-buffer result
             (should (string-match-p
-                     "Tx: Manual\\'"
-                     (string-trim
-                      (substring-no-properties clutch--footer-base-string))))
+                     "Tx: Manual"
+                     (substring-no-properties clutch--footer-base-string)))
+            (should-not (string-match-p "Tx: Manual\\*"
+                                        clutch--footer-base-string))
             (clutch-toggle-auto-commit)
             (should (string-match-p
                      "Tx: Auto"
@@ -4122,6 +4123,85 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                         :database "demo"
                         :user "default")
                       nil)))))))
+
+(ert-deftest clutch-test-columns-cache-empty-synchronous-success ()
+  "Synchronous completion fallback should retain empty success until refresh."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn 'test-conn)
+          (requests 0))
+      (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_) t))
+                ((symbol-function 'clutch-db-list-columns)
+                 (lambda (_conn _table) (cl-incf requests) nil)))
+        (clutch--install-schema-cache conn '("empty"))
+        (dotimes (_ 3)
+          (should-not (clutch--ensure-columns
+                       conn (gethash conn clutch--schema-cache) "empty")))
+        (should (= requests 1))
+        (clutch--install-schema-cache conn '("empty"))
+        (clutch--ensure-columns conn (gethash conn clutch--schema-cache) "empty")
+        (should (= requests 2))))))
+
+(ert-deftest clutch-test-mongodb-completion-caches-empty-column-success ()
+  "Installed CAPF should cache empty success until metadata is refreshed."
+  (dolist (columns '(nil ("name")))
+    (clutch-test--with-isolated-metadata-caches
+      (let* ((conn (make-clutch-mongodb-conn :database "test"))
+             (schema (make-hash-table :test 'equal))
+             (requests 0)
+             callback)
+        (puthash "users" nil schema)
+        (puthash conn schema clutch--schema-cache)
+        (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_) t))
+                  ((symbol-function 'clutch-db-busy-p) (lambda (_) nil))
+                  ((symbol-function 'clutch-db-list-columns-async)
+                   (lambda (_conn _table success &optional _errback)
+                     (cl-incf requests)
+                     (setq callback success)
+                     t))
+                  ((symbol-function 'completion-in-region)
+                   (lambda (&rest _) t)))
+          (with-temp-buffer
+            (clutch-mongodb-mode)
+            (setq-local clutch-connection conn)
+            (insert "db.users.find({na")
+            (completion-at-point)
+            (completion-at-point)
+            (should (= requests 1))
+            (funcall callback columns)
+            (completion-at-point)
+            (should (= requests 1))
+            (clutch--install-schema-cache conn '("users"))
+            (completion-at-point)
+            (should (= requests 2))))))))
+
+(ert-deftest clutch-test-mongodb-completion-ignores-collection-text-in-strings ()
+  "Installed field completion should resolve code, not collection-like data."
+  (dolist (expression '("db.users.find({note: \"ordinary\", na"
+                        "db.users.find({note: \"db.orders.find(\", na"
+                        "db.users.find({note: 1 /* db.orders.find( */, na"
+                        "db.users.find({note: 1 // db.orders.find(\n, na"
+                        "db.getCollection(\"users\").find({note: \"db.orders.find(\", na"))
+    (clutch-test--with-isolated-metadata-caches
+      (let* ((conn (make-clutch-mongodb-conn :database "test"))
+             (schema (make-hash-table :test 'equal))
+             captured)
+        (puthash "users" '("name" "note") schema)
+        (puthash "orders" '("order_id") schema)
+        (puthash conn schema clutch--schema-cache)
+        (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_) t))
+                  ((symbol-function 'completion-in-region)
+                   (lambda (beg end collection &optional predicate)
+                     (setq captured
+                           (all-completions
+                            (buffer-substring-no-properties beg end)
+                            collection predicate))
+                     t)))
+          (with-temp-buffer
+            (clutch-mongodb-mode)
+            (setq-local clutch-connection conn)
+            (insert expression)
+            (completion-at-point)
+            (should (equal captured '("name")))))))))
 
 (provide 'clutch-test-connection)
 
