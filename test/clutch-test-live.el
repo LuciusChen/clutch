@@ -455,6 +455,28 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                   (should (equal (clutch-test--live-row-ids clutch--result-rows)
                                  '(4 5)))
                   (should (string-match-p "eve" (buffer-string)))
+                  (let ((summary clutch--footer-base-string))
+                    (dolist (pattern '("eve" "missing" ""))
+                      (cl-letf (((symbol-function 'read-string)
+                                 (lambda (&rest _) pattern)))
+                        (call-interactively (key-binding (kbd "/"))))
+                      (should (equal summary clutch--footer-base-string))
+                      (pcase pattern
+                        ("eve"
+                         (should (equal (clutch-test--live-row-ids
+                                         (clutch--result-display-rows))
+                                        '(5)))
+                         (should (string-match-p
+                                  "1/2 page matches"
+                                  (clutch--footer-mode-line-display))))
+                        ("missing"
+                         (should-not (clutch--result-display-rows))
+                         (should (string-match-p "No matches on this page"
+                                                 (buffer-string))))
+                        (""
+                         (should (= 2 (length (clutch--result-display-rows))))
+                         (should-not (string-match-p "No matches"
+                                                     (buffer-string)))))))
                   (let ((score-column
                          (cl-find "score" clutch--result-columns
                                   :test #'string-equal-ignore-case)))
@@ -488,6 +510,10 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                                  '(3 4)))
                   (clutch-result-count-total)
                   (should (= clutch--page-total-rows 3))
+                  (cl-letf (((symbol-function 'read-string)
+                             (lambda (&rest _) "missing")))
+                    (call-interactively (key-binding (kbd "/"))))
+                  (should-not (clutch--result-display-rows))
                   (let ((rows (clutch-result--collect-all-export-rows)))
                     (should (equal (sort (clutch-test--live-row-ids rows) #'<)
                                    '(3 4 5))))))))

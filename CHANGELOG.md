@@ -4,18 +4,25 @@
 
 ### Changed
 
+- Copy and Export menus now state their current-cell/selection and all-result scopes; Export explicitly notes when an active local filter is ignored without changing exported data.
+- Result footers prioritize transaction state and staged changes over row statistics and sorting, and shorten long sort/filter labels while preserving their complete text in hover help.
 - Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
 - Removed unused `clutch-db-sql-has-top-level-limit-p` and `clutch-db-sql-has-top-level-offset-p` helpers. Use `clutch-db-sql-has-top-level-row-limit-p` when guarding bounded-query rewrites.
 
 ### Fixed
 
+- Preserved JSON serialization and clipboard read errors instead of misreporting them as invalid JSON or an empty kill ring.
+- Rejected stale JDBC handles before sending requests, so restarting the agent cannot redirect old queries or disconnects to a new connection with a reused numeric id.
+- Cached successful empty column metadata until schema refresh, avoiding repeated completion requests for empty collections or tables.
+- Ignored collection-like text inside MongoDB strings and comments when resolving field completion, without copying and scanning the whole preceding buffer.
+- Kept query page ranges and totals independent of current-page filtering. Matching-row counts are shown separately, and zero-match pages explain how to change or clear the filter, including after adding or discarding a staged insert.
 - Removed an unused whole-buffer table-name scan from SQL completion; current-statement table/alias caching and completion candidates are preserved.
 - Cleared stale NULL/default field state on single-row CSV/TSV import, including cloned rows; submitted values now match the imported text.
 - Preserved UTF-16 byte order and line endings with a single BOM across export batches, and selected compression from the requested filename even when a symbolic link points to a differently named target.
 - Resolved local SQLite filenames against the command source directory before connection caching, preserving special in-memory and temporary database names.
 - Indexed MongoDB document grids in linear field traversal while preserving sparse fields, type categories, duplicate-key lookup behavior and original source documents.
 - Kept native MySQL Manual-mode staged batches inside transactions opened by result-set queries when using the corresponding mysql.el EOF-status fix.
-- Pinned clutch-jdbc-agent 0.2.21 and its verified release checksum. Structured BLOB text retains its original whitespace and encoding, and CLOB preview truncation no longer splits a Unicode surrogate pair into invalid JSON.
+- Pinned clutch-jdbc-agent 0.2.22 and its verified release checksum, including SQL diagnostics fixes and centralized request validation. Structured BLOB text retains its original whitespace and encoding, and CLOB preview truncation no longer splits a Unicode surrogate pair into invalid JSON.
 - Bounded column sizing for long values and reduced repeated list traversal in local aggregation, filtering, and CSV/TSV formatting and copying. Full table rendering now copies fewer intermediate strings while preserving cell properties and Unicode behavior.
 - Released value-dependent pixel-render caches on every newly installed query result, while retaining compatible font measurements and cache reuse within the current result.
 - Collected pageable export rows in linear time. CSV, TSV, INSERT and UPDATE file exports now format and write one batch at a time, preserve the selected encoding and a single BOM, and replace the destination only after success. Exports follow symbolic links without replacing the links themselves and preserve filename-based transformations such as gzip compression.

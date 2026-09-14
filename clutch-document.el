@@ -319,19 +319,19 @@ after a helper call."
     (memq (char-before) '(?{ ?,))))
 
 (defun clutch-mongodb--current-collection ()
-  "Return the nearest collection expression before point, or nil."
-  (let ((text (buffer-substring-no-properties (point-min) (point)))
-        (start 0)
-        collection)
-    (while (string-match
-            (concat "\\_<db\\.\\([[:alpha:]_][[:alnum:]_]*\\)\\_>\\s-*\\."
-                    "\\|"
-                    "\\_<db\\.getCollection\\s-*(\\s-*\"\\([^\"]+\\)\"\\s-*)")
-            text start)
-      (setq collection (or (match-string 1 text)
-                           (match-string 2 text))
-            start (match-end 0)))
-    collection))
+  "Return the nearest collection expression in code before point, or nil."
+  (save-excursion
+    (let (collection)
+      (while (and (not collection)
+                  (re-search-backward
+                   (concat "\\_<db\\.\\([[:alpha:]_][[:alnum:]_]*\\)\\_>\\s-*\\."
+                           "\\|"
+                           "\\_<db\\.getCollection\\s-*(\\s-*\"\\([^\"]+\\)\"\\s-*)")
+                   nil t))
+        (unless (save-match-data (nth 8 (syntax-ppss)))
+          (setq collection (or (match-string-no-properties 1)
+                               (match-string-no-properties 2)))))
+      collection)))
 
 (defun clutch-mongodb--collection-columns (schema collection)
   "Return cached field names for COLLECTION from SCHEMA.

@@ -1627,6 +1627,21 @@
       (should (= (length clutch--row-start-positions) 3))
       (should-not (string-match-p "dana" (buffer-string))))))
 
+(ert-deftest clutch-test-filter-empty-state-follows-staged-inserts ()
+  "The empty filter hint must follow zero-to-one ghost-row transitions."
+  (clutch-test--with-result-state
+   (:connection nil :filter-pattern "missing" :render t)
+   (should (string-match-p "No matches on this page" (buffer-string)))
+   (setq-local clutch--pending-inserts '((("name" . "new"))))
+   (clutch--append-pending-insert-row 0)
+   (should-not (string-match-p "No matches" (buffer-string)))
+   (should (= 1 (length clutch--row-start-positions)))
+   (should (= (point-min) (aref clutch--row-start-positions 0)))
+   (setq-local clutch--pending-inserts nil)
+   (clutch--delete-row-at-index 0)
+   (should (= 0 (length clutch--row-start-positions)))
+   (should (string-match-p "No matches on this page" (buffer-string)))))
+
 (ert-deftest clutch-test-delete-pending-insert-middle-row-falls-back ()
   "Deleting a non-final rendered row should fall back to a full redraw."
   (with-temp-buffer
@@ -2319,7 +2334,18 @@
       (should (string-match-p "C-c C-c" footer))
       (should (string-match-p "C-c C-k" footer))
       (should-not (string-match-p "commit:" footer))
-      (should-not (string-match-p "discard:" footer)))))
+      (should-not (string-match-p "discard:" footer)))
+    (dolist (state '(auto dirty uncertain))
+      (setq-local clutch--connection-render-state
+                  (list :connected-p t :transaction-state state)
+                  clutch--order-by
+                  (cons (make-string 100 ?x) "DESC"))
+      (let ((visible (truncate-string-to-width
+                      (clutch--render-footer 500 0 500 nil nil t) 60)))
+        (should (string-match-p "Tx:" visible))
+        (when (eq state 'uncertain)
+          (should (string-match-p "Tx: Uncertain" visible)))
+        (should (string-match-p "E-1 D-1 I-1" visible))))))
 
 (ert-deftest clutch-test-render-footer-row-range-contract ()
   "Footer should show global row ranges and omit page-count segments."
@@ -2460,6 +2486,38 @@
                              :weight normal)))))))))
 
 ;;;; Filter
+
+(ert-deftest clutch-test-client-filter-preserves-page-summary ()
+  "Filtering must not change page extent or infer a smaller query total."
+  (dolist (spec '((5 nil nil) (5 8 nil) (3 8 5)))
+    (pcase-let ((`(,size ,total ,offset) spec))
+      (clutch-test--with-result-state
+       (:rows '((6 "six") (7 "seven") (8 "eight"))
+              :page-current 1 :page-total-rows total :result-max-rows size)
+       (setq-local clutch--page-offset offset
+                   clutch--connection-render-state '(:connected-p t))
+       (clutch--render-result)
+       (let ((summary clutch--footer-base-string))
+         (dolist (pattern '("eight" "missing"))
+           (cl-letf (((symbol-function 'read-string)
+                      (lambda (&rest _) pattern)))
+             (call-interactively (key-binding (kbd "/"))))
+           (should (equal summary clutch--footer-base-string))
+           (should (string-match-p
+                    (if (equal pattern "eight") "1/3 page matches"
+                      "0/3 page matches")
+                    (clutch--footer-mode-line-display)))
+           (when (equal pattern "missing")
+             (should (string-match-p "No matches on this page" (buffer-string)))
+             (should (string-match-p "/.*clear" (buffer-string)))
+             (should-not (text-property-not-all
+                          (point-min) (point-max) 'clutch-row-idx nil))))
+         (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+           (call-interactively (key-binding (kbd "/"))))
+         (should (equal summary clutch--footer-base-string))
+         (should (= 3 (length (clutch--result-display-rows))))
+         (should (= 3 (length clutch--row-start-positions)))
+         (should-not (string-match-p "No matches" (buffer-string))))))))
 
 (ert-deftest clutch-test-reset-result-state-clears-where-filter ()
   "A fresh result should not inherit the previous query's WHERE filter."
@@ -4335,6 +4393,26 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (string-match-p "^label[ ]+\\[required\\]: duplicate me$"
                                 (buffer-string)))))))
 
+(ert-deftest clutch-test-insert-import-delimited-preserves-clipboard-errors ()
+  "Clipboard failures must not be misreported as an empty kill ring."
+  (with-temp-buffer
+    (insert "existing form text")
+    (let ((kill-ring '("owner,severity\nbob,high\n"))
+          (interprogram-paste-function
+           (lambda () (error "Clipboard provider failed"))))
+      (should (equal
+               (should-error
+                (call-interactively #'clutch-result-insert-import-delimited))
+               '(error "Clipboard provider failed"))))
+    (let ((kill-ring nil)
+          (interprogram-paste-function nil))
+      (should (string-match-p
+               "Kill ring is empty"
+               (error-message-string
+                (should-error
+                 (call-interactively #'clutch-result-insert-import-delimited))))))
+    (should (equal (buffer-string) "existing form text"))))
+
 (ert-deftest clutch-test-insert-import-delimited-parses-quoted-csv-row ()
   "Single-row CSV import should prefill the current insert form."
   (clutch-test--with-pop-to-buffer-capture insert-buf
@@ -5111,6 +5189,29 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-result-insert--json-editor-mode)))
     (should (eq selected-mode 'js-mode))))
 
+(ert-deftest clutch-test-json-sub-editor-preserves-serialization-errors ()
+  "JSON save commands distinguish invalid input from serialization failure."
+  (dolist (command '(clutch-result-edit-json-finish
+                     clutch-result-insert-json-finish))
+    (ert-info ((symbol-name command))
+      (with-temp-buffer
+        (setq-local clutch-result-edit-json--field-name "payload"
+                    clutch-result-insert-json--field-name "payload")
+        (insert "{")
+        (should (equal
+                 (should-error (call-interactively command) :type 'user-error)
+                 '(user-error "Field payload expects valid JSON")))
+        (erase-buffer)
+        (insert "{\"ok\":true}")
+        (cl-letf (((symbol-function 'json-serialize)
+                   (lambda (&rest _) (error "Serializer failed"))))
+          (should (equal
+                   (should-error (call-interactively command)
+                                 :type 'clutch-db-error)
+                   '(clutch-db-error
+                     "Cannot serialize value as JSON: Serializer failed"))))
+        (should (equal (buffer-string) "{\"ok\":true}"))))))
+
 (ert-deftest clutch-test-json-sub-editor-editing-contract ()
   "JSON child editors should validate parents, save JSON, and cancel cleanly."
   (dolist (case
@@ -5443,7 +5544,9 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
          (when-let* ((buffer (get-buffer " *transient*")))
            (kill-buffer buffer))
          (transient-setup 'clutch-result-export)
-         (with-current-buffer " *transient*" (buffer-string)))
+         (with-current-buffer " *transient*"
+           (should (string-match-p "Export all result rows" (buffer-string)))
+           (buffer-string)))
        (check-menu (menu present absent)
          (dolist (label present)
            (should (string-match-p (regexp-quote label) menu)))
@@ -5477,6 +5580,29 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                             "Insert many")))))
       (when-let* ((buffer (get-buffer " *transient*")))
         (kill-buffer buffer)))))
+
+(ert-deftest clutch-test-copy-export-menus-show-data-scope ()
+  "Menus distinguish current cell, selection and locally filtered export."
+  (clutch-test--with-result-state
+   (:connection nil :connection-params '(:backend sqlite) :render t)
+   (let ((transient-mark-mode t))
+     (unwind-protect
+         (progn
+           (goto-char (point-min))
+           (transient-setup 'clutch-result-copy-dispatch)
+           (with-current-buffer " *transient*"
+             (should (string-match-p "Copy current cell" (buffer-string))))
+           (push-mark (point-max) nil t)
+           (transient-setup 'clutch-result-copy-dispatch)
+           (with-current-buffer " *transient*"
+             (should (string-match-p "Copy selected cells" (buffer-string))))
+           (deactivate-mark)
+           (setq-local clutch--filter-pattern "alice")
+           (transient-setup 'clutch-result-export)
+           (with-current-buffer " *transient*"
+             (should (string-match-p "ignores local filter" (buffer-string)))))
+       (when-let* ((buffer (get-buffer " *transient*")))
+         (kill-buffer buffer))))))
 
 (ert-deftest clutch-test-document-copy-uses-backend-mutation-snippet-generic ()
   "Document helper copy should use backend-owned mutation snippet generation."
@@ -6896,6 +7022,21 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
                                    clutch--result-rows)
                            '(("one" 10) ("two" 20))))
+            (dolist (pattern '("two" "missing" ""))
+              (cl-letf (((symbol-function 'read-string)
+                         (lambda (&rest _) pattern)))
+                (call-interactively (key-binding (kbd "/"))))
+              (should (string-match-p (regexp-quote "1-2 of 3+ rows")
+                                      clutch--footer-base-string))
+              (should (eq (and clutch--page-has-more t) t))
+              (when (equal pattern "two")
+                (should (string-match-p
+                         "1/2 page matches" (clutch--footer-mode-line-display))))
+              (when (equal pattern "missing")
+                (should (string-match-p "No matches on this page" (buffer-string))))
+              (when (equal pattern "two")
+                (clutch-result-copy-tsv)
+                (should (string-match-p "two" (current-kill 0 t)))))
             (cl-letf (((symbol-function 'completing-read)
                        (lambda (&rest _args) "score"))
                       ((symbol-function 'read-string)
@@ -6916,6 +7057,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               (should-not clutch--page-has-more)
               (should (equal (plist-get clutch--row-identity :indices) '(2)))
               (should (equal clutch--result-rows '(("five" 50 5))))
+              (cl-letf (((symbol-function 'read-string)
+                         (lambda (&rest _) "not-a-row")))
+                (call-interactively #'clutch-result-filter))
+              (should-not (clutch--result-display-rows))
               (let ((suffix
                      (clutch-test--transient-suffix-for-key
                       'clutch-result-export "t")))

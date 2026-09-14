@@ -19,7 +19,7 @@ The agent's `set-current-schema` operation, currently used by Oracle, updates bo
 
 The stdin reader is intentionally not blocked by one long-running request. Each decoded request is submitted to a request pool.  The dispatcher then serializes most operations per `conn-id`, so one JDBC connection still sees one foreground operation at a time.
 
-`cancel` is the exception: it bypasses the per-connection lock, looks up the currently running `Statement` for the target `conn-id`, and calls `Statement.cancel()` from another request thread.  This is what makes recoverable `C-g` interruption possible on the Elisp side.
+`cancel` and `force-disconnect` bypass the per-connection locks. `cancel` looks up the running `Statement` for the target `conn-id` and requests cancellation outside the execution thread, enabling recoverable `C-g` interruption. `force-disconnect` retires the logical connection without waiting for the blocked JDBC operation or physical close.
 
 ## Transport
 
@@ -76,6 +76,7 @@ Connection lifecycle:
 
 - `connect`
 - `disconnect`
+- `force-disconnect`
 - `ping`
 - `commit`
 - `rollback`
@@ -139,6 +140,8 @@ The connect response returns:
 - `conn-id`
 
 Connection-scoped operations use that `conn-id`.  Cursor operations use the `cursor-id` returned by execution, while `ping` checks the agent process itself.
+
+These ids belong to one agent process, not to a persistent connection identity. Clutch validates the originating process and registered owner before sending connection-scoped requests. A handle retained across an agent restart cannot operate on, cancel, or disconnect a new connection that reuses its numeric id.
 
 Savepoint operations translate the standard JDBC `Connection` API without embedding SQL dialects in the Elisp client:
 
@@ -239,8 +242,10 @@ There are five distinct failure classes:
    - The error response includes `diag.connection-invalidated=true`, and Elisp retires only the matching local `conn-id` while preserving the original diagnostics and console reconnect context.
    - The failed SQL is never replayed because its transaction outcome may be unknown. The next user command creates a new session and executes once.
 
-4. A request times out at the outer RPC boundary or the shared agent becomes unresponsive.
-   - Elisp stops the wedged process and treats every connection owned by that process as dead.
+4. A synchronous request times out at the outer RPC boundary.
+   - If the agent is still running and the request has a connection owner, Elisp retires only that connection and sends `force-disconnect` without waiting. Other connections keep their agent process.
+   - An ownerless timeout, such as startup or connect, or an agent process failure stops the shared agent and invalidates every connection it owned. A live process alone does not prove that its driver threads remain responsive.
+   - An asynchronous metadata timeout instead expires its callback, ignores a late reply and reports the metadata error; that client-side timeout alone does not retire the connection or stop the agent.
 
 5. The agent exits before replying.
    - Elisp reads agent stderr and reports the startup failure directly.

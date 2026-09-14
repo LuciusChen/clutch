@@ -1612,9 +1612,10 @@ All field types use the same delay so feedback timing is consistent."
   "Return VALUE normalized as compact JSON for FIELD-NAME."
   (if (string-empty-p value)
       ""
-    (condition-case nil
-        (clutch--json-serialize-text (json-parse-string value))
-      (error (user-error "Field %s expects valid JSON" field-name)))))
+    (clutch--json-serialize-text
+     (condition-case nil
+         (json-parse-string value)
+       (json-error (user-error "Field %s expects valid JSON" field-name))))))
 
 (defun clutch-result-insert--json-editor-mode ()
   "Select the best available major mode for JSON field editing."
@@ -2143,10 +2144,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
   "Return import text from the active region or the current kill."
   (if (use-region-p)
       (buffer-substring-no-properties (region-beginning) (region-end))
-    (condition-case nil
-        (current-kill 0 t)
-      (error
-       (user-error "Kill ring is empty")))))
+    (current-kill 0 t)))
 
 (defun clutch-result-insert--parse-delimited-text (text)
   "Parse delimited TEXT as TSV or CSV.
