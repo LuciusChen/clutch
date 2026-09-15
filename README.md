@@ -1,8 +1,13 @@
-# Clutch
-
 [![MELPA](https://melpa.org/packages/clutch-badge.svg)](https://melpa.org/#/clutch)
 
-**Query and browse databases—and stage SQL row edits—without leaving Emacs.**
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/clutch-dark.svg">
+    <img src="docs/logo/clutch-light.svg" alt="Clutch" width="400">
+  </picture>
+</p>
+
+<p align="center"><strong>Query and browse databases—and stage SQL row edits—without leaving Emacs.</strong></p>
 
 Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and other databases.
 
