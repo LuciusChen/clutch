@@ -26,7 +26,7 @@ Support levels are defined in [[file:backend-support.org][docs/backend-support.o
 
 ** Setup
 
-On first =clutch-connect= to a JDBC backend, clutch loads =clutch-db-jdbc.el= automatically and then prompts to download the agent jar and the required driver jar automatically. Just answer =y= at each prompt — no manual setup commands needed.
+On first =clutch-connect= to a JDBC backend, clutch loads =clutch-db-jdbc.el= automatically and then prompts to download the published agent jar and the required driver jar. Just answer =y= at each prompt — no manual setup commands needed.
 
 If you prefer to pre-install everything up front:
 

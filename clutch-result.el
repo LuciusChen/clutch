@@ -2911,7 +2911,9 @@ Selects JSON, XML, or binary string view based on column type and content."
   (let* ((conn      clutch-connection)
          (col-names (clutch--column-names-for-indices col-indices))
          (cols      (mapconcat (lambda (c) (clutch-db-escape-identifier conn c))
-                               col-names ", ")))
+                               col-names ", "))
+         (target    (and rows (clutch-db-sql-target-table
+                              conn table clutch--last-query))))
     (cl-loop for row in rows
              for vals = (cl-mapcar
                          (lambda (cidx col-name)
@@ -2919,7 +2921,7 @@ Selects JSON, XML, or binary string view based on column type and content."
                             table col-name (nth cidx row) cidx))
                          col-indices col-names)
              collect (format "INSERT INTO %s (%s) VALUES (%s);"
-                             (clutch-db-sql-target-table conn table clutch--last-query)
+                             target
                              cols
                              (mapconcat
                               (lambda (param)
@@ -3195,17 +3197,22 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
                     col-indices))
            (data-rows
             (cl-loop for row in rows
-                     collect (mapcar (lambda (i) (nth i row)) col-indices)))
+                     for values = (vconcat row)
+                     collect (mapcar (lambda (i)
+                                       (and (< i (length values)) (aref values i)))
+                                     col-indices)))
            (table-rows
             (cons (mapcar #'cell col-names)
                   (cl-loop for row in data-rows
                            collect (mapcar #'cell row))))
            (widths
-            (cl-loop for index below (length col-indices)
-                     collect
-                     (max 3
-                          (cl-loop for row in table-rows
-                                   maximize (string-width (nth index row))))))
+            (let ((width-vector (make-vector (length col-indices) 3)))
+              (dolist (row table-rows)
+                (cl-loop for text in row for i from 0
+                         do (aset width-vector i
+                                  (max (aref width-vector i)
+                                       (string-width text)))))
+              (append width-vector nil)))
            (separator
             (format "|%s|"
                     (mapconcat (lambda (width)
