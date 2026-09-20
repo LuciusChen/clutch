@@ -22,6 +22,8 @@
 
 Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-.= through the buffer-local xref backend for SQL alias navigation, so =M-.= on =u= or =u.name= jumps to the alias definition in the current statement. Schema-qualified table names such as =schema.table= are not treated as aliases; use =C-c C-d= or =C-c C-j= for object lookup and table description.  CAPF completion handles SQL identifiers, including empty column positions such as =select | from users=.  =TAB= completes columns after a table or alias dot, then falls back to indentation elsewhere; other completion stays on normal CAPF keys such as =M-TAB= inherited from Emacs.
 
+SQL execution status marks the statement's starting line with a colored dot: a fringe bitmap on graphical displays, or =●= in the left margin on text terminals. Both use the same success/failure faces. Terminal SQL buffers reserve enough margin width for the dot automatically and retain it between executions; existing wider margins and right margins are preserved. No additional mode or configuration is required.
+
 * Result Browser (clutch-result-mode) Key Bindings
 
 | Key            | Action                                        |
