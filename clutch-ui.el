@@ -1117,15 +1117,16 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--sql-status-marker-before-string (status)
   "Return the before-string used to mark SQL execution STATUS."
-  (pcase-let* ((`(,face ,fallback)
-                (if (eq status 'failed)
-                    '(clutch-failed-sql-marker-face "✗ ")
-                  '(clutch-executed-sql-marker-face "✓ "))))
+  (let ((face (if (eq status 'failed)
+                  'clutch-failed-sql-marker-face
+                'clutch-executed-sql-marker-face)))
     (if (display-graphic-p)
         (propertize " "
                     'display
                     `(left-fringe clutch-executed-sql-dot ,face))
-      (propertize fallback 'face face))))
+      (propertize " " 'display
+                  `((margin left-margin)
+                    ,(propertize "●" 'face face))))))
 
 (defun clutch--mark-sql-status-region (beg end status &optional message)
   "Mark SQL region BEG..END with execution STATUS.
@@ -1134,6 +1135,15 @@ MESSAGE, when non-nil, is used as hover text for failed SQL."
               (tbeg (car trimmed))
               (tend (cdr trimmed)))
     (clutch--clear-executed-sql-overlay)
+    (unless (display-graphic-p)
+      (let ((width (string-width "●")))
+        ;; Reserve space for future windows and update existing ones.
+        (setq-local left-margin-width (max width (or left-margin-width 0)))
+        (dolist (window (get-buffer-window-list (current-buffer) nil t))
+          (let ((margins (window-margins window)))
+            (set-window-margins window
+                                (max width (or (car margins) 0))
+                                (cdr margins))))))
     (setq clutch--executed-sql-overlay
           (make-overlay (save-excursion
                           (goto-char tbeg)
