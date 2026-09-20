@@ -8194,11 +8194,13 @@ statement."
                  (overlay-get clutch--executed-sql-overlay 'help-echo)))
         (let* ((before (overlay-get clutch--executed-sql-overlay 'before-string))
                (display (get-text-property 0 'display before)))
-          (if display
+          (if (display-graphic-p)
               (should (equal display
                              '(left-fringe clutch-executed-sql-dot
                                            clutch-failed-sql-marker-face)))
-            (should (eq (get-text-property 0 'face before)
+            (should (equal (car display) '(margin left-margin)))
+            (should (equal (cadr display) "●"))
+            (should (eq (get-text-property 0 'face (cadr display))
                         'clutch-failed-sql-marker-face))))
         (should (eq clutch--last-result-buffer (current-buffer)))))))
 
@@ -8265,11 +8267,13 @@ statement."
     (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
     (let* ((before (overlay-get clutch--executed-sql-overlay 'before-string))
            (display (get-text-property 0 'display before)))
-      (if display
+      (if (display-graphic-p)
           (should (equal display
                          '(left-fringe clutch-executed-sql-dot
                                        clutch-executed-sql-marker-face)))
-        (should (eq (get-text-property 0 'face before)
+         (should (equal (car display) '(margin left-margin)))
+         (should (equal (cadr display) "●"))
+         (should (eq (get-text-property 0 'face (cadr display))
                     'clutch-executed-sql-marker-face))))
     (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
 
