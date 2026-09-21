@@ -634,22 +634,33 @@ list cannot be established."
        (clutch-db-sql-source-table sql t)
        (not (clutch--row-identity-select-list-has-aggregate-p sql))
        (not (clutch-db-sql-next-top-level-clause-position
-             sql 0 '("DISTINCT" "GROUP" "HAVING")))))
+             sql 0 '("DISTINCT" "GROUP" "HAVING")))
+       ;; A sole * must be qualifiable as TABLE.*; engines such as Oracle
+       ;; reject "SELECT *, hidden" once extra columns are appended.
+       (let ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+         (or (not (and from-pos
+                       (clutch--row-identity-bare-star-select-p sql from-pos)))
+             (and (clutch--row-identity-star-qualifier sql from-pos) t)))))
+
+(defun clutch--row-identity-bare-star-select-p (sql from-pos)
+  "Return non-nil when SQL's select list before FROM-POS is a sole *."
+  (string-match-p "\\`SELECT[ \t\n\r]+\\*\\'"
+                  (string-trim (substring sql 0 from-pos))))
 
 (defun clutch--row-identity-star-qualifier (sql from-pos)
-  "Return TABLE.* qualifier for simple SELECT * SQL before FROM-POS."
-  (let ((select-list (string-trim (substring sql 0 from-pos))))
-    (when (string-match-p "\\`\\s-*SELECT\\s-+\\*\\s-*\\'" select-list)
-      (pcase-let* ((`(,body-start ,body-end)
-                    (clutch-db-sql-from-body-range sql from-pos))
-                   (body (substring sql body-start body-end))
-                   (parts (clutch-db-sql-from-body-parts body)))
-        (when parts
-          (let* ((table (car parts))
-                 (alias (cadr parts))
-                 (qualifier (or alias
-                                (clutch-db-sql-table-qualifier table))))
-            (format "%s.*" qualifier)))))))
+  "Return TABLE.* qualifier for simple SELECT * SQL before FROM-POS, or nil.
+Nil also means the FROM body did not yield a usable qualifier; callers must
+not augment a bare * in that case."
+  (when (clutch--row-identity-bare-star-select-p sql from-pos)
+    (pcase-let* ((`(,body-start ,body-end)
+                  (clutch-db-sql-from-body-range sql from-pos))
+                 (body (substring sql body-start body-end))
+                 (parts (clutch-db-sql-from-body-parts body)))
+      (when parts
+        (when-let* ((qualifier (or (cadr parts)
+                                   (clutch-db-sql-table-qualifier
+                                    (car parts)))))
+          (format "%s.*" qualifier))))))
 
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.

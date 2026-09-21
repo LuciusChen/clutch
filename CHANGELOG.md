@@ -12,6 +12,7 @@
 ### Fixed
 
 - Display SQL execution status as colored dots in the left margin on text terminals, using the graphical marker faces and preserving existing wider margins.
+- Parsed `SELECT *` row-identity augmentation independently of the buffer's syntax table, so multi-line statements executed from SQL buffers no longer inject `SELECT nil.*` (MySQL error 1051, "Unknown table 'nil'"). A bare `*` whose table qualifier cannot be derived is now left unaugmented instead of producing invalid SQL.
 - Preserved JSON serialization and clipboard read errors instead of misreporting them as invalid JSON or an empty kill ring.
 - Rejected stale JDBC handles before sending requests, so restarting the agent cannot redirect old queries or disconnects to a new connection with a reused numeric id.
 - Cached successful empty column metadata until schema refresh, avoiding repeated completion requests for empty collections or tables.
