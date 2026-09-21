@@ -838,6 +838,66 @@
         (should (equal requested-table "USERS"))
         (should (equal (plist-get prep :table) "USERS"))))))
 
+(ert-deftest clutch-test-row-identity-prep-multiline-sql-mode-syntax ()
+  "Multi-line SELECT * must qualify the star under sql-mode syntax.
+sql-mode gives newlines comment-end syntax, so syntax-dependent whitespace
+classes once let the source-table token keep a trailing newline and the
+injected head became \"SELECT nil.*\" (MySQL error 1051)."
+  (cl-letf (((symbol-function 'clutch-db--source-table-name)
+             (lambda (_conn token) (clutch-db-sql-table-name token)))
+            ((symbol-function 'clutch-db--source-table-schema)
+             (lambda (_conn token) (clutch-db-sql-table-schema token)))
+            ((symbol-function 'clutch-db--source-table-catalog)
+             (lambda (_conn _token) nil))
+            ((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table &optional _schema _catalog)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("order_consign_id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "`%s`" id))))
+    (with-temp-buffer
+      (sql-mode)
+      (let* ((sql (concat "SELECT *\n"
+                          "FROM `zj`.`ffp_order_consign`\n"
+                          "WHERE oil_extraction_id = 14\n"
+                          "  AND NOT order_consign_id IN"
+                          " (SELECT order_consign_id"
+                          " FROM ffp_order_payoil_plan_relation);"))
+             (prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+        (should (plist-get prep :augmented))
+        (should-not (string-match-p "\\bnil\\b" (plist-get prep :sql)))
+        (should (string-prefix-p "SELECT `ffp_order_consign`.*,"
+                                 (plist-get prep :sql)))))))
+
+(ert-deftest clutch-test-from-body-parts-newline-under-sql-mode-syntax ()
+  "FROM-body token parsing must not depend on the buffer syntax table."
+  (with-temp-buffer
+    (sql-mode)
+    (should (equal (clutch-db-sql-from-body-parts
+                    " `zj`.`ffp_order_consign`\n")
+                   '("`zj`.`ffp_order_consign`" nil)))
+    (should (equal (clutch-db-sql-source-table
+                    "SELECT *\nFROM\n  `zj`.`ffp_order_consign`\nWHERE x = 1")
+                   "ffp_order_consign"))))
+
+(ert-deftest clutch-test-row-identity-prep-skips-unqualifiable-star ()
+  "A bare * whose qualifier cannot be derived must not be augmented."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key
+                           :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id)))
+            ((symbol-function 'clutch-db-sql-table-qualifier)
+             (lambda (_table) nil)))
+    (let ((prep (clutch--prepare-row-identity-query
+                 'fake-conn "SELECT * FROM users")))
+      (should-not (plist-get prep :augmented))
+      (should (equal (plist-get prep :sql) "SELECT * FROM users"))
+      (should-not (string-match-p "\\bnil\\b" (plist-get prep :sql))))))
+
 (ert-deftest clutch-test-row-identity-prep-records-metadata-errors ()
   "Row identity preparation should keep metadata errors visible."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
