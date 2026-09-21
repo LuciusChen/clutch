@@ -3471,6 +3471,14 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
               ('prefix (should (string-prefix-p expected-coords requested-coords))))
             (should (file-exists-p (expand-file-name jar-path tmpdir)))))))))
 
+(ert-deftest clutch-db-test-jdbc-installable-drivers-excludes-companions ()
+  "Companion-only driver entries should not appear as top-level install choices."
+  (let ((installable (clutch-jdbc--installable-drivers)))
+    (should (memq 'oracle installable))
+    (should (memq 'clickhouse installable))
+    (dolist (companion '(oracle-i18n slf4j-api slf4j-nop))
+      (should-not (memq companion installable)))))
+
 ;;;; Unit tests — props normalization
 
 (ert-deftest clutch-db-test-jdbc-connect-normalizes-plist-props ()
@@ -7471,6 +7479,11 @@ It does so without touching the agent process."
     (puthash conn '(:summary "old error") clutch-jdbc--error-details-by-conn)
     (clutch-db-clear-error-details conn)
     (should-not (gethash conn clutch-jdbc--error-details-by-conn))))
+
+(ert-deftest clutch-db-test-jdbc-error-details-do-not-own-connections ()
+  "Diagnostics caching must not keep retired JDBC connections alive."
+  (should (eq (hash-table-weakness clutch-jdbc--error-details-by-conn)
+              'key)))
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-surfaces-invalid-json-lines ()
   "Malformed agent output should surface as a protocol error."

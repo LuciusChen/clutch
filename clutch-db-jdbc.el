@@ -142,7 +142,8 @@ A stuck disconnect should not block the user or kill the agent.")
                   :class "oracle.jdbc.OracleDriver"
                   :companions (oracle-i18n)))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
-                    :filename "orai18n.jar"))
+                    :filename "orai18n.jar"
+                    :internal t))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
                   :filename "db2jcc4.jar"
                   :class "com.ibm.db2.jcc.DB2Driver"))
@@ -160,9 +161,11 @@ A stuck disconnect should not block the user or kill the agent.")
                   :filename "mongodb-jdbc.jar"
                   :class "com.mongodb.jdbc.MongoDriver"))
     (slf4j-api  . (:maven "org.slf4j:slf4j-api:2.0.16"
-                   :filename "slf4j-api.jar"))
+                   :filename "slf4j-api.jar"
+                   :internal t))
     (slf4j-nop  . (:maven "org.slf4j:slf4j-nop:2.0.16"
-                   :filename "slf4j-nop.jar")))
+                   :filename "slf4j-nop.jar"
+                   :internal t)))
   "Known JDBC driver sources.
 All entries support auto-download via `clutch-jdbc-install-driver'.")
 
@@ -256,7 +259,7 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defvar clutch-jdbc--connections-by-id (make-hash-table :test 'eql)
   "Map of JDBC connection ids to their live connection structs.")
 
-(defvar clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)
+(defvar clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq :weakness 'key)
   "Map of JDBC connection objects to their latest structured error details.")
 
 (defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
@@ -1010,7 +1013,7 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
     (unless (file-exists-p dest)
       (let ((label (clutch-jdbc--driver-install-label driver)))
         (cond
-         ((or (plist-get spec :maven) (plist-get spec :url))
+         ((plist-get spec :maven)
           (user-error
            "%s driver not found.  Run M-x clutch-jdbc-install-driver RET %s"
            label driver))
@@ -1424,24 +1427,17 @@ This is allowed in the hot path."
     (apply #'nconc (nreverse batches))))
 
 (defun clutch-jdbc--collect-table-entries (conn result)
-  "Return normalized table entry plists from get-tables RESULT on CONN.
+  "Return table entry plists from get-tables RESULT on CONN.
 The agent returns cursor-style :rows batches.  Also accepts an alternate
 plist-list payload under :tables."
-  (mapcar (lambda (entry)
-            (clutch-jdbc--normalize-table-entry conn entry))
-          (or (plist-get result :tables)
-              (mapcar
-               #'clutch-jdbc--table-entry-from-row
-               (let* ((first-rows (plist-get result :rows))
-                      (cursor-id  (plist-get result :cursor-id)))
-                 (if (eq t (plist-get result :done))
-                     first-rows
-                   (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id))))))))
-
-(defun clutch-jdbc--normalize-table-entry (conn entry)
-  "Return table ENTRY normalized for JDBC CONN."
-  (ignore conn)
-  (copy-sequence entry))
+  (or (plist-get result :tables)
+      (mapcar
+       #'clutch-jdbc--table-entry-from-row
+       (let* ((first-rows (plist-get result :rows))
+              (cursor-id  (plist-get result :cursor-id)))
+         (if (eq t (plist-get result :done))
+             first-rows
+           (nconc first-rows (clutch-jdbc--fetch-all conn cursor-id)))))))
 
 (defun clutch-jdbc--entry-type= (entry type)
   "Return non-nil when ENTRY has TYPE, case-insensitively."
@@ -2162,9 +2158,7 @@ the metadata request."
                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
                       (prefix  . ,prefix)
                       ,@(clutch-jdbc--metadata-scope-params conn)))))
-      (mapcar (lambda (entry)
-                (clutch-jdbc--normalize-table-entry conn entry))
-              (plist-get result :tables)))))
+      (plist-get result :tables))))
 
 (cl-defmethod clutch-db-table-comment-async ((conn clutch-jdbc-conn) table callback
                                              &optional errback)
@@ -2182,9 +2176,7 @@ the metadata request."
            (funcall callback
                     (clutch-jdbc--table-comment-from-entries
                      table
-                     (mapcar (lambda (entry)
-                               (clutch-jdbc--normalize-table-entry conn entry))
-                             (plist-get result :tables))
+                     (plist-get result :tables)
                      schema))))
        errback
        rpc-timeout
@@ -2537,8 +2529,6 @@ Fetches from GitHub Releases."
       (message "Driver already installed: %s" dest))
      ((plist-get spec :maven)
       (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest))
-     ((plist-get spec :url)
-      (clutch-jdbc--download-url-driver (plist-get spec :url) dest))
      (t
       (message "Manual download required for %s.\nURL: %s\nPlace as: %s"
                driver (plist-get spec :manual) dest)))
@@ -2574,12 +2564,6 @@ COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
       (message "Downloading %s from Maven Central..." coords)
       (url-copy-file url dest)
       (message "Downloaded driver to %s" dest))))
-
-(defun clutch-jdbc--download-url-driver (url dest)
-  "Download a JDBC driver from URL to DEST."
-  (message "Downloading JDBC driver from %s..." url)
-  (url-copy-file url dest)
-  (message "Downloaded driver to %s" dest))
 
 (defun clutch-jdbc--oracle-driver-symbol-p (driver)
   "Return non-nil for DRIVER symbols that use an Oracle JDBC jar."

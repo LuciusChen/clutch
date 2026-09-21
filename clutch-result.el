@@ -22,6 +22,7 @@
 (require 'clutch-edit)
 (require 'json)
 (require 'subr-x)
+(require 'text-property-search)
 (require 'transient)
 
 ;;;; Configuration
@@ -83,7 +84,6 @@ fraction.  Values must be greater than zero and no greater than one."
 
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
-(defvar clutch--pre-fullscreen-config)
 
 (defvar-local clutch--aggregate-summary nil
   "Last aggregate summary plist for result footer, or nil.
@@ -94,8 +94,6 @@ Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
   "Current client-side filter string, or nil.")
 (defvar-local clutch--filtered-rows nil
   "Filtered subset of `clutch--result-rows', or nil when unfiltered.")
-(defvar-local clutch--marked-rows nil
-  "List of marked row indices.")
 (defvar-local clutch--order-by nil
   "Current ORDER BY state as (COL-NAME . DIRECTION) or nil.")
 (defvar-local clutch--local-sort-original-rows nil
@@ -404,11 +402,10 @@ Signal `user-error' if the user declines."
     (clutch-result--effective-query)))
 
 (defun clutch-result--clear-staged-state ()
-  "Clear staged mutation and row selection state in the current result buffer."
+  "Clear staged mutation state in the current result buffer."
   (setq-local clutch--pending-edits nil
               clutch--pending-deletes nil
-              clutch--pending-inserts nil
-              clutch--marked-rows nil))
+              clutch--pending-inserts nil))
 
 (defun clutch-result--split-page-lookahead-rows (rows page-size)
   "Return (VISIBLE-ROWS . HAS-MORE) from ROWS after PAGE-SIZE lookahead trimming."
@@ -1101,7 +1098,7 @@ Triggers a COUNT(*) query if total rows are not yet known."
   (interactive)
   (unless (clutch-result--server-rewritable-p)
     (user-error "Server-side count is not available for this query result"))
-  (let* ((conn clutch-connection)
+  (let* (conn
          (base (clutch-result--effective-query)))
     (clutch--ensure-connection)
     (setq conn clutch-connection)
@@ -1276,8 +1273,7 @@ the selected column when result labels are not unique."
   (when clutch--filter-pattern
     (setq clutch--filtered-rows
           (clutch-result--client-filter-rows
-           clutch--result-rows clutch--filter-pattern)))
-  (setq clutch--marked-rows nil))
+           clutch--result-rows clutch--filter-pattern))))
 
 (defun clutch-result--sort (col-name descending &optional col-index)
   "Sort result rows by COL-NAME.
@@ -1363,8 +1359,7 @@ The cycle is unsorted, ascending, descending, then unsorted again."
               (message "Sort cleared"))
           (unless original-rows
             (error "Local sort snapshot is missing"))
-          (setq clutch--result-rows (copy-sequence original-rows)
-                clutch--marked-rows nil)
+          (setq clutch--result-rows (copy-sequence original-rows))
           (when clutch--filter-pattern
             (setq clutch--filtered-rows
                   (clutch-result--client-filter-rows
@@ -1526,8 +1521,7 @@ empty string at the condition prompt to clear the filter."
   (let ((matching (clutch-result--client-filter-rows
                    clutch--result-rows input)))
     (setq clutch--filter-pattern input
-          clutch--filtered-rows matching
-          clutch--marked-rows nil)
+          clutch--filtered-rows matching)
     (clutch--render-result)
     (message "Filter: %s/%s rows match %s"
              (clutch--message-count (length matching))
@@ -1548,8 +1542,7 @@ Prompts for a pattern; enter empty string to clear."
     (if (string-empty-p input)
         (progn
           (setq clutch--filter-pattern nil
-                clutch--filtered-rows nil
-                clutch--marked-rows nil)
+                clutch--filtered-rows nil)
           (clutch--render-result)
           (message "Filter cleared"))
       (clutch-result--apply-filter input))))
@@ -1594,18 +1587,26 @@ Optionally tag with TAG-PROP = TAG-VAL for incremental removal."
     (push ov clutch--refine-overlays)))
 
 (defun clutch-refine--init-overlays ()
-  "Apply layer-1 selection overlays for the rect.  Called once on refine start."
+  "Apply layer-1 selection overlays for the rect.  Called once on refine start.
+Scans the buffer once, testing each cell's row/col against hash sets of the
+rect's selected indices — O(buffer)."
   (clutch-refine--clear-overlays)
   (save-excursion
     (pcase-let ((`(,row-indices . ,col-indices) clutch--refine-rect))
-      (dolist (cidx col-indices)
+      (let ((row-set (make-hash-table :test 'eql))
+            (col-set (make-hash-table :test 'eql)))
+        (dolist (ridx row-indices) (puthash ridx t row-set))
+        (dolist (cidx col-indices) (puthash cidx t col-set))
         (goto-char (point-min))
-        (cl-loop for match = (text-property-search-forward 'clutch-col-idx cidx #'eql)
+        (cl-loop for match = (text-property-search-forward
+                              'clutch-col-idx nil (lambda (_val cur) cur))
                  while match
-                 do (let ((beg (prop-match-beginning match))
-                          (end (prop-match-end match)))
-                      (when (memq (get-text-property beg 'clutch-row-idx) row-indices)
-                        (clutch-refine--make-overlay beg end 'secondary-selection 0))))))))
+                 do (let ((beg (prop-match-beginning match)))
+                      (when (and (gethash (prop-match-value match) col-set)
+                                 (gethash (get-text-property beg 'clutch-row-idx)
+                                          row-set))
+                        (clutch-refine--make-overlay
+                         beg (prop-match-end match) 'secondary-selection 0))))))))
 
 (defun clutch-refine--add-row-exclusion (ridx)
   "Add exclusion overlays for row RIDX within the rect's columns.
@@ -3739,16 +3740,14 @@ Reuses a single *clutch-record* buffer, updating it in place."
       (clutch-record--render))
     (pop-to-buffer buf '(display-buffer-at-bottom))))
 
-(defun clutch-record--render-field (name cidx val col-def row ridx row-identity
+(defun clutch-record--render-field (name cidx val col-def identity-vec ridx
                                         edits fk-info expanded-fields max-name-w)
   "Insert one field line for column NAME at CIDX.
-VAL is the cell value, COL-DEF the column metadata, ROW the full row.
-RIDX is the row index.  ROW-IDENTITY, EDITS, FK-INFO, and EXPANDED-FIELDS
-provide edit/FK/expand state.  MAX-NAME-W is the label column width."
-  (let* ((identity-vec (and row-identity row
-                            (clutch-db-row-identity-values
-                             row row-identity)))
-         (edited (and identity-vec (assoc (cons identity-vec cidx) edits)))
+VAL is the cell value, COL-DEF the column metadata, IDENTITY-VEC the row's
+precomputed identity vector (or nil).  RIDX is the row index.  EDITS,
+FK-INFO, and EXPANDED-FIELDS provide edit/FK/expand state.  MAX-NAME-W is
+the label column width."
+  (let* ((edited (and identity-vec (assoc (cons identity-vec cidx) edits)))
          (display-val (if edited (cdr edited) val))
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
@@ -3810,6 +3809,8 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
                 (list #'clutch--header-with-disconnect-badge
                       'clutch-record--header-base)))
     (let* ((row (nth ridx rows))
+           (identity-vec (and row-identity row
+                              (clutch-db-row-identity-values row row-identity)))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (cl-loop for name in col-names
                for col-def in col-defs
@@ -3817,7 +3818,7 @@ provide edit/FK/expand state.  MAX-NAME-W is the label column width."
                unless (plist-get col-def :hidden)
                do (clutch-record--render-field
                    name cidx (nth cidx row) col-def
-                   row ridx row-identity edits fk-info clutch-record--expanded-fields
+                   identity-vec ridx edits fk-info clutch-record--expanded-fields
                    max-name-w)))
     (goto-char (point-min))))
 
