@@ -758,8 +758,11 @@ PATTERNS is a list of case-insensitive regex fragments passed to
               (length sql)))))
 
 (defconst clutch-db-sql--identifier-token-pattern
-  "\\(?:`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\|[^[:space:],();.]+\\)"
-  "SQL identifier token pattern accepted by source-table helpers.")
+  "\\(?:`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\|[^ \t\n\r\f,();.]+\\)"
+  "SQL identifier token pattern accepted by source-table helpers.
+Whitespace is spelled as literal characters because `[:space:]' follows
+the current buffer's syntax table, and in `sql-mode' buffers a newline
+ends comments instead of counting as whitespace.")
 
 (defconst clutch-db-sql--table-token-pattern
   (concat clutch-db-sql--identifier-token-pattern
@@ -771,12 +774,12 @@ PATTERNS is a list of case-insensitive regex fragments passed to
 (defun clutch-db-sql-from-body-parts (body)
   "Return `(TABLE ALIAS)' from simple FROM BODY."
   (let ((case-fold-search t)
-        (pattern (concat "\\`\\s-*\\("
+        (pattern (concat "\\`[ \t\n\r]*\\("
                          clutch-db-sql--table-token-pattern
                          "\\)"
-                         "\\(?:\\s-+\\(?:AS\\s-+\\)?"
-                         "\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\|[^[:space:]]+\\)"
-                         "\\)?\\s-*\\'")))
+                         "\\(?:[ \t\n\r]+\\(?:AS[ \t\n\r]+\\)?"
+                         "\\(\"[^\"]+\"\\|`[^`]+`\\|\\[[^]]+\\]\\|[^ \t\n\r]+\\)"
+                         "\\)?[ \t\n\r]*\\'")))
     (and (string-match pattern body)
          (list (match-string 1 body)
                (match-string 2 body)))))
@@ -862,7 +865,7 @@ relations return nil.  The returned token preserves identifier quoting."
                               (and join-pos (< join-pos end))))))
           (if simple-only
               (car (clutch-db-sql-from-body-parts body))
-            (when (string-match (concat "\\`\\s-*\\("
+            (when (string-match (concat "\\`[ \t\n\r]*\\("
                                         clutch-db-sql--table-token-pattern
                                         "\\)")
                                 body)
