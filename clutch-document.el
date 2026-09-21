@@ -91,18 +91,9 @@
 (defun clutch-mongodb--object-array-depth-before-line ()
   "Return MongoDB object/array delimiter depth before the current line."
   (save-excursion
-    (let ((limit (line-beginning-position))
-          (depth 0))
-      (goto-char (point-min))
-      (while (< (point) limit)
-        (unless (nth 8 (syntax-ppss))
-          (pcase (char-after)
-            ((or ?\[ ?{)
-             (setq depth (1+ depth)))
-            ((or ?\] ?})
-             (setq depth (max 0 (1- depth))))))
-        (forward-char 1))
-      depth)))
+    (let ((state (syntax-ppss (line-beginning-position))))
+      (cl-count-if (lambda (pos) (memq (char-after pos) '(?\[ ?{)))
+                   (nth 9 state)))))
 
 (defun clutch-mongodb--calculate-indentation ()
   "Return indentation for the current MongoDB query line."

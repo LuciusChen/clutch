@@ -8,9 +8,13 @@
 - Result footers prioritize transaction state and staged changes over row statistics and sorting, and shorten long sort/filter labels while preserving their complete text in hover help.
 - Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
 - Removed unused `clutch-db-sql-has-top-level-limit-p` and `clutch-db-sql-has-top-level-offset-p` helpers. Use `clutch-db-sql-has-top-level-row-limit-p` when guarding bounded-query rewrites.
+- Removed the unwired row-marking state that no command could set; the public `clutch-marked-face` remains for themes.
+- The interactive JDBC driver installer no longer offers companion jars (orai18n, slf4j-api, slf4j-nop) as top-level drivers; they still install automatically with their parent driver.
 
 ### Fixed
 
+- Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke.
+- Reduced per-keystroke work in SQL consoles: statement-context lookups scan the buffer once instead of twice, keyword completion candidates are computed once, delimited bulk import no longer allocates a string per character, and MongoDB console indentation uses one syntax scan per line instead of a character-by-character buffer walk.
 - Display SQL execution status as colored dots in the left margin on text terminals, using the graphical marker faces and preserving existing wider margins.
 - Preserved JSON serialization and clipboard read errors instead of misreporting them as invalid JSON or an empty kill ring.
 - Rejected stale JDBC handles before sending requests, so restarting the agent cannot redirect old queries or disconnects to a new connection with a reused numeric id.
