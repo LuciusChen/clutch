@@ -170,7 +170,6 @@ project-shipped demo schema.")
                 clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
-                clutch--marked-rows nil
                 clutch--fk-info nil
                 clutch--active-edit-cell nil
                 clutch--row-identity nil

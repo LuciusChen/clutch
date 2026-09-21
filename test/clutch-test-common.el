@@ -140,7 +140,7 @@ SPEC is (CONN BACKEND MODEL)."
 SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
 :connection, :connection-params, :source-table, :base-query, :last-query,
 :where-filter, :order-by, :row-identity, :row-identity-status,
-:row-identity-error-message, :filter-pattern, :filtered-rows, :marked-rows,
+:row-identity-error-message, :filter-pattern, :filtered-rows,
 :pending-edits, :pending-deletes, :pending-inserts, :sort-column,
 :sort-descending, :page-current, :page-total-rows, :column-widths,
 :server-pageable, :server-rewritable, :result-max-rows, and :render."
@@ -193,7 +193,6 @@ SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
                 clutch--pending-edits (plist-get spec :pending-edits)
                 clutch--pending-deletes (plist-get spec :pending-deletes)
                 clutch--pending-inserts (plist-get spec :pending-inserts)
-                clutch--marked-rows (plist-get spec :marked-rows)
                 clutch--row-identity (plist-get spec :row-identity)
                 clutch--row-identity-status (plist-get spec
                                                        :row-identity-status)
@@ -269,7 +268,6 @@ ROWS defaults to a small three-row sample."
                 clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
-                clutch--marked-rows nil
                 clutch--row-identity (clutch-test--primary-row-identity
                                        "users" '("id") '(0))
                 clutch--sort-column nil

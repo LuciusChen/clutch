@@ -36,7 +36,6 @@
 
 (defvar-local clutch--fk-info nil
   "Foreign key info for the current result.")
-(defvar clutch--marked-rows)
 (defvar-local clutch--pending-deletes nil
   "List of row identity vectors staged for deletion.")
 (defvar-local clutch--pending-edits nil
@@ -1212,8 +1211,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
                              (error-message-string err)))))
         (setq clutch--pending-edits nil
               clutch--pending-deletes nil
-              clutch--pending-inserts nil
-              clutch--marked-rows nil)
+              clutch--pending-inserts nil)
         (revert-buffer nil t)
         (if restore-error
             (user-error "%s" (clutch--humanize-db-error
@@ -1563,7 +1561,7 @@ All field types use the same delay so feedback timing is consistent."
                (plist-get field :name))))
 
 (defun clutch-result-insert--after-change (beg end _len)
-  "Locally validate the changed insert field spanning BEG..END."
+  "Schedule local validation for the changed insert field spanning BEG..END."
   (when-let* ((field (or (clutch-result-insert--field-state-at-position beg)
                          (and (> beg (point-min))
                               (clutch-result-insert--field-state-at-position (1- beg)))
@@ -1572,7 +1570,6 @@ All field types use the same delay so feedback timing is consistent."
       (clutch-result-insert--set-field-prop
        field :value (buffer-substring-no-properties (car bounds) (cdr bounds))))
     (clutch-result-insert--refresh-field-placeholder field)
-    (clutch-result-insert--validate-field-live field)
     (clutch-result-insert--schedule-field-validation field)))
 
 (defun clutch-result-insert--field-name-at-line ()
@@ -2166,28 +2163,28 @@ ROWS is a list of string lists."
             (if (and (< (1+ i) len)
                      (eq (aref text (1+ i)) ?\"))
                 (progn
-                  (push "\"" field)
+                  (push ?\" field)
                   (setq i (1+ i)))
               (setq quoted nil)))
            (t
-            (push (char-to-string ch) field))))
+            (push ch field))))
          ((eq ch ?\")
           (setq quoted t))
          ((eq ch delim)
-          (push (apply #'concat (nreverse field)) row)
+          (push (concat (nreverse field)) row)
           (setq field nil))
          ((eq ch ?\r))
          ((eq ch ?\n)
-          (push (apply #'concat (nreverse field)) row)
+          (push (concat (nreverse field)) row)
           (push (nreverse row) rows)
           (setq field nil
                 row nil))
          (t
-          (push (char-to-string ch) field))))
+          (push ch field))))
       (setq i (1+ i)))
     (when quoted
       (user-error "Import text has an unterminated quoted field"))
-    (push (apply #'concat (nreverse field)) row)
+    (push (concat (nreverse field)) row)
     (push (nreverse row) rows)
     (cons delim
           (cl-remove-if

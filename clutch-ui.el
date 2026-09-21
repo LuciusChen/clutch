@@ -85,7 +85,6 @@ The function is called with the column index and the column name captured when
 the header cell was rendered.")
 (defvar-local clutch--last-window-width nil
   "Last known window body width for the current result buffer.")
-(defvar clutch--marked-rows)
 (defvar clutch--order-by)
 (defvar clutch--page-current)
 (defvar clutch--page-has-more)
@@ -1329,19 +1328,15 @@ These tables avoid repeated linear scans through staged UI state while
 rendering large result pages."
   (let ((edit-table (make-hash-table :test 'equal))
         (edit-row-table (make-hash-table :test 'equal))
-        (marked-table (make-hash-table :test 'eql))
         (delete-table (make-hash-table :test 'equal))
         (row-identity clutch--row-identity))
     (dolist (edit clutch--pending-edits)
       (puthash (car edit) edit edit-table)
       (puthash (car (car edit)) t edit-row-table))
-    (dolist (ridx clutch--marked-rows)
-      (puthash ridx t marked-table))
     (dolist (identity-vec clutch--pending-deletes)
       (puthash identity-vec t delete-table))
     (list :edits edit-table
           :edit-rows edit-row-table
-          :marked marked-table
           :deletes delete-table
           :insert-placeholders (clutch--pending-insert-placeholders)
           :active-edit-cell clutch--active-edit-cell
@@ -1583,7 +1578,6 @@ COLUMN-SPECS optionally precomputes visible column metadata."
                                (* clutch--page-current clutch-result-max-rows)))
          (bface 'clutch-border-face)
          (pad-str (make-string clutch-column-padding ?\s))
-         (marked-table (plist-get render-state :marked))
          (delete-table (plist-get render-state :deletes))
          (edit-row-table (plist-get render-state :edit-rows))
          (identity-values (clutch--row-render-identity row render-state))
@@ -1599,7 +1593,6 @@ COLUMN-SPECS optionally precomputes visible column metadata."
                        rendered)))
          (mark-char (cond (deletingp "D")
                           (editedp "E")
-                          ((gethash ridx marked-table) "*")
                           (t " ")))
          (num-label (string-pad
                      (number-to-string
@@ -1607,7 +1600,6 @@ COLUMN-SPECS optionally precomputes visible column metadata."
                      nw nil t))
          (num-face (cond (deletingp 'clutch-pending-delete-face)
                          (editedp 'clutch-modified-face)
-                         ((gethash ridx marked-table) 'clutch-marked-face)
                          (t 'shadow))))
     (concat (propertize "│" 'face bface)
             (propertize mark-char 'face num-face)

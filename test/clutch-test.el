@@ -1257,7 +1257,6 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
     (setq-local clutch--pending-edits nil)
     (setq-local clutch--pending-deletes nil)
     (setq-local clutch--pending-inserts nil)
-    (setq-local clutch--marked-rows nil)
     (setq-local clutch--sort-column nil)
     (setq-local clutch--sort-descending nil)
     (setq-local clutch--page-current 0)
@@ -1635,7 +1634,6 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
                 clutch--pending-edits nil
                 clutch--pending-deletes nil
                 clutch--pending-inserts nil
-                clutch--marked-rows nil
                 clutch--sort-column nil
                 clutch--sort-descending nil
                 clutch--page-current 0
@@ -1912,8 +1910,7 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0))
                 clutch--pending-edits '((([1] . 1) . "edited"))
-                clutch--pending-deletes nil
-                clutch--marked-rows nil)
+                clutch--pending-deletes nil)
     (let ((row-positions (make-vector 1 nil)))
       (clutch--insert-data-rows '((1 "before"))
                                 row-positions
@@ -2588,47 +2585,37 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
     (should-not clutch--where-filter)))
 
 (ert-deftest clutch-test-filter-apply-state ()
-  "Client-side filtering should update display rows, pattern, and row marks."
+  "Client-side filtering should update display rows and pattern."
   (dolist (case
            '((substring
               ("id" "name")
               ((:name "id" :type-category numeric)
                (:name "name" :type-category text))
               ((1 "alice") (2 "bob") (3 "carol"))
-              nil "ALI" ((1 "alice")) "ALI" nil)
+              "ALI" ((1 "alice")) "ALI")
              (formatted-value
               ("id" "value")
               ((:name "id" :type-category numeric)
                (:name "value" :type-category numeric))
               ((1 nil) (2 42) (3 "hello"))
-              nil "42" ((2 42)) "42" nil)
+              "42" ((2 42)) "42")
              (no-matches
               ("id" "name")
               ((:name "id") (:name "name"))
               ((1 "alice") (2 "bob"))
-              nil "missing" nil "missing" nil)
-             (clears-marked
-              ("id" "name")
-              ((:name "id" :type-category numeric)
-               (:name "name" :type-category text))
-              ((1 "alice") (2 "bob") (3 "carol"))
-              (0 2) "ali" ((1 "alice")) "ali" t)))
-    (pcase-let ((`(,label ,columns ,column-defs ,rows ,marked-rows
-                          ,pattern ,expected-rows ,expected-pattern
-                          ,expect-marks-cleared)
+              "missing" nil "missing")))
+    (pcase-let ((`(,label ,columns ,column-defs ,rows
+                          ,pattern ,expected-rows ,expected-pattern)
                  case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-result-state
             (:columns columns
              :column-defs column-defs
-             :rows rows
-             :marked-rows marked-rows)
+             :rows rows)
           (cl-letf (((symbol-function 'clutch--render-result) #'ignore))
             (clutch-result--apply-filter pattern)
             (should (equal (clutch--result-display-rows) expected-rows))
-            (should (equal clutch--filter-pattern expected-pattern))
-            (when expect-marks-cleared
-              (should-not clutch--marked-rows))))))))
+            (should (equal clutch--filter-pattern expected-pattern))))))))
 
 (ert-deftest clutch-test-filter-clear-restores-all-rows ()
   "Clearing the client-side filter should restore the full result set."
@@ -4730,7 +4717,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                   (lambda (ignore-auto noconfirm)
                     (push (list ignore-auto noconfirm
                                 clutch--pending-edits clutch--pending-deletes
-                                clutch--pending-inserts clutch--marked-rows)
+                                clutch--pending-inserts)
                           reverts)))
       (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
                  (lambda () '(("INSERT INTO users (id, name) VALUES (?, ?)" . ("3" "c")))))
@@ -4759,7 +4746,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should (equal (cdr (nth 1 executed)) '("a2" 1)))
         (should (string-prefix-p "DELETE" (car (nth 2 executed))))
         (should (equal (cdr (nth 2 executed)) '(2)))
-        (should (equal reverts '((nil t nil nil nil nil))))))))
+        (should (equal reverts '((nil t nil nil nil))))))))
 
 (ert-deftest clutch-test-submit-validates-before-auto-commit ()
   "Auto submit should roll back when row-count validation fails."
@@ -4906,6 +4893,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (with-current-buffer insert-buf
         (clutch-test--goto-insert-field-value "impact_score")
         (insert "x")
+        (clutch-result-insert--run-idle-validation insert-buf "impact_score")
         (let* ((field (clutch-result-insert--field-state "impact_score"))
                (after (overlay-get (plist-get field :error-overlay)
                                    'after-string)))
@@ -4917,6 +4905,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-test--goto-insert-field-value "impact_score")
           (delete-region (point) (line-end-position))
           (insert "1.5")
+          (clutch-result-insert--run-idle-validation insert-buf "impact_score")
           (setq field (clutch-result-insert--field-state "impact_score"))
           (should-not (plist-get field :error-message))
           (should-not (plist-get field :error-overlay))))))))
