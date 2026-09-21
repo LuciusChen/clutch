@@ -550,21 +550,28 @@ preceding statement."
       (1- offset))
      (t offset))))
 
-(defun clutch-db-sql-semicolon-statement-bounds
-    (text offset &optional dialect)
-  "Return zero-based statement bounds around OFFSET in TEXT.
-Top-level semicolons delimit statements.  Semicolons inside strings and
-comments are ignored.  DIALECT is a `clutch-db-sql-dialect' plist."
+(defun clutch-db-sql--bounds-from-breaks (text offset breaks)
+  "Return zero-based statement bounds around OFFSET in TEXT given BREAKS.
+BREAKS are zero-based top-level semicolon offsets in TEXT, as returned by
+`clutch-db-sql-statement-breaks'."
   (let ((beg 0)
         (end (length text))
         (effective-offset
          (clutch-db-sql-statement-effective-offset text offset)))
-    (dolist (break (clutch-db-sql-statement-breaks text dialect))
+    (dolist (break breaks)
       (if (< break effective-offset)
           (setq beg (1+ break))
         (when (= end (length text))
           (setq end break))))
     (cons beg end)))
+
+(defun clutch-db-sql-semicolon-statement-bounds
+    (text offset &optional dialect)
+  "Return zero-based statement bounds around OFFSET in TEXT.
+Top-level semicolons delimit statements.  Semicolons inside strings and
+comments are ignored.  DIALECT is a `clutch-db-sql-dialect' plist."
+  (clutch-db-sql--bounds-from-breaks
+   text offset (clutch-db-sql-statement-breaks text dialect)))
 
 (defun clutch-db-sql--trim-bounds (text beg end)
   "Return non-whitespace bounds in TEXT between BEG and END, or nil."
@@ -624,9 +631,10 @@ delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
 Use semicolon-aware bounds when TEXT has top-level semicolons; otherwise fall
 back to blank-line paragraph bounds.  DIALECT is a `clutch-db-sql-dialect'
 plist, so context features split statements the same way execution does."
-  (if (clutch-db-sql-statement-breaks text dialect)
-      (clutch-db-sql-semicolon-statement-bounds text offset dialect)
-    (clutch-db-sql-blank-line-statement-bounds text offset)))
+  (let ((breaks (clutch-db-sql-statement-breaks text dialect)))
+    (if breaks
+        (clutch-db-sql--bounds-from-breaks text offset breaks)
+      (clutch-db-sql-blank-line-statement-bounds text offset))))
 
 ;;;; SQL helpers (top-level clause detection)
 

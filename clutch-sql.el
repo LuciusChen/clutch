@@ -929,24 +929,30 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
     ('upper (upcase text))
     (_ text)))
 
+(defvar clutch--sql-keyword-completion-raw-candidates-cache nil
+  "Cache of raw SQL keyword completion candidates, nil until computed.
+Not invalidated: the source defconsts never change at runtime.")
+
 (defun clutch--sql-keyword-completion-raw-candidates ()
   "Return raw SQL keyword completion candidates before case conversion."
-  (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases))
-        (zero-arg-functions nil))
-    (maphash
-     (lambda (_name doc)
-       (let ((sig (plist-get doc :sig)))
-         (when (and (stringp sig)
-                    (string-match-p "\\`[[:upper:]_]+()[[:space:]]*\\'" sig))
-           (push (string-trim sig) zero-arg-functions))))
-     clutch--sql-function-docs)
-    (delete-dups
-     (append
-      (mapcar #'cdr clutch--sql-keyword-replacement-phrases)
-      clutch--sql-keyword-additive-phrases
-      zero-arg-functions
-      (seq-remove (lambda (keyword) (member keyword replaced))
-                  clutch--sql-keywords)))))
+  (or clutch--sql-keyword-completion-raw-candidates-cache
+      (setq clutch--sql-keyword-completion-raw-candidates-cache
+            (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases))
+                  (zero-arg-functions nil))
+              (maphash
+               (lambda (_name doc)
+                 (let ((sig (plist-get doc :sig)))
+                   (when (and (stringp sig)
+                              (string-match-p "\\`[[:upper:]_]+()[[:space:]]*\\'" sig))
+                     (push (string-trim sig) zero-arg-functions))))
+               clutch--sql-function-docs)
+              (delete-dups
+               (append
+                (mapcar #'cdr clutch--sql-keyword-replacement-phrases)
+                clutch--sql-keyword-additive-phrases
+                zero-arg-functions
+                (seq-remove (lambda (keyword) (member keyword replaced))
+                            clutch--sql-keywords)))))))
 
 (defun clutch--sql-completion-insert-space-p (candidate)
   "Return non-nil when accepting CANDIDATE should add a trailing space."
