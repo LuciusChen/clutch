@@ -652,9 +652,14 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
 TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
   (let ((entries
          (clutch--filter-object-entries-by-types
-          (if table-like-only
-              (clutch--browseable-object-entries conn)
+          (cond
+           ((not table-like-only)
             (clutch--object-entries conn))
+           ((clutch-db-object-name-search-p conn)
+            (clutch--merge-object-entries-by-name
+             (clutch-db-search-table-entries conn name)))
+           (t
+            (clutch--browseable-object-entries conn)))
           allowed-types)))
     (seq-filter
      (lambda (entry)

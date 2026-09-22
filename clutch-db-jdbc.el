@@ -1392,6 +1392,12 @@ unknown effect."
 Oracle JDBC schema enumeration is too slow to block connect."
   (not (clutch-jdbc--oracle-conn-p conn)))
 
+(cl-defmethod clutch-db-object-name-search-p ((conn clutch-jdbc-conn))
+  "Return non-nil when CONN is Oracle, which lists its schema too slowly.
+Its search-tables covers the same tables, views and synonyms as get-tables,
+so an object name is matched by prefix search instead."
+  (clutch-jdbc--oracle-conn-p conn))
+
 (cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
   "Return non-nil when CONN may synchronously load completion columns.
 This is allowed in the hot path."
