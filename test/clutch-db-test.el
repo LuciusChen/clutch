@@ -6965,6 +6965,43 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
                 (should (clutch-db-live-p conn))
               (should-not (clutch-db-live-p conn)))))))))
 
+;;;; Unit tests — clutch-jdbc--start-agent / clutch-jdbc--stop-agent buffer lifecycle
+
+(ert-deftest clutch-db-test-jdbc-agent-restart-does-not-leak-process-buffers ()
+  "Restarting the JDBC agent should not leak retired process buffers."
+  (let ((clutch-jdbc--agent-process nil)
+        (clutch-jdbc--response-queue nil)
+        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        (clutch-jdbc--connections-by-id (make-hash-table :test 'eql)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'clutch-jdbc--validate-agent-jar) #'ignore)
+                    ((symbol-function 'executable-find) (lambda (_cmd) "java"))
+                    ((symbol-function 'clutch-jdbc--recv-response)
+                     (lambda (&rest _args) '(:ok t)))
+                    ((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (make-pipe-process :name (plist-get args :name)
+                                          :buffer (plist-get args :buffer)
+                                          :noquery t))))
+            ;; Two full restart cycles, then a third start left running.
+            (dotimes (_ 2)
+              (clutch-jdbc--ensure-agent)
+              (clutch-jdbc--stop-agent))
+            (clutch-jdbc--ensure-agent))
+          (should (equal
+                   (seq-filter
+                    (lambda (buf) (string-prefix-p " *clutch-jdbc-agent*" (buffer-name buf)))
+                    (buffer-list))
+                   (list (process-buffer clutch-jdbc--agent-process)))))
+      (clutch-jdbc--stop-agent)
+      (dolist (buf (seq-filter
+                    (lambda (buf) (string-prefix-p " *clutch-jdbc-agent*" (buffer-name buf)))
+                    (buffer-list)))
+        (kill-buffer buf)))))
+
 ;;;; Unit tests — clutch-jdbc--recv-response timeout behaviour
 
 (ert-deftest clutch-db-test-jdbc-recv-response-returns-matching ()
@@ -6983,6 +7020,7 @@ It does so without touching the agent process."
   (let (deleted-proc)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
               ((symbol-function 'delete-process)  (lambda (p) (setq deleted-proc p)))
+              ((symbol-function 'process-buffer) (lambda (_p) nil))
               ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
       (let ((clutch-jdbc--agent-process 'fake-proc)
             (clutch-jdbc--response-queue '(stale)))
@@ -6997,6 +7035,7 @@ It does so without touching the agent process."
              clutch-jdbc--async-callbacks)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
               ((symbol-function 'delete-process) #'ignore)
+              ((symbol-function 'process-buffer) (lambda (_p) nil))
               ((symbol-function 'accept-process-output) (lambda (_p _s) nil))
               ((symbol-function 'cancel-timer)
                (lambda (timer)
@@ -7033,6 +7072,7 @@ It does so without touching the agent process."
                    (lambda (_p) (plist-get case :live)))
                   ((symbol-function 'delete-process)
                    (lambda (p) (setq deleted-proc p)))
+                  ((symbol-function 'process-buffer) (lambda (_p) nil))
                   ((symbol-function 'accept-process-output)
                    (lambda (_p _s) nil)))
           (let ((clutch-jdbc--agent-process (plist-get case :process))
