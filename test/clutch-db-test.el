@@ -1582,6 +1582,34 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (clutch-db-test--assert-row-identity-skips-lower-priority
          conn table pk-columns unique-fn locator-fn locator-value)))))
 
+(ert-deftest clutch-db-test-jdbc-row-identity-index-lookup-is-table-scoped ()
+  "Row identity must ask for one table's indexes, not the whole schema.
+`clutch-db-list-objects' is uncached and schema-wide, so resolving identity
+through it puts every index in the schema inside the user's query."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "APP")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-db-column-details)
+               (lambda (_conn _table) '((:name "CODE" :nullable nil))))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (&rest _args)
+                 (error "Row identity must not enumerate schema-wide objects")))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params &optional _timeout)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:indexes ((:name "DEMO_UQ" :type "INDEX"
+                              :unique t :table "DEMO")))))
+              ((symbol-function 'clutch-db-object-details)
+               (lambda (_conn _entry) '("CODE"))))
+      (should (equal (clutch-jdbc--unique-not-null-identities conn "DEMO")
+                     '((:kind unique-key :name "DEMO_UQ" :columns ("CODE")))))
+      (should (equal captured-op "get-indexes"))
+      (should (equal (alist-get 'table captured-params) "DEMO"))
+      (should (equal (alist-get 'schema captured-params) "APP"))
+      (should (equal (alist-get 'conn-id captured-params) 4)))))
+
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
   (skip-unless (sqlite-available-p))
@@ -1773,61 +1801,6 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (equal (alist-get 'prefix captured-params) "ORDERS"))
       (should (= captured-timeout 7))
       (should (equal callback-result "订单")))))
-
-(ert-deftest clutch-db-test-jdbc-oracle-warms-row-identity-metadata ()
-  "Oracle should pre-run the metadata statements row identity resolves with."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 4
-                                     :params '(:driver oracle
-                                               :schema "APP"
-                                               :rpc-timeout 11)))
-        calls)
-    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (op params _callback &optional _errback timeout _conn)
-                 (push (list op params timeout) calls)
-                 t)))
-      (should (clutch-db-warm-row-identity-metadata conn))
-      (setq calls (nreverse calls))
-      (should (equal (mapcar #'car calls)
-                     '("search-tables" "get-primary-keys")))
-      (pcase-let ((`((,_ ,search-params ,search-timeout)
-                     (,_ ,pk-params ,_))
-                   calls))
-        (should (equal (alist-get 'prefix search-params)
-                       clutch-jdbc--metadata-warmup-name))
-        (should (equal (alist-get 'table pk-params)
-                       clutch-jdbc--metadata-warmup-name))
-        (should (equal (alist-get 'conn-id search-params) 4))
-        (should (equal (alist-get 'schema search-params) "APP"))
-        (should (= search-timeout 11))))))
-
-(ert-deftest clutch-db-test-jdbc-warmup-name-matches-no-rows ()
-  "The warmup object name must stay wildcard-free so it matches nothing.
-The agent appends `%' to the search prefix, so a `_' or `%' here would turn
-a warmup into a real catalog scan."
-  (should-not (string-match-p "[_%]" clutch-jdbc--metadata-warmup-name)))
-
-(ert-deftest clutch-db-test-jdbc-warms-row-identity-only-for-oracle ()
-  "Warmup should stay off backends without a first-use metadata penalty."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 4
-                                     :params '(:driver generic
-                                               :rpc-timeout 7))))
-    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (&rest _args)
-                 (error "Warmup must not run for non-Oracle connections"))))
-      (should-not (clutch-db-warm-row-identity-metadata conn)))))
-
-(ert-deftest clutch-db-test-jdbc-skips-row-identity-warmup-when-dead ()
-  "Warmup should not send requests for a connection that is already gone."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 4
-                                     :params '(:driver oracle
-                                               :rpc-timeout 7))))
-    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (&rest _args)
-                 (error "Warmup must not run on a dead connection"))))
-      (should-not (clutch-db-warm-row-identity-metadata conn)))))
 
 (ert-deftest clutch-db-test-jdbc-table-comment-uses-table-search-remarks ()
   "JDBC table-comment should use remarks surfaced by search-tables."

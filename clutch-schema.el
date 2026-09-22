@@ -522,13 +522,7 @@ Only loads table names (fast).  Column info is loaded lazily."
        nil))))
 
 (defun clutch--prime-schema-cache (conn)
-  "Kick off post-connect metadata priming for CONN.
-Row identity warmup runs first because it is what the first query waits on."
-  (when (clutch-db-warm-row-identity-metadata conn)
-    (clutch--metadata-debug-event
-     conn "row-identity-warmup" "submit"
-     (clutch--metadata-debug-backend conn)
-     "Queued background row identity metadata warmup"))
+  "Kick off the appropriate schema refresh strategy for CONN."
   (if (clutch-db-eager-schema-refresh-p conn)
       (clutch--refresh-schema-cache conn)
     (unless (clutch--refresh-schema-cache-async
