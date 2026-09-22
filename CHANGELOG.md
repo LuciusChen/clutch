@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- Warmed the Oracle metadata statements that row identity resolves with as soon as a JDBC connection is primed, so their session-wide hard parse and data dictionary load no longer land inside the first query. Warmup runs on the isolated metadata session, matches no rows, and leaves failures for the real request to report.
+- Resolved row identity for a table without a primary key by requesting that table's indexes instead of every index in the schema. The lookup ran synchronously before the query and consulted no cache, so on large Oracle schemas the first query of a session waited on a full-schema index enumeration.
 - Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke.
 - Reduced per-keystroke work in SQL consoles: statement-context lookups scan the buffer once instead of twice, keyword completion candidates are computed once, delimited bulk import no longer allocates a string per character, and MongoDB console indentation uses one syntax scan per line instead of a character-by-character buffer walk.
 - Display SQL execution status as colored dots in the left margin on text terminals, using the graphical marker faces and preserving existing wider margins.
