@@ -3057,6 +3057,30 @@ replacement connection would run the statement against an empty transaction."
       (should-not rebound)
       (should (equal released '(new-conn old-conn))))))
 
+(ert-deftest clutch-test-replace-connection-releases-new-connection-when-old-teardown-signals ()
+  "A failing old-connection teardown must not orphan the new connection."
+  (let (disconnected released rebound)
+    (cl-letf (((symbol-function 'clutch--build-conn)
+               (lambda (_params) 'new-conn))
+              ((symbol-function 'clutch--connection-alive-p)
+               (lambda (conn) (memq conn '(old-conn new-conn))))
+              ((symbol-function 'clutch--clear-tx-state) #'ignore)
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (conn)
+                 (if (eq conn 'old-conn)
+                     (signal 'clutch-db-error '("old teardown failed"))
+                   (setq disconnected conn))))
+              ((symbol-function 'clutch--release-connection-transport)
+               (lambda (conn) (push conn released)))
+              ((symbol-function 'clutch--rebind-connection-buffers)
+               (lambda (&rest _args) (setq rebound t))))
+      (should-error
+       (clutch--replace-connection 'old-conn '(:backend pg) 'pg)
+       :type 'clutch-db-error)
+      (should-not rebound)
+      (should (eq disconnected 'new-conn))
+      (should (memq 'new-conn released)))))
+
 (ert-deftest clutch-test-derived-buffers-reconnect-using-inherited-context ()
   "Derived buffers reconnect their logical session without losing local state."
   (dolist (kind '(result object))
@@ -3189,6 +3213,35 @@ replacement connection would run the statement against an empty transaction."
                 ((symbol-function 'message) #'ignore))
         (should-error (clutch-connect) :type 'clutch-db-error)
         (should (equal built '((:backend jdbc :database "newdb"))))
+        (should-not activated)))))
+
+(ert-deftest clutch-test-connect-releases-new-connection-when-old-teardown-signals ()
+  "A failing old-connection teardown must not orphan the new connection."
+  (let (disconnected released activated)
+    (with-temp-buffer
+      (setq-local clutch-connection 'old-conn)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (memq conn '(old-conn new-conn))))
+                ((symbol-function 'clutch--confirm-session-close)
+                 #'ignore)
+                ((symbol-function 'clutch--connect-params-for-current-buffer)
+                 (lambda () '(:backend jdbc :database "newdb")))
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'jdbc))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (_params) 'new-conn))
+                ((symbol-function 'clutch--do-disconnect)
+                 (lambda (_conn) (signal 'clutch-db-error '("old teardown failed"))))
+                ((symbol-function 'clutch-db-disconnect)
+                 (lambda (conn) (setq disconnected conn)))
+                ((symbol-function 'clutch--release-connection-transport)
+                 (lambda (conn) (setq released conn)))
+                ((symbol-function 'clutch--activate-current-buffer-connection)
+                 (lambda (conn params product)
+                   (setq activated (list conn params product)))))
+        (should-error (clutch-connect) :type 'clutch-db-error)
+        (should (eq disconnected 'new-conn))
+        (should (eq released 'new-conn))
         (should-not activated)))))
 
 (defmacro clutch-test--with-connect-build-stubs (spec &rest body)
@@ -3991,6 +4044,20 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
         (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
           (clutch-connect)
           (should (equal built '(:backend mysql :database "manual_db"))))))))
+
+(ert-deftest clutch-test-connect-over-dead-connection-cleans-up-old-transport ()
+  "Connecting over a dead old connection should release its old transport."
+  (with-temp-buffer
+    (setq-local clutch-connection 'old-conn)
+    (let (built cleaned-up)
+      (cl-letf (((symbol-function 'clutch--read-connection-params)
+                 (lambda () '(:backend mysql :database "manual_db")))
+                ((symbol-function 'clutch--cleanup-dead-connection)
+                 (lambda (conn) (setq cleaned-up conn))))
+        (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+          (clutch-connect)
+          (should (eq cleaned-up 'old-conn))
+          (should (eq clutch-connection 'new-conn)))))))
 
 ;;;; Schema and database switching
 
