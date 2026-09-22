@@ -47,6 +47,10 @@ value must be a symbol recognized by `sql-mode', such as `mysql' or `postgres'."
 (defvar clutch--object-cache (make-hash-table :test 'eq)
   "Object discovery cache keyed by connection object identity.
 Each value is a plist with at least :entries and :fetched-at.")
+
+(defvar clutch--browseable-object-cache (make-hash-table :test 'eq)
+  "Browseable object snapshot keyed by connection object identity.
+Dropped together with `clutch--object-cache' when the schema cache changes.")
 (defvar clutch--object-warmup-timers (make-hash-table :test 'eq)
   "Idle timers warming object discovery caches keyed by connection identity.")
 (defvar clutch--object-warmup-generations
@@ -205,22 +209,19 @@ exact resolver under the internal `:clutch-resolver' key.")
                      ("FUNCTION" 'functions)
                      ("TRIGGER" 'triggers)
                      (_ nil))))
-    (let ((browseable (clutch--browseable-object-entries conn)))
-      (clutch--cache-table-entry-comments conn browseable)
-      (when category
-        (cl-pushnew category loaded))
-      (puthash conn
-               (list :entries (clutch--merge-object-entries
-                               browseable
-                               (cl-remove type (plist-get cache :entries)
-                                          :key (lambda (entry)
-                                                 (clutch--normalize-object-type
-                                                  (plist-get entry :type)))
-                                          :test #'equal)
-                               entries)
-                     :loaded-categories loaded
-                     :fetched-at (float-time))
-               clutch--object-cache))
+    (when category
+      (cl-pushnew category loaded))
+    (puthash conn
+             (list :entries (clutch--merge-object-entries
+                             (cl-remove type (plist-get cache :entries)
+                                        :key (lambda (entry)
+                                               (clutch--normalize-object-type
+                                                (plist-get entry :type)))
+                                        :test #'equal)
+                             entries)
+                   :loaded-categories loaded
+                   :fetched-at (float-time))
+             clutch--object-cache)
     entries))
 
 (defun clutch--table-like-entry-p (entry)
@@ -407,12 +408,20 @@ GENERATION rejects stale work, and BACKEND labels diagnostics."
   (pcase state
     ('invalidated
      (clutch--invalidate-object-warmup conn)
-     (remhash conn clutch--object-cache))
+     (remhash conn clutch--object-cache)
+     (remhash conn clutch--browseable-object-cache))
     ('ready
      (clutch--schedule-object-warmup conn))))
 
 (add-hook 'clutch--schema-cache-updated-hook
           #'clutch--handle-schema-cache-updated)
+
+(defun clutch--warmed-object-entries (conn)
+  "Return the object entries warmed so far for CONN and schedule the rest.
+Unlike `clutch--partial-object-entries' this never lists the schema."
+  (unless (clutch--object-cache-complete-p conn)
+    (clutch--schedule-object-warmup conn))
+  (clutch--object-cache-entries conn))
 
 (defun clutch--partial-object-entries (conn)
   "Return a fast object snapshot for CONN.
@@ -434,7 +443,7 @@ When REFRESH is non-nil, bypass any cached discovery snapshot."
        (apply
         #'clutch--merge-object-entries
         (append
-         (list (clutch-db-browseable-object-entries conn))
+         (list (clutch--browseable-object-entries conn t))
          (mapcar (lambda (category)
                    (clutch-db-list-objects conn category))
                  clutch--object-categories))))
@@ -451,7 +460,7 @@ When REFRESH is non-nil, bypass any cached per-type entries."
          (pcase type
            ((or "TABLE" "VIEW" "SYNONYM" "COLLECTION" "KEY")
             (clutch--filter-object-entries-by-type
-             (clutch--browseable-object-entries conn)
+             (clutch--browseable-object-entries conn refresh)
              type))
            ("INDEX" (clutch-db-list-objects conn 'indexes))
            ("SEQUENCE" (clutch-db-list-objects conn 'sequences))
@@ -649,17 +658,23 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
 
 (defun clutch--object-matches-by-name (conn name &optional table-like-only allowed-types)
   "Return object entries on CONN whose name matches NAME.
-TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
+TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set.  On a backend that
+searches by name, table-like matches come from the prefix search and, unless
+TABLE-LIKE-ONLY, the other types from the warmed categories, so resolving an
+object never lists the schema there."
   (let ((entries
          (clutch--filter-object-entries-by-types
           (cond
-           ((not table-like-only)
-            (clutch--object-entries conn))
            ((clutch-db-object-name-search-p conn)
-            (clutch--merge-object-entries-by-name
-             (clutch-db-search-table-entries conn name)))
+            (clutch--merge-object-entries
+             (clutch--merge-object-entries-by-name
+              (clutch-db-search-table-entries conn name))
+             (unless table-like-only
+               (clutch--warmed-object-entries conn))))
+           (table-like-only
+            (clutch--browseable-object-entries conn))
            (t
-            (clutch--browseable-object-entries conn)))
+            (clutch--object-entries conn)))
           allowed-types)))
     (seq-filter
      (lambda (entry)
@@ -894,12 +909,20 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
                 (string= schema source))
       schema)))
 
-(defun clutch--browseable-object-entries (conn)
+(defun clutch--browseable-object-entries (conn &optional refresh)
   "Return the base browseable object entry list for CONN.
 Includes both schema/browser entries and search-discovered entries so object
-selection can surface objects from different Oracle sources and types."
-  (clutch--merge-object-entries-by-name
-   (clutch-db-browseable-object-entries conn)))
+selection can surface objects from different Oracle sources and types.  The
+backend lists them once per schema cache generation; REFRESH lists them again."
+  (let ((cached (if refresh
+                    'missing
+                  (gethash conn clutch--browseable-object-cache 'missing))))
+    (if (eq cached 'missing)
+        (let ((entries (clutch--merge-object-entries-by-name
+                        (clutch-db-browseable-object-entries conn))))
+          (clutch--cache-table-entry-comments conn entries)
+          (puthash conn entries clutch--browseable-object-cache))
+      cached)))
 
 (defun clutch--find-console-for-conn (conn)
   "Return the query console buffer that owns CONN, or nil."
@@ -1141,11 +1164,13 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
 
 (defun clutch--object-related-entries (conn entry type &optional refresh)
   "Return related TYPE entries for table-like ENTRY on CONN.
-When REFRESH is non-nil, bypass cached entries for TYPE."
+Without REFRESH only the warmed TYPE entries are consulted, so nothing is
+listed; when REFRESH is non-nil, list TYPE again."
   (when-let* ((name (plist-get entry :name))
               (objects (if refresh
                            (clutch--object-type-entries conn type t)
-                         (clutch--object-entries conn))))
+                         (clutch--filter-object-entries-by-type
+                          (clutch--warmed-object-entries conn) type))))
     (seq-filter
      (lambda (candidate)
        (and (equal (clutch--normalize-object-type (plist-get candidate :type))
