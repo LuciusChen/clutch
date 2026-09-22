@@ -254,6 +254,39 @@ document connection."
              (should-not browse-entry)
              (should (equal show-entry (plist-get case :entry))))))))))
 
+(ert-deftest clutch-test-object-name-match-searches-when-backend-says-so ()
+  "A backend that declares name search must not have its full listing pulled.
+The exact-name match only needs entries under the name's prefix."
+  (let (browsed)
+    (cl-letf (((symbol-function 'clutch-db-object-name-search-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-browseable-object-entries)
+               (lambda (_conn) (setq browsed t) nil))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn prefix)
+                 (should (equal prefix "orders"))
+                 '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                   (:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                   (:name "ORDERS_LOG" :type "TABLE" :schema "APP" :source-schema "APP")))))
+      (should (equal (clutch--object-matches-by-name 'fake-conn "orders" t)
+                     '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+      (should-not browsed))))
+
+(ert-deftest clutch-test-object-name-match-lists-by-default ()
+  "Backends that do not declare name search keep matching the full listing."
+  (let (searched)
+    (cl-letf (((symbol-function 'clutch-db-object-name-search-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-search-table-entries)
+               (lambda (_conn _prefix) (setq searched t) nil))
+              ((symbol-function 'clutch-db-browseable-object-entries)
+               (lambda (_conn)
+                 '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                   (:name "USERS" :type "TABLE" :schema "APP" :source-schema "APP")))))
+      (should (equal (clutch--object-matches-by-name 'fake-conn "orders" t)
+                     '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+      (should-not searched))))
+
 (ert-deftest clutch-test-object-jump-target-resolves-index-table ()
   "Jump target should follow index target-table metadata."
   (let (described)

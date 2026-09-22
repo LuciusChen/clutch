@@ -1610,6 +1610,13 @@ through it puts every index in the schema inside the user's query."
       (should (equal (alist-get 'schema captured-params) "APP"))
       (should (equal (alist-get 'conn-id captured-params) 4)))))
 
+(ert-deftest clutch-db-test-jdbc-name-search-only-for-oracle ()
+  "Only Oracle matches an object name by prefix search; its listing is slow."
+  (should (clutch-db-object-name-search-p
+           (make-clutch-jdbc-conn :params '(:driver oracle))))
+  (should-not (clutch-db-object-name-search-p
+               (make-clutch-jdbc-conn :params '(:driver generic)))))
+
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
   (skip-unless (sqlite-available-p))

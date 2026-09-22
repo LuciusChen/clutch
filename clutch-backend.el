@@ -1182,6 +1182,16 @@ backend should preserve the current dirty state.")
   "Most backends refresh schema immediately after connect."
   t)
 
+(cl-defgeneric clutch-db-object-name-search-p (conn)
+  "Return non-nil when CONN matches an object name by prefix search.
+Only a backend whose `clutch-db-search-table-entries' returns the same
+entries for a name as `clutch-db-browseable-object-entries' would, and whose
+full listing is too slow for a per-command lookup, should say so.")
+
+(cl-defmethod clutch-db-object-name-search-p ((_conn t))
+  "Most backends match an object name against their full listing."
+  nil)
+
 (cl-defgeneric clutch-db-completion-sync-columns-p (conn)
   "Return non-nil when completion may synchronously load column metadata for CONN.")
 
