@@ -1582,6 +1582,34 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
         (clutch-db-test--assert-row-identity-skips-lower-priority
          conn table pk-columns unique-fn locator-fn locator-value)))))
 
+(ert-deftest clutch-db-test-jdbc-row-identity-index-lookup-is-table-scoped ()
+  "Row identity must ask for one table's indexes, not the whole schema.
+`clutch-db-list-objects' is uncached and schema-wide, so resolving identity
+through it puts every index in the schema inside the user's query."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "APP")))
+        captured-op captured-params)
+    (cl-letf (((symbol-function 'clutch-db-column-details)
+               (lambda (_conn _table) '((:name "CODE" :nullable nil))))
+              ((symbol-function 'clutch-db-list-objects)
+               (lambda (&rest _args)
+                 (error "Row identity must not enumerate schema-wide objects")))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params &optional _timeout)
+                 (setq captured-op op
+                       captured-params params)
+                 '(:indexes ((:name "DEMO_UQ" :type "INDEX"
+                              :unique t :table "DEMO")))))
+              ((symbol-function 'clutch-db-object-details)
+               (lambda (_conn _entry) '("CODE"))))
+      (should (equal (clutch-jdbc--unique-not-null-identities conn "DEMO")
+                     '((:kind unique-key :name "DEMO_UQ" :columns ("CODE")))))
+      (should (equal captured-op "get-indexes"))
+      (should (equal (alist-get 'table captured-params) "DEMO"))
+      (should (equal (alist-get 'schema captured-params) "APP"))
+      (should (equal (alist-get 'conn-id captured-params) 4)))))
+
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
   "SQLite rowid tables should expose `rowid' as a row locator."
   (skip-unless (sqlite-available-p))
