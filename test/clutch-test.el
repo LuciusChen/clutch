@@ -3314,6 +3314,25 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
               (should (string-match-p (regexp-quote message-fragment)
                                       seen-message)))))))))
 
+(ert-deftest clutch-test-prime-schema-cache-warms-row-identity-first ()
+  "Post-connect priming should warm row identity before scheduling refresh.
+The first query waits on row identity metadata, not on the schema cache."
+  (let (order)
+    (cl-letf (((symbol-function 'clutch-db-warm-row-identity-metadata)
+               (lambda (_conn) (push 'warm order) t))
+              ((symbol-function 'clutch-db-eager-schema-refresh-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--refresh-schema-cache-async)
+               (lambda (_conn &optional _idle-delay) (push 'refresh order) t))
+              ((symbol-function 'clutch--refresh-schema-cache)
+               (lambda (_conn) (push 'sync-refresh order) t)))
+      (clutch--prime-schema-cache 'fake-conn)
+      (should (equal (nreverse order) '(warm refresh))))))
+
+(ert-deftest clutch-test-row-identity-warmup-defaults-to-no-work ()
+  "Backends without a first-use metadata penalty should not warm anything."
+  (should-not (clutch-db-warm-row-identity-metadata 'fake-conn)))
+
 (ert-deftest clutch-test-refresh-schema-command-forces-sync-refresh-on-lazy-backends ()
   "Explicit schema refresh should bypass background refresh for lazy backends."
   (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
