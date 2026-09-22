@@ -2339,9 +2339,8 @@ the metadata request."
 
 (defun clutch-jdbc--table-indexes (conn table)
   "Return index entry plists for TABLE on CONN.
-`clutch-db-list-objects' enumerates every index in the schema, which is far
-more than row identity needs and is not cached.  The agent accepts a table
-filter for the same operation, so ask it for one table."
+The agent filters the indexes operation by table, so this never enumerates
+the schema the way `clutch-db-list-objects' does."
   (when-let* ((spec (clutch-jdbc--object-category-spec 'indexes)))
     (let ((result (clutch-jdbc--rpc
                    conn (plist-get spec :op)

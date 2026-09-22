@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- Resolved row identity for a table without a primary key by requesting that table's indexes instead of every index in the schema. The lookup ran synchronously before the query and consulted no cache, so on large Oracle schemas the first query of a session waited on a full-schema index enumeration.
+- Made row identity resolution cheaper and visible. It runs synchronously before every statement: a table without a primary key previously enumerated every index in the schema on each query (seconds on large Oracle schemas) and nothing cached the answer. The lookup now asks for that table's indexes only, the result is reused per relation until schema refresh, DDL, reconnect or a schema switch discards it (failed lookups are not cached), and `clutch-debug-mode` records each resolution with its table, chosen candidate and duration.
 - Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke.
 - Reduced per-keystroke work in SQL consoles: statement-context lookups scan the buffer once instead of twice, keyword completion candidates are computed once, delimited bulk import no longer allocates a string per character, and MongoDB console indentation uses one syntax scan per line instead of a character-by-character buffer walk.
 - Display SQL execution status as colored dots in the left margin on text terminals, using the graphical marker faces and preserving existing wider margins.
