@@ -1182,17 +1182,6 @@ backend should preserve the current dirty state.")
   "Most backends refresh schema immediately after connect."
   t)
 
-(cl-defgeneric clutch-db-warm-row-identity-metadata (conn)
-  "Warm the metadata statements row identity resolution needs on CONN.
-Resolution runs synchronously before a SELECT reaches a new source table.
-When a backend's metadata statements are expensive the first time a session
-runs them, running them once after connect keeps that cost out of the user's
-first query.  Return non-nil when warmup was started.")
-
-(cl-defmethod clutch-db-warm-row-identity-metadata ((_conn t))
-  "Most backends resolve row identity without a first-use penalty."
-  nil)
-
 (cl-defgeneric clutch-db-completion-sync-columns-p (conn)
   "Return non-nil when completion may synchronously load column metadata for CONN.")
 
