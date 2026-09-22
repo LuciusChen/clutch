@@ -2068,6 +2068,35 @@ the metadata request."
       (start))
     t))
 
+(defconst clutch-jdbc--metadata-warmup-name "ZZZCLUTCHWARMUPZZZ"
+  "Object name used to warm Oracle row identity metadata statements.
+It holds no SQL LIKE wildcard and is not a plausible object name, so each
+warmed statement is parsed and executed without matching a row.")
+
+(cl-defmethod clutch-db-warm-row-identity-metadata ((conn clutch-jdbc-conn))
+  "Warm the Oracle metadata statements row identity needs on CONN.
+Oracle resolves row identity through `search-tables' and `get-primary-keys'.
+Their first execution in a session pays a hard parse and a cold data
+dictionary, which lands inside the user's first query.  Running both once
+after connect moves that cost into the connection window, where the isolated
+metadata session keeps it off foreground SQL.  Warmup is best-effort: it
+matches no rows, and a failure is left for the real request to report."
+  (when (and (clutch-jdbc--oracle-conn-p conn)
+             (clutch-db-live-p conn))
+    (let ((timeout (clutch-jdbc--conn-rpc-timeout conn)))
+      (clutch-jdbc--rpc-async
+       "search-tables"
+       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+         (prefix . ,clutch-jdbc--metadata-warmup-name)
+         ,@(clutch-jdbc--metadata-scope-params conn))
+       #'ignore #'ignore timeout conn)
+      (clutch-jdbc--rpc-async
+       "get-primary-keys"
+       (clutch-jdbc--table-metadata-params
+        conn clutch-jdbc--metadata-warmup-name)
+       #'ignore #'ignore timeout conn))
+    t))
+
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
                                               &optional errback)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
