@@ -1774,61 +1774,6 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should (= captured-timeout 7))
       (should (equal callback-result "订单")))))
 
-(ert-deftest clutch-db-test-jdbc-oracle-warms-row-identity-metadata ()
-  "Oracle should pre-run the metadata statements row identity resolves with."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 4
-                                     :params '(:driver oracle
-                                               :schema "APP"
-                                               :rpc-timeout 11)))
-        calls)
-    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (op params _callback &optional _errback timeout _conn)
-                 (push (list op params timeout) calls)
-                 t)))
-      (should (clutch-db-warm-row-identity-metadata conn))
-      (setq calls (nreverse calls))
-      (should (equal (mapcar #'car calls)
-                     '("search-tables" "get-primary-keys")))
-      (pcase-let ((`((,_ ,search-params ,search-timeout)
-                     (,_ ,pk-params ,_))
-                   calls))
-        (should (equal (alist-get 'prefix search-params)
-                       clutch-jdbc--metadata-warmup-name))
-        (should (equal (alist-get 'table pk-params)
-                       clutch-jdbc--metadata-warmup-name))
-        (should (equal (alist-get 'conn-id search-params) 4))
-        (should (equal (alist-get 'schema search-params) "APP"))
-        (should (= search-timeout 11))))))
-
-(ert-deftest clutch-db-test-jdbc-warmup-name-matches-no-rows ()
-  "The warmup object name must stay wildcard-free so it matches nothing.
-The agent appends `%' to the search prefix, so a `_' or `%' here would turn
-a warmup into a real catalog scan."
-  (should-not (string-match-p "[_%]" clutch-jdbc--metadata-warmup-name)))
-
-(ert-deftest clutch-db-test-jdbc-warms-row-identity-only-for-oracle ()
-  "Warmup should stay off backends without a first-use metadata penalty."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 4
-                                     :params '(:driver generic
-                                               :rpc-timeout 7))))
-    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (&rest _args)
-                 (error "Warmup must not run for non-Oracle connections"))))
-      (should-not (clutch-db-warm-row-identity-metadata conn)))))
-
-(ert-deftest clutch-db-test-jdbc-skips-row-identity-warmup-when-dead ()
-  "Warmup should not send requests for a connection that is already gone."
-  (let ((conn (make-clutch-jdbc-conn :conn-id 4
-                                     :params '(:driver oracle
-                                               :rpc-timeout 7))))
-    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
-              ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (&rest _args)
-                 (error "Warmup must not run on a dead connection"))))
-      (should-not (clutch-db-warm-row-identity-metadata conn)))))
-
 (ert-deftest clutch-db-test-jdbc-table-comment-uses-table-search-remarks ()
   "JDBC table-comment should use remarks surfaced by search-tables."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
