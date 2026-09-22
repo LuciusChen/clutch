@@ -96,9 +96,11 @@ Functions receive CONN, TABLE, and KIND.")
   (when clutch-debug-mode
     (clutch-db-backend-key conn)))
 
-(defun clutch--metadata-debug-event (conn op phase backend summary &optional context)
+(defun clutch--metadata-debug-event (conn op phase backend summary
+                                          &optional context elapsed)
   "Record a metadata debug event.
-CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
+CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event.
+ELAPSED, when non-nil, is the operation's duration in seconds."
   (when clutch-debug-mode
     (apply #'clutch--remember-debug-event
            (append (list :connection conn
@@ -107,12 +109,16 @@ CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
                          :backend backend
                          :summary summary)
                    (when context
-                     (list :context context))))))
+                     (list :context context))
+                   (when elapsed
+                     (list :elapsed elapsed))))))
 
-(defun clutch--metadata-debug-table-event (conn op phase backend table summary)
-  "Record a metadata debug event for TABLE and OP on CONN."
+(defun clutch--metadata-debug-table-event (conn op phase backend table summary
+                                                &optional elapsed)
+  "Record a metadata debug event for TABLE and OP on CONN.
+ELAPSED, when non-nil, is the operation's duration in seconds."
   (clutch--metadata-debug-event conn op phase backend summary
-                                (list :table table)))
+                                (list :table table) elapsed))
 
 (defun clutch--metadata-debug-stale-table-event (conn op backend table what)
   "Record a stale metadata debug event for TABLE, OP, and WHAT on CONN."
@@ -310,6 +316,31 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 (defun clutch--table-comment-key (conn table &optional schema)
   "Return the schema-qualified cache key for TABLE on CONN."
   (cons (or schema (clutch-db-current-schema conn)) table))
+
+(defun clutch--row-identity-cache-key (conn table schema catalog)
+  "Return the metadata cache key for TABLE's row identity on CONN.
+Row identity belongs to one concrete relation, so the key carries the
+namespace the lookup ran in rather than the bare table name.  CATALOG is
+kept as given because a backend without catalogs always passes nil."
+  (list catalog (or schema (clutch-db-current-schema conn)) table))
+
+(defun clutch--cached-row-identity (conn table schema catalog)
+  "Return TABLE's cached row identity candidates on CONN, wrapped in a list.
+Return nil when nothing is cached.  The wrapper keeps a cached empty
+candidate list distinguishable from a cache miss."
+  (let ((metadata (clutch--table-metadata
+                   conn (clutch--row-identity-cache-key
+                         conn table schema catalog))))
+    (when (plist-member metadata :row-identity)
+      (list (plist-get metadata :row-identity)))))
+
+(defun clutch--cache-row-identity (conn table schema catalog candidates)
+  "Cache CANDIDATES as TABLE's row identity on CONN.
+The entry lives with the rest of CONN's table metadata, so schema refresh,
+DDL, reconnect and schema switching already discard it."
+  (clutch--set-table-metadata
+   conn (clutch--row-identity-cache-key conn table schema catalog)
+   :row-identity candidates))
 
 (defun clutch--cached-table-comment (conn table &optional schema)
   "Return TABLE's cached comment in SCHEMA on CONN, or nil."

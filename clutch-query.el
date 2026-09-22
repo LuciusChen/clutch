@@ -711,14 +711,34 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
      (candidate
       (setq candidates (list candidate)))
      (table
-      (condition-case err
-          (setq candidates
-                (if (or source-schema source-catalog)
-                    (clutch-db-row-identity-candidates
-                     conn table source-schema source-catalog)
-                  (clutch-db-row-identity-candidates conn table)))
-        (clutch-db-error
-         (setq identity-error err)))))
+      (let* ((start (float-time))
+             (cached (clutch--cached-row-identity
+                      conn table source-schema source-catalog)))
+        (if cached
+            (setq candidates (car cached))
+          (condition-case err
+              (setq candidates
+                    (if (or source-schema source-catalog)
+                        (clutch-db-row-identity-candidates
+                         conn table source-schema source-catalog)
+                      (clutch-db-row-identity-candidates conn table)))
+            (clutch-db-error
+             (setq identity-error err)))
+          (unless identity-error
+            (clutch--cache-row-identity
+             conn table source-schema source-catalog candidates)))
+        (clutch--metadata-debug-table-event
+         conn "row-identity"
+         (cond (identity-error "error")
+               (cached "cache-hit")
+               (t "success"))
+         (clutch--metadata-debug-backend conn) table
+         (if identity-error
+             (format "Row identity failed: %s"
+                     (error-message-string identity-error))
+           (format "Resolved %s"
+                   (or (plist-get (car candidates) :name) "no candidate")))
+         (- (float-time) start)))))
     (let* ((candidate (car candidates))
            (expressions (and candidate
                              (clutch--row-identity-select-expressions
