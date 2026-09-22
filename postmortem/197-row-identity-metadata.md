@@ -45,7 +45,7 @@ Warming the metadata statements at connect was tried first, in postmortem 196, a
 
 The first statement against a relation resolves identity with one scoped index request instead of a schema enumeration; later statements against it reuse the answer. Verified against the reporter's database: 487 ms, then 2 ms. Execute-path tests isolate `clutch--table-metadata-cache`, which a resolved identity otherwise carries between them.
 
-The first resolution on a cold, remote database remains the dominant cost before a query, and `column-details` is its largest single call. Deferred column metadata has its own lifecycle in postmortem 182.
+The first resolution on a cold, remote database remains the dominant cost before a query. Its largest single call was `column-details` — on the reporter's database 296 ms of a 391 ms chain — fetched only to check a unique index's columns for NOT NULL, yet fetched before the table's indexes were even listed. The chain now lists the table's indexes first (29 ms there) and asks for column details only when a unique index exists to validate; a table without one, like the reported one, skips the call with an identical result. Deferred column metadata has its own lifecycle in postmortem 182.
 
 ## The same rule in the object picker
 

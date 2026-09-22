@@ -1610,6 +1610,23 @@ through it puts every index in the schema inside the user's query."
       (should (equal (alist-get 'schema captured-params) "APP"))
       (should (equal (alist-get 'conn-id captured-params) 4)))))
 
+(ert-deftest clutch-db-test-jdbc-row-identity-skips-column-details-without-unique-index ()
+  "A table with no unique index must not fetch column details.
+They exist only to validate a unique index's columns, and they are the most
+expensive request in the chain."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "APP"))))
+    (cl-letf (((symbol-function 'clutch-db-column-details)
+               (lambda (_conn _table)
+                 (error "Column details must not be fetched without a unique index")))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op _params &optional _timeout)
+                 (should (equal op "get-indexes"))
+                 '(:indexes ((:name "DEMO_IX" :type "INDEX"
+                              :unique nil :table "DEMO"))))))
+      (should-not (clutch-jdbc--unique-not-null-identities conn "DEMO")))))
+
 (ert-deftest clutch-db-test-jdbc-name-search-only-for-oracle ()
   "Only Oracle matches an object name by prefix search; its listing is slow."
   (should (clutch-db-object-name-search-p
