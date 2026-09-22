@@ -679,6 +679,7 @@ When DML is non-nil, mark the buffer as a non-tabular result."
               clutch--last-cell-position nil
               clutch--header-active-col nil
               clutch--header-line-string nil
+              clutch--header-line-crop-cache nil
               clutch--footer-base-string nil
               clutch--footer-display-cache nil
               clutch--footer-timing-cache nil

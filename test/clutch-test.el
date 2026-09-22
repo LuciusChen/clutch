@@ -2313,6 +2313,46 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
           (should (equal (get-text-property 0 'display rendered)
                          '(space :align-to 0))))))))
 
+(ert-deftest clutch-test-header-line-crop-computed-once-per-offset ()
+  "Redisplay evaluates the header on every frame.  At offset zero the rendered
+header is returned as is, and a crop is computed once per offset, font width,
+header string and column pixel widths, then reused."
+  (with-temp-buffer
+    (let ((header (copy-sequence "0123456789"))
+          (hscroll 0)
+          (font-width 10)
+          (crops 0))
+      (setq-local clutch--header-line-string header
+                  clutch--column-pixel-widths [30])
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _display) t))
+                ((symbol-function 'default-font-width)
+                 (lambda () font-width))
+                ((symbol-function 'window-hscroll)
+                 (lambda (&optional _window) hscroll))
+                ((symbol-function 'clutch--pixel-crop-left)
+                 (lambda (string pixels)
+                   (cl-incf crops)
+                   (substring string (/ pixels 10)))))
+        (should (eq (clutch--header-line-with-hscroll) header))
+        (should (= crops 0))
+        (setq hscroll 3)
+        (should (equal (clutch--header-line-with-hscroll) "3456789"))
+        (should (equal (clutch--header-line-with-hscroll) "3456789"))
+        (should (= crops 1))
+        (setq hscroll 4)
+        (should (equal (clutch--header-line-with-hscroll) "456789"))
+        (should (= crops 2))
+        (setq font-width 20)
+        (clutch--header-line-with-hscroll)
+        (should (= crops 3))
+        (setq-local clutch--header-line-string (copy-sequence "0123456789"))
+        (clutch--header-line-with-hscroll)
+        (should (= crops 4))
+        (setq-local clutch--column-pixel-widths [40])
+        (clutch--header-line-with-hscroll)
+        (should (= crops 5))))))
+
 (ert-deftest clutch-test-active-header-face-covers-cell-width ()
   "The active header face should cover the full cell, including padding."
   (with-temp-buffer
