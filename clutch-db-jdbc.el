@@ -2337,11 +2337,25 @@ the metadata request."
     (plist-get column :column))
    (t (format "%s" column))))
 
+(defun clutch-jdbc--table-indexes (conn table)
+  "Return index entry plists for TABLE on CONN.
+`clutch-db-list-objects' enumerates every index in the schema, which is far
+more than row identity needs and is not cached.  The agent accepts a table
+filter for the same operation, so ask it for one table."
+  (when-let* ((spec (clutch-jdbc--object-category-spec 'indexes)))
+    (let ((result (clutch-jdbc--rpc
+                   conn (plist-get spec :op)
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                     (table   . ,table)
+                     ,@(clutch-jdbc--metadata-scope-params conn)))))
+      (mapcar #'clutch-jdbc--normalize-object-entry
+              (plist-get result (plist-get spec :key))))))
+
 (defun clutch-jdbc--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
   (let* ((details (clutch-db-column-details conn table))
          (not-null (make-hash-table :test 'equal))
-         (indexes (clutch-db-list-objects conn 'indexes)))
+         (indexes (clutch-jdbc--table-indexes conn table)))
     (dolist (detail details)
       (puthash (plist-get detail :name)
                (not (plist-get detail :nullable))
