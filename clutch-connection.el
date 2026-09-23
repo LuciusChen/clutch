@@ -636,6 +636,14 @@ ACTION is a short question such as \"Disconnect? \"."
     (signal 'clutch-db-error '("Connection closed during setup")))
   conn)
 
+(defun clutch--discard-unbound-connection (conn)
+  "Disconnect CONN, not yet bound to any buffer, and release its transport.
+The transport is released even when disconnecting signals or is quit."
+  (unwind-protect
+      (when (clutch--connection-alive-p conn)
+        (ignore-errors (clutch-db-disconnect conn)))
+    (clutch--release-connection-transport conn)))
+
 (defun clutch--connection-context (conn)
   "Return `(PARAMS PRODUCT)' for CONN from any attached buffer, or nil."
   (when conn
@@ -762,16 +770,24 @@ Connection failures propagate to the calling command."
   "Replace OLD-CONN with a new connection built from PARAMS.
 PRODUCT is the effective SQL product for the new logical session."
   (let* ((product (or product (clutch--effective-sql-product params)))
-         (new-conn (clutch--build-conn params)))
-    (clutch--clear-tx-state old-conn)
+         (new-conn (clutch--build-conn params))
+         (bound nil))
+    ;; Tearing down the old connection can signal; until NEW-CONN is bound
+    ;; to attached buffers, this function still owns its transport.
     (unwind-protect
-        (when (clutch--connection-alive-p old-conn)
-          (clutch-db-disconnect old-conn))
-      (clutch--release-connection-transport old-conn))
-    (clutch--require-live-connection new-conn)
-    (clutch--rebind-connection-buffers old-conn new-conn params product)
-    (clutch--clear-reconnect-metadata-caches old-conn new-conn)
-    (clutch--finalize-rebound-connection new-conn)))
+        (progn
+          (clutch--clear-tx-state old-conn)
+          (unwind-protect
+              (when (clutch--connection-alive-p old-conn)
+                (clutch-db-disconnect old-conn))
+            (clutch--release-connection-transport old-conn))
+          (clutch--require-live-connection new-conn)
+          (clutch--rebind-connection-buffers old-conn new-conn params product)
+          (setq bound t)
+          (clutch--clear-reconnect-metadata-caches old-conn new-conn)
+          (clutch--finalize-rebound-connection new-conn))
+      (unless bound
+        (clutch--discard-unbound-connection new-conn)))))
 
 (defun clutch--ensure-connection ()
   "Ensure current buffer has a live connection.
@@ -2474,12 +2490,21 @@ params; see `clutch-connection-alist' for details."
            (effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product effective-params))
            (conn    (clutch--build-conn effective-params)))
-      (when old-live-p
-        (clutch--do-disconnect old-conn))
-      (clutch--require-live-connection conn)
-      (clutch--clear-reconnect-metadata-caches old-conn conn)
-      (clutch--activate-current-buffer-connection conn effective-params product)
-      (message "Connected to %s" (clutch--connection-key conn)))))
+      ;; Tearing down the old connection can signal or be quit; until this
+      ;; buffer holds CONN, this function still owns it.
+      (unwind-protect
+          (progn
+            (if old-live-p
+                (clutch--do-disconnect old-conn)
+              ;; Other buffers keep a dead OLD-CONN to reconnect in place;
+              ;; only its transport is released here.
+              (clutch--release-connection-transport old-conn))
+            (clutch--require-live-connection conn)
+            (clutch--clear-reconnect-metadata-caches old-conn conn)
+            (clutch--activate-current-buffer-connection conn effective-params product)
+            (message "Connected to %s" (clutch--connection-key conn)))
+        (unless (eq clutch-connection conn)
+          (clutch--discard-unbound-connection conn))))))
 
 ;;;###autoload
 (defun clutch-prepare-ssh-host (&optional ssh-host)

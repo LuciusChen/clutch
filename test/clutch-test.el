@@ -1064,6 +1064,62 @@ would abort the user's statement before it runs."
         (should (string-match-p "row-identity" debug-text))
         (should (string-match-p "metadata failed" debug-text))))))
 
+(ert-deftest clutch-test-sql-clause-matching-ignores-buffer-syntax ()
+  "Clause keywords must match the same way from every buffer.
+`sql-mode' gives newlines comment-end syntax, which hid a clause split
+across lines, and `_' is no word constituent there or in the standard
+syntax table, which let keywords match inside identifiers."
+  (dolist (mode '(fundamental-mode sql-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (ert-info ((symbol-name mode))
+        (should (clutch-db-sql-has-top-level-clause-p
+                 "SELECT * FROM t\nORDER\nBY id" "ORDER\\s-+BY"))
+        (should (equal (clutch--high-risk-query-reason
+                        "DELETE FROM t WHERE 1 = 1\nORDER\nBY id")
+                       "WHERE is always true"))
+        (should (equal (clutch-db-sql-normalize "SELECT 1;\n") "SELECT 1"))
+        (should (equal (clutch-db-sql-source-table
+                        "SELECT id, valid_from FROM prices")
+                       "prices"))
+        (should (clutch--row-identity-augmentable-sql-p
+                 "SELECT * FROM t WHERE group_id = 3" "t"))
+        (should-not (clutch-db-sql-has-top-level-row-limit-p
+                     "SELECT credit_limit FROM accounts"))))))
+
+(ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
+  "A lowercase sole * is qualified whatever `case-fold-search' says.
+Oracle rejects \"select *, ROWID\", which the star check exists to avoid."
+  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (let ((case-fold-search nil))
+      (should (equal (clutch--row-identity-inject-select-list
+                      'fake-conn "select * from t" '("ROWID") '("clutch__rid_0"))
+                     "SELECT t.*, ROWID AS \"clutch__rid_0\" from t")))))
+
+(ert-deftest clutch-test-row-identity-prep-skips-select-lists-with-comments ()
+  "Hidden identity columns are not appended to a select list with a comment.
+A trailing line comment swallowed them together with FROM, and a hint hid
+a sole * that Oracle rejects next to other columns (ORA-00923)."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (&rest _)
+               (list (list :kind 'primary-key :name "PRIMARY" :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    ;; A fresh connection object per statement: identity must be resolved,
+    ;; not reused from another statement or test.
+    (dolist (sql '("SELECT /*+ FIRST_ROWS(10) */ * FROM emp"
+                   "SELECT * -- every column\nFROM emp"
+                   "SELECT id, name /* shown */ FROM emp"))
+      (let ((prep (clutch--prepare-row-identity-query (list 'conn) sql)))
+        (should (plist-get prep :candidate))
+        (should-not (plist-get prep :augmented))
+        (should (equal (plist-get prep :sql) sql))))
+    (should (plist-get (clutch--prepare-row-identity-query
+                        (list 'conn)
+                        "SELECT id, name FROM emp WHERE id > 0 -- shown")
+                       :augmented))))
+
 (ert-deftest clutch-test-row-identity-prep-records-metadata-errors ()
   "Row identity preparation should keep metadata errors visible."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
@@ -2481,6 +2537,46 @@ would abort the user's statement before it runs."
           (should (equal (substring rendered 1) "abc"))
           (should (equal (get-text-property 0 'display rendered)
                          '(space :align-to 0))))))))
+
+(ert-deftest clutch-test-header-line-crop-computed-once-per-offset ()
+  "Redisplay evaluates the header on every frame.  At offset zero the rendered
+header is returned as is, and a crop is computed once per offset, font width,
+header string and column pixel widths, then reused."
+  (with-temp-buffer
+    (let ((header (copy-sequence "0123456789"))
+          (hscroll 0)
+          (font-width 10)
+          (crops 0))
+      (setq-local clutch--header-line-string header
+                  clutch--column-pixel-widths [30])
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _display) t))
+                ((symbol-function 'default-font-width)
+                 (lambda () font-width))
+                ((symbol-function 'window-hscroll)
+                 (lambda (&optional _window) hscroll))
+                ((symbol-function 'clutch--pixel-crop-left)
+                 (lambda (string pixels)
+                   (cl-incf crops)
+                   (substring string (/ pixels 10)))))
+        (should (eq (clutch--header-line-with-hscroll) header))
+        (should (= crops 0))
+        (setq hscroll 3)
+        (should (equal (clutch--header-line-with-hscroll) "3456789"))
+        (should (equal (clutch--header-line-with-hscroll) "3456789"))
+        (should (= crops 1))
+        (setq hscroll 4)
+        (should (equal (clutch--header-line-with-hscroll) "456789"))
+        (should (= crops 2))
+        (setq font-width 20)
+        (clutch--header-line-with-hscroll)
+        (should (= crops 3))
+        (setq-local clutch--header-line-string (copy-sequence "0123456789"))
+        (clutch--header-line-with-hscroll)
+        (should (= crops 4))
+        (setq-local clutch--column-pixel-widths [40])
+        (clutch--header-line-with-hscroll)
+        (should (= crops 5))))))
 
 (ert-deftest clutch-test-active-header-face-covers-cell-width ()
   "The active header face should cover the full cell, including padding."
@@ -5062,7 +5158,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (with-current-buffer insert-buf
         (clutch-test--goto-insert-field-value "impact_score")
         (insert "x")
-        (clutch-result-insert--run-idle-validation insert-buf "impact_score")
+        (clutch-result-insert--run-idle-validation insert-buf)
         (let* ((field (clutch-result-insert--field-state "impact_score"))
                (after (overlay-get (plist-get field :error-overlay)
                                    'after-string)))
@@ -5074,10 +5170,48 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-test--goto-insert-field-value "impact_score")
           (delete-region (point) (line-end-position))
           (insert "1.5")
-          (clutch-result-insert--run-idle-validation insert-buf "impact_score")
+          (clutch-result-insert--run-idle-validation insert-buf)
           (setq field (clutch-result-insert--field-state "impact_score"))
           (should-not (plist-get field :error-message))
           (should-not (plist-get field :error-overlay))))))))
+
+(ert-deftest clutch-test-insert-idle-validation-covers-all-changed-fields ()
+  "Idle validation should validate every field changed since the last run."
+  (clutch-test--with-insert-result-buffer result-buf
+      (:columns '("impact_score" "severity")
+       :column-defs '((:name "impact_score" :type-category numeric)
+                      (:name "severity" :type-category numeric))
+       :connection 'fake-conn)
+    (clutch-test--with-pop-to-buffer-capture insert-buf
+      (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                 (lambda (_conn _table)
+                   (list (list :name "impact_score" :type "decimal(5,1)")
+                         (list :name "severity" :type "int")))))
+        (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+        (with-current-buffer insert-buf
+          (clutch-test--goto-insert-field-value "impact_score")
+          (insert "x")
+          (clutch-test--goto-insert-field-value "severity")
+          (insert "1")
+          (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
+                                           insert-buf)))
+            (apply (timer--function timer) (timer--args timer)))
+          (should (equal (plist-get (clutch-result-insert--field-state "impact_score")
+                                    :error-message)
+                         "Field impact_score expects a numeric value"))
+          (should-not (plist-get (clutch-result-insert--field-state "severity")
+                                 :error-message))
+          (clutch-test--goto-insert-field-value "impact_score")
+          (delete-region (point) (line-end-position))
+          (insert "1.5")
+          (clutch-test--goto-insert-field-value "severity" t)
+          (insert "2")
+          (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
+                                           insert-buf)))
+            (apply (timer--function timer) (timer--args timer)))
+          (let ((field (clutch-result-insert--field-state "impact_score")))
+            (should-not (plist-get field :error-message))
+            (should-not (plist-get field :error-overlay))))))))
 
 (ert-deftest clutch-test-json-validation-is-scheduled-on-idle ()
   "JSON insert and edit buffers should defer local validation until idle."
@@ -5109,7 +5243,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (should (eq (cadr scheduled)
                                  #'clutch-result-insert--run-idle-validation))
                      (should (equal (caddr scheduled)
-                                    (list (current-buffer) "postmortem"))))))))
+                                    (list (current-buffer)))))))))
             ('edit
              (with-temp-buffer
                (clutch--result-edit-mode 1)
@@ -9129,7 +9263,7 @@ statement."
           (with-current-buffer insert-buf
             (clutch-test--goto-insert-field-value "payload")
             (funcall (car case))
-            (clutch-result-insert--run-idle-validation insert-buf "payload")
+            (clutch-result-insert--run-idle-validation insert-buf)
             (should (equal (clutch-result-insert--parse-fields) (cadr case))))
           (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
           (with-current-buffer insert-buf

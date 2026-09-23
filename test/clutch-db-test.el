@@ -3524,12 +3524,46 @@ expensive request in the chain."
             (should (file-exists-p (expand-file-name jar-path tmpdir)))))))))
 
 (ert-deftest clutch-db-test-jdbc-installable-drivers-excludes-companions ()
-  "Companion-only driver entries should not appear as top-level install choices."
+  "Logging companion jars should not appear as top-level install choices.
+`oracle-i18n' is a companion of `oracle' too, but it stays installable on
+its own so `clutch-jdbc-install-driver' accepts the driver named in the
+orai18n warning."
   (let ((installable (clutch-jdbc--installable-drivers)))
     (should (memq 'oracle installable))
     (should (memq 'clickhouse installable))
-    (dolist (companion '(oracle-i18n slf4j-api slf4j-nop))
+    (should (memq 'oracle-i18n installable))
+    (dolist (companion '(slf4j-api slf4j-nop))
       (should-not (memq companion installable)))))
+
+(ert-deftest clutch-db-test-jdbc-install-driver-restarts-agent-only-on-change ()
+  "A live agent should restart only when install actually changed drivers."
+  (ert-info ("case: every jar is already installed")
+    (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file (expand-file-name "drivers/ojdbc8.jar" tmpdir)
+        (insert "jar"))
+      (with-temp-file (expand-file-name "drivers/orai18n.jar" tmpdir)
+        (insert "jar"))
+      (let (stopped)
+        (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t)))
+                  ((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (&rest _)
+                     (error "Should not download an already-installed driver"))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should-not stopped)))))
+  (ert-info ("case: a driver jar is missing")
+    (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+      (let (stopped)
+        (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t)))
+                  ((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (_coords dest)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should stopped))))))
 
 ;;;; Unit tests — props normalization
 
@@ -4402,6 +4436,32 @@ expensive request in the chain."
           (should (string-match-p pattern sql)))
         (dolist (pattern not-matches)
           (should-not (string-match-p pattern sql))))))))
+
+(ert-deftest clutch-db-test-jdbc-paged-sql-sees-a-multi-line-order-by-in-sql-mode ()
+  "Paging from a SQL buffer must find an ORDER BY split across lines.
+`sql-mode' gives newlines comment-end syntax, so the clause and the
+trailing semicolon went unseen and SQL Server got a second ORDER BY."
+  (with-temp-buffer
+    (sql-mode)
+    (should (equal (clutch-db-build-paged-sql
+                    (make-clutch-jdbc-conn :params '(:driver sqlserver))
+                    "SELECT * FROM t\nORDER\nBY id;\n" 0 10)
+                   (concat "SELECT * FROM t\nORDER\nBY id"
+                           " OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY")))))
+
+(ert-deftest clutch-db-test-jdbc-paged-sql-closes-a-trailing-comment ()
+  "JDBC paging must not append its clauses inside a trailing comment.
+Oracle's closing parenthesis and SQL Server's OFFSET/FETCH were commented
+out, which broke the Oracle statement and left SQL Server unpaged."
+  (dolist (case '((oracle ") WHERE ROWNUM <= 10")
+                  (sqlserver "OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY")))
+    (ert-info ((symbol-name (car case)))
+      (should (string-search
+               (cadr case)
+               (clutch-db-sql-mask-literal-or-comment
+                (clutch-db-build-paged-sql
+                 (make-clutch-jdbc-conn :params (list :driver (car case)))
+                 "SELECT * FROM t -- note" 0 10)))))))
 
 (ert-deftest clutch-db-test-jdbc-source-table-scope-follows-dialect-rules ()
   "JDBC source tables should preserve scope and dialect identifier rules."
@@ -6989,6 +7049,61 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
                 (should (clutch-db-live-p conn))
               (should-not (clutch-db-live-p conn)))))))))
 
+;;;; Unit tests — clutch-jdbc--start-agent / clutch-jdbc--stop-agent buffer lifecycle
+
+(ert-deftest clutch-db-test-jdbc-agent-restart-does-not-leak-process-buffers ()
+  "Restarting the JDBC agent should not leak retired process buffers.
+That holds whether the old agent was stopped or exited on its own."
+  (dolist (exits-on-its-own '(nil t))
+    (ert-info ((format "agent exits on its own: %s" exits-on-its-own))
+      (let ((clutch-jdbc--agent-process nil)
+            (clutch-jdbc--response-queue nil)
+            (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+            (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+            (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+            (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+            (before (buffer-list))
+            (real-make-process (symbol-function 'make-process)))
+        (cl-flet ((new-agent-buffers ()
+                    (seq-filter
+                     (lambda (buf)
+                       (and (not (memq buf before))
+                            (string-match-p "\\` ?\\*clutch-jdbc-agent"
+                                            (buffer-name buf))))
+                     (buffer-list))))
+          (unwind-protect
+              (progn
+                (cl-letf (((symbol-function 'clutch-jdbc--validate-agent-jar) #'ignore)
+                          ((symbol-function 'executable-find) (lambda (_cmd) "java"))
+                          ((symbol-function 'clutch-jdbc--recv-response)
+                           (lambda (&rest _args) '(:ok t)))
+                          ((symbol-function 'make-process)
+                           (lambda (&rest args)
+                             (if exits-on-its-own
+                                 (funcall real-make-process
+                                          :name (plist-get args :name)
+                                          :buffer (plist-get args :buffer)
+                                          :command '("true")
+                                          :noquery t)
+                               (make-pipe-process :name (plist-get args :name)
+                                                  :buffer (plist-get args :buffer)
+                                                  :noquery t)))))
+                  ;; Two restart cycles, then a third start left running.
+                  (dotimes (_ 2)
+                    (clutch-jdbc--ensure-agent)
+                    (if exits-on-its-own
+                        (while (process-live-p clutch-jdbc--agent-process)
+                          (accept-process-output nil 0.01))
+                      (clutch-jdbc--stop-agent)))
+                  (clutch-jdbc--ensure-agent))
+                (should (equal (seq-filter
+                                (lambda (buf)
+                                  (string-prefix-p " *clutch-jdbc-agent*" (buffer-name buf)))
+                                (new-agent-buffers))
+                               (list (process-buffer clutch-jdbc--agent-process)))))
+            (clutch-jdbc--stop-agent)
+            (mapc #'kill-buffer (new-agent-buffers))))))))
+
 ;;;; Unit tests — clutch-jdbc--recv-response timeout behaviour
 
 (ert-deftest clutch-db-test-jdbc-recv-response-returns-matching ()
@@ -7007,6 +7122,7 @@ It does so without touching the agent process."
   (let (deleted-proc)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
               ((symbol-function 'delete-process)  (lambda (p) (setq deleted-proc p)))
+              ((symbol-function 'process-buffer) (lambda (_p) nil))
               ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
       (let ((clutch-jdbc--agent-process 'fake-proc)
             (clutch-jdbc--response-queue '(stale)))
@@ -7021,6 +7137,7 @@ It does so without touching the agent process."
              clutch-jdbc--async-callbacks)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
               ((symbol-function 'delete-process) #'ignore)
+              ((symbol-function 'process-buffer) (lambda (_p) nil))
               ((symbol-function 'accept-process-output) (lambda (_p _s) nil))
               ((symbol-function 'cancel-timer)
                (lambda (timer)
@@ -7038,7 +7155,7 @@ It does so without touching the agent process."
               :live nil
               :process dead-proc
               :must-match ("exited before replying")
-              :deleted nil)
+              :deleted dead-proc)
              (:label "lost session"
               :live t
               :process fake-proc
@@ -7057,6 +7174,7 @@ It does so without touching the agent process."
                    (lambda (_p) (plist-get case :live)))
                   ((symbol-function 'delete-process)
                    (lambda (p) (setq deleted-proc p)))
+                  ((symbol-function 'process-buffer) (lambda (_p) nil))
                   ((symbol-function 'accept-process-output)
                    (lambda (_p _s) nil)))
           (let ((clutch-jdbc--agent-process (plist-get case :process))
@@ -7086,6 +7204,7 @@ It does so without touching the agent process."
             (insert "Exception in thread \"main\" java.lang.UnsupportedClassVersionError: clutch/jdbc/Agent has been compiled by a more recent version of the Java Runtime\n"))
           (cl-letf (((symbol-function 'process-live-p) (lambda (_p) nil))
                     ((symbol-function 'delete-process) #'ignore)
+                    ((symbol-function 'process-buffer) (lambda (_p) nil))
                     ((symbol-function 'accept-process-output) (lambda (_p _s) nil)))
             (let ((clutch-jdbc--agent-process 'dead-proc)
                   (clutch-jdbc--response-queue nil)
@@ -7765,6 +7884,34 @@ It does so without touching the agent process."
                 (body)
                 ("rollback-savepoint" (conn-id . 23) (savepoint-id . 71)))))
       (should (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-sqlite-rewrites-survive-a-trailing-comment ()
+  "Paging, sorting, counting and filtering must not be commented out.
+A statement whose last line ends in a comment had the clause a rewrite
+appends, or the parenthesis that closes its derived table, commented out:
+paging fetched the whole table and every page started at the first row."
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+        (sql "SELECT id FROM t -- note"))
+    (unwind-protect
+        (cl-flet ((ids (query)
+                    (mapcar #'car (clutch-db-result-rows
+                                   (clutch-db-query conn query)))))
+          (clutch-db-query conn "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+          (clutch-db-query
+           conn (concat "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL"
+                        " SELECT i + 1 FROM n WHERE i < 30)"
+                        " INSERT INTO t SELECT i FROM n"))
+          (should (equal (ids (clutch-db-build-paged-sql conn sql 1 10))
+                         (number-sequence 11 20)))
+          (should (equal (ids (clutch-db-build-paged-sql
+                               conn (concat sql "\nORDER BY id") 0 3
+                               '("id" . "DESC")))
+                         '(30 29 28)))
+          (should (equal (ids (clutch-db-build-count-sql conn sql)) '(30)))
+          (should (equal (ids (clutch-db-apply-where conn sql "id > 27"))
+                         '(28 29 30))))
+      (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
   "SQLite should commit or roll back a staged multi-row batch as a unit."

@@ -644,8 +644,18 @@ list cannot be established."
 
 (defun clutch--row-identity-bare-star-select-p (sql from-pos)
   "Return non-nil when SQL's select list before FROM-POS is a sole *."
-  (string-match-p "\\`SELECT[ \t\n\r]+\\*\\'"
-                  (string-trim (substring sql 0 from-pos))))
+  (let ((case-fold-search t))
+    (string-match-p "\\`SELECT[ \t\n\r]+\\*\\'"
+                    (string-trim (substring sql 0 from-pos)))))
+
+(defun clutch--row-identity-select-list-comment-p (sql)
+  "Return non-nil when a comment precedes SQL's top-level FROM.
+Hidden identity columns are appended to the select list's text, where a
+trailing line comment would swallow them, and a comment or optimizer hint
+hides a sole * from `clutch--row-identity-bare-star-select-p'.  Quoted text
+that only looks like a comment counts too, which merely skips the rewrite."
+  (when-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+    (string-match-p "--\\|/\\*" (substring sql 0 from-pos))))
 
 (defun clutch--row-identity-star-qualifier (sql from-pos)
   "Return TABLE.* qualifier for simple SELECT * SQL before FROM-POS, or nil.
@@ -665,8 +675,7 @@ not augment a bare * in that case."
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
 CONN supplies identifier escaping for the hidden aliases."
-  (let ((sql (string-trim-right
-              (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+  (let ((sql (clutch-db-sql-trim-end sql)))
     (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
       (let* ((star-qualifier
               (clutch--row-identity-star-qualifier sql from-pos))
@@ -748,7 +757,9 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
                           (length expressions))))
            (augment-p (and candidate expressions
                            (clutch--row-identity-augmentable-sql-p
-                            analysis-sql table)))
+                            analysis-sql table)
+                           (not (clutch--row-identity-select-list-comment-p
+                                 analysis-sql))))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
