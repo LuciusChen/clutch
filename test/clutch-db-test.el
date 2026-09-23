@@ -3500,12 +3500,46 @@ through it puts every index in the schema inside the user's query."
             (should (file-exists-p (expand-file-name jar-path tmpdir)))))))))
 
 (ert-deftest clutch-db-test-jdbc-installable-drivers-excludes-companions ()
-  "Companion-only driver entries should not appear as top-level install choices."
+  "Logging companion jars should not appear as top-level install choices.
+`oracle-i18n' is a companion of `oracle' too, but it stays installable on
+its own so `clutch-jdbc-install-driver' accepts the driver named in the
+orai18n warning."
   (let ((installable (clutch-jdbc--installable-drivers)))
     (should (memq 'oracle installable))
     (should (memq 'clickhouse installable))
-    (dolist (companion '(oracle-i18n slf4j-api slf4j-nop))
+    (should (memq 'oracle-i18n installable))
+    (dolist (companion '(slf4j-api slf4j-nop))
       (should-not (memq companion installable)))))
+
+(ert-deftest clutch-db-test-jdbc-install-driver-restarts-agent-only-on-change ()
+  "A live agent should restart only when install actually changed drivers."
+  (ert-info ("case: every jar is already installed")
+    (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file (expand-file-name "drivers/ojdbc8.jar" tmpdir)
+        (insert "jar"))
+      (with-temp-file (expand-file-name "drivers/orai18n.jar" tmpdir)
+        (insert "jar"))
+      (let (stopped)
+        (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t)))
+                  ((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (&rest _)
+                     (error "Should not download an already-installed driver"))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should-not stopped)))))
+  (ert-info ("case: a driver jar is missing")
+    (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+      (let (stopped)
+        (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t)))
+                  ((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (_coords dest)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should stopped))))))
 
 ;;;; Unit tests — props normalization
 

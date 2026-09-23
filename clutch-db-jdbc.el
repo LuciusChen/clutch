@@ -142,8 +142,7 @@ A stuck disconnect should not block the user or kill the agent.")
                   :class "oracle.jdbc.OracleDriver"
                   :companions (oracle-i18n)))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
-                    :filename "orai18n.jar"
-                    :internal t))
+                    :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
                   :filename "db2jcc4.jar"
                   :class "com.ibm.db2.jcc.DB2Driver"))
@@ -2536,7 +2535,8 @@ Fetches from GitHub Releases."
 
 ;;;###autoload
 (defun clutch-jdbc-install-driver (driver)
-  "Download the JDBC driver for DRIVER symbol."
+  "Download the JDBC driver for DRIVER symbol.
+Return non-nil when installation changed the drivers directory."
   (interactive
    (list (intern (completing-read "Driver: "
                                   (clutch-jdbc--installable-drivers)
@@ -2544,27 +2544,32 @@ Fetches from GitHub Releases."
   (let* ((spec       (alist-get driver clutch-jdbc--driver-sources))
          (filename   (plist-get spec :filename))
          (dest       (expand-file-name filename (clutch-jdbc--drivers-dir)))
-         (companions (plist-get spec :companions)))
+         (companions (plist-get spec :companions))
+         changed)
     (make-directory (clutch-jdbc--drivers-dir) t)
     (cond
      ((file-exists-p dest)
       (message "Driver already installed: %s" dest))
      ((plist-get spec :maven)
-      (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest))
+      (clutch-jdbc--download-maven-driver (plist-get spec :maven) dest)
+      (setq changed t))
      (t
       (message "Manual download required for %s.\nURL: %s\nPlace as: %s"
                driver (plist-get spec :manual) dest)))
     (when (clutch-jdbc--oracle-driver-symbol-p driver)
-      (clutch-jdbc--disable-conflicting-oracle-jars filename))
+      (when (clutch-jdbc--disable-conflicting-oracle-jars filename)
+        (setq changed t)))
     (dolist (companion companions)
       (unless (file-exists-p
                (expand-file-name
                 (plist-get (alist-get companion clutch-jdbc--driver-sources) :filename)
                 (clutch-jdbc--drivers-dir)))
-        (clutch-jdbc-install-driver companion)))
-    (when (clutch-jdbc--agent-live-p)
+        (when (clutch-jdbc-install-driver companion)
+          (setq changed t))))
+    (when (and changed (clutch-jdbc--agent-live-p))
       (clutch-jdbc--stop-agent)
-      (message "Installed JDBC driver(s); shared clutch-jdbc-agent restarted on next use"))))
+      (message "Installed JDBC driver(s); shared clutch-jdbc-agent restarted on next use"))
+    changed))
 
 (defun clutch-jdbc--installable-drivers ()
   "Return public driver symbols accepted by `clutch-jdbc-install-driver'."
@@ -2592,12 +2597,16 @@ COORDS is \"group:artifact:version\" or \"group:artifact:version:classifier\"."
   (memq driver '(oracle oracle-8 oracle-11)))
 
 (defun clutch-jdbc--disable-conflicting-oracle-jars (selected-filename)
-  "Remove Oracle JDBC jars that conflict with SELECTED-FILENAME."
-  (dolist (filename clutch-jdbc--oracle-driver-filenames)
-    (unless (string-equal filename selected-filename)
-      (let ((path (expand-file-name filename (clutch-jdbc--drivers-dir))))
-        (when (file-exists-p path)
-          (delete-file path))))))
+  "Remove Oracle JDBC jars that conflict with SELECTED-FILENAME.
+Return non-nil when at least one conflicting jar was deleted."
+  (let (deleted)
+    (dolist (filename clutch-jdbc--oracle-driver-filenames)
+      (unless (string-equal filename selected-filename)
+        (let ((path (expand-file-name filename (clutch-jdbc--drivers-dir))))
+          (when (file-exists-p path)
+            (delete-file path)
+            (setq deleted t)))))
+    deleted))
 
 (provide 'clutch-db-jdbc)
 ;;; clutch-db-jdbc.el ends here
