@@ -463,10 +463,19 @@ Return non-nil when RESPONSE was consumed asynchronously."
           (error "JDBC agent failed to start: %s" (plist-get ready :error))))
       proc)))
 
+(defun clutch-jdbc--kill-agent-process (proc)
+  "Delete agent PROC together with its process buffer.
+Every agent teardown goes through here so a retired buffer cannot outlive
+its process."
+  (let ((buf (process-buffer proc)))
+    (delete-process proc)
+    (when (buffer-live-p buf)
+      (kill-buffer buf))))
+
 (defun clutch-jdbc--stop-agent ()
   "Stop the shared clutch-jdbc-agent process, if running."
-  (when (clutch-jdbc--agent-live-p)
-    (delete-process clutch-jdbc--agent-process))
+  (when clutch-jdbc--agent-process
+    (clutch-jdbc--kill-agent-process clutch-jdbc--agent-process))
   (setq clutch-jdbc--agent-process nil
         clutch-jdbc--response-queue nil)
   (clutch-jdbc--clear-async-callbacks)
@@ -475,7 +484,7 @@ Return non-nil when RESPONSE was consumed asynchronously."
 (defun clutch-jdbc--ensure-agent ()
   "Ensure the agent process is running, starting it if necessary."
   (unless (clutch-jdbc--agent-live-p)
-    (setq clutch-jdbc--response-queue nil)
+    (clutch-jdbc--stop-agent)
     (clutch-jdbc--start-agent)))
 
 (defun clutch-jdbc--agent-stderr-buffer ()
@@ -591,9 +600,8 @@ a live agent then condemns only that connection instead of the process."
                (not (process-live-p clutch-jdbc--agent-process)))
       (setq failure-message (clutch-jdbc--agent-exit-error-message)))
     (when (and response (plist-get response :protocol-error))
-      (when (and clutch-jdbc--agent-process
-                 (process-live-p clutch-jdbc--agent-process))
-        (delete-process clutch-jdbc--agent-process))
+      (when clutch-jdbc--agent-process
+        (clutch-jdbc--kill-agent-process clutch-jdbc--agent-process))
       (clutch-jdbc--clear-async-callbacks)
       (clutch-jdbc--clear-request-state)
       (setq clutch-jdbc--agent-process nil
@@ -618,8 +626,8 @@ a live agent then condemns only that connection instead of the process."
         ;; connection (startup handshake, connect), so there is nothing
         ;; narrower to reset than the process and every registration
         ;; hanging off it.
-        (when (process-live-p clutch-jdbc--agent-process)
-          (delete-process clutch-jdbc--agent-process))
+        (when clutch-jdbc--agent-process
+          (clutch-jdbc--kill-agent-process clutch-jdbc--agent-process))
         (clutch-jdbc--clear-async-callbacks)
         (clutch-jdbc--clear-request-state)
         (setq clutch-jdbc--agent-process nil
