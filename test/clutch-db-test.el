@@ -3500,11 +3500,15 @@ through it puts every index in the schema inside the user's query."
             (should (file-exists-p (expand-file-name jar-path tmpdir)))))))))
 
 (ert-deftest clutch-db-test-jdbc-installable-drivers-excludes-companions ()
-  "Companion-only driver entries should not appear as top-level install choices."
+  "Logging companion jars should not appear as top-level install choices.
+`oracle-i18n' is a companion of `oracle' too, but it stays installable on
+its own so `clutch-jdbc-install-driver' accepts the driver named in the
+orai18n warning."
   (let ((installable (clutch-jdbc--installable-drivers)))
     (should (memq 'oracle installable))
     (should (memq 'clickhouse installable))
-    (dolist (companion '(oracle-i18n slf4j-api slf4j-nop))
+    (should (memq 'oracle-i18n installable))
+    (dolist (companion '(slf4j-api slf4j-nop))
       (should-not (memq companion installable)))))
 
 ;;;; Unit tests — props normalization
