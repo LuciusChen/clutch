@@ -1061,6 +1061,7 @@ connection and signal `clutch-query-interrupted'."
                connection "success" sql source-buffer
                (clutch--query-debug-summary result) elapsed)
               (unless result-query-p
+                (clutch--forget-row-identities connection)
                 (clutch--note-schema-affecting-query sql connection))
               (list :result result
                     :connection connection

@@ -31,7 +31,7 @@ Row identity asks the agent for one table's indexes. The `get-indexes` operation
 
 Record a `row-identity` event with the table, the chosen candidate and its duration, next to the query it delays. The schema, foreign-key and object-warmup paths already have events; the one path that runs ahead of every execution had none.
 
-Cache resolved candidates with the connection's other table metadata, keyed by catalog and schema as well as table (postmortem 127: identity belongs to one relation). Schema refresh, DDL, reconnect and schema switching already discard that store. A failed lookup is not cached; a transient metadata error must not leave a result permanently non-editable.
+Cache resolved candidates per connection, keyed by the table and its explicit catalog and schema (postmortem 127: identity belongs to one relation). The store is dropped with the connection's table metadata (schema refresh, reconnect, schema switching, a table's describe refresh) and by any statement that returns no result set: DDL, `USE` and `SET search_path` change what an unqualified name resolves to, on the server, without telling Clutch which relation changed. Because every such change drops the store, the key needs no implicit namespace, and computing it never queries the session (DuckDB's current schema is a query). A failed lookup is not cached; a transient metadata error must not leave a result permanently non-editable.
 
 ## Rejected alternatives
 
@@ -43,7 +43,7 @@ Warming the metadata statements at connect was tried first, in postmortem 196, a
 
 ## Consequence
 
-The first statement against a relation resolves identity with one scoped index request instead of a schema enumeration; later statements against it reuse the answer. Verified against the reporter's database: 487 ms, then 2 ms. Execute-path tests isolate `clutch--table-metadata-cache`, which a resolved identity otherwise carries between them.
+The first statement against a relation resolves identity with one scoped index request instead of a schema enumeration; later statements against it reuse the answer. Verified against the reporter's database: 487 ms, then 2 ms. Tests that resolve identity on a shared connection symbol isolate `clutch--row-identity-cache`, which a resolved identity otherwise carries between them.
 
 The first resolution on a cold, remote database remains the dominant cost before a query. Its largest single call was `column-details` — on the reporter's database 296 ms of a 391 ms chain — fetched only to check a unique index's columns for NOT NULL, yet fetched before the table's indexes were even listed. The chain now lists the table's indexes first (29 ms there) and asks for column details only when a unique index exists to validate; a table without one, like the reported one, skips the call with an identical result. Deferred column metadata has its own lifecycle in postmortem 182.
 
