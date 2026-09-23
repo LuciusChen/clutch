@@ -4933,7 +4933,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (with-current-buffer insert-buf
         (clutch-test--goto-insert-field-value "impact_score")
         (insert "x")
-        (clutch-result-insert--run-idle-validation insert-buf "impact_score")
+        (clutch-result-insert--run-idle-validation insert-buf)
         (let* ((field (clutch-result-insert--field-state "impact_score"))
                (after (overlay-get (plist-get field :error-overlay)
                                    'after-string)))
@@ -4945,10 +4945,48 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (clutch-test--goto-insert-field-value "impact_score")
           (delete-region (point) (line-end-position))
           (insert "1.5")
-          (clutch-result-insert--run-idle-validation insert-buf "impact_score")
+          (clutch-result-insert--run-idle-validation insert-buf)
           (setq field (clutch-result-insert--field-state "impact_score"))
           (should-not (plist-get field :error-message))
           (should-not (plist-get field :error-overlay))))))))
+
+(ert-deftest clutch-test-insert-idle-validation-covers-all-changed-fields ()
+  "Idle validation should validate every field changed since the last run."
+  (clutch-test--with-insert-result-buffer result-buf
+      (:columns '("impact_score" "severity")
+       :column-defs '((:name "impact_score" :type-category numeric)
+                      (:name "severity" :type-category numeric))
+       :connection 'fake-conn)
+    (clutch-test--with-pop-to-buffer-capture insert-buf
+      (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                 (lambda (_conn _table)
+                   (list (list :name "impact_score" :type "decimal(5,1)")
+                         (list :name "severity" :type "int")))))
+        (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+        (with-current-buffer insert-buf
+          (clutch-test--goto-insert-field-value "impact_score")
+          (insert "x")
+          (clutch-test--goto-insert-field-value "severity")
+          (insert "1")
+          (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
+                                           insert-buf)))
+            (apply (timer--function timer) (timer--args timer)))
+          (should (equal (plist-get (clutch-result-insert--field-state "impact_score")
+                                    :error-message)
+                         "Field impact_score expects a numeric value"))
+          (should-not (plist-get (clutch-result-insert--field-state "severity")
+                                 :error-message))
+          (clutch-test--goto-insert-field-value "impact_score")
+          (delete-region (point) (line-end-position))
+          (insert "1.5")
+          (clutch-test--goto-insert-field-value "severity" t)
+          (insert "2")
+          (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
+                                           insert-buf)))
+            (apply (timer--function timer) (timer--args timer)))
+          (let ((field (clutch-result-insert--field-state "impact_score")))
+            (should-not (plist-get field :error-message))
+            (should-not (plist-get field :error-overlay))))))))
 
 (ert-deftest clutch-test-json-validation-is-scheduled-on-idle ()
   "JSON insert and edit buffers should defer local validation until idle."
@@ -4980,7 +5018,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                      (should (eq (cadr scheduled)
                                  #'clutch-result-insert--run-idle-validation))
                      (should (equal (caddr scheduled)
-                                    (list (current-buffer) "postmortem"))))))))
+                                    (list (current-buffer)))))))))
             ('edit
              (with-temp-buffer
                (clutch--result-edit-mode 1)
@@ -8993,7 +9031,7 @@ statement."
           (with-current-buffer insert-buf
             (clutch-test--goto-insert-field-value "payload")
             (funcall (car case))
-            (clutch-result-insert--run-idle-validation insert-buf "payload")
+            (clutch-result-insert--run-idle-validation insert-buf)
             (should (equal (clutch-result-insert--parse-fields) (cadr case))))
           (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
           (with-current-buffer insert-buf

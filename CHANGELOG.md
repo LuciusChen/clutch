@@ -9,12 +9,13 @@
 - Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
 - Removed unused `clutch-db-sql-has-top-level-limit-p` and `clutch-db-sql-has-top-level-offset-p` helpers. Use `clutch-db-sql-has-top-level-row-limit-p` when guarding bounded-query rewrites.
 - Removed the unwired row-marking state that no command could set; the public `clutch-marked-face` remains for themes.
-- The interactive JDBC driver installer no longer offers companion jars (orai18n, slf4j-api, slf4j-nop) as top-level drivers; they still install automatically with their parent driver.
+- The interactive JDBC driver installer no longer offers the slf4j-api and slf4j-nop companion jars as top-level drivers; they still install automatically with their parent driver. orai18n stays installable on its own.
 
 ### Fixed
 
 - Resolved row identity for a table without a primary key by requesting that table's indexes instead of every index in the schema. The lookup ran synchronously before the query and consulted no cache, so on large Oracle schemas the first query of a session waited on a full-schema index enumeration.
-- Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke.
+- Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke. Every field edited before the delay expires is validated, not only the last one.
+- Restarted the shared JDBC agent after `clutch-jdbc-install-driver` only when the command downloaded a driver or removed a conflicting Oracle jar. Re-running it for drivers that were already installed no longer ends every live JDBC session and its uncommitted work.
 - Reduced per-keystroke work in SQL consoles: statement-context lookups scan the buffer once instead of twice, keyword completion candidates are computed once, delimited bulk import no longer allocates a string per character, and MongoDB console indentation uses one syntax scan per line instead of a character-by-character buffer walk.
 - Released connections that reconnecting left behind. Connecting over a dead connection now tears down its old transport, so a stale SSH or container tunnel no longer outlives each reconnect; a failure or quit while the old connection is torn down now disconnects and releases the freshly built one instead of orphaning it; and the JDBC agent's process buffer is killed with the process on every restart instead of accumulating hidden buffers.
 - Display SQL execution status as colored dots in the left margin on text terminals, using the graphical marker faces and preserving existing wider margins.
