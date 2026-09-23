@@ -305,7 +305,7 @@ Values are nesting counts.")
   "Return SQL trimmed for clause-aware analysis and rewrite."
   (string-trim-right
    (replace-regexp-in-string
-    ";\\s-*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
+    ";[ \t\n\r\f]*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
 
 (defun clutch-db-sql-dialect (product)
   "Return the lexical rules for SQL PRODUCT as a plist.
@@ -638,23 +638,36 @@ plist, so context features split statements the same way execution does."
 
 ;;;; SQL helpers (top-level clause detection)
 
+(defconst clutch-db-sql--syntax-table
+  (let ((table (make-syntax-table)))
+    (modify-syntax-entry ?_ "w" table)
+    table)
+  "Syntax table for matching SQL keywords with regexps.
+The `\\s-' and `\\b' regexp classes follow the current buffer's syntax
+table.  In `sql-mode' a newline ends comments rather than counting as
+whitespace, which would hide a clause split across lines, and neither that
+table nor the standard one makes `_' a word constituent, which would let
+FROM match inside valid_from.  `$' is already one in the standard table.")
+
 (defun clutch-db-sql-code-match-positions (sql start end regexp)
   "Return a hash mapping REGEXP match positions in SQL to their match ends.
-Matching runs case-insensitively from START to END without interpreting SQL
-structure, so callers must still confirm each position is top-level code
-through `clutch-db-sql-scan-code'.  Collecting candidates in one pass keeps
-that confirmation linear; retrying REGEXP at every scanned position instead
-searches the remainder of SQL each time, which is quadratic."
+Matching runs case-insensitively under `clutch-db-sql--syntax-table' from
+START to END without interpreting SQL structure, so callers must still
+confirm each position is top-level code through `clutch-db-sql-scan-code'.
+Collecting candidates in one pass keeps that confirmation linear; retrying
+REGEXP at every scanned position instead searches the remainder of SQL each
+time, which is quadratic."
   (let ((case-fold-search t)
         (limit (or end (length sql)))
         (positions (make-hash-table :test 'eq))
         (pos (or start 0)))
-    (while (and (< pos limit)
-                (string-match regexp sql pos)
-                (< (match-beginning 0) limit))
-      (when (<= (match-end 0) limit)
-        (puthash (match-beginning 0) (match-end 0) positions))
-      (setq pos (1+ (match-beginning 0))))
+    (with-syntax-table clutch-db-sql--syntax-table
+      (while (and (< pos limit)
+                  (string-match regexp sql pos)
+                  (< (match-beginning 0) limit))
+        (when (<= (match-end 0) limit)
+          (puthash (match-beginning 0) (match-end 0) positions))
+        (setq pos (1+ (match-beginning 0)))))
     positions))
 
 (defun clutch-db-sql--clause-match-positions (sql start patterns)
@@ -967,7 +980,7 @@ PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
   (if (clutch-db-sql-has-top-level-row-limit-p base-sql)
       base-sql
     (let* ((trimmed (string-trim-right
-                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+                     (replace-regexp-in-string ";[ \t\n\r\f]*\\'" "" base-sql)))
            (sortable-sql (if order-by
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
