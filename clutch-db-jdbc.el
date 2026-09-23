@@ -1722,7 +1722,7 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
     base-sql)
    (t
     (let* ((trimmed (string-trim-right
-                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+                     (replace-regexp-in-string ";[ \t\n\r\f]*\\'" "" base-sql)))
            (has-user-order-by
             (clutch-db-sql-has-top-level-clause-p trimmed "ORDER\\s-+BY"))
            (sortable-sql (if order-by

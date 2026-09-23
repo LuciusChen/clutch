@@ -898,6 +898,29 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
       (should (equal (plist-get prep :sql) "SELECT * FROM users"))
       (should-not (string-match-p "\\bnil\\b" (plist-get prep :sql))))))
 
+(ert-deftest clutch-test-sql-clause-matching-ignores-buffer-syntax ()
+  "Clause keywords must match the same way from every buffer.
+`sql-mode' gives newlines comment-end syntax, which hid a clause split
+across lines, and `_' is no word constituent there or in the standard
+syntax table, which let keywords match inside identifiers."
+  (dolist (mode '(fundamental-mode sql-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (ert-info ((symbol-name mode))
+        (should (clutch-db-sql-has-top-level-clause-p
+                 "SELECT * FROM t\nORDER\nBY id" "ORDER\\s-+BY"))
+        (should (equal (clutch--high-risk-query-reason
+                        "DELETE FROM t WHERE 1 = 1\nORDER\nBY id")
+                       "WHERE is always true"))
+        (should (equal (clutch-db-sql-normalize "SELECT 1;\n") "SELECT 1"))
+        (should (equal (clutch-db-sql-source-table
+                        "SELECT id, valid_from FROM prices")
+                       "prices"))
+        (should (clutch--row-identity-augmentable-sql-p
+                 "SELECT * FROM t WHERE group_id = 3" "t"))
+        (should-not (clutch-db-sql-has-top-level-row-limit-p
+                     "SELECT credit_limit FROM accounts"))))))
+
 (ert-deftest clutch-test-row-identity-prep-records-metadata-errors ()
   "Row identity preparation should keep metadata errors visible."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
