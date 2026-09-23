@@ -9,7 +9,7 @@
 - Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
 - Removed unused `clutch-db-sql-has-top-level-limit-p` and `clutch-db-sql-has-top-level-offset-p` helpers. Use `clutch-db-sql-has-top-level-row-limit-p` when guarding bounded-query rewrites.
 - Removed the unwired row-marking state that no command could set; the public `clutch-marked-face` remains for themes.
-- The interactive JDBC driver installer no longer offers companion jars (orai18n, slf4j-api, slf4j-nop) as top-level drivers; they still install automatically with their parent driver.
+- The interactive JDBC driver installer no longer offers the slf4j-api and slf4j-nop companion jars as top-level drivers; they still install automatically with their parent driver. orai18n stays installable on its own.
 
 ### Fixed
 

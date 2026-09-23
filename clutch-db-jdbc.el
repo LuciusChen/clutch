@@ -142,8 +142,7 @@ A stuck disconnect should not block the user or kill the agent.")
                   :class "oracle.jdbc.OracleDriver"
                   :companions (oracle-i18n)))
     (oracle-i18n . (:maven "com.oracle.database.nls:orai18n:21.13.0.0"
-                    :filename "orai18n.jar"
-                    :internal t))
+                    :filename "orai18n.jar"))
     (db2       . (:manual "https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads"
                   :filename "db2jcc4.jar"
                   :class "com.ibm.db2.jcc.DB2Driver"))
