@@ -134,7 +134,7 @@ Not every backend implements every metadata operation.  On the Elisp side, unsup
 
 `auto-commit=false` is how clutch requests manual-commit mode for the primary session.  The metadata session stays read-only/autocommit-oriented.
 
-`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables primary-session idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp.
+`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp. A metadata request on a metadata or bulk session idle that long is preceded by the same check, and a session that fails it is replaced before the request runs, as after a connection failure. A NAT or firewall that drops an idle connection leaves its socket silent, so without the check the request would wait out `network-timeout-seconds`, and clutch, whose request timeout is no longer, would retire the whole logical connection first.
 
 The connect response returns:
 
