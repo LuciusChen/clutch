@@ -675,8 +675,7 @@ not augment a bare * in that case."
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
 CONN supplies identifier escaping for the hidden aliases."
-  (let ((sql (string-trim-right
-              (replace-regexp-in-string ";[ \t\n\r\f]*\\'" "" sql))))
+  (let ((sql (clutch-db-sql-trim-end sql)))
     (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
       (let* ((star-qualifier
               (clutch--row-identity-star-qualifier sql from-pos))

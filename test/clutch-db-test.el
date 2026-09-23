@@ -4391,6 +4391,20 @@ trailing semicolon went unseen and SQL Server got a second ORDER BY."
                    (concat "SELECT * FROM t\nORDER\nBY id"
                            " OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY")))))
 
+(ert-deftest clutch-db-test-jdbc-paged-sql-closes-a-trailing-comment ()
+  "JDBC paging must not append its clauses inside a trailing comment.
+Oracle's closing parenthesis and SQL Server's OFFSET/FETCH were commented
+out, which broke the Oracle statement and left SQL Server unpaged."
+  (dolist (case '((oracle ") WHERE ROWNUM <= 10")
+                  (sqlserver "OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY")))
+    (ert-info ((symbol-name (car case)))
+      (should (string-search
+               (cadr case)
+               (clutch-db-sql-mask-literal-or-comment
+                (clutch-db-build-paged-sql
+                 (make-clutch-jdbc-conn :params (list :driver (car case)))
+                 "SELECT * FROM t -- note" 0 10)))))))
+
 (ert-deftest clutch-db-test-jdbc-source-table-scope-follows-dialect-rules ()
   "JDBC source tables should preserve scope and dialect identifier rules."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle))))
@@ -7753,6 +7767,34 @@ It does so without touching the agent process."
                 (body)
                 ("rollback-savepoint" (conn-id . 23) (savepoint-id . 71)))))
       (should (clutch-db-manual-commit-p conn)))))
+
+(ert-deftest clutch-db-test-sqlite-rewrites-survive-a-trailing-comment ()
+  "Paging, sorting, counting and filtering must not be commented out.
+A statement whose last line ends in a comment had the clause a rewrite
+appends, or the parenthesis that closes its derived table, commented out:
+paging fetched the whole table and every page started at the first row."
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+        (sql "SELECT id FROM t -- note"))
+    (unwind-protect
+        (cl-flet ((ids (query)
+                    (mapcar #'car (clutch-db-result-rows
+                                   (clutch-db-query conn query)))))
+          (clutch-db-query conn "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+          (clutch-db-query
+           conn (concat "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL"
+                        " SELECT i + 1 FROM n WHERE i < 30)"
+                        " INSERT INTO t SELECT i FROM n"))
+          (should (equal (ids (clutch-db-build-paged-sql conn sql 1 10))
+                         (number-sequence 11 20)))
+          (should (equal (ids (clutch-db-build-paged-sql
+                               conn (concat sql "\nORDER BY id") 0 3
+                               '("id" . "DESC")))
+                         '(30 29 28)))
+          (should (equal (ids (clutch-db-build-count-sql conn sql)) '(30)))
+          (should (equal (ids (clutch-db-apply-where conn sql "id > 27"))
+                         '(28 29 30))))
+      (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
   "SQLite should commit or roll back a staged multi-row batch as a unit."
