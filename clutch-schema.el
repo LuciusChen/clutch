@@ -34,6 +34,11 @@ after async metadata refreshes."
 (defvar clutch--table-metadata-cache (make-hash-table :test 'eq)
   "Table metadata and load status keyed by connection and table identity.")
 
+(defvar clutch--row-identity-cache (make-hash-table :test 'eq)
+  "Resolved row identity candidates keyed by connection object identity.
+Each value maps (CATALOG SCHEMA TABLE) to a candidate list, where CATALOG
+and SCHEMA are the source table's explicit qualifiers.")
+
 (defvar clutch--column-details-queue-cache (make-hash-table :test 'eq)
   "Per-connection queue of tables waiting for async column-detail fetch.")
 
@@ -72,6 +77,7 @@ Functions receive CONN, TABLE, and KIND.")
 
 (defconst clutch--schema-dependent-cache-symbols
   '(clutch--table-metadata-cache
+    clutch--row-identity-cache
     clutch--column-details-queue-cache
     clutch--column-details-active-cache
     clutch--help-doc-cache)
@@ -96,9 +102,11 @@ Functions receive CONN, TABLE, and KIND.")
   (when clutch-debug-mode
     (clutch-db-backend-key conn)))
 
-(defun clutch--metadata-debug-event (conn op phase backend summary &optional context)
+(defun clutch--metadata-debug-event (conn op phase backend summary
+                                          &optional context elapsed)
   "Record a metadata debug event.
-CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
+CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event.
+ELAPSED, when non-nil, is the operation's duration in seconds."
   (when clutch-debug-mode
     (apply #'clutch--remember-debug-event
            (append (list :connection conn
@@ -107,12 +115,16 @@ CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
                          :backend backend
                          :summary summary)
                    (when context
-                     (list :context context))))))
+                     (list :context context))
+                   (when elapsed
+                     (list :elapsed elapsed))))))
 
-(defun clutch--metadata-debug-table-event (conn op phase backend table summary)
-  "Record a metadata debug event for TABLE and OP on CONN."
+(defun clutch--metadata-debug-table-event (conn op phase backend table summary
+                                                &optional elapsed)
+  "Record a metadata debug event for TABLE and OP on CONN.
+ELAPSED, when non-nil, is the operation's duration in seconds."
   (clutch--metadata-debug-event conn op phase backend summary
-                                (list :table table)))
+                                (list :table table) elapsed))
 
 (defun clutch--metadata-debug-stale-table-event (conn op backend table what)
   "Record a stale metadata debug event for TABLE, OP, and WHAT on CONN."
@@ -183,6 +195,7 @@ CONN, OP, PHASE, BACKEND, SUMMARY, and CONTEXT describe the event."
   (when-let* ((schema (gethash conn clutch--schema-cache)))
     (unless (eq (gethash table schema 'missing) 'missing)
       (puthash table nil schema)))
+  (clutch--forget-row-identities conn table)
   (when-let* ((cache (gethash conn clutch--table-metadata-cache)))
     (remhash table cache)
     (let (comment-keys)
@@ -310,6 +323,40 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 (defun clutch--table-comment-key (conn table &optional schema)
   "Return the schema-qualified cache key for TABLE on CONN."
   (cons (or schema (clutch-db-current-schema conn)) table))
+
+(defun clutch--cached-row-identity (conn table schema catalog)
+  "Return TABLE's cached row identity candidates on CONN, wrapped in a list.
+SCHEMA and CATALOG are the source table's explicit qualifiers, if any.
+Return nil when nothing is cached.  The wrapper keeps a cached empty
+candidate list distinguishable from a cache miss."
+  (when-let* ((cache (gethash conn clutch--row-identity-cache)))
+    (let ((candidates (gethash (list catalog schema table) cache 'missing)))
+      (unless (eq candidates 'missing)
+        (list candidates)))))
+
+(defun clutch--cache-row-identity (conn table schema catalog candidates)
+  "Cache CANDIDATES as TABLE's row identity on CONN.
+SCHEMA and CATALOG are the source table's explicit qualifiers, if any.  An
+unqualified table needs no namespace in the key: whatever can change what
+it resolves to also drops the cache, namely schema refresh, reconnect,
+schema switching, and any statement that returns no result set."
+  (puthash (list catalog schema table) candidates
+           (or (gethash conn clutch--row-identity-cache)
+               (puthash conn (make-hash-table :test 'equal)
+                        clutch--row-identity-cache))))
+
+(defun clutch--forget-row-identities (conn &optional table)
+  "Drop CONN's cached row identities, only TABLE's when TABLE is non-nil."
+  (if (null table)
+      (remhash conn clutch--row-identity-cache)
+    (when-let* ((cache (gethash conn clutch--row-identity-cache)))
+      (let (keys)
+        (maphash (lambda (key _candidates)
+                   (when (string-equal-ignore-case (nth 2 key) table)
+                     (push key keys)))
+                 cache)
+        (dolist (key keys)
+          (remhash key cache))))))
 
 (defun clutch--cached-table-comment (conn table &optional schema)
   "Return TABLE's cached comment in SCHEMA on CONN, or nil."

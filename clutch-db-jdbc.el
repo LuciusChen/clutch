@@ -1399,6 +1399,12 @@ unknown effect."
 Oracle JDBC schema enumeration is too slow to block connect."
   (not (clutch-jdbc--oracle-conn-p conn)))
 
+(cl-defmethod clutch-db-object-name-search-p ((conn clutch-jdbc-conn))
+  "Return non-nil when CONN is Oracle, which lists its schema too slowly.
+Its search-tables covers the same tables, views and synonyms as get-tables,
+so an object name is matched by prefix search instead."
+  (clutch-jdbc--oracle-conn-p conn))
+
 (cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
   "Return non-nil when CONN may synchronously load completion columns.
 This is allowed in the hot path."
@@ -2345,9 +2351,8 @@ the metadata request."
 
 (defun clutch-jdbc--table-indexes (conn table)
   "Return index entry plists for TABLE on CONN.
-`clutch-db-list-objects' enumerates every index in the schema, which is far
-more than row identity needs and is not cached.  The agent accepts a table
-filter for the same operation, so ask it for one table."
+The agent filters the indexes operation by table, so this never enumerates
+the schema the way `clutch-db-list-objects' does."
   (when-let* ((spec (clutch-jdbc--object-category-spec 'indexes)))
     (let ((result (clutch-jdbc--rpc
                    conn (plist-get spec :op)
@@ -2358,19 +2363,22 @@ filter for the same operation, so ask it for one table."
               (plist-get result (plist-get spec :key))))))
 
 (defun clutch-jdbc--unique-not-null-identities (conn table)
-  "Return unique-not-null row identity candidates for TABLE on CONN."
-  (let* ((details (clutch-db-column-details conn table))
-         (not-null (make-hash-table :test 'equal))
-         (indexes (clutch-jdbc--table-indexes conn table)))
-    (dolist (detail details)
+  "Return unique-not-null row identity candidates for TABLE on CONN.
+Column details are only needed to check a unique index's columns for NOT
+NULL, and they are the most expensive request in this chain, so a table
+without a unique index never asks for them."
+  (let ((unique (cl-remove-if-not
+                 (lambda (index)
+                   (and (plist-get index :unique)
+                        (string= (or (plist-get index :target-table) table)
+                                 table)))
+                 (clutch-jdbc--table-indexes conn table)))
+        (not-null (make-hash-table :test 'equal)))
+    (dolist (detail (and unique (clutch-db-column-details conn table)))
       (puthash (plist-get detail :name)
                (not (plist-get detail :nullable))
                not-null))
-    (cl-loop for index in indexes
-             when (and (plist-get index :unique)
-                       (string= (or (plist-get index :target-table)
-                                    table)
-                                table))
+    (cl-loop for index in unique
              for cols = (mapcar
                          #'clutch-jdbc--index-column-name
                          (clutch-db-object-details conn index))
