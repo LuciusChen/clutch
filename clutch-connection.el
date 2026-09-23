@@ -2491,10 +2491,11 @@ params; see `clutch-connection-alist' for details."
       ;; is bound to this buffer, this function still owns its transport.
       (unwind-protect
           (progn
-            (when old-live-p
-              (clutch--do-disconnect old-conn))
-            (when (and old-conn (not old-live-p))
-              (clutch--cleanup-dead-connection old-conn))
+            (if old-live-p
+                (clutch--do-disconnect old-conn)
+              ;; Other buffers keep a dead OLD-CONN to reconnect in place;
+              ;; only its transport is released here.
+              (clutch--release-connection-transport old-conn))
             (clutch--require-live-connection conn)
             (clutch--clear-reconnect-metadata-caches old-conn conn)
             (clutch--activate-current-buffer-connection conn effective-params product)
