@@ -17,6 +17,7 @@
   "Run BODY with fresh object cache and warmup scheduler state."
   (declare (indent 0) (debug (body)))
   `(let ((clutch--object-cache (make-hash-table :test 'eq))
+         (clutch--browseable-object-cache (make-hash-table :test 'eq))
          (clutch--object-warmup-timers (make-hash-table :test 'eq))
          (clutch--object-warmup-generations (make-hash-table :test 'eq)))
      ,@body))
@@ -253,6 +254,41 @@ document connection."
             ('show-definition
              (should-not browse-entry)
              (should (equal show-entry (plist-get case :entry))))))))))
+
+(ert-deftest clutch-test-object-name-match-searches-when-backend-says-so ()
+  "A backend that declares name search must not have its full listing pulled.
+The exact-name match only needs entries under the name's prefix."
+  (clutch-test-object--with-warmup-state
+   (let (browsed)
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p)
+                (lambda (_conn) t))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn) (setq browsed t) nil))
+               ((symbol-function 'clutch-db-search-table-entries)
+                (lambda (_conn prefix)
+                  (should (equal prefix "orders"))
+                  '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                    (:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                    (:name "ORDERS_LOG" :type "TABLE" :schema "APP" :source-schema "APP")))))
+       (should (equal (clutch--object-matches-by-name 'fake-conn "orders" t)
+                      '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+       (should-not browsed)))))
+
+(ert-deftest clutch-test-object-name-match-lists-by-default ()
+  "Backends that do not declare name search keep matching the full listing."
+  (clutch-test-object--with-warmup-state
+   (let (searched)
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p)
+                (lambda (_conn) nil))
+               ((symbol-function 'clutch-db-search-table-entries)
+                (lambda (_conn _prefix) (setq searched t) nil))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn)
+                  '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP")
+                    (:name "USERS" :type "TABLE" :schema "APP" :source-schema "APP")))))
+       (should (equal (clutch--object-matches-by-name 'fake-conn "orders" t)
+                      '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+       (should-not searched)))))
 
 (ert-deftest clutch-test-object-jump-target-resolves-index-table ()
   "Jump target should follow index target-table metadata."
@@ -890,16 +926,18 @@ document connection."
         (should-not (gethash 'fake-conn clutch--problem-records-by-conn))))))
 
 (ert-deftest clutch-test-object-describe-propagates-related-object-errors ()
-  "Describe rendering should not silently swallow related-object lookup failures."
-  (cl-letf (((symbol-function 'clutch--ensure-table-comment) (lambda (&rest _) nil))
-            ((symbol-function 'clutch--ensure-column-details) (lambda (&rest _) nil))
-            ((symbol-function 'clutch-db-list-columns) (lambda (&rest _) '("id")))
-            ((symbol-function 'clutch--object-entries)
-             (lambda (_conn)
-               (signal 'clutch-db-error '("related boom")))))
-    (should-error
-     (clutch--object-describe-text 'fake-conn '(:name "USERS" :type "TABLE"))
-     :type 'clutch-db-error)))
+  "Describe rendering should not silently swallow related-object lookup failures.
+A collection describe lists its indexes afresh; a table describe reads the
+warmed categories and performs no lookup."
+  (clutch-test-object--with-warmup-state
+   (cl-letf (((symbol-function 'clutch--ensure-column-details) (lambda (&rest _) nil))
+             ((symbol-function 'clutch-db-list-columns) (lambda (&rest _) '("id")))
+             ((symbol-function 'clutch-db-list-objects)
+              (lambda (_conn _category)
+                (signal 'clutch-db-error '("related boom")))))
+     (should-error
+      (clutch--object-describe-text 'fake-conn '(:name "USERS" :type "COLLECTION"))
+      :type 'clutch-db-error))))
 
 ;;;; Object — jump, resolve, and warmup
 
@@ -960,8 +998,9 @@ document connection."
       (should (equal (plist-get captured :proc-ann) "  APP/procedure")))))
 
 (ert-deftest clutch-test-object-cache-primes-table-entry-comments ()
-  "Object cache storage should prime table comments carried by entries."
+  "Listing the browseable snapshot should prime table comments carried by entries."
   (let ((clutch--object-cache (make-hash-table :test 'eq))
+        (clutch--browseable-object-cache (make-hash-table :test 'eq))
         (clutch--table-metadata-cache (make-hash-table :test 'eq)))
     (cl-letf (((symbol-function 'clutch-db-list-table-entries)
                (lambda (_conn)
@@ -975,7 +1014,7 @@ document connection."
                (lambda (_conn) "APP"))
               ((symbol-function 'clutch-db-search-table-entries)
                (lambda (_conn _prefix) nil)))
-      (clutch--store-object-cache-type-entries 'fake-conn "INDEX" nil)
+      (clutch--browseable-object-entries 'fake-conn)
       (should (equal (clutch--cached-table-comment 'fake-conn "ORDERS")
                      "订单"))
       (should (clutch--table-comment-cached-p 'fake-conn "AUDIT_LOG"))
@@ -1315,31 +1354,32 @@ document connection."
 
 (ert-deftest clutch-test-object-entries-refresh-uses-browseable-contract ()
   "Full refresh should preserve backend-specific browseable snapshot bounds."
-  (let ((browseable-calls 0)
-        categories
-        stored)
-    (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
-               (lambda (_conn)
-                 (cl-incf browseable-calls)
-                 '((:name "cache:1" :type "KEY"))))
-              ((symbol-function 'clutch-db-list-table-entries)
-               (lambda (&rest _)
-                 (ert-fail "refresh bypassed browseable object contract")))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (&rest _)
-                 (ert-fail "refresh repeated empty-prefix object search")))
-              ((symbol-function 'clutch-db-list-objects)
-               (lambda (_conn category)
-                 (push category categories)
-                 nil))
-              ((symbol-function 'clutch--store-object-cache)
-               (lambda (_conn entries)
-                 (setq stored entries))))
-      (should (equal (clutch--object-entries 'fake-conn t)
-                     '((:name "cache:1" :type "KEY"))))
-      (should (= browseable-calls 1))
-      (should (equal (nreverse categories) clutch--object-categories))
-      (should (equal stored '((:name "cache:1" :type "KEY")))))))
+  (clutch-test-object--with-warmup-state
+   (let ((browseable-calls 0)
+         categories
+         stored)
+     (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn)
+                  (cl-incf browseable-calls)
+                  '((:name "cache:1" :type "KEY"))))
+               ((symbol-function 'clutch-db-list-table-entries)
+                (lambda (&rest _)
+                  (ert-fail "refresh bypassed browseable object contract")))
+               ((symbol-function 'clutch-db-search-table-entries)
+                (lambda (&rest _)
+                  (ert-fail "refresh repeated empty-prefix object search")))
+               ((symbol-function 'clutch-db-list-objects)
+                (lambda (_conn category)
+                  (push category categories)
+                  nil))
+               ((symbol-function 'clutch--store-object-cache)
+                (lambda (_conn entries)
+                  (setq stored entries))))
+       (should (equal (clutch--object-entries 'fake-conn t)
+                      '((:name "cache:1" :type "KEY"))))
+       (should (= browseable-calls 1))
+       (should (equal (nreverse categories) clutch--object-categories))
+       (should (equal stored '((:name "cache:1" :type "KEY"))))))))
 
 (ert-deftest clutch-test-safe-completion-call-records-debug-event-on-db-errors ()
   "Recoverable completion metadata errors should surface in the debug buffer."
@@ -1443,17 +1483,18 @@ document connection."
 
 (ert-deftest clutch-test-browseable-object-entries-skip-empty-search-for-oracle-jdbc ()
   "Oracle JDBC browseable entries should not issue an extra empty-prefix search."
-  (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
-             (lambda (_conn)
-               '((:name "ORDERS" :type "TABLE"))))
-            ((symbol-function 'clutch-db-search-table-entries)
-             (lambda (&rest _args)
-               (ert-fail "browseable entries must not trigger a search")))
-            ((symbol-function 'clutch-db-list-table-entries)
-             (lambda (&rest _args)
-               (ert-fail "browseable entries must not list tables"))))
-    (should (equal (clutch--browseable-object-entries 'fake-conn)
-                   '((:name "ORDERS" :type "TABLE"))))))
+  (clutch-test-object--with-warmup-state
+   (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
+              (lambda (_conn)
+                '((:name "ORDERS" :type "TABLE"))))
+             ((symbol-function 'clutch-db-search-table-entries)
+              (lambda (&rest _args)
+                (ert-fail "browseable entries must not trigger a search")))
+             ((symbol-function 'clutch-db-list-table-entries)
+              (lambda (&rest _args)
+                (ert-fail "browseable entries must not list tables"))))
+     (should (equal (clutch--browseable-object-entries 'fake-conn)
+                    '((:name "ORDERS" :type "TABLE")))))))
 
 (ert-deftest clutch-test-object-entry-reader-keeps-overloaded-object-names ()
   "Object reader should keep duplicate names distinct when identity differs."
@@ -1752,6 +1793,118 @@ alone does not bound how long completion blocks."
                 (clutch--embark-actions-keymap))
     (should (equal (alist-get ?d bindings)
                    '("Describe object" . clutch-object-describe)))))
+
+(ert-deftest clutch-test-object-browseable-snapshot-listed-once-per-schema-generation ()
+  "The browseable snapshot is listed once and reused until the schema cache changes.
+Every object view and every warmup step merges it in; on a large schema one
+listing costs seconds, so listing per call made a describe pay it twice."
+  (clutch-test-object--with-warmup-state
+   (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+         (listings 0)
+         (entries '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn) (cl-incf listings) entries)))
+       (should (equal (clutch--browseable-object-entries 'fake-conn) entries))
+       (clutch--browseable-object-entries 'fake-conn)
+       (clutch--partial-object-entries 'fake-conn)
+       ;; A warmup step storing its category must not list the tables again.
+       (clutch--store-object-cache-type-entries
+        'fake-conn "INDEX"
+        '((:name "IX_ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS")))
+       (should (= listings 1))
+       (clutch--handle-schema-cache-updated 'fake-conn 'invalidated)
+       (clutch--browseable-object-entries 'fake-conn)
+       (should (= listings 2))
+       (clutch--browseable-object-entries 'fake-conn t)
+       (should (= listings 3))))))
+
+(ert-deftest clutch-test-object-related-entries-never-list-the-schema ()
+  "Related indexes and triggers come from the warmed categories.
+A describe must not pay a schema listing for them, cold or warm, and a warmup
+step storing its category must not list either."
+  (clutch-test-object--with-warmup-state
+   (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+         (index '(:name "IX_ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS"))
+         (entry '(:name "ORDERS" :type "TABLE" :schema "APP"))
+         scheduled)
+     (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn) (ert-fail "related entries listed the schema")))
+               ((symbol-function 'clutch--schedule-object-warmup)
+                (lambda (_conn) (setq scheduled t))))
+       (should-not (clutch--object-related-entries 'fake-conn entry "INDEX"))
+       (should scheduled)
+       (clutch--store-object-cache-type-entries 'fake-conn "INDEX" (list index))
+       (should (equal (clutch--object-related-entries 'fake-conn entry "INDEX")
+                      (list index)))))))
+
+(ert-deftest clutch-test-object-name-match-any-type-never-lists-on-a-search-backend ()
+  "Resolving any object type on a name-search backend must not list the schema.
+Table-like matches come from the prefix search; the rest from the warmed
+categories, so an index resolves once the warmup has loaded indexes."
+  (clutch-test-object--with-warmup-state
+   (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+         (table '(:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))
+         (index '(:name "ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS_T")))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn) (ert-fail "any-type resolve listed the schema")))
+               ((symbol-function 'clutch-db-search-table-entries)
+                (lambda (_conn prefix)
+                  (should (equal prefix "orders"))
+                  (list table))))
+       (should (equal (clutch--object-matches-by-name 'fake-conn "orders") (list table)))
+       (clutch--store-object-cache-type-entries 'fake-conn "INDEX" (list index))
+       (should (equal (clutch--object-matches-by-name 'fake-conn "orders")
+                      (list table index)))))))
+
+(ert-deftest clutch-test-object-type-entries-tables-come-from-the-snapshot ()
+  "The table-type lookup reads the cached snapshot now that a category store
+no longer merges tables into the object cache; the snapshot is listed once."
+  (clutch-test-object--with-warmup-state
+   (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+         (table '(:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))
+         (index '(:name "IX_ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS"))
+         (listings 0))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn) (cl-incf listings) (list table))))
+       (clutch--store-object-cache-type-entries 'fake-conn "INDEX" (list index))
+       (should (equal (clutch--object-type-entries 'fake-conn "TABLE") (list table)))
+       (should (equal (clutch--object-type-entries 'fake-conn "INDEX") (list index)))
+       (should (equal (clutch--object-type-entries 'fake-conn "TABLE") (list table)))
+       (should (= listings 1))))))
+
+(ert-deftest clutch-test-object-browseable-snapshot-is-live-without-name-search ()
+  "Backends that list objects quickly list them on every call.
+Their objects change through ordinary commands (Redis keys, MongoDB
+collections, tables created by DDL) that never invalidate a snapshot."
+  (clutch-test-object--with-warmup-state
+   (let ((listings 0))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) nil))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn)
+                  (cl-incf listings)
+                  (list (list :name (format "k%d" listings) :type "KEY")))))
+       (clutch--browseable-object-entries 'fake-conn)
+       (should (equal (mapcar (lambda (entry) (plist-get entry :name))
+                              (clutch--browseable-object-entries 'fake-conn))
+                      '("k2")))
+       (should (= listings 2))))))
+
+(ert-deftest clutch-test-object-browseable-snapshot-caches-an-empty-listing ()
+  "An empty schema is not listed again on every snapshot."
+  (clutch-test-object--with-warmup-state
+   (let ((listings 0))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn) (cl-incf listings) nil)))
+       (should-not (clutch--browseable-object-entries 'fake-conn))
+       (should-not (clutch--browseable-object-entries 'fake-conn))
+       (should (= listings 1))))))
 
 (provide 'clutch-test-object)
 

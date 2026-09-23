@@ -301,11 +301,20 @@ Values are nesting counts.")
                    ""))))))
     s))
 
+(defun clutch-db-sql-trim-end (sql)
+  "Return SQL without trailing whitespace and its final semicolon.
+When the last line may end in a comment (-- or MySQL's #), keep a newline
+after it, so a clause that a rewrite appends, or the parenthesis closing a
+derived table around SQL, is not commented out along with it."
+  (let ((trimmed (string-trim-right
+                  (replace-regexp-in-string ";[ \t\n\r\f]*\\'" "" sql))))
+    (if (string-match-p "\\(?:--\\|#\\)[^\n]*\\'" trimmed)
+        (concat trimmed "\n")
+      trimmed)))
+
 (defun clutch-db-sql-normalize (sql)
   "Return SQL trimmed for clause-aware analysis and rewrite."
-  (string-trim-right
-   (replace-regexp-in-string
-    ";\\s-*\\'" "" (clutch-db-sql-strip-leading-comments sql))))
+  (clutch-db-sql-trim-end (clutch-db-sql-strip-leading-comments sql)))
 
 (defun clutch-db-sql-dialect (product)
   "Return the lexical rules for SQL PRODUCT as a plist.
@@ -638,23 +647,36 @@ plist, so context features split statements the same way execution does."
 
 ;;;; SQL helpers (top-level clause detection)
 
+(defconst clutch-db-sql--syntax-table
+  (let ((table (make-syntax-table)))
+    (modify-syntax-entry ?_ "w" table)
+    table)
+  "Syntax table for matching SQL keywords with regexps.
+The `\\s-' and `\\b' regexp classes follow the current buffer's syntax
+table.  In `sql-mode' a newline ends comments rather than counting as
+whitespace, which would hide a clause split across lines, and neither that
+table nor the standard one makes `_' a word constituent, which would let
+FROM match inside valid_from.  `$' is already one in the standard table.")
+
 (defun clutch-db-sql-code-match-positions (sql start end regexp)
   "Return a hash mapping REGEXP match positions in SQL to their match ends.
-Matching runs case-insensitively from START to END without interpreting SQL
-structure, so callers must still confirm each position is top-level code
-through `clutch-db-sql-scan-code'.  Collecting candidates in one pass keeps
-that confirmation linear; retrying REGEXP at every scanned position instead
-searches the remainder of SQL each time, which is quadratic."
+Matching runs case-insensitively under `clutch-db-sql--syntax-table' from
+START to END without interpreting SQL structure, so callers must still
+confirm each position is top-level code through `clutch-db-sql-scan-code'.
+Collecting candidates in one pass keeps that confirmation linear; retrying
+REGEXP at every scanned position instead searches the remainder of SQL each
+time, which is quadratic."
   (let ((case-fold-search t)
         (limit (or end (length sql)))
         (positions (make-hash-table :test 'eq))
         (pos (or start 0)))
-    (while (and (< pos limit)
-                (string-match regexp sql pos)
-                (< (match-beginning 0) limit))
-      (when (<= (match-end 0) limit)
-        (puthash (match-beginning 0) (match-end 0) positions))
-      (setq pos (1+ (match-beginning 0))))
+    (with-syntax-table clutch-db-sql--syntax-table
+      (while (and (< pos limit)
+                  (string-match regexp sql pos)
+                  (< (match-beginning 0) limit))
+        (when (<= (match-end 0) limit)
+          (puthash (match-beginning 0) (match-end 0) positions))
+        (setq pos (1+ (match-beginning 0)))))
     positions))
 
 (defun clutch-db-sql--clause-match-positions (sql start patterns)
@@ -922,7 +944,7 @@ Only reuse SQL's relation when it is a simple query of that same TABLE."
   "Strip a top-level ORDER BY tail from SQL.
 Leaves nested ORDER BY clauses inside subqueries or window functions intact."
   (if-let* ((order-pos (clutch-db-sql-find-top-level-clause sql "ORDER\\s-+BY")))
-      (string-trim-right (substring sql 0 order-pos))
+      (clutch-db-sql-trim-end (substring sql 0 order-pos))
     sql))
 
 (defun clutch-db-sql-derived-table-body (sql)
@@ -966,8 +988,7 @@ ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name.
 PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
   (if (clutch-db-sql-has-top-level-row-limit-p base-sql)
       base-sql
-    (let* ((trimmed (string-trim-right
-                     (replace-regexp-in-string ";\\s-*\\'" "" base-sql)))
+    (let* ((trimmed (clutch-db-sql-trim-end base-sql))
            (sortable-sql (if order-by
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
@@ -1181,6 +1202,16 @@ backend should preserve the current dirty state.")
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn t))
   "Most backends refresh schema immediately after connect."
   t)
+
+(cl-defgeneric clutch-db-object-name-search-p (conn)
+  "Return non-nil when CONN matches an object name by prefix search.
+Only a backend whose `clutch-db-search-table-entries' returns the same
+entries for a name as `clutch-db-browseable-object-entries' would, and whose
+full listing is too slow for a per-command lookup, should say so.")
+
+(cl-defmethod clutch-db-object-name-search-p ((_conn t))
+  "Most backends match an object name against their full listing."
+  nil)
 
 (cl-defgeneric clutch-db-completion-sync-columns-p (conn)
   "Return non-nil when completion may synchronously load column metadata for CONN.")
