@@ -8,14 +8,15 @@ It is intentionally narrower than the user-facing JDBC section in `README.md`. `
 
 `clutch` launches [`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent) as a local JVM sidecar process and communicates with it over stdin/stdout using one JSON object per line.
 
-Each logical JDBC connection in clutch maps to one logical session in the agent.  That session owns two JDBC connections:
+Each logical JDBC connection in clutch maps to one logical session in the agent.  That session owns two JDBC connections, and on Oracle a third:
 
 - `primary`: foreground SQL execution, DML, DDL, transactions
 - `metadata`: schema and object introspection
+- `bulk` (Oracle only, opened on first use): the schema-wide listings — `get-tables`, `get-sequences`, `get-procedures`, `get-functions`, and `get-indexes` or `get-triggers` without a `table` — which other products run on `metadata`
 
-This split exists to keep metadata traffic from contending with foreground SQL, especially on Oracle.
+The primary/metadata split keeps metadata traffic from contending with foreground SQL.  The bulk session exists because on a large Oracle schema one listing can hold its session for seconds while a lookup the user is waiting on, such as `get-primary-keys` before a query, queues behind it; other products list quickly and keep two sessions, so they never pay a third logon.  Cursors opened by a bulk listing keep fetching on the bulk session.  A bulk session that fails is dropped and reopened by the next listing; the metadata session is not touched.  The third session counts against the account's session limits: if Oracle refuses it (for example `ORA-02391`, the profile's `SESSIONS_PER_USER`), that connection stops using a bulk session and runs its schema-wide listings on `metadata`, as other products do, without attempting the logon again.
 
-The agent's `set-current-schema` operation, currently used by Oracle, updates both sessions together so one logical Clutch connection still presents one effective schema.  Product-specific namespace paths remain explicit: DuckDB switches the primary session with `USE` and synchronizes catalog/schema metadata parameters, while ClickHouse reconnects with a different database.
+The agent's `set-current-schema` operation, currently used by Oracle, updates the primary and metadata sessions together so one logical Clutch connection still presents one effective schema, and drops the bulk session (ending any listing still paging on it), which the next listing reopens with the remembered schema.  Product-specific namespace paths remain explicit: DuckDB switches the primary session with `USE` and synchronizes catalog/schema metadata parameters, while ClickHouse reconnects with a different database.
 
 The stdin reader is intentionally not blocked by one long-running request. Each decoded request is submitted to a request pool.  The dispatcher then serializes most operations per `conn-id`, so one JDBC connection still sees one foreground operation at a time.
 
@@ -133,7 +134,7 @@ Not every backend implements every metadata operation.  On the Elisp side, unsup
 
 `auto-commit=false` is how clutch requests manual-commit mode for the primary session.  The metadata session stays read-only/autocommit-oriented.
 
-`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables primary-session idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp.
+`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp. A metadata request on a metadata or bulk session idle that long is preceded by the same check, and a session that fails it is replaced before the request runs, as after a connection failure. A NAT or firewall that drops an idle connection leaves its socket silent, so without the check the request would wait out `network-timeout-seconds`, and clutch, whose request timeout is no longer, would retire the whole logical connection first.
 
 The connect response returns:
 
