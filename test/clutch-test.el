@@ -784,7 +784,8 @@
 
 (ert-deftest clutch-test-row-identity-prep-augments-row-preserving-selects ()
   "Row-preserving SELECTs should receive hidden identity expressions."
-  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db-row-identity-candidates)
              (lambda (_conn _table)
                (list (list :kind 'primary-key
                            :name "PRIMARY"
@@ -820,7 +821,8 @@
 
 (ert-deftest clutch-test-row-identity-prep-uses-backend-source-table-name ()
   "Row identity preparation should canonicalize source tables through the backend."
-  (let (requested-table)
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
+        requested-table)
     (cl-letf (((symbol-function 'clutch-db--source-table-name)
                (lambda (_conn token)
                  (should (equal token "users"))
@@ -843,7 +845,8 @@
 sql-mode gives newlines comment-end syntax, so syntax-dependent whitespace
 classes once let the source-table token keep a trailing newline and the
 injected head became \"SELECT nil.*\" (MySQL error 1051)."
-  (cl-letf (((symbol-function 'clutch-db--source-table-name)
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db--source-table-name)
              (lambda (_conn token) (clutch-db-sql-table-name token)))
             ((symbol-function 'clutch-db--source-table-schema)
              (lambda (_conn token) (clutch-db-sql-table-schema token)))
@@ -883,7 +886,8 @@ injected head became \"SELECT nil.*\" (MySQL error 1051)."
 
 (ert-deftest clutch-test-row-identity-prep-skips-unqualifiable-star ()
   "A bare * whose qualifier cannot be derived must not be augmented."
-  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db-row-identity-candidates)
              (lambda (_conn _table)
                (list (list :kind 'primary-key
                            :name "PRIMARY"
@@ -920,7 +924,7 @@ Without an event its wait is invisible and looks like query time."
   "Row identity is stable for a relation, so resolve it once per relation.
 It runs synchronously before every execution, so repeating it charges the
 user for the same metadata round trips on every query."
-  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
         (conn (make-clutch-db-sqlite-conn :database "/tmp/cache.db"))
         (calls 0))
     (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
@@ -950,7 +954,7 @@ user for the same metadata round trips on every query."
 
 (ert-deftest clutch-test-row-identity-cache-keeps-namespaces-apart ()
   "A cached identity belongs to one relation, not to a bare table name."
-  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
         (conn (make-clutch-db-sqlite-conn :database "/tmp/cache.db"))
         requested)
     (cl-letf (((symbol-function 'clutch-db--source-table-schema)
@@ -973,7 +977,7 @@ user for the same metadata round trips on every query."
 
 (ert-deftest clutch-test-row-identity-failure-is-not-cached ()
   "A metadata failure must not become a permanently cached answer."
-  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
         (conn (make-clutch-db-sqlite-conn :database "/tmp/cache.db"))
         (calls 0))
     (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
@@ -983,6 +987,69 @@ user for the same metadata round trips on every query."
       (clutch--prepare-row-identity-query conn "SELECT name FROM users")
       (clutch--prepare-row-identity-query conn "SELECT name FROM users")
       (should (= calls 2)))))
+
+(ert-deftest clutch-test-row-identity-is-forgotten-after-a-statement-without-results ()
+  "DDL, USE or SET can change what a table name resolves to.
+Any statement that returns no result set drops the cached row identities."
+  (skip-unless (sqlite-available-p))
+  (let* ((clutch--row-identity-cache (make-hash-table :test 'eq))
+         (db-file (make-temp-file "clutch-row-identity-" nil ".db"))
+         (conn (clutch-db-sqlite-connect (list :database db-file))))
+    (unwind-protect
+        (cl-flet ((identity-columns ()
+                    (plist-get (plist-get (clutch--prepare-row-identity-query
+                                           conn "SELECT * FROM t")
+                                          :candidate)
+                               :columns)))
+          (clutch-db-query conn "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+          (should (equal (identity-columns) '("id")))
+          (dolist (sql '("DROP TABLE t"
+                         "CREATE TABLE t (code TEXT PRIMARY KEY, name TEXT)"))
+            (should-not (plist-get (clutch--execute-statement-attempt sql conn t)
+                                   :error)))
+          (should (equal (identity-columns) '("code"))))
+      (clutch-db-disconnect conn)
+      (ignore-errors (delete-file db-file)))))
+
+(ert-deftest clutch-test-row-identity-is-forgotten-with-its-table-metadata ()
+  "Refreshing one table's metadata also drops that table's row identity."
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
+        (conn (make-clutch-db-sqlite-conn :database "/tmp/cache.db"))
+        (calls 0))
+    (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _)
+                 (cl-incf calls)
+                 (list (list :kind 'primary-key :name "PRIMARY" :columns '("id")))))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id))))
+      (clutch--prepare-row-identity-query conn "SELECT * FROM users")
+      (clutch--prepare-row-identity-query conn "SELECT * FROM orders")
+      (clutch--clear-table-metadata-caches conn "users")
+      (clutch--prepare-row-identity-query conn "SELECT * FROM users")
+      (clutch--prepare-row-identity-query conn "SELECT * FROM orders")
+      (should (= calls 3)))))
+
+(ert-deftest clutch-test-row-identity-cache-key-runs-no-query ()
+  "Keying the cache must not query the connection.
+On DuckDB the current schema is a query on the session, so a failure there
+would abort the user's statement before it runs."
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
+        (conn (make-clutch-db-sqlite-conn :database "/tmp/cache.db")))
+    (cl-letf (((symbol-function 'clutch-db-current-schema)
+               (lambda (_conn)
+                 (signal 'clutch-db-error '("current schema query failed"))))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _)
+                 (list (list :kind 'primary-key :name "PRIMARY" :columns '("id")))))
+              ((symbol-function 'clutch-db-escape-identifier)
+               (lambda (_conn id) (format "\"%s\"" id))))
+      (should (equal (plist-get (plist-get (clutch--prepare-row-identity-query
+                                            conn "SELECT * FROM users")
+                                           :candidate)
+                                :name)
+                     "PRIMARY")))))
 
 (ert-deftest clutch-test-row-identity-trace-reports-failures ()
   "A failed row identity lookup should stay visible in the trace."
@@ -1002,7 +1069,7 @@ user for the same metadata round trips on every query."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
              (lambda (_conn _table)
                (signal 'clutch-db-error '("metadata failed"))))
-            (clutch--table-metadata-cache (make-hash-table :test 'eq)))
+            (clutch--row-identity-cache (make-hash-table :test 'eq)))
     (let ((prep (clutch--prepare-row-identity-query
                  'fake-conn "SELECT name FROM users")))
       (should (equal (plist-get prep :identity-status) 'error))
@@ -1013,7 +1080,8 @@ user for the same metadata round trips on every query."
 
 (ert-deftest clutch-test-row-identity-prep-select-star-qualifies-star ()
   "SELECT * row identity injection should qualify the star before adding columns."
-  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db-row-identity-candidates)
              (lambda (_conn _table)
                (list (list :kind 'row-locator
                            :name "ROWID"
@@ -1055,7 +1123,8 @@ user for the same metadata round trips on every query."
               ("SELECT COUNT(*) FROM users"))))
     (pcase-let ((`(,label ,conn ,candidate ,sqls) case))
       (ert-info ((format "candidate: %s" label))
-        (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+        (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+                  ((symbol-function 'clutch-db-row-identity-candidates)
                    (lambda (_conn _table) (list candidate)))
                   ((symbol-function 'clutch-db-escape-identifier)
                    (lambda (_conn id) (format "\"%s\"" id))))
@@ -7571,7 +7640,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 
 (ert-deftest clutch-test-execute-select-detects-primary-key-before-first-render ()
   "Primary-key identity should be ready before the first result render."
-  (let ((clutch--source-window (selected-window))
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
+        (clutch--source-window (selected-window))
         (result-name "*clutch-test-result*")
         (captured-identity :unset))
     (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
@@ -7603,7 +7673,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 (ert-deftest clutch-test-execute-select-fetches-one-row-lookahead ()
   "Initial SELECT execution should trim lookahead rows before rendering."
   (let ((clutch--source-window (selected-window))
-        (clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
         (result-name "*clutch-test-result*")
         (clutch-result-max-rows 2)
         captured-page-size
@@ -7649,7 +7719,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
     (pcase-let ((`(,label ,sql ,columns ,rows ,expected-rows) case))
       (ert-info ((format "case: %s" label))
         (let ((clutch--source-window (selected-window))
-              (clutch--table-metadata-cache (make-hash-table :test 'eq))
+              (clutch--row-identity-cache (make-hash-table :test 'eq))
               (result-name "*clutch-test-result*")
               captured-sql)
           (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
@@ -7677,7 +7747,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 
 (ert-deftest clutch-test-execute-simple-limit-select-retains-edit-source ()
   "A simple SELECT with LIMIT should retain its staged-edit source table."
-  (let ((clutch--source-window (selected-window))
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
+        (clutch--source-window (selected-window))
         (result-name "*clutch-test-result*")
         (sql "SELECT id, name FROM users LIMIT 10")
         captured-sql)
@@ -7711,7 +7782,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 (ert-deftest clutch-test-execute-select-duplicate-labels-are-not-rewritable ()
   "Duplicate result labels should remain pageable but not relation-rewritable."
   (let ((clutch--source-window (selected-window))
-        (clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
         (result-name "*clutch-test-result*")
         (sql "SELECT id AS dup, name AS dup FROM users")
         captured-build-sql)
@@ -7736,7 +7807,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 
 (ert-deftest clutch-test-execute-select-honors-result-context-overrides ()
   "Internal filter SQL should keep the verified relation source capabilities."
-  (let ((clutch--source-window (selected-window))
+  (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
+        (clutch--source-window (selected-window))
         (result-context
          '(:server-pageable t
            :row-identity-prep
@@ -7765,7 +7837,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 (ert-deftest clutch-test-execute-select-remembers-result-buffer-on-source-buffer ()
   "SELECT execution should attach the result buffer to the source buffer."
   (let ((source (generate-new-buffer " *clutch-source*"))
-        (clutch--table-metadata-cache (make-hash-table :test 'eq))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
         (result-name "*clutch-test-result*"))
     (unwind-protect
         (progn
