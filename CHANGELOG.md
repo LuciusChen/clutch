@@ -14,7 +14,7 @@
 ### Fixed
 
 - Resolved row identity for a table without a primary key by requesting that table's indexes instead of every index in the schema. The lookup ran synchronously before the query and consulted no cache, so on large Oracle schemas the first query of a session waited on a full-schema index enumeration.
-- Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke.
+- Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke. Every field edited before the delay expires is validated, not only the last one.
 - Reduced per-keystroke work in SQL consoles: statement-context lookups scan the buffer once instead of twice, keyword completion candidates are computed once, delimited bulk import no longer allocates a string per character, and MongoDB console indentation uses one syntax scan per line instead of a character-by-character buffer walk.
 - Display SQL execution status as colored dots in the left margin on text terminals, using the graphical marker faces and preserving existing wider margins.
 - Parsed `SELECT *` row-identity augmentation independently of the buffer's syntax table, so multi-line statements executed from SQL buffers no longer inject `SELECT nil.*` (MySQL error 1051, "Unknown table 'nil'"). A bare `*` whose table qualifier cannot be derived is now left unaugmented instead of producing invalid SQL.

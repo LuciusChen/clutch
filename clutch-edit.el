@@ -1320,6 +1320,9 @@ Use \\[clutch-result-submit] in the result buffer to submit."
 (defvar-local clutch-result-insert--validation-timer nil
   "Idle validation timer for the current insert buffer.")
 
+(defvar-local clutch-result-insert--pending-validation-fields nil
+  "Names of insert fields changed since the last idle validation.")
+
 (defvar-local clutch-result-insert--active-field-overlay nil
   "Overlay highlighting the active insert field line.")
 
@@ -1541,24 +1544,29 @@ Use \\[clutch-result-submit] in the result buffer to submit."
       (clutch-result-insert--show-field-error field message)
     (clutch-result-insert--clear-field-error field)))
 
-(defun clutch-result-insert--run-idle-validation (buffer field-name)
-  "Validate FIELD-NAME in BUFFER after an idle delay."
+(defun clutch-result-insert--run-idle-validation (buffer)
+  "Validate every insert field in BUFFER changed since the last idle run."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq-local clutch-result-insert--validation-timer nil)
-      (when-let* ((field (clutch-result-insert--field-state field-name)))
-        (clutch-result-insert--validate-field-live field)))))
+      (let ((field-names (reverse clutch-result-insert--pending-validation-fields)))
+        (setq-local clutch-result-insert--pending-validation-fields nil)
+        (dolist (field-name field-names)
+          (when-let* ((field (clutch-result-insert--field-state field-name)))
+            (clutch-result-insert--validate-field-live field)))))))
 
 (defun clutch-result-insert--schedule-field-validation (field)
   "Validate structured FIELD after a short idle delay.
 All field types use the same delay so feedback timing is consistent."
+  (cl-pushnew (plist-get field :name)
+              clutch-result-insert--pending-validation-fields
+              :test #'equal)
   (clutch-result-insert--cancel-validation-timer)
   (setq-local clutch-result-insert--validation-timer
               (run-with-idle-timer
                clutch-insert-validation-idle-delay nil
                #'clutch-result-insert--run-idle-validation
-               (current-buffer)
-               (plist-get field :name))))
+               (current-buffer))))
 
 (defun clutch-result-insert--after-change (beg end _len)
   "Schedule local validation for the changed insert field spanning BEG..END."
