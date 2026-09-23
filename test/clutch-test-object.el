@@ -1802,7 +1802,8 @@ listing costs seconds, so listing per call made a describe pay it twice."
    (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
          (listings 0)
          (entries '((:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))))
-     (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
                ((symbol-function 'clutch-db-browseable-object-entries)
                 (lambda (_conn) (cl-incf listings) entries)))
        (should (equal (clutch--browseable-object-entries 'fake-conn) entries))
@@ -1867,7 +1868,8 @@ no longer merges tables into the object cache; the snapshot is listed once."
          (table '(:name "ORDERS" :type "TABLE" :schema "APP" :source-schema "APP"))
          (index '(:name "IX_ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS"))
          (listings 0))
-     (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-live-p) (lambda (_conn) nil))
                ((symbol-function 'clutch-db-browseable-object-entries)
                 (lambda (_conn) (cl-incf listings) (list table))))
        (clutch--store-object-cache-type-entries 'fake-conn "INDEX" (list index))
@@ -1876,11 +1878,29 @@ no longer merges tables into the object cache; the snapshot is listed once."
        (should (equal (clutch--object-type-entries 'fake-conn "TABLE") (list table)))
        (should (= listings 1))))))
 
+(ert-deftest clutch-test-object-browseable-snapshot-is-live-without-name-search ()
+  "Backends that list objects quickly list them on every call.
+Their objects change through ordinary commands (Redis keys, MongoDB
+collections, tables created by DDL) that never invalidate a snapshot."
+  (clutch-test-object--with-warmup-state
+   (let ((listings 0))
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) nil))
+               ((symbol-function 'clutch-db-browseable-object-entries)
+                (lambda (_conn)
+                  (cl-incf listings)
+                  (list (list :name (format "k%d" listings) :type "KEY")))))
+       (clutch--browseable-object-entries 'fake-conn)
+       (should (equal (mapcar (lambda (entry) (plist-get entry :name))
+                              (clutch--browseable-object-entries 'fake-conn))
+                      '("k2")))
+       (should (= listings 2))))))
+
 (ert-deftest clutch-test-object-browseable-snapshot-caches-an-empty-listing ()
   "An empty schema is not listed again on every snapshot."
   (clutch-test-object--with-warmup-state
    (let ((listings 0))
-     (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
+     (cl-letf (((symbol-function 'clutch-db-object-name-search-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-db-browseable-object-entries)
                 (lambda (_conn) (cl-incf listings) nil)))
        (should-not (clutch--browseable-object-entries 'fake-conn))
        (should-not (clutch--browseable-object-entries 'fake-conn))
