@@ -644,8 +644,18 @@ list cannot be established."
 
 (defun clutch--row-identity-bare-star-select-p (sql from-pos)
   "Return non-nil when SQL's select list before FROM-POS is a sole *."
-  (string-match-p "\\`SELECT[ \t\n\r]+\\*\\'"
-                  (string-trim (substring sql 0 from-pos))))
+  (let ((case-fold-search t))
+    (string-match-p "\\`SELECT[ \t\n\r]+\\*\\'"
+                    (string-trim (substring sql 0 from-pos)))))
+
+(defun clutch--row-identity-select-list-comment-p (sql)
+  "Return non-nil when a comment precedes SQL's top-level FROM.
+Hidden identity columns are appended to the select list's text, where a
+trailing line comment would swallow them, and a comment or optimizer hint
+hides a sole * from `clutch--row-identity-bare-star-select-p'.  Quoted text
+that only looks like a comment counts too, which merely skips the rewrite."
+  (when-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
+    (string-match-p "--\\|/\\*" (substring sql 0 from-pos))))
 
 (defun clutch--row-identity-star-qualifier (sql from-pos)
   "Return TABLE.* qualifier for simple SELECT * SQL before FROM-POS, or nil.
@@ -665,8 +675,7 @@ not augment a bare * in that case."
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
 CONN supplies identifier escaping for the hidden aliases."
-  (let ((sql (string-trim-right
-              (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+  (let ((sql (clutch-db-sql-trim-end sql)))
     (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
       (let* ((star-qualifier
               (clutch--row-identity-star-qualifier sql from-pos))
@@ -711,14 +720,34 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
      (candidate
       (setq candidates (list candidate)))
      (table
-      (condition-case err
-          (setq candidates
-                (if (or source-schema source-catalog)
-                    (clutch-db-row-identity-candidates
-                     conn table source-schema source-catalog)
-                  (clutch-db-row-identity-candidates conn table)))
-        (clutch-db-error
-         (setq identity-error err)))))
+      (let* ((start (float-time))
+             (cached (clutch--cached-row-identity
+                      conn table source-schema source-catalog)))
+        (if cached
+            (setq candidates (car cached))
+          (condition-case err
+              (setq candidates
+                    (if (or source-schema source-catalog)
+                        (clutch-db-row-identity-candidates
+                         conn table source-schema source-catalog)
+                      (clutch-db-row-identity-candidates conn table)))
+            (clutch-db-error
+             (setq identity-error err)))
+          (unless identity-error
+            (clutch--cache-row-identity
+             conn table source-schema source-catalog candidates)))
+        (clutch--metadata-debug-table-event
+         conn "row-identity"
+         (cond (identity-error "error")
+               (cached "cache-hit")
+               (t "success"))
+         (clutch--metadata-debug-backend conn) table
+         (if identity-error
+             (format "Row identity failed: %s"
+                     (error-message-string identity-error))
+           (format "Resolved %s"
+                   (or (plist-get (car candidates) :name) "no candidate")))
+         (- (float-time) start)))))
     (let* ((candidate (car candidates))
            (expressions (and candidate
                              (clutch--row-identity-select-expressions
@@ -728,7 +757,9 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
                           (length expressions))))
            (augment-p (and candidate expressions
                            (clutch--row-identity-augmentable-sql-p
-                            analysis-sql table)))
+                            analysis-sql table)
+                           (not (clutch--row-identity-select-list-comment-p
+                                 analysis-sql))))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
@@ -1041,6 +1072,7 @@ connection and signal `clutch-query-interrupted'."
                connection "success" sql source-buffer
                (clutch--query-debug-summary result) elapsed)
               (unless result-query-p
+                (clutch--forget-row-identities connection)
                 (clutch--note-schema-affecting-query sql connection))
               (list :result result
                     :connection connection
