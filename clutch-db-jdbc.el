@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.23"
+(defcustom clutch-jdbc-agent-version "0.2.24"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "20064d708f526fd248a757b14e5201bcec415c1517aa47f86b95612760f1c53f"
+  "d179cada65623082dad688ff573cc5a35bb736e6158eeb308dd6cf9da018d0e6"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -89,7 +89,9 @@ Examples:
   "Validate a JDBC primary session before executing after this idle period.
 The agent validates immediately before statement creation.  When that check
 proves the session dead, Clutch may reconnect and execute once on a clean
-transaction.  Set this to nil or 0 to disable idle validation."
+transaction.  The agent checks an idle metadata or bulk session the same way
+before a metadata request and replaces it when the check fails.  Set this to
+nil or 0 to disable idle validation."
   :type '(choice (const :tag "Disable" nil) natnum)
   :group 'clutch-jdbc)
 
