@@ -77,6 +77,11 @@ The connection workflow supplies a plist containing only display inputs; it
 must not contain a connection object, params, callbacks, or rendered text.")
 (defvar-local clutch--execution-spinner-frame nil
   "Current execution spinner frame supplied by the connection workflow.")
+(defvar-local clutch--header-line-crop-cache nil
+  "Header crop for the current offset and the inputs it was computed from.
+The value is (HSCROLL FONT-WIDTH HEADER PIXEL-WIDTHS . RESULT).  Redisplay
+evaluates the header on every frame; the crop is recomputed only when one
+of the four inputs changes.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--header-sort-function nil
@@ -2074,20 +2079,39 @@ padding so following content keeps its pixel position."
                  (throw 'done (concat carry after)))))))))
       (substring string pos))))
 
+(defun clutch--crop-header-line (str hs font-width)
+  "Return header STR cropped by HS columns of FONT-WIDTH pixels each."
+  (let ((width (string-width str)))
+    (cond
+     ((>= hs width) "")
+     ((and clutch--column-pixel-widths (display-graphic-p))
+      (clutch--pixel-crop-left str (* hs font-width)))
+     (t (truncate-string-to-width str width hs)))))
+
 (defun clutch--header-line-with-hscroll ()
   "Return the header string shifted to match `window-hscroll'.
-The header-line should track body hscroll exactly."
+The header-line should track body hscroll exactly.  At offset zero the
+header is returned as is; otherwise the crop is kept per offset, font width,
+header and column pixel widths so every redisplay after the first reuses it."
   (when clutch--header-line-string
-    (let* ((hs (window-hscroll))
-           (str clutch--header-line-string)
-           (width (string-width str)))
-      (if (>= hs width)
-          ""
-        (if (and (> hs 0)
-                 clutch--column-pixel-widths
-                 (display-graphic-p))
-            (clutch--pixel-crop-left str (* hs (default-font-width)))
-          (truncate-string-to-width str width hs))))))
+    (let ((hs (window-hscroll))
+          (str clutch--header-line-string))
+      (if (zerop hs)
+          str
+        (let ((font-width (default-font-width))
+              (cache clutch--header-line-crop-cache))
+          (if (and cache
+                   (= (nth 0 cache) hs)
+                   (= (nth 1 cache) font-width)
+                   (eq (nth 2 cache) str)
+                   (eq (nth 3 cache) clutch--column-pixel-widths))
+              (nthcdr 4 cache)
+            (let ((cropped (clutch--crop-header-line str hs font-width)))
+              (setq clutch--header-line-crop-cache
+                    (cons hs (cons font-width
+                                   (cons str (cons clutch--column-pixel-widths
+                                                   cropped)))))
+              cropped)))))))
 
 (defun clutch--schedule-pixel-metric-refresh ()
   "Schedule a redraw if graphical font metrics changed since render."
