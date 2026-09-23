@@ -921,6 +921,39 @@ syntax table, which let keywords match inside identifiers."
         (should-not (clutch-db-sql-has-top-level-row-limit-p
                      "SELECT credit_limit FROM accounts"))))))
 
+(ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
+  "A lowercase sole * is qualified whatever `case-fold-search' says.
+Oracle rejects \"select *, ROWID\", which the star check exists to avoid."
+  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (let ((case-fold-search nil))
+      (should (equal (clutch--row-identity-inject-select-list
+                      'fake-conn "select * from t" '("ROWID") '("clutch__rid_0"))
+                     "SELECT t.*, ROWID AS \"clutch__rid_0\" from t")))))
+
+(ert-deftest clutch-test-row-identity-prep-skips-select-lists-with-comments ()
+  "Hidden identity columns are not appended to a select list with a comment.
+A trailing line comment swallowed them together with FROM, and a hint hid
+a sole * that Oracle rejects next to other columns (ORA-00923)."
+  (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (&rest _)
+               (list (list :kind 'primary-key :name "PRIMARY" :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    ;; A fresh connection object per statement: identity must be resolved,
+    ;; not reused from another statement or test.
+    (dolist (sql '("SELECT /*+ FIRST_ROWS(10) */ * FROM emp"
+                   "SELECT * -- every column\nFROM emp"
+                   "SELECT id, name /* shown */ FROM emp"))
+      (let ((prep (clutch--prepare-row-identity-query (list 'conn) sql)))
+        (should (plist-get prep :candidate))
+        (should-not (plist-get prep :augmented))
+        (should (equal (plist-get prep :sql) sql))))
+    (should (plist-get (clutch--prepare-row-identity-query
+                        (list 'conn)
+                        "SELECT id, name FROM emp WHERE id > 0 -- shown")
+                       :augmented))))
+
 (ert-deftest clutch-test-row-identity-prep-records-metadata-errors ()
   "Row identity preparation should keep metadata errors visible."
   (cl-letf (((symbol-function 'clutch-db-row-identity-candidates)
