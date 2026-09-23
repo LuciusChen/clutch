@@ -666,7 +666,7 @@ not augment a bare * in that case."
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
 CONN supplies identifier escaping for the hidden aliases."
   (let ((sql (string-trim-right
-              (replace-regexp-in-string ";\\s-*\\'" "" sql))))
+              (replace-regexp-in-string ";[ \t\n\r\f]*\\'" "" sql))))
     (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
       (let* ((star-qualifier
               (clutch--row-identity-star-qualifier sql from-pos))

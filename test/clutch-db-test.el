@@ -4379,6 +4379,18 @@ through it puts every index in the schema inside the user's query."
         (dolist (pattern not-matches)
           (should-not (string-match-p pattern sql))))))))
 
+(ert-deftest clutch-db-test-jdbc-paged-sql-sees-a-multi-line-order-by-in-sql-mode ()
+  "Paging from a SQL buffer must find an ORDER BY split across lines.
+`sql-mode' gives newlines comment-end syntax, so the clause and the
+trailing semicolon went unseen and SQL Server got a second ORDER BY."
+  (with-temp-buffer
+    (sql-mode)
+    (should (equal (clutch-db-build-paged-sql
+                    (make-clutch-jdbc-conn :params '(:driver sqlserver))
+                    "SELECT * FROM t\nORDER\nBY id;\n" 0 10)
+                   (concat "SELECT * FROM t\nORDER\nBY id"
+                           " OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY")))))
+
 (ert-deftest clutch-db-test-jdbc-source-table-scope-follows-dialect-rules ()
   "JDBC source tables should preserve scope and dialect identifier rules."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle))))
