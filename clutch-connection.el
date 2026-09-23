@@ -637,7 +637,7 @@ ACTION is a short question such as \"Disconnect? \"."
   conn)
 
 (defun clutch--discard-unbound-connection (conn)
-  "Disconnect CONN, which no buffer holds yet, and release its transport.
+  "Disconnect CONN, not yet bound to any buffer, and release its transport.
 The transport is released even when disconnecting signals or is quit."
   (unwind-protect
       (when (clutch--connection-alive-p conn)
