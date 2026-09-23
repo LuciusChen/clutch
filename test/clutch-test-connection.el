@@ -3055,7 +3055,8 @@ replacement connection would run the statement against an empty transaction."
        :type 'clutch-db-error)
       (should (= builds 1))
       (should-not rebound)
-      (should (equal released '(new-conn old-conn))))))
+      (should (memq 'new-conn released))
+      (should (memq 'old-conn released)))))
 
 (ert-deftest clutch-test-replace-connection-releases-new-connection-when-old-teardown-signals ()
   "A failing old-connection teardown must not orphan the new connection."
@@ -3080,6 +3081,37 @@ replacement connection would run the statement against an empty transaction."
       (should-not rebound)
       (should (eq disconnected 'new-conn))
       (should (memq 'new-conn released)))))
+
+(ert-deftest clutch-test-replace-connection-releases-new-transport-on-failed-handover ()
+  "The new connection's transport is released however the handover fails.
+That includes a new connection that died meanwhile and a quit while
+disconnecting it."
+  (dolist (case '((:label new-died :new-disconnect nil)
+                  (:label cleanup-quit :new-disconnect quit)))
+    (ert-info ((format "case: %s" (plist-get case :label)))
+      (let ((alive '(old-conn new-conn))
+            released)
+        (cl-letf (((symbol-function 'clutch--build-conn)
+                   (lambda (_params) 'new-conn))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (memq conn alive)))
+                  ((symbol-function 'clutch--clear-tx-state) #'ignore)
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (conn)
+                     (if (eq conn 'old-conn)
+                         (progn
+                           (when (eq (plist-get case :label) 'new-died)
+                             (setq alive nil))
+                           (signal 'clutch-db-error '("old teardown failed")))
+                       (when (plist-get case :new-disconnect)
+                         (signal 'quit nil)))))
+                  ((symbol-function 'clutch--release-connection-transport)
+                   (lambda (conn) (push conn released)))
+                  ((symbol-function 'clutch--rebind-connection-buffers) #'ignore))
+          (condition-case nil
+              (clutch--replace-connection 'old-conn '(:backend pg) 'pg)
+            ((error quit) nil))
+          (should (memq 'new-conn released)))))))
 
 (ert-deftest clutch-test-derived-buffers-reconnect-using-inherited-context ()
   "Derived buffers reconnect their logical session without losing local state."
@@ -4067,6 +4099,35 @@ them in place."
                 (should (eq (buffer-local-value 'clutch-connection other)
                             'old-conn))))))
       (kill-buffer other))))
+
+(ert-deftest clutch-test-connect-keeps-bound-connection-when-schema-priming-quits ()
+  "A quit while priming the schema must not disconnect the bound connection."
+  (let (disconnected released)
+    (with-temp-buffer
+      (setq-local clutch-connection nil)
+      (cl-letf (((symbol-function 'clutch--connect-params-for-current-buffer)
+                 (lambda () '(:backend sqlite :database "x.db")))
+                ((symbol-function 'clutch-prepare-connection-params)
+                 (lambda (params _directory) params))
+                ((symbol-function 'clutch--materialize-connection-params) #'identity)
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'sqlite))
+                ((symbol-function 'clutch--build-conn) (lambda (_params) 'new-conn))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (eq conn 'new-conn)))
+                ((symbol-function 'clutch--clear-reconnect-metadata-caches) #'ignore)
+                ((symbol-function 'clutch--bind-connection-context)
+                 (lambda (conn &rest _) (setq-local clutch-connection conn)))
+                ((symbol-function 'clutch--prime-schema-cache)
+                 (lambda (_conn) (signal 'quit nil)))
+                ((symbol-function 'clutch-db-disconnect)
+                 (lambda (conn) (setq disconnected conn)))
+                ((symbol-function 'clutch--release-connection-transport)
+                 (lambda (conn) (push conn released))))
+        (condition-case nil (clutch-connect) (quit nil))
+        (should (eq clutch-connection 'new-conn))
+        (should-not disconnected)
+        (should-not (memq 'new-conn released))))))
 
 ;;;; Schema and database switching
 
