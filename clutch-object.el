@@ -50,7 +50,8 @@ Each value is a plist with at least :entries and :fetched-at.")
 
 (defvar clutch--browseable-object-cache (make-hash-table :test 'eq)
   "Browseable object snapshot keyed by connection object identity.
-Dropped together with `clutch--object-cache' when the schema cache changes.")
+Only kept for backends that search objects by name; dropped together with
+`clutch--object-cache' when the schema cache changes.")
 (defvar clutch--object-warmup-timers (make-hash-table :test 'eq)
   "Idle timers warming object discovery caches keyed by connection identity.")
 (defvar clutch--object-warmup-generations
@@ -912,17 +913,24 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
 (defun clutch--browseable-object-entries (conn &optional refresh)
   "Return the base browseable object entry list for CONN.
 Includes both schema/browser entries and search-discovered entries so object
-selection can surface objects from different Oracle sources and types.  The
-backend lists them once per schema cache generation; REFRESH lists them again."
-  (let ((cached (if refresh
-                    'missing
-                  (gethash conn clutch--browseable-object-cache 'missing))))
-    (if (eq cached 'missing)
-        (let ((entries (clutch--merge-object-entries-by-name
-                        (clutch-db-browseable-object-entries conn))))
-          (clutch--cache-table-entry-comments conn entries)
+selection can surface objects from different Oracle sources and types.  A
+backend that searches objects by name, because its listing is too slow for
+every command, is listed once per schema cache generation, and REFRESH lists
+it again.  Other backends are listed on every call: their objects also change
+through commands that never refresh the schema cache, such as Redis writes or
+an insert that creates a MongoDB collection."
+  (let* ((cacheable (clutch-db-object-name-search-p conn))
+         (cached (if (and cacheable (not refresh))
+                     (gethash conn clutch--browseable-object-cache 'missing)
+                   'missing)))
+    (if (not (eq cached 'missing))
+        cached
+      (let ((entries (clutch--merge-object-entries-by-name
+                      (clutch-db-browseable-object-entries conn))))
+        (clutch--cache-table-entry-comments conn entries)
+        (when cacheable
           (puthash conn entries clutch--browseable-object-cache))
-      cached)))
+        entries))))
 
 (defun clutch--find-console-for-conn (conn)
   "Return the query console buffer that owns CONN, or nil."
