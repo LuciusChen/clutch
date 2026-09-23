@@ -3511,6 +3511,36 @@ orai18n warning."
     (dolist (companion '(slf4j-api slf4j-nop))
       (should-not (memq companion installable)))))
 
+(ert-deftest clutch-db-test-jdbc-install-driver-restarts-agent-only-on-change ()
+  "A live agent should restart only when install actually changed drivers."
+  (ert-info ("case: every jar is already installed")
+    (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+      (make-directory (expand-file-name "drivers" tmpdir) t)
+      (with-temp-file (expand-file-name "drivers/ojdbc8.jar" tmpdir)
+        (insert "jar"))
+      (with-temp-file (expand-file-name "drivers/orai18n.jar" tmpdir)
+        (insert "jar"))
+      (let (stopped)
+        (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t)))
+                  ((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (&rest _)
+                     (error "Should not download an already-installed driver"))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should-not stopped)))))
+  (ert-info ("case: a driver jar is missing")
+    (clutch-db-test--with-jdbc-temp-dir tmpdir "clutch-jdbc-driver-"
+      (let (stopped)
+        (cl-letf (((symbol-function 'clutch-jdbc--agent-live-p) (lambda () t))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t)))
+                  ((symbol-function 'clutch-jdbc--download-maven-driver)
+                   (lambda (_coords dest)
+                     (with-temp-file dest (insert "jar")))))
+          (clutch-jdbc-install-driver 'oracle)
+          (should stopped))))))
+
 ;;;; Unit tests — props normalization
 
 (ert-deftest clutch-db-test-jdbc-connect-normalizes-plist-props ()
