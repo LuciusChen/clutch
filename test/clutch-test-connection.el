@@ -4045,19 +4045,28 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
           (clutch-connect)
           (should (equal built '(:backend mysql :database "manual_db"))))))))
 
-(ert-deftest clutch-test-connect-over-dead-connection-cleans-up-old-transport ()
-  "Connecting over a dead old connection should release its old transport."
-  (with-temp-buffer
-    (setq-local clutch-connection 'old-conn)
-    (let (built cleaned-up)
-      (cl-letf (((symbol-function 'clutch--read-connection-params)
-                 (lambda () '(:backend mysql :database "manual_db")))
-                ((symbol-function 'clutch--cleanup-dead-connection)
-                 (lambda (conn) (setq cleaned-up conn))))
-        (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-          (clutch-connect)
-          (should (eq cleaned-up 'old-conn))
-          (should (eq clutch-connection 'new-conn)))))))
+(ert-deftest clutch-test-connect-over-dead-connection-releases-only-its-transport ()
+  "Connecting over a dead connection should release its transport only.
+Other buffers keep the dead connection so their next command can reconnect
+them in place."
+  (let ((other (generate-new-buffer " *clutch-other*")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local clutch-connection 'old-conn)
+          (with-current-buffer other
+            (setq-local clutch-connection 'old-conn))
+          (let (built released)
+            (cl-letf (((symbol-function 'clutch--read-connection-params)
+                       (lambda () '(:backend mysql :database "manual_db")))
+                      ((symbol-function 'clutch--release-connection-transport)
+                       (lambda (conn) (push conn released))))
+              (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+                (clutch-connect)
+                (should (memq 'old-conn released))
+                (should (eq clutch-connection 'new-conn))
+                (should (eq (buffer-local-value 'clutch-connection other)
+                            'old-conn))))))
+      (kill-buffer other))))
 
 ;;;; Schema and database switching
 
