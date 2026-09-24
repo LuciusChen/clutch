@@ -1067,8 +1067,8 @@ would abort the user's statement before it runs."
 (ert-deftest clutch-test-sql-clause-matching-ignores-buffer-syntax ()
   "Clause keywords must match the same way from every buffer.
 `sql-mode' gives newlines comment-end syntax, which hid a clause split
-across lines, and `_' is no word constituent there or in the standard
-syntax table, which let keywords match inside identifiers."
+across lines, and `_', `#' and `@' are no word constituents there or in the
+standard syntax table, which let keywords match inside identifiers."
   (dolist (mode '(fundamental-mode sql-mode))
     (with-temp-buffer
       (funcall mode)
@@ -1085,7 +1085,16 @@ syntax table, which let keywords match inside identifiers."
         (should (clutch--row-identity-augmentable-sql-p
                  "SELECT * FROM t WHERE group_id = 3" "t"))
         (should-not (clutch-db-sql-has-top-level-row-limit-p
-                     "SELECT credit_limit FROM accounts"))))))
+                     "SELECT credit_limit FROM accounts"))
+        (should (equal (clutch--high-risk-query-reason
+                        "UPDATE t SET valid#where = 1")
+                       "no WHERE"))
+        (should (equal (clutch--high-risk-query-reason
+                        "UPDATE t SET value = @where")
+                       "no WHERE"))
+        ;; A MySQL # comment line must not hide the real clause after it.
+        (should-not (clutch--high-risk-query-reason
+                     "UPDATE t SET a = 1\n# note\nWHERE id = 3"))))))
 
 (ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
   "A lowercase sole * is qualified whatever `case-fold-search' says.
