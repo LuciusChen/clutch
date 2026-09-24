@@ -7913,6 +7913,29 @@ paging fetched the whole table and every page started at the first row."
                          '(28 29 30))))
       (clutch-db-disconnect conn))))
 
+(ert-deftest clutch-db-test-sqlite-rewrites-drop-a-semicolon-before-a-comment ()
+  "A statement's final semicolon goes even when a comment follows it.
+Otherwise the clause a rewrite appends starts a second statement, which
+SQLite ignores, so paging fetched the whole table."
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+        (sql "SELECT id FROM t; -- note"))
+    (unwind-protect
+        (cl-flet ((ids (query)
+                    (mapcar #'car (clutch-db-result-rows
+                                   (clutch-db-query conn query)))))
+          (clutch-db-query conn "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+          (clutch-db-query
+           conn (concat "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL"
+                        " SELECT i + 1 FROM n WHERE i < 30)"
+                        " INSERT INTO t SELECT i FROM n"))
+          (should (equal (ids (clutch-db-build-paged-sql conn sql 1 10))
+                         (number-sequence 11 20)))
+          (should (equal (ids (clutch-db-build-count-sql conn sql)) '(30)))
+          (should (equal (ids (clutch-db-apply-where conn sql "id > 27"))
+                         '(28 29 30))))
+      (clutch-db-disconnect conn))))
+
 (ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
   "SQLite should commit or roll back a staged multi-row batch as a unit."
   (skip-unless (sqlite-available-p))

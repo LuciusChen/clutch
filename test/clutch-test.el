@@ -1096,6 +1096,34 @@ standard syntax table, which let keywords match inside identifiers."
         (should-not (clutch--high-risk-query-reason
                      "UPDATE t SET a = 1\n# note\nWHERE id = 3"))))))
 
+(ert-deftest clutch-test-split-statement-specs-drops-comment-only-fragments ()
+  "A comment after the last semicolon is no statement of its own.
+Running a region or buffer that ended in one failed on the comment with
+\"Statement 2 failed\"."
+  (with-temp-buffer
+    (should (equal (mapcar #'car (clutch--split-statement-specs
+                                  "SELECT 1; -- note"))
+                   '("SELECT 1")))
+    (should (equal (mapcar #'car (clutch--split-statement-specs
+                                  "SELECT 1;\n/* a */\nSELECT 2; -- b\n"))
+                   '("SELECT 1" "/* a */\nSELECT 2")))
+    (should-not (clutch--split-statement-specs "-- only a comment\n"))))
+
+(ert-deftest clutch-test-execute-range-runs-one-statement-without-its-comment ()
+  "A range with one statement and a trailing comment runs that statement.
+The whole range, comment included, used to reach paging, whose LIMIT then
+started a second statement after the semicolon."
+  (with-temp-buffer
+    (insert "SELECT 1; -- note")
+    (let (ran)
+      (cl-letf (((symbol-function 'clutch--execute-and-mark)
+                 (lambda (sql beg end) (setq ran (list sql beg end))))
+                ((symbol-function 'clutch--execute-statements)
+                 (lambda (&rest _)
+                   (ert-fail "one statement ran as a batch"))))
+        (clutch--execute-sql-range (point-min) (point-max) "region")
+        (should (equal ran '("SELECT 1" 1 9)))))))
+
 (ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
   "A lowercase sole * is qualified whatever `case-fold-search' says.
 Oracle rejects \"select *, ROWID\", which the star check exists to avoid."
