@@ -207,6 +207,107 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                             (buffer-substring-no-properties beg end))
                            expected))))))))
 
+(ert-deftest clutch-test-statement-scan-follows-edits-and-context ()
+  "Context bounds must track edits, restriction and dialect between requests.
+The scan is cached and partially reused after an edit, so every way the
+answer can change has to invalidate or extend it correctly."
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2;\nSELECT 3")
+    (cl-flet ((statement ()
+                (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+                  (string-trim (buffer-substring-no-properties beg end)))))
+      (goto-char (point-max))
+      (should (equal (statement) "SELECT 3"))
+      ;; Appending extends the current statement.
+      (insert " WHERE x = 1")
+      (should (equal (statement) "SELECT 3 WHERE x = 1"))
+      ;; A quote inserted before an earlier break swallows every later
+      ;; semicolon, so breaks after the edit must be recomputed.
+      (goto-char (point-min))
+      (search-forward "SELECT ")
+      (search-forward "SELECT ")
+      (let ((quote-pos (point)))
+        (insert "'")
+        (goto-char (point-max))
+        (should (equal (statement) "SELECT '2;\nSELECT 3 WHERE x = 1"))
+        (goto-char quote-pos)
+        (delete-char 1))
+      (goto-char (point-max))
+      (should (equal (statement) "SELECT 3 WHERE x = 1"))
+      ;; An edit before the first break falls back to a full scan.
+      (goto-char (point-min))
+      (insert "SELECT 0;\n")
+      (goto-char (point-min))
+      (should (equal (statement) "SELECT 0"))
+      ;; Narrowing changes the text the scan describes.
+      (search-forward "SELECT 2")
+      (narrow-to-region (match-beginning 0) (point-max))
+      (goto-char (point-max))
+      (should (equal (statement) "SELECT 3 WHERE x = 1"))
+      (goto-char (point-min))
+      (should (equal (statement) "SELECT 2"))
+      (widen)
+      (goto-char (point-min))
+      (should (equal (statement) "SELECT 0"))))
+  ;; The same text splits differently under another dialect, so a cached
+  ;; scan must not outlive a dialect change.
+  (with-temp-buffer
+    (insert "SELECT $$a;b$$; SELECT 2")
+    (goto-char (point-min))
+    (search-forward "b")
+    (let ((dialect nil))
+      (cl-letf (((symbol-function 'clutch-db-connection-sql-dialect)
+                 (lambda (_conn) dialect)))
+        (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+          (should (equal (buffer-substring-no-properties beg end) "b$$")))
+        (setq dialect (clutch-db-sql-dialect 'postgres))
+        (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+          (should (equal (buffer-substring-no-properties beg end)
+                         "SELECT $$a;b$$")))))))
+
+(ert-deftest clutch-test-statement-scan-reuses-breaks-before-an-edit ()
+  "Typing at the end of a script must not rescan its earlier statements."
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2;\nSELECT 3")
+    (goto-char (point-max))
+    (clutch--statement-bounds)
+    (insert " WHERE")
+    (let (starts)
+      (cl-letf* ((breaks (symbol-function 'clutch-db-sql-statement-breaks))
+                 ((symbol-function 'clutch-db-sql-statement-breaks)
+                  (lambda (sql &optional dialect start)
+                    (push start starts)
+                    (funcall breaks sql dialect start))))
+        (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+          (should (equal (string-trim (buffer-substring-no-properties beg end))
+                         "SELECT 3 WHERE")))
+        ;; The rescan started after the last unchanged semicolon.
+        (should (equal starts (list (length "SELECT 1;\nSELECT 2;"))))))))
+
+(ert-deftest clutch-test-completion-stops-after-a-terminated-statement ()
+  "Column slots end at the semicolon; past it there is nothing to complete."
+  (with-temp-buffer
+    (clutch-mode)
+    (insert "SELECT id FROM users WHERE ;")
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection 'fake))
+      (puthash "users" '("id" "name") schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p) (lambda (_conn) nil))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t)))
+        ;; Just past the terminating semicolon.
+        (goto-char (point-max))
+        (should-not (clutch--completion-empty-column-bounds))
+        (should-not (clutch-completion-at-point))
+        ;; On the semicolon, the WHERE slot is still open.
+        (backward-char 1)
+        (should (equal (clutch--completion-empty-column-bounds)
+                       (cons (point) (point))))
+        (should (member "name" (clutch-test--completion-candidates
+                                (clutch-completion-at-point))))))))
+
 (ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
   :tags '(:smoke)
   "DWIM execution should prefer semicolon-delimited statement bounds."
@@ -838,6 +939,95 @@ Keywords inside a function body are literal text, not clauses."
                    "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))))
 
 ;;;; SQL parsing — candidate match collection
+
+(ert-deftest clutch-test-skip-literal-or-comment-contract ()
+  "Skipping must end exactly after each literal or comment, or at the end."
+  (let ((mysql (clutch-db-sql-dialect 'mysql)))
+    (dolist (case `(("doubled quote" "'a''b' x" nil nil 6)
+                    ("unterminated literal" "'abc" nil nil 4)
+                    ("line comment" "-- x\nSELECT" nil nil 5)
+                    ("line comment at end" "-- x" nil nil 4)
+                    ("block comment" "/* a */b" nil nil 7)
+                    ("unterminated block" "/* a" nil nil 4)
+                    ("slash star slash" "/*/" nil nil 3)
+                    ("backslash escape" "'a\\'b' c" nil ,mysql 6)
+                    ("backslash at end" "'a\\" nil ,mysql 3)
+                    ("backslash is plain" "'a\\'b' c" nil nil 4)
+                    ("doubled double quote" "\"a\"\"b\" c" t nil 6)
+                    ("doubled bracket" "[a]]b] c" t nil 6)
+                    ("bracket has no escape" "[a\\] c" t ,mysql 4)
+                    ("identifier only with flag" "\"a\" c" nil nil nil)
+                    ("single dash" "-x" nil nil nil)
+                    ("single slash" "/x" nil nil nil)
+                    ("code" "x" nil nil nil)))
+      (pcase-let ((`(,label ,sql ,identifiers ,dialect ,expected) case))
+        (ert-info ((format "case: %s" label))
+          (should (equal (clutch-db-sql-skip-literal-or-comment
+                          sql 0 identifiers dialect)
+                         expected)))))
+    ;; Past the end there is nothing to skip.
+    (should-not (clutch-db-sql-skip-literal-or-comment "'a'" 3))))
+
+(ert-deftest clutch-test-scan-code-restrictions-agree-with-full-scan ()
+  "Restricted scans must visit the same top-level code as a full scan.
+The restricted modes jump between structural characters, so every
+literal, comment and dialect rule has to keep them in step."
+  (let ((corpus
+         `(("SELECT 'a;b', \"c;d\", `e;f`, [g;h] FROM t; SELECT (1, (2;3)) ; -- x;\nSELECT /* ; */ 1; select 'it''s;' from u" nil)
+           ("SELECT $$a;b$$, $x$c;d$x$; SELECT foo$bar; SELECT $1; SELECT 1" ,(clutch-db-sql-dialect 'postgres))
+           ("SELECT $$a;b$$, $x$c;d$x$; SELECT foo$bar; SELECT $1; SELECT 1" nil)
+           ("SELECT 'a\\';b' ; SELECT 2; SELECT 'a\\\\'; SELECT 3;" ,(clutch-db-sql-dialect 'mysql))
+           ("SELECT 'a\\';b' ; SELECT 2; SELECT 'a\\\\'; SELECT 3;" nil)
+           ("SELECT 'abc; SELECT 2" nil)
+           ("SELECT /* abc; SELECT 2" nil)
+           ("SELECT 1 -- abc; SELECT 2" nil)
+           ("SELECT \"a\"\";b\" FROM t; SELECT [a]];b]; SELECT `x``;y`;" nil)
+           ("SELECT 1-2, 4/2; SELECT 3 - - 4; SELECT 5 /x/ 6;" nil)
+           ("select (a, (b; c), 'd;e') from f -- g;\nwhere h = 1; select 2" nil)))
+        (keywords "\\bselect\\b\\|\\bfrom\\b\\|\\bwhere\\b"))
+    (cl-flet ((collect (sql start end dialect interest)
+                (let (seen)
+                  (clutch-db-sql-scan-code
+                   sql start end
+                   (lambda (pos ch depth) (push (list pos ch depth) seen) nil)
+                   dialect interest)
+                  (nreverse seen))))
+      (dolist (entry corpus)
+        (pcase-let* ((`(,sql ,dialect) entry)
+                     (len (length sql)))
+          (dolist (range (list (cons 0 nil) (cons 7 nil) (cons 0 (/ len 2))))
+            (pcase-let* ((`(,start . ,end) range)
+                         (full (collect sql start end dialect nil))
+                         (matches (clutch-db-sql-code-match-positions
+                                   sql start end keywords)))
+              (ert-info ((format "sql: %s range: %S" sql range))
+                (should (equal (collect sql start end dialect ";(),")
+                               (seq-filter (lambda (item)
+                                             (memq (nth 1 item) '(?\; ?\( ?\) ?,)))
+                                           full)))
+                (should (equal (collect sql start end dialect matches)
+                               (seq-filter (lambda (item)
+                                             (gethash (car item) matches))
+                                           full)))))))))))
+
+(ert-deftest clutch-test-blank-line-statement-bounds-contract ()
+  "Blank-line bounds should treat whitespace-only lines as separators."
+  (dolist (case '(("A\n\nB" 0 (0 . 2))
+                  ("A\n\nB" 3 (3 . 4))
+                  ("A\n \t\r\nB" 6 (6 . 7))
+                  ("A\n \t\r\nB" 3 (0 . 7))
+                  ("\nA" 1 (1 . 2))
+                  ("A\n" 2 (0 . 2))
+                  ("A\n\n\nB" 4 (4 . 5))
+                  ("A\r\n\r\nB" 5 (5 . 6))
+                  ("A\r\n\r\nB" 0 (0 . 3))
+                  ("" 0 (0 . 0))
+                  ("\n\n" 2 (2 . 2))
+                  ("SELECT 1\n\n  \nSELECT 2\n\nSELECT 3" 15 (13 . 22))))
+    (pcase-let ((`(,text ,offset ,expected) case))
+      (ert-info ((format "text: %S offset: %d" text offset))
+        (should (equal (clutch-db-sql-blank-line-statement-bounds text offset)
+                       expected))))))
 
 (ert-deftest clutch-test-db-sql-code-match-positions ()
   "Candidate collection should report every match start with its end.
