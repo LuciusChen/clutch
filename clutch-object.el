@@ -1174,8 +1174,8 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
 (defun clutch--object-related-entries (conn entry type &optional refresh)
   "Return related TYPE entries for table-like ENTRY on CONN.
 Once the warmup has loaded TYPE its cached entries are used; before that
-only ENTRY's table is asked for, so the schema is never listed and the
-section is not silently empty.  When REFRESH is non-nil, list TYPE again."
+only ENTRY's table is asked for, on backends that can do so, and the
+schema is never listed.  When REFRESH is non-nil, list TYPE again."
   (when-let* ((name (plist-get entry :name))
               (category (clutch--object-type-category type))
               (objects (cond

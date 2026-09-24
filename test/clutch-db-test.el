@@ -1655,6 +1655,14 @@ for it; listing the whole category instead would scan the schema."
       (should (equal (nreverse calls)
                      '(("get-indexes" "DEMO") ("get-triggers" "DEMO")))))))
 
+(ert-deftest clutch-db-test-table-objects-default-lists-nothing ()
+  "A backend without a table-scoped lookup must not list a whole category.
+Filtering the category listing ran a schema-wide query per describe."
+  (cl-letf (((symbol-function 'clutch-db-list-objects)
+             (lambda (&rest _) (ert-fail "the default listed a whole category"))))
+    (should-not (clutch-db-table-objects
+                 (make-clutch-db-sqlite-conn :database ":memory:") "t" 'indexes))))
+
 (ert-deftest clutch-db-test-jdbc-name-search-only-for-oracle ()
   "Only Oracle matches an object name by prefix search; its listing is slow."
   (should (clutch-db-object-name-search-p
