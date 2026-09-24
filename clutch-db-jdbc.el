@@ -2351,11 +2351,11 @@ the metadata request."
     (plist-get column :column))
    (t (format "%s" column))))
 
-(defun clutch-jdbc--table-indexes (conn table)
-  "Return index entry plists for TABLE on CONN.
-The agent filters the indexes operation by table, so this never enumerates
-the schema the way `clutch-db-list-objects' does."
-  (when-let* ((spec (clutch-jdbc--object-category-spec 'indexes)))
+(cl-defmethod clutch-db-table-objects ((conn clutch-jdbc-conn) table category)
+  "Return CATEGORY entries for TABLE on JDBC CONN.
+The agent filters the indexes and triggers operations by table, so this
+never enumerates the schema the way `clutch-db-list-objects' does."
+  (when-let* ((spec (clutch-jdbc--object-category-spec category)))
     (let ((result (clutch-jdbc--rpc
                    conn (plist-get spec :op)
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -2374,7 +2374,7 @@ without a unique index never asks for them."
                    (and (plist-get index :unique)
                         (string= (or (plist-get index :target-table) table)
                                  table)))
-                 (clutch-jdbc--table-indexes conn table)))
+                 (clutch-db-table-objects conn table 'indexes)))
         (not-null (make-hash-table :test 'equal)))
     (dolist (detail (and unique (clutch-db-column-details conn table)))
       (puthash (plist-get detail :name)

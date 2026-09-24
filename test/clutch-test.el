@@ -1067,8 +1067,8 @@ would abort the user's statement before it runs."
 (ert-deftest clutch-test-sql-clause-matching-ignores-buffer-syntax ()
   "Clause keywords must match the same way from every buffer.
 `sql-mode' gives newlines comment-end syntax, which hid a clause split
-across lines, and `_' is no word constituent there or in the standard
-syntax table, which let keywords match inside identifiers."
+across lines, and `_', `#' and `@' are no word constituents there or in the
+standard syntax table, which let keywords match inside identifiers."
   (dolist (mode '(fundamental-mode sql-mode))
     (with-temp-buffer
       (funcall mode)
@@ -1085,7 +1085,56 @@ syntax table, which let keywords match inside identifiers."
         (should (clutch--row-identity-augmentable-sql-p
                  "SELECT * FROM t WHERE group_id = 3" "t"))
         (should-not (clutch-db-sql-has-top-level-row-limit-p
-                     "SELECT credit_limit FROM accounts"))))))
+                     "SELECT credit_limit FROM accounts"))
+        (should (equal (clutch--high-risk-query-reason
+                        "UPDATE t SET valid#where = 1")
+                       "no WHERE"))
+        (should (equal (clutch--high-risk-query-reason
+                        "UPDATE t SET value = @where")
+                       "no WHERE"))))))
+
+(ert-deftest clutch-test-split-statement-specs-drops-comment-only-fragments ()
+  "A comment after the last semicolon is no statement of its own.
+Running a region or buffer that ended in one failed on the comment with
+\"Statement 2 failed\"."
+  (with-temp-buffer
+    (should (equal (mapcar #'car (clutch--split-statement-specs
+                                  "SELECT 1; -- note"))
+                   '("SELECT 1")))
+    (should (equal (mapcar #'car (clutch--split-statement-specs
+                                  "SELECT 1;\n/* a */\nSELECT 2; -- b\n"))
+                   '("SELECT 1" "/* a */\nSELECT 2")))
+    (should-not (clutch--split-statement-specs "-- only a comment\n"))))
+
+(ert-deftest clutch-test-execute-range-runs-one-statement-without-its-comment ()
+  "A range with one statement and a trailing comment runs that statement.
+The whole range, comment included, used to reach paging, whose LIMIT then
+started a second statement after the semicolon."
+  (with-temp-buffer
+    (insert "SELECT 1; -- note")
+    (let (ran)
+      (cl-letf (((symbol-function 'clutch--execute-and-mark)
+                 (lambda (sql beg end) (setq ran (list sql beg end))))
+                ((symbol-function 'clutch--execute-statements)
+                 (lambda (&rest _)
+                   (ert-fail "one statement ran as a batch"))))
+        (clutch--execute-sql-range (point-min) (point-max) "region")
+        (should (equal ran '("SELECT 1" 1 9)))))))
+
+(ert-deftest clutch-test-execute-range-runs-executable-comments ()
+  "A /*! or /*M! comment is a statement, as MySQL and MariaDB run its body.
+A dump script sets its session variables in them, and dropping fragments
+that hold only comments skipped those settings without a word."
+  (with-temp-buffer
+    (insert "-- dump header\n/*!40101 SET @x=1 */;\n/*M!100100 SET @y=2 */;\n"
+            "SELECT 1; /* note */ -- note\n")
+    (let (ran)
+      (cl-letf (((symbol-function 'clutch--execute-statements)
+                 (lambda (stmts) (setq ran (mapcar #'car stmts)))))
+        (clutch--execute-sql-range (point-min) (point-max) "buffer")
+        (should (equal ran '("-- dump header\n/*!40101 SET @x=1 */"
+                             "/*M!100100 SET @y=2 */"
+                             "SELECT 1")))))))
 
 (ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
   "A lowercase sole * is qualified whatever `case-fold-search' says.

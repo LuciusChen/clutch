@@ -1821,23 +1821,31 @@ listing costs seconds, so listing per call made a describe pay it twice."
        (should (= listings 3))))))
 
 (ert-deftest clutch-test-object-related-entries-never-list-the-schema ()
-  "Related indexes and triggers come from the warmed categories.
-A describe must not pay a schema listing for them, cold or warm, and a warmup
-step storing its category must not list either."
+  "Related indexes and triggers never list the schema, cold or warm.
+Once the warmup has loaded a category its cache is used; before that only
+the described table's objects are asked for, which backends with a
+table-scoped lookup (JDBC) answer and the others answer with nil."
   (clutch-test-object--with-warmup-state
    (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
          (index '(:name "IX_ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS"))
          (entry '(:name "ORDERS" :type "TABLE" :schema "APP"))
-         scheduled)
+         asked)
      (cl-letf (((symbol-function 'clutch-db-browseable-object-entries)
                 (lambda (_conn) (ert-fail "related entries listed the schema")))
-               ((symbol-function 'clutch--schedule-object-warmup)
-                (lambda (_conn) (setq scheduled t))))
-       (should-not (clutch--object-related-entries 'fake-conn entry "INDEX"))
-       (should scheduled)
+               ((symbol-function 'clutch-db-list-objects)
+                (lambda (&rest _) (ert-fail "related entries listed a category")))
+               ((symbol-function 'clutch-db-table-objects)
+                (lambda (_conn table category)
+                  (push (list table category) asked)
+                  (and (eq category 'indexes) (list index)))))
+       (should (equal (clutch--object-related-entries 'fake-conn entry "INDEX")
+                      (list index)))
+       (should (equal asked '(("ORDERS" indexes))))
+       (setq asked nil)
        (clutch--store-object-cache-type-entries 'fake-conn "INDEX" (list index))
        (should (equal (clutch--object-related-entries 'fake-conn entry "INDEX")
-                      (list index)))))))
+                      (list index)))
+       (should-not asked)))))
 
 (ert-deftest clutch-test-object-name-match-any-type-never-lists-on-a-search-backend ()
   "Resolving any object type on a name-search backend must not list the schema.
