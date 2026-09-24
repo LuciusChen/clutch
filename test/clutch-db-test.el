@@ -1627,6 +1627,34 @@ expensive request in the chain."
                               :unique nil :table "DEMO"))))))
       (should-not (clutch-jdbc--unique-not-null-identities conn "DEMO")))))
 
+(ert-deftest clutch-db-test-jdbc-table-objects-ask-for-one-table ()
+  "Describe asks the agent for one table's indexes and triggers.
+Before the warmup has loaded a category, describe used to show nothing
+for it; listing the whole category instead would scan the schema."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "APP")))
+        calls)
+    (cl-letf (((symbol-function 'clutch-db-list-objects)
+               (lambda (&rest _args)
+                 (error "Describe must not enumerate schema-wide objects")))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params &optional _timeout)
+                 (push (list op (alist-get 'table params)) calls)
+                 (if (equal op "get-indexes")
+                     '(:indexes ((:name "DEMO_IX" :type "INDEX"
+                                  :unique nil :table "DEMO")))
+                   '(:triggers ((:name "DEMO_TRG" :type "TRIGGER"
+                                 :table "DEMO")))))))
+      (should (equal (mapcar (lambda (e) (plist-get e :name))
+                             (clutch-db-table-objects conn "DEMO" 'indexes))
+                     '("DEMO_IX")))
+      (should (equal (mapcar (lambda (e) (plist-get e :name))
+                             (clutch-db-table-objects conn "DEMO" 'triggers))
+                     '("DEMO_TRG")))
+      (should (equal (nreverse calls)
+                     '(("get-indexes" "DEMO") ("get-triggers" "DEMO")))))))
+
 (ert-deftest clutch-db-test-jdbc-name-search-only-for-oracle ()
   "Only Oracle matches an object name by prefix search; its listing is slow."
   (should (clutch-db-object-name-search-p
