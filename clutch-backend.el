@@ -34,6 +34,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'regexp-opt)
 (require 'subr-x)
 
 ;;;; Configuration
@@ -350,7 +351,10 @@ backtick-quoted, and bracket-quoted identifiers, including doubled closing
 delimiter escapes.  DIALECT is a `clutch-db-sql-dialect' plist; its
 `:backslash-escapes' rule additionally treats a backslash as escaping the
 next character inside a literal, and its `:dollar-quotes' rule skips
-dollar-quoted bodies.  Returns nil when POS is at normal code."
+dollar-quoted bodies.  Returns nil when POS is at normal code.  An
+unterminated literal or comment extends to the end of SQL.  The body of a
+literal or comment is searched, not walked character by character, and
+match data is left untouched."
   (let ((len (length sql))
         (backslash (plist-get dialect :backslash-escapes))
         (ch (and (< pos (length sql)) (aref sql pos))))
@@ -365,29 +369,35 @@ dollar-quoted bodies.  Returns nil when POS is at normal code."
         (when delimiter
           ;; Bracket-quoted identifiers have no backslash escape even in
           ;; dialects that use one inside quoted strings.
-          (let ((escaping (and backslash (not (eq delimiter ?\])))))
-            (cl-loop for i from (1+ pos) below len
-                     do (cond
-                         ((and escaping (= (aref sql i) ?\\))
-                          (cl-incf i))
-                         ((= (aref sql i) delimiter)
-                          (if (and (< (1+ i) len)
-                                   (= (aref sql (1+ i)) delimiter))
-                              (cl-incf i)
-                            (cl-return (1+ i)))))
-                     finally return len)))))
+          (let* ((escaping (and backslash (not (eq delimiter ?\]))))
+                 (stop (if escaping
+                           (string ?\[ ?\\ delimiter ?\])
+                         (string delimiter)))
+                 (from (1+ pos))
+                 end)
+            (while (and (null end) (< from len))
+              (let ((hit (if escaping
+                             (save-match-data (string-match stop sql from))
+                           (string-search stop sql from))))
+                (cond
+                 ((null hit) (setq end len))
+                 ((and escaping (= (aref sql hit) ?\\))
+                  (setq from (+ hit 2)))
+                 ((and (< (1+ hit) len)
+                       (= (aref sql (1+ hit)) delimiter))
+                  (setq from (+ hit 2)))
+                 (t (setq end (1+ hit))))))
+            (or end len)))))
      ((eq ch ?-)  ;; Possible -- line comment.
       (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
-        (or (cl-loop for i from (+ pos 2) below len
-                     when (= (aref sql i) ?\n) return (1+ i))
-            len)))
+        (if-let* ((newline (string-search "\n" sql (+ pos 2))))
+            (1+ newline)
+          len)))
      ((eq ch ?/)  ;; Possible /* block comment */.
       (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?*))
-        (or (cl-loop for i from (+ pos 2) below (1- len)
-                     when (and (= (aref sql i) ?*)
-                               (= (aref sql (1+ i)) ?/))
-                     return (+ i 2))
-            len))))))
+        (if-let* ((close (string-search "*/" sql (+ pos 2))))
+            (+ close 2)
+          len))))))
 
 (defun clutch-db-sql--skip-dollar-quote (sql pos)
   "Return the end of a PostgreSQL dollar-quoted body at POS, or nil.
@@ -434,28 +444,32 @@ selection fails closed.  This parser is linear and does not alter match data."
 Single-quoted content (between the quotes) and comment text become spaces.
 Quote delimiters are preserved.  Double-quoted identifiers and backticks
 are left intact.  DIALECT is a `clutch-db-sql-dialect' plist deciding where
-a literal ends.  Safe for multibyte strings (avoids `aset')."
+a literal ends.  Safe for multibyte strings (avoids `aset').  Code between
+literals is copied by searching for the next possible opener, so the cost
+follows the number of literals and comments rather than the length of SQL."
   (let ((pieces nil)
         (copy-from 0)
         (pos 0)
         (len (length sql)))
-    (while (< pos len)
-      (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
-                       sql pos nil dialect)))
-          (if (= (aref sql pos) ?\')
-              ;; String literal: preserve quote delimiters, blank content.
-              (let* ((has-close (and (> skip (1+ pos))
-                                    (= (aref sql (1- skip)) ?\')))
-                     (content-end (if has-close (1- skip) skip)))
-                (push (substring sql copy-from (1+ pos)) pieces)
-                (push (make-string (max 0 (- content-end (1+ pos))) ?\s) pieces)
-                (when has-close (push "'" pieces))
-                (setq copy-from skip pos skip))
-            ;; Comment: blank entirely.
-            (push (substring sql copy-from pos) pieces)
-            (push (make-string (- skip pos) ?\s) pieces)
-            (setq copy-from skip pos skip))
-        (cl-incf pos)))
+    (save-match-data
+      (while (and (< pos len)
+                  (setq pos (string-match "[-'/$]" sql pos)))
+        (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
+                         sql pos nil dialect)))
+            (if (= (aref sql pos) ?\')
+                ;; String literal: preserve quote delimiters, blank content.
+                (let* ((has-close (and (> skip (1+ pos))
+                                      (= (aref sql (1- skip)) ?\')))
+                       (content-end (if has-close (1- skip) skip)))
+                  (push (substring sql copy-from (1+ pos)) pieces)
+                  (push (make-string (max 0 (- content-end (1+ pos))) ?\s) pieces)
+                  (when has-close (push "'" pieces))
+                  (setq copy-from skip pos skip))
+              ;; Comment: blank entirely.
+              (push (substring sql copy-from pos) pieces)
+              (push (make-string (- skip pos) ?\s) pieces)
+              (setq copy-from skip pos skip))
+          (cl-incf pos))))
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
@@ -496,12 +510,71 @@ string and the number of placeholders replaced."
       (emit len len))
     (cons (apply #'concat (nreverse parts)) count)))
 
-(defun clutch-db-sql-scan-code (sql start end fn &optional dialect)
+(defconst clutch-db-sql--code-structure-chars "()'\"`[/-$"
+  "Characters that change scanner state in SQL code.
+Parentheses change depth and the rest can open a literal or comment.")
+
+(defun clutch-db-sql-scan-code (sql start end fn &optional dialect interest)
   "Scan SQL code characters from START to END, skipping strings/comments.
 FN is called with (POS CHAR DEPTH), where DEPTH is the parenthesis depth before
 CHAR is applied.  When FN returns non-nil, stop and return that value.
 DIALECT is a `clutch-db-sql-dialect' plist selecting the lexical rules that
-decide where literals end."
+decide where literals end.
+
+INTEREST restricts where FN is called.  When nil, FN sees every code
+character.  A string calls FN only at code characters that appear in it.  A
+hash table, as returned by `clutch-db-sql-code-match-positions', calls FN
+only at its keys that turn out to be code, in ascending order.  Either
+restriction lets the scanner jump between structural characters with a
+regexp search, so the cost follows the number of literals, parentheses and
+interesting characters instead of the length of SQL."
+  (if (null interest)
+      (clutch-db-sql--scan-every-code-char sql start end fn dialect)
+    (let* ((pos (or start 0))
+           (end (or end (length sql)))
+           (depth 0)
+           (chars (and (stringp interest) (append interest nil)))
+           (positions (and (hash-table-p interest)
+                           (sort (hash-table-keys interest) #'<)))
+           (_ (unless (or (stringp interest) (hash-table-p interest))
+                (signal 'wrong-type-argument
+                        (list '(or string hash-table) interest))))
+           (regexp (regexp-opt-charset
+                    (append clutch-db-sql--code-structure-chars chars)))
+           result)
+      (save-match-data
+        (while (and (< pos end) (not result))
+          (let ((next (min end (or (string-match regexp sql pos) end))))
+            ;; Text before NEXT is plain code at the current depth, so
+            ;; interesting positions there need no further checks.
+            (while (and positions (< (car positions) next) (not result))
+              (let ((candidate (pop positions)))
+                (when (>= candidate pos)
+                  (setq result (funcall fn candidate (aref sql candidate)
+                                        depth)))))
+            (setq pos next)
+            (when (and (not result) (< pos end))
+              (let ((skip (clutch-db-sql-skip-literal-or-comment
+                           sql pos t dialect))
+                    (ch (aref sql pos)))
+                (cond
+                 (skip (setq pos (min skip end)))
+                 (t
+                  (when (if chars
+                            (memq ch chars)
+                          (and positions (= (car positions) pos)
+                               (pop positions)))
+                    (setq result (funcall fn pos ch depth)))
+                  (unless result
+                    (cond
+                     ((= ch ?\() (cl-incf depth))
+                     ((= ch ?\)) (setq depth (max 0 (1- depth)))))
+                    (cl-incf pos)))))))))
+      result)))
+
+(defun clutch-db-sql--scan-every-code-char (sql start end fn dialect)
+  "Call FN at every code character of SQL from START to END.
+See `clutch-db-sql-scan-code' for FN and DIALECT."
   (let ((pos (or start 0))
         (end (or end (length sql)))
         (depth 0)
@@ -523,26 +596,27 @@ decide where literals end."
   "Return the matching close-paren position for OPEN-POS in SQL, or nil."
   (clutch-db-sql-scan-code
    sql open-pos nil
-   (lambda (pos ch depth)
-     (and (= ch ?\))
-          (= depth 1)
-          pos))))
+   (lambda (pos _ch depth)
+     (and (= depth 1) pos))
+   nil ")"))
 
 ;;;; SQL helpers (statement boundaries)
 
-(defun clutch-db-sql-statement-breaks (sql &optional dialect)
+(defun clutch-db-sql-statement-breaks (sql &optional dialect start)
   "Return zero-based offsets of top-level semicolons in SQL.
 Semicolons inside strings and comments do not count.  DIALECT is a
 `clutch-db-sql-dialect' plist; its rules decide where a literal ends, so a
-semicolon inside one is not a break."
+semicolon inside one is not a break.  START, when non-nil, is an offset
+known to be top-level code outside any literal, such as the position just
+past a top-level semicolon; scanning begins there instead of at 0."
   (let (breaks)
     (clutch-db-sql-scan-code
-     sql 0 nil
-     (lambda (pos ch depth)
-       (when (and (zerop depth) (= ch ?\;))
+     sql (or start 0) nil
+     (lambda (pos _ch depth)
+       (when (zerop depth)
          (push pos breaks))
        nil)
-     dialect)
+     dialect ";")
     (nreverse breaks)))
 
 (defun clutch-db-sql-statement-effective-offset (text offset)
@@ -620,19 +694,22 @@ delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
         (beg 0)
         (end nil)
         (pos 0))
-    (while (< pos len)
-      (let* ((line-start pos)
-             (newline (string-search "\n" text pos))
-             (line-end (or newline len))
-             (blank-p (string-match-p
-                       "\\`[ \t\r]*\\'"
-                       (substring text line-start line-end))))
-        (cond
-         ((and blank-p (<= line-end offset))
-          (setq beg (if newline (1+ line-end) line-end)))
-         ((and blank-p (not end) (> line-start offset))
-          (setq end line-start)))
-        (setq pos (if newline (1+ line-end) len))))
+    ;; Visit only blank lines: the search is linear in C, whereas testing
+    ;; every line from Lisp costs a substring and a match per line.
+    (save-match-data
+      (while (and (not end)
+                  (< pos len)
+                  (string-match "^[ \t\r]*$" text pos)
+                  ;; Text after a final newline is no line of its own.
+                  (< (match-beginning 0) len))
+        (let ((line-start (match-beginning 0))
+              (line-end (match-end 0)))
+          (cond
+           ((<= line-end offset)
+            (setq beg (min len (1+ line-end))))
+           ((> line-start offset)
+            (setq end line-start)))
+          (setq pos (1+ line-end)))))
     (cons beg (or end len))))
 
 (defun clutch-db-sql-context-statement-bounds (text offset &optional dialect)
@@ -640,10 +717,17 @@ delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
 Use semicolon-aware bounds when TEXT has top-level semicolons; otherwise fall
 back to blank-line paragraph bounds.  DIALECT is a `clutch-db-sql-dialect'
 plist, so context features split statements the same way execution does."
-  (let ((breaks (clutch-db-sql-statement-breaks text dialect)))
-    (if breaks
-        (clutch-db-sql--bounds-from-breaks text offset breaks)
-      (clutch-db-sql-blank-line-statement-bounds text offset))))
+  (clutch-db-sql-context-bounds-from-breaks
+   text offset (clutch-db-sql-statement-breaks text dialect)))
+
+(defun clutch-db-sql-context-bounds-from-breaks (text offset breaks)
+  "Return context statement bounds in TEXT at OFFSET from its BREAKS.
+BREAKS are the top-level semicolon offsets of TEXT, as returned by
+`clutch-db-sql-statement-breaks'; a caller holding them for unchanged text
+avoids scanning TEXT again.  With no BREAKS, blank lines delimit statements."
+  (if breaks
+      (clutch-db-sql--bounds-from-breaks text offset breaks)
+    (clutch-db-sql-blank-line-statement-bounds text offset)))
 
 ;;;; SQL helpers (top-level clause detection)
 
@@ -706,8 +790,8 @@ fragments matched with word boundaries."
        sql start nil
        (lambda (pos _ch depth)
          (and (zerop depth)
-              (when-let* ((pattern (gethash pos positions)))
-                (cons pos pattern))))))))
+              (cons pos (gethash pos positions))))
+       nil positions))))
 
 (defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)
   "Return start position of top-level PATTERN in SQL, or nil.
@@ -744,7 +828,8 @@ Quoted text, comments and nested queries do not contribute clauses."
       (clutch-db-sql-scan-code
        sql 0 nil
        (lambda (pos _char depth)
-         (and (zerop depth) (gethash pos positions)))))))
+         (and (zerop depth) (gethash pos positions)))
+       nil positions))))
 
 (defun clutch-db-sql-starts-with-keyword-p (sql keywords)
   "Return non-nil for SQL with one of KEYWORDS as the leading token."
@@ -770,8 +855,9 @@ Quoted text, comments and nested queries do not contribute clauses."
   "Return non-nil when SQL has a top-level comma between START and END."
   (clutch-db-sql-scan-code
    sql start end
-   (lambda (_pos ch depth)
-     (and (zerop depth) (= ch ?,)))))
+   (lambda (_pos _ch depth)
+     (zerop depth))
+   nil ","))
 
 (defun clutch-db-sql-next-top-level-clause-position (sql start patterns)
   "Return earliest top-level clause match in SQL after START for PATTERNS.

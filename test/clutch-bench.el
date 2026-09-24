@@ -18,6 +18,9 @@
 ;;     -L . -L test \
 ;;     -l test/clutch-bench.el \
 ;;     -f clutch-bench-run-all
+;;
+;; `clutch-bench-run-sql-context' needs no database: it times statement,
+;; eldoc and completion analysis on a long pasted SQL script.
 
 ;;; Code:
 
@@ -221,6 +224,108 @@ project-shipped demo schema.")
        "row-refresh" row clutch-bench-ui-row-refresh-iterations)
       (clutch-bench--print-ui-line
        "footer" footer clutch-bench-ui-row-refresh-iterations)))
+  (princ "\nDone.\n"))
+
+;;;; SQL context benchmark (long pasted SQL)
+
+(defvar clutch-bench-sql-context-bytes (* 1024 1024)
+  "Size of the synthetic SQL script for context benchmarks, in bytes.")
+
+(defun clutch-bench--sql-script (bytes)
+  "Return a semicolon-delimited SQL script of at least BYTES bytes.
+Every statement carries strings, comments and parentheses holding
+semicolons, so the scan cannot take shortcuts."
+  (with-temp-buffer
+    (let ((i 0))
+      (while (< (buffer-size) bytes)
+        (insert (format (concat
+                         "SELECT u.id, u.name, 'it''s; ok' AS note -- x;\n"
+                         "FROM users u\n"
+                         "JOIN orders o ON (o.user_id = u.id AND o.n IN (1, (2)))\n"
+                         "WHERE u.created_at > '2024-01-01' /* y; */ AND o.id = %d;\n\n")
+                        i))
+        (cl-incf i)))
+    (buffer-string)))
+
+(defun clutch-bench--sql-context-sample (label setup body)
+  "Print LABEL with the time of BODY in a buffer built by SETUP."
+  (let ((buf (funcall setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (garbage-collect)
+          (let ((start (float-time)))
+            (funcall body)
+            (princ (format "  %-28s %s\n" label
+                           (clutch-bench--format-ms (- (float-time) start))))))
+      (with-current-buffer buf
+        ;; The stub connection has nothing to disconnect on kill.
+        (setq-local clutch-connection nil)
+        (kill-buffer buf)))))
+
+;;;###autoload
+(defun clutch-bench-run-sql-context ()
+  "Benchmark statement, eldoc and completion analysis on a long SQL script.
+Runs without a database: the connection is a stub whose schema knows the
+tables the script mentions.  Each sample uses a fresh buffer so the first
+request after a paste and the request after the next keystroke are both
+measured."
+  (interactive)
+  (let* ((text (clutch-bench--sql-script clutch-bench-sql-context-bytes))
+         (schema (make-hash-table :test 'equal))
+         (fresh (lambda ()
+                  (let ((buf (generate-new-buffer " *clutch-bench-sql*")))
+                    (with-current-buffer buf
+                      (clutch-mode)
+                      (setq-local clutch-connection 'clutch-bench-stub)
+                      (insert text)
+                      (goto-char (point-max))
+                      (syntax-propertize (point-max)))
+                    buf))))
+    (puthash "users" '("id" "name" "created_at") schema)
+    (puthash "orders" '("id" "user_id" "n") schema)
+    (princ (format "clutch SQL context benchmark (%d bytes, %d statements)\n"
+                   (length text)
+                   (length (clutch-db-sql-statement-breaks text))))
+    (princ (format-time-string "timestamp: %Y-%m-%d %H:%M:%S %z\n"))
+    (cl-letf (((symbol-function 'clutch--schema-for-connection)
+               (lambda (&optional _conn) schema))
+              ((symbol-function 'clutch-db-busy-p) (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-db-completion-sync-columns-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-completion-deferred-columns-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-connection-sql-dialect)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-database) (lambda (_conn) "bench"))
+              ((symbol-function 'clutch--cached-table-comment)
+               (lambda (&rest _) nil))
+              ((symbol-function 'clutch--table-comment-cached-p)
+               (lambda (&rest _) t))
+              ((symbol-function 'clutch--ensure-columns)
+               (lambda (_conn schema table) (gethash table schema))))
+      (clutch-bench--sql-context-sample
+       "statement-breaks" fresh
+       (lambda () (clutch-db-sql-statement-breaks text)))
+      (clutch-bench--sql-context-sample
+       "eldoc after paste" fresh
+       (lambda () (insert "SELECT id") (clutch--eldoc-function)))
+      (clutch-bench--sql-context-sample
+       "completion after paste" fresh
+       (lambda () (insert "sel") (clutch-completion-at-point)))
+      (clutch-bench--sql-context-sample
+       "completion next keystroke"
+       (lambda ()
+         (let ((buf (funcall fresh)))
+           (with-current-buffer buf
+             (insert "sel")
+             (clutch-completion-at-point)
+             (insert "e"))
+           buf))
+       (lambda () (clutch-completion-at-point)))
+      (clutch-bench--sql-context-sample
+       "execute-buffer split" fresh
+       (lambda () (clutch--split-statement-specs text 1)))))
   (princ "\nDone.\n"))
 
 ;;;###autoload
