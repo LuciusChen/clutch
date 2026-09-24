@@ -885,16 +885,19 @@ unique.  Arbitrary query results are displayed as result sets instead."
 
 ;;;; Query execution engine
 
-(defun clutch--risky-dml-where-condition (sql)
-  "Return top-level WHERE condition expression from normalized SQL, or nil."
-  (when-let* ((where-pos (clutch-db-sql-find-top-level-clause sql "WHERE")))
+(defun clutch--risky-dml-where-condition (sql &optional dialect)
+  "Return top-level WHERE condition expression from normalized SQL, or nil.
+DIALECT is a `clutch-db-sql-dialect' plist deciding what is a comment."
+  (when-let* ((where-pos (clutch-db-sql-find-top-level-clause
+                          sql "WHERE" nil dialect)))
     (let* ((cond-start (+ where-pos 5))
            (cond-end (or (clutch-db-sql-next-top-level-clause-position
                           sql cond-start
                           '("RETURNING" "ORDER\\s-+BY" "LIMIT" "OFFSET"
                             "FETCH" "GROUP\\s-+BY" "HAVING" "UNION"
                             "INTERSECT" "EXCEPT" "FOR\\s-+UPDATE"
-                            "OPTION"))
+                            "OPTION")
+                          dialect)
                          (length sql))))
       (string-trim (substring sql cond-start cond-end)))))
 
@@ -954,7 +957,8 @@ unique.  Arbitrary query results are displayed as result sets instead."
     (cond
      ((equal leading-op "TRUNCATE") "TRUNCATE removes all rows")
      ((member main-op '("UPDATE" "DELETE"))
-      (if-let* ((where (clutch--risky-dml-where-condition normalized)))
+      (if-let* ((where (clutch--risky-dml-where-condition
+                        normalized (clutch--buffer-sql-dialect))))
           (and (clutch--risky-dml-trivially-true-expression-p where)
                "WHERE is always true")
         "no WHERE")))))
@@ -1398,7 +1402,8 @@ product is `postgres'.  A fragment holding only comments, such as one after
 the last semicolon, is no statement and is dropped."
   (let ((stmts nil)
         (start 0)
-        (len (length sql)))
+        (len (length sql))
+        (dialect (clutch--buffer-sql-dialect)))
     (cl-labels
         ((blank-char-p (ch)
            (memq ch '(?\s ?\t ?\r ?\n)))
@@ -1414,13 +1419,12 @@ the last semicolon, is no statement and is dropped."
              (when (and (< tbeg tend)
                         (not (string-empty-p
                               (clutch-db-sql-strip-leading-comments
-                               (substring sql tbeg tend)))))
+                               (substring sql tbeg tend) dialect))))
                (push (list (substring sql tbeg tend)
                            (and base-position (+ base-position tbeg))
                            (and base-position (+ base-position tend)))
                      stmts)))))
-      (dolist (break (clutch-db-sql-statement-breaks
-                      sql (clutch--buffer-sql-dialect)))
+      (dolist (break (clutch-db-sql-statement-breaks sql dialect))
         (emit break)
         (setq start (1+ break)))
       (emit len))
