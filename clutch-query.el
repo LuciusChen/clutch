@@ -1395,7 +1395,8 @@ BEG and END are buffer positions when BASE-POSITION is non-nil.  Semicolons
 inside single-quoted strings, -- line comments, and /* */ block comments are
 skipped.  PostgreSQL dollar-quoted bodies are skipped when the current SQL
 product is `postgres'.  A fragment holding only comments, such as one after
-the last semicolon, is no statement and is dropped."
+the last semicolon, is no statement and is dropped unless it contains /*! or
+/*M!, which open a comment whose body MySQL and MariaDB run."
   (let ((stmts nil)
         (start 0)
         (len (length sql)))
@@ -1411,14 +1412,15 @@ the last semicolon, is no statement and is dropped."
              (while (and (< tbeg tend)
                          (blank-char-p (aref sql (1- tend))))
                (cl-decf tend))
-             (when (and (< tbeg tend)
-                        (not (string-empty-p
-                              (clutch-db-sql-strip-leading-comments
-                               (substring sql tbeg tend)))))
-               (push (list (substring sql tbeg tend)
-                           (and base-position (+ base-position tbeg))
-                           (and base-position (+ base-position tend)))
-                     stmts)))))
+             (let ((fragment (substring sql tbeg tend)))
+               (when (or (string-match-p "/\\*M?!" fragment)
+                         (not (string-empty-p
+                               (clutch-db-sql-strip-leading-comments
+                                fragment))))
+                 (push (list fragment
+                             (and base-position (+ base-position tbeg))
+                             (and base-position (+ base-position tend)))
+                       stmts))))))
       (dolist (break (clutch-db-sql-statement-breaks
                       sql (clutch--buffer-sql-dialect)))
         (emit break)

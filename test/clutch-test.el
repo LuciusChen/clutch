@@ -1121,6 +1121,21 @@ started a second statement after the semicolon."
         (clutch--execute-sql-range (point-min) (point-max) "region")
         (should (equal ran '("SELECT 1" 1 9)))))))
 
+(ert-deftest clutch-test-execute-range-runs-executable-comments ()
+  "A /*! or /*M! comment is a statement, as MySQL and MariaDB run its body.
+A dump script sets its session variables in them, and dropping fragments
+that hold only comments skipped those settings without a word."
+  (with-temp-buffer
+    (insert "-- dump header\n/*!40101 SET @x=1 */;\n/*M!100100 SET @y=2 */;\n"
+            "SELECT 1; /* note */ -- note\n")
+    (let (ran)
+      (cl-letf (((symbol-function 'clutch--execute-statements)
+                 (lambda (stmts) (setq ran (mapcar #'car stmts)))))
+        (clutch--execute-sql-range (point-min) (point-max) "buffer")
+        (should (equal ran '("-- dump header\n/*!40101 SET @x=1 */"
+                             "/*M!100100 SET @y=2 */"
+                             "SELECT 1")))))))
+
 (ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
   "A lowercase sole * is qualified whatever `case-fold-search' says.
 Oracle rejects \"select *, ROWID\", which the star check exists to avoid."
