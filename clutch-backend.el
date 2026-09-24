@@ -649,14 +649,17 @@ plist, so context features split statements the same way execution does."
 
 (defconst clutch-db-sql--syntax-table
   (let ((table (make-syntax-table)))
-    (modify-syntax-entry ?_ "w" table)
+    (dolist (char '(?_ ?# ?@))
+      (modify-syntax-entry char "w" table))
     table)
   "Syntax table for matching SQL keywords with regexps.
 The `\\s-' and `\\b' regexp classes follow the current buffer's syntax
 table.  In `sql-mode' a newline ends comments rather than counting as
-whitespace, which would hide a clause split across lines, and neither that
-table nor the standard one makes `_' a word constituent, which would let
-FROM match inside valid_from.  `$' is already one in the standard table.")
+whitespace, which would hide a clause split across lines.  Characters that
+can appear inside a name are word constituents, so a keyword never matches
+inside one: `_' as in valid_from, `#' as in the Oracle name valid#where,
+and `@' as in the SQL Server variable @where.  `$' is already one in the
+standard table.")
 
 (defun clutch-db-sql-code-match-positions (sql start end regexp)
   "Return a hash mapping REGEXP match positions in SQL to their match ends.
@@ -1593,6 +1596,16 @@ CATEGORY is one of: indexes, sequences, procedures, functions, triggers.")
 
 (cl-defmethod clutch-db-list-objects ((_conn t) _category)
   "Default: return nil when CATEGORY is unsupported."
+  nil)
+
+(cl-defgeneric clutch-db-table-objects (conn table category)
+  "Return object entry plists for CATEGORY that belong to TABLE on CONN.
+CATEGORY is indexes or triggers.  A backend that can ask for one table's
+objects implements this; the default returns nil rather than list the
+whole category, which is the object warmup's job.")
+
+(cl-defmethod clutch-db-table-objects ((_conn t) _table _category)
+  "Default: return nil for TABLE's CATEGORY, as CONN has no such lookup."
   nil)
 
 (cl-defgeneric clutch-db-list-objects-async (conn category callback &optional errback)

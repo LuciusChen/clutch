@@ -1627,6 +1627,42 @@ expensive request in the chain."
                               :unique nil :table "DEMO"))))))
       (should-not (clutch-jdbc--unique-not-null-identities conn "DEMO")))))
 
+(ert-deftest clutch-db-test-jdbc-table-objects-ask-for-one-table ()
+  "Describe asks the agent for one table's indexes and triggers.
+Before the warmup has loaded a category, describe used to show nothing
+for it; listing the whole category instead would scan the schema."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 4
+                                     :params '(:driver oracle
+                                               :schema "APP")))
+        calls)
+    (cl-letf (((symbol-function 'clutch-db-list-objects)
+               (lambda (&rest _args)
+                 (error "Describe must not enumerate schema-wide objects")))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params &optional _timeout)
+                 (push (list op (alist-get 'table params)) calls)
+                 (if (equal op "get-indexes")
+                     '(:indexes ((:name "DEMO_IX" :type "INDEX"
+                                  :unique nil :table "DEMO")))
+                   '(:triggers ((:name "DEMO_TRG" :type "TRIGGER"
+                                 :table "DEMO")))))))
+      (should (equal (mapcar (lambda (e) (plist-get e :name))
+                             (clutch-db-table-objects conn "DEMO" 'indexes))
+                     '("DEMO_IX")))
+      (should (equal (mapcar (lambda (e) (plist-get e :name))
+                             (clutch-db-table-objects conn "DEMO" 'triggers))
+                     '("DEMO_TRG")))
+      (should (equal (nreverse calls)
+                     '(("get-indexes" "DEMO") ("get-triggers" "DEMO")))))))
+
+(ert-deftest clutch-db-test-table-objects-default-lists-nothing ()
+  "A backend without a table-scoped lookup must not list a whole category.
+Filtering the category listing ran a schema-wide query per describe."
+  (cl-letf (((symbol-function 'clutch-db-list-objects)
+             (lambda (&rest _) (ert-fail "the default listed a whole category"))))
+    (should-not (clutch-db-table-objects
+                 (make-clutch-db-sqlite-conn :database ":memory:") "t" 'indexes))))
+
 (ert-deftest clutch-db-test-jdbc-name-search-only-for-oracle ()
   "Only Oracle matches an object name by prefix search; its listing is slow."
   (should (clutch-db-object-name-search-p
@@ -7911,6 +7947,24 @@ paging fetched the whole table and every page started at the first row."
           (should (equal (ids (clutch-db-build-count-sql conn sql)) '(30)))
           (should (equal (ids (clutch-db-apply-where conn sql "id > 27"))
                          '(28 29 30))))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-db-test-sqlite-rewrites-keep-a-semicolon-inside-a-string ()
+  "Paging, counting and filtering must not edit a string literal.
+A semicolon inside a literal and followed by -- text was once taken for
+the statement's terminator and removed, changing the value returned."
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+        (sql "SELECT 'x; -- y' AS value"))
+    (unwind-protect
+        (cl-flet ((first-value (query)
+                    (caar (clutch-db-result-rows (clutch-db-query conn query)))))
+          (should (equal (first-value (clutch-db-build-paged-sql conn sql 0 10))
+                         "x; -- y"))
+          (should (equal (first-value (clutch-db-build-count-sql conn sql)) 1))
+          (should (equal (first-value
+                          (clutch-db-apply-where conn sql "value = 'x; -- y'"))
+                         "x; -- y")))
       (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-db-test-sqlite-mutation-batch-is-atomic ()
