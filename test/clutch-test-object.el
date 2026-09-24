@@ -1823,8 +1823,8 @@ listing costs seconds, so listing per call made a describe pay it twice."
 (ert-deftest clutch-test-object-related-entries-never-list-the-schema ()
   "Related indexes and triggers never list the schema, cold or warm.
 Once the warmup has loaded a category its cache is used; before that only
-the described table's objects are asked for, so describe shows them instead
-of silently leaving the section out."
+the described table's objects are asked for, which backends with a
+table-scoped lookup (JDBC) answer and the others answer with nil."
   (clutch-test-object--with-warmup-state
    (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
          (index '(:name "IX_ORDERS" :type "INDEX" :schema "APP" :target-table "ORDERS"))
