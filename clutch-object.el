@@ -203,13 +203,7 @@ exact resolver under the internal `:clutch-resolver' key.")
   (let* ((cache (or (gethash conn clutch--object-cache) (list)))
          (loaded (copy-sequence (plist-get cache :loaded-categories)))
          (type (clutch--normalize-object-type type))
-         (category (pcase type
-                     ("INDEX" 'indexes)
-                     ("SEQUENCE" 'sequences)
-                     ("PROCEDURE" 'procedures)
-                     ("FUNCTION" 'functions)
-                     ("TRIGGER" 'triggers)
-                     (_ nil))))
+         (category (clutch--object-type-category type)))
     (when category
       (cl-pushnew category loaded))
     (puthash conn
@@ -272,6 +266,13 @@ exact resolver under the internal `:clutch-resolver' key.")
     ('functions "FUNCTION")
     ('triggers "TRIGGER")
     (_ nil)))
+
+(defun clutch--object-type-category (type)
+  "Return the object category whose entries have TYPE, or nil."
+  (let ((type (clutch--normalize-object-type type)))
+    (seq-find (lambda (category)
+                (equal (clutch--object-category-type category) type))
+              clutch--object-categories)))
 
 (defun clutch--cancel-object-warmup (conn)
   "Cancel any pending object warmup timer for CONN."
@@ -1172,13 +1173,17 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
 
 (defun clutch--object-related-entries (conn entry type &optional refresh)
   "Return related TYPE entries for table-like ENTRY on CONN.
-Without REFRESH only the warmed TYPE entries are consulted, so nothing is
-listed; when REFRESH is non-nil, list TYPE again."
+Once the warmup has loaded TYPE its cached entries are used; before that
+only ENTRY's table is asked for, so the schema is never listed and the
+section is not silently empty.  When REFRESH is non-nil, list TYPE again."
   (when-let* ((name (plist-get entry :name))
-              (objects (if refresh
-                           (clutch--object-type-entries conn type t)
-                         (clutch--filter-object-entries-by-type
-                          (clutch--warmed-object-entries conn) type))))
+              (category (clutch--object-type-category type))
+              (objects (cond
+                        (refresh (clutch--object-type-entries conn type t))
+                        ((memq category
+                               (clutch--object-cache-loaded-categories conn))
+                         (clutch--object-cache-type-entries conn type))
+                        (t (clutch-db-table-objects conn name category)))))
     (seq-filter
      (lambda (candidate)
        (and (equal (clutch--normalize-object-type (plist-get candidate :type))

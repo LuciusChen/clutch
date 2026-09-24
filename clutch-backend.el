@@ -1607,6 +1607,19 @@ CATEGORY is one of: indexes, sequences, procedures, functions, triggers.")
   "Default: return nil when CATEGORY is unsupported."
   nil)
 
+(cl-defgeneric clutch-db-table-objects (conn table category)
+  "Return object entry plists for CATEGORY that belong to TABLE on CONN.
+CATEGORY is indexes or triggers.  The default filters the schema-wide
+`clutch-db-list-objects' listing; a backend that can ask for one table's
+objects overrides it.")
+
+(cl-defmethod clutch-db-table-objects ((conn t) table category)
+  "Filter CONN's schema-wide CATEGORY listing down to TABLE's objects."
+  (seq-filter (lambda (entry)
+                (string= (downcase (or (plist-get entry :target-table) ""))
+                         (downcase table)))
+              (clutch-db-list-objects conn category)))
+
 (cl-defgeneric clutch-db-list-objects-async (conn category callback &optional errback)
   "Fetch object entry plists for CATEGORY on CONN asynchronously.
 CALLBACK receives the entry plist list on success.  ERRBACK receives an error
