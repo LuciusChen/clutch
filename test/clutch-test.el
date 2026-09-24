@@ -1124,33 +1124,6 @@ started a second statement after the semicolon."
         (clutch--execute-sql-range (point-min) (point-max) "region")
         (should (equal ran '("SELECT 1" 1 9)))))))
 
-(ert-deftest clutch-test-mysql-hash-comments-are-comments ()
-  "On MySQL # starts a line comment, whatever it contains.
-A where inside one hid a missing WHERE from the full-table confirmation,
-and a # comment after the last semicolon ran as a statement of its own.
-Other products keep # as an ordinary character."
-  (with-temp-buffer
-    (setq-local clutch--conn-sql-product 'mysql)
-    (should (equal (clutch--high-risk-query-reason
-                    "UPDATE t SET a = 1 # note where id = 3")
-                   "no WHERE"))
-    (should (equal (clutch--high-risk-query-reason
-                    "DELETE FROM t # where id = 3")
-                   "no WHERE"))
-    (should-not (clutch--high-risk-query-reason
-                 "UPDATE t SET a = 1 # note\nWHERE id = 3"))
-    (should (equal (mapcar #'car (clutch--split-statement-specs
-                                  "SELECT 1; # note"))
-                   '("SELECT 1")))
-    (should (equal (mapcar #'car (clutch--split-statement-specs
-                                  "SELECT 1 # a;b\n"))
-                   '("SELECT 1 # a;b"))))
-  (with-temp-buffer
-    (setq-local clutch--conn-sql-product 'postgres)
-    (should (equal (mapcar #'car (clutch--split-statement-specs
-                                  "SELECT 5 # 3; SELECT 1"))
-                   '("SELECT 5 # 3" "SELECT 1")))))
-
 (ert-deftest clutch-test-row-identity-qualifies-lowercase-star ()
   "A lowercase sole * is qualified whatever `case-fold-search' says.
 Oracle rejects \"select *, ROWID\", which the star check exists to avoid."
@@ -8429,8 +8402,7 @@ statement."
 (ert-deftest clutch-test-sql-dialect-rules ()
   "Dialect lookup should only claim rules a product actually has."
   (should (equal (clutch-db-sql-dialect 'postgres) '(:dollar-quotes t)))
-  (should (equal (clutch-db-sql-dialect 'mysql)
-                 '(:backslash-escapes t :hash-comments t)))
+  (should (equal (clutch-db-sql-dialect 'mysql) '(:backslash-escapes t)))
   (dolist (product '(sqlite oracle ms db2 nil))
     (should-not (clutch-db-sql-dialect product))))
 

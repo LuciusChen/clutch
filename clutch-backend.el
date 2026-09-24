@@ -284,18 +284,14 @@ Values are nesting counts.")
 
 ;;;; SQL helpers (literal-or-comment awareness)
 
-(defun clutch-db-sql-strip-leading-comments (sql &optional dialect)
-  "Strip leading SQL comments and whitespace from SQL.
-DIALECT is a `clutch-db-sql-dialect' plist; with its `:hash-comments' rule
-leading # line comments are stripped too."
-  (let ((s (string-trim-left sql))
-        (hash (plist-get dialect :hash-comments)))
+(defun clutch-db-sql-strip-leading-comments (sql)
+  "Strip leading SQL comments and whitespace from SQL."
+  (let ((s (string-trim-left sql)))
     (while (or (string-prefix-p "--" s)
-               (string-prefix-p "/*" s)
-               (and hash (string-prefix-p "#" s)))
+               (string-prefix-p "/*" s))
       (setq s (string-trim-left
                (cond
-                ((or (string-prefix-p "--" s) (string-prefix-p "#" s))
+                ((string-prefix-p "--" s)
                  (if-let* ((nl (string-search "\n" s)))
                      (substring s (1+ nl))
                    ""))
@@ -323,15 +319,14 @@ derived table around SQL, is not commented out along with it."
 (defun clutch-db-sql-dialect (product)
   "Return the lexical rules for SQL PRODUCT as a plist.
 These describe how a statement is tokenized, not how it executes, so they
-only cover constructs that change where a literal, comment or statement
-ends: `:dollar-quotes' for PostgreSQL dollar-quoted bodies, and for the
-MySQL family `:backslash-escapes', where a backslash escapes the next
-character inside a string literal, and `:hash-comments', where # starts a
-line comment.  PRODUCT is an `sql-mode' product symbol as registered by
-`clutch-backend-sql-product'."
+only cover constructs that change where a literal or statement ends:
+`:dollar-quotes' for PostgreSQL dollar-quoted bodies, and
+`:backslash-escapes' for the MySQL family, where a backslash escapes the
+next character inside a string literal.  PRODUCT is an `sql-mode' product
+symbol as registered by `clutch-backend-sql-product'."
   (pcase product
     ('postgres '(:dollar-quotes t))
-    ('mysql '(:backslash-escapes t :hash-comments t))
+    ('mysql '(:backslash-escapes t))
     (_ nil)))
 
 (defun clutch-db-connection-sql-dialect (conn)
@@ -354,9 +349,8 @@ Handles single-quoted strings (with `''' escape), -- line comments, and
 backtick-quoted, and bracket-quoted identifiers, including doubled closing
 delimiter escapes.  DIALECT is a `clutch-db-sql-dialect' plist; its
 `:backslash-escapes' rule additionally treats a backslash as escaping the
-next character inside a literal, its `:dollar-quotes' rule skips
-dollar-quoted bodies, and its `:hash-comments' rule skips # line comments.
-Returns nil when POS is at normal code."
+next character inside a literal, and its `:dollar-quotes' rule skips
+dollar-quoted bodies.  Returns nil when POS is at normal code."
   (let ((len (length sql))
         (backslash (plist-get dialect :backslash-escapes))
         (ch (and (< pos (length sql)) (aref sql pos))))
@@ -382,10 +376,6 @@ Returns nil when POS is at normal code."
                               (cl-incf i)
                             (cl-return (1+ i)))))
                      finally return len)))))
-     ((and (eq ch ?#) (plist-get dialect :hash-comments))
-      (or (cl-loop for i from (1+ pos) below len
-                   when (= (aref sql i) ?\n) return (1+ i))
-          len))
      ((eq ch ?-)  ;; Possible -- line comment.
       (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
         (or (cl-loop for i from (+ pos 2) below len
@@ -703,11 +693,10 @@ fragments matched with word boundaries; earlier patterns win a position."
                 sql start nil (format "\\b%s\\b" pattern))))
     positions))
 
-(defun clutch-db-sql--top-level-clause-match (sql start patterns &optional dialect)
+(defun clutch-db-sql--top-level-clause-match (sql start patterns)
   "Return (POS . PATTERN) for the first top-level PATTERNS match in SQL.
 START is the initial search offset.  PATTERNS are case-insensitive regex
-fragments matched with word boundaries.  DIALECT is a
-`clutch-db-sql-dialect' plist deciding where literals and comments end."
+fragments matched with word boundaries."
   ;; Collect candidate positions in one pass per pattern, then walk the code
   ;; once.  Testing each pattern at every scanned position instead searches
   ;; the remainder of SQL per position, which is quadratic on long statements.
@@ -718,15 +707,14 @@ fragments matched with word boundaries.  DIALECT is a
        (lambda (pos _ch depth)
          (and (zerop depth)
               (when-let* ((pattern (gethash pos positions)))
-                (cons pos pattern))))
-       dialect))))
+                (cons pos pattern))))))))
 
-(defun clutch-db-sql-find-top-level-clause (sql pattern &optional start dialect)
+(defun clutch-db-sql-find-top-level-clause (sql pattern &optional start)
   "Return start position of top-level PATTERN in SQL, or nil.
 PATTERN is matched case-insensitively with word boundaries.
-START defaults to 0.  DIALECT is a `clutch-db-sql-dialect' plist."
+START defaults to 0."
   (car (clutch-db-sql--top-level-clause-match
-        sql (or start 0) (list pattern) dialect)))
+        sql (or start 0) (list pattern))))
 
 (defun clutch-db-sql-has-top-level-clause-p (sql pattern &optional start)
   "Return non-nil when SQL has top-level PATTERN starting at START."
@@ -785,13 +773,11 @@ Quoted text, comments and nested queries do not contribute clauses."
    (lambda (_pos ch depth)
      (and (zerop depth) (= ch ?,)))))
 
-(defun clutch-db-sql-next-top-level-clause-position (sql start patterns
-                                                         &optional dialect)
+(defun clutch-db-sql-next-top-level-clause-position (sql start patterns)
   "Return earliest top-level clause match in SQL after START for PATTERNS.
 PATTERNS is a list of case-insensitive regex fragments passed to
-`clutch-db-sql-find-top-level-clause'.  DIALECT is a
-`clutch-db-sql-dialect' plist."
-  (car (clutch-db-sql--top-level-clause-match sql start patterns dialect)))
+`clutch-db-sql-find-top-level-clause'."
+  (car (clutch-db-sql--top-level-clause-match sql start patterns)))
 
 (defun clutch-db-sql-from-body-range (sql from-pos)
   "Return `(START END)' for the top-level FROM body in SQL after FROM-POS."
