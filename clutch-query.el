@@ -477,11 +477,12 @@ window rather than replacing the current window."
             items)
         (clutch-db-sql-scan-code
          sql start from-pos
-         (lambda (pos ch depth)
-           (when (and (zerop depth) (= ch ?,))
+         (lambda (pos _ch depth)
+           (when (zerop depth)
              (push (string-trim (substring sql start pos)) items)
              (setq start (1+ pos)))
-           nil))
+           nil)
+         nil ",")
         (nreverse
          (cons (string-trim (substring sql start from-pos)) items))))))
 

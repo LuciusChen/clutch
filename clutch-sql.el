@@ -32,6 +32,11 @@
 (defvar-local clutch--tables-in-query-cache nil
   "Cached statement bounds, table names and aliases in the current buffer.")
 
+(defvar-local clutch--statement-scan-cache nil
+  "Cached statement-break scan of the accessible buffer text.
+A plist with :tick, :beg, :end and :dialect identifying the scanned text,
+and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
+
 (defconst clutch--schema-inline-table-limit 3
   "Maximum number of statement tables for synchronous schema hints.")
 
@@ -85,13 +90,60 @@
            "  "))
       header)))
 
+(defun clutch--statement-breaks-after-edit (text previous dialect)
+  "Return top-level semicolon offsets of TEXT, reusing PREVIOUS where possible.
+PREVIOUS is the (TEXT . BREAKS) scan of an earlier version of TEXT under the
+same DIALECT.  Scanner state at an offset depends only on the text before
+it, so breaks before the first differing character stay valid and the scan
+resumes just past the last of them, where the text is top-level code.
+Typing at the end of a long script therefore rescans only its final
+statement."
+  (let* ((difference (compare-strings (car previous) nil nil text nil nil))
+         (shared (if (eq difference t)
+                     (length text)
+                   (1- (abs difference))))
+         (remaining (cdr previous))
+         kept)
+    (while (and remaining (< (car remaining) shared))
+      (push (pop remaining) kept))
+    (let ((resume (and kept (1+ (car kept)))))
+      (nconc (nreverse kept)
+             (clutch-db-sql-statement-breaks text dialect resume)))))
+
+(defun clutch--statement-scan ()
+  "Return (TEXT . BREAKS) for the accessible buffer text.
+TEXT is the text between `point-min' and `point-max' and BREAKS are its
+top-level semicolon offsets under the connection's SQL dialect.  The scan is
+cached by modification tick, restriction and dialect, so eldoc, completion
+and xref requests on unchanged text share one pass instead of each copying
+and scanning the whole buffer.  After an edit, breaks before the change are
+reused through `clutch--statement-breaks-after-edit'."
+  (let* ((tick (buffer-chars-modified-tick))
+         (dialect (clutch-db-connection-sql-dialect clutch-connection))
+         (cached clutch--statement-scan-cache)
+         (comparable (and cached
+                          (eql (plist-get cached :beg) (point-min))
+                          (equal (plist-get cached :dialect) dialect))))
+    (if (and comparable
+             (= (plist-get cached :tick) tick)
+             (eql (plist-get cached :end) (point-max)))
+        (plist-get cached :scan)
+      (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+             (breaks (if comparable
+                         (clutch--statement-breaks-after-edit
+                          text (plist-get cached :scan) dialect)
+                       (clutch-db-sql-statement-breaks text dialect)))
+             (scan (cons text breaks)))
+        (setq clutch--statement-scan-cache
+              (list :tick tick :beg (point-min) :end (point-max)
+                    :dialect dialect :scan scan))
+        scan))))
+
 (defun clutch--statement-bounds ()
   "Return (BEG . END) for the SQL statement surrounding point."
-  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
-         (offset (- (point) (point-min)))
-         (bounds (clutch-db-sql-context-statement-bounds
-                  text offset
-                  (clutch-db-connection-sql-dialect clutch-connection))))
+  (pcase-let* ((`(,text . ,breaks) (clutch--statement-scan))
+               (bounds (clutch-db-sql-context-bounds-from-breaks
+                        text (- (point) (point-min)) breaks)))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 
@@ -158,7 +210,8 @@ POINT-OFFSET is at the top level."
                              (>= pos point-offset)
                              (< (- pos open) (- (cdr result) (car result))))
                     (setq result (cons (1+ open) pos)))))))
-       nil))
+       nil)
+     nil "()")
     result))
 
 (defun clutch--union-branch-range-in-scope (text point-offset scope)
@@ -181,10 +234,10 @@ inside string literals, comments, or nested parentheses are ignored."
        sub 0 nil
        (lambda (pos _ch depth)
          (when (zerop depth)
-           (when-let* ((end (gethash pos matches)))
-             (push pos boundaries)
-             (push end boundaries)))
-         nil)))
+           (push pos boundaries)
+           (push (gethash pos matches) boundaries))
+         nil)
+       nil matches))
     (push sub-len boundaries)
     (setq boundaries (nreverse boundaries))
     (let ((beg 0)
@@ -1141,11 +1194,11 @@ control backend column loading."
      sql 0 limit
      (lambda (pos _ch depth)
        (when (zerop depth)
-         (when-let* ((end (gethash pos matches)))
-           (setq token (replace-regexp-in-string
-                        "[ \t\n\r]+" " "
-                        (upcase (substring sql pos end))))))
-       nil))
+         (setq token (replace-regexp-in-string
+                      "[ \t\n\r]+" " "
+                      (upcase (substring sql pos (gethash pos matches))))))
+       nil)
+     nil matches)
     token))
 
 (defun clutch--completion-select-list-ready-p (sql start offset)
@@ -1181,33 +1234,32 @@ control backend column loading."
     (and (zerop depth)
          (memq significant '(nil comma)))))
 
-(defun clutch--completion-select-list-empty-bounds ()
-  "Return point bounds for empty SELECT-list completion, or nil."
-  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
-               (sql (buffer-substring-no-properties beg end))
-               (offset (- (point) beg))
-               (select-pos (clutch-db-sql-find-top-level-clause sql "SELECT"))
-               (select-end (and select-pos (+ select-pos 6)))
-               (from-pos (and select-end
-                              (clutch-db-sql-find-top-level-clause
-                               sql "FROM" select-end))))
-    (when (and select-end from-pos
-               (<= select-end offset)
-               (< offset from-pos)
-               (clutch--completion-select-list-ready-p sql select-end offset))
-      (cons (point) (point)))))
+(defun clutch--completion-select-list-empty-p (sql offset)
+  "Return non-nil when OFFSET in statement SQL is an empty SELECT-list slot."
+  (let* ((select-pos (clutch-db-sql-find-top-level-clause sql "SELECT"))
+         (select-end (and select-pos (+ select-pos 6)))
+         (from-pos (and select-end
+                        (clutch-db-sql-find-top-level-clause
+                         sql "FROM" select-end))))
+    (and select-end from-pos
+         (<= select-end offset)
+         (< offset from-pos)
+         (clutch--completion-select-list-ready-p sql select-end offset))))
 
 (defun clutch--completion-empty-column-bounds ()
-  "Return point bounds for empty-slot column completion, or nil."
+  "Return point bounds for empty-slot column completion, or nil.
+Point just past the semicolon that ends a statement belongs to no clause of
+it, so nothing is scanned there."
   (unless (clutch--completion-table-context-p (point))
-    (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
-                 (sql (buffer-substring-no-properties beg end))
-                 (offset (- (point) beg))
-                 (token (clutch--completion-top-level-token-before sql offset)))
-      (when (or (and (equal token "SELECT")
-                     (clutch--completion-select-list-empty-bounds))
-                (member token '("WHERE" "HAVING" "GROUP BY" "ORDER BY" "ON")))
-        (cons (point) (point))))))
+    (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
+      (when (<= (point) end)
+        (let* ((sql (buffer-substring-no-properties beg end))
+               (offset (- (point) beg))
+               (token (clutch--completion-top-level-token-before sql offset)))
+          (when (or (and (equal token "SELECT")
+                         (clutch--completion-select-list-empty-p sql offset))
+                    (member token '("WHERE" "HAVING" "GROUP BY" "ORDER BY" "ON")))
+            (cons (point) (point))))))))
 
 (defun clutch-complete-at-point ()
   "Complete SQL identifiers at point."
