@@ -649,14 +649,17 @@ plist, so context features split statements the same way execution does."
 
 (defconst clutch-db-sql--syntax-table
   (let ((table (make-syntax-table)))
-    (modify-syntax-entry ?_ "w" table)
+    (dolist (char '(?_ ?# ?@))
+      (modify-syntax-entry char "w" table))
     table)
   "Syntax table for matching SQL keywords with regexps.
 The `\\s-' and `\\b' regexp classes follow the current buffer's syntax
 table.  In `sql-mode' a newline ends comments rather than counting as
-whitespace, which would hide a clause split across lines, and neither that
-table nor the standard one makes `_' a word constituent, which would let
-FROM match inside valid_from.  `$' is already one in the standard table.")
+whitespace, which would hide a clause split across lines.  Characters that
+can appear inside a name are word constituents, so a keyword never matches
+inside one: `_' as in valid_from, `#' as in the Oracle name valid#where,
+and `@' as in the SQL Server variable @where.  `$' is already one in the
+standard table.")
 
 (defun clutch-db-sql-code-match-positions (sql start end regexp)
   "Return a hash mapping REGEXP match positions in SQL to their match ends.
