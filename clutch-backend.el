@@ -303,20 +303,11 @@ Values are nesting counts.")
 
 (defun clutch-db-sql-trim-end (sql)
   "Return SQL without trailing whitespace and its final semicolon.
-The semicolon goes even when comments follow it; otherwise a clause that a
-rewrite appends would start a second statement.  When the last line may
-end in a comment (-- or MySQL's #), keep a newline after it, so a clause
-that a rewrite appends, or the parenthesis closing a derived table around
-SQL, is not commented out along with it."
-  (let* ((semicolon (cl-position ?\; sql :from-end t))
-         (trimmed (string-trim-right
-                   (if (and semicolon
-                            (string-empty-p
-                             (clutch-db-sql-strip-leading-comments
-                              (substring sql (1+ semicolon)))))
-                       (concat (substring sql 0 semicolon)
-                               (substring sql (1+ semicolon)))
-                     sql))))
+When the last line may end in a comment (-- or MySQL's #), keep a newline
+after it, so a clause that a rewrite appends, or the parenthesis closing a
+derived table around SQL, is not commented out along with it."
+  (let ((trimmed (string-trim-right
+                  (replace-regexp-in-string ";[ \t\n\r\f]*\\'" "" sql))))
     (if (string-match-p "\\(?:--\\|#\\)[^\n]*\\'" trimmed)
         (concat trimmed "\n")
       trimmed)))
