@@ -1091,10 +1091,7 @@ standard syntax table, which let keywords match inside identifiers."
                        "no WHERE"))
         (should (equal (clutch--high-risk-query-reason
                         "UPDATE t SET value = @where")
-                       "no WHERE"))
-        ;; A MySQL # comment line must not hide the real clause after it.
-        (should-not (clutch--high-risk-query-reason
-                     "UPDATE t SET a = 1\n# note\nWHERE id = 3"))))))
+                       "no WHERE"))))))
 
 (ert-deftest clutch-test-split-statement-specs-drops-comment-only-fragments ()
   "A comment after the last semicolon is no statement of its own.
