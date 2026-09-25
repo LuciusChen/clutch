@@ -62,14 +62,6 @@ Each value is a plist containing :buffer and :problem.")
       (setq-local header-line-format " Clutch debug capture"))
     buf))
 
-(defun clutch--reset-debug-buffer ()
-  "Reset the dedicated clutch debug buffer for a new capture window."
-  (with-current-buffer (clutch--debug-buffer)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (format "Clutch Debug\n============\nStarted: %s\n"
-                      (format-time-string "%F %T"))))))
-
 (defun clutch--debug-buffer-source-label (buffer)
   "Return a human-readable source label for BUFFER."
   (when (buffer-live-p buffer)
@@ -307,7 +299,11 @@ When TRACE-EVENT is non-nil, mark the entry and enforce the trace limit."
 
 (defun clutch--clear-debug-capture ()
   "Reset the dedicated debug buffer for a new capture window."
-  (clutch--reset-debug-buffer))
+  (with-current-buffer (clutch--debug-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (format "Clutch Debug\n============\nStarted: %s\n"
+                      (format-time-string "%F %T"))))))
 
 (defun clutch--replay-problem-records-to-debug-buffer ()
   "Replay stored problem records into the dedicated debug buffer.

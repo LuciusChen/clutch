@@ -358,13 +358,11 @@ schema switching, and any statement that returns no result set."
         (dolist (key keys)
           (remhash key cache))))))
 
-(defun clutch--cached-table-comment (conn table &optional schema)
-  "Return TABLE's cached comment in SCHEMA on CONN, or nil."
-  (let ((metadata
-         (clutch--table-metadata
-          conn (clutch--table-comment-key conn table schema))))
-    (when (plist-member metadata :comment)
-      (plist-get metadata :comment))))
+(defun clutch--cached-table-comment (conn table)
+  "Return TABLE's cached comment on CONN, or nil."
+  (plist-get
+   (clutch--table-metadata conn (clutch--table-comment-key conn table))
+   :comment))
 
 (defun clutch--table-comment-cached-p (conn table &optional schema)
   "Return non-nil when TABLE in SCHEMA has a cached comment on CONN."

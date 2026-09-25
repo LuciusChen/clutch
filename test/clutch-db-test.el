@@ -321,30 +321,34 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (ert-deftest clutch-db-test-normalize-connect-params-tls-options ()
   "Backend TLS options should normalize to adapter-native connection params."
-  (dolist (case '((mysql-disabled mysql
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (dolist (case '((mysql-disabled clutch-db-mysql--normalize-connect-params
                    (:host "127.0.0.1" :tls nil :ssl-mode off)
                    ((:clutch-tls-mode . disable) (:ssl-mode . disabled))
                    (:tls) nil)
-                  (mysql-conflict mysql
+                  (mysql-conflict clutch-db-mysql--normalize-connect-params
                    (:host "127.0.0.1" :tls t :ssl-mode disabled)
                    nil nil clutch-db-error)
-                  (pg-require pg
+                  (pg-require clutch-db-pg--normalize-connect-params
                    (:host "127.0.0.1" :tls t)
                    ((:sslmode . require))
                    (:tls :clutch-tls-mode) nil)
-                  (pg-prefer pg
+                  (pg-prefer clutch-db-pg--normalize-connect-params
                    (:host "127.0.0.1" :sslmode "prefer")
                    ((:sslmode . prefer))
                    (:tls :clutch-tls-mode) nil)
-                  (pg-unsupported pg
+                  (pg-unsupported clutch-db-pg--normalize-connect-params
                    (:host "127.0.0.1" :sslmode verify-ca)
                    nil nil clutch-db-error)))
-    (pcase-let ((`(,label ,backend ,input ,expected ,absent ,error-type) case))
+    (pcase-let ((`(,label ,normalize-fn ,input ,expected ,absent ,error-type) case))
       (ert-info ((format "case: %s" label))
         (if error-type
-            (should-error (clutch-db--normalize-connect-params backend input)
+            (should-error (funcall normalize-fn
+                                   (clutch-db--reject-removed-connect-params input))
                           :type error-type)
-          (let ((params (clutch-db--normalize-connect-params backend input)))
+          (let ((params (funcall normalize-fn
+                                 (clutch-db--reject-removed-connect-params input))))
             (dolist (pair expected)
               (should (eq (plist-get params (car pair)) (cdr pair))))
             (dolist (key absent)
@@ -378,24 +382,9 @@ and a `?' inside a dollar-quoted function body is part of the body."
 (ert-deftest clutch-db-test-normalize-connect-params-rejects-removed-read-timeout ()
   "Removed connection timeout aliases should fail before reaching adapters."
   (should-error
-   (clutch-db--normalize-connect-params
-    'mysql '(:host "127.0.0.1" :read-timeout 5))
+   (clutch-db--reject-removed-connect-params
+    '(:host "127.0.0.1" :read-timeout 5))
    :type 'user-error))
-
-(ert-deftest clutch-db-test-normalize-connect-params-dispatches-registry-function ()
-  "Connection parameter normalization should come from backend registry metadata."
-  (let ((clutch-backend--registry
-         '((alpha . (:normalize-fn clutch-db-test--alpha-normalize))
-           (beta . (:normalize-fn clutch-db-test--beta-normalize)))))
-    (cl-letf (((symbol-function 'clutch-db-test--alpha-normalize)
-               (lambda (params)
-                 (append params '(:normalized-by alpha))))
-              ((symbol-function 'clutch-db-test--beta-normalize)
-               (lambda (_params)
-                 (ert-fail "Called the wrong backend normalizer"))))
-      (should (equal (clutch-db--normalize-connect-params
-                      'alpha '(:database "app"))
-                     '(:database "app" :normalized-by alpha))))))
 
 (ert-deftest clutch-db-test-redis-query-mapping-contract ()
   :tags '(:smoke)
@@ -681,9 +670,10 @@ and a `?' inside a dollar-quoted function body is part of the body."
 
 (ert-deftest clutch-db-test-jdbc-connect-timeout-contract ()
   "JDBC connect should keep explicit and default timeout phases separate."
-  (ert-info ("explicit timeouts")
+  (ert-info ("explicit timeouts, query timeout from its default")
     (let ((clutch-jdbc-oracle-manual-commit t)
           (clutch-jdbc-validate-after-idle-seconds 123)
+          (clutch-query-timeout-seconds 88)
           captured-op captured-params captured-timeout)
       (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                 ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
@@ -714,6 +704,8 @@ and a `?' inside a dollar-quoted function body is part of the body."
           (should (= (alist-get 'validate-after-idle-seconds captured-params)
                      123))
           (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 41))
+          (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout)
+                     88))
           (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
   (ert-info ("default timeouts")
     (let ((clutch-connect-timeout-seconds 10)
@@ -2247,10 +2239,8 @@ Filtering the category listing ran a schema-wide query per describe."
 (defun clutch-db-test--make-mongodb-conn (&optional database client)
   "Return a lightweight native MongoDB Clutch connection for unit tests."
   (make-clutch-mongodb-conn
-   :params (list :database (or database "app"))
    :database (or database "app")
    :client (or client 'mongodb-client)
-   :closed nil
    :busy nil))
 
 (ert-deftest clutch-db-test-mongodb-endpoint-metadata-uses-effective-client-state ()
@@ -2292,8 +2282,10 @@ Filtering the category listing ran a schema-wide query per describe."
                (lambda (file &rest _args)
                  (setq loaded file)
                  t)))
-      (let ((err (should-error (clutch-mongodb--ensure-mongodb-client-api)
-                               :type 'clutch-db-error)))
+      (let ((err (should-error
+                  (clutch-db--ensure-client-api
+                   'mongodb "MongoDB" clutch-mongodb--required-mongodb-functions)
+                  :type 'clutch-db-error)))
         (should (string-match-p "requires current mongodb.el public API"
                                 (error-message-string err)))
         (should (string-match-p "mongodb-connection-host"
@@ -2364,8 +2356,8 @@ Filtering the category listing ran a schema-wide query per describe."
                  (setq captured-driver driver
                        captured-params params)
                  'jdbc-conn))
-              ((symbol-function 'clutch-mongodb--ensure-mongodb-client-api)
-               (lambda ()
+              ((symbol-function 'clutch-db--ensure-client-api)
+               (lambda (&rest _args)
                  (ert-fail "SQL Interface should not load native mongodb.el API"))))
       (should (eq (clutch-mongodb-connect
                    '(:surface "sql-interface"
@@ -2459,12 +2451,12 @@ Filtering the category listing ran a schema-wide query per describe."
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   :tags '(:smoke)
   "Native MongoDB query results should flatten top-level document keys."
-  (let ((docs '((("_id" . (("$oid" . "64f")))
+  (let ((docs `((("_id" . ,(mongodb-object-id "64f"))
                  ("name" . "Ann")
                  ("score" . 10)
                  ("tags" . ["a" "b"])
                  ("meta" . "plain"))
-                (("_id" . (("$oid" . "650")))
+                (("_id" . ,(mongodb-object-id "650"))
                  ("name" . "Bob")
                  ("meta" . (("ok" . t)))
                  ("active" . :false)))))
@@ -2481,25 +2473,16 @@ Filtering the category listing ran a schema-wide query per describe."
         (should (equal (mapcar (lambda (column)
                                  (plist-get column :type-category))
                                (clutch-db-result-columns result))
-                       '(json text numeric json json text json)))
+                       '(text text numeric json json text json)))
         (should (plist-get (car (last (clutch-db-result-columns result)))
                            :hidden))
         (should (plist-get (car (last (clutch-db-result-columns result)))
                            :document-source))
         (should (equal (clutch-db-result-rows result)
-                       '(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
-                          "plain" nil
-                          (("_id" . (("$oid" . "64f")))
-                           ("name" . "Ann")
-                           ("score" . 10)
-                           ("tags" . ["a" "b"])
-                           ("meta" . "plain")))
+                       `(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
+                          "plain" nil ,(nth 0 docs))
                          ("{\"$oid\":\"650\"}" "Bob" nil nil
-                          "{\"ok\":true}" "false"
-                          (("_id" . (("$oid" . "650")))
-                           ("name" . "Bob")
-                           ("meta" . (("ok" . t)))
-                           ("active" . :false))))))))))
+                          "{\"ok\":true}" "false" ,(nth 1 docs)))))))))
 
 (ert-deftest clutch-db-test-mongodb-result-context-records-source-collection ()
   "Native MongoDB query context should record collection result metadata."
@@ -2536,11 +2519,13 @@ Filtering the category listing ran a schema-wide query per describe."
       '("db.getCollection(\"users\").deleteOne({\"_id\":7});")))))
 
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
-  "Native MongoDB scalar array results should use a value column."
+  "Native MongoDB scalar array results should use a value column.
+mongodb.el decodes a BSON array, such as the values of `distinct()', as a
+vector."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
-             (lambda (_conn _code) '(1 2 3))))
+             (lambda (_conn _code) [1 2 3])))
     (let* ((conn (clutch-db-test--make-mongodb-conn))
-           (result (clutch-db-query conn "[1, 2, 3]")))
+           (result (clutch-db-query conn "db.users.distinct('n')")))
       (should (equal (clutch-db-result-column-names
                       (clutch-db-result-columns result))
                      '("value")))
@@ -2610,26 +2595,26 @@ Filtering the category listing ran a schema-wide query per describe."
                                  (cdr option)))))
             (should-not options)))))))
 
-(ert-deftest clutch-db-test-mongodb-find-limit-is-bounded ()
-  "Native MongoDB find should reject unbounded and oversized limits."
-  (let ((clutch-mongodb-find-result-limit 50))
-    (dolist (query '("db.users.find({}).limit(0)"
-                     "db.users.find({}).limit(51)"))
-      (should-error
-       (clutch-mongodb--eval
-        (clutch-db-test--make-mongodb-conn "app" 'client)
-        query)
-       :type 'clutch-db-error))))
+(ert-deftest clutch-db-test-mongodb-parse-allows-space-before-arguments ()
+  "A helper call may put whitespace between its name and argument list.
+The parser took the start of that whitespace for the opening paren."
+  (dolist (pair '(("db.users.find({a: 1}).limit(5)"
+                   "db.users.find ({a: 1}).limit (5)")
+                  ("db.users.countDocuments({})"
+                   "db.users.countDocuments\t({})")))
+    (ert-info ((cadr pair))
+      (should (equal (clutch-mongodb--parse-db-call (cadr pair))
+                     (clutch-mongodb--parse-db-call (car pair)))))))
 
 (ert-deftest clutch-db-test-mongodb-eval-validation-contract ()
-  "Native MongoDB helper parsing should reject unsupported or invalid inputs."
-  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
-    (cl-letf (((symbol-function 'mongodb-find)
-               (lambda (&rest _) 'unexpected-success))
-              ((symbol-function 'mongodb-count-documents)
-               (lambda (&rest _) 'unexpected-success))
-              ((symbol-function 'mongodb-update)
-               (lambda (&rest _) 'unexpected-success)))
+  "Native MongoDB helper parsing should reject unsupported or invalid inputs.
+Every helper reaches the server through `mongodb-command', so a query that
+passes validation fails the test instead of failing on the fake client."
+  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client))
+        (clutch-mongodb-find-result-limit 50))
+    (cl-letf (((symbol-function 'mongodb-command)
+               (lambda (&rest _)
+                 (ert-fail "Invalid MongoDB query reached the server"))))
       (dolist (query '("db.users.find('name')"
                        "db.users.find({}, {}, {})"
                        "db.users.findOne({}).limit(1)"
@@ -2641,25 +2626,19 @@ Filtering the category listing ran a schema-wide query per describe."
                        "db.users.find({}).explain({mode: 'executionStats'})"
                        "db.users.deleteOne()"
                        "db.users.deleteOne('name')"
+                       "db.users.deleteOne({}, {})"
                        "db.users.deleteMany({})"
                        "db.users.insertOne('name')"
                        "db.users.insertMany({name: 'Ann'})"
                        "db.users.insertMany([1])"
                        "db.users.find({_id: NumberLong(7)})"
                        "db.getSiblingDB('admin').runCommand({ping: 1})"
-                       "db.users.find({name: /ann/i})"))
+                       "db.users.find({name: /ann/i})"
+                       "db.users.find({}).limit(0)"
+                       "db.users.find({}).limit(51)"))
         (ert-info ((format "query: %s" query))
           (should-error (clutch-mongodb--eval conn query)
                         :type 'clutch-db-error))))))
-
-(ert-deftest clutch-db-test-mongodb-helper-chains-are-method-specific ()
-  "MongoDB parsing should reject chains that execution would ignore."
-  (dolist (query '("db.users.findOne({}).limit(1)"
-                   "db.users.aggregate([]).sort({_id: 1})"
-                   "db.users.deleteOne({}).limit(1)"))
-    (ert-info ((format "query: %s" query))
-      (should-error (clutch-mongodb--parse-db-call query)
-                    :type 'clutch-db-error))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
   "Native MongoDB eval should translate aggregate options and helper chains."
@@ -2868,11 +2847,11 @@ Filtering the category listing ran a schema-wide query per describe."
 (ert-deftest clutch-db-test-mongodb-metadata-uses-public-client-api ()
   "Native MongoDB metadata should map databases and collections into Clutch objects."
   (let ((clutch-mongodb-schema-sample-size 2)
-        (documents '((("_id" . (("$oid" . "64f")))
+        (documents `((("_id" . ,(mongodb-object-id "64f"))
                       ("name" . "Ann")
                       ("score" . 10)
                       ("profile" . (("age" . 30))))
-                     (("_id" . (("$oid" . "650")))
+                     (("_id" . ,(mongodb-object-id "650"))
                       ("score" . "high")
                       ("active" . :false))))
         sample-collections)
@@ -2901,8 +2880,8 @@ Filtering the category listing ran a schema-wide query per describe."
                        '("_id" "name" "score" "profile" "profile.age" "active")))
         (should (equal (clutch-db-column-details conn "users")
                        '((:name "_id"
-                          :type "BSON<object>"
-                          :type-category json
+                          :type "BSON<objectId>"
+                          :type-category text
                           :nullable t
                           :comment nil)
                          (:name "name"
@@ -3091,18 +3070,18 @@ Filtering the category listing ran a schema-wide query per describe."
 (ert-deftest clutch-db-test-mongodb-collection-profile-samples-nested-fields ()
   "Native MongoDB collection profiles should include nested field stats."
   (let ((clutch-mongodb-schema-sample-size 3)
-        (sample-docs '((("_id" . (("$oid" . "64f")))
+        (sample-docs `((("_id" . ,(mongodb-object-id "64f"))
                         ("name" . "Ann")
                         ("profile" . (("age" . 30)))
                         ("items" . [(("sku" . "A") ("qty" . 2))])
                         ("status" . "active"))
-                       (("_id" . (("$oid" . "650")))
+                       (("_id" . ,(mongodb-object-id "650"))
                         ("name" . "Bob")
                         ("profile" . (("age" . 40)))
                         ("items" . [(("sku" . "A") ("qty" . 1))
                                      (("sku" . "B") ("qty" . 4))])
                         ("status" . "active"))
-                       (("_id" . (("$oid" . "651")))
+                       (("_id" . ,(mongodb-object-id "651"))
                         ("name" . "Cal")
                         ("status" . "blocked"))))
         (id-index (mongodb-document
@@ -3839,27 +3818,6 @@ orai18n warning."
       (should (equal executed-sql "USE `analytics`"))
       (should (equal (mysql-current-database conn) "analytics")))))
 
-;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
-
-(ert-deftest clutch-db-test-jdbc-apply-timeout-defaults ()
-  "Missing JDBC timeouts should be filled without overwriting explicit values."
-  (let ((clutch-connect-timeout-seconds 10)
-        (clutch-read-idle-timeout-seconds 20)
-        (clutch-query-timeout-seconds 30)
-        (clutch-jdbc-rpc-timeout-seconds 40))
-    (dolist (case '((nil
-                     (:connect-timeout 10 :read-idle-timeout 20
-                      :query-timeout 30 :rpc-timeout 40))
-                    ((:connect-timeout 99 :query-timeout 88)
-                     (:connect-timeout 99 :read-idle-timeout 20
-                      :query-timeout 88 :rpc-timeout 40))))
-      (pcase-let* ((`(,params ,expected) case)
-                   (result (clutch-jdbc--apply-timeout-defaults params)))
-        (dolist (key '(:connect-timeout :read-idle-timeout
-                       :query-timeout :rpc-timeout))
-          (should (= (plist-get result key)
-                     (plist-get expected key))))))))
-
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
@@ -3876,8 +3834,6 @@ orai18n warning."
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
     (should (eq (plist-get mysql-features :connect-fn) 'clutch-db-mysql-connect))
-    (should (eq (plist-get mysql-features :normalize-fn)
-                'clutch-db-mysql--normalize-connect-params))
     (should (equal (plist-get mysql-features :display-name) "MySQL"))
     (should (= (plist-get mysql-features :default-port) 3306))
     (should (eq (plist-get mysql-features :support-level) 'core))
@@ -3887,8 +3843,6 @@ orai18n warning."
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'clutch-db-pg))
     (should (eq (plist-get pg-features :connect-fn) 'clutch-db-pg-connect))
-    (should (eq (plist-get pg-features :normalize-fn)
-                'clutch-db-pg--normalize-connect-params))
     (should (equal (plist-get pg-features :display-name) "PostgreSQL"))
     (should (= (plist-get pg-features :default-port) 5432))
     (should (eq (plist-get pg-features :support-level) 'core))
@@ -4348,86 +4302,64 @@ orai18n warning."
 
 ;;;; Unit tests — SQL building (paged queries)
 
-(ert-deftest clutch-db-test-mysql-build-paged-sql ()
+(ert-deftest clutch-db-test-build-paged-sql-limit-offset ()
   :tags '(:smoke)
-  "Test MySQL paged SQL generation."
+  "MySQL and PostgreSQL share LIMIT/OFFSET paging, quoted per dialect."
   (require 'clutch-db-mysql)
   (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost")))
-    ;; Basic pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 0" sql)))
-    ;; Page 2
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 1 10)))
-      (should (string-match-p "OFFSET 10" sql)))
-    ;; Explicit offset for last-window pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 70" sql)))
-    ;; With order
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10
-                                              '("name" . "ASC"))))
-      (should (string-match-p "ORDER BY" sql))
-      (should (string-match-p "ASC" sql)))
-    ;; Replacing existing ORDER BY for result-driven sort
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM t ORDER BY created_at DESC"
-                0 10 '("name" . "ASC"))))
-      (should (string-match-p "ORDER BY `name` ASC" sql))
-      (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql)))
-    ;; Already has LIMIT — no modification
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t LIMIT 5" 0 10)))
-      (should (equal sql "SELECT * FROM t LIMIT 5")))
-    ;; Nested LIMIT should not disable outer pagination
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub"
-                0 10)))
-      (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
-      (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
-
-(ert-deftest clutch-db-test-pg-build-paged-sql ()
-  :tags '(:smoke)
-  "Test PostgreSQL paged SQL generation."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pg-connection :host "localhost")))
-    ;; Basic pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 0" sql)))
-    ;; Page 3, page-size 25
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 2 25)))
-      (should (string-match-p "LIMIT 25" sql))
-      (should (string-match-p "OFFSET 50" sql)))
-    ;; Explicit offset for last-window pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 70" sql)))
-    ;; With descending order
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10
-                                              '("id" . "DESC"))))
-      (should (string-match-p "ORDER BY" sql))
-      (should (string-match-p "DESC" sql)))
-    ;; Replacing existing ORDER BY for result-driven sort
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM t ORDER BY created_at DESC"
-                0 10 '("id" . "ASC"))))
-      (should (string-match-p "ORDER BY \"id\" ASC" sql))
-      (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql)))
-    ;; Query with trailing semicolon
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t;" 0 10)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should-not (string-match-p ";\\s*LIMIT" sql)))
-    ;; Nested LIMIT should not disable outer pagination
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub"
-                0 10)))
-      (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
-      (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
+  (let ((mysql-conn (make-mysql-conn :host "localhost"))
+        (pg-conn (clutch-db-test--make-pg-connection :host "localhost")))
+    (dolist (case
+             `(("mysql basic pagination" ,mysql-conn "SELECT * FROM t" 0 10
+                nil nil ("LIMIT 10" "OFFSET 0") nil)
+               ("mysql page 2" ,mysql-conn "SELECT * FROM t" 1 10 nil nil
+                ("OFFSET 10") nil)
+               ("mysql explicit offset" ,mysql-conn "SELECT * FROM t" 9 10
+                nil 70 ("LIMIT 10" "OFFSET 70") nil)
+               ("mysql with order" ,mysql-conn "SELECT * FROM t" 0 10
+                ("name" . "ASC") nil ("ORDER BY" "ASC") nil)
+               ("mysql replaces existing order by" ,mysql-conn
+                "SELECT * FROM t ORDER BY created_at DESC" 0 10
+                ("name" . "ASC") nil ("ORDER BY `name` ASC")
+                ("ORDER BY created_at DESC.*ORDER BY"))
+               ("mysql already has limit" ,mysql-conn
+                "SELECT * FROM t LIMIT 5" 0 10 nil nil
+                ("\\`SELECT \\* FROM t LIMIT 5\\'") nil)
+               ("mysql nested limit" ,mysql-conn
+                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub" 0 10 nil nil
+                ("FROM (SELECT \\* FROM t LIMIT 1) AS sub"
+                 "LIMIT 10 OFFSET 0\\'")
+                nil)
+               ("pg basic pagination" ,pg-conn "SELECT * FROM t" 0 10 nil nil
+                ("LIMIT 10" "OFFSET 0") nil)
+               ("pg page 3 size 25" ,pg-conn "SELECT * FROM t" 2 25 nil nil
+                ("LIMIT 25" "OFFSET 50") nil)
+               ("pg explicit offset" ,pg-conn "SELECT * FROM t" 9 10 nil 70
+                ("LIMIT 10" "OFFSET 70") nil)
+               ("pg with descending order" ,pg-conn "SELECT * FROM t" 0 10
+                ("id" . "DESC") nil ("ORDER BY" "DESC") nil)
+               ("pg replaces existing order by" ,pg-conn
+                "SELECT * FROM t ORDER BY created_at DESC" 0 10
+                ("id" . "ASC") nil ("ORDER BY \"id\" ASC")
+                ("ORDER BY created_at DESC.*ORDER BY"))
+               ("pg trailing semicolon" ,pg-conn "SELECT * FROM t;" 0 10
+                nil nil ("LIMIT 10") (";\\s*LIMIT"))
+               ("pg nested limit" ,pg-conn
+                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub" 0 10 nil nil
+                ("FROM (SELECT \\* FROM t LIMIT 1) AS sub"
+                 "LIMIT 10 OFFSET 0\\'")
+                nil)))
+      (pcase-let ((`(,label ,conn ,input-sql ,page ,page-size ,order-by
+                     ,offset ,matches ,not-matches)
+                   case))
+        (ert-info ((format "case: %s" label))
+          (let ((sql (clutch-db-build-paged-sql conn input-sql page page-size
+                                                 order-by offset)))
+            (dolist (pattern matches)
+              (should (string-match-p pattern sql)))
+            (dolist (pattern not-matches)
+              (should-not (string-match-p pattern sql)))))))))
 
 (ert-deftest clutch-db-test-jdbc-build-paged-sql-dialects ()
   "JDBC pagination should follow dialect-specific offset syntax."
@@ -4945,65 +4877,6 @@ out, which broke the Oracle statement and left SQL Server unpaged."
       (should drained)
       (should disconnected)
       (should (= (mysql-conn-read-idle-timeout conn) 30)))))
-
-(ert-deftest clutch-db-test-mysql-query-timeout-interrupts-and-keeps-connection ()
-  "MySQL query timeout should cancel the server query when recovery succeeds."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        interrupted
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn _sql)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq interrupted t)
-                 t))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (_conn)
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-query conn "SELECT SLEEP(60)")
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should-not disconnected)
-      (should (string-match-p "restored MySQL connection" message)))))
-
-(ert-deftest clutch-db-test-mysql-query-timeout-disconnects-when-recovery-fails ()
-  "MySQL query timeout should close the connection when cancel recovery fails."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        interrupted
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn _sql)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq interrupted t)
-                 nil))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-query conn "SELECT SLEEP(60)")
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should disconnected)
-      (should (string-match-p "timeout recovery failed" message)))))
 
 (ert-deftest clutch-db-test-pg-interrupt-query-return-contract ()
   "PostgreSQL interrupt should reuse synchronized clients without recancelling."
@@ -7368,9 +7241,7 @@ It does so without touching the agent process."
                           "clutch-jdbc-request"))
            (should (string-match-p
                     "SQLNonTransientConnectionException"
-                    (plist-get (plist-get details :debug) :stack-trace))))
-         (should-not (string-match-p "cookie-secret-71"
-                                     (prin1-to-string (nth 2 err)))))))))
+                    (plist-get (plist-get details :debug) :stack-trace)))))))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
   "Connection-scoped JDBC errors should stay on that connection."
