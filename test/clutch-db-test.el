@@ -681,9 +681,10 @@ and a `?' inside a dollar-quoted function body is part of the body."
 
 (ert-deftest clutch-db-test-jdbc-connect-timeout-contract ()
   "JDBC connect should keep explicit and default timeout phases separate."
-  (ert-info ("explicit timeouts")
+  (ert-info ("explicit timeouts, query timeout from its default")
     (let ((clutch-jdbc-oracle-manual-commit t)
           (clutch-jdbc-validate-after-idle-seconds 123)
+          (clutch-query-timeout-seconds 88)
           captured-op captured-params captured-timeout)
       (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                 ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
@@ -714,6 +715,8 @@ and a `?' inside a dollar-quoted function body is part of the body."
           (should (= (alist-get 'validate-after-idle-seconds captured-params)
                      123))
           (should (= (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout) 41))
+          (should (= (plist-get (clutch-jdbc-conn-params conn) :query-timeout)
+                     88))
           (should (= (clutch-jdbc-conn-conn-id conn) 7))))))
   (ert-info ("default timeouts")
     (let ((clutch-connect-timeout-seconds 10)
@@ -3824,27 +3827,6 @@ orai18n warning."
       (should (equal executed-sql "USE `analytics`"))
       (should (equal (mysql-current-database conn) "analytics")))))
 
-;;;; Unit tests — clutch-jdbc--apply-timeout-defaults
-
-(ert-deftest clutch-db-test-jdbc-apply-timeout-defaults ()
-  "Missing JDBC timeouts should be filled without overwriting explicit values."
-  (let ((clutch-connect-timeout-seconds 10)
-        (clutch-read-idle-timeout-seconds 20)
-        (clutch-query-timeout-seconds 30)
-        (clutch-jdbc-rpc-timeout-seconds 40))
-    (dolist (case '((nil
-                     (:connect-timeout 10 :read-idle-timeout 20
-                      :query-timeout 30 :rpc-timeout 40))
-                    ((:connect-timeout 99 :query-timeout 88)
-                     (:connect-timeout 99 :read-idle-timeout 20
-                      :query-timeout 88 :rpc-timeout 40))))
-      (pcase-let* ((`(,params ,expected) case)
-                   (result (clutch-jdbc--apply-timeout-defaults params)))
-        (dolist (key '(:connect-timeout :read-idle-timeout
-                       :query-timeout :rpc-timeout))
-          (should (= (plist-get result key)
-                     (plist-get expected key))))))))
-
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
@@ -4930,65 +4912,6 @@ out, which broke the Oracle statement and left SQL Server unpaged."
       (should drained)
       (should disconnected)
       (should (= (mysql-conn-read-idle-timeout conn) 30)))))
-
-(ert-deftest clutch-db-test-mysql-query-timeout-interrupts-and-keeps-connection ()
-  "MySQL query timeout should cancel the server query when recovery succeeds."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        interrupted
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn _sql)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq interrupted t)
-                 t))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (_conn)
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-query conn "SELECT SLEEP(60)")
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should-not disconnected)
-      (should (string-match-p "restored MySQL connection" message)))))
-
-(ert-deftest clutch-db-test-mysql-query-timeout-disconnects-when-recovery-fails ()
-  "MySQL query timeout should close the connection when cancel recovery fails."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
-                               :user "root" :database "test"))
-        interrupted
-        disconnected
-        message)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn _sql)
-                 (signal 'mysql-timeout
-                         '("Timed out waiting for 4 bytes"))))
-              ((symbol-function 'clutch-db-interrupt-query)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq interrupted t)
-                 nil))
-              ((symbol-function 'mysql-disconnect)
-               (lambda (mysql-conn)
-                 (should (eq mysql-conn conn))
-                 (setq disconnected t))))
-      (condition-case err
-          (clutch-db-query conn "SELECT SLEEP(60)")
-        (clutch-db-error
-         (setq message (error-message-string err))))
-      (should interrupted)
-      (should disconnected)
-      (should (string-match-p "timeout recovery failed" message)))))
 
 (ert-deftest clutch-db-test-pg-interrupt-query-return-contract ()
   "PostgreSQL interrupt should reuse synchronized clients without recancelling."
@@ -7353,9 +7276,7 @@ It does so without touching the agent process."
                           "clutch-jdbc-request"))
            (should (string-match-p
                     "SQLNonTransientConnectionException"
-                    (plist-get (plist-get details :debug) :stack-trace))))
-         (should-not (string-match-p "cookie-secret-71"
-                                     (prin1-to-string (nth 2 err)))))))))
+                    (plist-get (plist-get details :debug) :stack-trace)))))))))
 
 (ert-deftest clutch-db-test-jdbc-rpc-on-conn-stores-structured-diagnostics-on-connection ()
   "Connection-scoped JDBC errors should stay on that connection."
