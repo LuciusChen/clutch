@@ -3584,10 +3584,22 @@ header string and column pixel widths, then reused."
                  (propertize "schema…" 'face 'shadow))))
 
 (ert-deftest clutch-test-refresh-current-schema-background-contract ()
-  "Manual refresh should use background refresh and sync fallback for lazy backends."
-  (dolist (case '((background t nil "started in background")
-                  (fallback nil t "Schema refreshed (2 tables)")))
-    (pcase-let ((`(,label ,async-result ,expect-sync ,message-fragment) case))
+  "Manual schema refresh should pick the background or synchronous path.
+Lazy backends refresh in the background and fall back to a synchronous
+refresh, while the `clutch-refresh-schema' command always refreshes
+synchronously."
+  (dolist (case
+           (list
+            (list "background" (lambda () (clutch--refresh-current-schema))
+                  t t nil "started in background")
+            (list "fallback" (lambda () (clutch--refresh-current-schema))
+                  nil t t "Schema refreshed (2 tables)")
+            (list "command entry point forces sync"
+                  (lambda () (clutch-refresh-schema))
+                  t nil t "Schema refreshed (2 tables)")))
+    (pcase-let ((`(,label ,entry-point ,async-result ,expect-async
+                   ,expect-sync ,message-fragment)
+                 case))
       (ert-info ((format "case: %s" label))
         (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
               seen-message
@@ -3612,44 +3624,15 @@ header string and column pixel widths, then reused."
                        (setq seen-message (apply #'format fmt args)))))
             (with-temp-buffer
               (setq-local clutch-connection 'fake-conn)
-              (should (clutch--refresh-current-schema))
-              (should async-called)
+              (should (funcall entry-point))
+              (if expect-async
+                  (should async-called)
+                (should-not async-called))
               (if expect-sync
                   (should sync-called)
                 (should-not sync-called))
               (should (string-match-p (regexp-quote message-fragment)
                                       seen-message)))))))))
-
-(ert-deftest clutch-test-refresh-schema-command-forces-sync-refresh-on-lazy-backends ()
-  "Explicit schema refresh should bypass background refresh for lazy backends."
-  (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
-        seen-message
-        sync-called
-        async-called)
-    (cl-letf (((symbol-function 'clutch-db-live-p)
-               (lambda (_conn) t))
-              ((symbol-function 'clutch-db-eager-schema-refresh-p)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch--refresh-schema-cache-async)
-               (lambda (_conn)
-                 (setq async-called t)
-                 t))
-              ((symbol-function 'clutch--refresh-schema-cache)
-               (lambda (_conn)
-                 (setq sync-called t)
-                 (puthash 'fake-conn '(:state ready :tables 2)
-                          clutch--schema-status-cache)
-                 t))
-              ((symbol-function 'message)
-               (lambda (fmt &rest args)
-                 (setq seen-message (apply #'format fmt args)))))
-      (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn)
-        (should (clutch-refresh-schema))
-        (should sync-called)
-        (should-not async-called)
-        (should (string-match-p (regexp-quote "Schema refreshed (2 tables)")
-                                seen-message))))))
 
 (ert-deftest clutch-test-describe-dwim-warns-when-schema-cache-is-stale ()
   "Object prompts should surface stale-schema recovery hints."

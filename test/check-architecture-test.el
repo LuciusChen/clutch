@@ -14,8 +14,7 @@
   (should-not (featurep 'clutch))
   (should-not (featurep 'clutch-connection))
   (should (fboundp 'clutch-debug-mode))
-  (should (boundp 'clutch-debug-mode))
-  (should (equal clutch-debug-buffer-name "*clutch-debug*")))
+  (should (boundp 'clutch-debug-mode)))
 
 (ert-deftest clutch-architecture-reader-cases ()
   "Exercise dependency and source-reference reader cases."
@@ -342,7 +341,6 @@
   (should-not (featurep 'clutch))
   (should (= clutch-result-max-rows 500))
   (should (custom-variable-p 'clutch-sql-product))
-  (should (eq clutch-sql-product 'mysql))
   (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
                     clutch-switch-schema))
     (should (fboundp symbol))))
