@@ -520,7 +520,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (signal 'clutch-db-error
             (list "Expected MongoDB collection method call")))
   (let* ((method-start (1+ pos))
-         (open (string-match-p "[[:space:]]*(" text method-start))
+         (open (and (string-match "[[:space:]]*(" text method-start)
+                    (1- (match-end 0))))
          method args close chain)
     (unless open
       (signal 'clutch-db-error
@@ -548,7 +549,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
         (signal 'clutch-db-error
                 (list "Unsupported MongoDB helper chain")))
       (let* ((method-start 1)
-             (open (string-match-p "[[:space:]]*(" tail method-start)))
+             (open (and (string-match "[[:space:]]*(" tail method-start)
+                        (1- (match-end 0)))))
         (unless open
           (signal 'clutch-db-error
                   (list "Expected MongoDB chained helper arguments")))

@@ -2595,6 +2595,17 @@ vector."
                                  (cdr option)))))
             (should-not options)))))))
 
+(ert-deftest clutch-db-test-mongodb-parse-allows-space-before-arguments ()
+  "A helper call may put whitespace between its name and argument list.
+The parser took the start of that whitespace for the opening paren."
+  (dolist (pair '(("db.users.find({a: 1}).limit(5)"
+                   "db.users.find ({a: 1}).limit (5)")
+                  ("db.users.countDocuments({})"
+                   "db.users.countDocuments\t({})")))
+    (ert-info ((cadr pair))
+      (should (equal (clutch-mongodb--parse-db-call (cadr pair))
+                     (clutch-mongodb--parse-db-call (car pair)))))))
+
 (ert-deftest clutch-db-test-mongodb-eval-validation-contract ()
   "Native MongoDB helper parsing should reject unsupported or invalid inputs.
 Every helper reaches the server through `mongodb-command', so a query that
