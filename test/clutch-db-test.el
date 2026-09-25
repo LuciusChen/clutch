@@ -4302,86 +4302,64 @@ orai18n warning."
 
 ;;;; Unit tests — SQL building (paged queries)
 
-(ert-deftest clutch-db-test-mysql-build-paged-sql ()
+(ert-deftest clutch-db-test-build-paged-sql-limit-offset ()
   :tags '(:smoke)
-  "Test MySQL paged SQL generation."
+  "MySQL and PostgreSQL share LIMIT/OFFSET paging, quoted per dialect."
   (require 'clutch-db-mysql)
   (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost")))
-    ;; Basic pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 0" sql)))
-    ;; Page 2
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 1 10)))
-      (should (string-match-p "OFFSET 10" sql)))
-    ;; Explicit offset for last-window pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 70" sql)))
-    ;; With order
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10
-                                              '("name" . "ASC"))))
-      (should (string-match-p "ORDER BY" sql))
-      (should (string-match-p "ASC" sql)))
-    ;; Replacing existing ORDER BY for result-driven sort
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM t ORDER BY created_at DESC"
-                0 10 '("name" . "ASC"))))
-      (should (string-match-p "ORDER BY `name` ASC" sql))
-      (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql)))
-    ;; Already has LIMIT — no modification
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t LIMIT 5" 0 10)))
-      (should (equal sql "SELECT * FROM t LIMIT 5")))
-    ;; Nested LIMIT should not disable outer pagination
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub"
-                0 10)))
-      (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
-      (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
-
-(ert-deftest clutch-db-test-pg-build-paged-sql ()
-  :tags '(:smoke)
-  "Test PostgreSQL paged SQL generation."
   (require 'clutch-db-pg)
-  (let ((conn (clutch-db-test--make-pg-connection :host "localhost")))
-    ;; Basic pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 0" sql)))
-    ;; Page 3, page-size 25
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 2 25)))
-      (should (string-match-p "LIMIT 25" sql))
-      (should (string-match-p "OFFSET 50" sql)))
-    ;; Explicit offset for last-window pagination
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 9 10 nil 70)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should (string-match-p "OFFSET 70" sql)))
-    ;; With descending order
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t" 0 10
-                                              '("id" . "DESC"))))
-      (should (string-match-p "ORDER BY" sql))
-      (should (string-match-p "DESC" sql)))
-    ;; Replacing existing ORDER BY for result-driven sort
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM t ORDER BY created_at DESC"
-                0 10 '("id" . "ASC"))))
-      (should (string-match-p "ORDER BY \"id\" ASC" sql))
-      (should-not (string-match-p "ORDER BY created_at DESC.*ORDER BY" sql)))
-    ;; Query with trailing semicolon
-    (let ((sql (clutch-db-build-paged-sql conn "SELECT * FROM t;" 0 10)))
-      (should (string-match-p "LIMIT 10" sql))
-      (should-not (string-match-p ";\\s*LIMIT" sql)))
-    ;; Nested LIMIT should not disable outer pagination
-    (let ((sql (clutch-db-build-paged-sql
-                conn
-                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub"
-                0 10)))
-      (should (string-match-p "FROM (SELECT \\* FROM t LIMIT 1) AS sub" sql))
-      (should (string-match-p "LIMIT 10 OFFSET 0\\'" sql)))))
+  (let ((mysql-conn (make-mysql-conn :host "localhost"))
+        (pg-conn (clutch-db-test--make-pg-connection :host "localhost")))
+    (dolist (case
+             `(("mysql basic pagination" ,mysql-conn "SELECT * FROM t" 0 10
+                nil nil ("LIMIT 10" "OFFSET 0") nil)
+               ("mysql page 2" ,mysql-conn "SELECT * FROM t" 1 10 nil nil
+                ("OFFSET 10") nil)
+               ("mysql explicit offset" ,mysql-conn "SELECT * FROM t" 9 10
+                nil 70 ("LIMIT 10" "OFFSET 70") nil)
+               ("mysql with order" ,mysql-conn "SELECT * FROM t" 0 10
+                ("name" . "ASC") nil ("ORDER BY" "ASC") nil)
+               ("mysql replaces existing order by" ,mysql-conn
+                "SELECT * FROM t ORDER BY created_at DESC" 0 10
+                ("name" . "ASC") nil ("ORDER BY `name` ASC")
+                ("ORDER BY created_at DESC.*ORDER BY"))
+               ("mysql already has limit" ,mysql-conn
+                "SELECT * FROM t LIMIT 5" 0 10 nil nil
+                ("\\`SELECT \\* FROM t LIMIT 5\\'") nil)
+               ("mysql nested limit" ,mysql-conn
+                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub" 0 10 nil nil
+                ("FROM (SELECT \\* FROM t LIMIT 1) AS sub"
+                 "LIMIT 10 OFFSET 0\\'")
+                nil)
+               ("pg basic pagination" ,pg-conn "SELECT * FROM t" 0 10 nil nil
+                ("LIMIT 10" "OFFSET 0") nil)
+               ("pg page 3 size 25" ,pg-conn "SELECT * FROM t" 2 25 nil nil
+                ("LIMIT 25" "OFFSET 50") nil)
+               ("pg explicit offset" ,pg-conn "SELECT * FROM t" 9 10 nil 70
+                ("LIMIT 10" "OFFSET 70") nil)
+               ("pg with descending order" ,pg-conn "SELECT * FROM t" 0 10
+                ("id" . "DESC") nil ("ORDER BY" "DESC") nil)
+               ("pg replaces existing order by" ,pg-conn
+                "SELECT * FROM t ORDER BY created_at DESC" 0 10
+                ("id" . "ASC") nil ("ORDER BY \"id\" ASC")
+                ("ORDER BY created_at DESC.*ORDER BY"))
+               ("pg trailing semicolon" ,pg-conn "SELECT * FROM t;" 0 10
+                nil nil ("LIMIT 10") (";\\s*LIMIT"))
+               ("pg nested limit" ,pg-conn
+                "SELECT * FROM (SELECT * FROM t LIMIT 1) AS sub" 0 10 nil nil
+                ("FROM (SELECT \\* FROM t LIMIT 1) AS sub"
+                 "LIMIT 10 OFFSET 0\\'")
+                nil)))
+      (pcase-let ((`(,label ,conn ,input-sql ,page ,page-size ,order-by
+                     ,offset ,matches ,not-matches)
+                   case))
+        (ert-info ((format "case: %s" label))
+          (let ((sql (clutch-db-build-paged-sql conn input-sql page page-size
+                                                 order-by offset)))
+            (dolist (pattern matches)
+              (should (string-match-p pattern sql)))
+            (dolist (pattern not-matches)
+              (should-not (string-match-p pattern sql)))))))))
 
 (ert-deftest clutch-db-test-jdbc-build-paged-sql-dialects ()
   "JDBC pagination should follow dialect-specific offset syntax."
