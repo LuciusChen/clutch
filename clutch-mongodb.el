@@ -1662,16 +1662,16 @@ FIELDS is an optional list of top-level field names for update snippets."
     (clutch-mongodb--result-from-docs conn value))
    ((clutch-mongodb--alist-p value)
     (clutch-mongodb--result-from-docs conn (list value)))
-   ((and (listp value) (not (clutch-mongodb--alist-p value)))
-    (let ((rows (mapcar (lambda (item)
-                          (list (clutch-mongodb--display-value item)))
-                        value)))
+   ((vectorp value)
+    (let ((items (append value nil)))
       (make-clutch-db-result
        :connection conn
        :columns (list (list :name "value"
                             :type-category
-                            (clutch-mongodb--column-category (car value))))
-       :rows rows)))
+                            (clutch-mongodb--column-category (car items))))
+       :rows (mapcar (lambda (item)
+                       (list (clutch-mongodb--display-value item)))
+                     items))))
    (t
     (make-clutch-db-result
      :connection conn
