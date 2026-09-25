@@ -669,8 +669,7 @@ object never lists the schema there."
           (cond
            ((clutch-db-object-name-search-p conn)
             (clutch--merge-object-entries
-             (clutch--merge-object-entries-by-name
-              (clutch-db-search-table-entries conn name))
+             (clutch-db-search-table-entries conn name)
              (unless table-like-only
                (clutch--warmed-object-entries conn))))
            (table-like-only
@@ -779,8 +778,7 @@ Results are filtered by ALLOWED-TYPES and deduplicated."
                full-entries)))))
     (list :attempted t
           :hits (clutch--filter-object-entries-by-types
-                 (clutch--merge-object-entries-by-name
-                  (append table-hits name-from-full))
+                 (clutch--merge-object-entries table-hits name-from-full)
                  allowed-types)
           :full-entries full-entries)))
 
@@ -865,13 +863,6 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
      ((string-empty-p type) "")
      (t (downcase type)))))
 
-(defun clutch--object-entry-identity-key (entry)
-  "Return a stable identity key for object ENTRY."
-  (list (or (plist-get entry :name) "")
-        (or (plist-get entry :type) "")
-        (or (plist-get entry :schema) "")
-        (or (plist-get entry :source-schema) "")))
-
 (defun clutch--object-entry-sort-key (entry)
   "Return a stable sort key for ENTRY."
   (list (clutch--object-type-rank (plist-get entry :type))
@@ -890,18 +881,6 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
                       (or (string< left-schema right-schema)
                           (and (string= left-schema right-schema)
                                (string< left-name right-name)))))))))
-
-(defun clutch--merge-object-entries-by-name (&rest entry-lists)
-  "Merge ENTRY-LISTS by object identity, preserving the first occurrence."
-  (let ((seen (make-hash-table :test 'equal))
-        merged)
-    (dolist (entries entry-lists)
-      (dolist (entry entries)
-        (let ((key (clutch--object-entry-identity-key entry)))
-          (unless (gethash key seen)
-            (puthash key t seen)
-            (push entry merged)))))
-    (nreverse merged)))
 
 (defun clutch--object-entry-target (entry)
   "Return the target schema display for object ENTRY, or nil."
@@ -926,7 +905,7 @@ an insert that creates a MongoDB collection."
                    'missing)))
     (if (not (eq cached 'missing))
         cached
-      (let ((entries (clutch--merge-object-entries-by-name
+      (let ((entries (clutch--merge-object-entries
                       (clutch-db-browseable-object-entries conn))))
         (clutch--cache-table-entry-comments conn entries)
         (when cacheable
