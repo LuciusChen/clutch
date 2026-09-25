@@ -1596,12 +1596,14 @@ and the ssh -N process has no owner yet at that point."
       (should-not (string-match-p "\\[\\.\\.\\.\\]" mode-name)))))
 
 (ert-deftest clutch-test-update-mode-line-preserves-result-header ()
-  "Execution UI updates should not replace a result table header."
+  "Execution UI updates should keep a result table's header and mode name.
+Re-running a query from a result buffer renamed its mode to \"clutch\"."
   (with-temp-buffer
     (clutch-result-mode)
     (setq-local header-line-format " result header")
     (clutch--update-mode-line)
-    (should (equal header-line-format " result header"))))
+    (should (equal header-line-format " result header"))
+    (should (equal mode-name "clutch-result"))))
 
 (ert-deftest clutch-test-result-footer-spinner-contract ()
   "Result footer timing slot should show spinner only while executing."

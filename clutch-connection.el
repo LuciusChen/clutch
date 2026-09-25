@@ -1032,6 +1032,7 @@ the high-frequency execution indicator."
     (clutch--refresh-connection-render-state))
   (let* ((base (cond
                 ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
+                ((derived-mode-p 'clutch-result-mode) "clutch-result")
                 ((clutch--query-buffer-p)
                  (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
