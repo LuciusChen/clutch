@@ -2239,10 +2239,8 @@ Filtering the category listing ran a schema-wide query per describe."
 (defun clutch-db-test--make-mongodb-conn (&optional database client)
   "Return a lightweight native MongoDB Clutch connection for unit tests."
   (make-clutch-mongodb-conn
-   :params (list :database (or database "app"))
    :database (or database "app")
    :client (or client 'mongodb-client)
-   :closed nil
    :busy nil))
 
 (ert-deftest clutch-db-test-mongodb-endpoint-metadata-uses-effective-client-state ()
@@ -2453,12 +2451,12 @@ Filtering the category listing ran a schema-wide query per describe."
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
   :tags '(:smoke)
   "Native MongoDB query results should flatten top-level document keys."
-  (let ((docs '((("_id" . (("$oid" . "64f")))
+  (let ((docs `((("_id" . ,(mongodb-object-id "64f"))
                  ("name" . "Ann")
                  ("score" . 10)
                  ("tags" . ["a" "b"])
                  ("meta" . "plain"))
-                (("_id" . (("$oid" . "650")))
+                (("_id" . ,(mongodb-object-id "650"))
                  ("name" . "Bob")
                  ("meta" . (("ok" . t)))
                  ("active" . :false)))))
@@ -2475,25 +2473,16 @@ Filtering the category listing ran a schema-wide query per describe."
         (should (equal (mapcar (lambda (column)
                                  (plist-get column :type-category))
                                (clutch-db-result-columns result))
-                       '(json text numeric json json text json)))
+                       '(text text numeric json json text json)))
         (should (plist-get (car (last (clutch-db-result-columns result)))
                            :hidden))
         (should (plist-get (car (last (clutch-db-result-columns result)))
                            :document-source))
         (should (equal (clutch-db-result-rows result)
-                       '(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
-                          "plain" nil
-                          (("_id" . (("$oid" . "64f")))
-                           ("name" . "Ann")
-                           ("score" . 10)
-                           ("tags" . ["a" "b"])
-                           ("meta" . "plain")))
+                       `(("{\"$oid\":\"64f\"}" "Ann" 10 "[\"a\",\"b\"]"
+                          "plain" nil ,(nth 0 docs))
                          ("{\"$oid\":\"650\"}" "Bob" nil nil
-                          "{\"ok\":true}" "false"
-                          (("_id" . (("$oid" . "650")))
-                           ("name" . "Bob")
-                           ("meta" . (("ok" . t)))
-                           ("active" . :false))))))))))
+                          "{\"ok\":true}" "false" ,(nth 1 docs)))))))))
 
 (ert-deftest clutch-db-test-mongodb-result-context-records-source-collection ()
   "Native MongoDB query context should record collection result metadata."
@@ -2847,11 +2836,11 @@ passes validation fails the test instead of failing on the fake client."
 (ert-deftest clutch-db-test-mongodb-metadata-uses-public-client-api ()
   "Native MongoDB metadata should map databases and collections into Clutch objects."
   (let ((clutch-mongodb-schema-sample-size 2)
-        (documents '((("_id" . (("$oid" . "64f")))
+        (documents `((("_id" . ,(mongodb-object-id "64f"))
                       ("name" . "Ann")
                       ("score" . 10)
                       ("profile" . (("age" . 30))))
-                     (("_id" . (("$oid" . "650")))
+                     (("_id" . ,(mongodb-object-id "650"))
                       ("score" . "high")
                       ("active" . :false))))
         sample-collections)
@@ -2880,8 +2869,8 @@ passes validation fails the test instead of failing on the fake client."
                        '("_id" "name" "score" "profile" "profile.age" "active")))
         (should (equal (clutch-db-column-details conn "users")
                        '((:name "_id"
-                          :type "BSON<object>"
-                          :type-category json
+                          :type "BSON<objectId>"
+                          :type-category text
                           :nullable t
                           :comment nil)
                          (:name "name"
@@ -3070,18 +3059,18 @@ passes validation fails the test instead of failing on the fake client."
 (ert-deftest clutch-db-test-mongodb-collection-profile-samples-nested-fields ()
   "Native MongoDB collection profiles should include nested field stats."
   (let ((clutch-mongodb-schema-sample-size 3)
-        (sample-docs '((("_id" . (("$oid" . "64f")))
+        (sample-docs `((("_id" . ,(mongodb-object-id "64f"))
                         ("name" . "Ann")
                         ("profile" . (("age" . 30)))
                         ("items" . [(("sku" . "A") ("qty" . 2))])
                         ("status" . "active"))
-                       (("_id" . (("$oid" . "650")))
+                       (("_id" . ,(mongodb-object-id "650"))
                         ("name" . "Bob")
                         ("profile" . (("age" . 40)))
                         ("items" . [(("sku" . "A") ("qty" . 1))
                                      (("sku" . "B") ("qty" . 4))])
                         ("status" . "active"))
-                       (("_id" . (("$oid" . "651")))
+                       (("_id" . ,(mongodb-object-id "651"))
                         ("name" . "Cal")
                         ("status" . "blocked"))))
         (id-index (mongodb-document
