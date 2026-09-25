@@ -329,7 +329,7 @@ them would fail the plist-member assertions rather than coincide."
                   ((symbol-function 'clutch--connection-alive-p)
                    (lambda (_conn) t)))
           (let ((conn (plist-get case :conn)))
-            (should (eq (clutch--build-conn input) conn))
+            (should (eq (clutch-open-connection input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
             (should (= (plist-get captured :port) (plist-get case :local-port)))
             (should-not (plist-member captured :tramp-default-directory))
@@ -345,39 +345,6 @@ them would fail the plist-member assertions rather than coincide."
                          (gethash conn clutch--connection-transport-cache)
                          :kind)
                         'tramp))))))))
-
-(ert-deftest clutch-test-open-connection-supports-tramp-default-directory ()
-  "The public connection API should support TRAMP default-directory origin."
-  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
-        (clutch--connection-transport-cache (make-hash-table :test 'eq))
-        captured)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch--start-tramp-tcp-forward)
-               (lambda (params)
-                 (should (equal (plist-get params :tramp-default-directory)
-                                "/ssh:devbox:/workspace/"))
-                 '(:kind tramp
-                   :process fake-listener
-                   :local-port 40124
-                   :tramp-default-directory "/ssh:devbox:/workspace/")))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (_backend params)
-                 (setq captured params)
-                 'fake-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch-open-connection
-                   '(:backend pg
-                     :host "db"
-                     :port 5432
-                     :user "alice"
-                     :database "appdb"
-                     :tramp-default-directory "/ssh:devbox:/workspace/"))
-                  'fake-conn))
-      (should (equal (plist-get captured :host) "127.0.0.1"))
-      (should (= (plist-get captured :port) 40124))
-      (should-not (plist-member captured :tramp-default-directory)))))
 
 (ert-deftest clutch-test-prepare-connect-params-rejects-ambiguous-transports ()
   "A connection must not combine SSH and TRAMP transports."
