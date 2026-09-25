@@ -197,29 +197,6 @@ Emacs result contract from materializing an unbounded collection."
     mongodb-conn-database)
   "Public mongodb.el functions required by the native MongoDB adapter.")
 
-(defun clutch-mongodb--missing-mongodb-functions ()
-  "Return mongodb.el functions required by Clutch but currently unavailable."
-  (seq-remove #'fboundp clutch-mongodb--required-mongodb-functions))
-
-(defun clutch-mongodb--ensure-mongodb-client-api ()
-  "Load mongodb.el and verify that the native client API is available."
-  (unless (featurep 'mongodb)
-    (condition-case err
-        (require 'mongodb)
-      (error
-       (signal 'clutch-db-error
-               (list (format "MongoDB backend requires mongodb.el: %s"
-                             (error-message-string err)))))))
-  (when-let* ((missing (clutch-mongodb--missing-mongodb-functions)))
-    (signal 'clutch-db-error
-            (list (format
-                   (concat "MongoDB backend requires current mongodb.el public API; "
-                           "missing %s. Loaded library: %s. Update/install "
-                           "LuciusChen/mongodb.el, clear stale native-compile cache, "
-                           "and restart Emacs.")
-                   (mapconcat #'symbol-name missing ", ")
-                   (or (locate-library "mongodb") "not found"))))))
-
 (defun clutch-mongodb-connect (params)
   "Connect to MongoDB using PARAMS.
 PARAMS may contain :url, or structured :host/:port/:database fields.
@@ -230,7 +207,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
       (progn
         (require 'clutch-db-jdbc)
         (clutch-db-jdbc-connect 'mongodb params))
-    (clutch-mongodb--ensure-mongodb-client-api)
+    (clutch-db--ensure-client-api
+     'mongodb "MongoDB" clutch-mongodb--required-mongodb-functions)
     (clutch-mongodb--with-mongodb-errors
       (let ((client (mongodb-connect params)))
         (make-clutch-mongodb-conn
@@ -1697,9 +1675,6 @@ FIELDS is an optional list of top-level field names for update snippets."
   "Return the registered backend key for MongoDB connections."
   'mongodb)
 
-(cl-defmethod clutch-db-init-connection ((_conn clutch-mongodb-conn))
-  "No eager MongoDB initialization is required.")
-
 (cl-defmethod clutch-db-query ((conn clutch-mongodb-conn) code)
   "Evaluate MongoDB shell CODE on CONN and return a `clutch-db-result'."
   (setf (clutch-mongodb-conn-busy conn) t)
@@ -2065,21 +2040,8 @@ of top-level field names for field-scoped snippets."
   "Return nil; MongoDB collections have no SQL table comments."
   nil)
 
-(cl-defmethod clutch-db-primary-key-columns ((_conn clutch-mongodb-conn) _table)
-  "Return nil; native MongoDB results are not edited through SQL row identity."
-  nil)
-
-(cl-defmethod clutch-db-row-identity-candidates ((_conn clutch-mongodb-conn) _table
-                                                 &optional _schema _catalog)
-  "Return nil; native MongoDB staged SQL edits are unsupported."
-  nil)
-
 (cl-defmethod clutch-db-foreign-keys ((_conn clutch-mongodb-conn) _table)
   "Return nil; MongoDB has no SQL foreign-key metadata."
-  nil)
-
-(cl-defmethod clutch-db-referencing-objects ((_conn clutch-mongodb-conn) _table)
-  "Return nil; MongoDB has no SQL referencing-object metadata."
   nil)
 
 (cl-defmethod clutch-db-busy-p ((conn clutch-mongodb-conn))
@@ -2101,10 +2063,6 @@ of top-level field names for field-scoped snippets."
 (cl-defmethod clutch-db-database ((conn clutch-mongodb-conn))
   "Return the current MongoDB database for CONN."
   (clutch-mongodb-conn-database conn))
-
-(cl-defmethod clutch-db-display-name ((_conn clutch-mongodb-conn))
-  "Return \"MongoDB\" as the display name."
-  "MongoDB")
 
 (provide 'clutch-mongodb)
 ;;; clutch-mongodb.el ends here

@@ -308,10 +308,6 @@
   "Execute SQL through the pgsql.el client owned by CONN."
   (pgsql-exec (clutch-db-pg--connection-client conn) sql))
 
-(defun clutch-db-pg--cached-current-schema (conn)
-  "Return cached current schema for CONN, or nil."
-  (clutch-db-pg--connection-current-schema conn))
-
 (defun clutch-db-pg--cache-current-schema (conn schema)
   "Cache SCHEMA as the current schema for CONN."
   (setf (clutch-db-pg--connection-current-schema conn) schema)
@@ -387,7 +383,8 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 `:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name."
   (clutch-db-pg--ensure-client-api)
   (setq params (clutch-db-pg--apply-timeout-defaults
-                (clutch-db--normalize-connect-params 'pg params)))
+                (clutch-db-pg--normalize-connect-params
+                 (clutch-db--reject-removed-connect-params params))))
   (let ((schema (plist-get params :schema))
         (sslmode (plist-get params :sslmode))
         (connect-timeout (plist-get params :connect-timeout))
@@ -475,24 +472,28 @@ positions."
     (mapcar #'clutch-db-pg--prepare-array-value value))
    (t value)))
 
+(defun clutch-db-pg--array-string-value (trimmed type)
+  "Return TRIMMED PostgreSQL array text as a literal string or prepared value.
+A curly-brace literal or a dimension-slice literal (e.g. \"[1:2]={1,2}\") of
+TYPE is returned unchanged as text.  A JSON array is parsed and returned as a
+value prepared for pgsql.el.  Signal `user-error' when TRIMMED is neither."
+  (cond
+   ((string-prefix-p "{" trimmed) trimmed)
+   ((string-match-p "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+=" trimmed)
+    trimmed)
+   ((string-prefix-p "[" trimmed)
+    (clutch-db-pg--prepare-array-value
+     (clutch-db-pg--parse-json-array-param trimmed type)))
+   (t
+    (user-error "PostgreSQL array value for %s must be a JSON array or curly-brace array literal"
+                type))))
+
 (defun clutch-db-pg--array-literal-string (value type)
   "Return PostgreSQL array literal text for VALUE of PostgreSQL TYPE."
   (cond
    ((stringp value)
-    (let ((trimmed (string-trim value)))
-      (cond
-       ((string-prefix-p "{" trimmed) trimmed)
-       ((string-match-p "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+="
-                        trimmed)
-        trimmed)
-       ((string-prefix-p "[" trimmed)
-        (pgsql-array-literal
-         (clutch-db-pg--prepare-array-value
-          (clutch-db-pg--parse-json-array-param trimmed type))
-         type))
-       (t
-        (user-error "PostgreSQL array value for %s must be a JSON array or curly-brace array literal"
-                    type)))))
+    (let ((result (clutch-db-pg--array-string-value (string-trim value) type)))
+      (if (stringp result) result (pgsql-array-literal result type))))
    ((or (vectorp value) (listp value))
     (pgsql-array-literal (clutch-db-pg--prepare-array-value value) type))
    (t
@@ -512,19 +513,7 @@ positions."
            (temporal temporal)
            (array-type-p
             (if (stringp value)
-                (let ((trimmed (string-trim value)))
-                  (cond
-                   ((string-prefix-p "{" trimmed) trimmed)
-                   ((string-match-p
-                     "\\`\\(?:\\[[+-]?[0-9]+:[+-]?[0-9]+\\]\\)+=" trimmed)
-                    trimmed)
-                   ((string-prefix-p "[" trimmed)
-                    (clutch-db-pg--prepare-array-value
-                     (clutch-db-pg--parse-json-array-param trimmed type)))
-                   (t
-                    (user-error
-                     "PostgreSQL array value for %s must be a JSON array or curly-brace array literal"
-                     type))))
+                (clutch-db-pg--array-string-value (string-trim value) type)
               (clutch-db-pg--prepare-array-value value)))
            (t value))
           type)))
@@ -662,10 +651,6 @@ FKS is an alist of (column-name . fk-plist)."
   "Return the registered backend key for PostgreSQL connections."
   'pg)
 
-(cl-defmethod clutch-db-init-connection ((_conn clutch-db-pg--connection))
-  "Initialize PostgreSQL CONN.
-No special init needed — encoding is set in startup message.")
-
 (cl-defmethod clutch-db-eager-schema-refresh-p
     ((_conn clutch-db-pg--connection))
   "PostgreSQL schema refresh should not block connect."
@@ -777,17 +762,6 @@ manual-commit mode via lazy BEGIN."
             t)
         (pgsql-error nil)))))
 
-(cl-defmethod clutch-db-build-paged-sql
-    ((_conn clutch-db-pg--connection) base-sql
-                                             page-num page-size
-                                             &optional order-by page-offset)
-  "Build a paginated SQL query for PostgreSQL from BASE-SQL.
-PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
-controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
-when non-nil."
-  (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by #'pgsql-escape-identifier page-offset))
-
 ;;;; SQL dialect methods
 
 (cl-defmethod clutch-db-escape-identifier
@@ -831,7 +805,7 @@ ORDER BY schema_name")))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-db-pg--connection))
   "Return the current effective schema for PostgreSQL CONN."
-  (or (clutch-db-pg--cached-current-schema conn)
+  (or (clutch-db-pg--connection-current-schema conn)
       (clutch-db--translate-library-error pgsql-error
         (let* ((result (clutch-db-pg--exec conn "SELECT current_schema()"))
                (schema (caar (clutch-db-pg--metadata-rows result))))
@@ -1260,10 +1234,6 @@ ORDER BY c.ordinal_position"
 (cl-defmethod clutch-db-database ((conn clutch-db-pg--connection))
   "Return the database for PostgreSQL CONN."
   (pgsql-database (clutch-db-pg--connection-client conn)))
-
-(cl-defmethod clutch-db-display-name ((_conn clutch-db-pg--connection))
-  "Return \"PostgreSQL\" as the display name."
-  "PostgreSQL")
 
 (provide 'clutch-db-pg)
 ;;; clutch-db-pg.el ends here

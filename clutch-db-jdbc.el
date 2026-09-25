@@ -601,12 +601,7 @@ a live agent then condemns only that connection instead of the process."
                (not (process-live-p clutch-jdbc--agent-process)))
       (setq failure-message (clutch-jdbc--agent-exit-error-message)))
     (when (and response (plist-get response :protocol-error))
-      (when clutch-jdbc--agent-process
-        (clutch-jdbc--kill-agent-process clutch-jdbc--agent-process))
-      (clutch-jdbc--clear-async-callbacks)
-      (clutch-jdbc--clear-request-state)
-      (setq clutch-jdbc--agent-process nil
-            clutch-jdbc--response-queue nil)
+      (clutch-jdbc--stop-agent)
       (signal 'clutch-db-error
               (list (plist-get response :error))))
     (unless response
@@ -627,12 +622,7 @@ a live agent then condemns only that connection instead of the process."
         ;; connection (startup handshake, connect), so there is nothing
         ;; narrower to reset than the process and every registration
         ;; hanging off it.
-        (when clutch-jdbc--agent-process
-          (clutch-jdbc--kill-agent-process clutch-jdbc--agent-process))
-        (clutch-jdbc--clear-async-callbacks)
-        (clutch-jdbc--clear-request-state)
-        (setq clutch-jdbc--agent-process nil
-              clutch-jdbc--response-queue nil)
+        (clutch-jdbc--stop-agent)
         (signal 'clutch-db-error
                 (list (or failure-message
                           (if (equal op "connect")
@@ -1161,9 +1151,6 @@ pass `process-live-p' briefly; the identity check closes that window."
   "Forget the latest structured error details snapshot for JDBC CONN."
   (remhash conn clutch-jdbc--error-details-by-conn))
 
-(cl-defmethod clutch-db-init-connection ((_conn clutch-jdbc-conn))
-  "No post-connect initialization needed for JDBC connections.")
-
 (defun clutch-jdbc--conn-rpc-timeout (conn)
   "Return the RPC timeout in seconds for CONN.
 Always non-nil: `clutch-jdbc--apply-timeout-defaults' ensures the value is
@@ -1233,16 +1220,10 @@ Emacs RPC timeout."
         (setf (clutch-jdbc-conn-params metadata-conn) params))
       metadata-conn)))
 
-(defun clutch-jdbc--table-like-entry-p (conn entry)
-  "Return non-nil when ENTRY should be used as a table-like object for CONN."
-  (ignore conn)
-  (clutch-jdbc--entry-type= entry "TABLE"))
-
-(defun clutch-jdbc--table-entry-names (conn entries)
-  "Return table names from ENTRIES visible as table-like objects for CONN."
+(defun clutch-jdbc--table-entry-names (entries)
+  "Return table names from ENTRIES visible as table-like objects."
   (mapcar (lambda (entry) (plist-get entry :name))
-          (seq-filter (lambda (entry)
-                        (clutch-jdbc--table-like-entry-p conn entry))
+          (seq-filter (lambda (entry) (clutch-jdbc--entry-type= entry "TABLE"))
                       entries)))
 
 (defun clutch-jdbc--clickhouse-simple-identifier-p (name)
@@ -1729,10 +1710,7 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
    ((clutch-jdbc--limit-offset-conn-p conn)
     ;; Keep this dialect family explicit; generic JDBC covers engines with
     ;; materially different pagination syntax under one transport.
-    (clutch-db--build-limit-offset-paged-sql
-     base-sql page-num page-size order-by
-     (lambda (name) (clutch-db-escape-identifier conn name))
-     page-offset))
+    (cl-call-next-method))
    ((clutch-db-sql-has-top-level-row-limit-p base-sql)
     base-sql)
    (t
@@ -1917,7 +1895,7 @@ For Oracle, defaults the schema filter to the connected username to avoid
 returning tables from SYS/SYSTEM and other visible schemas.  ClickHouse uses
 system.tables because its JDBC metadata does not reliably enumerate the
 current database."
-  (clutch-jdbc--table-entry-names conn (clutch-db-list-table-entries conn)))
+  (clutch-jdbc--table-entry-names (clutch-db-list-table-entries conn)))
 
 (defun clutch-jdbc--clickhouse-table-entries (conn)
   "Return ClickHouse table entries for CONN from system.tables."
@@ -2070,8 +2048,8 @@ the metadata request."
                 (when callback
                   (funcall callback
                            (clutch-jdbc--table-entry-names
-                            conn (clutch-jdbc--collect-table-entries
-                                  conn result)))))
+                            (clutch-jdbc--collect-table-entries
+                             conn result)))))
               errback
               (clutch-jdbc--conn-rpc-timeout conn)
               conn)

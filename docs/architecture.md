@@ -85,7 +85,7 @@ Staged submission has one backend contract: `clutch-db-call-with-atomic-batch`. 
 
 ```mermaid
 flowchart LR
-  Registry["Backend registry<br/>:support-level<br/>:data-model<br/>:query-mode<br/>:surfaces<br/>:normalize-fn"]
+  Registry["Backend registry<br/>:support-level<br/>:data-model<br/>:query-mode<br/>:surfaces"]
 
   subgraph Relational["Relational SQL data model"]
     MySQLCore["mysql<br/>core SQL"]

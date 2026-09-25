@@ -214,7 +214,8 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
   (clutch-db-mysql--ensure-client-api)
   (setq params (clutch-db-mysql--apply-timeout-defaults
-                (clutch-db--normalize-connect-params 'mysql params)))
+                (clutch-db-mysql--normalize-connect-params
+                 (clutch-db--reject-removed-connect-params params))))
   (let ((tls-mode (plist-get params :clutch-tls-mode)))
     (cl-remf params :clutch-tls-mode)
     (pcase tls-mode
@@ -460,16 +461,6 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
                 (list (error-message-string pending-error)))
       result)))
 
-(cl-defmethod clutch-db-build-paged-sql ((_conn mysql-conn) base-sql
-                                             page-num page-size
-                                             &optional order-by page-offset)
-  "Build a paginated SQL query for MySQL from BASE-SQL.
-PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
-controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
-when non-nil."
-  (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by #'mysql-escape-identifier page-offset))
-
 ;;;; SQL dialect methods
 
 (cl-defmethod clutch-db-escape-identifier ((_conn mysql-conn) name)
@@ -638,29 +629,14 @@ ORDER BY ORDINAL_POSITION"
 (cl-defmethod clutch-db-object-source ((conn mysql-conn) entry)
   "Return source text for MySQL object ENTRY on CONN."
   (clutch-db--translate-library-error mysql-error
-    (pcase (upcase (or (plist-get entry :type) ""))
-      ("PROCEDURE"
-       (let* ((result (mysql-query
-                       conn
-                       (format "SHOW CREATE PROCEDURE %s"
-                               (mysql-escape-identifier (plist-get entry :name)))))
-              (row (car (mysql-result-rows result))))
-         (nth 2 row)))
-      ("FUNCTION"
-       (let* ((result (mysql-query
-                       conn
-                       (format "SHOW CREATE FUNCTION %s"
-                               (mysql-escape-identifier (plist-get entry :name)))))
-              (row (car (mysql-result-rows result))))
-         (nth 2 row)))
-      ("TRIGGER"
-       (let* ((result (mysql-query
-                       conn
-                       (format "SHOW CREATE TRIGGER %s"
-                               (mysql-escape-identifier (plist-get entry :name)))))
-              (row (car (mysql-result-rows result))))
-         (nth 2 row)))
-      (_ nil))))
+    (let ((type (upcase (or (plist-get entry :type) ""))))
+      (when (member type '("PROCEDURE" "FUNCTION" "TRIGGER"))
+        (nth 2 (car (mysql-result-rows
+                     (mysql-query
+                      conn
+                      (format "SHOW CREATE %s %s" type
+                              (mysql-escape-identifier
+                               (plist-get entry :name)))))))))))
 
 (cl-defmethod clutch-db-object-definition ((conn mysql-conn) entry)
   "Return definition or source text for MySQL object ENTRY on CONN."
@@ -828,10 +804,6 @@ ORDER BY ORDINAL_POSITION"
 (cl-defmethod clutch-db-database ((conn mysql-conn))
   "Return the database for MySQL CONN."
   (mysql-current-database conn))
-
-(cl-defmethod clutch-db-display-name ((_conn mysql-conn))
-  "Return \"MySQL\" as the display name."
-  "MySQL")
 
  (setq clutch-db-mysql--methods-installed t))
 

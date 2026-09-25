@@ -35,6 +35,7 @@
 
 (require 'cl-lib)
 (require 'regexp-opt)
+(require 'seq)
 (require 'subr-x)
 
 ;;;; Configuration
@@ -141,6 +142,29 @@ actionable hints for known error patterns."
       (signal 'clutch-db-error
               (list (error-message-string err))))))
 
+(defun clutch-db--ensure-client-api (feature label functions)
+  "Load FEATURE and verify that its public FUNCTIONS are available.
+FEATURE is the client library's feature symbol, e.g. `redis' or `mongodb'.
+LABEL names the backend in error messages, e.g. \"Redis\" or \"MongoDB\"."
+  (unless (featurep feature)
+    (condition-case err
+        (require feature)
+      (error
+       (signal 'clutch-db-error
+               (list (format "%s backend requires %s.el: %s"
+                             label feature (error-message-string err)))))))
+  (when-let* ((missing (seq-remove #'fboundp functions)))
+    (signal 'clutch-db-error
+            (list (format
+                   (concat "%s backend requires current %s.el public API; "
+                           "missing %s. Loaded library: %s. Update/install "
+                           "LuciusChen/%s.el, clear stale native-compile cache, "
+                           "and restart Emacs.")
+                   label feature
+                   (mapconcat #'symbol-name missing ", ")
+                   (or (locate-library (symbol-name feature)) "not found")
+                   feature)))))
+
 (defun clutch-db--normalize-symbol-option (value)
   "Return VALUE normalized to a lowercase symbol, or nil when absent."
   (cond
@@ -203,19 +227,6 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
              (list (format "Cannot serialize %s as JSON: %s"
                            (or context "value")
                            (error-message-string err)))))))
-
-(defun clutch-db--normalize-connect-params (backend params)
-  "Return connection PARAMS normalized for BACKEND."
-  (let* ((params (clutch-db--reject-removed-connect-params params))
-         (features (and backend (clutch-backend-feature backend)))
-         (normalize-fn (plist-get features :normalize-fn)))
-    (when (and (symbolp normalize-fn)
-               (not (fboundp normalize-fn))
-               (plist-get features :require))
-      (require (plist-get features :require)))
-    (if normalize-fn
-        (funcall normalize-fn params)
-      params)))
 
 ;;;; Result struct
 
@@ -648,14 +659,6 @@ BREAKS are zero-based top-level semicolon offsets in TEXT, as returned by
           (setq end break))))
     (cons beg end)))
 
-(defun clutch-db-sql-semicolon-statement-bounds
-    (text offset &optional dialect)
-  "Return zero-based statement bounds around OFFSET in TEXT.
-Top-level semicolons delimit statements.  Semicolons inside strings and
-comments are ignored.  DIALECT is a `clutch-db-sql-dialect' plist."
-  (clutch-db-sql--bounds-from-breaks
-   text offset (clutch-db-sql-statement-breaks text dialect)))
-
 (defun clutch-db-sql--trim-bounds (text beg end)
   "Return non-whitespace bounds in TEXT between BEG and END, or nil."
   (while (and (< beg end)
@@ -674,8 +677,8 @@ When STRICT-LEADING-SPACE is non-nil and OFFSET is before the trimmed
 statement body, return an empty range at OFFSET.  This lets execute-at-point
 avoid running the previous statement from blank space between semicolon
 delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
-  (let* ((bounds (clutch-db-sql-semicolon-statement-bounds
-                  text offset dialect))
+  (let* ((bounds (clutch-db-sql--bounds-from-breaks
+                  text offset (clutch-db-sql-statement-breaks text dialect)))
          (effective-offset (clutch-db-sql-statement-effective-offset text offset))
          (semicolon-edge (or (/= effective-offset offset)
                              (and (< offset (length text))
@@ -711,14 +714,6 @@ delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
             (setq end line-start)))
           (setq pos (1+ line-end)))))
     (cons beg (or end len))))
-
-(defun clutch-db-sql-context-statement-bounds (text offset &optional dialect)
-  "Return statement bounds for SQL context features in TEXT at OFFSET.
-Use semicolon-aware bounds when TEXT has top-level semicolons; otherwise fall
-back to blank-line paragraph bounds.  DIALECT is a `clutch-db-sql-dialect'
-plist, so context features split statements the same way execution does."
-  (clutch-db-sql-context-bounds-from-breaks
-   text offset (clutch-db-sql-statement-breaks text dialect)))
 
 (defun clutch-db-sql-context-bounds-from-breaks (text offset breaks)
   "Return context statement bounds in TEXT at OFFSET from its BREAKS.
@@ -1047,17 +1042,13 @@ targets the user's visible result set."
         normalized
       (clutch-db-sql-strip-top-level-order-by normalized))))
 
-(defun clutch-db-sql-count-derived-table-body (sql)
-  "Return SQL normalized for COUNT(*) derived-table wrapping.
-Top-level ORDER BY is removed when there is no top-level row limit because
-it cannot affect the row count.  Limited result sets keep their tail clauses so
-counts target the user's visible result set."
-  (clutch-db-sql-derived-table-body sql))
-
 (defun clutch-db-build-count-sql (conn sql)
-  "Return a COUNT(*) query for SQL using CONN's derived-table syntax."
+  "Return a COUNT(*) query for SQL using CONN's derived-table syntax.
+Top-level ORDER BY is removed when there is no top-level row limit because it
+cannot affect the row count.  Limited result sets keep their tail clauses so
+counts target the user's visible result set."
   (format "SELECT COUNT(*) FROM (%s) %s"
-          (clutch-db-sql-count-derived-table-body sql)
+          (clutch-db-sql-derived-table-body sql)
           (clutch-db-derived-table-alias conn "_clutch_count")))
 
 (defun clutch-db-apply-where (conn sql filter)
@@ -1114,6 +1105,10 @@ PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
 (cl-defgeneric clutch-db-init-connection (conn)
   "Perform post-connect initialization on CONN.
 For example, SET NAMES utf8mb4 on MySQL.")
+
+(cl-defmethod clutch-db-init-connection ((_conn t))
+  "Default: no post-connect initialization is needed."
+  nil)
 
 (cl-defgeneric clutch-db-backend-key (conn)
   "Return the registered backend key for CONN, or nil when unknown.")
@@ -1440,6 +1435,17 @@ interrupt path and the connection should remain usable.")
 BASE-SQL is the original query.  PAGE-NUM is 0-based, PAGE-SIZE is
 the row limit.  ORDER-BY is (COL-NAME . DIRECTION) or nil.  PAGE-OFFSET,
 when non-nil, overrides PAGE-NUM for last-window pagination.")
+
+(cl-defmethod clutch-db-build-paged-sql ((conn t) base-sql page-num page-size
+                                         &optional order-by page-offset)
+  "Build a LIMIT/OFFSET paginated SQL query for CONN from BASE-SQL.
+PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
+controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
+when non-nil."
+  (clutch-db--build-limit-offset-paged-sql
+   base-sql page-num page-size order-by
+   (lambda (name) (clutch-db-escape-identifier conn name))
+   page-offset))
 
 ;; SQL dialect
 
@@ -1929,13 +1935,16 @@ Used to prevent re-entrant queries from completion timers.")
   "Return a display name string for CONN's backend type.
 E.g., \"MySQL\" or \"PostgreSQL\".")
 
+(cl-defmethod clutch-db-display-name ((conn t))
+  "Default: return CONN's registered backend display name."
+  (clutch-backend-display-name (clutch-db-backend-key conn)))
+
 ;;;; Connect dispatcher
 
 (defvar clutch-backend--registry
   '((mysql  . (:require clutch-db-mysql
                :aliases (mariadb)
                :connect-fn clutch-db-mysql-connect
-               :normalize-fn clutch-db-mysql--normalize-connect-params
                :display-name "MySQL"
                :default-port 3306
                :support-level core
@@ -1945,7 +1954,6 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
     (pg     . (:require clutch-db-pg
                :aliases (postgres postgresql)
                :connect-fn clutch-db-pg-connect
-               :normalize-fn clutch-db-pg--normalize-connect-params
                :display-name "PostgreSQL"
                :default-port 5432
                :support-level core
@@ -1979,10 +1987,10 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
               :query-mode clutch-redis-mode)))
   "Alist mapping backend symbols to their feature plists.
 Each plist has :require (the feature to load), :connect-fn (a function taking
-a plist of connection params and returning a conn), and optional :aliases,
-:normalize-fn plus UI metadata such as :display-name, :default-port,
-:support-level, :data-model, :query-mode, :surfaces, and :manual-choice, plus
-capability metadata such as :update-default.
+a plist of connection params and returning a conn), and optional :aliases
+plus UI metadata such as :display-name, :default-port, :support-level,
+:data-model, :query-mode, :surfaces, and :manual-choice, plus capability
+metadata such as :update-default.
 Surface entries may set :execution-model and :transport for non-default
 execution paths.")
 
@@ -2111,13 +2119,7 @@ Returns a backend-specific connection object."
              (clutch-backend-feature backend))
             (connect-fn
              (progn
-               (condition-case err
-                   (require (plist-get feature-plist :require))
-                 (file-missing
-                  (pcase backend
-                    ('mysql (user-error "MySQL backend requires the mysql package"))
-                    ('pg (user-error "PostgreSQL backend requires pgsql.el"))
-                    (_ (signal (car err) (cdr err))))))
+               (require (plist-get feature-plist :require))
                (plist-get feature-plist :connect-fn))))
       (condition-case err
           ;; Initialization runs statements, so it can fail or be quit after
