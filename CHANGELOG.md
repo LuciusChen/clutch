@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1 - Unreleased
+## 0.5.1 - 2026-09-25
 
 ### Changed
 
@@ -9,10 +9,15 @@
 - Required one explicit `YES` confirmation by default before `TRUNCATE` or an `UPDATE`/`DELETE` without an effective `WHERE`. `clutch-high-risk-query-confirmation` can switch these high-risk statements to an ordinary prompt or disable their confirmation, and they no longer stack a second generic destructive-query prompt.
 - Removed unused `clutch-db-sql-has-top-level-limit-p` and `clutch-db-sql-has-top-level-offset-p` helpers. Use `clutch-db-sql-has-top-level-row-limit-p` when guarding bounded-query rewrites.
 - Removed the unwired row-marking state that no command could set; the public `clutch-marked-face` remains for themes.
+- Removed the unused `clutch-db-sql-context-statement-bounds` helper and folded `clutch-db-sql-semicolon-statement-bounds` and `clutch-db-sql-count-derived-table-body`, which each had one caller, into those callers.
 - The interactive JDBC driver installer no longer offers the slf4j-api and slf4j-nop companion jars as top-level drivers; they still install automatically with their parent driver. orai18n stays installable on its own.
 
 ### Fixed
 
+- Showed each value of a MongoDB `distinct()` result on its own row. mongodb.el returns the values as a vector, which the result grid displayed as a single JSON array cell.
+- Kept a result buffer's mode name when its query is re-run; `g` renamed the mode to "clutch".
+- Accepted whitespace between a MongoDB helper's name and its argument list, as in `db.users.find ({})` or `.limit (5)`; the parser took the whitespace for the opening paren and failed with an empty constructor name.
+- Offered every PostgreSQL overload of a function when resolving an object by name beyond the local cache; the on-demand search merged same-name routines by name, type and schema, which dropped all overloads but the first.
 - Matched the object at point through Oracle's prefix search instead of listing every table-like object first. On an Oracle schema with 33,460 table-like entries, `clutch-jump` and the other at-point object commands resolved a table in 77 ms instead of 1.8 s, and no longer stream the whole catalog on every invocation. A backend opts in through `clutch-db-object-name-search-p`; every other backend keeps matching against its listing.
 - Made row identity resolution cheaper and visible. It runs synchronously before every statement: a table without a primary key previously enumerated every index in the schema on each query (seconds on large Oracle schemas) and nothing cached the answer. The lookup now asks for that table's indexes only, the result is reused per relation until a schema refresh, reconnect, schema switch, or any statement that returns no result set (DDL, `USE`, `SET search_path`) discards it (failed lookups are not cached), and `clutch-debug-mode` records each resolution with its table, chosen candidate and duration. A table without a unique index also no longer fetches column details on that path, which was three quarters of the remaining first-resolution cost.
 - Validated insert-form fields only after `clutch-insert-validation-idle-delay`, as its documentation states, instead of also re-validating synchronously on every keystroke. Every field edited before the delay expires is validated, not only the last one.

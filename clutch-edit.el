@@ -626,7 +626,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (quit-window 'kill)
           (when (buffer-live-p parent)
             (with-current-buffer parent
-              (clutch-result-edit--cancel-buffer t))))
+              (clutch-result-edit--close-buffer t))))
       (clutch--cancel-json-sub-editor parent))))
 
 (defun clutch-result--edit-pending-insert (ridx)
@@ -778,10 +778,8 @@ the selected window."
             ('default clutch--cell-default-placeholder)
             (_ (cdr new-state))))
          (cb clutch-result--edit-callback)
-         (result-buf clutch-result--edit-result-buffer)
          (return-buf clutch-result-edit--return-buffer)
-         (target-cell clutch-result-edit--target-cell)
-         (viewport clutch-result-edit--result-viewport))
+         (target-cell clutch-result-edit--target-cell))
     (when (and clutch-result-edit--blob-encoding
                (stringp new-value)
                (> (length new-value) 0))
@@ -806,24 +804,19 @@ the selected window."
       (funcall cb new-value))
     (clutch-result-edit--refresh-record-return-buffer return-buf
                                                       (cdr target-cell))
-    (clutch-result-edit--clear-active-target)
-    (if kill-buffer-directly
-        (kill-buffer (current-buffer))
-      (quit-window 'kill))
-    (clutch-result-edit--restore-result-position result-buf target-cell
-                                                 return-buf
-                                                 viewport)))
+    (clutch-result-edit--close-buffer kill-buffer-directly)))
 
 ;;;###autoload
 (defun clutch-result-edit-cancel ()
   "Cancel the edit and return to the result buffer."
   (interactive)
-  (clutch-result-edit--cancel-buffer))
+  (clutch-result-edit--close-buffer))
 
-(defun clutch-result-edit--cancel-buffer (&optional kill-buffer-directly)
-  "Cancel the current edit buffer and return to the result buffer.
-When KILL-BUFFER-DIRECTLY is non-nil, kill the current buffer without relying on
-the selected window."
+(defun clutch-result-edit--close-buffer (&optional kill-buffer-directly)
+  "Clear edit state and close the current edit buffer.
+Shared tail for both `clutch-result-edit--finish-buffer' and cancelling the
+edit.  When KILL-BUFFER-DIRECTLY is non-nil, kill the current buffer without
+relying on the selected window."
   (let ((result-buf clutch-result--edit-result-buffer)
         (return-buf clutch-result-edit--return-buffer)
         (target-cell clutch-result-edit--target-cell)
@@ -1734,10 +1727,9 @@ next field.  Returns nil when no matching field exists."
           (end (cdr bounds)))
       (list beg end candidates :exclusive 'no))))
 
-(defun clutch-result-insert--current-time-value (type-category &optional time)
-  "Return a formatted current time string for TYPE-CATEGORY.
-TIME defaults to `current-time'."
-  (let ((ts (or time (current-time))))
+(defun clutch-result-insert--current-time-value (type-category)
+  "Return a formatted current time string for TYPE-CATEGORY."
+  (let ((ts (current-time)))
     (pcase type-category
       ('date (format-time-string "%F" ts))
       ('time (format-time-string "%T" ts))
@@ -1779,13 +1771,9 @@ TIME defaults to `current-time'."
   "Refresh the insert form header line."
   (setq-local header-line-format (clutch-result-insert--header-line)))
 
-(defun clutch-result-insert--line-prefix-end ()
-  "Return the end position of the current insert field prefix."
-  (clutch-result-insert--current-field-value-start))
-
 (defun clutch-result-insert--field-prefix-read-only-p ()
   "Return non-nil when point is inside the read-only insert field prefix."
-  (when-let* ((prefix-end (clutch-result-insert--line-prefix-end)))
+  (when-let* ((prefix-end (clutch-result-insert--current-field-value-start)))
     (< (point) prefix-end)))
 
 (defun clutch-result-insert--normalize-point ()

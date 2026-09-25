@@ -264,10 +264,6 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
     (clutch--json-serialize-text val "query result value"))
    (t (format "%S" val))))
 
-(defun clutch--json-false-value-p (val)
-  "Return non-nil when VAL is the generic parsed JSON false sentinel."
-  (eq val :false))
-
 (defun clutch--json-normalize-text (text)
   "Return TEXT parsed and serialized as compact JSON."
   (clutch--json-serialize-text (json-parse-string text)))
@@ -281,7 +277,7 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
     (condition-case nil
         (clutch--json-normalize-text val)
       (error (clutch--json-serialize-text val))))
-   ((clutch--json-false-value-p val)
+   ((eq val :false)
     "false")
    ((or (numberp val)
         (eq val t)
@@ -289,8 +285,7 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
         (vectorp val)
         (listp val))
     (condition-case nil
-        (clutch--json-serialize-text
-         (if (clutch--json-false-value-p val) :false val))
+        (clutch--json-serialize-text val)
       (error (clutch--format-value val))))
    (t (clutch--format-value val))))
 
@@ -739,16 +734,14 @@ static compositions intact and honor the current display table."
       (setq end (min (length text) (* 2 end))))
     (min limit width)))
 
-(defun clutch--compute-column-widths (col-names rows column-defs
-                                                &optional max-width)
+(defun clutch--compute-column-widths (col-names rows column-defs)
   "Compute display width for each column.
 COL-NAMES is a list of header strings, ROWS is the data,
 COLUMN-DEFS is the column metadata list.
-MAX-WIDTH caps individual column width (default `clutch-column-width-max').
-Pass a large value or nil to use the default.
+Individual column width is capped by `clutch-column-width-max'.
 Returns a vector of integers."
   (let* ((ncols (length col-names))
-         (max-w (or max-width clutch-column-width-max))
+         (max-w clutch-column-width-max)
          (widths (make-vector ncols 0))
          (sample (mapcar #'vconcat (seq-take rows 50))))
     (cl-loop for name in col-names
@@ -756,7 +749,6 @@ Returns a vector of integers."
              for defs = column-defs then (cdr defs)
              do
              (if (and (eq (plist-get (car defs) :type-category) 'blob)
-                      (<= max-w clutch-column-width-max)
                       (not (seq-some (lambda (row)
                                        (clutch--blob-text-display-value-p
                                         (and (< i (length row)) (aref row i))))
@@ -2362,6 +2354,36 @@ Preserves point position (row + column) across the render."
         (clutch--goto-cell save-ridx save-cidx)
       (goto-char (point-min)))))
 
+(defun clutch--rendered-row-line (ridx nrows rows)
+  "Return the rendered line for row RIDX, or nil if unsafe to splice in place.
+NROWS is the count of plain ROWS; RIDX at or beyond NROWS renders a staged
+pending-insert ghost row instead.  Returns nil when the row is missing or the
+pixel layout no longer matches `clutch--column-pixel-widths', signaling that a
+full `clutch--refresh-display' redraw is required instead."
+  (let* ((pendingp (>= ridx nrows))
+         (iidx (- ridx nrows))
+         (widths (clutch--effective-widths))
+         (pixel-metric (clutch--pixel-metric-signature))
+         (base-render-state (clutch--build-render-state))
+         (row (if pendingp
+                  (nth iidx (clutch--pending-insert-render-rows base-render-state))
+                (nth ridx rows)))
+         (render-state (clutch--prepare-pixel-layout
+                        widths (list row)
+                        base-render-state
+                        clutch--column-pixel-widths ridx
+                        pixel-metric))
+         (pixel-widths (plist-get render-state :pixel-widths)))
+    (when (and row (equal pixel-widths clutch--column-pixel-widths))
+      (let* ((visible-cols (clutch--visible-columns))
+             (nw (clutch--row-number-digits))
+             (column-specs (clutch--visible-column-specs visible-cols widths)))
+        (if pendingp
+            (clutch--render-pending-insert-row-line
+             row iidx ridx visible-cols widths nw render-state column-specs)
+          (clutch--render-row-line
+           row ridx visible-cols widths nw render-state column-specs))))))
+
 (defun clutch--replace-row-at-index (ridx)
   "Re-render row RIDX in place without a full body redraw.
 Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
@@ -2374,11 +2396,7 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
                         (<= 0 ridx)
                         (< ridx total-rows)
                         (aref clutch--row-start-positions ridx))))
-    (if (or (not line-pos)
-            (not total-rows)
-            (not (integerp ridx))
-            (< ridx 0)
-            (>= ridx total-rows))
+    (if (not line-pos)
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
              (save-cidx (get-text-property (point) 'clutch-col-idx))
@@ -2389,51 +2407,25 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
                             (goto-char line-pos)
                             (forward-line 1)
                             (point))))
-             (pendingp (>= ridx nrows))
-             (iidx (- ridx nrows))
-             (widths (clutch--effective-widths))
-             (pixel-metric (clutch--pixel-metric-signature))
-             (base-render-state (clutch--build-render-state))
-             (row (if pendingp
-                      (nth iidx
-                           (clutch--pending-insert-render-rows
-                            base-render-state))
-                    (nth ridx rows)))
-             (render-state (clutch--prepare-pixel-layout
-                            widths (list row)
-                            base-render-state
-                            clutch--column-pixel-widths ridx
-                            pixel-metric))
-             (pixel-widths (plist-get render-state :pixel-widths))
-             (inhibit-read-only t))
-        (if (or (not row)
-                (not (equal pixel-widths clutch--column-pixel-widths)))
+             (inhibit-read-only t)
+             (line (clutch--rendered-row-line ridx nrows rows)))
+        (if (not line)
             (clutch--refresh-display)
-          (let* ((visible-cols (clutch--visible-columns))
-                 (nw (clutch--row-number-digits))
-                 (column-specs (clutch--visible-column-specs visible-cols widths))
-                 (line (if pendingp
-                           (clutch--render-pending-insert-row-line
-                            row iidx ridx visible-cols widths nw
-                            render-state column-specs)
-                         (clutch--render-row-line
-                          row ridx visible-cols widths nw render-state
-                          column-specs))))
-            (let ((delta (- (length line) (- end-pos line-pos))))
-              (save-excursion
-                (goto-char line-pos)
-                (delete-region line-pos end-pos)
-                (insert line))
-              (aset clutch--row-start-positions ridx line-pos)
-              (unless (zerop delta)
-                (cl-loop for idx from (1+ ridx)
-                         below (length clutch--row-start-positions)
-                         for pos = (aref clutch--row-start-positions idx)
-                         when pos
-                         do (aset clutch--row-start-positions idx
-                                  (+ pos delta)))))
-            (when save-ridx
-              (clutch--goto-cell save-ridx save-cidx))))))))
+          (let ((delta (- (length line) (- end-pos line-pos))))
+            (save-excursion
+              (goto-char line-pos)
+              (delete-region line-pos end-pos)
+              (insert line))
+            (aset clutch--row-start-positions ridx line-pos)
+            (unless (zerop delta)
+              (cl-loop for idx from (1+ ridx)
+                       below (length clutch--row-start-positions)
+                       for pos = (aref clutch--row-start-positions idx)
+                       when pos
+                       do (aset clutch--row-start-positions idx
+                                (+ pos delta)))))
+          (when save-ridx
+            (clutch--goto-cell save-ridx save-cidx)))))))
 
 (defun clutch--append-pending-insert-row (iidx)
   "Append staged insert ghost row IIDX without a full body redraw when safe."
@@ -2448,37 +2440,20 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
              (save-cidx (get-text-property (point) 'clutch-col-idx))
-             (widths (clutch--effective-widths))
-             (pixel-metric (clutch--pixel-metric-signature))
-             (base-render-state (clutch--build-render-state))
-             (row (nth iidx
-                       (clutch--pending-insert-render-rows base-render-state)))
-             (render-state (clutch--prepare-pixel-layout
-                            widths (list row)
-                            base-render-state
-                            clutch--column-pixel-widths ridx
-                            pixel-metric))
-             (pixel-widths (plist-get render-state :pixel-widths))
-             (inhibit-read-only t))
-        (if (or (not row)
-                (not (equal pixel-widths clutch--column-pixel-widths)))
+             (inhibit-read-only t)
+             (line (clutch--rendered-row-line ridx nrows rows)))
+        (if (not line)
             (clutch--refresh-display)
-          (let* ((visible-cols (clutch--visible-columns))
-                 (nw (clutch--row-number-digits))
-                 (column-specs (clutch--visible-column-specs visible-cols widths))
-                 (line (clutch--render-pending-insert-row-line
-                        row iidx ridx visible-cols widths nw
-                        render-state column-specs))
-                 (new-positions (make-vector (1+ old-count) nil)))
+          (let ((new-positions (make-vector (1+ old-count) nil)))
             (dotimes (idx old-count)
               (aset new-positions idx (aref clutch--row-start-positions idx)))
             (save-excursion
               (goto-char (point-max))
               (aset new-positions ridx (point))
               (insert line))
-            (setq clutch--row-start-positions new-positions)
-            (when save-ridx
-              (clutch--goto-cell save-ridx save-cidx))))))))
+            (setq clutch--row-start-positions new-positions))
+          (when save-ridx
+            (clutch--goto-cell save-ridx save-cidx)))))))
 
 (defun clutch--delete-row-at-index (ridx)
   "Delete rendered row RIDX without a full redraw when it is the final row.

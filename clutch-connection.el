@@ -838,41 +838,29 @@ Returns non-nil on success, nil on failure."
   (clutch--ensure-connection)
   (let* ((conn clutch-connection)
          (entry (clutch--schema-status-entry conn)))
-    (if (eq (plist-get entry :state) 'refreshing)
-        (progn
-          (unless quiet
-            (message "Schema refresh already in progress"))
-          nil)
-      (if (or force-sync
-              (clutch-db-eager-schema-refresh-p conn))
-          (let* ((ok (clutch--refresh-schema-cache conn))
-                 (entry (clutch--schema-status-entry conn))
-                 (tables (plist-get entry :tables))
-                 (err (plist-get entry :error)))
-            (unless quiet
-              (message (if ok
-                           (format "Schema refreshed%s"
-                                   (if tables (format " (%d tables)" tables) ""))
-                         (format "Schema refresh failed%s"
-                                 (if err (format ": %s" err) "")))))
-            ok)
-        (let ((started (clutch--refresh-schema-cache-async conn)))
-          (if started
-              (progn
-                (unless quiet
-                  (message "Schema refresh started in background"))
-                t)
-            (let* ((ok (clutch--refresh-schema-cache conn))
-                   (entry (clutch--schema-status-entry conn))
-                   (tables (plist-get entry :tables))
-                   (err (plist-get entry :error)))
-              (unless quiet
-                (message (if ok
-                             (format "Schema refreshed%s"
-                                     (if tables (format " (%d tables)" tables) ""))
-                           (format "Schema refresh failed%s"
-                                   (if err (format ": %s" err) "")))))
-              ok)))))))
+    (cond
+     ((eq (plist-get entry :state) 'refreshing)
+      (unless quiet
+        (message "Schema refresh already in progress"))
+      nil)
+     ((and (not force-sync)
+           (not (clutch-db-eager-schema-refresh-p conn))
+           (clutch--refresh-schema-cache-async conn))
+      (unless quiet
+        (message "Schema refresh started in background"))
+      t)
+     (t
+      (let* ((ok (clutch--refresh-schema-cache conn))
+             (entry (clutch--schema-status-entry conn))
+             (tables (plist-get entry :tables))
+             (err (plist-get entry :error)))
+        (unless quiet
+          (message (if ok
+                       (format "Schema refreshed%s"
+                               (if tables (format " (%d tables)" tables) ""))
+                     (format "Schema refresh failed%s"
+                             (if err (format ": %s" err) "")))))
+        ok)))))
 
 ;;;###autoload
 (defun clutch-refresh-schema ()
@@ -1032,6 +1020,7 @@ the high-frequency execution indicator."
     (clutch--refresh-connection-render-state))
   (let* ((base (cond
                 ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
+                ((derived-mode-p 'clutch-result-mode) "clutch-result")
                 ((clutch--query-buffer-p)
                  (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
@@ -1794,7 +1783,6 @@ and TIMEOUT is the maximum wait in seconds."
                                        ssh-host)
                         :coding 'utf-8
                         :noquery t))
-            (set-process-query-on-exit-flag proc nil)
             (clutch--wait-for-ssh-tunnel
              proc local-port (plist-put (copy-sequence params) :ssh-host ssh-host)
              buffer timeout)
@@ -1935,7 +1923,6 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                                   (list target))
                         :coding 'utf-8
                         :noquery t))
-            (set-process-query-on-exit-flag proc nil)
             (clutch--wait-for-ssh-tunnel
              proc local-port (plist-put (copy-sequence params) :ssh-host target)
              buffer timeout)
@@ -2052,7 +2039,6 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                      :stderr buffer
                      :noquery t)))
         (set-process-coding-system client 'no-conversion 'no-conversion)
-        (set-process-query-on-exit-flag relay nil)
         (process-put client :clutch-container-relay relay)
         (process-put relay :clutch-container-client client)
         (when listener
@@ -2093,7 +2079,6 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                    :sentinel #'clutch--container-forward-client-sentinel
                    :noquery t))
             (setq local-port (process-contact listener :service))
-            (set-process-query-on-exit-flag listener nil)
             (process-put listener :clutch-container-command command)
             (process-put listener :clutch-container-buffer buffer)
             (process-put listener :clutch-container-listener listener)

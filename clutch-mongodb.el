@@ -45,7 +45,7 @@
 (declare-function mongodb-aggregate-command "mongodb" (collection pipeline &optional options))
 (declare-function mongodb-command "mongodb" (client database command &optional timeout sequences))
 (declare-function mongodb-connect "mongodb" (params))
-(declare-function mongodb-count-documents "mongodb" (client database collection filter &optional options))
+(declare-function mongodb-count-documents "mongodb" (client database collection &optional filter options))
 (declare-function mongodb-delete "mongodb" (client database collection filter &optional multi))
 (declare-function mongodb-datetime "mongodb" (millis))
 (declare-function mongodb-disconnect "mongodb" (conn))
@@ -55,14 +55,14 @@
 (declare-function mongodb-document-p "mongodb" (value))
 (declare-function mongodb-error-labels "mongodb" (condition))
 (declare-function mongodb-explain "mongodb" (client database command &optional verbosity))
-(declare-function mongodb-find "mongodb" (client database collection filter &optional projection limit skip sort options))
-(declare-function mongodb-find-command "mongodb" (collection filter &optional projection limit skip sort options))
-(declare-function mongodb-insert "mongodb" (client database collection documents))
+(declare-function mongodb-find "mongodb" (client database collection &optional filter projection limit skip sort options))
+(declare-function mongodb-find-command "mongodb" (collection &optional filter projection limit skip sort options))
+(declare-function mongodb-insert "mongodb" (client database collection documents &optional ordered))
 (declare-function mongodb-connection-host "mongodb" (conn))
 (declare-function mongodb-connection-port "mongodb" (conn))
 (declare-function mongodb-connection-username "mongodb" (conn))
 (declare-function mongodb-list-collection-docs "mongodb" (client database &optional filter options))
-(declare-function mongodb-list-collections "mongodb" (client database &optional filter options))
+(declare-function mongodb-list-collections "mongodb" (client database))
 (declare-function mongodb-list-databases "mongodb" (client))
 (declare-function mongodb-list-indexes "mongodb" (client database collection))
 (declare-function mongodb-live-p "mongodb" (conn))
@@ -147,10 +147,8 @@ Emacs result contract from materializing an unbounded collection."
 
 (cl-defstruct clutch-mongodb-conn
   "A logical MongoDB connection executed through mongodb.el."
-  params
   database
   client
-  closed
   busy)
 
 ;;;; Connect function
@@ -197,29 +195,6 @@ Emacs result contract from materializing an unbounded collection."
     mongodb-conn-database)
   "Public mongodb.el functions required by the native MongoDB adapter.")
 
-(defun clutch-mongodb--missing-mongodb-functions ()
-  "Return mongodb.el functions required by Clutch but currently unavailable."
-  (seq-remove #'fboundp clutch-mongodb--required-mongodb-functions))
-
-(defun clutch-mongodb--ensure-mongodb-client-api ()
-  "Load mongodb.el and verify that the native client API is available."
-  (unless (featurep 'mongodb)
-    (condition-case err
-        (require 'mongodb)
-      (error
-       (signal 'clutch-db-error
-               (list (format "MongoDB backend requires mongodb.el: %s"
-                             (error-message-string err)))))))
-  (when-let* ((missing (clutch-mongodb--missing-mongodb-functions)))
-    (signal 'clutch-db-error
-            (list (format
-                   (concat "MongoDB backend requires current mongodb.el public API; "
-                           "missing %s. Loaded library: %s. Update/install "
-                           "LuciusChen/mongodb.el, clear stale native-compile cache, "
-                           "and restart Emacs.")
-                   (mapconcat #'symbol-name missing ", ")
-                   (or (locate-library "mongodb") "not found"))))))
-
 (defun clutch-mongodb-connect (params)
   "Connect to MongoDB using PARAMS.
 PARAMS may contain :url, or structured :host/:port/:database fields.
@@ -230,14 +205,13 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
       (progn
         (require 'clutch-db-jdbc)
         (clutch-db-jdbc-connect 'mongodb params))
-    (clutch-mongodb--ensure-mongodb-client-api)
+    (clutch-db--ensure-client-api
+     'mongodb "MongoDB" clutch-mongodb--required-mongodb-functions)
     (clutch-mongodb--with-mongodb-errors
       (let ((client (mongodb-connect params)))
         (make-clutch-mongodb-conn
-         :params (copy-sequence params)
          :database (mongodb-conn-database client)
          :client client
-         :closed nil
          :busy nil)))))
 
 ;;;; MQL helper parsing
@@ -475,37 +449,21 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
   (let (args done)
     (while (not done)
       (clutch-mongodb--mql-skip-space reader)
-      (if (if end-char
-              (eq (clutch-mongodb--mql-peek reader) end-char)
-            (clutch-mongodb--mql-end-p reader))
+      (if (eq (clutch-mongodb--mql-peek reader) end-char)
           (progn
-            (when end-char
-              (clutch-mongodb--mql-read reader))
+            (clutch-mongodb--mql-read reader)
             (setq done t))
         (push (clutch-mongodb--mql-parse-value reader) args)
         (clutch-mongodb--mql-skip-space reader)
         (cond
          ((eq (clutch-mongodb--mql-peek reader) ?,)
           (clutch-mongodb--mql-read reader))
-         ((if end-char
-              (eq (clutch-mongodb--mql-peek reader) end-char)
-            (clutch-mongodb--mql-end-p reader))
+         ((eq (clutch-mongodb--mql-peek reader) end-char)
           nil)
          (t
           (signal 'clutch-db-error
                   (list "Expected `,' or closing delimiter in MongoDB arguments"))))))
     (nreverse args)))
-
-(defun clutch-mongodb--mql-parse-args (text)
-  "Parse MongoDB helper argument TEXT."
-  (let ((reader (make-clutch-mongodb--mql-reader
-                 :text text
-                 :pos 0)))
-    (prog1 (clutch-mongodb--mql-parse-args-until-end reader nil)
-      (clutch-mongodb--mql-skip-space reader)
-      (unless (clutch-mongodb--mql-end-p reader)
-        (signal 'clutch-db-error
-                (list "Trailing text in MongoDB arguments"))))))
 
 (defun clutch-mongodb--split-statements (code)
   "Split MongoDB CODE on top-level semicolons."
@@ -547,49 +505,13 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (seq-filter (lambda (part) (not (string-empty-p part)))
                 (nreverse parts))))
 
-(defun clutch-mongodb--matching-paren (text open-pos)
-  "Return matching close paren for TEXT at OPEN-POS."
-  (let ((depth 0)
-        quote
-        escape
-        found
-        (index open-pos))
-    (while (and (< index (length text))
-                (not found))
-      (let ((char (aref text index)))
-        (cond
-         (escape
-          (setq escape nil)
-          (cl-incf index))
-         ((and quote (eq char ?\\))
-          (setq escape t)
-          (cl-incf index))
-         (quote
-          (when (eq char quote)
-            (setq quote nil))
-          (cl-incf index))
-         ((memq char '(?\" ?\'))
-          (setq quote char)
-          (cl-incf index))
-         ((eq char ?\()
-          (cl-incf depth)
-          (cl-incf index))
-         ((eq char ?\))
-          (cl-decf depth)
-          (when (zerop depth)
-            (setq found index))
-          (cl-incf index))
-         (t
-          (cl-incf index)))))
-    (or found
-        (signal 'clutch-db-error
-                (list "Unclosed MongoDB helper call")))))
-
 (defun clutch-mongodb--parse-call-args (text open-pos)
   "Return (ARGS . CLOSE-POS) for TEXT call starting at OPEN-POS."
-  (let* ((close (clutch-mongodb--matching-paren text open-pos))
-         (inside (substring text (1+ open-pos) close)))
-    (cons (clutch-mongodb--mql-parse-args inside) close)))
+  (let ((reader (make-clutch-mongodb--mql-reader
+                 :text text
+                 :pos (1+ open-pos))))
+    (cons (clutch-mongodb--mql-parse-args-until-end reader ?\))
+          (1- (clutch-mongodb--mql-reader-pos reader)))))
 
 (defun clutch-mongodb--parse-method-call (text pos collection)
   "Parse a collection method call in TEXT at POS for COLLECTION."
@@ -598,7 +520,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (signal 'clutch-db-error
             (list "Expected MongoDB collection method call")))
   (let* ((method-start (1+ pos))
-         (open (string-match-p "[[:space:]]*(" text method-start))
+         (open (and (string-match "[[:space:]]*(" text method-start)
+                    (1- (match-end 0))))
          method args close chain)
     (unless open
       (signal 'clutch-db-error
@@ -626,7 +549,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
         (signal 'clutch-db-error
                 (list "Unsupported MongoDB helper chain")))
       (let* ((method-start 1)
-             (open (string-match-p "[[:space:]]*(" tail method-start)))
+             (open (and (string-match "[[:space:]]*(" tail method-start)
+                        (1- (match-end 0)))))
         (unless open
           (signal 'clutch-db-error
                   (list "Expected MongoDB chained helper arguments")))
@@ -697,14 +621,7 @@ When both are present, return the earlier one."
 
 (defun clutch-mongodb--options-from-chain (chain methods)
   "Return MongoDB command option pairs parsed from CHAIN for METHODS."
-  (delq nil
-        (mapcar
-         (lambda (pair)
-           (let ((method (car pair))
-                 (value (cdr pair)))
-             (when (member method methods)
-               (cons method value))))
-         chain)))
+  (seq-filter (lambda (pair) (member (car pair) methods)) chain))
 
 (defun clutch-mongodb--merge-options (base extra)
   "Return option document merged from BASE document and EXTRA alist."
@@ -808,9 +725,8 @@ chain options."
 
 (defun clutch-mongodb--find-command (collection args chain &optional single)
   "Return a MongoDB find command for COLLECTION from ARGS, CHAIN, and SINGLE."
-  (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
-               (clutch-mongodb--find-arguments args chain single)))
-    (mongodb-find-command collection filter projection limit skip sort options)))
+  (apply #'mongodb-find-command collection
+         (clutch-mongodb--find-arguments args chain single)))
 
 (defun clutch-mongodb--aggregate-options (args chain)
   "Return MongoDB aggregate options parsed from ARGS and CHAIN."
@@ -842,21 +758,16 @@ CHAIN contains parsed cursor helper calls, when present."
         (database (clutch-mongodb-conn-database conn)))
     (pcase method
       ("find"
-       (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
-                    (clutch-mongodb--find-arguments args chain)))
+       (let ((find-args (clutch-mongodb--find-arguments args chain)))
          (if (assoc "explain" chain)
              (mongodb-explain
               client database
-              (mongodb-find-command
-               collection filter projection limit skip sort options)
+              (apply #'mongodb-find-command collection find-args)
               (clutch-mongodb--explain-verbosity chain))
-           (mongodb-find
-            client database collection filter projection limit skip sort options))))
+           (apply #'mongodb-find client database collection find-args))))
       ("findOne"
-       (pcase-let ((`(,filter ,projection ,limit ,skip ,sort ,options)
-                    (clutch-mongodb--find-arguments args chain t)))
-         (car (mongodb-find
-               client database collection filter projection limit skip sort options))))
+       (car (apply #'mongodb-find client database collection
+                   (clutch-mongodb--find-arguments args chain t))))
       ("countDocuments"
        (unless (<= (length args) 2)
          (signal 'clutch-db-error
@@ -994,9 +905,6 @@ CHAIN contains parsed cursor helper calls, when present."
                  thereis (clutch-mongodb--find-document-key (cdr pair) key))))
    ((vectorp value)
     (cl-loop for item across value
-             thereis (clutch-mongodb--find-document-key item key)))
-   ((listp value)
-    (cl-loop for item in value
              thereis (clutch-mongodb--find-document-key item key)))))
 
 (defun clutch-mongodb--document-has-value-p (value key expected)
@@ -1011,9 +919,6 @@ CHAIN contains parsed cursor helper calls, when present."
                           (cdr pair) key expected))))
    ((vectorp value)
     (cl-loop for item across value
-             thereis (clutch-mongodb--document-has-value-p item key expected)))
-   ((listp value)
-    (cl-loop for item in value
              thereis (clutch-mongodb--document-has-value-p item key expected)))))
 
 (defun clutch-mongodb--explain-summary (explain)
@@ -1119,7 +1024,6 @@ numbers."
    ((vectorp value) "array")
    ((mongodb-document-p value) "object")
    ((clutch-mongodb--alist-p value) "object")
-   ((listp value) "array")
    ((mongodb-int64-p value) "long")
    ((mongodb-int32-p value) "int")
    ((mongodb-object-id-p value) "objectId")
@@ -1360,7 +1264,6 @@ FIELDS is an optional list of top-level field names for update snippets."
 (defun clutch-mongodb--index-entry (conn collection document)
   "Return a Clutch index entry for MongoDB index DOCUMENT on COLLECTION in CONN."
   (let ((name (clutch-mongodb--document-value document "name"))
-        (key (clutch-mongodb--document-value document "key"))
         (database (clutch-mongodb-conn-database conn)))
     (list :name name
           :type "INDEX"
@@ -1369,7 +1272,6 @@ FIELDS is an optional list of top-level field names for update snippets."
           :target-table collection
           :identity (format "%s.%s" collection name)
           :unique (eq (clutch-mongodb--document-value document "unique") t)
-          :key key
           :definition document)))
 
 (defun clutch-mongodb--index-json (document &optional stats)
@@ -1453,7 +1355,6 @@ FIELDS is an optional list of top-level field names for update snippets."
                (list :path path
                      :present 0
                      :values nil
-                     :types (make-hash-table :test 'equal)
                      :top-values (make-hash-table :test 'equal)
                      :examples nil
                      :numeric-min nil
@@ -1489,15 +1390,12 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (defun clutch-mongodb--profile-record-value (stats seen path value)
   "Record sampled VALUE for PATH in STATS, tracking document-level SEEN paths."
-  (let* ((stat (clutch-mongodb--profile-stat stats path))
-         (type (clutch-mongodb--value-type-name value))
-         (types (plist-get stat :types)))
+  (let ((stat (clutch-mongodb--profile-stat stats path)))
     (unless (gethash path seen)
       (puthash path t seen)
       (setq stat (plist-put stat :present
                             (1+ (plist-get stat :present)))))
     (push value (plist-get stat :values))
-    (puthash type (1+ (or (gethash type types) 0)) types)
     (when-let* ((number (clutch-mongodb--scalar-number value)))
       (setq stat
             (plist-put stat :numeric-min
@@ -1527,13 +1425,6 @@ FIELDS is an optional list of top-level field names for update snippets."
                  top-values)))
     (puthash path stat stats)))
 
-(defun clutch-mongodb--extended-json-wrapper-p (value)
-  "Return non-nil if VALUE is an Extended JSON scalar wrapper."
-  (and (clutch-mongodb--alist-p value)
-       (= (length value) 1)
-       (stringp (caar value))
-       (string-prefix-p "$" (caar value))))
-
 (defun clutch-mongodb--profile-stats-for-docs (docs)
   "Return sorted field profile stat plists sampled from DOCS."
   (let ((stats (make-hash-table :test 'equal))
@@ -1550,9 +1441,8 @@ FIELDS is an optional list of top-level field names for update snippets."
              (clutch-mongodb--profile-record-value
               stats doc-seen path value))
            (cond
-            ((and (or (mongodb-document-p value)
-                      (clutch-mongodb--alist-p value))
-                  (not (clutch-mongodb--extended-json-wrapper-p value)))
+            ((or (mongodb-document-p value)
+                 (clutch-mongodb--alist-p value))
              (dolist (pair (clutch-mongodb--document-elements value))
                (walk (cdr pair)
                      (if path
@@ -1662,16 +1552,16 @@ FIELDS is an optional list of top-level field names for update snippets."
     (clutch-mongodb--result-from-docs conn value))
    ((clutch-mongodb--alist-p value)
     (clutch-mongodb--result-from-docs conn (list value)))
-   ((and (listp value) (not (clutch-mongodb--alist-p value)))
-    (let ((rows (mapcar (lambda (item)
-                          (list (clutch-mongodb--display-value item)))
-                        value)))
+   ((vectorp value)
+    (let ((items (append value nil)))
       (make-clutch-db-result
        :connection conn
        :columns (list (list :name "value"
                             :type-category
-                            (clutch-mongodb--column-category (car value))))
-       :rows rows)))
+                            (clutch-mongodb--column-category (car items))))
+       :rows (mapcar (lambda (item)
+                       (list (clutch-mongodb--display-value item)))
+                     items))))
    (t
     (make-clutch-db-result
      :connection conn
@@ -1684,21 +1574,15 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-mongodb-conn))
   "Disconnect MongoDB CONN."
-  (setf (clutch-mongodb-conn-closed conn) t)
   (mongodb-disconnect (clutch-mongodb-conn-client conn)))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-mongodb-conn))
   "Return non-nil when MongoDB CONN is still usable."
-  (and conn
-       (not (clutch-mongodb-conn-closed conn))
-       (mongodb-live-p (clutch-mongodb-conn-client conn))))
+  (and conn (mongodb-live-p (clutch-mongodb-conn-client conn))))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-mongodb-conn))
   "Return the registered backend key for MongoDB connections."
   'mongodb)
-
-(cl-defmethod clutch-db-init-connection ((_conn clutch-mongodb-conn))
-  "No eager MongoDB initialization is required.")
 
 (cl-defmethod clutch-db-query ((conn clutch-mongodb-conn) code)
   "Evaluate MongoDB shell CODE on CONN and return a `clutch-db-result'."
@@ -1759,9 +1643,6 @@ SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-mongodb-conn) schema)
   "Switch MongoDB CONN to SCHEMA for subsequent mongodb.el commands."
   (setf (clutch-mongodb-conn-database conn) schema)
-  (setf (clutch-mongodb-conn-params conn)
-        (plist-put (copy-sequence (clutch-mongodb-conn-params conn))
-                   :database schema))
   schema)
 
 (cl-defmethod clutch-db-update-namespace-params
@@ -2065,21 +1946,8 @@ of top-level field names for field-scoped snippets."
   "Return nil; MongoDB collections have no SQL table comments."
   nil)
 
-(cl-defmethod clutch-db-primary-key-columns ((_conn clutch-mongodb-conn) _table)
-  "Return nil; native MongoDB results are not edited through SQL row identity."
-  nil)
-
-(cl-defmethod clutch-db-row-identity-candidates ((_conn clutch-mongodb-conn) _table
-                                                 &optional _schema _catalog)
-  "Return nil; native MongoDB staged SQL edits are unsupported."
-  nil)
-
 (cl-defmethod clutch-db-foreign-keys ((_conn clutch-mongodb-conn) _table)
   "Return nil; MongoDB has no SQL foreign-key metadata."
-  nil)
-
-(cl-defmethod clutch-db-referencing-objects ((_conn clutch-mongodb-conn) _table)
-  "Return nil; MongoDB has no SQL referencing-object metadata."
   nil)
 
 (cl-defmethod clutch-db-busy-p ((conn clutch-mongodb-conn))
@@ -2101,10 +1969,6 @@ of top-level field names for field-scoped snippets."
 (cl-defmethod clutch-db-database ((conn clutch-mongodb-conn))
   "Return the current MongoDB database for CONN."
   (clutch-mongodb-conn-database conn))
-
-(cl-defmethod clutch-db-display-name ((_conn clutch-mongodb-conn))
-  "Return \"MongoDB\" as the display name."
-  "MongoDB")
 
 (provide 'clutch-mongodb)
 ;;; clutch-mongodb.el ends here
