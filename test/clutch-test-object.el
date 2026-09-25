@@ -1235,6 +1235,25 @@ warmed categories and performs no lookup."
         (should-not (plist-get result :full-entries)))
       (should (= refresh-count 1)))))
 
+(ert-deftest clutch-test-on-demand-object-search-keeps-overloads ()
+  "On-demand search should keep same-name routines with different identities.
+PostgreSQL overloads differ only in their OID, which a merge by name, type
+and schema ignored, so the search offered the first overload alone."
+  (let ((overloads '((:name "area" :type "FUNCTION" :schema "public"
+                      :identity "OID:16401")
+                     (:name "area" :type "FUNCTION" :schema "public"
+                      :identity "OID:16402"))))
+    (cl-letf (((symbol-function 'clutch-db-search-table-entries)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch--object-cache-complete-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch--object-entries)
+               (lambda (_conn &optional _refresh) overloads)))
+      (should (equal (plist-get (clutch--on-demand-object-search
+                                 'fake-conn "area" nil nil)
+                                :hits)
+                     overloads)))))
+
 (ert-deftest clutch-test-resolve-object-entry-effect-boundaries ()
   "The real resolver should avoid remote I/O for local and dead paths."
   (let ((entries '((:name "ORDERS" :type "TABLE")
