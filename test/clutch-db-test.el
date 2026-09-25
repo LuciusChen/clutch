@@ -2536,11 +2536,13 @@ Filtering the category listing ran a schema-wide query per describe."
       '("db.getCollection(\"users\").deleteOne({\"_id\":7});")))))
 
 (ert-deftest clutch-db-test-mongodb-query-scalars-to-value-column ()
-  "Native MongoDB scalar array results should use a value column."
+  "Native MongoDB scalar array results should use a value column.
+mongodb.el decodes a BSON array, such as the values of `distinct()', as a
+vector."
   (cl-letf (((symbol-function 'clutch-mongodb--eval)
-             (lambda (_conn _code) '(1 2 3))))
+             (lambda (_conn _code) [1 2 3])))
     (let* ((conn (clutch-db-test--make-mongodb-conn))
-           (result (clutch-db-query conn "[1, 2, 3]")))
+           (result (clutch-db-query conn "db.users.distinct('n')")))
       (should (equal (clutch-db-result-column-names
                       (clutch-db-result-columns result))
                      '("value")))
