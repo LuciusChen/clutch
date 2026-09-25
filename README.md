@@ -71,7 +71,7 @@ Joined, grouped, derived, or otherwise ambiguous result sets remain read-only un
 
 | Backend | Support level | Requirements and notes |
 |---|---|---|
-| MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, and MariaDB 10.11 |
+| MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, MySQL 8.4 LTS, and MariaDB 10.11 |
 | PostgreSQL | Core SQL support | Requires [`pgsql`](https://melpa.org/#/pgsql), available from MELPA |
 | SQLite | Core SQL support | Uses Emacs 29.1+ built-in `sqlite-*` functions; no external dependency |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
