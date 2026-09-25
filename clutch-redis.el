@@ -81,38 +81,6 @@ lists.  Stop before those lists can grow without bound."
     redis-conn-port)
   "Public redis.el functions required by the Redis adapter.")
 
-(defun clutch-redis--missing-redis-functions ()
-  "Return redis.el functions required by Clutch but currently unavailable."
-  (seq-remove #'fboundp clutch-redis--required-redis-functions))
-
-(defun clutch-redis--ensure-redis-client-api ()
-  "Load redis.el and verify that its public API is available."
-  (unless (featurep 'redis)
-    (condition-case err
-        (require 'redis)
-      (error
-       (signal 'clutch-db-error
-               (list (format "Redis backend requires redis.el: %s"
-                             (error-message-string err)))))))
-  (when-let* ((missing (clutch-redis--missing-redis-functions)))
-    (signal 'clutch-db-error
-            (list (format
-                   (concat "Redis backend requires current redis.el public API; "
-                           "missing %s. Loaded library: %s. Update/install "
-                           "LuciusChen/redis.el, clear stale native-compile cache, "
-                           "and restart Emacs.")
-                   (mapconcat #'symbol-name missing ", ")
-                   (or (locate-library "redis") "not found"))))))
-
-(defmacro clutch-redis--with-redis-errors (&rest body)
-  "Run BODY and translate `redis-error' to `clutch-db-error'."
-  (declare (indent 0) (debug t))
-  `(condition-case err
-       (progn ,@body)
-     (redis-error
-      (signal 'clutch-db-error
-              (list (error-message-string err))))))
-
 ;;;; Connection
 
 (cl-defstruct clutch-redis-conn
@@ -124,8 +92,9 @@ lists.  Stop before those lists can grow without bound."
 
 (defun clutch-redis-connect (params)
   "Connect to Redis using PARAMS."
-  (clutch-redis--ensure-redis-client-api)
-  (clutch-redis--with-redis-errors
+  (clutch-db--ensure-client-api
+   'redis "Redis" clutch-redis--required-redis-functions)
+  (clutch-db--translate-library-error redis-error
     (make-clutch-redis-conn
      :params (copy-sequence params)
      :client (redis-connect params)
@@ -359,9 +328,6 @@ lists.  Stop before those lists can grow without bound."
   "Return the registered backend key for Redis connections."
   'redis)
 
-(cl-defmethod clutch-db-init-connection ((_conn clutch-redis-conn))
-  "No eager Redis initialization is required.")
-
 (cl-defmethod clutch-db-disconnect ((conn clutch-redis-conn))
   "Close Redis CONN."
   (setf (clutch-redis-conn-closed conn) t)
@@ -381,7 +347,7 @@ lists.  Stop before those lists can grow without bound."
   "Execute Redis COMMAND-TEXT on CONN and return a `clutch-db-result'."
   (setf (clutch-redis-conn-busy conn) t)
   (unwind-protect
-      (clutch-redis--with-redis-errors
+      (clutch-db--translate-library-error redis-error
         (pcase-let ((`(,command ,arguments ,response)
                      (clutch-redis--eval conn command-text)))
           (clutch-redis--result-from-response conn command arguments response)))
@@ -419,10 +385,6 @@ lists.  Stop before those lists can grow without bound."
   "Return the Redis logical database for CONN."
   (let ((database (redis-conn-database (clutch-redis-conn-client conn))))
     (and database (format "%s" database))))
-
-(cl-defmethod clutch-db-display-name ((_conn clutch-redis-conn))
-  "Return the Redis display name."
-  "Redis")
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-redis-conn))
   "Return the Redis logical database label for CONN."
@@ -483,7 +445,7 @@ first-seen order."
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-redis-conn))
   "Return Redis key names for CONN."
-  (clutch-redis--with-redis-errors
+  (clutch-db--translate-library-error redis-error
     (clutch-redis--scan-keys conn)))
 
 (defun clutch-redis--key-entry (conn key)
@@ -494,7 +456,7 @@ first-seen order."
 
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-redis-conn))
   "Return Redis key entries for CONN."
-  (clutch-redis--with-redis-errors
+  (clutch-db--translate-library-error redis-error
     (mapcar (lambda (key)
               (clutch-redis--key-entry conn key))
             (clutch-redis--scan-keys conn))))
@@ -505,7 +467,7 @@ first-seen order."
 
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-redis-conn) prefix)
   "Return Redis key entries for CONN matching PREFIX."
-  (clutch-redis--with-redis-errors
+  (clutch-db--translate-library-error redis-error
     (let ((keys
            (clutch-redis--scan-keys
             conn
@@ -516,7 +478,7 @@ first-seen order."
 
 (cl-defmethod clutch-db-find-table-entry ((conn clutch-redis-conn) name)
   "Return the Redis key entry exactly matching NAME on CONN."
-  (clutch-redis--with-redis-errors
+  (clutch-db--translate-library-error redis-error
     (when (= (redis-command (clutch-redis-conn-client conn)
                             "EXISTS" name)
              1)
@@ -536,7 +498,7 @@ first-seen order."
   (if (or (plist-get entry :value-type)
           (not (equal (plist-get entry :type) "KEY")))
       entry
-    (clutch-redis--with-redis-errors
+    (clutch-db--translate-library-error redis-error
       (plist-put (copy-sequence entry)
                  :value-type
                  (upcase (clutch-redis--key-type conn
@@ -559,7 +521,7 @@ first-seen order."
     (user-error "Redis browse limit must be a positive integer"))
   (let* ((key (plist-get entry :name))
          (quoted (clutch-redis--quoted-argument key))
-         (type (clutch-redis--with-redis-errors
+         (type (clutch-db--translate-library-error redis-error
                  (clutch-redis--key-type conn key))))
     (pcase type
       ("string" (format "GET %s" quoted))
@@ -577,7 +539,7 @@ first-seen order."
 
 (cl-defmethod clutch-db-object-details ((conn clutch-redis-conn) entry)
   "Return Redis metadata pairs for key ENTRY on CONN."
-  (clutch-redis--with-redis-errors
+  (clutch-db--translate-library-error redis-error
     (let* ((client (clutch-redis-conn-client conn))
            (key (plist-get entry :name))
            (type (clutch-redis--string-value (redis-command client "TYPE" key)))

@@ -321,30 +321,34 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (ert-deftest clutch-db-test-normalize-connect-params-tls-options ()
   "Backend TLS options should normalize to adapter-native connection params."
-  (dolist (case '((mysql-disabled mysql
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (dolist (case '((mysql-disabled clutch-db-mysql--normalize-connect-params
                    (:host "127.0.0.1" :tls nil :ssl-mode off)
                    ((:clutch-tls-mode . disable) (:ssl-mode . disabled))
                    (:tls) nil)
-                  (mysql-conflict mysql
+                  (mysql-conflict clutch-db-mysql--normalize-connect-params
                    (:host "127.0.0.1" :tls t :ssl-mode disabled)
                    nil nil clutch-db-error)
-                  (pg-require pg
+                  (pg-require clutch-db-pg--normalize-connect-params
                    (:host "127.0.0.1" :tls t)
                    ((:sslmode . require))
                    (:tls :clutch-tls-mode) nil)
-                  (pg-prefer pg
+                  (pg-prefer clutch-db-pg--normalize-connect-params
                    (:host "127.0.0.1" :sslmode "prefer")
                    ((:sslmode . prefer))
                    (:tls :clutch-tls-mode) nil)
-                  (pg-unsupported pg
+                  (pg-unsupported clutch-db-pg--normalize-connect-params
                    (:host "127.0.0.1" :sslmode verify-ca)
                    nil nil clutch-db-error)))
-    (pcase-let ((`(,label ,backend ,input ,expected ,absent ,error-type) case))
+    (pcase-let ((`(,label ,normalize-fn ,input ,expected ,absent ,error-type) case))
       (ert-info ((format "case: %s" label))
         (if error-type
-            (should-error (clutch-db--normalize-connect-params backend input)
+            (should-error (funcall normalize-fn
+                                   (clutch-db--reject-removed-connect-params input))
                           :type error-type)
-          (let ((params (clutch-db--normalize-connect-params backend input)))
+          (let ((params (funcall normalize-fn
+                                 (clutch-db--reject-removed-connect-params input))))
             (dolist (pair expected)
               (should (eq (plist-get params (car pair)) (cdr pair))))
             (dolist (key absent)
@@ -378,24 +382,9 @@ and a `?' inside a dollar-quoted function body is part of the body."
 (ert-deftest clutch-db-test-normalize-connect-params-rejects-removed-read-timeout ()
   "Removed connection timeout aliases should fail before reaching adapters."
   (should-error
-   (clutch-db--normalize-connect-params
-    'mysql '(:host "127.0.0.1" :read-timeout 5))
+   (clutch-db--reject-removed-connect-params
+    '(:host "127.0.0.1" :read-timeout 5))
    :type 'user-error))
-
-(ert-deftest clutch-db-test-normalize-connect-params-dispatches-registry-function ()
-  "Connection parameter normalization should come from backend registry metadata."
-  (let ((clutch-backend--registry
-         '((alpha . (:normalize-fn clutch-db-test--alpha-normalize))
-           (beta . (:normalize-fn clutch-db-test--beta-normalize)))))
-    (cl-letf (((symbol-function 'clutch-db-test--alpha-normalize)
-               (lambda (params)
-                 (append params '(:normalized-by alpha))))
-              ((symbol-function 'clutch-db-test--beta-normalize)
-               (lambda (_params)
-                 (ert-fail "Called the wrong backend normalizer"))))
-      (should (equal (clutch-db--normalize-connect-params
-                      'alpha '(:database "app"))
-                     '(:database "app" :normalized-by alpha))))))
 
 (ert-deftest clutch-db-test-redis-query-mapping-contract ()
   :tags '(:smoke)
@@ -2295,8 +2284,10 @@ Filtering the category listing ran a schema-wide query per describe."
                (lambda (file &rest _args)
                  (setq loaded file)
                  t)))
-      (let ((err (should-error (clutch-mongodb--ensure-mongodb-client-api)
-                               :type 'clutch-db-error)))
+      (let ((err (should-error
+                  (clutch-db--ensure-client-api
+                   'mongodb "MongoDB" clutch-mongodb--required-mongodb-functions)
+                  :type 'clutch-db-error)))
         (should (string-match-p "requires current mongodb.el public API"
                                 (error-message-string err)))
         (should (string-match-p "mongodb-connection-host"
@@ -2367,8 +2358,8 @@ Filtering the category listing ran a schema-wide query per describe."
                  (setq captured-driver driver
                        captured-params params)
                  'jdbc-conn))
-              ((symbol-function 'clutch-mongodb--ensure-mongodb-client-api)
-               (lambda ()
+              ((symbol-function 'clutch-db--ensure-client-api)
+               (lambda (&rest _args)
                  (ert-fail "SQL Interface should not load native mongodb.el API"))))
       (should (eq (clutch-mongodb-connect
                    '(:surface "sql-interface"
@@ -3843,8 +3834,6 @@ orai18n warning."
     (should mysql-features)
     (should (eq (plist-get mysql-features :require) 'clutch-db-mysql))
     (should (eq (plist-get mysql-features :connect-fn) 'clutch-db-mysql-connect))
-    (should (eq (plist-get mysql-features :normalize-fn)
-                'clutch-db-mysql--normalize-connect-params))
     (should (equal (plist-get mysql-features :display-name) "MySQL"))
     (should (= (plist-get mysql-features :default-port) 3306))
     (should (eq (plist-get mysql-features :support-level) 'core))
@@ -3854,8 +3843,6 @@ orai18n warning."
     (should pg-features)
     (should (eq (plist-get pg-features :require) 'clutch-db-pg))
     (should (eq (plist-get pg-features :connect-fn) 'clutch-db-pg-connect))
-    (should (eq (plist-get pg-features :normalize-fn)
-                'clutch-db-pg--normalize-connect-params))
     (should (equal (plist-get pg-features :display-name) "PostgreSQL"))
     (should (= (plist-get pg-features :default-port) 5432))
     (should (eq (plist-get pg-features :support-level) 'core))

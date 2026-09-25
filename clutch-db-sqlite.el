@@ -184,17 +184,6 @@ Return a `clutch-db-result'."
        (clutch-db--translate-library-error sqlite-error
          (sqlite-rollback handle))))))
 
-(cl-defmethod clutch-db-build-paged-sql ((_conn clutch-db-sqlite-conn)
-                                          base-sql page-num page-size
-                                          &optional order-by page-offset)
-  "Build a paginated SQL query for SQLite from BASE-SQL.
-PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
-controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
-when non-nil."
-  (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by #'clutch-db-sqlite--escape-id
-   page-offset))
-
 ;;;; SQL dialect methods
 
 (defun clutch-db-sqlite--escape-id (name)
@@ -412,10 +401,6 @@ PK-COLS is a list of pk column names.  FKS is an FK alist."
 (cl-defmethod clutch-db-database ((conn clutch-db-sqlite-conn))
   "Return the database file path for SQLite CONN."
   (clutch-db-sqlite-conn-database conn))
-
-(cl-defmethod clutch-db-display-name ((_conn clutch-db-sqlite-conn))
-  "Return \"SQLite\" as the display name."
-  "SQLite")
 
 (provide 'clutch-db-sqlite)
 ;;; clutch-db-sqlite.el ends here
