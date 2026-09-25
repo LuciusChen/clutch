@@ -562,7 +562,7 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-start-tramp-forward-starts-direct-ssh-forward ()
   "Direct ssh TRAMP forward startup should use OpenSSH -L."
-  (let (make-process-args query-flag waited)
+  (let (make-process-args waited)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (program)
                  (when (equal program "ssh") "/usr/bin/ssh")))
@@ -572,9 +572,6 @@ and the ssh -N process has no owner yet at that point."
                (lambda (&rest args)
                  (setq make-process-args args)
                  'fake-proc))
-              ((symbol-function 'set-process-query-on-exit-flag)
-               (lambda (proc flag)
-                 (setq query-flag (list proc flag))))
               ((symbol-function 'clutch--wait-for-ssh-tunnel)
                (lambda (proc port params buffer timeout)
                  (setq waited (list proc port params buffer timeout)))))
@@ -590,7 +587,7 @@ and the ssh -N process has no owner yet at that point."
                          "-o" "ExitOnForwardFailure=yes"
                          "-L" "127.0.0.1:40124:db:5432"
                          "devbox")))
-        (should (equal query-flag '(fake-proc nil)))
+        (should (eq (plist-get make-process-args :noquery) t))
         (should (eq (plist-get transport :kind) 'tramp))
         (should (eq (plist-get transport :process) 'fake-proc))
         (should (= (plist-get transport :local-port) 40124))
@@ -673,7 +670,7 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-start-tramp-forward-starts-docker-container-relay ()
   "Docker TRAMP forward startup should create a local relay listener."
-  (let (network-args puts query-flag)
+  (let (network-args puts)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (program)
                  (when (equal program "docker") "/usr/bin/docker")))
@@ -686,10 +683,7 @@ and the ssh -N process has no owner yet at that point."
                  (when (eq key :service) 40125)))
               ((symbol-function 'process-put)
                (lambda (process key value)
-                 (push (list process key value) puts)))
-              ((symbol-function 'set-process-query-on-exit-flag)
-               (lambda (proc flag)
-                 (setq query-flag (list proc flag)))))
+                 (push (list process key value) puts))))
       (let ((transport (clutch--start-tramp-tcp-forward
                         '(:backend pg
                           :host "db"
@@ -702,7 +696,7 @@ and the ssh -N process has no owner yet at that point."
         (should (equal (plist-get network-args :host) "127.0.0.1"))
         (should (eq (plist-get network-args :service) t))
         (should (eq (plist-get network-args :coding) 'no-conversion))
-        (should (equal query-flag '(fake-listener nil)))
+        (should (eq (plist-get network-args :noquery) t))
         (should (member
                  (list 'fake-listener
                        :clutch-container-command

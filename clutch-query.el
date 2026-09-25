@@ -304,9 +304,9 @@ console window; (3) nil, meaning use the selected window."
               (if port (format ":%s" port) "")
               (if database (format "/%s" database) "")))))
 
-(defun clutch--ad-hoc-console-target (&optional params)
-  "Return an ad hoc query console target for PARAMS."
-  (let ((params (or params (clutch--read-manual-connection-params t))))
+(defun clutch--ad-hoc-console-target ()
+  "Return an ad hoc query console target for manually entered params."
+  (let ((params (clutch--read-manual-connection-params t)))
     (list :name (clutch--ad-hoc-console-name params)
           :params params
           :ad-hoc t)))
@@ -343,12 +343,7 @@ console window; (3) nil, meaning use the selected window."
                      (clutch--read-saved-connection-choice "Console: " names)
                    ""))
          (target (cdr (assoc choice targets))))
-    (cond
-     ((string= choice "")
-      (clutch--ad-hoc-console-target))
-     (target target)
-     (t
-      (clutch--ad-hoc-console-target)))))
+    (or target (clutch--ad-hoc-console-target))))
 
 (defun clutch--console-yank-cleanup ()
   "Clean whitespace in the just-pasted region of a query console.
@@ -1287,8 +1282,8 @@ Return a plist with :message, :summary, and :display-summary."
           :summary summary
           :display-summary display-summary)))
 
-(defun clutch--execute-and-mark (sql beg end &optional conn)
-  "Execute SQL on CONN and mark BEG..END on success."
+(defun clutch--execute-and-mark (sql beg end)
+  "Execute SQL on the current buffer connection and mark BEG..END on success."
   (pcase-let* ((`(,trim-beg . ,trim-end)
                  (or (clutch--trim-sql-bounds beg end)
                      (cons beg end))))
@@ -1296,7 +1291,7 @@ Return a plist with :message, :summary, and :display-summary."
     (redisplay t)
     (when (let ((clutch--executing-sql-start trim-beg)
                 (clutch--executing-sql-end trim-end))
-            (clutch--execute sql conn))
+            (clutch--execute sql))
       (clutch--mark-executed-sql-region beg end))))
 
 ;;;; Query-at-point detection

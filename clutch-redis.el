@@ -36,7 +36,7 @@
 (require 'seq)
 (require 'subr-x)
 
-(declare-function clutch--execute-and-mark "clutch-query" (sql beg end &optional conn))
+(declare-function clutch--execute-and-mark "clutch-query" (sql beg end))
 (declare-function clutch--install-query-keybindings "clutch-query" (map))
 (declare-function clutch--query-mode-common-setup "clutch-query" (&optional mode-line-name))
 (declare-function redis-command "redis" (conn command &rest arguments))
