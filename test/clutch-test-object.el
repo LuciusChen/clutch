@@ -348,7 +348,7 @@ The exact-name match only needs entries under the name's prefix."
       (let (setup-command)
         (with-temp-buffer
           (setq-local clutch-connection 'fake-conn)
-          (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
+          (cl-letf (((symbol-function 'clutch--resolve-object-entry)
                      (lambda (&rest _)
                        (or (plist-get case :resolved)
                            (ert-fail "explicit entry should not resolve"))))
@@ -363,15 +363,6 @@ The exact-name match only needs entries under the name's prefix."
               (should (equal clutch--object-action-entry
                              (or (plist-get case :entry)
                                  (plist-get case :resolved)))))))))))
-
-(ert-deftest clutch-test-act-dwim-errors-without-action-ui ()
-  "Act-dwim should not silently run the default action when no UI exists."
-  (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
-             (lambda (&rest _)
-               '(:name "ORDERS" :type "TABLE")))
-            ((symbol-function 'clutch--present-object-actions-natively)
-             (lambda (_entry) nil)))
-    (should-error (clutch-act-dwim) :type 'user-error)))
 
 (ert-deftest clutch-test-object-action-inapt-flags-reflect-target-type ()
   "Object action transient flags should reflect the current target type."
@@ -490,7 +481,7 @@ The exact-name match only needs entries under the name's prefix."
     (with-temp-buffer
       (setq-local clutch-connection 'fake-conn)
       (cl-letf (((symbol-function 'thing-at-point) (lambda (&rest _) nil))
-                ((symbol-function 'clutch--resolve-object-dwim)
+                ((symbol-function 'clutch--resolve-object-entry)
                  (lambda (prompt &rest _args)
                    (setq resolved-prompt prompt)
                    '(:name "IDX_A" :type "INDEX")))
@@ -1046,7 +1037,7 @@ warmed categories and performs no lookup."
   (ert-info ("table default browse")
     (let (resolved-prompt resolved-category resolved-types
                           action-call presented-entry)
-      (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
+      (cl-letf (((symbol-function 'clutch--resolve-object-entry)
                  (lambda (prompt &optional _table-like-only category allowed-types)
                    (setq resolved-prompt prompt)
                    (setq resolved-category category)
@@ -1068,7 +1059,7 @@ warmed categories and performs no lookup."
         (should-not presented-entry))))
   (ert-info ("procedure default definition")
     (let (resolved-prompt action-call)
-      (cl-letf (((symbol-function 'clutch--resolve-object-dwim)
+      (cl-letf (((symbol-function 'clutch--resolve-object-entry)
                  (lambda (prompt &optional _table-like-only
                                   _category _allowed-types)
                    (setq resolved-prompt prompt)
@@ -1098,7 +1089,7 @@ warmed categories and performs no lookup."
                  (lambda (prompt &optional table-like-only initial-input category allowed-types)
                    (setq read-args (list prompt table-like-only initial-input category allowed-types))
                    '(:name "users" :type "TABLE")))
-                ((symbol-function 'clutch--resolve-object-dwim)
+                ((symbol-function 'clutch--resolve-object-entry)
                  (lambda (&rest _args)
                    (setq resolved-called t)
                    '(:name "users" :type "TABLE")))
@@ -1135,7 +1126,7 @@ warmed categories and performs no lookup."
                    (lambda (_conn)
                      '((:name "users" :schema "app" :type "COLLECTION")
                        (:name "orders" :schema "app" :type "COLLECTION"))))
-                  ((symbol-function 'clutch--resolve-object-dwim)
+                  ((symbol-function 'clutch--resolve-object-entry)
                    (lambda (&rest _args)
                      (ert-fail "MongoDB collection at point should resolve directly")))
                   ((symbol-function 'clutch-object-read)

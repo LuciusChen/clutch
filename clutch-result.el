@@ -185,44 +185,28 @@ missing table metadata."
                 (gethash (downcase name) by-name))
               col-names))))
 
-(defun clutch--refresh-result-metadata-buffers (conn table)
-  "Refresh cached result column metadata for live result buffers on CONN/TABLE."
-  (when conn
-    (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (and (derived-mode-p 'clutch-result-mode)
-                     (eq clutch-connection conn)
-                     clutch--result-columns
-                     (equal clutch--result-source-table table))
-            (setq-local clutch--result-column-details
-                        (clutch--result-column-details
-                         clutch-connection table clutch--result-columns))
-            (when clutch--pending-inserts
-              (clutch--refresh-display))))))))
-
-(defun clutch--refresh-result-foreign-key-buffers (conn table)
-  "Refresh cached foreign-key display metadata for result buffers on CONN/TABLE."
-  (when conn
-    (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (and (derived-mode-p 'clutch-result-mode)
-                     (eq clutch-connection conn)
-                     clutch--result-columns
-                     (equal clutch--result-source-table table))
-            (setq-local clutch--fk-info
-                        (clutch--foreign-key-column-info
-                         clutch-connection table clutch--result-columns))
-            (clutch--refresh-display)))))))
-
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND."
-  (pcase kind
-    ('column-details
-     (clutch--refresh-result-metadata-buffers conn table))
-    ('foreign-keys
-     (clutch--refresh-result-foreign-key-buffers conn table))))
+  (when conn
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'clutch-result-mode)
+                     (eq clutch-connection conn)
+                     clutch--result-columns
+                     (equal clutch--result-source-table table))
+            (pcase kind
+              ('column-details
+               (setq-local clutch--result-column-details
+                           (clutch--result-column-details
+                            clutch-connection table clutch--result-columns))
+               (when clutch--pending-inserts
+                 (clutch--refresh-display)))
+              ('foreign-keys
+               (setq-local clutch--fk-info
+                           (clutch--foreign-key-column-info
+                            clutch-connection table clutch--result-columns))
+               (clutch--refresh-display)))))))))
 
 (add-hook 'clutch--table-metadata-updated-hook
           #'clutch--handle-table-metadata-updated)
@@ -1715,6 +1699,17 @@ Scans buffer once for this column — O(buffer)."
         (user-error "Column not in selection"))
     (user-error "No column at point")))
 
+(defun clutch-refine--exit ()
+  "Clear refine overlays, disable refine mode, and reset refine state."
+  (clutch-refine--clear-overlays)
+  (clutch-refine-mode -1)
+  (setq mode-line-format clutch--refine-saved-mode-line
+        clutch--refine-rect nil
+        clutch--refine-excluded-rows nil
+        clutch--refine-excluded-cols nil
+        clutch--refine-callback nil
+        clutch--refine-saved-mode-line nil))
+
 ;;;###autoload
 (defun clutch-refine-confirm ()
   "Confirm the current refine selection and execute the callback."
@@ -1731,28 +1726,14 @@ Scans buffer once for this column — O(buffer)."
       (user-error "No columns left after exclusion"))
     (let ((cb clutch--refine-callback)
           (final-rect (cons row-indices col-indices)))
-      (clutch-refine--clear-overlays)
-      (clutch-refine-mode -1)
-      (setq mode-line-format clutch--refine-saved-mode-line
-            clutch--refine-rect nil
-            clutch--refine-excluded-rows nil
-            clutch--refine-excluded-cols nil
-            clutch--refine-callback nil
-            clutch--refine-saved-mode-line nil)
+      (clutch-refine--exit)
       (funcall cb final-rect))))
 
 ;;;###autoload
 (defun clutch-refine-cancel ()
   "Cancel refine mode without executing the callback."
   (interactive)
-  (clutch-refine--clear-overlays)
-  (clutch-refine-mode -1)
-  (setq mode-line-format clutch--refine-saved-mode-line
-        clutch--refine-rect nil
-        clutch--refine-excluded-rows nil
-        clutch--refine-excluded-cols nil
-        clutch--refine-callback nil
-        clutch--refine-saved-mode-line nil)
+  (clutch-refine--exit)
   (message "Refine cancelled"))
 
 (defun clutch-result--start-refine (rect callback)
@@ -2146,13 +2127,12 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
 
 ;;;; Aggregate values
 
-(defun clutch-result--aggregate-target (&optional rect)
+(defun clutch-result--aggregate-target ()
   "Return aggregate target as (ROW-INDICES COL-INDICES).
-When RECT is non-nil, use it directly.  With region: use all selected columns.
-Without region: use current cell."
-  (if (or rect (use-region-p))
+With region: use all selected columns.  Without region: use current cell."
+  (if (use-region-p)
       (pcase-let* ((`(,row-indices . ,col-indices)
-                    (or rect (clutch-result--region-rectangle-indices))))
+                    (clutch-result--region-rectangle-indices)))
         (unless col-indices
           (user-error "No columns selected for aggregate"))
         (list row-indices col-indices))
@@ -2248,7 +2228,7 @@ With prefix arg REFINE and an active region, enter visual refine mode."
        (clutch-result--region-rectangle-indices)
        #'clutch-result--do-aggregate)
     (pcase-let* ((`(,row-indices ,col-indices)
-                  (clutch-result--aggregate-target nil)))
+                  (clutch-result--aggregate-target)))
       (clutch-result--do-aggregate (cons row-indices col-indices)))))
 
 ;;;; Value viewers
@@ -2374,9 +2354,9 @@ When QUIET is non-nil, suppress informational fallback messages."
         (setq offset (+ offset line-len))))
     (nreverse lines)))
 
-(defun clutch--blob-likely-text-p (bytes &optional sample-size)
-  "Return non-nil when BYTES appears mostly text-like within SAMPLE-SIZE bytes."
-  (let* ((n (min (length bytes) (or sample-size 512)))
+(defun clutch--blob-likely-text-p (bytes)
+  "Return non-nil when BYTES appears mostly text-like within 512 bytes."
+  (let* ((n (min (length bytes) 512))
          (printable 0))
     (if (= n 0)
         t
@@ -3086,14 +3066,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
                    (documents (clutch-result--document-source-documents rows op))
                    (fields (when (eq action 'update-one-set)
                              (clutch--column-names-for-indices col-indices))))
-              (clutch-result--require-action
-               (pcase action
-                 ('insert-one 'document-insert-one)
-                 ('insert-many 'document-insert-many)
-                 ('replace-one 'document-replace-one)
-                 ('delete-one 'document-delete-one)
-                 ('update-one-set 'document-update-one-set))
-               op)
+              (clutch-result--require-action kind op)
               (clutch-db-document-mutation-snippets
                clutch-connection action collection documents fields)))
            (_

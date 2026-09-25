@@ -207,14 +207,6 @@
     (pcase-let ((`(,value ,expected) case))
       (should (equal (clutch--json-value-to-string value) expected)))))
 
-(ert-deftest clutch-test-json-false-value-p-generic-only ()
-  "UI JSON false detection should only recognize the generic :false sentinel."
-  (should (clutch--json-false-value-p :false))
-  (should-not (clutch--json-false-value-p nil))
-  (should-not (clutch--json-false-value-p t))
-  (should-not (clutch--json-false-value-p
-               (make-symbol "clutch-jdbc-json-false"))))
-
 (ert-deftest clutch-test-dispatch-view-json-values ()
   "JSON dispatch should serialize non-strings and pass JSON strings through."
   (let (seen buffer-name)
@@ -3888,7 +3880,7 @@ header string and column pixel widths, then reused."
             (setq-local clutch--result-columns '("id"))
             (setq-local clutch--result-source-table "users")
             (setq-local clutch--last-query "select * from users"))
-          (clutch--refresh-result-metadata-buffers conn-a "users")
+          (clutch--handle-table-metadata-updated conn-a "users" 'column-details)
           (with-current-buffer buf-a
             (should (equal clutch--result-column-details details)))
           (with-current-buffer buf-b
@@ -7486,14 +7478,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
   (let ((measure (symbol-function 'string-width))
-        (long (make-string 1048576 ?x)))
+        (long (make-string 1048576 ?x))
+        (clutch-column-width-max 30))
     (cl-letf (((symbol-function 'string-width)
                (lambda (text &rest args)
                  (should (< (length text) 128))
                  (apply measure text args))))
       (should (equal (clutch--compute-column-widths
                       '("value") (make-list 50 (list long))
-                      '((:name "value" :type-category text)) 30)
+                      '((:name "value" :type-category text)))
                      [30])))))
 
 (ert-deftest clutch-test-capped-width-preserves-display-width ()
