@@ -2612,26 +2612,15 @@ vector."
                                  (cdr option)))))
             (should-not options)))))))
 
-(ert-deftest clutch-db-test-mongodb-find-limit-is-bounded ()
-  "Native MongoDB find should reject unbounded and oversized limits."
-  (let ((clutch-mongodb-find-result-limit 50))
-    (dolist (query '("db.users.find({}).limit(0)"
-                     "db.users.find({}).limit(51)"))
-      (should-error
-       (clutch-mongodb--eval
-        (clutch-db-test--make-mongodb-conn "app" 'client)
-        query)
-       :type 'clutch-db-error))))
-
 (ert-deftest clutch-db-test-mongodb-eval-validation-contract ()
-  "Native MongoDB helper parsing should reject unsupported or invalid inputs."
-  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client)))
-    (cl-letf (((symbol-function 'mongodb-find)
-               (lambda (&rest _) 'unexpected-success))
-              ((symbol-function 'mongodb-count-documents)
-               (lambda (&rest _) 'unexpected-success))
-              ((symbol-function 'mongodb-update)
-               (lambda (&rest _) 'unexpected-success)))
+  "Native MongoDB helper parsing should reject unsupported or invalid inputs.
+Every helper reaches the server through `mongodb-command', so a query that
+passes validation fails the test instead of failing on the fake client."
+  (let ((conn (clutch-db-test--make-mongodb-conn "app" 'client))
+        (clutch-mongodb-find-result-limit 50))
+    (cl-letf (((symbol-function 'mongodb-command)
+               (lambda (&rest _)
+                 (ert-fail "Invalid MongoDB query reached the server"))))
       (dolist (query '("db.users.find('name')"
                        "db.users.find({}, {}, {})"
                        "db.users.findOne({}).limit(1)"
@@ -2643,25 +2632,19 @@ vector."
                        "db.users.find({}).explain({mode: 'executionStats'})"
                        "db.users.deleteOne()"
                        "db.users.deleteOne('name')"
+                       "db.users.deleteOne({}, {})"
                        "db.users.deleteMany({})"
                        "db.users.insertOne('name')"
                        "db.users.insertMany({name: 'Ann'})"
                        "db.users.insertMany([1])"
                        "db.users.find({_id: NumberLong(7)})"
                        "db.getSiblingDB('admin').runCommand({ping: 1})"
-                       "db.users.find({name: /ann/i})"))
+                       "db.users.find({name: /ann/i})"
+                       "db.users.find({}).limit(0)"
+                       "db.users.find({}).limit(51)"))
         (ert-info ((format "query: %s" query))
           (should-error (clutch-mongodb--eval conn query)
                         :type 'clutch-db-error))))))
-
-(ert-deftest clutch-db-test-mongodb-helper-chains-are-method-specific ()
-  "MongoDB parsing should reject chains that execution would ignore."
-  (dolist (query '("db.users.findOne({}).limit(1)"
-                   "db.users.aggregate([]).sort({_id: 1})"
-                   "db.users.deleteOne({}).limit(1)"))
-    (ert-info ((format "query: %s" query))
-      (should-error (clutch-mongodb--parse-db-call query)
-                    :type 'clutch-db-error))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
   "Native MongoDB eval should translate aggregate options and helper chains."
