@@ -735,9 +735,9 @@ Returns non-nil on success and nil when no reconnect context exists.
 Connection failures propagate to the calling command."
   (when-let* ((old-conn clutch-connection)
               (context (clutch--connection-context old-conn))
-              (params (car context))
-              (product (cadr context)))
-    (let ((conn (clutch--build-conn params))
+              (params (car context)))
+    (let ((product (cadr context))
+          (conn (clutch--build-conn params))
           (prior-tx-state (clutch--tx-state old-conn)))
       (if (eq prior-tx-state 'dirty)
           (clutch--discard-lost-transaction old-conn)

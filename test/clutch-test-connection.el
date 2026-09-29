@@ -1997,6 +1997,33 @@ replacement connection would run the statement against an empty transaction."
                 (lambda (text)
                   (string-match-p message-pattern text))
                 messages)))))))))
+(ert-deftest clutch-test-try-reconnect-without-sql-product ()
+  "Backends without a SQL product, such as Redis, should still reconnect."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+        rebound)
+    (with-temp-buffer
+      (setq-local clutch-connection 'dead-conn
+                  clutch--connection-params '(:backend redis :host "cache.internal")
+                  clutch--conn-sql-product nil)
+      (cl-letf (((symbol-function 'clutch--build-conn)
+                 (lambda (_params) 'new-conn))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (eq conn 'new-conn)))
+                ((symbol-function 'clutch--release-connection-transport) #'ignore)
+                ((symbol-function 'clutch--clear-connection-problem-capture)
+                 #'ignore)
+                ((symbol-function 'clutch--clear-reconnect-metadata-caches)
+                 #'ignore)
+                ((symbol-function 'clutch--rebind-connection-buffers)
+                 (lambda (old-conn new-conn _params product)
+                   (setq rebound (list old-conn new-conn product))))
+                ((symbol-function 'clutch--finalize-rebound-connection) #'ignore)
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "redis:cache.internal"))
+                ((symbol-function 'message) #'ignore))
+        (should (clutch--try-reconnect))
+        (should (equal rebound '(dead-conn new-conn nil)))))))
+
 (defun clutch-test--make-dml-result-buf (conn)
   "Create a temporary DML result buffer associated with CONN for testing."
   (let ((buf (generate-new-buffer " *clutch-dml-test*")))

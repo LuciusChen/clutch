@@ -13,6 +13,7 @@
 - JSON viewers, describe buffers and JSON sub-editors no longer fail with `void-function` in an Emacs built without tree-sitter; they fall back to `json-mode` or `js-mode`.
 - In MySQL buffers a backslash-escaped quote such as `'it\'s'` no longer hides the rest of the statement from table completion, alias lookup and the always-true `WHERE` check, which let `DELETE ... WHERE name = 'it\'s' OR 1 = 1` run without the high-risk confirmation.
 - Jumping to a table alias works for an alias that follows an unaliased table, such as `o` in `FROM users JOIN orders o`.
+- MongoDB, Redis, ClickHouse and generic JDBC connections reconnect automatically after dropping, as the other backends do, instead of reporting "Not connected".
 
 ## 0.5.1 - 2026-09-25
 
