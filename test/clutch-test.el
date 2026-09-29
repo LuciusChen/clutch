@@ -138,7 +138,11 @@
                   (42 "42")
                   (-1 "-1")
                   (3.14 "3.14")
-                  ([1 2 3] "[1,2,3]")))
+                  ([1 2 3] "[1,2,3]")
+                  ([1 nil 3] "[1,null,3]")
+                  ([[1 nil] [3 4]] "[[1,null],[3,4]]")
+                  ([#s(hash-table test equal data ("a" :null)) nil]
+                   "[{\"a\":null},null]")))
     (pcase-let ((`(,value ,expected) case))
       (should (equal (clutch--format-value value) expected))))
   (should (equal (clutch--format-value '(:year 2024 :month 3 :day 15))
