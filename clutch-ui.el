@@ -248,7 +248,15 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
    ((or (hash-table-p val) (vectorp val))
-    (clutch--json-serialize-text val "query result value"))
+    ;; SQL NULL array elements are nil, which `json-serialize' prints as {}.
+    (cl-labels
+        ((null-elements (value)
+           (if (vectorp value)
+               (vconcat (mapcar (lambda (element)
+                                  (if element (null-elements element) :null))
+                                value))
+             value)))
+      (clutch--json-serialize-text (null-elements val) "query result value")))
    (t (format "%S" val))))
 
 (defun clutch--json-normalize-text (text)

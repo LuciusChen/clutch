@@ -20,6 +20,7 @@
 - MongoDB, Redis, ClickHouse and generic JDBC connections reconnect automatically after dropping, as the other backends do, instead of reporting "Not connected".
 - Browsing an object from a buffer other than its query console appends the query at the end of the console instead of wherever the console's point was.
 - PostgreSQL `timestamptz[]` cells show their timestamps as text, as a single `timestamptz` cell does.  An element with fractional seconds made the cell fail to render, and whole-second elements showed as epoch numbers.
+- PostgreSQL array cells show SQL NULL elements as `null` instead of `{}`, and the edit buffer of such a cell starts from that text.  Saving the old `{}` text failed, or in a text array stored the string `#s(hash-table test equal)` in place of each NULL.
 
 ## 0.5.1 - 2026-09-25
 

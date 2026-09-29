@@ -4236,10 +4236,9 @@ orai18n warning."
         (should (equal (nth 7 row)
                        ["2026-04-07 08:30:45" "2026-04-07 08:30:45"
                         "infinity" nil]))
-        (should (string-prefix-p
-                 (concat "[\"2026-04-07 08:30:45\",\"2026-04-07 08:30:45\","
-                         "\"infinity\",")
-                 (clutch--format-value (nth 7 row))))))))
+        (should (equal (clutch--format-value (nth 7 row))
+                       (concat "[\"2026-04-07 08:30:45\","
+                               "\"2026-04-07 08:30:45\",\"infinity\",null]")))))))
 
 ;;;; Unit tests — SQL building (paged queries)
 
