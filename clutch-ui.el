@@ -25,8 +25,6 @@
   :type 'natnum
   :group 'clutch)
 
-(defvar clutch--executing-p)
-
 (defvar clutch--aggregate-summary)
 (defvar clutch--active-edit-cell)
 (defconst clutch--cell-generated-placeholder :clutch-generated-placeholder
@@ -76,7 +74,7 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
 The connection workflow supplies a plist containing only display inputs; it
 must not contain a connection object, params, callbacks, or rendered text.")
 (defvar-local clutch--execution-start-time nil
-  "Start time of the current foreground query execution, or nil.")
+  "Start time of the query running in this buffer, or nil when idle.")
 (defvar-local clutch--header-line-crop-cache nil
   "Header crop for the current offset and the inputs it was computed from.
 The value is (HSCROLL FONT-WIDTH HEADER PIXEL-WIDTHS . RESULT).  Redisplay
@@ -479,19 +477,15 @@ not enforce `min-width' consistently across supported Emacs versions."
 
 (defun clutch--format-elapsed (seconds)
   "Format SECONDS as milliseconds, or seconds plus milliseconds."
-  (let* ((total-ms (max 0 (round (* seconds 1000))))
-         (seconds (/ total-ms 1000))
-         (milliseconds (% total-ms 1000)))
-    (if (zerop seconds)
-        (format "%dms" milliseconds)
-      (format "%ds %03dms" seconds milliseconds))))
+  (let ((ms (max 0 (round (* seconds 1000)))))
+    (if (< ms 1000)
+        (format "%dms" ms)
+      (format "%ds %03dms" (/ ms 1000) (% ms 1000)))))
 
 (defun clutch--execution-elapsed-seconds ()
-  "Return elapsed seconds for the current execution, or nil when idle."
-  (when (and clutch--executing-p
-             clutch--execution-start-time)
-    (max 0.0
-         (- (float-time) clutch--execution-start-time))))
+  "Return the running query's elapsed seconds, or nil when idle."
+  (when clutch--execution-start-time
+    (- (float-time) clutch--execution-start-time)))
 
 (defun clutch--transient-state-display (state choices)
   "Return a transient state display for STATE from CHOICES.
@@ -1811,13 +1805,12 @@ records one-row lookahead."
 
 (defun clutch--footer-timing-part ()
   "Return the dynamic footer timing segment for the current result buffer."
-  (let ((hi 'font-lock-keyword-face))
+  (let ((hi 'font-lock-keyword-face)
+        (running (clutch--execution-elapsed-seconds)))
     (when-let* ((payload (cond
-                          ((clutch--execution-elapsed-seconds)
-                           (propertize
-                            (clutch--format-elapsed
-                             (clutch--execution-elapsed-seconds))
-                            'face 'success))
+                          (running
+                           (propertize (clutch--format-elapsed running)
+                                       'face 'success))
                           (clutch--query-elapsed
                            (propertize
                             (clutch--format-elapsed clutch--query-elapsed)

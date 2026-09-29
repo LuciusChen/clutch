@@ -1485,8 +1485,7 @@ and the ssh -N process has no owner yet at that point."
   "Busy buffers should show the running query's elapsed time in `mode-name'."
   (with-temp-buffer
     (clutch-mode)
-    (let ((clutch--executing-p t)
-          (clutch--execution-start-time (- (float-time) 1.21)))
+    (let ((clutch--execution-start-time (- (float-time) 1.21)))
       (clutch--update-mode-line)
       (should (string-match-p "\\`clutch 1s [0-9]\\{3\\}ms\\'" mode-name)))))
 
@@ -1515,7 +1514,6 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
         (clutch-result-mode)
         (let ((clutch--footer-base-string "Σ 1 of ? rows")
               (clutch--query-elapsed 0.042)
-              (clutch--executing-p executing)
               (clutch--execution-start-time
                (and executing (- (float-time) 1.21))))
           (clutch--refresh-footer-display)
