@@ -48,7 +48,6 @@
 ;; Forward declarations — shared buffer-local variables
 (defvar-local clutch-connection nil
   "Current database connection for this buffer.")
-(defvar clutch--executing-p)
 (defvar-local clutch--conn-sql-product nil
   "SQL product for the current connection, or nil to use the default.")
 (defvar-local clutch--connection-params nil
@@ -159,17 +158,12 @@ ssh-like TRAMP directories."
                  (const :tag "Automatically use current TRAMP context" auto))
   :group 'clutch)
 (defvar clutch--dml-result)
-(defvar clutch--spinner-timer nil
-  "Timer driving the mode-line spinner animation, or nil.")
-(defvar clutch--spinner-index 0
-  "Current frame index into `clutch--spinner-frames'.")
 
-(defconst clutch--spinner-frames
-  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Braille spinner frames.")
+(defvar clutch--execution-refresh-timer nil
+  "Timer driving execution elapsed-time UI refreshes, or nil.")
 
-(defconst clutch--spinner-interval 0.1
-  "Seconds between spinner frame advances.")
+(defconst clutch--execution-refresh-interval 0.1
+  "Seconds between execution elapsed-time UI refreshes.")
 
 (defconst clutch--ssh-tunnel-ready-poll-interval 0.05
   "Seconds between SSH tunnel readiness checks.")
@@ -974,49 +968,38 @@ executed outside clutch that would otherwise leave stale completions."
               (list (clutch--backend-support-annotation key))))))
    candidates))
 
-;;;; Spinner and mode-line
+;;;; Execution timing and mode-line
 
-(defun clutch--spinner-start ()
-  "Start the spinner timer if not already running."
-  (unless clutch--spinner-timer
-    (setq clutch--spinner-index 0)
-    (setq clutch--spinner-timer
-          (run-at-time 0 clutch--spinner-interval
-                       #'clutch--spinner-tick))))
+(defun clutch--execution-refresh-start ()
+  "Start the execution UI refresh timer if not already running."
+  (unless clutch--execution-refresh-timer
+    (setq clutch--execution-refresh-timer
+          (run-at-time 0 clutch--execution-refresh-interval
+                       #'clutch--execution-refresh-tick))))
 
-(defun clutch--spinner-stop ()
-  "Stop the spinner timer and reset state."
-  (when clutch--spinner-timer
-    (cancel-timer clutch--spinner-timer)
-    (setq clutch--spinner-timer nil)
-    (setq clutch--spinner-index 0)))
+(defun clutch--execution-refresh-stop ()
+  "Stop the execution UI refresh timer."
+  (when clutch--execution-refresh-timer
+    (cancel-timer clutch--execution-refresh-timer)
+    (setq clutch--execution-refresh-timer nil)))
 
-(defun clutch--spinner-tick ()
-  "Advance spinner frame and update mode-lines of busy buffers."
-  (setq clutch--spinner-index
-        (mod (1+ clutch--spinner-index)
-             (length clutch--spinner-frames)))
+(defun clutch--execution-refresh-tick ()
+  "Update elapsed-time displays of buffers with running queries."
   (let ((any-busy nil))
     (dolist (buf (buffer-list))
-      (when (and (buffer-live-p buf)
-                 (buffer-local-value 'clutch--executing-p buf))
+      (when (buffer-local-value 'clutch--execution-start-time buf)
         (setq any-busy t)
         (with-current-buffer buf
           (clutch--update-mode-line t))))
     (if any-busy
         (redisplay)
-      (clutch--spinner-stop))))
+      (clutch--execution-refresh-stop))))
 
-(defun clutch--spinner-string ()
-  "Return the current spinner frame string, or nil when idle."
-  (when clutch--spinner-timer
-    (aref clutch--spinner-frames clutch--spinner-index)))
-
-(defun clutch--update-mode-line (&optional spinner-only)
+(defun clutch--update-mode-line (&optional execution-only)
   "Update buffer-local execution UI with connection status.
-When SPINNER-ONLY is non-nil, retain semantic connection state and update only
+When EXECUTION-ONLY is non-nil, retain semantic connection state and update only
 the high-frequency execution indicator."
-  (unless spinner-only
+  (unless execution-only
     (clutch--refresh-connection-render-state))
   (let* ((base (cond
                 ((derived-mode-p 'clutch-repl-mode) "clutch-repl")
@@ -1024,17 +1007,15 @@ the high-frequency execution indicator."
                 ((clutch--query-buffer-p)
                  (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
-         (spinner (clutch--spinner-string)))
-    (setq-local clutch--execution-spinner-frame
-                (and clutch--executing-p spinner))
+         (elapsed (clutch--execution-elapsed-seconds)))
     (setq mode-name
-          (if clutch--execution-spinner-frame
+          (if elapsed
               (concat base " "
-                      (propertize clutch--execution-spinner-frame
+                      (propertize (clutch--format-elapsed elapsed)
                                   'face 'success))
             base)))
   (when (derived-mode-p 'clutch-result-mode)
-    (if spinner-only
+    (if execution-only
         (clutch--refresh-footer-timing)
       (clutch--refresh-result-status-line t)))
   (when (or (clutch--query-buffer-p)
