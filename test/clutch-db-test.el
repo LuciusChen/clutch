@@ -4206,12 +4206,18 @@ orai18n warning."
                          (:name "shipped_at" :type-oid ,clutch-db-test--pg-oid-timestamptz)
                          (:name "missing" :type-oid ,clutch-db-test--pg-oid-int4)
                          (:name "enabled" :type-oid 16)
-                         (:name "flags" :type-oid 1000))
+                         (:name "flags" :type-oid 1000)
+                         (:name "shipments" :type-oid 1185))
                        :rows
                        `(("2024-06-01" "09:10:11.250"
                           "2024-01-15 13:45:30.125" ,timestamptz
                           ,pgsql-null nil
-                          [,pgsql-null nil t])))))
+                          [,pgsql-null nil t]
+                          ;; pgsql.el decodes timestamptz as (TICKS . HZ) with
+                          ;; a fraction, an integer without, text otherwise.
+                          [,(time-convert (time-add timestamptz 0.25) 1000000)
+                           ,(time-convert timestamptz 'integer)
+                           "infinity" ,pgsql-null])))))
       (let* ((result (clutch-db-pg--wrap-result conn pg-result))
              (row (car (clutch-db-result-rows result))))
         (should (equal (nth 0 row)
@@ -4226,7 +4232,13 @@ orai18n warning."
                          :hours 8 :minutes 30 :seconds 45)))
         (should-not (nth 4 row))
         (should (eq (nth 5 row) :false))
-        (should (equal (nth 6 row) [nil :false t]))))))
+        (should (equal (nth 6 row) [nil :false t]))
+        (should (equal (nth 7 row)
+                       ["2026-04-07 08:30:45" "2026-04-07 08:30:45"
+                        "infinity" nil]))
+        (should (equal (clutch--format-value (nth 7 row))
+                       (concat "[\"2026-04-07 08:30:45\","
+                               "\"2026-04-07 08:30:45\",\"infinity\",null]")))))))
 
 ;;;; Unit tests — SQL building (paged queries)
 

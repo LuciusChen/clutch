@@ -232,8 +232,8 @@ Example:
 (defun clutch--format-value (val)
   "Format VAL for display in a result table.
 Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
-:false → \"false\", plists → formatted date/time strings, and JSON values
-→ JSON strings."
+:false → \"false\", :null → \"null\", plists → formatted date/time strings,
+and JSON values → JSON strings."
   (cond
    ((clutch--cell-placeholder-value val))
    ((clutch-db-value-preview-p val)
@@ -244,11 +244,20 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
    ((null val) "NULL")
    ((eq val t) "true")
    ((eq val :false) "false")
+   ((eq val :null) "null")
    ((stringp val) val)
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))
    ((or (hash-table-p val) (vectorp val))
-    (clutch--json-serialize-text val "query result value"))
+    ;; SQL NULL array elements are nil, which `json-serialize' prints as {}.
+    (cl-labels
+        ((null-elements (value)
+           (if (vectorp value)
+               (vconcat (mapcar (lambda (element)
+                                  (if element (null-elements element) :null))
+                                value))
+             value)))
+      (clutch--json-serialize-text (null-elements val) "query result value")))
    (t (format "%S" val))))
 
 (defun clutch--json-normalize-text (text)
