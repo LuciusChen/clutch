@@ -384,10 +384,9 @@ path expressions."
      (t
       (list :kind 'top-level)))))
 
-(defun clutch-mongodb--completion-candidates (beg end)
-  "Return MongoDB candidates for completion between BEG and END."
-  (let* ((context (clutch-mongodb--completion-context beg end))
-         (kind (plist-get context :kind)))
+(defun clutch-mongodb--completion-candidates (context)
+  "Return MongoDB candidates for completion CONTEXT."
+  (let ((kind (plist-get context :kind)))
     (pcase kind
       ('collection
        (clutch-mongodb--collection-candidates))
@@ -429,7 +428,7 @@ path expressions."
            (end (cdr bounds))
            (context (clutch-mongodb--completion-context beg end))
            (kind (plist-get context :kind))
-           (candidates (clutch-mongodb--completion-candidates beg end)))
+           (candidates (clutch-mongodb--completion-candidates context)))
       (when candidates
         (list beg end candidates
               :exclusive 'no
@@ -439,15 +438,6 @@ path expressions."
                            (clutch-mongodb--key-candidate-p candidate kind)
                            (not (looking-at-p "\\s-*:")))
                   (insert ": "))))))))
-
-(defun clutch--install-mongodb-completion-capfs ()
-  "Install MongoDB completion CAPFs for the current buffer."
-  (remove-hook 'completion-at-point-functions
-               #'clutch-mongodb-completion-at-point t)
-  (add-hook 'completion-at-point-functions
-            #'clutch-mongodb-completion-at-point nil t)
-  (add-hook 'corfu-mode-hook
-            #'clutch--install-mongodb-completion-capfs nil t))
 
 (defun clutch-mongodb-complete-at-point ()
   "Complete MongoDB Shell and MQL identifiers at point."
@@ -552,7 +542,8 @@ Key bindings:
   (setq-local font-lock-defaults '(clutch-mongodb-font-lock-keywords))
   (setq-local indent-line-function #'clutch-mongodb-indent-line)
   (clutch--query-mode-common-setup "clutch-mongodb")
-  (clutch--install-mongodb-completion-capfs))
+  (add-hook 'completion-at-point-functions
+            #'clutch-mongodb-completion-at-point nil t))
 
 (provide 'clutch-document)
 
