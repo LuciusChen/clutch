@@ -160,21 +160,19 @@ MODE-LINE-NAME is the base name shown while the buffer is idle."
   (or (and storage-name
            (cl-find-if
             (lambda (buf)
-              (and (buffer-live-p buf)
-                   (with-current-buffer buf
-                     (and (clutch--query-buffer-p)
-                          (clutch--console-buffer-storage-match-p
-                           storage-name)))))
+              (with-current-buffer buf
+                (and (clutch--query-buffer-p)
+                     (clutch--console-buffer-storage-match-p
+                      storage-name))))
             (buffer-list)))
       (cl-find-if
        (lambda (buf)
-         (and (buffer-live-p buf)
-              (with-current-buffer buf
-                (and (clutch--query-buffer-p)
-                     (equal clutch--console-name name)
-                     (or (not storage-name)
-                         (and (not clutch--console-storage-name)
-                              (not clutch--connection-params)))))))
+         (with-current-buffer buf
+           (and (clutch--query-buffer-p)
+                (equal clutch--console-name name)
+                (or (not storage-name)
+                    (and (not clutch--console-storage-name)
+                         (not clutch--connection-params))))))
        (buffer-list))))
 
 (defun clutch--query-console-major-mode (params)
@@ -274,13 +272,6 @@ console window; (3) nil, meaning use the selected window."
                     (string-prefix-p "*clutch: "
                                      (buffer-name (window-buffer w))))
                   (window-list))))
-
-(defun clutch--sqlite-file-console-target (&optional params)
-  "Return an ad hoc SQLite query console target for PARAMS."
-  (let ((params (or params (clutch--read-sqlite-file-params))))
-    (list :name (clutch--ad-hoc-console-name params)
-          :params params
-          :ad-hoc t)))
 
 (defun clutch--ad-hoc-console-name (params)
   "Return a display name for an ad hoc console using PARAMS."
@@ -403,10 +394,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
           (let* ((coding-system-for-read 'utf-8)
                  (file (clutch--console-file storage-name))
                  (legacy-file (clutch--console-file name))
-                 (read-file (if (or (file-readable-p file)
-                                    (equal file legacy-file))
-                                file
-                              legacy-file)))
+                 (read-file (if (file-readable-p file) file legacy-file)))
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
@@ -417,13 +405,10 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
   "Open a query console for SQLite database FILE."
   (interactive
    (list (plist-get (clutch--read-sqlite-file-params) :database)))
-  (let ((source-default-directory default-directory)
-        (params (list :backend 'sqlite
+  (let ((params (list :backend 'sqlite
                       :database (clutch--normalize-sqlite-database-file file))))
-    (pcase-let ((`(:name ,name :params ,target-params :ad-hoc t)
-                 (clutch--sqlite-file-console-target params)))
-      (clutch--open-query-console
-       name target-params target-params source-default-directory))))
+    (clutch--open-query-console
+     (clutch--ad-hoc-console-name params) params params default-directory)))
 
 ;;;###autoload (autoload 'clutch-query-console "clutch" nil t)
 (defun clutch-query-console (target)
@@ -765,7 +750,6 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
             :source-schema source-schema
             :source-catalog source-catalog
             :candidate candidate
-            :candidates candidates
             :hidden-aliases (and augment-p aliases)
             :writable-projection
             (clutch--writable-select-projection analysis-sql)
@@ -1003,16 +987,16 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
   "Record an execute debug event.
 CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
   (when clutch-debug-mode
-    (apply #'clutch--remember-debug-event
-           (append (when buffer (list :buffer buffer))
-                   (list :connection connection
-                         :op "execute"
-                         :phase phase
-                         :backend (and connection (clutch-db-backend-key connection))
-                         :sql sql)
-                   (when summary (list :summary summary))
-                   (when elapsed (list :elapsed elapsed))
-                   (when context (list :context context))))))
+    (clutch--remember-debug-event
+     :buffer buffer
+     :connection connection
+     :op "execute"
+     :phase phase
+     :backend (and connection (clutch-db-backend-key connection))
+     :sql sql
+     :summary summary
+     :elapsed elapsed
+     :context context)))
 
 (defun clutch--execute-statement-attempt
     (sql connection present-result-p &optional result-context)
@@ -1056,8 +1040,7 @@ connection and signal `clutch-query-interrupted'."
         (condition-case err
             (let* ((result (clutch--run-db-query connection execution-sql))
                    (elapsed (- (float-time) start)))
-              (when (and (clutch-db-result-p result)
-                         (not (clutch-db-result-connection result)))
+              (unless (clutch-db-result-connection result)
                 (setf (clutch-db-result-connection result) connection))
               (when (clutch-db-result-columns result)
                 (setq result-query-p t))
@@ -1246,7 +1229,7 @@ Prompts for confirmation on destructive operations."
 SOURCE-BUFFER is updated with the failed SQL marker and last result buffer
 when live.  ELAPSED records the failed duration.  CONTEXT is merged into
 stored diagnostics.  REGION is an optional (BEG . END) source range to mark.
-Return a plist with :message, :summary, and :display-summary."
+Return the failure summary."
   (let* ((failure (clutch--remember-execute-error
                    source-buffer connection sql err context))
          (message (car failure))
@@ -1275,9 +1258,7 @@ Return a plist with :message, :summary, and :display-summary."
                  (buffer-live-p buf))
         (with-current-buffer source-buffer
           (setq-local clutch--last-result-buffer buf))))
-    (list :message message
-          :summary summary
-          :display-summary display-summary)))
+    summary))
 
 (defun clutch--execute-and-mark (sql beg end)
   "Execute SQL on the current buffer connection and mark BEG..END on success."
@@ -1459,12 +1440,11 @@ result buffer.  Stops and reports on the first error."
                             (clutch--connection-loss-context
                              connection (list :statement-index (1+ done)))
                           (list :statement-index (1+ done))))
-                       (failure
+                       (summary
                         (clutch--show-execution-error
                          source-buffer connection stmt err
                          (plist-get outcome :elapsed) context
-                         (and beg end (cons beg end))))
-                       (summary (plist-get failure :summary)))
+                         (and beg end (cons beg end)))))
                   (when connection-lost
                     (clutch--retire-query-connection connection))
                   (user-error "Statement %d failed: %s" (1+ done)
@@ -1623,7 +1603,7 @@ The indirect buffer inherits the connection from any live
 to execute or \\[clutch-indirect-abort] to abort."
   (interactive)
   (let* ((text (clutch--extract-indirect-sql-text))
-         (conn (or (bound-and-true-p clutch-connection)
+         (conn (or clutch-connection
                    (clutch--find-connection)))
          (params clutch--connection-params)
          (product clutch--conn-sql-product)
@@ -1692,9 +1672,7 @@ When CONTINUATION is non-nil, return the continuation prompt."
   (let ((proc (get-buffer-process (current-buffer))))
     (if (and proc (process-live-p proc))
         proc
-      (let ((mark-pos (and proc
-                           (markerp (process-mark proc))
-                           (marker-position (process-mark proc)))))
+      (let ((mark-pos (and proc (marker-position (process-mark proc)))))
         (when proc
           (delete-process proc))
         (setq proc (start-process "clutch-repl" (current-buffer) "cat"))
@@ -1920,18 +1898,6 @@ Key bindings:
   (not (and clutch-connection
             (clutch--manual-commit-supported-p clutch-connection))))
 
-(transient-define-suffix clutch--dispatch-commit ()
-  "Transient suffix for `clutch-commit'."
-  :inapt-if #'clutch--dispatch-transaction-controls-inapt-p
-  (interactive)
-  (call-interactively #'clutch-commit))
-
-(transient-define-suffix clutch--dispatch-rollback ()
-  "Transient suffix for `clutch-rollback'."
-  :inapt-if #'clutch--dispatch-transaction-controls-inapt-p
-  (interactive)
-  (call-interactively #'clutch-rollback))
-
 (defun clutch--dispatch-auto-commit-description ()
   "Return the transient description for the current auto-commit state."
   (if (clutch--dispatch-transaction-controls-inapt-p)
@@ -1941,17 +1907,6 @@ Key bindings:
             (clutch--transient-state-display
              (if (clutch-db-manual-commit-p clutch-connection) 'manual 'auto)
              '((manual . "manual") (auto . "auto"))))))
-
-(transient-define-suffix clutch--dispatch-toggle-auto-commit ()
-  "Transient suffix for `clutch-toggle-auto-commit' with a dynamic label."
-  :description #'clutch--dispatch-auto-commit-description
-  :inapt-if (lambda ()
-              (or (clutch--dispatch-transaction-controls-inapt-p)
-                  (and clutch-connection
-                       (clutch-db-manual-commit-p clutch-connection)
-                       (clutch--tx-unresolved-p clutch-connection))))
-  (interactive)
-  (call-interactively #'clutch-toggle-auto-commit))
 
 ;;;###autoload (autoload 'clutch-dispatch "clutch" nil t)
 (transient-define-prefix clutch-dispatch ()
@@ -1963,9 +1918,17 @@ Key bindings:
     ("f" "SQLite file" clutch-query-sqlite-file)
     ("S" "Prepare SSH" clutch-prepare-ssh-host)
     ("d" "Disconnect" clutch-disconnect)
-    ("m" "Commit" clutch--dispatch-commit)
-    ("u" "Rollback" clutch--dispatch-rollback)
-    ("a" clutch--dispatch-toggle-auto-commit)
+    ("m" "Commit" clutch-commit
+     :inapt-if clutch--dispatch-transaction-controls-inapt-p)
+    ("u" "Rollback" clutch-rollback
+     :inapt-if clutch--dispatch-transaction-controls-inapt-p)
+    ("a" "Auto-commit" clutch-toggle-auto-commit
+     :description clutch--dispatch-auto-commit-description
+     :inapt-if (lambda ()
+                 (or (clutch--dispatch-transaction-controls-inapt-p)
+                     (and clutch-connection
+                          (clutch-db-manual-commit-p clutch-connection)
+                          (clutch--tx-unresolved-p clutch-connection)))))
     ("R" "REPL" clutch-repl)]
    ["Execute"
     ("x" "DWIM" clutch-execute-dwim)
