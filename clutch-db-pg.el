@@ -231,7 +231,8 @@
      ((equal backend-type "bool") (if (null value) :false value))
      ((and (clutch-db-pg--array-type-name-p backend-type)
            (vectorp value))
-      (let ((boolean-p (member backend-type '("_bool" "bool[]"))))
+      (let ((boolean-p (member backend-type '("_bool" "bool[]")))
+            (timestamptz-p (member backend-type '("_timestamptz" "timestamptz[]"))))
         (cl-labels
             ((normalize-element
               (element)
@@ -240,6 +241,11 @@
                ((and boolean-p (null element)) :false)
                ((vectorp element)
                 (vconcat (mapcar #'normalize-element element)))
+               ;; pgsql.el decodes timestamptz as a Lisp time value; show the
+               ;; text a timestamptz cell shows.
+               ((and timestamptz-p (not (stringp element)))
+                (clutch-db-format-temporal
+                 (clutch-db-pg--normalize-datetime-value element)))
                (t element))))
           (vconcat (mapcar #'normalize-element value)))))
      ((eq (plist-get col-def :type-category) 'date)
