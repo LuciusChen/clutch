@@ -1171,7 +1171,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
            (user-error
             "%s; %s before continuing"
             (clutch--humanize-db-error (error-message-string err))
-            (if (clutch--manual-commit-supported-p clutch-connection)
+            (if (clutch-db-manual-commit-supported-p clutch-connection)
                 "roll back or reconnect"
               "reconnect")))
           (clutch-db-error

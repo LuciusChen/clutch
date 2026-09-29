@@ -718,7 +718,7 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
          (cond (identity-error "error")
                (cached "cache-hit")
                (t "success"))
-         (clutch--metadata-debug-backend conn) table
+         table
          (if identity-error
              (format "Row identity failed: %s"
                      (error-message-string identity-error))
@@ -1896,7 +1896,7 @@ Key bindings:
 (defun clutch--dispatch-transaction-controls-inapt-p ()
   "Return non-nil when current connection has no transaction controls."
   (not (and clutch-connection
-            (clutch--manual-commit-supported-p clutch-connection))))
+            (clutch-db-manual-commit-supported-p clutch-connection))))
 
 (defun clutch--dispatch-auto-commit-description ()
   "Return the transient description for the current auto-commit state."
