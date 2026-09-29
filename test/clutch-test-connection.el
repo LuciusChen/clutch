@@ -1481,17 +1481,21 @@ and the ssh -N process has no owner yet at that point."
       (when (clutch-db-live-p conn)
         (clutch-db-disconnect conn)))))
 
-(ert-deftest clutch-test-update-mode-line-shows-spinner-when-executing ()
-  "Busy buffers should show the current spinner frame in `mode-name'."
+(ert-deftest clutch-test-update-mode-line-shows-elapsed-when-executing ()
+  "Busy buffers should show the running query's elapsed time in `mode-name'."
   (with-temp-buffer
     (clutch-mode)
     (let ((clutch--executing-p t)
-          (clutch--spinner-timer t)
-          (clutch--spinner-index 2))
+          (clutch--execution-start-time (- (float-time) 1.21)))
       (clutch--update-mode-line)
-      (should (string-prefix-p "clutch " mode-name))
-      (should (> (length mode-name) (length "clutch ")))
-      (should-not (string-match-p "\\[\\.\\.\\.\\]" mode-name)))))
+      (should (string-match-p "\\`clutch 1s [0-9]\\{3\\}ms\\'" mode-name)))))
+
+(ert-deftest clutch-test-format-elapsed ()
+  "Durations under a second show milliseconds; longer ones add whole seconds."
+  (pcase-dolist (`(,seconds ,text) '((0.042 "42ms")
+                                     (0.9996 "1s 000ms")
+                                     (61.5 "61s 500ms")))
+    (should (equal (clutch--format-elapsed seconds) text))))
 
 (ert-deftest clutch-test-update-mode-line-preserves-result-header ()
   "Execution UI updates should keep a result table's header and mode name.
@@ -1503,32 +1507,24 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
     (should (equal header-line-format " result header"))
     (should (equal mode-name "clutch-result"))))
 
-(ert-deftest clutch-test-result-footer-spinner-contract ()
-  "Result footer timing slot should show spinner only while executing."
-  (dolist (case '((busy-no-elapsed t nil)
-                  (busy-with-elapsed t 0.042)
-                  (idle-with-elapsed nil 0.042)))
-    (pcase-let ((`(,label ,executing ,elapsed) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (clutch-result-mode)
-          (let ((clutch--footer-base-string "Σ 1 of ? rows")
-                (clutch--query-elapsed elapsed)
-                (clutch--executing-p executing)
-                (clutch--execution-spinner-frame
-                 (and executing (aref clutch--spinner-frames 2))))
-            (cl-letf (((symbol-function 'clutch--format-elapsed)
-                       (lambda (_seconds) "42ms")))
-              (clutch--refresh-footer-display)
-              (let ((footer (substring-no-properties
-                             (clutch--footer-mode-line-display))))
-                (should (eq (not (null (string-match-p
-                                        (regexp-quote
-                                         (aref clutch--spinner-frames 2))
-                                        footer)))
-                            executing))
-                (should (eq (not (null (string-match-p "42ms" footer)))
-                            (and elapsed (not executing))))))))))))
+(ert-deftest clutch-test-result-footer-timing-contract ()
+  "The footer timing slot shows the running time while executing, else the last."
+  (dolist (executing '(t nil))
+    (ert-info ((format "executing: %s" executing))
+      (with-temp-buffer
+        (clutch-result-mode)
+        (let ((clutch--footer-base-string "Σ 1 of ? rows")
+              (clutch--query-elapsed 0.042)
+              (clutch--executing-p executing)
+              (clutch--execution-start-time
+               (and executing (- (float-time) 1.21))))
+          (clutch--refresh-footer-display)
+          (let ((footer (substring-no-properties
+                         (clutch--footer-mode-line-display))))
+            (should (eq (not (null (string-match-p "1s [0-9]\\{3\\}ms" footer)))
+                        executing))
+            (should (eq (not (null (string-match-p "42ms" footer)))
+                        (not executing)))))))))
 
 (ert-deftest clutch-test-transaction-refresh-updates-result-footer ()
   "Transaction transitions should rebuild attached and current result footers."
@@ -1605,20 +1601,18 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
       (when (buffer-live-p result)
         (kill-buffer result)))))
 
-(ert-deftest clutch-test-spinner-tick-stops-when-no-busy-buffers ()
-  "Spinner timer should stop itself when no buffers are busy."
+(ert-deftest clutch-test-execution-refresh-tick-stops-when-no-busy-buffers ()
+  "The execution refresh timer should stop itself when no buffers are busy."
   (with-temp-buffer
-    (let ((clutch--spinner-timer 'fake-timer)
-          (clutch--spinner-index 0)
+    (let ((clutch--execution-refresh-timer 'fake-timer)
           cancelled)
       (cl-letf (((symbol-function 'buffer-list)
                  (lambda (&optional _frame) (list (current-buffer))))
                 ((symbol-function 'cancel-timer)
                  (lambda (_timer) (setq cancelled t))))
-        (clutch--spinner-tick)
+        (clutch--execution-refresh-tick)
         (should cancelled)
-        (should-not clutch--spinner-timer)
-        (should (zerop clutch--spinner-index))))))
+        (should-not clutch--execution-refresh-timer)))))
 
 (ert-deftest clutch-test-run-db-query-updates-manual-commit-dirty-state ()
   "Query execution should update dirty state from SQL and backend DDL semantics."

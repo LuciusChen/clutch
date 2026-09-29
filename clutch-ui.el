@@ -75,8 +75,8 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Semantic connection state rendered by this buffer's UI.
 The connection workflow supplies a plist containing only display inputs; it
 must not contain a connection object, params, callbacks, or rendered text.")
-(defvar-local clutch--execution-spinner-frame nil
-  "Current execution spinner frame supplied by the connection workflow.")
+(defvar-local clutch--execution-start-time nil
+  "Start time of the current foreground query execution, or nil.")
 (defvar-local clutch--header-line-crop-cache nil
   "Header crop for the current offset and the inputs it was computed from.
 The value is (HSCROLL FONT-WIDTH HEADER PIXEL-WIDTHS . RESULT).  Redisplay
@@ -478,10 +478,20 @@ not enforce `min-width' consistently across supported Emacs versions."
     (clutch--plain-string-pixel-width string pixel-metric)))
 
 (defun clutch--format-elapsed (seconds)
-  "Format SECONDS as a human-readable duration."
-  (if (< seconds 1.0)
-      (format "%dms" (round (* seconds 1000)))
-    (format "%.3fs" seconds)))
+  "Format SECONDS as milliseconds, or seconds plus milliseconds."
+  (let* ((total-ms (max 0 (round (* seconds 1000))))
+         (seconds (/ total-ms 1000))
+         (milliseconds (% total-ms 1000)))
+    (if (zerop seconds)
+        (format "%dms" milliseconds)
+      (format "%ds %03dms" seconds milliseconds))))
+
+(defun clutch--execution-elapsed-seconds ()
+  "Return elapsed seconds for the current execution, or nil when idle."
+  (when (and clutch--executing-p
+             clutch--execution-start-time)
+    (max 0.0
+         (- (float-time) clutch--execution-start-time))))
 
 (defun clutch--transient-state-display (state choices)
   "Return a transient state display for STATE from CHOICES.
@@ -1803,10 +1813,11 @@ records one-row lookahead."
   "Return the dynamic footer timing segment for the current result buffer."
   (let ((hi 'font-lock-keyword-face))
     (when-let* ((payload (cond
-                          (clutch--executing-p
-                           (and clutch--execution-spinner-frame
-                                (propertize clutch--execution-spinner-frame
-                                            'face 'success)))
+                          ((clutch--execution-elapsed-seconds)
+                           (propertize
+                            (clutch--format-elapsed
+                             (clutch--execution-elapsed-seconds))
+                            'face 'success))
                           (clutch--query-elapsed
                            (propertize
                             (clutch--format-elapsed clutch--query-elapsed)
