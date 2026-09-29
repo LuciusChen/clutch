@@ -6,6 +6,10 @@
 
 - A running query shows its elapsed time, counting in tenths of a second, in the mode line and the result footer instead of a spinner.
 - Durations of one second or more read as seconds plus milliseconds, such as `1s 234ms` instead of `1.234s`, in the result footer and in the rows-loaded, completion, and failure messages.
+- MySQL `:tls` and `:ssl-mode` are passed to mysql.el, which parses them itself: the strings and the `disabled` and `off` symbols work as before, uppercase symbols such as `'DISABLED` are no longer accepted, and option conflicts are reported in mysql.el's wording.
+- A refreshed schema cache is installed in one step (about 23 ms for 100,000 table names) instead of in idle-timer slices, so `clutch-schema-cache-install-batch-size` is removed.
+- Every object picker reports the `clutch-object` completion category, including the multi-match and "Jump to target" pickers, which reported none.
+- Removed unused facade helpers and parameters: `clutch-db-referencing-objects`, which nothing called; `clutch-db-object-source`, which only each adapter's `clutch-db-object-definition` called; `clutch-db-sql-has-top-level-clause-p` (use `clutch-db-sql-find-top-level-clause`); the LOAD-OPTIONAL argument of `clutch-backends`, which now always loads optional registries; the STRICT-LEADING-SPACE argument of `clutch-db-sql-semicolon-statement-bounds-at-offset`, which now always applies it, so DIALECT is its third argument; and the TABLE-LIKE-ONLY and CATEGORY arguments of `clutch-object-read`.
 
 ### Fixed
 
@@ -14,6 +18,8 @@
 - In MySQL buffers a backslash-escaped quote such as `'it\'s'` no longer hides the rest of the statement from table completion, alias lookup and the always-true `WHERE` check, which let `DELETE ... WHERE name = 'it\'s' OR 1 = 1` run without the high-risk confirmation.
 - Jumping to a table alias works for an alias that follows an unaliased table, such as `o` in `FROM users JOIN orders o`.
 - MongoDB, Redis, ClickHouse and generic JDBC connections reconnect automatically after dropping, as the other backends do, instead of reporting "Not connected".
+- Browsing an object from a buffer other than its query console appends the query at the end of the console instead of wherever the console's point was.
+- PostgreSQL `timestamptz[]` values with fractional seconds no longer signal `wrong-type-argument` while a result is displayed.
 
 ## 0.5.1 - 2026-09-25
 
