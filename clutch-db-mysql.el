@@ -136,43 +136,10 @@ STMT is released only once recovery has resynchronized the wire."
    `((:connect-timeout . ,clutch-connect-timeout-seconds)
      (:read-idle-timeout . ,clutch-read-idle-timeout-seconds))))
 
-(defun clutch-db-mysql--normalize-ssl-mode (ssl-mode)
-  "Return canonical MySQL SSL-MODE, or signal `clutch-db-error'."
-  (pcase (clutch-db--normalize-symbol-option ssl-mode)
-    ('nil nil)
-    ((or 'disabled 'off) 'disabled)
-    (_
-     (signal 'clutch-db-error
-             (list (format "Unsupported MySQL :ssl-mode %S (supported: disabled)" ssl-mode))))))
-
-(defun clutch-db-mysql--normalize-connect-params (params)
-  "Return PARAMS normalized for the MySQL backend."
-  (let* ((params (copy-sequence params))
-         (tls-specified-p (plist-member params :tls))
-         (tls (plist-get params :tls))
-         (ssl-mode (clutch-db-mysql--normalize-ssl-mode
-                    (plist-get params :ssl-mode)))
-         (tls-mode (cond
-                    (ssl-mode 'disable)
-                    (tls-specified-p (if tls 'require 'disable))
-                    (t 'default))))
-    (when ssl-mode
-      (setq params (plist-put params :ssl-mode ssl-mode)))
-    (when (and ssl-mode tls-specified-p tls)
-      (signal 'clutch-db-error
-              (list "Conflicting MySQL TLS options: :tls t cannot be combined with :ssl-mode disabled")))
-    (setq params (plist-put params :clutch-tls-mode tls-mode))
-    (when (and tls-specified-p (null tls))
-      ;; Canonicalize the generic plaintext shortcut to MySQL's explicit name.
-      (setq params (plist-put params :ssl-mode 'disabled))
-      (cl-remf params :tls))
-    params))
-
 (defun clutch-db-mysql--wire-connect-args (params)
   "Return PARAMS with clutch-only keys removed for `mysql-connect'."
   (cl-loop for (key value) on params by #'cddr
-           unless (memq key '(:sql-product :backend :pass-entry
-                              :clutch-tls-mode))
+           unless (memq key '(:sql-product :backend :pass-entry))
            append (list key value)))
 
 (defun clutch-db-mysql--type-category (mysql-type charset)
@@ -213,27 +180,14 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
 :ssl-mode, :connect-timeout, :read-idle-timeout.
 For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
   (clutch-db-mysql--ensure-client-api)
-  (setq params (clutch-db-mysql--apply-timeout-defaults
-                (clutch-db-mysql--normalize-connect-params
-                 (clutch-db--reject-removed-connect-params params))))
-  (let ((tls-mode (plist-get params :clutch-tls-mode)))
-    (cl-remf params :clutch-tls-mode)
-    (pcase tls-mode
-      ('default
-       (cl-remf params :tls)
-       (cl-remf params :ssl-mode))
-      ('require
-       (setq params (plist-put params :tls t))
-       (cl-remf params :ssl-mode))
-      ('disable
-       (setq params (plist-put params :ssl-mode 'disabled))
-       (cl-remf params :tls)))
-    (clutch-db--translate-library-error mysql-error
-      (let* ((wire-args (clutch-db-mysql--wire-connect-args params))
-             (conn (apply #'mysql-connect wire-args)))
-        (puthash conn (copy-sequence wire-args)
-                 clutch-db-mysql--connection-params)
-        conn))))
+  (clutch-db--translate-library-error mysql-error
+    (let* ((wire-args (clutch-db-mysql--wire-connect-args
+                       (clutch-db-mysql--apply-timeout-defaults
+                        (clutch-db--reject-removed-connect-params params))))
+           (conn (apply #'mysql-connect wire-args)))
+      (puthash conn (copy-sequence wire-args)
+               clutch-db-mysql--connection-params)
+      conn)))
 
 (defun clutch-db-mysql--drain-interrupted-response (conn)
   "Drain the interrupted query response from CONN.
@@ -626,18 +580,6 @@ ORDER BY ORDINAL_POSITION"
               (mysql-result-rows result))))
           (_ nil)))))
 
-(cl-defmethod clutch-db-object-source ((conn mysql-conn) entry)
-  "Return source text for MySQL object ENTRY on CONN."
-  (clutch-db--translate-library-error mysql-error
-    (let ((type (upcase (or (plist-get entry :type) ""))))
-      (when (member type '("PROCEDURE" "FUNCTION" "TRIGGER"))
-        (nth 2 (car (mysql-result-rows
-                     (mysql-query
-                      conn
-                      (format "SHOW CREATE %s %s" type
-                              (mysql-escape-identifier
-                               (plist-get entry :name)))))))))))
-
 (cl-defmethod clutch-db-object-definition ((conn mysql-conn) entry)
   "Return definition or source text for MySQL object ENTRY on CONN."
   (clutch-db--translate-library-error mysql-error
@@ -657,7 +599,11 @@ ORDER BY ORDINAL_POSITION"
            (pcase-let ((`(,_ ,ddl) (car rows)))
              ddl)))
         ((or "PROCEDURE" "FUNCTION" "TRIGGER")
-         (clutch-db-object-source conn entry))
+         (nth 2 (car (mysql-result-rows
+                      (mysql-query
+                       conn
+                       (format "SHOW CREATE %s %s" type
+                               (mysql-escape-identifier name)))))))
         ("VIEW"
          (let* ((result (mysql-query
                          conn
@@ -731,21 +677,6 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
                            (let ((col-name (if (stringp n) n (format "%s" n))))
                            (cons col-name (list :ref-table ref-table
                                                 :ref-column ref-column))))))))
-
-(cl-defmethod clutch-db-referencing-objects ((conn mysql-conn) table)
-  "Return table entries that reference TABLE on MySQL CONN."
-  (clutch-db--translate-library-error mysql-error
-    (let* ((sql (format
-                   "SELECT DISTINCT TABLE_NAME \
-FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
-WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = %s"
-                   (mysql-escape-literal table)))
-             (result (mysql-query conn sql))
-             (rows (mysql-result-rows result)))
-      (mapcar (lambda (row)
-                (pcase-let ((`(,name) row))
-                  (list :name name :type "TABLE")))
-              rows))))
 
 ;;;; Column details
 
