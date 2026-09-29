@@ -8670,7 +8670,7 @@ statement."
           refresh-started
           (clutch--tx-state-cache (make-hash-table :test 'eq))
           (clutch-connection 'fake-conn)
-          (clutch--executing-p nil))
+          (clutch--execution-start-time nil))
       (puthash clutch-connection 'dirty clutch--tx-state-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
@@ -8710,7 +8710,7 @@ statement."
         ;; Retirement keeps the dirty flag as lost-transaction evidence;
         ;; the next transaction command consumes it and refuses to run.
         (should (gethash 'fake-conn clutch--tx-state-cache))
-        (should-not clutch--executing-p)))))
+        (should-not clutch--execution-start-time)))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
   "Quit should keep the session when a backend interrupt succeeds."
@@ -8721,7 +8721,7 @@ statement."
            (disconnected nil)
            (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch-connection conn)
-           (clutch--executing-p nil))
+           (clutch--execution-start-time nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch--update-mode-line)
@@ -8742,7 +8742,7 @@ statement."
         (should-not disconnected)
         (with-current-buffer buf
           (should (eq clutch-connection conn)))
-        (should-not clutch--executing-p)))))
+        (should-not clutch--execution-start-time)))))
 
 (ert-deftest clutch-test-execute-db-error-preserves-dead-reconnect-anchor ()
   "Query errors should retain a dead connection for the next reconnect."
@@ -8750,7 +8750,7 @@ statement."
     (let* ((conn 'fake-conn)
            (clutch-connection conn)
            (clutch--tx-state-cache (make-hash-table :test 'eq))
-           (clutch--executing-p nil)
+           (clutch--execution-start-time nil)
            (displayed-error nil)
            (error-context nil)
            (preserved nil)
@@ -8797,7 +8797,7 @@ statement."
         (should (eq clutch-connection conn))
         (should (eq preserved conn))
         (should (eq details-cleared conn))
-        (should-not clutch--executing-p)
+        (should-not clutch--execution-start-time)
         (should (> mode-line-updates 0))))))
 
 (ert-deftest clutch-test-dead-query-reconnects-on-next-command-without-replay ()

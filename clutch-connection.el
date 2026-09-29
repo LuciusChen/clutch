@@ -48,7 +48,6 @@
 ;; Forward declarations — shared buffer-local variables
 (defvar-local clutch-connection nil
   "Current database connection for this buffer.")
-(defvar clutch--executing-p)
 (defvar-local clutch--conn-sql-product nil
   "SQL product for the current connection, or nil to use the default.")
 (defvar-local clutch--connection-params nil
@@ -970,6 +969,7 @@ executed outside clutch that would otherwise leave stale completions."
    candidates))
 
 ;;;; Execution timing and mode-line
+
 (defun clutch--execution-refresh-start ()
   "Start the execution UI refresh timer if not already running."
   (unless clutch--execution-refresh-timer
@@ -987,8 +987,7 @@ executed outside clutch that would otherwise leave stale completions."
   "Update elapsed-time displays of buffers with running queries."
   (let ((any-busy nil))
     (dolist (buf (buffer-list))
-      (when (and (buffer-live-p buf)
-                 (buffer-local-value 'clutch--executing-p buf))
+      (when (buffer-local-value 'clutch--execution-start-time buf)
         (setq any-busy t)
         (with-current-buffer buf
           (clutch--update-mode-line t))))
