@@ -122,7 +122,7 @@ explicitly because `\\s-' resolves against the caller's syntax table, and
         (trimmed (clutch-db-sql-strip-leading-comments sql)))
     (or (string-match-p "\\`[ \t\r\n\f]*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\|VALUES\\)"
                         trimmed)
-        (clutch-db-sql-has-top-level-clause-p sql "RETURNING"))))
+        (clutch-db-sql-find-top-level-clause sql "RETURNING"))))
 
 (defun clutch-db-sqlite--run-select (conn sql &optional values)
   "Execute a SELECT-like SQL on CONN with optional VALUES.

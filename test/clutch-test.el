@@ -1071,7 +1071,7 @@ standard syntax table, which let keywords match inside identifiers."
     (with-temp-buffer
       (funcall mode)
       (ert-info ((symbol-name mode))
-        (should (clutch-db-sql-has-top-level-clause-p
+        (should (clutch-db-sql-find-top-level-clause
                  "SELECT * FROM t\nORDER\nBY id" "ORDER\\s-+BY"))
         (should (equal (clutch--high-risk-query-reason
                         "DELETE FROM t WHERE 1 = 1\nORDER\nBY id")
