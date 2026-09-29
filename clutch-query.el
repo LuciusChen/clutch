@@ -1354,7 +1354,7 @@ Semicolons inside strings, line comments, and block comments are skipped."
   (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
          (offset (- (point) (point-min)))
          (bounds (clutch-db-sql-semicolon-statement-bounds-at-offset
-                  text offset t (clutch--buffer-sql-dialect))))
+                  text offset (clutch--buffer-sql-dialect))))
     (cons (+ (point-min) (car bounds))
           (+ (point-min) (cdr bounds)))))
 

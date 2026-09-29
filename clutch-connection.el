@@ -899,7 +899,7 @@ executed outside clutch that would otherwise leave stale completions."
 (defun clutch--manual-backend-choices ()
   "Return backend choices offered by manual connection readers."
   (cl-remove-if-not #'clutch-backend-manual-choice-p
-                    (clutch-backends t)))
+                    (clutch-backends)))
 
 (defun clutch--backend-support-annotation (key)
   "Return manual chooser support annotation for backend KEY, or nil."

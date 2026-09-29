@@ -275,24 +275,22 @@ Values are nesting counts.")
 
 (defun clutch-db--foreground-busy-p (conn)
   "Return non-nil when CONN is reserved by foreground Clutch work."
-  (and conn (gethash conn clutch-db--foreground-connections)))
+  (gethash conn clutch-db--foreground-connections))
 
 (defmacro clutch-db-with-foreground-connection (conn &rest body)
   "Run BODY while marking CONN reserved for foreground work."
   (declare (indent 1) (debug t))
   (let ((conn-var (make-symbol "conn")))
     `(let ((,conn-var ,conn))
-       (when ,conn-var
-         (puthash ,conn-var
-                  (1+ (or (gethash ,conn-var clutch-db--foreground-connections) 0))
-                  clutch-db--foreground-connections))
+       (puthash ,conn-var
+                (1+ (or (gethash ,conn-var clutch-db--foreground-connections) 0))
+                clutch-db--foreground-connections)
        (unwind-protect
            (progn ,@body)
-         (when ,conn-var
-           (let ((count (1- (or (gethash ,conn-var clutch-db--foreground-connections) 1))))
-             (if (> count 0)
-                 (puthash ,conn-var count clutch-db--foreground-connections)
-               (remhash ,conn-var clutch-db--foreground-connections))))))))
+         (let ((count (1- (or (gethash ,conn-var clutch-db--foreground-connections) 1))))
+           (if (> count 0)
+               (puthash ,conn-var count clutch-db--foreground-connections)
+             (remhash ,conn-var clutch-db--foreground-connections)))))))
 
 ;;;; SQL helpers (literal-or-comment awareness)
 
@@ -473,7 +471,7 @@ follows the number of literals and comments rather than the length of SQL."
                                       (= (aref sql (1- skip)) ?\')))
                        (content-end (if has-close (1- skip) skip)))
                   (push (substring sql copy-from (1+ pos)) pieces)
-                  (push (make-string (max 0 (- content-end (1+ pos))) ?\s) pieces)
+                  (push (make-string (- content-end (1+ pos)) ?\s) pieces)
                   (when has-close (push "'" pieces))
                   (setq copy-from skip pos skip))
               ;; Comment: blank entirely.
@@ -541,15 +539,12 @@ regexp search, so the cost follows the number of literals, parentheses and
 interesting characters instead of the length of SQL."
   (if (null interest)
       (clutch-db-sql--scan-every-code-char sql start end fn dialect)
-    (let* ((pos (or start 0))
+    (let* ((pos start)
            (end (or end (length sql)))
            (depth 0)
            (chars (and (stringp interest) (append interest nil)))
            (positions (and (hash-table-p interest)
                            (sort (hash-table-keys interest) #'<)))
-           (_ (unless (or (stringp interest) (hash-table-p interest))
-                (signal 'wrong-type-argument
-                        (list '(or string hash-table) interest))))
            (regexp (regexp-opt-charset
                     (append clutch-db-sql--code-structure-chars chars)))
            result)
@@ -586,7 +581,7 @@ interesting characters instead of the length of SQL."
 (defun clutch-db-sql--scan-every-code-char (sql start end fn dialect)
   "Call FN at every code character of SQL from START to END.
 See `clutch-db-sql-scan-code' for FN and DIALECT."
-  (let ((pos (or start 0))
+  (let ((pos start)
         (end (or end (length sql)))
         (depth 0)
         result)
@@ -671,20 +666,19 @@ BREAKS are zero-based top-level semicolon offsets in TEXT, as returned by
     (cons beg end)))
 
 (defun clutch-db-sql-semicolon-statement-bounds-at-offset
-    (text offset &optional strict-leading-space dialect)
+    (text offset &optional dialect)
   "Return zero-based semicolon statement bounds around OFFSET in TEXT.
-When STRICT-LEADING-SPACE is non-nil and OFFSET is before the trimmed
-statement body, return an empty range at OFFSET.  This lets execute-at-point
-avoid running the previous statement from blank space between semicolon
-delimited statements.  DIALECT is a `clutch-db-sql-dialect' plist."
+When OFFSET is before the trimmed statement body, return an empty range at
+OFFSET.  This lets execute-at-point avoid running the previous statement from
+blank space between semicolon delimited statements.  DIALECT is a
+`clutch-db-sql-dialect' plist."
   (let* ((bounds (clutch-db-sql--bounds-from-breaks
                   text offset (clutch-db-sql-statement-breaks text dialect)))
          (effective-offset (clutch-db-sql-statement-effective-offset text offset))
          (semicolon-edge (or (/= effective-offset offset)
                              (and (< offset (length text))
                                   (= (aref text offset) ?\;)))))
-    (if (and strict-leading-space
-             (not semicolon-edge)
+    (if (and (not semicolon-edge)
              (not (when-let* ((trimmed (clutch-db-sql--trim-bounds
                                         text (car bounds) (cdr bounds))))
                     (>= offset (car trimmed)))))
@@ -751,7 +745,7 @@ time, which is quadratic."
   (let ((case-fold-search t)
         (limit (or end (length sql)))
         (positions (make-hash-table :test 'eq))
-        (pos (or start 0)))
+        (pos start))
     (with-syntax-table clutch-db-sql--syntax-table
       (while (and (< pos limit)
                   (string-match regexp sql pos)
@@ -794,10 +788,6 @@ PATTERN is matched case-insensitively with word boundaries.
 START defaults to 0."
   (car (clutch-db-sql--top-level-clause-match
         sql (or start 0) (list pattern))))
-
-(defun clutch-db-sql-has-top-level-clause-p (sql pattern &optional start)
-  "Return non-nil when SQL has top-level PATTERN starting at START."
-  (clutch-db-sql-find-top-level-clause sql pattern start))
 
 (defun clutch-db-sql-has-top-level-row-limit-p (sql)
   "Return non-nil when SQL has a top-level row-limit clause.
@@ -1058,27 +1048,6 @@ CONN supplies the dialect-specific derived-table alias syntax."
           (clutch-db-sql-derived-table-body sql)
           (clutch-db-derived-table-alias conn "_clutch_filter")
           filter))
-
-(defun clutch-db--build-limit-offset-paged-sql (base-sql page-num page-size
-                                                         order-by escape-fn
-                                                         &optional page-offset)
-  "Build a LIMIT/OFFSET paginated query from BASE-SQL.
-PAGE-NUM is zero-based and PAGE-SIZE is the row count per page.
-ORDER-BY is (COL . DIR) or nil.  ESCAPE-FN escapes the column name.
-PAGE-OFFSET, when non-nil, overrides the offset derived from PAGE-NUM."
-  (if (clutch-db-sql-has-top-level-row-limit-p base-sql)
-      base-sql
-    (let* ((trimmed (clutch-db-sql-trim-end base-sql))
-           (sortable-sql (if order-by
-                             (clutch-db-sql-strip-top-level-order-by trimmed)
-                           trimmed))
-           (offset (or page-offset (* page-num page-size)))
-           (order-clause (when order-by
-                           (format " ORDER BY %s %s"
-                                   (funcall escape-fn (car order-by))
-                                   (cdr order-by)))))
-      (format "%s%s LIMIT %d OFFSET %d"
-              sortable-sql (or order-clause "") page-size offset))))
 
 ;;;; Generic interface
 
@@ -1375,8 +1344,7 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
                (puthash conn t clutch-db--idle-metadata-connections)
                (unwind-protect
                    (condition-case err
-                       (when callback
-                         (funcall callback (apply fn conn args)))
+                       (funcall callback (apply fn conn args))
                      (error
                       (when errback
                         (funcall errback (error-message-string err)))))
@@ -1442,10 +1410,20 @@ when non-nil, overrides PAGE-NUM for last-window pagination.")
 PAGE-NUM is zero-based, PAGE-SIZE limits each page, and ORDER-BY
 controls the optional sort clause.  PAGE-OFFSET overrides PAGE-NUM
 when non-nil."
-  (clutch-db--build-limit-offset-paged-sql
-   base-sql page-num page-size order-by
-   (lambda (name) (clutch-db-escape-identifier conn name))
-   page-offset))
+  (if (clutch-db-sql-has-top-level-row-limit-p base-sql)
+      base-sql
+    (let* ((trimmed (clutch-db-sql-trim-end base-sql))
+           (sortable-sql (if order-by
+                             (clutch-db-sql-strip-top-level-order-by trimmed)
+                           trimmed))
+           (offset (or page-offset (* page-num page-size)))
+           (order-clause (when order-by
+                           (format " ORDER BY %s %s"
+                                   (clutch-db-escape-identifier
+                                    conn (car order-by))
+                                   (cdr order-by)))))
+      (format "%s%s LIMIT %d OFFSET %d"
+              sortable-sql (or order-clause "") page-size offset))))
 
 ;; SQL dialect
 
@@ -1523,8 +1501,7 @@ When absent, non-scalar values fall back to `format' with `%S'."
    ((null value) "NULL")
    ((numberp value) (number-to-string value))
    ((stringp value) (clutch-db-escape-literal conn value))
-   ((and (listp value)
-         (clutch-db-format-temporal value))
+   ((clutch-db-format-temporal value)
     (clutch-db-escape-literal conn (clutch-db-format-temporal value)))
    ((or (hash-table-p value) (vectorp value))
     (clutch-db-escape-literal
@@ -1652,7 +1629,7 @@ Derived from `clutch-db-list-tables'."
   "Default table entry search for CONN and PREFIX.
 Derived from `clutch-db-complete-tables'."
   (mapcar (lambda (name) (list :name name :type "TABLE"))
-          (or (clutch-db-complete-tables conn prefix) '())))
+          (clutch-db-complete-tables conn prefix)))
 
 (cl-defgeneric clutch-db-find-table-entry (conn name)
   "Return the exact table-like entry named NAME on CONN, or nil.")
@@ -2002,12 +1979,10 @@ Load optional registries if needed."
         (require 'clutch-db-jdbc nil t)
         (alist-get backend clutch-backend--registry))))
 
-(defun clutch-backends (&optional load-optional)
+(defun clutch-backends ()
   "Return registered backend symbols in user-facing order.
-When LOAD-OPTIONAL is non-nil, load optional backend registries such as JDBC
-before returning the list."
-  (when load-optional
-    (require 'clutch-db-jdbc nil t))
+Load optional backend registries such as JDBC before returning the list."
+  (require 'clutch-db-jdbc nil t)
   (mapcar #'car clutch-backend--registry))
 
 (defun clutch-backend-display-name (backend)

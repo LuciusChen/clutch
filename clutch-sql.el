@@ -292,10 +292,9 @@ String literals and comments are ignored via masking."
              (table-end (or (match-end 2)
                             (match-end 3)
                             (match-end 4)))
-             (table-token (and table-end
-                               (or (match-string 2 text)
-                                   (match-string 3 text)
-                                   (match-string 4 text))))
+             (table-token (or (match-string 2 text)
+                              (match-string 3 text)
+                              (match-string 4 text)))
              (table (clutch--normalize-statement-table-token table-token))
              (alias-consumed-end table-end))
         (setq pos table-end)
@@ -529,25 +528,17 @@ buffer text and cached metadata differ only by case."
 (defun clutch--normalize-statement-table-token (token)
   "Normalize a raw table TOKEN parsed from SQL into a bare table name.
 Handles schema-qualified names like \"HR\".\"EMPLOYEES\" or `db`.`table`."
-  (when token
-    (let* ((stripped (replace-regexp-in-string "[\"`]" "" token))
-           (parts (split-string stripped "\\." t)))
-      (car (last parts)))))
+  (let* ((stripped (replace-regexp-in-string "[\"`]" "" token))
+         (parts (split-string stripped "\\." t)))
+    (car (last parts))))
 
 (defun clutch--statement-table-identifiers-in-sql (sql)
   "Return table identifiers referenced in SQL.
 String literals and comments are ignored.  Returned names are normalized to
 bare table identifiers because clutch metadata methods are scoped to the
 current database/schema."
-  (when (stringp sql)
-    (delete-dups
-     (car (clutch--extract-tables-and-aliases sql 0 (length sql))))))
-
-(defun clutch--statement-table-identifiers ()
-  "Return raw table identifiers referenced in the current statement."
-  (pcase-let ((`(,beg . ,end) (clutch--statement-bounds)))
-    (clutch--statement-table-identifiers-in-sql
-     (buffer-substring-no-properties beg end))))
+  (delete-dups
+   (car (clutch--extract-tables-and-aliases sql 0 (length sql)))))
 
 (defun clutch--qualified-identifier-qualifier (beg)
   "Return the qualifier token immediately preceding BEG, or nil.
@@ -573,8 +564,7 @@ like `orders.id' within the current statement."
                            t))
         (let ((normalized (clutch--normalize-statement-table-token qualifier)))
           (when (member normalized
-                        (or (clutch--tables-in-current-statement schema)
-                            (clutch--statement-table-identifiers)))
+                        (clutch--tables-in-current-statement schema))
             normalized)))))
 
 (defconst clutch--sql-keywords
@@ -967,11 +957,11 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
 
 (defun clutch--eldoc-keyword-string (sym)
   "Return an eldoc string for SQL keyword/function SYM, or nil."
-  (when-let* ((doc (gethash (upcase sym) clutch--sql-function-docs))
-              (sig  (plist-get doc :sig))
-              (desc (plist-get doc :desc)))
-    (concat (propertize sig  'face 'font-lock-function-name-face)
-            (propertize (concat "  — " desc) 'face 'shadow))))
+  (when-let* ((doc (gethash (upcase sym) clutch--sql-function-docs)))
+    (concat (propertize (plist-get doc :sig)
+                        'face 'font-lock-function-name-face)
+            (propertize (concat "  — " (plist-get doc :desc))
+                        'face 'shadow))))
 
 (defun clutch--completion-finished-status-p (status)
   "Return non-nil when completion STATUS means candidate was accepted."
@@ -984,30 +974,23 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
     ('upper (upcase text))
     (_ text)))
 
-(defvar clutch--sql-keyword-completion-raw-candidates-cache nil
-  "Cache of raw SQL keyword completion candidates, nil until computed.
-Not invalidated: the source defconsts never change at runtime.")
-
-(defun clutch--sql-keyword-completion-raw-candidates ()
-  "Return raw SQL keyword completion candidates before case conversion."
-  (or clutch--sql-keyword-completion-raw-candidates-cache
-      (setq clutch--sql-keyword-completion-raw-candidates-cache
-            (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases))
-                  (zero-arg-functions nil))
-              (maphash
-               (lambda (_name doc)
-                 (let ((sig (plist-get doc :sig)))
-                   (when (and (stringp sig)
-                              (string-match-p "\\`[[:upper:]_]+()[[:space:]]*\\'" sig))
-                     (push (string-trim sig) zero-arg-functions))))
-               clutch--sql-function-docs)
-              (delete-dups
-               (append
-                (mapcar #'cdr clutch--sql-keyword-replacement-phrases)
-                clutch--sql-keyword-additive-phrases
-                zero-arg-functions
-                (seq-remove (lambda (keyword) (member keyword replaced))
-                            clutch--sql-keywords)))))))
+(defconst clutch--sql-keyword-completion-raw-candidates
+  (let ((replaced (mapcar #'car clutch--sql-keyword-replacement-phrases))
+        (zero-arg-functions nil))
+    (maphash
+     (lambda (_name doc)
+       (let ((sig (plist-get doc :sig)))
+         (when (string-match-p "\\`[[:upper:]_]+()[[:space:]]*\\'" sig)
+           (push (string-trim sig) zero-arg-functions))))
+     clutch--sql-function-docs)
+    (delete-dups
+     (append
+      (mapcar #'cdr clutch--sql-keyword-replacement-phrases)
+      clutch--sql-keyword-additive-phrases
+      zero-arg-functions
+      (seq-remove (lambda (keyword) (member keyword replaced))
+                  clutch--sql-keywords))))
+  "Raw SQL keyword completion candidates before case conversion.")
 
 (defun clutch--sql-completion-insert-space-p (candidate)
   "Return non-nil when accepting CANDIDATE should add a trailing space."
@@ -1016,11 +999,11 @@ Not invalidated: the source defconsts never change at runtime.")
 (defun clutch--sql-keyword-completion-candidates ()
   "Return SQL keyword completion candidates honoring case style."
   (mapcar #'clutch--apply-sql-completion-case-style
-          (clutch--sql-keyword-completion-raw-candidates)))
+          clutch--sql-keyword-completion-raw-candidates))
 
 (defun clutch--sql-keyword-completion-candidate-p (text)
   "Return non-nil when TEXT is a SQL keyword completion candidate."
-  (member (upcase text) (clutch--sql-keyword-completion-raw-candidates)))
+  (member (upcase text) clutch--sql-keyword-completion-raw-candidates))
 
 (defun clutch--sql-identifier-completion-candidates (candidates)
   "Return completion CANDIDATES honoring identifier case style."
@@ -1032,7 +1015,7 @@ Not invalidated: the source defconsts never change at runtime.")
   (let ((upcase-prefix (upcase prefix)))
     (seq-some (lambda (keyword)
                 (string-prefix-p upcase-prefix keyword))
-              (clutch--sql-keyword-completion-raw-candidates))))
+              clutch--sql-keyword-completion-raw-candidates)))
 
 
 (defun clutch-sql-keyword-completion-at-point ()
@@ -1053,10 +1036,6 @@ Works without a database connection."
   "Install completion CAPFs for the current buffer in priority order.
 Identifier completion must run before SQL keyword completion so table names in
 contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
-  (remove-hook 'completion-at-point-functions
-               #'clutch-completion-at-point t)
-  (remove-hook 'completion-at-point-functions
-               #'clutch-sql-keyword-completion-at-point t)
   (add-hook 'completion-at-point-functions
             #'clutch-sql-keyword-completion-at-point nil t)
   (add-hook 'completion-at-point-functions
@@ -1080,8 +1059,7 @@ appropriate."
                    (not force-columns-p)
                    (< prefix-len clutch--schema-inline-min-prefix-length)))
     (let ((tables (or (and qualified-table (list qualified-table))
-                      (and schema (clutch--tables-in-current-statement schema))
-                      (clutch--statement-table-identifiers))))
+                      (clutch--tables-in-current-statement schema))))
       (when (and tables
                  (or qualified-table
                      (<= (length tables) clutch--schema-inline-table-limit)))
@@ -1181,9 +1159,8 @@ control backend column loading."
 (defun clutch--completion-top-level-token-before (sql offset)
   "Return the last top-level SQL token in SQL before OFFSET."
   (let* ((case-fold-search t)
-         (limit (min offset (length sql)))
          (matches (clutch-db-sql-code-match-positions
-                   sql 0 limit
+                   sql 0 offset
                    (rx word-start
                        (or "select" "from" "where" "having" "on" "join"
                            "into" "update" "set" "values" "limit" "offset"
@@ -1193,7 +1170,7 @@ control backend column loading."
                        word-end)))
          token)
     (clutch-db-sql-scan-code
-     sql 0 limit
+     sql 0 offset
      (lambda (pos _ch depth)
        (when (zerop depth)
          (setq token (replace-regexp-in-string
@@ -1299,8 +1276,6 @@ when completion triggers during an in-flight query)."
            (qualified-empty-prefix-p (and qualified-bounds (not symbol-bounds)))
            (empty-column-prefix-p (and empty-column-bounds t))
            (schema (clutch--schema-for-connection))
-           (qualifier (and schema
-                           (clutch--qualified-identifier-qualifier beg)))
            (table-context-p (clutch--completion-table-context-p beg))
            (busy (clutch-db-busy-p conn))
            (sync-columns-p (clutch-db-completion-sync-columns-p conn))
@@ -1310,8 +1285,7 @@ when completion triggers during an in-flight query)."
               (or (clutch--schema-table-candidates conn schema prefix)
                   (clutch--safe-completion-call
                    (lambda () (clutch-db-complete-tables conn prefix))))))
-           (qualified-table (and qualifier
-                                 (clutch--qualified-identifier-table schema beg)))
+           (qualified-table (clutch--qualified-identifier-table schema beg))
            (context-tables
             (clutch--completion-context-tables
              schema qualified-table prefix-len table-context-p busy

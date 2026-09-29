@@ -1716,7 +1716,7 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
    (t
     (let* ((trimmed (clutch-db-sql-trim-end base-sql))
            (has-user-order-by
-            (clutch-db-sql-has-top-level-clause-p trimmed "ORDER\\s-+BY"))
+            (clutch-db-sql-find-top-level-clause trimmed "ORDER\\s-+BY"))
            (sortable-sql (if order-by
                              (clutch-db-sql-strip-top-level-order-by trimmed)
                            trimmed))
