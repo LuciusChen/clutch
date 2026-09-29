@@ -1109,6 +1109,8 @@ display them in their Extended JSON spelling."
             value))
    ((vectorp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable (append value nil))))
+   ;; mongodb.el decodes BSON null as nil; the list branch would print [].
+   ((null value) nil)
    ((listp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable value)))
    ((and (floatp value) (isnan value))
