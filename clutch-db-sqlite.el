@@ -50,7 +50,6 @@
   "A clutch SQLite connection."
   handle    ;; raw sqlite-handle from sqlite-open
   database  ;; file path string, for display
-  busy      ;; boolean re-entrancy guard
   closed)   ;; boolean, t after sqlite-close
 
 ;;;; Connect function
@@ -68,7 +67,6 @@ Use \":memory:\" for a transient in-memory database."
       (make-clutch-db-sqlite-conn
        :handle   (sqlite-open (unless (string= db ":memory:") db))
        :database db
-       :busy     nil
        :closed   nil))))
 
 ;;;; Lifecycle methods
@@ -80,8 +78,7 @@ Use \":memory:\" for a transient in-memory database."
 
 (cl-defmethod clutch-db-live-p ((conn clutch-db-sqlite-conn))
   "Return non-nil if SQLite CONN is live."
-  (and conn
-       (not (clutch-db-sqlite-conn-closed conn))
+  (and (not (clutch-db-sqlite-conn-closed conn))
        (sqlitep (clutch-db-sqlite-conn-handle conn))))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-sqlite-conn))
@@ -122,7 +119,7 @@ explicitly because `\\s-' resolves against the caller's syntax table, and
         (trimmed (clutch-db-sql-strip-leading-comments sql)))
     (or (string-match-p "\\`[ \t\r\n\f]*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\|VALUES\\)"
                         trimmed)
-        (clutch-db-sql-has-top-level-clause-p sql "RETURNING"))))
+        (clutch-db-sql-find-top-level-clause sql "RETURNING"))))
 
 (defun clutch-db-sqlite--run-select (conn sql &optional values)
   "Execute a SELECT-like SQL on CONN with optional VALUES.
@@ -148,25 +145,19 @@ Return a `clutch-db-result'."
 
 (cl-defmethod clutch-db-query ((conn clutch-db-sqlite-conn) sql)
   "Execute SQL on SQLite CONN, returning a `clutch-db-result'."
-  (setf (clutch-db-sqlite-conn-busy conn) t)
-  (unwind-protect
-      (clutch-db--translate-library-error sqlite-error
-        (if (clutch-db-sqlite--select-p sql)
-            (clutch-db-sqlite--run-select conn sql)
-          (clutch-db-sqlite--run-dml conn sql)))
-    (setf (clutch-db-sqlite-conn-busy conn) nil)))
+  (clutch-db--translate-library-error sqlite-error
+    (if (clutch-db-sqlite--select-p sql)
+        (clutch-db-sqlite--run-select conn sql)
+      (clutch-db-sqlite--run-dml conn sql))))
 
 (cl-defmethod clutch-db-execute-params ((conn clutch-db-sqlite-conn) sql params)
   "Execute parameterized SQL on SQLite CONN with PARAMS."
-  (setf (clutch-db-sqlite-conn-busy conn) t)
-  (unwind-protect
-      (clutch-db--translate-library-error sqlite-error
-        (if (clutch-db-sqlite--select-p sql)
-            (clutch-db-sqlite--run-select
-             conn sql (clutch-db-param-values params))
-          (clutch-db-sqlite--run-dml
-           conn sql (clutch-db-param-values params))))
-    (setf (clutch-db-sqlite-conn-busy conn) nil)))
+  (clutch-db--translate-library-error sqlite-error
+    (if (clutch-db-sqlite--select-p sql)
+        (clutch-db-sqlite--run-select
+         conn sql (clutch-db-param-values params))
+      (clutch-db-sqlite--run-dml
+       conn sql (clutch-db-param-values params)))))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
   ((conn clutch-db-sqlite-conn) function)
@@ -380,9 +371,9 @@ PK-COLS is a list of pk column names.  FKS is an FK alist."
 
 ;;;; Re-entrancy guard
 
-(cl-defmethod clutch-db-busy-p ((conn clutch-db-sqlite-conn))
-  "Return non-nil if SQLite CONN is executing a query."
-  (clutch-db-sqlite-conn-busy conn))
+(cl-defmethod clutch-db-busy-p ((_conn clutch-db-sqlite-conn))
+  "Return nil; SQLite is synchronous, so a connection is never busy."
+  nil)
 
 ;;;; Metadata methods
 

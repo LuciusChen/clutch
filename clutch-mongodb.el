@@ -153,13 +153,10 @@ Emacs result contract from materializing an unbounded collection."
 
 ;;;; Connect function
 
-(defun clutch-mongodb--surface (params)
-  "Return normalized MongoDB surface from PARAMS, or nil."
-  (clutch-db--normalize-symbol-option (plist-get params :surface)))
-
 (defun clutch-mongodb--validate-surface (params)
   "Signal if PARAMS contain an unsupported MongoDB surface."
-  (when-let* ((surface (clutch-mongodb--surface params)))
+  (when-let* ((surface (clutch-db--normalize-symbol-option
+                        (plist-get params :surface))))
     (unless (clutch-backend-surface-feature 'mongodb surface)
       (signal 'clutch-db-error
               (list (format "Unsupported MongoDB :surface %S" surface))))))
@@ -211,8 +208,7 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
       (let ((client (mongodb-connect params)))
         (make-clutch-mongodb-conn
          :database (mongodb-conn-database client)
-         :client client
-         :busy nil)))))
+         :client client)))))
 
 ;;;; MQL helper parsing
 
@@ -600,24 +596,9 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
                            (memq (car args) '(t :false)))
                  (signal 'clutch-db-error
                          (list "explain() verbosity must be a string or boolean")))
-               (push (cons method (car args)) chain))
-              (_
-               (signal 'clutch-db-error
-                       (list (format "Unsupported MongoDB chained helper: %s"
-                                     method)))))
+               (push (cons method (car args)) chain)))
             (setq tail (string-trim (substring tail (1+ close))))))))
     (nreverse chain)))
-
-(defun clutch-mongodb--next-db-member-separator (text start)
-  "Return the next `.' or `(' position in TEXT from START.
-When both are present, return the earlier one."
-  (let ((dot (cl-position ?. text :start start))
-        (open (cl-position ?\( text :start start)))
-    (cond
-     ((and dot open) (min dot open))
-     (dot dot)
-     (open open)
-     (t (length text)))))
 
 (defun clutch-mongodb--options-from-chain (chain methods)
   "Return MongoDB command option pairs parsed from CHAIN for METHODS."
@@ -636,40 +617,35 @@ When both are present, return the earlier one."
   "Return explain verbosity requested by helper CHAIN, or nil."
   (cdr (assoc "explain" chain)))
 
-(defun clutch-mongodb--parse-db-member-call (text rest-pos)
-  "Parse a MongoDB DB member call in TEXT starting at REST-POS."
-  (cond
-   ((string-prefix-p "getCollection(" (substring text rest-pos))
-    (let* ((open (+ rest-pos (length "getCollection")))
-           (parsed (clutch-mongodb--parse-call-args text open))
-           (args (car parsed))
-           (close (cdr parsed)))
-      (unless (and (= (length args) 1)
-                   (stringp (car args)))
-        (signal 'clutch-db-error
-                (list "db.getCollection() expects one collection name string")))
-      (clutch-mongodb--parse-method-call text (1+ close) (car args))))
-   (t
-    (let* ((token-end
-            (clutch-mongodb--next-db-member-separator text rest-pos))
-           (token (substring text rest-pos token-end)))
-      (if (and (< token-end (length text))
-               (eq (aref text token-end) ?\())
-          (pcase-let ((`(,args . ,close)
-                       (clutch-mongodb--parse-call-args text token-end)))
-            (unless (string-empty-p (string-trim (substring text (1+ close))))
-              (signal 'clutch-db-error
-                      (list "Unsupported MongoDB helper chain")))
-            (list :db-method token :args args))
-        (clutch-mongodb--parse-method-call text token-end token))))))
-
 (defun clutch-mongodb--parse-db-call (statement)
   "Parse one MongoDB shell helper STATEMENT."
   (let ((text (string-trim statement)))
     (unless (string-prefix-p "db." text)
       (signal 'clutch-db-error
               (list "Native MongoDB supports db.* helper calls, not arbitrary JavaScript")))
-    (clutch-mongodb--parse-db-member-call text 3)))
+    (cond
+     ((string-prefix-p "getCollection(" (substring text 3))
+      (let* ((open (+ 3 (length "getCollection")))
+             (parsed (clutch-mongodb--parse-call-args text open))
+             (args (car parsed))
+             (close (cdr parsed)))
+        (unless (and (= (length args) 1)
+                     (stringp (car args)))
+          (signal 'clutch-db-error
+                  (list "db.getCollection() expects one collection name string")))
+        (clutch-mongodb--parse-method-call text (1+ close) (car args))))
+     (t
+      (let* ((token-end (or (string-match-p "[.(]" text 3) (length text)))
+             (token (substring text 3 token-end)))
+        (if (and (< token-end (length text))
+                 (eq (aref text token-end) ?\())
+            (pcase-let ((`(,args . ,close)
+                         (clutch-mongodb--parse-call-args text token-end)))
+              (unless (string-empty-p (string-trim (substring text (1+ close))))
+                (signal 'clutch-db-error
+                        (list "Unsupported MongoDB helper chain")))
+              (list :db-method token :args args))
+          (clutch-mongodb--parse-method-call text token-end token)))))))
 
 (defun clutch-mongodb--mql-document-arg (value helper position)
   "Return VALUE as a MongoDB document argument for HELPER at POSITION."
@@ -684,13 +660,6 @@ When both are present, return the earlier one."
   (when value
     (clutch-mongodb--mql-document-arg value helper position)))
 
-(defun clutch-mongodb--delete-filter-arg (args method)
-  "Return the required delete filter document from ARGS for METHOD."
-  (unless (= (length args) 1)
-    (signal 'clutch-db-error
-            (list (format "%s() expects one filter document" method))))
-  (clutch-mongodb--mql-document-arg (car args) method 1))
-
 (defun clutch-mongodb--find-arguments (args chain &optional single)
   "Return MongoDB find arguments parsed from ARGS and CHAIN.
 When SINGLE is non-nil, force a single-result limit and ignore cursor paging
@@ -703,8 +672,7 @@ chain options."
     (user-error "MongoDB find result limit must be a positive integer"))
   (let ((requested-limit (cdr (assoc "limit" chain))))
     (when (and requested-limit
-               (or (not (integerp requested-limit))
-                   (< requested-limit 1)
+               (or (< requested-limit 1)
                    (> requested-limit clutch-mongodb-find-result-limit)))
       (signal 'clutch-db-error
               (list (format "MongoDB find limit must be between 1 and %d"
@@ -722,11 +690,6 @@ chain options."
           (unless single
             (clutch-mongodb--options-from-chain
              chain '("maxTimeMS" "allowDiskUse"))))))
-
-(defun clutch-mongodb--find-command (collection args chain &optional single)
-  "Return a MongoDB find command for COLLECTION from ARGS, CHAIN, and SINGLE."
-  (apply #'mongodb-find-command collection
-         (clutch-mongodb--find-arguments args chain single)))
 
 (defun clutch-mongodb--aggregate-options (args chain)
   "Return MongoDB aggregate options parsed from ARGS and CHAIN."
@@ -819,9 +782,12 @@ CHAIN contains parsed cursor helper calls, when present."
                    (list "insertMany() expects one document array")))
          (mongodb-insert client database collection documents)))
       ("deleteOne"
+       (unless (= (length args) 1)
+         (signal 'clutch-db-error
+                 (list "deleteOne() expects one filter document")))
        (mongodb-delete
         client database collection
-        (clutch-mongodb--delete-filter-arg args method)
+        (clutch-mongodb--mql-document-arg (car args) method 1)
         nil))
       ("updateOne"
        (unless (<= 2 (length args) 3)
@@ -880,15 +846,6 @@ CHAIN contains parsed cursor helper calls, when present."
       (dolist (statement (clutch-mongodb--split-statements code))
         (setq value (clutch-mongodb--eval-one conn statement)))
       value)))
-
-(defun clutch-mongodb--single-helper-call (query purpose)
-  "Parse QUERY as one MongoDB helper call for PURPOSE."
-  (let ((statements (clutch-mongodb--split-statements query)))
-    (unless (= (length statements) 1)
-      (signal 'clutch-db-error
-              (list (format "MongoDB %s expects exactly one helper call"
-                            purpose))))
-    (clutch-mongodb--parse-db-call (car statements))))
 
 (defun clutch-mongodb--last-helper-call (query)
   "Return the parsed last MongoDB helper call in QUERY, or nil."
@@ -960,8 +917,7 @@ CHAIN contains parsed cursor helper calls, when present."
          (args (plist-get call :args))
          (chain (plist-get call :chain))
          (database (clutch-mongodb-conn-database conn)))
-    (unless (and collection
-                 (member method '("find" "findOne" "aggregate")))
+    (unless (member method '("find" "findOne" "aggregate"))
       (signal 'clutch-db-error
               (list "MongoDB explain supports find(), findOne(), and aggregate() helpers")))
     (mongodb-explain
@@ -969,8 +925,9 @@ CHAIN contains parsed cursor helper calls, when present."
      database
      (if (string= method "aggregate")
          (clutch-mongodb--aggregate-command collection args chain)
-       (clutch-mongodb--find-command
-        collection args chain (string= method "findOne")))
+       (apply #'mongodb-find-command collection
+              (clutch-mongodb--find-arguments
+               args chain (string= method "findOne"))))
      (or (clutch-mongodb--explain-verbosity chain)
          "executionStats"))))
 
@@ -979,15 +936,13 @@ CHAIN contains parsed cursor helper calls, when present."
 (defun clutch-mongodb--alist-p (value)
   "Return non-nil when VALUE is a JSON object alist."
   (and (consp value)
-       (or (null value)
-           (consp (car value)))
+       (consp (car value))
        (not (listp (caar value)))))
 
 (defun clutch-mongodb--document-list-p (value)
   "Return non-nil when VALUE is a list of JSON object alists."
   (and (listp value)
-       (or (null value)
-           (cl-every #'clutch-mongodb--alist-p value))))
+       (cl-every #'clutch-mongodb--alist-p value)))
 
 (defun clutch-mongodb--scalar-number (value)
   "Return VALUE's number when it is a bare or int-wrapped BSON number.
@@ -1109,6 +1064,8 @@ display them in their Extended JSON spelling."
             value))
    ((vectorp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable (append value nil))))
+   ;; mongodb.el decodes BSON null as nil; the list branch would print [].
+   ((null value) nil)
    ((listp value)
     (vconcat (mapcar #'clutch-mongodb--json-encodable value)))
    ((and (floatp value) (isnan value))
@@ -1171,44 +1128,6 @@ display them in their Extended JSON spelling."
           method
           (mapconcat #'clutch-mongodb--json-encode-text args ", ")))
 
-(defun clutch-mongodb--document-mutation-snippet
-    (action collection documents &optional fields)
-  "Return MongoDB helper snippets for ACTION on COLLECTION and DOCUMENTS.
-FIELDS is an optional list of top-level field names for update snippets."
-  (pcase action
-    ('insert-one
-     (cl-loop for document in documents
-              collect (clutch-mongodb--helper-call
-                       collection "insertOne" (list document))))
-    ('insert-many
-     (list (clutch-mongodb--helper-call
-            collection "insertMany" (list (vconcat documents)))))
-    ('replace-one
-     (cl-loop for document in documents
-              collect (clutch-mongodb--helper-call
-                       collection "replaceOne"
-                       (list (clutch-mongodb--document-id-filter
-                              document "replaceOne")
-                             document))))
-    ('delete-one
-     (cl-loop for document in documents
-              collect (clutch-mongodb--helper-call
-                       collection "deleteOne"
-                       (list (clutch-mongodb--document-id-filter
-                              document "deleteOne")))))
-    ('update-one-set
-     (cl-loop for document in documents
-              collect (clutch-mongodb--helper-call
-                       collection "updateOne"
-                       (list (clutch-mongodb--document-id-filter
-                              document "updateOne")
-                             (list
-                              (cons "$set"
-                                    (clutch-mongodb--document-set-fields
-                                     document fields "updateOne")))))))
-    (_
-     (user-error "Unsupported MongoDB document mutation action: %s" action))))
-
 (defun clutch-mongodb--field-type-counts (values)
   "Return sorted BSON type count objects for sampled VALUES."
   (let ((counts (make-hash-table :test 'equal)))
@@ -1241,7 +1160,7 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (defun clutch-mongodb--sample-field-comment (present total)
   "Return a field comment for PRESENT out of TOTAL sampled documents."
-  (when (and (> total 0) (< present total))
+  (when (< present total)
     (format "present in %d/%d sampled documents" present total)))
 
 (defun clutch-mongodb--index-direction (value)
@@ -1354,11 +1273,7 @@ FIELDS is an optional list of top-level field names for update snippets."
       (puthash path
                (list :path path
                      :present 0
-                     :values nil
-                     :top-values (make-hash-table :test 'equal)
-                     :examples nil
-                     :numeric-min nil
-                     :numeric-max nil)
+                     :values nil)
                stats)))
 
 (defun clutch-mongodb--profile-value-key (value)
@@ -1372,21 +1287,30 @@ FIELDS is an optional list of top-level field names for update snippets."
      (number (format "n:%s" number))
      (t (clutch-mongodb--json-encode-text value)))))
 
-(defun clutch-mongodb--profile-top-values (stat)
-  "Return top sampled scalar values for profile STAT."
-  (vconcat
-   (cl-subseq
-    (sort
-     (cl-loop with counts = (plist-get stat :top-values)
-              for _key being the hash-keys of counts
-              using (hash-values payload)
-              collect `(("value" . ,(plist-get payload :value))
-                        ("count" . ,(plist-get payload :count))))
-     (lambda (a b)
-       (> (cdr (assoc "count" a))
-         (cdr (assoc "count" b)))))
-    0
-    (min 5 (hash-table-count (plist-get stat :top-values))))))
+(defun clutch-mongodb--profile-top-values (scalars)
+  "Return top values among the sampled scalar values SCALARS."
+  (let ((counts (make-hash-table :test 'equal)))
+    (dolist (value scalars)
+      (let* ((key (clutch-mongodb--profile-value-key value))
+             (payload (or (gethash key counts)
+                          (puthash key
+                                   (list :value (clutch-mongodb--json-encodable
+                                                 value)
+                                         :count 0)
+                                   counts))))
+        (cl-incf (plist-get payload :count))))
+    (vconcat
+     (cl-subseq
+      (sort
+       (cl-loop for _key being the hash-keys of counts
+                using (hash-values payload)
+                collect `(("value" . ,(plist-get payload :value))
+                          ("count" . ,(plist-get payload :count))))
+       (lambda (a b)
+         (> (cdr (assoc "count" a))
+            (cdr (assoc "count" b)))))
+      0
+      (min 5 (hash-table-count counts))))))
 
 (defun clutch-mongodb--profile-record-value (stats seen path value)
   "Record sampled VALUE for PATH in STATS, tracking document-level SEEN paths."
@@ -1395,35 +1319,7 @@ FIELDS is an optional list of top-level field names for update snippets."
       (puthash path t seen)
       (setq stat (plist-put stat :present
                             (1+ (plist-get stat :present)))))
-    (push value (plist-get stat :values))
-    (when-let* ((number (clutch-mongodb--scalar-number value)))
-      (setq stat
-            (plist-put stat :numeric-min
-                       (if (numberp (plist-get stat :numeric-min))
-                           (min (plist-get stat :numeric-min) number)
-                         number)))
-      (setq stat
-            (plist-put stat :numeric-max
-                       (if (numberp (plist-get stat :numeric-max))
-                           (max (plist-get stat :numeric-max) number)
-                         number))))
-    (when (clutch-mongodb--scalar-p value)
-      (let* ((examples (plist-get stat :examples))
-             (key (clutch-mongodb--profile-value-key value))
-             (top-values (plist-get stat :top-values))
-             (payload (or (gethash key top-values)
-                          (list :value (clutch-mongodb--json-encodable value)
-                                :count 0))))
-        (when (< (length examples) 3)
-          (setq stat (plist-put stat :examples
-                                (append examples
-                                        (list (clutch-mongodb--json-encodable
-                                               value))))))
-        (puthash key
-                 (plist-put payload :count
-                            (1+ (plist-get payload :count)))
-                 top-values)))
-    (puthash path stat stats)))
+    (push value (plist-get stat :values))))
 
 (defun clutch-mongodb--profile-stats-for-docs (docs)
   "Return sorted field profile stat plists sampled from DOCS."
@@ -1470,6 +1366,8 @@ FIELDS is an optional list of top-level field names for update snippets."
   "Return JSON-ready schema profile field object for STAT and SAMPLE-SIZE."
   (let* ((values (plist-get stat :values))
          (present (plist-get stat :present))
+         (scalars (seq-filter #'clutch-mongodb--scalar-p values))
+         (numbers (delq nil (mapcar #'clutch-mongodb--scalar-number values)))
          (field `(("path" . ,(plist-get stat :path))
                   ("type" . ,(clutch-mongodb--sample-field-type values))
                   ("typeCategory" . ,(format "%s"
@@ -1481,16 +1379,19 @@ FIELDS is an optional list of top-level field names for update snippets."
                                      (/ (float present) sample-size)
                                    0.0))
                   ("typeCounts" . ,(clutch-mongodb--field-type-counts values)))))
-    (when-let* ((examples (plist-get stat :examples)))
-      (setq field (append field `(("examples" . ,(vconcat examples))))))
-    (when (numberp (plist-get stat :numeric-min))
+    (when scalars
       (setq field (append field
-                          `(("min" . ,(plist-get stat :numeric-min))
-                            ("max" . ,(plist-get stat :numeric-max))))))
-    (when (> (hash-table-count (plist-get stat :top-values)) 0)
+                          `(("examples"
+                             . ,(vconcat (mapcar #'clutch-mongodb--json-encodable
+                                                 (seq-take scalars 3))))))))
+    (when numbers
+      (setq field (append field
+                          `(("min" . ,(apply #'min numbers))
+                            ("max" . ,(apply #'max numbers))))))
+    (when scalars
       (setq field (append field
                           `(("topValues" . ,(clutch-mongodb--profile-top-values
-                                             stat))))))
+                                             scalars))))))
     field))
 
 (defun clutch-mongodb--column-details-for-docs (docs)
@@ -1578,7 +1479,7 @@ FIELDS is an optional list of top-level field names for update snippets."
 
 (cl-defmethod clutch-db-live-p ((conn clutch-mongodb-conn))
   "Return non-nil when MongoDB CONN is still usable."
-  (and conn (mongodb-live-p (clutch-mongodb-conn-client conn))))
+  (mongodb-live-p (clutch-mongodb-conn-client conn)))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-mongodb-conn))
   "Return the registered backend key for MongoDB connections."
@@ -1607,15 +1508,6 @@ FIELDS is an optional list of top-level field names for update snippets."
            :server-rewritable nil)
      (when collection
        (list :source-table collection)))))
-
-(cl-defmethod clutch-db-build-paged-sql ((_conn clutch-mongodb-conn)
-                                         base-code page-num page-size
-                                         &optional _order-by page-offset)
-  "Return BASE-CODE unchanged for CONN, PAGE-NUM, PAGE-SIZE, and PAGE-OFFSET.
-Native MongoDB scripts are not SQL and cannot be safely paginated by appending
-SQL clauses.  Use cursor methods such as `.skip(N).limit(M)' in the query."
-  (ignore page-num page-size page-offset)
-  base-code)
 
 (cl-defmethod clutch-db-escape-identifier ((_conn clutch-mongodb-conn) name)
   "Return NAME unchanged; native MongoDB has no SQL identifier syntax."
@@ -1888,8 +1780,37 @@ The returned text is JSON metadata."
   "Return native MongoDB helper snippets for ACTION on COLLECTION.
 DOCUMENTS is a list of original MongoDB documents.  FIELDS is an optional list
 of top-level field names for field-scoped snippets."
-  (clutch-mongodb--document-mutation-snippet
-   action collection documents fields))
+  (pcase action
+    ('insert-one
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "insertOne" (list document))))
+    ('insert-many
+     (list (clutch-mongodb--helper-call
+            collection "insertMany" (list (vconcat documents)))))
+    ('replace-one
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "replaceOne"
+                       (list (clutch-mongodb--document-id-filter
+                              document "replaceOne")
+                             document))))
+    ('delete-one
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "deleteOne"
+                       (list (clutch-mongodb--document-id-filter
+                              document "deleteOne")))))
+    ('update-one-set
+     (cl-loop for document in documents
+              collect (clutch-mongodb--helper-call
+                       collection "updateOne"
+                       (list (clutch-mongodb--document-id-filter
+                              document "updateOne")
+                             (list
+                              (cons "$set"
+                                    (clutch-mongodb--document-set-fields
+                                     document fields "updateOne")))))))))
 
 (defun clutch-mongodb--collection-explain-sample (conn collection)
   "Return MongoDB explain metadata for a sample query on COLLECTION using CONN."
@@ -1900,12 +1821,16 @@ of top-level field names for field-scoped snippets."
 
 (cl-defmethod clutch-db-explain-query ((conn clutch-mongodb-conn) query)
   "Return MongoDB explain metadata for QUERY on CONN as JSON."
-  (let* ((call (clutch-mongodb--single-helper-call query "explain"))
-         (explain (clutch-mongodb--with-mongodb-errors
-                    (clutch-mongodb--explain-call conn call))))
-    (clutch-mongodb--json-encode-text
-     `(("summary" . ,(clutch-mongodb--explain-summary explain))
-       ("explain" . ,(clutch-mongodb--json-encodable explain))))))
+  (let ((statements (clutch-mongodb--split-statements query)))
+    (unless (= (length statements) 1)
+      (signal 'clutch-db-error
+              (list "MongoDB explain expects exactly one helper call")))
+    (let* ((call (clutch-mongodb--parse-db-call (car statements)))
+           (explain (clutch-mongodb--with-mongodb-errors
+                      (clutch-mongodb--explain-call conn call))))
+      (clutch-mongodb--json-encode-text
+       `(("summary" . ,(clutch-mongodb--explain-summary explain))
+         ("explain" . ,(clutch-mongodb--json-encodable explain)))))))
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-mongodb-conn) category)
   "Return MongoDB object entries in CATEGORY for CONN."

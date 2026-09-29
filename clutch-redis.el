@@ -87,7 +87,6 @@ lists.  Stop before those lists can grow without bound."
   "A logical Redis connection executed through redis.el."
   params
   client
-  closed
   busy)
 
 (defun clutch-redis-connect (params)
@@ -98,7 +97,6 @@ lists.  Stop before those lists can grow without bound."
     (make-clutch-redis-conn
      :params (copy-sequence params)
      :client (redis-connect params)
-     :closed nil
      :busy nil)))
 
 ;;;; Query console mode
@@ -161,13 +159,6 @@ lists.  Stop before those lists can grow without bound."
       (user-error "No Redis command at point"))
     (clutch--execute-and-mark command beg end)))
 
-(defun clutch-redis--install-completion-capfs ()
-  "Install Redis completion in the current buffer."
-  (remove-hook 'completion-at-point-functions
-               #'clutch-redis-completion-at-point t)
-  (add-hook 'completion-at-point-functions
-            #'clutch-redis-completion-at-point nil t))
-
 (defvar clutch-redis-mode-map
   (make-sparse-keymap)
   "Keymap for `clutch-redis-mode'.")
@@ -190,7 +181,8 @@ lists.  Stop before those lists can grow without bound."
   (setq-local comment-start "#")
   (setq-local comment-end "")
   (clutch--query-mode-common-setup "clutch-redis")
-  (clutch-redis--install-completion-capfs))
+  (add-hook 'completion-at-point-functions
+            #'clutch-redis-completion-at-point nil t))
 
 ;;;; Command parsing and result shaping
 
@@ -281,8 +273,7 @@ lists.  Stop before those lists can grow without bound."
 (defun clutch-redis--argument-present-p (arguments name)
   "Return non-nil when ARGUMENTS contain Redis option NAME."
   (seq-some (lambda (argument)
-              (and (stringp argument)
-                   (string-equal (upcase argument) name)))
+              (string-equal (upcase argument) name))
             arguments))
 
 (defun clutch-redis--zrange-with-scores-p (command arguments)
@@ -310,18 +301,6 @@ lists.  Stop before those lists can grow without bound."
    (t
     (clutch-redis--single-result conn command value))))
 
-(defun clutch-redis--eval (conn command-text)
-  "Execute Redis COMMAND-TEXT on CONN and return command data."
-  (pcase-let* ((`(,command . ,arguments)
-                 (clutch-redis--command-parts command-text))
-               (command (upcase command)))
-    (list command
-          arguments
-          (apply #'redis-command
-                 (clutch-redis-conn-client conn)
-                 command
-                 arguments))))
-
 ;;;; Backend methods
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-redis-conn))
@@ -330,14 +309,11 @@ lists.  Stop before those lists can grow without bound."
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-redis-conn))
   "Close Redis CONN."
-  (setf (clutch-redis-conn-closed conn) t)
-  (when-let* ((client (clutch-redis-conn-client conn)))
-    (redis-disconnect client)))
+  (redis-disconnect (clutch-redis-conn-client conn)))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-redis-conn))
   "Return non-nil when Redis CONN is alive."
-  (and (not (clutch-redis-conn-closed conn))
-       (redis-live-p (clutch-redis-conn-client conn))))
+  (redis-live-p (clutch-redis-conn-client conn)))
 
 (cl-defmethod clutch-db-busy-p ((conn clutch-redis-conn))
   "Return non-nil when Redis CONN is executing a command."
@@ -348,8 +324,13 @@ lists.  Stop before those lists can grow without bound."
   (setf (clutch-redis-conn-busy conn) t)
   (unwind-protect
       (clutch-db--translate-library-error redis-error
-        (pcase-let ((`(,command ,arguments ,response)
-                     (clutch-redis--eval conn command-text)))
+        (pcase-let* ((`(,command . ,arguments)
+                      (clutch-redis--command-parts command-text))
+                     (command (upcase command))
+                     (response (apply #'redis-command
+                                      (clutch-redis-conn-client conn)
+                                      command
+                                      arguments)))
           (clutch-redis--result-from-response conn command arguments response)))
     (setf (clutch-redis-conn-busy conn) nil)))
 
@@ -362,12 +343,6 @@ lists.  Stop before those lists can grow without bound."
   (list :row-identity-prep (list :sql command-text)
         :server-pageable nil
         :server-rewritable nil))
-
-(cl-defmethod clutch-db-build-paged-sql ((_conn clutch-redis-conn)
-                                         command-text _page-num _page-size
-                                         &optional _order-by _page-offset)
-  "Return COMMAND-TEXT unchanged because Redis commands are not SQL."
-  command-text)
 
 (cl-defmethod clutch-db-user ((conn clutch-redis-conn))
   "Return the Redis username for CONN, or nil."
@@ -401,7 +376,6 @@ first-seen order."
         (cursor "0")
         (seen (make-hash-table :test 'equal))
         keys
-        (key-count 0)
         (scan-batches 0)
         truncated)
     (while (and (not truncated)
@@ -421,14 +395,14 @@ first-seen order."
         (dolist (raw-key batch)
           (let ((key (clutch-redis--string-value raw-key)))
             (unless (gethash key seen)
-              (if (< key-count clutch-redis-key-discovery-limit)
+              (if (< (hash-table-count seen) clutch-redis-key-discovery-limit)
                   (progn
                     (puthash key t seen)
-                    (push key keys)
-                    (setq key-count (1+ key-count)))
+                    (push key keys))
                 (setq truncated 'key-limit)))))
         (when (and (not (string= cursor "0"))
-                   (>= key-count clutch-redis-key-discovery-limit))
+                   (>= (hash-table-count seen)
+                       clutch-redis-key-discovery-limit))
           (setq truncated 'key-limit))))
     (when (and (not truncated) (not (string= cursor "0")))
       (setq truncated 'scan-budget))
@@ -545,10 +519,9 @@ first-seen order."
            (type (clutch-redis--string-value (redis-command client "TYPE" key)))
            (ttl (redis-command client "TTL" key))
            (exists (redis-command client "EXISTS" key)))
-      (delq nil
-            `(("Type" . ,type)
-              ("TTL" . ,(number-to-string ttl))
-              ("Exists" . ,(if (= exists 1) "yes" "no")))))))
+      `(("Type" . ,type)
+        ("TTL" . ,(number-to-string ttl))
+        ("Exists" . ,(if (= exists 1) "yes" "no"))))))
 
 (provide 'clutch-redis)
 ;;; clutch-redis.el ends here

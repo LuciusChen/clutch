@@ -230,20 +230,26 @@
       (should-not serialize-called))))
 
 (ert-deftest clutch-test-json-view-mode-uses-json-mode-without-json-ts-grammar ()
-  "JSON viewers should use `json-mode' when the tree-sitter grammar is unavailable."
-  (let (selected-mode)
-    (with-temp-buffer
-      (insert "{\"ok\":true}")
-      (cl-letf (((symbol-function 'json-ts-mode)
-                 (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
-                ((symbol-function 'treesit-language-available-p)
-                 (lambda (_language &optional _quiet) nil))
-                ((symbol-function 'json-mode)
-                 (lambda () (setq selected-mode 'json-mode)))
-                ((symbol-function 'js-mode)
-                 (lambda () (setq selected-mode 'js-mode))))
-        (clutch--setup-json-view-buffer)))
-    (should (eq selected-mode 'json-mode))))
+  "JSON viewers should use `json-mode' without tree-sitter or its JSON grammar."
+  (pcase-dolist (`(,label ,treesit ,grammar-fn)
+                 `(("no JSON grammar" t ,(lambda (_language &optional _quiet) nil))
+                   ;; An Emacs built without tree-sitter does not define
+                   ;; `treesit-language-available-p' at all.
+                   ("no tree-sitter" nil nil)))
+    (ert-info (label)
+      (let (selected-mode)
+        (with-temp-buffer
+          (insert "{\"ok\":true}")
+          (cl-letf (((symbol-function 'json-ts-mode)
+                     (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
+                    ((symbol-function 'treesit-available-p) (lambda () treesit))
+                    ((symbol-function 'treesit-language-available-p) grammar-fn)
+                    ((symbol-function 'json-mode)
+                     (lambda () (setq selected-mode 'json-mode)))
+                    ((symbol-function 'js-mode)
+                     (lambda () (setq selected-mode 'js-mode))))
+            (clutch--setup-json-view-buffer)))
+        (should (eq selected-mode 'json-mode))))))
 
 (ert-deftest clutch-test-dispatch-view-routes-values-by-content ()
   "Value viewers should choose JSON/XML/plain buffers from type and content."
@@ -524,7 +530,7 @@
                   ((symbol-function 'string-pixel-width)
                    #'clutch-test--fake-pixel-width)
                   ((symbol-function 'clutch--header-label)
-                   (lambda (name &optional _include-unsorted-sort _cidx)
+                   (lambda (name _cidx)
                      (propertize name 'clutch-header-name t)))
                   ((symbol-function 'clutch--refresh-footer-line) #'ignore))
           (clutch--render-result)
@@ -1065,7 +1071,7 @@ standard syntax table, which let keywords match inside identifiers."
     (with-temp-buffer
       (funcall mode)
       (ert-info ((symbol-name mode))
-        (should (clutch-db-sql-has-top-level-clause-p
+        (should (clutch-db-sql-find-top-level-clause
                  "SELECT * FROM t\nORDER\nBY id" "ORDER\\s-+BY"))
         (should (equal (clutch--high-risk-query-reason
                         "DELETE FROM t WHERE 1 = 1\nORDER\nBY id")
@@ -1316,7 +1322,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     "REPORTS" [7]
                     (list (cons 1 clutch--cell-default-placeholder)
                           (cons 2 "ready"))
-                    clutch--result-columns identity))
+                    identity))
                   (`(,delete-sql . ,_)
                    (clutch-result--build-delete-stmt-for-identity
                     "REPORTS" [7] identity)))
@@ -1347,7 +1353,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     "DOCUMENTS" ["AAAPr9AAEAAAACXAAA"]
                     '((0 . "{\"message\":\"中文\"}")
                       (1 . "1"))
-                    clutch--result-columns identity)))
+                    identity)))
         (should (equal (mapcar #'clutch-db-param-type params)
                        '("BLOB" "NUMBER" nil)))))))
 
@@ -1392,7 +1398,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                  '((:name "NAME" :backend-type "VARCHAR2")))))
       (pcase-let ((`(,sql . ,_)
                    (clutch-result--build-update-stmt
-                    "USERS" [7] '((0 . "Ada")) '("name") identity)))
+                    "USERS" [7] '((0 . "Ada")) identity)))
         (should (string-search "SET \"NAME\" = ?" sql))))))
 
 (ert-deftest clutch-test-update-uses-canonical-source-behind-alias ()
@@ -1409,7 +1415,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                  '((:name "name" :backend-type "text")))))
       (pcase-let ((`(,sql . ,_)
                    (clutch-result--build-update-stmt
-                    "users" [7] '((0 . "Ada")) '("display_name") identity)))
+                    "users" [7] '((0 . "Ada")) identity)))
         (should (string-search "SET \"name\" = ?" sql))
         (should-not (string-search "display_name" sql))
         (should-not (string-search "\"NAME\"" sql))))))
@@ -1840,7 +1846,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                          (+ (* (string-width string) (default-font-width))
                             (if (string-search "中" string) 10 0))))
                       ((symbol-function 'clutch--header-label)
-                       (lambda (name &optional _include-unsorted-sort _cidx)
+                       (lambda (name _cidx)
                          name))
                       ((symbol-function 'clutch--refresh-footer-line) #'ignore))
               (clutch--refresh-display)
@@ -1912,7 +1918,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
               ((symbol-function 'string-pixel-width)
                #'clutch-test--fake-pixel-width)
               ((symbol-function 'clutch--header-label)
-               (lambda (name &optional _include-unsorted-sort _cidx)
+               (lambda (name _cidx)
                  name))
               ((symbol-function 'clutch--refresh-footer-line) #'ignore))
       (clutch--render-result)
@@ -2044,7 +2050,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                      (+ (* (string-width string) (default-font-width))
                         (if (string-search "中" string) 10 0))))
                   ((symbol-function 'clutch--header-label)
-                   (lambda (name &optional _include-unsorted-sort _cidx)
+                   (lambda (name _cidx)
                      name))
                   ((symbol-function 'clutch--refresh-footer-line) #'ignore))
           (with-temp-buffer
@@ -2133,20 +2139,35 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
       (when (buffer-live-p other)
         (kill-buffer other)))))
 
-(ert-deftest clutch-test-init-result-state-clears-stale-result-flags ()
-  "Result initialization should not keep stale source or DML metadata."
-  (with-temp-buffer
-    (setq-local clutch--result-source-table "users"
-                clutch--result-server-pageable t
-                clutch--result-server-rewritable t
-                clutch--dml-result t)
-    (clutch-result--init-state
-     'fake-conn "SELECT name FROM users"
-     '((:name "name" :type-category text)) '(("alice")) nil)
-    (should-not clutch--result-source-table)
-    (should-not clutch--result-server-pageable)
-    (should-not clutch--result-server-rewritable)
-    (should-not clutch--dml-result)))
+(ert-deftest clutch-test-display-select-clears-stale-result-state ()
+  "A fresh SELECT should not keep the previous result's state in its buffer."
+  (let ((result-name "*clutch-stale-result*")
+        (result (make-clutch-db-result
+                 :columns '((:name "name" :type-category text))
+                 :rows '(("alice")))))
+    (clutch-test--with-result-buffer (result-name)
+      (clutch-result--display-select
+       'fake-conn "SELECT name FROM orders" result 0
+       :server-pageable t
+       :result-context '(:server-rewritable t :source-table "orders"))
+      (with-current-buffer result-name
+        (should (equal clutch--result-source-table "orders"))
+        (should clutch--result-server-pageable)
+        (should clutch--result-server-rewritable)
+        (setq-local clutch--dml-result t
+                    clutch--where-filter "id > 10"
+                    header-line-format "stale"
+                    mode-line-format "stale"))
+      (clutch-result--display-select
+       'fake-conn "SELECT name FROM users" result 0)
+      (with-current-buffer result-name
+        (should-not clutch--result-source-table)
+        (should-not clutch--result-server-pageable)
+        (should-not clutch--result-server-rewritable)
+        (should-not clutch--dml-result)
+        (should-not clutch--where-filter)
+        (should-not header-line-format)
+        (should-not (local-variable-p 'mode-line-format))))))
 
 (ert-deftest clutch-test-result-source-table-uses-recorded-state ()
   "Result edit paths should use only recorded source table metadata."
@@ -2559,7 +2580,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                    #'clutch-test--fake-pixel-width)
                   ((symbol-function 'clutch--icon)
                    (lambda (&rest _args) wide-icon)))
-          (let ((indicator (clutch--header-sort-indicator "score" t 0)))
+          (let ((indicator (clutch--header-sort-indicator "score" 0)))
             (setq-local clutch--header-line-string (concat indicator "x")
                         clutch--column-pixel-widths [30])
             (setq cropped (clutch--header-line-with-hscroll))
@@ -2775,13 +2796,13 @@ header string and column pixel widths, then reused."
                  (let ((icons (list narrow-icon wide-icon)))
                    (lambda (&rest _args)
                      (pop icons)))))
-        (let ((narrow (clutch--header-sort-indicator "score" t 1)))
+        (let ((narrow (clutch--header-sort-indicator "score" 1)))
           (should (= (string-width narrow) 1))
           (should (equal (get-text-property 1 'display narrow)
                          '(space :width (2))))
           (should-not (get-display-property 1 'min-width narrow)))
         (clrhash clutch--header-sort-indicator-cache)
-        (let ((wide (clutch--header-sort-indicator "score" t 1)))
+        (let ((wide (clutch--header-sort-indicator "score" 1)))
           (should (= (string-width wide) 3))
           (should (equal (get-text-property 1 'display wide)
                          '(space :width (5))))
@@ -2882,14 +2903,6 @@ header string and column pixel widths, then reused."
          (should (= 3 (length clutch--row-start-positions)))
          (should-not (string-match-p "No matches" (buffer-string))))))))
 
-(ert-deftest clutch-test-reset-result-state-clears-where-filter ()
-  "A fresh result should not inherit the previous query's WHERE filter."
-  (with-temp-buffer
-    (clutch-result-mode)
-    (setq-local clutch--where-filter "id > 10")
-    (clutch-result--reset-state)
-    (should-not clutch--where-filter)))
-
 (ert-deftest clutch-test-filter-apply-state ()
   "Client-side filtering should update display rows and pattern."
   (dolist (case
@@ -2956,7 +2969,7 @@ header string and column pixel widths, then reused."
                 clutch--where-filter nil)
     (let (seen)
       (cl-letf (((symbol-function 'clutch--read-where-filter)
-                 (lambda (_current columns default-col &optional _conn)
+                 (lambda (_current columns default-col _conn)
                    (setq seen (list columns default-col))
                    "id > 1"))
                 ((symbol-function 'clutch--execute) #'ignore))
@@ -3119,7 +3132,7 @@ header string and column pixel widths, then reused."
     (should (equal (substring-no-properties s) "{\"a\":1,\"b\":\"x\"}"))
     (should-not (get-text-property 0 'clutch-cell-truncated s))
     (should (eq (get-text-property 0 'face s) 'shadow))
-    (should (eq (get-text-property 1 'face s) (clutch--json-key-face)))
+    (should (eq (get-text-property 1 'face s) 'font-lock-property-name-face))
     (should-not (eq (get-text-property 1 'face s) 'clutch-field-name-face))
     (should (eq (get-text-property 5 'face s) 'font-lock-constant-face))
     (should (eq (get-text-property 12 'face s) 'font-lock-string-face)))
@@ -3146,7 +3159,7 @@ header string and column pixel widths, then reused."
     (should-not (get-text-property 0 'clutch-cell-truncated s))
     (should (eq (get-text-property 0 'face s) 'shadow))
     (should (eq (get-text-property 1 'face s) 'font-lock-function-name-face))
-    (should (eq (get-text-property 6 'face s) (clutch--json-key-face)))
+    (should (eq (get-text-property 6 'face s) 'font-lock-property-name-face))
     (should (eq (get-text-property 11 'face s) 'font-lock-string-face))
     (should (eq (get-text-property 20 'face s) 'shadow))))
 
@@ -3457,7 +3470,7 @@ header string and column pixel widths, then reused."
               ((symbol-function 'clutch--schedule-object-warmup)
                (lambda (_conn) (setq scheduled t))))
       (clutch--object-warmup-error
-       conn 3 'postgres 'indexes "permission denied")
+       conn 3 'indexes "permission denied")
       (should (memq 'indexes
                     (clutch--object-cache-loaded-categories conn)))
       (should scheduled))))
@@ -4184,7 +4197,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (pcase-let ((`(,nullable ,default ,show-null ,show-default) case))
         (setq-local clutch-result-edit--column-detail
                     (list :name "status" :nullable nullable :default default))
-        (let ((header (clutch-result-edit--header-line 0 "status")))
+        (let ((header (clutch-result-edit--header-line)))
           (should (equal (list (and (string-match-p "Set NULL" header) t)
                                (and (string-match-p "Set DEFAULT" header) t))
                          (list show-null show-default))))))
@@ -5271,8 +5284,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             ('edit
              (with-temp-buffer
                (clutch--result-edit-mode 1)
-               (setq-local clutch-result-edit--row-idx 0
-                           clutch-result-edit--column-name "payload"
+               (setq-local clutch-result-edit--column-name "payload"
                            clutch-result-edit--column-def
                            '(:name "payload" :type-category json)
                            clutch-result-edit--column-detail
@@ -5290,8 +5302,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (insert "xx")
     (clutch--result-edit-mode 1)
-    (setq-local clutch-result-edit--row-idx 0
-                clutch-result-edit--column-name "impact_score"
+    (setq-local clutch-result-edit--column-name "impact_score"
                 clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
                 clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)"))
     (clutch-result-edit--refresh-header-line)
@@ -6932,10 +6943,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       clutch--page-total-rows total
                       clutch-result-max-rows page-size)
           (let (executed-page executed-offset)
-            (cl-letf (((symbol-function 'clutch-result--execute-page-at-offset)
-                       (lambda (offset page)
-                         (setq executed-offset offset
-                               executed-page page))))
+            (cl-letf (((symbol-function 'clutch-result--execute-page)
+                       (lambda (page &optional offset)
+                         (setq executed-page page
+                               executed-offset offset))))
               (if error-type
                   (should-error (clutch-result-last-page) :type error-type)
                 (clutch-result-last-page)
@@ -8856,7 +8867,7 @@ statement."
                                  :result-query-p nil
                                  :source-buffer source))))
                       ((symbol-function 'clutch--show-execution-error)
-                       (lambda (&rest _args) '(:summary "socket lost")))
+                       (lambda (&rest _args) "socket lost"))
                       ((symbol-function 'clutch-result--display) #'ignore)
                       ((symbol-function 'clutch-db-clear-error-details) #'ignore)
                       ((symbol-function 'clutch--prime-schema-cache) #'ignore)

@@ -256,7 +256,7 @@
             clutch--executing-sql-start clutch--executing-sql-end)
            ("clutch-query" defvar-local t clutch--last-query
             clutch--last-result-buffer)
-           ("clutch-schema" defcustom t clutch-schema-cache-install-batch-size
+           ("clutch-schema" defcustom t
             clutch-schema-refresh-idle-delay-seconds)
            ("clutch-sql" defcustom t clutch-sql-completion-case-style)
            ("clutch-edit" defcustom t clutch-insert-validation-idle-delay)
