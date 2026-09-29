@@ -126,6 +126,24 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "SELECT * FROM users"))
     (should-not (clutch--high-risk-query-reason sql))))
 
+(ert-deftest clutch-test-mysql-backslash-quote-keeps-statement-visible ()
+  "A backslash-escaped quote in MySQL must not hide the rest of the statement."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-mysql)
+    (cl-letf (((symbol-function 'clutch-db-connection-sql-dialect)
+               (lambda (_conn) (clutch-db-sql-dialect 'mysql))))
+      (should (equal (clutch--high-risk-query-reason
+                      "DELETE FROM users WHERE name = 'it\\'s' OR 1 = 1")
+                     "WHERE is always true"))
+      (let ((sql "SELECT 'it\\'s', o.id FROM users u JOIN orders o ON o.uid = u.id"))
+        (should (equal (car (clutch--extract-tables-and-aliases sql 0 (length sql)))
+                       '("users" "orders")))
+        (insert sql)
+        (goto-char (point-min))
+        (search-forward "o.id")
+        (should (equal (clutch--find-alias-definition-position "o")
+                       (1+ (string-match "o ON" sql))))))))
+
 ;;;; SQL parsing — statement bounds
 
 (ert-deftest clutch-test-statement-bounds ()
@@ -1784,6 +1802,15 @@ Structure is not interpreted here; callers confirm depth and literals through
                   :needle "o.total"
                   :schema 'fake-schema
                   :aliases '(("u" . "users") ("o" . "orders"))
+                  :tables '("users" "orders")
+                  :id "o"
+                  :before "orders "
+                  :char ?o)
+            (list :label "join alias after an unaliased table"
+                  :sql "SELECT o.total FROM users JOIN orders o ON o.uid = users.id"
+                  :needle "o.total"
+                  :schema 'fake-schema
+                  :aliases '(("o" . "orders"))
                   :tables '("users" "orders")
                   :id "o"
                   :before "orders "

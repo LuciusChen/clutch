@@ -489,7 +489,6 @@ Customize these through =M-x customize-group RET clutch RET=:
 - =clutch-cell-preview-max-size= bounds the preview relative to its parent frame (default width 65%, height 45%).
 - =clutch-column-displayers= controls the per-table/per-column result displayer registry.
 - =clutch-object-warmup-idle-delay-seconds= delays background object warmup after schema refresh.
-- =clutch-schema-cache-install-batch-size= controls how many schema entries are installed per idle batch.
 - =clutch-csv-export-default-coding-system= sets the default CSV and TSV encoding (UTF-8 with BOM by default for Excel compatibility).
 - =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through 10,000 rows (default 500).
 - =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.

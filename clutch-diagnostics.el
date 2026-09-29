@@ -130,16 +130,8 @@ debug event when `clutch-debug-mode' is enabled."
   "Return a human-readable string for PLIST."
   (with-temp-buffer
     (cl-loop for (key val) on plist by #'cddr
-             when val
-             do (let ((rendered (clutch--debug-format-data val)))
-                  (when rendered
-                    (if (string-match-p "\n" rendered)
-                        (insert (format "%s:\n%s\n"
-                                        (clutch--debug-format-label key)
-                                        (clutch--debug-indent-block rendered 2)))
-                      (insert (format "%s: %s\n"
-                                      (clutch--debug-format-label key)
-                                      rendered))))))
+             do (clutch--debug-insert-field
+                 (clutch--debug-format-label key) val))
     (string-trim-right (buffer-string))))
 
 (defun clutch--debug-format-list-data (items)
@@ -274,28 +266,26 @@ When TRACE-EVENT is non-nil, mark the entry and enforce the trace limit."
 
 (defun clutch--append-debug-event-to-buffer (buffer connection event)
   "Append EVENT for BUFFER and CONNECTION to the dedicated debug buffer."
-  (when clutch-debug-mode
-    (let* ((backend (plist-get event :backend))
-           (body
-            (with-temp-buffer
-              (clutch--debug-insert-fields
-               `(("Recorded" . ,(or (plist-get event :time)
-                                    (format-time-string "%F %T")))
-                 ("Operation" . ,(plist-get event :op))
-                 ("Phase" . ,(plist-get event :phase))
-                 ("Backend" . ,(and backend (upcase (symbol-name backend))))
-                 ("Source" . ,(clutch--debug-buffer-source-label buffer))
-                 ("Connection" . ,(clutch--debug-buffer-connection-label connection))
-                 ("Elapsed" . ,(when-let* ((elapsed (plist-get event :elapsed)))
-                                 (if (< elapsed 1.0)
-                                     (format "%dms" (round (* elapsed 1000)))
-                                   (format "%.3fs" elapsed))))
-                 ("Summary" . ,(plist-get event :summary))
-                 ("SQL preview" . ,(plist-get event :sql-preview))))
-              (clutch--debug-insert-sections
-               `(("Context" . ,(plist-get event :context))))
-              (string-trim-right (buffer-string)))))
-      (clutch--append-debug-buffer-entry "Trace Event" body t))))
+  (let* ((backend (plist-get event :backend))
+         (body
+          (with-temp-buffer
+            (clutch--debug-insert-fields
+             `(("Recorded" . ,(plist-get event :time))
+               ("Operation" . ,(plist-get event :op))
+               ("Phase" . ,(plist-get event :phase))
+               ("Backend" . ,(and backend (upcase (symbol-name backend))))
+               ("Source" . ,(clutch--debug-buffer-source-label buffer))
+               ("Connection" . ,(clutch--debug-buffer-connection-label connection))
+               ("Elapsed" . ,(when-let* ((elapsed (plist-get event :elapsed)))
+                               (if (< elapsed 1.0)
+                                   (format "%dms" (round (* elapsed 1000)))
+                                 (format "%.3fs" elapsed))))
+               ("Summary" . ,(plist-get event :summary))
+               ("SQL preview" . ,(plist-get event :sql-preview))))
+            (clutch--debug-insert-sections
+             `(("Context" . ,(plist-get event :context))))
+            (string-trim-right (buffer-string)))))
+    (clutch--append-debug-buffer-entry "Trace Event" body t)))
 
 (defun clutch--clear-debug-capture ()
   "Reset the dedicated debug buffer for a new capture window."
@@ -309,26 +299,20 @@ When TRACE-EVENT is non-nil, mark the entry and enforce the trace limit."
   "Replay stored problem records into the dedicated debug buffer.
 This preserves historical failure context when debug capture starts after a
 problem was already recorded."
-  (let (records seen)
+  (let (records)
     (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when clutch--buffer-error-details
-            (let ((entry (list :buffer buf
-                               :connection clutch-connection
-                               :problem (copy-tree clutch--buffer-error-details))))
-              (unless (member entry seen)
-                (push entry seen)
-                (push entry records)))))))
+      (with-current-buffer buf
+        (when clutch--buffer-error-details
+          (cl-pushnew (list :buffer buf
+                            :connection clutch-connection
+                            :problem clutch--buffer-error-details)
+                      records :test #'equal))))
     (maphash
      (lambda (connection provenance)
-       (let ((entry (list :buffer (plist-get provenance :buffer)
-                          :connection connection
-                          :problem (copy-tree
-                                    (plist-get provenance :problem)))))
-         (unless (member entry seen)
-           (push entry seen)
-           (push entry records))))
+       (cl-pushnew (list :buffer (plist-get provenance :buffer)
+                         :connection connection
+                         :problem (plist-get provenance :problem))
+                   records :test #'equal))
      clutch--problem-records-by-conn)
     (when records
       (clutch--append-debug-buffer-entry
@@ -380,8 +364,7 @@ A nil BUFFER explicitly clears the connection-scoped record."
   (when connection
     (remhash connection clutch--problem-records-by-conn)
     (dolist (buf (buffer-list))
-      (when (and (buffer-live-p buf)
-                 (eq (buffer-local-value 'clutch-connection buf) connection))
+      (when (eq (buffer-local-value 'clutch-connection buf) connection)
         (with-current-buffer buf
           (setq-local clutch--buffer-error-details nil))))))
 
@@ -428,8 +411,7 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
 
 (defun clutch--debug-workflow-message (message)
   "Return MESSAGE annotated with the single debug-buffer workflow."
-  (if (or (not message)
-          (string-match-p (regexp-quote clutch-debug-buffer-name) message)
+  (if (or (string-match-p (regexp-quote clutch-debug-buffer-name) message)
           (string-match-p
            "Run M-x clutch-jdbc-\\(ensure-agent\\|install-driver\\)" message))
       message
@@ -453,8 +435,6 @@ EXTRA-DIAG is merged into the diagnostic plist when non-nil."
       (setq diag (append extra-diag diag)))
     (when extra-context
       (setq context (append extra-context context)))
-    (unless details
-      (setq details (list :summary (clutch--humanize-db-error message))))
     (when-let* ((backend (and connection
                               (clutch-db-backend-key connection))))
       (unless (plist-member details :backend)
@@ -462,8 +442,6 @@ EXTRA-DIAG is merged into the diagnostic plist when non-nil."
     (unless (plist-get details :summary)
       (setq details (plist-put details :summary
                                (clutch--humanize-db-error message))))
-    (unless diag
-      (setq diag (list :raw-message message)))
     (unless (plist-get diag :raw-message)
       (setq diag (plist-put diag :raw-message message)))
     (unless (or (plist-get context :generated-sql)

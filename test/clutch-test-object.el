@@ -232,6 +232,32 @@ document connection."
           (when (buffer-live-p console)
             (kill-buffer console)))))))
 
+(ert-deftest clutch-test-object-browse-from-another-buffer-appends-to-console ()
+  "Browsing from a buffer other than the console should append at its end.
+The real `pop-to-buffer' runs, so the console is already current by the time
+the query is inserted."
+  (let ((conn (list 'fake-conn))
+        (console (generate-new-buffer " *clutch-test-object-browse-console*"))
+        (source (generate-new-buffer " *clutch-test-object-browse-source*")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer console
+            (insert "SELECT 1;\nSELECT 2;")
+            (setq-local clutch-connection conn
+                        clutch--query-buffer-local-p t)
+            (goto-char (point-min)))
+          (with-current-buffer source
+            (setq-local clutch-connection conn)
+            (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+                       (lambda (_conn name) name)))
+              (clutch-object-browse '(:name "orders" :type "TABLE"))))
+          (with-current-buffer console
+            (should (equal (buffer-string)
+                           "SELECT 1;\nSELECT 2;\n\nSELECT * FROM orders;"))
+            (should (= (point) (point-max)))))
+      (kill-buffer console)
+      (kill-buffer source))))
+
 (ert-deftest clutch-test-object-default-action-routing-contract ()
   "Default action should browse table-like entries and show definitions otherwise."
   (dolist (case '((:entry (:name "orders" :type "TABLE")
@@ -1035,33 +1061,28 @@ warmed categories and performs no lookup."
 (ert-deftest clutch-test-jump-default-action-contract ()
   "Jump should resolve once and run the shared default action."
   (ert-info ("table default browse")
-    (let (resolved-prompt resolved-category resolved-types
-                          action-call presented-entry)
+    (let (resolved-prompt resolved-types action-call presented)
       (cl-letf (((symbol-function 'clutch--resolve-object-entry)
-                 (lambda (prompt &optional _table-like-only category allowed-types)
+                 (lambda (prompt &optional _table-like-only allowed-types)
                    (setq resolved-prompt prompt)
-                   (setq resolved-category category)
                    (setq resolved-types allowed-types)
                    '(:name "ORDERS" :type "TABLE")))
                 ((symbol-function 'clutch--run-object-action)
                  (lambda (entry action-id)
                    (setq action-call (list entry action-id))))
-                ((symbol-function 'clutch--present-object-actions-natively)
-                 (lambda (entry)
-                   (setq presented-entry entry)
-                   t)))
+                ((symbol-function 'transient-setup)
+                 (lambda (&rest _args)
+                   (setq presented t))))
         (clutch-jump)
         (should (equal resolved-prompt "Jump to object: "))
-        (should-not resolved-category)
         (should (equal resolved-types clutch-primary-object-types))
         (should (equal action-call
                        '((:name "ORDERS" :type "TABLE") browse)))
-        (should-not presented-entry))))
+        (should-not presented))))
   (ert-info ("procedure default definition")
     (let (resolved-prompt action-call)
       (cl-letf (((symbol-function 'clutch--resolve-object-entry)
-                 (lambda (prompt &optional _table-like-only
-                                  _category _allowed-types)
+                 (lambda (prompt &optional _table-like-only _allowed-types)
                    (setq resolved-prompt prompt)
                    '(:name "PROCESS_ORDER" :type "PROCEDURE")))
                 ((symbol-function 'clutch--run-object-action)
@@ -1086,8 +1107,8 @@ warmed categories and performs no lookup."
                 ((symbol-function 'thing-at-point)
                  (lambda (&rest _args) "users"))
                 ((symbol-function 'clutch-object-read)
-                 (lambda (prompt &optional table-like-only initial-input category allowed-types)
-                   (setq read-args (list prompt table-like-only initial-input category allowed-types))
+                 (lambda (prompt &optional initial-input allowed-types)
+                   (setq read-args (list prompt initial-input allowed-types))
                    '(:name "users" :type "TABLE")))
                 ((symbol-function 'clutch--resolve-object-entry)
                  (lambda (&rest _args)
@@ -1097,12 +1118,9 @@ warmed categories and performs no lookup."
                  (lambda (entry action-id)
                    (setq action-call (list entry action-id)))))
         (clutch-jump)
-        (should read-args)
-        (should (equal (nth 0 read-args) "Jump to object: "))
-        (should-not (nth 1 read-args))
-        (should (equal (nth 2 read-args) "users"))
-        (should-not (nth 3 read-args))
-        (should (equal (nth 4 read-args) clutch-primary-object-types))
+        (should (equal read-args
+                       (list "Jump to object: " "users"
+                             clutch-primary-object-types)))
         (should-not resolved-called)
         (should (equal action-call
                        '((:name "users" :type "TABLE") browse)))))))
@@ -1130,9 +1148,9 @@ warmed categories and performs no lookup."
                    (lambda (&rest _args)
                      (ert-fail "MongoDB collection at point should resolve directly")))
                   ((symbol-function 'clutch-object-read)
-                   (lambda (prompt &optional table-like-only initial-input category allowed-types)
+                   (lambda (prompt &optional initial-input allowed-types)
                      (setq read-args
-                           (list prompt table-like-only initial-input category allowed-types))
+                           (list prompt initial-input allowed-types))
                      '(:name "users" :schema "app" :type "COLLECTION")))
                   ((symbol-function 'clutch--run-object-action)
                    (lambda (entry action-id)
@@ -1140,9 +1158,7 @@ warmed categories and performs no lookup."
           (clutch-jump)
           (should (equal read-args
                          (list "Jump to object: "
-                               nil
                                "users"
-                               nil
                                clutch-primary-object-types)))
           (should (equal action-call
                          '((:name "users" :schema "app" :type "COLLECTION")
@@ -1159,12 +1175,12 @@ warmed categories and performs no lookup."
                    (:name "ORDER_IDX" :type "INDEX")
                    (:name "PROCESS_ORDER" :type "PROCEDURE"))))
               ((symbol-function 'clutch--object-entry-reader)
-               (lambda (_conn _prompt entries &optional _initial _category)
+               (lambda (_conn _prompt entries &optional _initial)
                  (setq captured entries)
                  (car entries))))
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
-        (should (equal (clutch-object-read "Object: " nil nil nil '("TABLE" "VIEW"))
+        (should (equal (clutch-object-read "Object: " nil '("TABLE" "VIEW"))
                        '(:name "ORDERS" :type "TABLE"))))
       (should (equal captured '((:name "ORDERS" :type "TABLE")))))))
 
@@ -1268,9 +1284,9 @@ and schema ignored, so the search offered the first overload alone."
               ((symbol-function 'clutch-db-search-table-entries)
                (lambda (&rest _args) (setq remote-called t)))
               ((symbol-function 'clutch--object-entry-reader)
-               (lambda (conn prompt candidates &optional initial category)
+               (lambda (conn prompt candidates &optional initial)
                  (setq reader-call
-                       (list conn prompt candidates initial category))
+                       (list conn prompt candidates initial))
                  (car candidates)))
               ((symbol-function 'message)
                (lambda (format-string &rest args)
@@ -1282,8 +1298,7 @@ and schema ignored, so the search offered the first overload alone."
         (should (equal (clutch--resolve-object-entry "Describe: ")
                        (car entries)))
         (should (equal reader-call
-                       (list 'fake-conn "Describe: " entries "ord"
-                             'clutch-object)))
+                       (list 'fake-conn "Describe: " entries "ord")))
         (should (equal clutch-browser-current-object (car entries)))
         (should-not remote-called))
       (setq object-alive nil reader-call nil messages nil)
