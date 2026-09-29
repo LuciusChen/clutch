@@ -10,6 +10,7 @@
 ### Fixed
 
 - MongoDB null values no longer turn into empty arrays in insertOne, insertMany and replaceOne snippets, in JSON cell display, or in re-rendered helper commands.
+- JSON viewers, describe buffers and JSON sub-editors no longer fail with `void-function` in an Emacs built without tree-sitter; they fall back to `json-mode` or `js-mode`.
 
 ## 0.5.1 - 2026-09-25
 

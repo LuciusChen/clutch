@@ -289,7 +289,7 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
 
 (defun clutch--json-ts-mode-available-p ()
   "Return non-nil when `json-ts-mode' can be enabled now."
-  (and (fboundp 'json-ts-mode)
+  (and (treesit-available-p)
        (treesit-language-available-p 'json)))
 
 (defun clutch--json-display-mode ()
