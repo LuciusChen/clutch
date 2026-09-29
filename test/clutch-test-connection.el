@@ -1487,7 +1487,7 @@ and the ssh -N process has no owner yet at that point."
     (clutch-mode)
     (let ((clutch--execution-start-time (- (float-time) 1.21)))
       (clutch--update-mode-line)
-      (should (string-match-p "\\`clutch 1s [0-9]\\{3\\}ms\\'" mode-name)))))
+      (should (string-match-p "\\`clutch 1s [0-9]00ms\\'" mode-name)))))
 
 (ert-deftest clutch-test-format-elapsed ()
   "Durations under a second show milliseconds; longer ones add whole seconds."
@@ -1519,7 +1519,7 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
           (clutch--refresh-footer-display)
           (let ((footer (substring-no-properties
                          (clutch--footer-mode-line-display))))
-            (should (eq (not (null (string-match-p "1s [0-9]\\{3\\}ms" footer)))
+            (should (eq (not (null (string-match-p "1s [0-9]00ms" footer)))
                         executing))
             (should (eq (not (null (string-match-p "42ms" footer)))
                         (not executing)))))))))
