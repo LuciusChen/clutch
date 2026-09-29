@@ -3470,7 +3470,7 @@ header string and column pixel widths, then reused."
               ((symbol-function 'clutch--schedule-object-warmup)
                (lambda (_conn) (setq scheduled t))))
       (clutch--object-warmup-error
-       conn 3 'postgres 'indexes "permission denied")
+       conn 3 'indexes "permission denied")
       (should (memq 'indexes
                     (clutch--object-cache-loaded-categories conn)))
       (should scheduled))))

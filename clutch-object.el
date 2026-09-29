@@ -46,7 +46,7 @@ value must be a symbol recognized by `sql-mode', such as `mysql' or `postgres'."
   "Object entry currently displayed in a clutch describe buffer.")
 (defvar clutch--object-cache (make-hash-table :test 'eq)
   "Object discovery cache keyed by connection object identity.
-Each value is a plist with at least :entries and :fetched-at.")
+Each value is a plist with :entries and :loaded-categories.")
 
 (defvar clutch--browseable-object-cache (make-hash-table :test 'eq)
   "Browseable object snapshot keyed by connection object identity.
@@ -85,22 +85,18 @@ When ALLOWED-TYPES is nil, return ENTRIES unchanged."
        (clutch--object-type-allowed-p entry allowed-types))
      entries)))
 
-(defun clutch--object-connection-alive-p (conn)
-  "Return non-nil when CONN is usable for object metadata work.
-Recoverable database liveness-check failures are warned once and treated as
-  temporarily unavailable."
-  (condition-case err
-      (and conn (clutch-db-live-p conn))
-    (clutch-db-error
-     (clutch--remember-recoverable-metadata-warning
-      conn "object-warmup" err '(:phase "liveness"))
-     (clutch--warn-completion-metadata-error-once (error-message-string err))
-     nil)))
-
 ;;;; Object discovery
 
+(defconst clutch--object-category-types
+  '((indexes . "INDEX")
+    (sequences . "SEQUENCE")
+    (procedures . "PROCEDURE")
+    (functions . "FUNCTION")
+    (triggers . "TRIGGER"))
+  "Object type of each metadata category loaded into clutch object pickers.")
+
 (defconst clutch--object-categories
-  '(indexes sequences procedures functions triggers)
+  (mapcar #'car clutch--object-category-types)
   "Metadata categories loaded into clutch object pickers.")
 
 (defconst clutch--object-type-order
@@ -157,7 +153,7 @@ exact resolver under the internal `:clutch-resolver' key.")
 
 (defun clutch--object-cache-entry (conn)
   "Return cached object discovery metadata for CONN, or nil."
-  (and conn (gethash conn clutch--object-cache)))
+  (gethash conn clutch--object-cache))
 
 (defun clutch--object-cache-entries (conn)
   "Return cached object entries for CONN, or nil."
@@ -193,14 +189,13 @@ exact resolver under the internal `:clutch-resolver' key.")
   (clutch--cache-table-entry-comments conn entries)
   (puthash conn
            (list :entries entries
-                 :loaded-categories (copy-sequence clutch--object-categories)
-                 :fetched-at (float-time))
+                 :loaded-categories (copy-sequence clutch--object-categories))
            clutch--object-cache)
   entries)
 
 (defun clutch--store-object-cache-type-entries (conn type entries)
   "Store per-type object ENTRIES for CONN and TYPE, returning ENTRIES."
-  (let* ((cache (or (gethash conn clutch--object-cache) (list)))
+  (let* ((cache (gethash conn clutch--object-cache))
          (loaded (copy-sequence (plist-get cache :loaded-categories)))
          (type (clutch--normalize-object-type type))
          (category (clutch--object-type-category type)))
@@ -214,8 +209,7 @@ exact resolver under the internal `:clutch-resolver' key.")
                                                 (plist-get entry :type)))
                                         :test #'equal)
                              entries)
-                   :loaded-categories loaded
-                   :fetched-at (float-time))
+                   :loaded-categories loaded)
              clutch--object-cache)
     entries))
 
@@ -246,10 +240,6 @@ exact resolver under the internal `:clutch-resolver' key.")
     ("TRIGGER" "Triggers")
     (_ "Objects")))
 
-(defun clutch--object-entry-group-title (entry)
-  "Return the grouped completion title for ENTRY."
-  (clutch--object-type-title (plist-get entry :type)))
-
 (defun clutch--object-type-rank (type)
   "Return the display rank for object TYPE."
   (or (seq-position clutch--object-type-order
@@ -259,20 +249,12 @@ exact resolver under the internal `:clutch-resolver' key.")
 
 (defun clutch--object-category-type (category)
   "Return the normalized object TYPE string for CATEGORY."
-  (pcase category
-    ('indexes "INDEX")
-    ('sequences "SEQUENCE")
-    ('procedures "PROCEDURE")
-    ('functions "FUNCTION")
-    ('triggers "TRIGGER")
-    (_ nil)))
+  (alist-get category clutch--object-category-types))
 
 (defun clutch--object-type-category (type)
   "Return the object category whose entries have TYPE, or nil."
-  (let ((type (clutch--normalize-object-type type)))
-    (seq-find (lambda (category)
-                (equal (clutch--object-category-type category) type))
-              clutch--object-categories)))
+  (car (rassoc (clutch--normalize-object-type type)
+               clutch--object-category-types)))
 
 (defun clutch--cancel-object-warmup (conn)
   "Cancel any pending object warmup timer for CONN."
@@ -293,55 +275,52 @@ exact resolver under the internal `:clutch-resolver' key.")
 
 (defun clutch--object-warmup-current-p (conn generation)
   "Return non-nil when GENERATION is current for live CONN."
-  (and conn
-       (clutch--object-connection-alive-p conn)
+  (and (clutch-db-live-p conn)
        (= generation (clutch--object-warmup-generation conn))))
 
-(defun clutch--object-warmup-debug-event (conn phase backend category summary)
+(defun clutch--object-warmup-debug-event (conn phase category summary)
   "Record an object warmup debug event for CATEGORY and PHASE on CONN."
   (when clutch-debug-mode
     (clutch--remember-debug-event
      :connection conn
      :op "object-warmup"
      :phase phase
-     :backend backend
+     :backend (clutch-db-backend-key conn)
      :summary summary
      :context (list :object-category category))))
 
-(defun clutch--object-warmup-stale-debug-event (conn backend category what)
+(defun clutch--object-warmup-stale-debug-event (conn category what)
   "Record a stale object warmup event.
-CATEGORY, BACKEND, WHAT, and CONN describe the stale work item."
+CATEGORY, WHAT, and CONN describe the stale work item."
   (clutch--object-warmup-debug-event
-   conn "stale-drop" backend category
+   conn "stale-drop" category
    (format "Ignored stale %s warmup %s" category what)))
 
-(defun clutch--object-warmup-success (conn generation backend category type entries)
+(defun clutch--object-warmup-success (conn generation category type entries)
   "Handle successful warmup ENTRIES of TYPE for CATEGORY on CONN.
-GENERATION rejects stale work, and BACKEND labels diagnostics."
+GENERATION rejects stale work."
   (if (clutch--object-warmup-current-p conn generation)
       (progn
         (clutch--object-warmup-debug-event
-         conn "success" backend category
+         conn "success" category
          (format "Loaded %d %s entries" (length entries) category))
         (clutch--store-object-cache-type-entries conn type entries)
         (clutch--schedule-object-warmup conn))
-    (clutch--object-warmup-stale-debug-event conn backend category "result")))
+    (clutch--object-warmup-stale-debug-event conn category "result")))
 
-(defun clutch--object-warmup-error (conn generation backend category message)
+(defun clutch--object-warmup-error (conn generation category message)
   "Handle a warmup error MESSAGE for CATEGORY on CONN.
-GENERATION rejects stale work, and BACKEND labels diagnostics."
+GENERATION rejects stale work."
   (if (clutch--object-warmup-current-p conn generation)
       (progn
-        (clutch--object-warmup-debug-event
-         conn "error" backend category
-         (or message (format "%s warmup failed" category)))
-        (when-let* ((type (clutch--object-category-type category)))
-          ;; Mark the failed category attempted so a permanent permission or
-          ;; capability error cannot starve every category behind it.  Schema
-          ;; invalidation clears the cache and permits a later retry.
-          (clutch--store-object-cache-type-entries conn type nil))
+        (clutch--object-warmup-debug-event conn "error" category message)
+        ;; Mark the failed category attempted so a permanent permission or
+        ;; capability error cannot starve every category behind it.  Schema
+        ;; invalidation clears the cache and permits a later retry.
+        (clutch--store-object-cache-type-entries
+         conn (clutch--object-category-type category) nil)
         (clutch--schedule-object-warmup conn))
-    (clutch--object-warmup-stale-debug-event conn backend category "error")))
+    (clutch--object-warmup-stale-debug-event conn category "error")))
 
 (defun clutch--schedule-object-warmup (conn)
   "Warm non-table object categories for CONN during idle time."
@@ -349,12 +328,9 @@ GENERATION rejects stale work, and BACKEND labels diagnostics."
          (next (seq-find (lambda (category)
                            (not (memq category loaded)))
                          clutch--object-categories))
-         (generation (clutch--object-warmup-generation conn))
-         (backend (when clutch-debug-mode
-                    (clutch-db-backend-key conn))))
+         (generation (clutch--object-warmup-generation conn)))
     (cond
-     ((or (not conn)
-          (not (clutch--object-connection-alive-p conn))
+     ((or (not (clutch-db-live-p conn))
           (null next))
       (clutch--cancel-object-warmup conn))
      ((gethash conn clutch--object-warmup-timers)
@@ -372,36 +348,28 @@ GENERATION rejects stale work, and BACKEND labels diagnostics."
                         (clutch-db--foreground-busy-p conn))
                     (clutch--schedule-object-warmup conn)
                   (let ((type (clutch--object-category-type next)))
-                    (unless
-                        (and type
-                             (let ((started
-                                    (clutch-db-list-objects-async
-                                     conn next
-                                     (lambda (entries)
-                                       (clutch--object-warmup-success
-                                        conn generation backend next type entries))
-                                     (lambda (message)
-                                       (clutch--object-warmup-error
-                                        conn generation backend next message)))))
-                               (when (and started clutch-debug-mode)
-                                 (clutch--object-warmup-debug-event
-                                  conn "submit" backend next
-                                  (format "Queued background object warmup for %s"
-                                          next)))
-                               started))
-                      (progn
-                        (when type
-                          (clutch--object-type-entries conn type))
-                        (clutch--schedule-object-warmup conn)))))
+                    (if (clutch-db-list-objects-async
+                         conn next
+                         (lambda (entries)
+                           (clutch--object-warmup-success
+                            conn generation next type entries))
+                         (lambda (message)
+                           (clutch--object-warmup-error
+                            conn generation next message)))
+                        (clutch--object-warmup-debug-event
+                         conn "submit" next
+                         (format "Queued background object warmup for %s"
+                                 next))
+                      (clutch--object-type-entries conn type)
+                      (clutch--schedule-object-warmup conn))))
               (clutch-db-error err
                (clutch--remember-recoverable-metadata-warning
                 conn "object-warmup" err (list :object-category next))
                (clutch--warn-completion-metadata-error-once
                 (error-message-string err))
-               (when (and conn
-                          (clutch--object-connection-alive-p conn))
-                 (when-let* ((type (clutch--object-category-type next)))
-                   (clutch--store-object-cache-type-entries conn type nil))
+               (when (clutch-db-live-p conn)
+                 (clutch--store-object-cache-type-entries
+                  conn (clutch--object-category-type next) nil)
                  (clutch--schedule-object-warmup conn)))))))
        clutch--object-warmup-timers)))))
 
@@ -464,29 +432,21 @@ When REFRESH is non-nil, bypass any cached per-type entries."
             (clutch--filter-object-entries-by-type
              (clutch--browseable-object-entries conn refresh)
              type))
-           ("INDEX" (clutch-db-list-objects conn 'indexes))
-           ("SEQUENCE" (clutch-db-list-objects conn 'sequences))
-           ("PROCEDURE" (clutch-db-list-objects conn 'procedures))
-           ("FUNCTION" (clutch-db-list-objects conn 'functions))
-           ("TRIGGER" (clutch-db-list-objects conn 'triggers))
-           (_ nil))))))
+           (_ (when-let* ((category (clutch--object-type-category type)))
+                (clutch-db-list-objects conn category))))))))
 
 (defun clutch--object-entry-display-detail (entry duplicate-counts)
   "Return optional disambiguation detail for ENTRY.
 DUPLICATE-COUNTS maps object names to the number of visible entries."
   (let* ((name (or (plist-get entry :name) ""))
-         (target (clutch--object-entry-target entry))
          (schema (or (plist-get entry :schema) ""))
          (source (or (plist-get entry :source-schema) ""))
          (identity (plist-get entry :identity)))
     (when (> (gethash name duplicate-counts 0) 1)
       (cond
-       ((and target (not (string-empty-p target))) target)
-       ((and schema source (not (string-empty-p schema)) (not (string= schema source)))
-        schema)
+       ((not (or (string-empty-p schema) (string= schema source))) schema)
        ((and identity (not (string-empty-p identity))) identity)
-       ((not (string-empty-p schema)) schema)
-       (t nil)))))
+       ((not (string-empty-p schema)) schema)))))
 
 (defun clutch--object-entry-candidate (entry duplicate-counts)
   "Return a completion candidate string for ENTRY.
@@ -552,7 +512,7 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
          (list cand "" suffix)))
      cands)))
 
-(defun clutch--object-entry-reader (conn prompt entries &optional initial-input category)
+(defun clutch--object-entry-reader (conn prompt entries &optional initial-input)
   "Read an object entry from ENTRIES on CONN using PROMPT."
   (let* ((sorted
           (sort (copy-sequence entries)
@@ -577,8 +537,7 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
         (puthash candidate entry entry-map)
         (push candidate candidates)))
     (setq candidates (nreverse candidates))
-    (cl-labels ((candidate-list () candidates)
-                (metadata-entry (candidate)
+    (cl-labels ((metadata-entry (candidate)
                   (when-let* ((entry (gethash candidate entry-map)))
                     (or (gethash candidate metadata-map)
                         (puthash
@@ -592,7 +551,7 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
                   (if transform
                       candidate
                     (when-let* ((entry (gethash candidate entry-map)))
-                      (clutch--object-entry-group-title entry))))
+                      (clutch--object-type-title (plist-get entry :type)))))
                 (affixate (cands)
                   (let ((display-map (make-hash-table :test 'equal))
                         (remaining clutch--object-affixation-metadata-limit)
@@ -613,13 +572,13 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
                 (complete (str pred action)
                   (if (eq action 'metadata)
                       `(metadata
-                        ,@(when category `((category . ,category)))
+                        (category . clutch-object)
                         (annotation-function . ,#'annotation)
                         (group-function . ,#'group)
                         (affixation-function . ,#'affixate)
                         (display-sort-function . identity)
                         (cycle-sort-function . identity))
-                    (complete-with-action action (candidate-list) str pred))))
+                    (complete-with-action action candidates str pred))))
       (setq clutch--object-completion-entry-map entry-map)
       (when key-value-p
         (puthash :clutch-resolver
@@ -689,7 +648,7 @@ object never lists the schema there."
   "Return matching object entries for the symbol at point.
 TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
   (when-let* ((conn clutch-connection)
-              ((clutch--object-connection-alive-p conn))
+              ((clutch-db-live-p conn))
               (sym (thing-at-point 'symbol t)))
     (clutch--object-matches-by-name conn sym table-like-only allowed-types)))
 
@@ -702,34 +661,28 @@ TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
   "Return the uniquely identified object entry at point, or nil."
   (clutch--preferred-object-match (clutch--object-matches-at-point)))
 
-(defun clutch-object-read (&optional prompt table-like-only initial-input category allowed-types)
+(defun clutch-object-read (&optional prompt initial-input allowed-types)
   "Read and return a database object entry for the current connection.
-PROMPT, INITIAL-INPUT, CATEGORY, and ALLOWED-TYPES customize the
-reader.  When TABLE-LIKE-ONLY is non-nil, only include table-like
-objects."
+PROMPT, INITIAL-INPUT, and ALLOWED-TYPES customize the reader."
   (clutch--ensure-connection)
   (clutch--warn-schema-cache-state clutch-connection)
   (let* ((entries
           (clutch--filter-object-entries-by-types
-           (if table-like-only
-               (clutch--browseable-object-entries clutch-connection)
-             (clutch--object-entries clutch-connection))
+           (clutch--object-entries clutch-connection)
            allowed-types)))
     (clutch--remember-current-object
      (clutch--object-entry-reader
       clutch-connection
       (or prompt "Object: ")
       entries
-      initial-input
-      (or category 'clutch-object)))))
+      initial-input))))
 
 (defun clutch--buffer-current-object (&optional table-like-only allowed-types)
   "Return the current object associated with the command context buffer.
 When TABLE-LIKE-ONLY is non-nil, only return table-like objects
 allowed by ALLOWED-TYPES."
   (let* ((buf (plist-get (clutch--command-connection-context) :buffer))
-         (entry (and (buffer-live-p buf)
-                     (buffer-local-value 'clutch-browser-current-object buf))))
+         (entry (buffer-local-value 'clutch-browser-current-object buf)))
     (when (and entry
                (or (not table-like-only)
                    (clutch--table-like-entry-p entry))
@@ -782,7 +735,7 @@ Results are filtered by ALLOWED-TYPES and deduplicated."
                  allowed-types)
           :full-entries full-entries)))
 
-(defun clutch--resolve-object-entry (prompt &optional table-like-only category allowed-types)
+(defun clutch--resolve-object-entry (prompt &optional table-like-only allowed-types)
   "Return the object entry for PROMPT in the current buffer context.
 Uses a layered resolution strategy:
 1. Buffer-local current object or exact match at point
@@ -791,7 +744,7 @@ Uses a layered resolution strategy:
 4. On-demand remote search → direct return or picker with results
 5. No match → picker with full candidate list, no pre-fill
 
-TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
+TABLE-LIKE-ONLY and ALLOWED-TYPES refine the candidate set."
   (let ((current-object (clutch--buffer-current-object table-like-only allowed-types))
         (matches (clutch--object-matches-at-point table-like-only allowed-types)))
     (clutch--remember-current-object
@@ -808,8 +761,7 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
        (clutch--object-entry-reader clutch-connection
                                     prompt
                                     matches
-                                    (thing-at-point 'symbol t)
-                                    category))
+                                    (thing-at-point 'symbol t)))
       (t
        (clutch--ensure-connection)
        (clutch--warn-schema-cache-state clutch-connection)
@@ -820,13 +772,12 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
                     (clutch--browseable-object-entries clutch-connection)
                   (clutch--object-entries clutch-connection))
                 allowed-types))
-              (cat (or category 'clutch-object))
               (plan (clutch--object-resolution-plan sym entries)))
          (when (eq (car plan) 'search)
            (setq plan
                  (clutch--object-resolution-plan
                   sym entries
-                  (if (clutch--object-connection-alive-p clutch-connection)
+                  (if (clutch-db-live-p clutch-connection)
                       (clutch--on-demand-object-search
                        clutch-connection sym table-like-only allowed-types)
                     '(:attempted t)))))
@@ -834,13 +785,11 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
           (`(return ,entry) entry)
           (`(read ,candidates ,initial)
            (clutch--object-entry-reader clutch-connection
-                                         (or prompt "Object: ")
-                                         candidates initial cat))
+                                        prompt candidates initial))
           (`(missing ,candidates)
            (message "No matching object found for: %s" sym)
            (clutch--object-entry-reader clutch-connection
-                                         (or prompt "Object: ")
-                                         candidates nil cat)))))))))
+                                        prompt candidates nil)))))))))
 
 (defun clutch--object-entry-label (entry)
   "Return a compact source/type label for object ENTRY."
@@ -881,14 +830,6 @@ TABLE-LIKE-ONLY, CATEGORY, and ALLOWED-TYPES refine the candidate set."
                       (or (string< left-schema right-schema)
                           (and (string= left-schema right-schema)
                                (string< left-name right-name)))))))))
-
-(defun clutch--object-entry-target (entry)
-  "Return the target schema display for object ENTRY, or nil."
-  (let ((schema (or (plist-get entry :schema) ""))
-        (source (or (plist-get entry :source-schema) "")))
-    (unless (or (string-empty-p schema)
-                (string= schema source))
-      schema)))
 
 (defun clutch--browseable-object-entries (conn &optional refresh)
   "Return the base browseable object entry list for CONN.
@@ -1267,11 +1208,10 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
     (let* ((header (format "%s (%s)"
                            (clutch--object-fqname entry)
                            (clutch--object-type-string entry)))
-           (sections (delq nil
-                           (append
-                            (list (cons "Summary"
-                                        (clutch--object-summary-lines entry)))
-                            (clutch--object-describe-sections conn entry)))))
+           (sections (append
+                      (list (cons "Summary"
+                                  (clutch--object-summary-lines entry)))
+                      (clutch--object-describe-sections conn entry))))
       (string-join
        (cons
         header
@@ -1508,7 +1448,7 @@ or starting another schema refresh."
   (or entry
       (clutch--resolve-object-entry
        (plist-get (clutch--object-action-spec action-id) :prompt)
-       t nil '("COLLECTION"))))
+       t '("COLLECTION"))))
 
 (defun clutch--run-document-collection-action (entry action-id)
   "Run document collection ACTION-ID for ENTRY and show its metadata."
@@ -1579,9 +1519,10 @@ When ENTRY is nil, use the current table-like object."
                              (eq clutch-connection conn)
                              (current-buffer))
                         (clutch--find-console-for-conn conn)
-                        (user-error "No query console open for this connection"))))
+                        (user-error "No query console open for this connection")))
+           (from-other-buffer (not (eq (current-buffer) console))))
       (pop-to-buffer console)
-      (unless (eq (current-buffer) console)
+      (when from-other-buffer
         (goto-char (point-max)))
       (clutch--insert-console-sql-block sql))))
 
@@ -1753,10 +1694,6 @@ When ENTRY is nil, use the current table-like object."
   "Return the display label for ACTION-ID."
   (plist-get (clutch--object-action-spec action-id) :label))
 
-(defun clutch--object-action-command (action-id)
-  "Return the command implementing ACTION-ID."
-  (plist-get (clutch--object-action-spec action-id) :command))
-
 (defun clutch--object-action-current-connection ()
   "Return the connection relevant to the current object action, or nil."
   (or (plist-get (clutch--command-connection-context) :connection)
@@ -1789,7 +1726,7 @@ When ENTRY is nil, use the current table-like object."
                 (clutch--object-fqname entry)
                 (downcase (clutch--object-action-label action-id))))
   (clutch--remember-current-object entry)
-  (funcall (clutch--object-action-command action-id) entry))
+  (funcall (plist-get (clutch--object-action-spec action-id) :command) entry))
 
 (defun clutch--object-act-jump-target-p ()
   "Return non-nil when the current action target supports forward jumps."
@@ -1848,19 +1785,15 @@ When ENTRY is nil, use the current table-like object."
    ["Cache"
     ("g" "Refresh schema" clutch-refresh-schema)]])
 
-(defun clutch--present-object-actions-natively (entry)
-  "Present actions for ENTRY via clutch's native action UI."
-  (setq clutch--object-action-entry entry)
-  (clutch--remember-current-object entry)
-  (transient-setup 'clutch-object-actions-menu))
-
 ;;;###autoload
 (defun clutch-act-dwim (&optional entry)
   "Resolve ENTRY, or an object at point, and present its action UI."
   (interactive)
-  (clutch--present-object-actions-natively
-   (or entry
-       (clutch--resolve-object-entry "Object actions for: "))))
+  (let ((entry (or entry
+                   (clutch--resolve-object-entry "Object actions for: "))))
+    (setq clutch--object-action-entry entry)
+    (clutch--remember-current-object entry)
+    (transient-setup 'clutch-object-actions-menu)))
 
 ;;;###autoload
 (defun clutch-jump (&optional entry)
@@ -1875,14 +1808,11 @@ When ENTRY is nil, use the current table-like object."
                               ((clutch--object-type-allowed-p
                                 at-point clutch-primary-object-types)))
                         (clutch-object-read
-                         prompt nil
-                         (or (thing-at-point 'symbol t)
-                             (plist-get at-point :name))
-                         nil
+                         prompt
+                         (thing-at-point 'symbol t)
                          clutch-primary-object-types)
-                      (clutch--resolve-object-entry prompt
-                                                    nil nil
-                                                    clutch-primary-object-types)))))
+                      (clutch--resolve-object-entry
+                       prompt nil clutch-primary-object-types)))))
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
 ;;;###autoload

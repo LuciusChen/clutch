@@ -2166,8 +2166,7 @@ Filtering the category listing ran a schema-wide query per describe."
   "Return a lightweight native MongoDB Clutch connection for unit tests."
   (make-clutch-mongodb-conn
    :database (or database "app")
-   :client (or client 'mongodb-client)
-   :busy nil))
+   :client (or client 'mongodb-client)))
 
 (ert-deftest clutch-db-test-mongodb-endpoint-metadata-uses-effective-client-state ()
   "URL connections should expose normalized endpoint metadata from mongodb.el."
