@@ -19,7 +19,6 @@
 - Jumping to a table alias works for an alias that follows an unaliased table, such as `o` in `FROM users JOIN orders o`.
 - MongoDB, Redis, ClickHouse and generic JDBC connections reconnect automatically after dropping, as the other backends do, instead of reporting "Not connected".
 - Browsing an object from a buffer other than its query console appends the query at the end of the console instead of wherever the console's point was.
-- PostgreSQL `timestamptz[]` values with fractional seconds no longer signal `wrong-type-argument` while a result is displayed.
 
 ## 0.5.1 - 2026-09-25
 
