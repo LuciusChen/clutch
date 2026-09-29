@@ -7,6 +7,10 @@
 - A running query shows its elapsed time, counting in tenths of a second, in the mode line and the result footer instead of a spinner.
 - Durations of one second or more read as seconds plus milliseconds, such as `1s 234ms` instead of `1.234s`, in the result footer and in the rows-loaded, completion, and failure messages.
 
+### Fixed
+
+- MongoDB null values no longer turn into empty arrays in insertOne, insertMany and replaceOne snippets, in JSON cell display, or in re-rendered helper commands.
+
 ## 0.5.1 - 2026-09-25
 
 ### Changed
