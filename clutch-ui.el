@@ -483,9 +483,9 @@ not enforce `min-width' consistently across supported Emacs versions."
       (format "%ds %03dms" (/ ms 1000) (% ms 1000)))))
 
 (defun clutch--execution-elapsed-seconds ()
-  "Return the running query's elapsed seconds, or nil when idle."
+  "Return the running query's elapsed seconds to the tenth, or nil when idle."
   (when clutch--execution-start-time
-    (- (float-time) clutch--execution-start-time)))
+    (/ (floor (* 10 (- (float-time) clutch--execution-start-time))) 10.0)))
 
 (defun clutch--transient-state-display (state choices)
   "Return a transient state display for STATE from CHOICES.
