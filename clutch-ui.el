@@ -232,8 +232,8 @@ Example:
 (defun clutch--format-value (val)
   "Format VAL for display in a result table.
 Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
-:false → \"false\", plists → formatted date/time strings, and JSON values
-→ JSON strings."
+:false → \"false\", :null → \"null\", plists → formatted date/time strings,
+and JSON values → JSON strings."
   (cond
    ((clutch--cell-placeholder-value val))
    ((clutch-db-value-preview-p val)
@@ -244,6 +244,7 @@ Special cell sentinels become placeholders, nil → \"NULL\", t → \"true\",
    ((null val) "NULL")
    ((eq val t) "true")
    ((eq val :false) "false")
+   ((eq val :null) "null")
    ((stringp val) val)
    ((numberp val) (number-to-string val))
    ((listp val) (or (clutch-db-format-temporal val) (format "%S" val)))

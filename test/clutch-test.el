@@ -133,6 +133,7 @@
   "Result values should render as compact display strings."
   (dolist (case '((nil "NULL")
                   (:false "false")
+                  (:null "null")
                   ("hello" "hello")
                   ("" "")
                   (42 "42")
