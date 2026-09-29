@@ -177,61 +177,31 @@
 
 (defun clutch-db-pg--normalize-date-value (value)
   "Normalize PostgreSQL DATE VALUE to clutch's date plist representation."
-  (cond
-   ((null value) nil)
-   ((and (listp value)
-         (plist-get value :year)
-         (not (plist-member value :hours)))
-    value)
-   ((and (stringp value)
-         (string-match "\\`\\([0-9]+\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)\\'" value))
-    (list :year (string-to-number (match-string 1 value))
-          :month (string-to-number (match-string 2 value))
-          :day (string-to-number (match-string 3 value))))
-   ((stringp value) value)
-   (t
-    (pcase-let ((`(,_seconds ,_minutes ,_hours ,day ,month ,year . ,_)
-                  (decode-time value)))
-      (list :year year
-            :month month
-            :day day)))))
+  (if (string-match "\\`\\([0-9]+\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)\\'" value)
+      (list :year (string-to-number (match-string 1 value))
+            :month (string-to-number (match-string 2 value))
+            :day (string-to-number (match-string 3 value)))
+    value))
 
 (defun clutch-db-pg--normalize-time-value (value)
   "Normalize PostgreSQL TIME VALUE to clutch's time plist representation."
-  (cond
-   ((null value) nil)
-   ((and (listp value) (plist-member value :hours))
-    value)
-   ((stringp value)
-    (let* ((negative (string-prefix-p "-" value))
-           (rest (if negative (substring value 1) value))
-           (rest (replace-regexp-in-string "[+-][0-9:]+\\'" "" rest))
-           (dot-pos (string-search "." rest))
-           (time-part (if dot-pos (substring rest 0 dot-pos) rest))
-           (parts (split-string time-part ":")))
-      (pcase parts
-        (`(,hours ,minutes ,seconds)
-         (list :hours (string-to-number hours)
-               :minutes (string-to-number minutes)
-               :seconds (string-to-number seconds)
-               :negative negative))
-        (_ value))))
-   (t
-    (pcase-let ((`(,seconds ,minutes ,hours . ,_)
-                  (decode-time value)))
-      (list :hours hours
-            :minutes minutes
-            :seconds seconds
-            :negative nil)))))
+  (let* ((negative (string-prefix-p "-" value))
+         (rest (if negative (substring value 1) value))
+         (rest (replace-regexp-in-string "[+-][0-9:]+\\'" "" rest))
+         (dot-pos (string-search "." rest))
+         (time-part (if dot-pos (substring rest 0 dot-pos) rest))
+         (parts (split-string time-part ":")))
+    (pcase parts
+      (`(,hours ,minutes ,seconds)
+       (list :hours (string-to-number hours)
+             :minutes (string-to-number minutes)
+             :seconds (string-to-number seconds)
+             :negative negative))
+      (_ value))))
 
 (defun clutch-db-pg--normalize-datetime-value (value)
   "Normalize PostgreSQL DATETIME VALUE to clutch's datetime plist representation."
   (cond
-   ((null value) nil)
-   ((and (listp value)
-         (plist-get value :year)
-         (plist-member value :hours))
-    value)
    ((and (stringp value)
          (string-match
           "\\`\\([0-9]+\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)[ T]\\([0-9][0-9]\\):\\([0-9][0-9]\\):\\([.0-9]+\\)\\'"
@@ -260,7 +230,7 @@
      ((eq value pgsql-null) nil)
      ((equal backend-type "bool") (if (null value) :false value))
      ((and (clutch-db-pg--array-type-name-p backend-type)
-           (or (vectorp value) (listp value)))
+           (vectorp value))
       (let ((boolean-p (member backend-type '("_bool" "bool[]"))))
         (cl-labels
             ((normalize-element
@@ -270,11 +240,8 @@
                ((and boolean-p (null element)) :false)
                ((vectorp element)
                 (vconcat (mapcar #'normalize-element element)))
-               ((listp element) (mapcar #'normalize-element element))
                (t element))))
-          (if (vectorp value)
-              (vconcat (mapcar #'normalize-element value))
-            (mapcar #'normalize-element value)))))
+          (vconcat (mapcar #'normalize-element value)))))
      ((eq (plist-get col-def :type-category) 'date)
       (clutch-db-pg--normalize-date-value value))
      ((eq (plist-get col-def :type-category) 'time)
@@ -313,13 +280,6 @@
   (setf (clutch-db-pg--connection-current-schema conn) schema)
   schema)
 
-(defun clutch-db-pg--set-statement-timeout (conn timeout-seconds)
-  "Set CONN statement_timeout to TIMEOUT-SECONDS, or reset when nil."
-  (clutch-db-pg--exec conn
-           (if timeout-seconds
-               (format "SET statement_timeout = %d" (* timeout-seconds 1000))
-             "SET statement_timeout = DEFAULT")))
-
 (defun clutch-db-pg--set-search-path (conn schema)
   "Set CONN search_path to SCHEMA and update the local cache."
   (let ((schema (string-trim schema)))
@@ -327,10 +287,6 @@
              (format "SET search_path TO %s"
                      (pgsql-escape-identifier schema)))
     (clutch-db-pg--cache-current-schema conn schema)))
-
-(defun clutch-db-pg--manual-commit-enabled-p (conn)
-  "Return non-nil when CONN is in clutch-managed manual-commit mode."
-  (and conn (clutch-db-pg--connection-manual-commit conn)))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
@@ -344,11 +300,6 @@
        (clutch-db-pg--connection-client conn))
       'failed-transaction))
 
-(defun clutch-db-pg--set-manual-commit-enabled (conn enabled)
-  "Set clutch-managed manual-commit mode on CONN to ENABLED."
-  (when conn
-    (setf (clutch-db-pg--connection-manual-commit conn) (and enabled t))))
-
 (defun clutch-db-pg--transaction-control-query-p (sql)
   "Return non-nil when SQL is explicit PostgreSQL transaction control."
   (let ((case-fold-search t)
@@ -359,7 +310,7 @@
 
 (defun clutch-db-pg--ensure-foreground-transaction (conn sql)
   "Lazily open a foreground transaction on CONN before running SQL."
-  (when (and (clutch-db-pg--manual-commit-enabled-p conn)
+  (when (and (clutch-db-pg--connection-manual-commit conn)
              (not (clutch-db-pg--transaction-control-query-p sql))
              (not (clutch-db-pg--tx-open-p conn)))
     (clutch-db-pg--exec conn "BEGIN")))
@@ -406,7 +357,8 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
                  :application-name "clutch")
                 conn (clutch-db-pg--make-connection :client client))
           (when query-timeout
-            (clutch-db-pg--set-statement-timeout conn query-timeout))
+            (clutch-db-pg--exec
+             conn (format "SET statement_timeout = %d" (* query-timeout 1000))))
           (when schema
             (clutch-db-pg--set-search-path conn schema))
           conn)
@@ -522,24 +474,19 @@ value prepared for pgsql.el.  Signal `user-error' when TRIMMED is neither."
   "Return PARAMS as pgsql.el typed arguments."
   (mapcar #'clutch-db-pg--typed-argument params))
 
-(defun clutch-db-pg--metadata-value (value)
-  "Return VALUE with pgsql.el's SQL NULL sentinel normalized to nil."
-  (unless (eq value pgsql-null)
-    value))
-
 (defun clutch-db-pg--metadata-rows (result)
   "Return metadata rows from RESULT with SQL NULL sentinels normalized."
   (mapcar (lambda (row)
-            (mapcar #'clutch-db-pg--metadata-value row))
+            (mapcar (lambda (value)
+                      (unless (eq value pgsql-null)
+                        value))
+                    row))
           (pgsql-result-rows result)))
 
 (defun clutch-db-pg--format-column-ddl (col)
   "Format a single column COL row as a DDL line."
   (pcase-let ((`(,name ,dtype ,max-len ,default-val ,nullable) col))
-    (let* ((max-len (clutch-db-pg--metadata-value max-len))
-           (default-val (clutch-db-pg--metadata-value default-val))
-           (nullable (clutch-db-pg--metadata-value nullable))
-           (type-str (if max-len (format "%s(%s)" dtype max-len) dtype))
+    (let* ((type-str (if max-len (format "%s(%s)" dtype max-len) dtype))
            (parts (append (list (pgsql-escape-identifier name) type-str)
                           (when default-val
                             (list (format "DEFAULT %s" default-val)))
@@ -582,8 +529,7 @@ WHERE c.oid = %s::regclass"
                         (pgsql-escape-literal table)))
            (result (clutch-db-pg--exec conn sql))
            (relkind (car (car (clutch-db-pg--metadata-rows result)))))
-      (when (or (equal relkind "r")
-                (equal relkind ?r))
+      (when (equal relkind "r")
         (list :kind 'row-locator
               :name "ctid"
               :select-expressions '("ctid::text")
@@ -610,13 +556,7 @@ PK-COLS is a list of primary key column names.
 FKS is an alist of (column-name . fk-plist)."
   (pcase-let ((`(,name ,dtype ,backend-type ,nullable-str ,max-len
                  ,num-prec ,num-scale ,default-val ,identity-str ,comment) row))
-    (let* ((backend-type (clutch-db-pg--metadata-value backend-type))
-           (max-len (clutch-db-pg--metadata-value max-len))
-           (num-prec (clutch-db-pg--metadata-value num-prec))
-           (num-scale (clutch-db-pg--metadata-value num-scale))
-           (default-val (clutch-db-pg--metadata-value default-val))
-           (comment (clutch-db-pg--metadata-value comment))
-           (type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
+    (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
            (nullable (equal nullable-str "YES"))
            (pk-p     (member name pk-cols))
            (fk       (cdr (assoc name fks)))
@@ -640,12 +580,12 @@ FKS is an alist of (column-name . fk-plist)."
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-db-pg--connection))
   "Disconnect PostgreSQL CONN."
-  (clutch-db-pg--set-manual-commit-enabled conn nil)
+  (setf (clutch-db-pg--connection-manual-commit conn) nil)
   (pgsql-disconnect (clutch-db-pg--connection-client conn)))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-db-pg--connection))
   "Return non-nil if PostgreSQL CONN is live."
-  (and conn (pgsql-live-p (clutch-db-pg--connection-client conn))))
+  (pgsql-live-p (clutch-db-pg--connection-client conn)))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-pg--connection))
   "Return the registered backend key for PostgreSQL connections."
@@ -665,7 +605,7 @@ FKS is an alist of (column-name . fk-plist)."
 
 (cl-defmethod clutch-db-manual-commit-p ((conn clutch-db-pg--connection))
   "Return non-nil when PostgreSQL CONN is in manual-commit mode."
-  (clutch-db-pg--manual-commit-enabled-p conn))
+  (clutch-db-pg--connection-manual-commit conn))
 
 (cl-defmethod clutch-db-manual-commit-supported-p
     ((_conn clutch-db-pg--connection))
@@ -701,8 +641,8 @@ manual-commit mode via lazy BEGIN."
             (clutch-db-pg--exec conn (if (clutch-db-pg--tx-failed-p conn)
                               "ROLLBACK"
                             "COMMIT")))
-          (clutch-db-pg--set-manual-commit-enabled conn nil))
-      (clutch-db-pg--set-manual-commit-enabled conn t))))
+          (setf (clutch-db-pg--connection-manual-commit conn) nil))
+      (setf (clutch-db-pg--connection-manual-commit conn) t))))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
     ((conn clutch-db-pg--connection) function)
@@ -1029,19 +969,6 @@ ORDER BY position" oid)))
             (clutch-db-pg--metadata-rows result))))
       (_ nil))))
 
-(cl-defmethod clutch-db-object-source ((conn clutch-db-pg--connection) entry)
-  "Return source text for PostgreSQL object ENTRY on CONN."
-  (clutch-db--translate-library-error pgsql-error
-    (let ((oid (substring (plist-get entry :identity) 4)))
-      (pcase (upcase (or (plist-get entry :type) ""))
-        ((or "PROCEDURE" "FUNCTION")
-         (caar (clutch-db-pg--metadata-rows
-                (clutch-db-pg--exec conn (format "SELECT pg_get_functiondef(%s::oid)" oid)))))
-        ("TRIGGER"
-         (caar (clutch-db-pg--metadata-rows
-                (clutch-db-pg--exec conn (format "SELECT pg_get_triggerdef(%s::oid, true)" oid)))))
-        (_ nil)))))
-
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-pg--connection) entry)
   "Return definition or source text for PostgreSQL object ENTRY on CONN."
   (clutch-db--translate-library-error pgsql-error
@@ -1063,8 +990,17 @@ ORDER BY ordinal_position"
            (format "CREATE TABLE %s (\n%s\n);"
                    (pgsql-escape-identifier name)
                    (mapconcat #'identity lines ",\n"))))
-        ((or "PROCEDURE" "FUNCTION" "TRIGGER")
-         (clutch-db-object-source conn entry))
+        ((or "PROCEDURE" "FUNCTION")
+         (let ((oid (substring (plist-get entry :identity) 4)))
+           (caar (clutch-db-pg--metadata-rows
+                  (clutch-db-pg--exec
+                   conn (format "SELECT pg_get_functiondef(%s::oid)" oid))))))
+        ("TRIGGER"
+         (let ((oid (substring (plist-get entry :identity) 4)))
+           (caar (clutch-db-pg--metadata-rows
+                  (clutch-db-pg--exec
+                   conn
+                   (format "SELECT pg_get_triggerdef(%s::oid, true)" oid))))))
         ("INDEX"
          (caar (clutch-db-pg--metadata-rows
                 (clutch-db-pg--exec
@@ -1159,34 +1095,10 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
          (lambda (row)
-           (unless (and (listp row)
-                        (= (length row) 3)
-                        (cl-every #'stringp row))
-             (signal 'pgsql-error
-                     '("Invalid PostgreSQL foreign-key metadata row")))
            (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
              (cons col-name
                    (list :ref-table ref-table :ref-column ref-column))))
          (clutch-db-pg--metadata-rows result)))))
-
-(cl-defmethod clutch-db-referencing-objects ((conn clutch-db-pg--connection) table)
-  "Return table entries that reference TABLE on PostgreSQL CONN."
-  (clutch-db--translate-library-error pgsql-error
-    (let* ((sql (format "SELECT DISTINCT tc.table_name
-FROM information_schema.table_constraints tc
-JOIN information_schema.constraint_column_usage ccu
-  ON ccu.constraint_name = tc.constraint_name
- AND ccu.table_schema = tc.table_schema
-WHERE tc.constraint_type = 'FOREIGN KEY'
-  AND tc.table_schema = current_schema()
-  AND ccu.table_schema = current_schema()
-  AND ccu.table_name = %s"
-                          (pgsql-escape-literal table)))
-             (result (clutch-db-pg--exec conn sql)))
-      (mapcar (lambda (row)
-                (pcase-let ((`(,name) row))
-                  (list :name name :type "TABLE")))
-              (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table)
   "Return detailed column info for TABLE on PostgreSQL CONN."

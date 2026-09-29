@@ -1703,13 +1703,6 @@ Backends may add cheap, caller-facing metadata used by object pickers.")
   "Default: return ENTRY unchanged."
   entry)
 
-(cl-defgeneric clutch-db-object-source (conn entry)
-  "Return source text for source-bearing object ENTRY on CONN.")
-
-(cl-defmethod clutch-db-object-source ((_conn t) _entry)
-  "Default: return nil when source is unavailable."
-  nil)
-
 (cl-defgeneric clutch-db-object-definition (conn entry)
   "Return definition or source text for object ENTRY on CONN.")
 
@@ -1870,15 +1863,6 @@ UPDATE and DELETE.")
 (cl-defgeneric clutch-db-foreign-keys (conn table)
   "Return foreign key info for TABLE on CONN.
 Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")
-
-(cl-defgeneric clutch-db-referencing-objects (conn table)
-  "Return objects that reference TABLE on CONN.
-Each element is an entry plist suitable for object navigation, typically
-including at least :name and :type, and optionally :schema / :source-schema.")
-
-(cl-defmethod clutch-db-referencing-objects ((_conn t) _table)
-  "Default: return nil when reverse-reference lookup is unsupported."
-  nil)
 
 (cl-defgeneric clutch-db-column-details (conn table)
   "Return detailed column info for TABLE on CONN.
