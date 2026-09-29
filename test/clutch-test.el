@@ -230,20 +230,26 @@
       (should-not serialize-called))))
 
 (ert-deftest clutch-test-json-view-mode-uses-json-mode-without-json-ts-grammar ()
-  "JSON viewers should use `json-mode' when the tree-sitter grammar is unavailable."
-  (let (selected-mode)
-    (with-temp-buffer
-      (insert "{\"ok\":true}")
-      (cl-letf (((symbol-function 'json-ts-mode)
-                 (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
-                ((symbol-function 'treesit-language-available-p)
-                 (lambda (_language &optional _quiet) nil))
-                ((symbol-function 'json-mode)
-                 (lambda () (setq selected-mode 'json-mode)))
-                ((symbol-function 'js-mode)
-                 (lambda () (setq selected-mode 'js-mode))))
-        (clutch--setup-json-view-buffer)))
-    (should (eq selected-mode 'json-mode))))
+  "JSON viewers should use `json-mode' without tree-sitter or its JSON grammar."
+  (pcase-dolist (`(,label ,treesit ,grammar-fn)
+                 `(("no JSON grammar" t ,(lambda (_language &optional _quiet) nil))
+                   ;; An Emacs built without tree-sitter does not define
+                   ;; `treesit-language-available-p' at all.
+                   ("no tree-sitter" nil nil)))
+    (ert-info (label)
+      (let (selected-mode)
+        (with-temp-buffer
+          (insert "{\"ok\":true}")
+          (cl-letf (((symbol-function 'json-ts-mode)
+                     (lambda () (ert-fail "json-ts-mode should not run without a JSON grammar")))
+                    ((symbol-function 'treesit-available-p) (lambda () treesit))
+                    ((symbol-function 'treesit-language-available-p) grammar-fn)
+                    ((symbol-function 'json-mode)
+                     (lambda () (setq selected-mode 'json-mode)))
+                    ((symbol-function 'js-mode)
+                     (lambda () (setq selected-mode 'js-mode))))
+            (clutch--setup-json-view-buffer)))
+        (should (eq selected-mode 'json-mode))))))
 
 (ert-deftest clutch-test-dispatch-view-routes-values-by-content ()
   "Value viewers should choose JSON/XML/plain buffers from type and content."
