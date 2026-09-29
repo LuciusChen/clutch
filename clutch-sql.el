@@ -263,7 +263,8 @@ Return (TABLES . ALIASES) where TABLES is a list of table names and
 ALIASES is an alist of (alias . table) pairs.
 String literals and comments are ignored via masking."
   (let ((case-fold-search t)
-        (masked (clutch-db-sql-mask-literal-or-comment text))
+        (masked (clutch-db-sql-mask-literal-or-comment
+                 text (clutch-db-connection-sql-dialect clutch-connection)))
         (pos beg)
         tables aliases)
     (while (and (< pos end)
@@ -376,7 +377,8 @@ outer FROM/JOIN clauses."
          (stmt-beg (car bounds))
          (text (buffer-substring-no-properties stmt-beg (cdr bounds)))
          (point-offset (- (point) stmt-beg))
-         (masked (clutch-db-sql-mask-literal-or-comment text))
+         (masked (clutch-db-sql-mask-literal-or-comment
+                  text (clutch-db-connection-sql-dialect clutch-connection)))
          (inner (clutch--union-branch-range text point-offset))
          (outer (clutch--toplevel-union-branch-range text point-offset)))
     (or (clutch--find-alias-in-range text masked alias stmt-beg
@@ -475,7 +477,8 @@ not treat schema qualifiers in `schema.table' as aliases."
   (when-let* ((hit (clutch--xref-symbol-at-point)))
     (pcase-let* ((`(,stmt-beg . ,stmt-end) (clutch--statement-bounds))
                  (text (buffer-substring-no-properties stmt-beg stmt-end))
-                 (masked (clutch-db-sql-mask-literal-or-comment text))
+                 (masked (clutch-db-sql-mask-literal-or-comment
+                          text (clutch-db-connection-sql-dialect clutch-connection)))
                  (target (- (car hit) stmt-beg))
                  (case-fold-search t)
                  (pos 0))
