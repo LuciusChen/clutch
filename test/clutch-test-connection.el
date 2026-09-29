@@ -30,17 +30,9 @@
 
 ;;;; Connection — build, timeout, and lifecycle
 
-(ert-deftest clutch-test-backend-key-from-conn-returns-nil-for-opaque-connections ()
+(ert-deftest clutch-test-backend-key-returns-nil-for-opaque-connections ()
   "Backend key detection should tolerate opaque connections."
-  (should-not (clutch--backend-key-from-conn 'fake-conn)))
-
-(ert-deftest clutch-test-backend-key-from-conn-propagates-backend-errors ()
-  "Backend key detection should expose invalid backend state."
-  (cl-letf (((symbol-function 'clutch-db-backend-key)
-             (lambda (_conn)
-               (signal 'clutch-db-error '("backend key boom")))))
-    (should-error (clutch--backend-key-from-conn 'broken-conn)
-                  :type 'clutch-db-error)))
+  (should-not (clutch-db-backend-key 'fake-conn)))
 
 (ert-deftest clutch-test-backend-key-from-params-prefers-concrete-backend ()
   "Concrete :backend should win over generic JDBC :driver metadata."
@@ -94,12 +86,12 @@
                           ,remote ,expected-key ,expected-display)
                  case))
       (ert-info ((symbol-name label))
-        (let ((clutch--connection-remote-params-cache
+        (let ((clutch--connection-transport-cache
                (make-hash-table :test 'eq))
               (conn 'fake-conn))
           (when remote
-            (puthash conn remote clutch--connection-remote-params-cache))
-          (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+            (puthash conn remote clutch--connection-transport-cache))
+          (cl-letf (((symbol-function 'clutch-db-backend-key)
                      (lambda (_conn) backend))
                     ((symbol-function 'clutch-db-user)
                      (lambda (_conn) user))
@@ -239,8 +231,7 @@ them would fail the plist-member assertions rather than coincide."
                             :database "app"
                             :ssh-host "bastion-prod"))))
     (ert-info ((format "SSH endpoint rewrite: %s" (plist-get case :label)))
-      (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
-            (clutch--connection-transport-cache (make-hash-table :test 'eq))
+      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
             (input (plist-get case :params))
             captured)
         (cl-letf (((symbol-function 'clutch--resolve-password)
@@ -271,7 +262,7 @@ them would fail the plist-member assertions rather than coincide."
             (should (= (plist-get captured :port) (plist-get case :local-port)))
             (should-not (plist-member captured :ssh-host))
             (should (equal (plist-get
-                            (gethash conn clutch--connection-remote-params-cache)
+                            (gethash conn clutch--connection-transport-cache)
                             :host)
                            (plist-get input :host)))
             (should (equal (plist-get
@@ -301,8 +292,7 @@ them would fail the plist-member assertions rather than coincide."
                             :database "app"
                             :tramp-default-directory "/ssh:devbox:/workspace/"))))
     (ert-info ((format "TRAMP endpoint rewrite: %s" (plist-get case :label)))
-      (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
-            (clutch--connection-transport-cache (make-hash-table :test 'eq))
+      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
             (input (plist-get case :params))
             captured)
         (cl-letf (((symbol-function 'clutch--resolve-password)
@@ -334,11 +324,11 @@ them would fail the plist-member assertions rather than coincide."
             (should (= (plist-get captured :port) (plist-get case :local-port)))
             (should-not (plist-member captured :tramp-default-directory))
             (should (equal (plist-get
-                            (gethash conn clutch--connection-remote-params-cache)
+                            (gethash conn clutch--connection-transport-cache)
                             :host)
                            (plist-get input :host)))
             (should (equal (plist-get
-                            (gethash conn clutch--connection-remote-params-cache)
+                            (gethash conn clutch--connection-transport-cache)
                             :tramp-default-directory)
                            "/ssh:devbox:/workspace/"))
             (should (eq (plist-get
@@ -1975,7 +1965,7 @@ replacement connection would run the statement against an empty transaction."
                        #'ignore)
                       ((symbol-function 'clutch--clear-connection-problem-capture)
                        #'ignore)
-                      ((symbol-function 'clutch--clear-reconnect-metadata-caches)
+                      ((symbol-function 'clutch--clear-connection-metadata-caches)
                        #'ignore)
                       ((symbol-function 'clutch--rebind-connection-buffers)
                        #'ignore)
@@ -2012,7 +2002,7 @@ replacement connection would run the statement against an empty transaction."
                 ((symbol-function 'clutch--release-connection-transport) #'ignore)
                 ((symbol-function 'clutch--clear-connection-problem-capture)
                  #'ignore)
-                ((symbol-function 'clutch--clear-reconnect-metadata-caches)
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
                  #'ignore)
                 ((symbol-function 'clutch--rebind-connection-buffers)
                  (lambda (old-conn new-conn _params product)
@@ -2196,7 +2186,7 @@ replacement connection would run the statement against an empty transaction."
             (view (generate-new-buffer " *clutch-shortcuts-view*")))
         (unwind-protect
             (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                       (lambda (_conn) t)))
+                       (lambda (conn) (eq conn 'fake-conn))))
               (with-current-buffer view
                 (funcall mode)
                 (clutch--bind-connection-context
@@ -2222,7 +2212,7 @@ replacement connection would run the statement against an empty transaction."
     (with-temp-buffer
       (clutch-result-mode)
       (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                 (lambda (_conn) t))
+                 (lambda (conn) (eq conn 'fake-conn)))
                 ((symbol-function 'clutch--connection-alive-p)
                  (lambda (_conn) t))
                 ((symbol-function 'clutch--confirm-session-close)
@@ -2570,7 +2560,7 @@ replacement connection would run the statement against an empty transaction."
   "MongoDB SQL Interface object browsing should insert SELECT SQL."
   (require 'clutch-db-jdbc)
   (let ((conn (make-clutch-jdbc-conn :params '(:driver mongodb))))
-    (cl-letf (((symbol-function 'clutch--backend-key-from-conn)
+    (cl-letf (((symbol-function 'clutch-db-backend-key)
                (lambda (_conn) 'mongodb))
               ((symbol-function 'clutch-db-object-browse-query)
                (lambda (&rest _args) nil))
@@ -2653,8 +2643,7 @@ replacement connection would run the statement against an empty transaction."
 
 (ert-deftest clutch-test-do-disconnect-stops-ssh-tunnel ()
   "Disconnect should stop any SSH tunnel associated with the connection."
-  (let ((clutch--connection-remote-params-cache (make-hash-table :test 'eq))
-        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+  (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
         disconnected
         stopped)
     (puthash 'fake-conn '(:kind ssh :process fake-proc) clutch--connection-transport-cache)
@@ -2867,8 +2856,7 @@ replacement connection would run the statement against an empty transaction."
           prime-called
           status-before-prime)
       (puthash old-conn '(:state refreshing) clutch--schema-status-cache)
-      (puthash new-conn '(:state refreshing) clutch--schema-status-cache)
-      (puthash new-conn 7 clutch--schema-refresh-tickets)
+      (puthash old-conn 7 clutch--schema-refresh-tickets)
       (puthash other-conn '(:state ready) clutch--schema-status-cache)
       (unwind-protect
           (with-temp-buffer
@@ -2893,10 +2881,10 @@ replacement connection would run the statement against an empty transaction."
                        (lambda (conn &optional _params _product)
                          (setq-local clutch-connection conn)))
                       ((symbol-function 'clutch--prime-schema-cache)
-                       (lambda (conn)
+                       (lambda (_conn)
                          (setq prime-called t)
                          (setq status-before-prime
-                               (gethash conn clutch--schema-status-cache))))
+                               (gethash old-conn clutch--schema-status-cache))))
                       ((symbol-function 'clutch--update-mode-line) #'ignore)
                       ((symbol-function 'clutch--connection-key)
                        (lambda (_conn) "test")))
@@ -2906,7 +2894,7 @@ replacement connection would run the statement against an empty transaction."
               (should prime-called)
               (should-not status-before-prime)
               (should-not (gethash old-conn clutch--schema-status-cache))
-              (should-not (gethash new-conn clutch--schema-refresh-tickets))
+              (should-not (gethash old-conn clutch--schema-refresh-tickets))
               (should (equal (gethash other-conn clutch--schema-status-cache)
                              '(:state ready)))))
         (when (buffer-live-p result)
@@ -3199,7 +3187,7 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                    ((symbol-function 'clutch--connection-alive-p)
                     (lambda (conn)
                       (eq conn clutch-test--conn)))
-                   ((symbol-function 'clutch--clear-reconnect-metadata-caches)
+                   ((symbol-function 'clutch--clear-connection-metadata-caches)
                     #'ignore)
                    ((symbol-function 'clutch--activate-current-buffer-connection)
                     (lambda (conn conn-params product)
@@ -4012,7 +4000,7 @@ them in place."
                 ((symbol-function 'clutch--build-conn) (lambda (_params) 'new-conn))
                 ((symbol-function 'clutch--connection-alive-p)
                  (lambda (conn) (eq conn 'new-conn)))
-                ((symbol-function 'clutch--clear-reconnect-metadata-caches) #'ignore)
+                ((symbol-function 'clutch--clear-connection-metadata-caches) #'ignore)
                 ((symbol-function 'clutch--bind-connection-context)
                  (lambda (conn &rest _) (setq-local clutch-connection conn)))
                 ((symbol-function 'clutch--prime-schema-cache)
