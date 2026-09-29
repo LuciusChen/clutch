@@ -187,26 +187,24 @@ missing table metadata."
 
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND."
-  (when conn
-    (dolist (buf (buffer-list))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (and (derived-mode-p 'clutch-result-mode)
-                     (eq clutch-connection conn)
-                     clutch--result-columns
-                     (equal clutch--result-source-table table))
-            (pcase kind
-              ('column-details
-               (setq-local clutch--result-column-details
-                           (clutch--result-column-details
-                            clutch-connection table clutch--result-columns))
-               (when clutch--pending-inserts
-                 (clutch--refresh-display)))
-              ('foreign-keys
-               (setq-local clutch--fk-info
-                           (clutch--foreign-key-column-info
-                            clutch-connection table clutch--result-columns))
-               (clutch--refresh-display)))))))))
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'clutch-result-mode)
+                 (eq clutch-connection conn)
+                 clutch--result-columns
+                 (equal clutch--result-source-table table))
+        (pcase kind
+          ('column-details
+           (setq-local clutch--result-column-details
+                       (clutch--result-column-details
+                        clutch-connection table clutch--result-columns))
+           (when clutch--pending-inserts
+             (clutch--refresh-display)))
+          ('foreign-keys
+           (setq-local clutch--fk-info
+                       (clutch--foreign-key-column-info
+                        clutch-connection table clutch--result-columns))
+           (clutch--refresh-display)))))))
 
 (add-hook 'clutch--table-metadata-updated-hook
           #'clutch--handle-table-metadata-updated)
@@ -240,13 +238,11 @@ Uses the full connection key so each console gets its own result buffer."
 
 (defun clutch-result--server-pageable-p ()
   "Return non-nil when server-side page navigation is safe here."
-  (and (local-variable-p 'clutch--result-server-pageable (current-buffer))
-       clutch--result-server-pageable))
+  clutch--result-server-pageable)
 
 (defun clutch-result--server-rewritable-p ()
   "Return non-nil when server-side sort/filter/count rewrites are safe here."
-  (and (local-variable-p 'clutch--result-server-rewritable (current-buffer))
-       clutch--result-server-rewritable))
+  clutch--result-server-rewritable)
 
 (defconst clutch-result--action-requirements
   '((sql-mutation . (:surface sql))
@@ -461,21 +457,19 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
     column-names))
 
 (cl-defun clutch-result--init-state
-    (conn sql columns rows elapsed
-          &key row-identity-prep page-offset page-has-more
-          server-pageable server-rewritable source-table)
+    (sql columns rows elapsed
+         &key row-identity-prep page-offset page-has-more
+         server-pageable server-rewritable source-table)
   "Initialize buffer-local state for a fresh query result.
-CONN is the connection, SQL the original query, COLUMNS and ROWS
-the result data, ELAPSED the query time.  ROW-IDENTITY-PREP describes any
-hidden row identity columns in COLUMNS.  PAGE-OFFSET is the zero-based row
-offset for ROWS, and PAGE-HAS-MORE records one-row lookahead.
+SQL is the original query, COLUMNS and ROWS the result data, ELAPSED the
+query time.  ROW-IDENTITY-PREP describes any hidden row identity columns in
+COLUMNS.  PAGE-OFFSET is the zero-based row offset for ROWS, and
+PAGE-HAS-MORE records one-row lookahead.
 SERVER-PAGEABLE, SERVER-REWRITABLE, and SOURCE-TABLE describe whether clutch
 may treat the result as a re-executable relation source.
 Returns column names."
-  (clutch-result--reset-state)
   (setq-local clutch--last-query sql
               clutch--base-query sql
-              clutch-connection conn
               clutch--result-source-table source-table
               clutch--result-server-pageable server-pageable
               clutch--result-server-rewritable server-rewritable
@@ -527,7 +521,7 @@ are produced by the query execution layer."
       (clutch--bind-connection-context connection params product)
       (setq col-names
             (clutch-result--init-state
-             connection sql raw-columns rows elapsed
+             sql raw-columns rows elapsed
              :row-identity-prep row-identity-prep
              :page-offset 0
              :page-has-more has-more
@@ -613,71 +607,11 @@ PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination."
                  (clutch--message-count (length rows))
                  (if (= (length rows) 1) "" "s"))))))
 
-(defun clutch-result--execute-page-at-offset (page-offset &optional page-num)
-  "Execute result page for PAGE-OFFSET as its first row offset.
-PAGE-NUM records the logical page index for navigation when provided."
-  (clutch-result--execute-page
-   (or page-num
-       (if (> clutch-result-max-rows 0)
-           (floor (max 0 page-offset) clutch-result-max-rows)
-         0))
-   page-offset))
-
-(defun clutch-result--reset-state (&optional dml)
-  "Clear result-buffer state before rendering a fresh result.
-When DML is non-nil, mark the buffer as a non-tabular result."
-  (setq-local clutch--dml-result dml
-              clutch--base-query nil
-              clutch--result-source-table nil
-              clutch--result-server-pageable nil
-              clutch--result-server-rewritable nil
-              clutch--column-widths nil
-              clutch--column-pixel-widths nil
-              clutch--column-pixel-metric nil
-              clutch--column-pixel-logical-widths nil
-              clutch--cell-render-cache nil
-              clutch--cell-render-cache-signature nil
-              clutch--char-pixel-width-cache nil
-              clutch--char-pixel-width-cache-signature nil
-              clutch--result-columns nil
-              clutch--result-column-defs nil
-              clutch--result-rows nil
-              clutch--result-column-details nil
-              clutch--row-identity nil
-              clutch--row-identity-status nil
-              clutch--row-identity-error-message nil
-              clutch--sort-column nil
-              clutch--sort-descending nil
-              clutch--order-by nil
-              clutch--local-sort-original-rows nil
-              clutch--local-sort-column-index nil
-              clutch--page-current 0
-              clutch--page-offset nil
-              clutch--page-has-more nil
-              clutch--page-total-rows nil
-              clutch--query-elapsed nil
-              clutch--filter-pattern nil
-              clutch--filtered-rows nil
-              clutch--where-filter nil
-              clutch--aggregate-summary nil
-              clutch--last-cell-position nil
-              clutch--header-active-col nil
-              clutch--header-line-string nil
-              clutch--header-line-crop-cache nil
-              clutch--footer-base-string nil
-              clutch--footer-display-cache nil
-              clutch--footer-timing-cache nil
-              clutch--footer-cursor-cache nil
-              clutch--footer-filters-cache nil)
-  (clutch-result--clear-staged-state)
-  (setq header-line-format nil)
-  (kill-local-variable 'mode-line-format))
-
 (defun clutch-result--display-dml (result sql elapsed)
   "Render a DML RESULT (INSERT/UPDATE/DELETE) with SQL and ELAPSED time."
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (clutch-result--reset-state t)
+    (setq-local clutch--dml-result t)
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))
     (insert (format "Affected rows: %s\n"
@@ -703,22 +637,22 @@ is an optional actionable hint."
          (buf (get-buffer-create buf-name))
          (params clutch--connection-params)
          (product clutch--conn-sql-product)
-         (summary (string-trim (or summary "")))
-         (message (string-trim (or message "")))
+         (summary (string-trim summary))
+         (message (string-trim message))
          (hint (string-trim (or hint "")))
          (headline (cond
                     ((not (string-empty-p summary)) summary)
                     ((not (string-empty-p message)) message)
                     (t "SQL execution failed")))
-         (sql (string-trim (or sql ""))))
+         (sql (string-trim sql)))
     (with-current-buffer buf
       (clutch-result-mode)
       (clutch--bind-connection-context connection params product)
       (setq-local clutch--last-query sql)
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (clutch-result--reset-state t)
-        (setq-local truncate-lines nil
+        (setq-local clutch--dml-result t
+                    truncate-lines nil
                     word-wrap t)
         (insert (propertize headline 'face 'clutch-error-summary-face)
                 "\n")
@@ -1070,12 +1004,12 @@ Triggers a COUNT(*) query if total rows are not yet known."
            (last-page (max 0 (1- (ceiling clutch--page-total-rows
                                            (float page-size)))))
            (last-offset (max 0 (- clutch--page-total-rows page-size))))
-      (if (and (= clutch--page-current (truncate last-page))
+      (if (and (= clutch--page-current last-page)
                (= (or clutch--page-offset
                       (* clutch--page-current page-size))
                   last-offset))
           (user-error "Already on last page")
-        (clutch-result--execute-page-at-offset last-offset (truncate last-page))))))
+        (clutch-result--execute-page last-page last-offset)))))
 
 ;;;###autoload
 (defun clutch-result-count-total ()
@@ -1398,16 +1332,15 @@ The cycle is unsorted, ascending, descending, then unsorted again."
 
 ;;;; WHERE filtering
 
-(defun clutch--where-filter-column-expression (column condition &optional conn)
+(defun clutch--where-filter-column-expression (column condition conn)
   "Return a WHERE fragment for COLUMN and user-entered CONDITION.
-When CONN is non-nil, escape COLUMN using the backend identifier rules."
+Escape COLUMN using the backend identifier rules of CONN."
   (let ((expr (if (string-match-p
                   "\\`\\(?:[=<>!]\\|IN\\b\\|IS\\b\\|NOT\\b\\|LIKE\\b\\|BETWEEN\\b\\)"
                   (upcase condition))
                   condition
                 (concat "= " condition))))
-    (format "%s %s" (if conn (clutch-db-escape-identifier conn column) column)
-            expr)))
+    (format "%s %s" (clutch-db-escape-identifier conn column) expr)))
 
 (defun clutch-result--filter-transient-description (label value)
   "Return a transient filter description for LABEL and current VALUE."
@@ -1431,7 +1364,7 @@ When CONN is non-nil, escape COLUMN using the backend identifier rules."
   (clutch-result--filter-transient-description
    "WHERE filter" clutch--where-filter))
 
-(defun clutch--read-where-filter (current columns default-col &optional conn)
+(defun clutch--read-where-filter (current columns default-col conn)
   "Read a WHERE filter string from CURRENT state, COLUMNS, and DEFAULT-COL.
 CONN supplies identifier escaping for picker-built column filters.  Raw WHERE
 input is passed through unchanged."
@@ -1780,16 +1713,10 @@ header from tabular formats."
     ('update
      (clutch-result--require-action 'copy-update "Copy UPDATE SQL")
      (clutch-result--copy-rows 'update rect))
-    ('document-insert-one
-     (clutch-result--copy-rows 'document-insert-one rect))
-    ('document-insert-many
-     (clutch-result--copy-rows 'document-insert-many rect))
-    ('document-replace-one
-     (clutch-result--copy-rows 'document-replace-one rect))
-    ('document-delete-one
-     (clutch-result--copy-rows 'document-delete-one rect))
-    ('document-update-one-set
-     (clutch-result--copy-rows 'document-update-one-set rect))
+    ((or 'document-insert-one 'document-insert-many
+         'document-replace-one 'document-delete-one
+         'document-update-one-set)
+     (clutch-result--copy-rows format rect))
     (_
      (user-error "Unsupported copy format: %s" format))))
 
@@ -2103,8 +2030,9 @@ latest matching result buffer; it does not execute the SQL being copied."
 
 ;;;; Cell and region selection
 
-(defun clutch-result--region-rectangle-bounds ()
-  "Return active region bounds as (ROW-INDICES . COL-INDICES)."
+(defun clutch-result--region-rectangle-indices ()
+  "Return rectangle row/column indices from active region.
+Result is a cons cell (ROW-INDICES . COL-INDICES)."
   (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch--cell-at-or-near
                                      (region-beginning))
                                     (user-error "No cell at region start")))
@@ -2118,27 +2046,16 @@ latest matching result buffer; it does not execute the SQL being copied."
     (cons (cl-loop for ridx from row-min to row-max collect ridx)
           (cl-loop for cidx from col-min to col-max collect cidx))))
 
-(defun clutch-result--region-rectangle-indices ()
-  "Return rectangle row/column indices from active region.
+(defun clutch-result--selection-rect ()
+  "Return the active region or else the current cell as a rectangle.
 Result is a cons cell (ROW-INDICES . COL-INDICES)."
-  (unless (use-region-p)
-    (user-error "Set a region to select rows and columns"))
-  (clutch-result--region-rectangle-bounds))
+  (if (use-region-p)
+      (clutch-result--region-rectangle-indices)
+    (pcase-let ((`(,ridx ,cidx ,_val) (or (clutch--cell-at-point)
+                                          (user-error "No cell at point"))))
+      (cons (list ridx) (list cidx)))))
 
 ;;;; Aggregate values
-
-(defun clutch-result--aggregate-target ()
-  "Return aggregate target as (ROW-INDICES COL-INDICES).
-With region: use all selected columns.  Without region: use current cell."
-  (if (use-region-p)
-      (pcase-let* ((`(,row-indices . ,col-indices)
-                    (clutch-result--region-rectangle-indices)))
-        (unless col-indices
-          (user-error "No columns selected for aggregate"))
-        (list row-indices col-indices))
-    (pcase-let* ((`(,ridx ,cidx ,_val) (or (clutch--cell-at-point)
-                                           (user-error "No cell at point"))))
-      (list (list ridx) (list cidx)))))
 
 (defun clutch-result--parse-number (val)
   "Parse VAL into a number or return nil."
@@ -2205,16 +2122,7 @@ With region: use all selected columns.  Without region: use current cell."
                           (plist-get stats :rows)
                           (plist-get stats :cells)
                           (plist-get stats :skipped)))))
-    (setq-local clutch--aggregate-summary
-                (list :label label
-                      :rows (plist-get stats :rows)
-                      :cells (plist-get stats :cells)
-                      :skipped (plist-get stats :skipped)
-                      :sum (plist-get stats :sum)
-                      :avg (plist-get stats :avg)
-                      :min (plist-get stats :min)
-                      :max (plist-get stats :max)
-                      :count (plist-get stats :count)))
+    (setq-local clutch--aggregate-summary (append (list :label label) stats))
     (clutch--refresh-footer-line)
     (kill-new summary)))
 
@@ -2227,9 +2135,7 @@ With prefix arg REFINE and an active region, enter visual refine mode."
       (clutch-result--start-refine
        (clutch-result--region-rectangle-indices)
        #'clutch-result--do-aggregate)
-    (pcase-let* ((`(,row-indices ,col-indices)
-                  (clutch-result--aggregate-target)))
-      (clutch-result--do-aggregate (cons row-indices col-indices)))))
+    (clutch-result--do-aggregate (clutch-result--selection-rect))))
 
 ;;;; Value viewers
 
@@ -2317,12 +2223,7 @@ When QUIET is non-nil, suppress informational fallback messages."
                       (string-bytes val)))
   ;; Force fontification so XML is highlighted immediately in popup buffers.
   (font-lock-ensure (point-min) (point-max))
-  (when (fboundp 'jit-lock-fontify-now)
-    (jit-lock-fontify-now (point-min) (point-max))))
-
-(defun clutch--setup-plain-view-buffer ()
-  "Enable plain text view mode for the current buffer."
-  (special-mode))
+  (jit-lock-fontify-now (point-min) (point-max)))
 
 (defun clutch--blob-bytes (val)
   "Return a unibyte string for blob-like VAL."
@@ -2378,9 +2279,8 @@ When QUIET is non-nil, suppress informational fallback messages."
     (concat
      (format "BLOB size: %d bytes\n\n" size)
      (if text-like
-         (let ((preview (condition-case nil
-                            (decode-coding-string (substring bytes 0 shown) 'utf-8 t)
-                          (error ""))))
+         (let ((preview (decode-coding-string (substring bytes 0 shown)
+                                              'utf-8 t)))
            (concat "Text preview:\n"
                    (if (string-empty-p preview) "<empty>" preview)))
        (concat "Hex preview:\n"
@@ -2414,7 +2314,7 @@ When QUIET is non-nil, suppress nonessential viewer messages."
           (clutch-db-value-preview-p val))
       (list :kind "Value"
             :content (clutch--view-format-value val)
-            :setup #'clutch--setup-plain-view-buffer))
+            :setup #'special-mode))
      ((or (eq cat 'json)
           (clutch--json-view-string-p val))
       (list :kind "JSON"
@@ -2428,11 +2328,11 @@ When QUIET is non-nil, suppress nonessential viewer messages."
      ((eq cat 'blob)
       (list :kind "BLOB"
             :content (clutch--blob-view-string val)
-            :setup #'clutch--setup-plain-view-buffer))
+            :setup #'special-mode))
      (t
       (list :kind "Value"
             :content (clutch--view-format-value val)
-            :setup #'clutch--setup-plain-view-buffer)))))
+            :setup #'special-mode)))))
 
 (defun clutch--dispatch-view (val col-def)
   "Open the appropriate viewer for VAL given column metadata COL-DEF.
@@ -2448,7 +2348,7 @@ blob type with non-text value → binary string; otherwise plain text."
                               ("Value" . "*clutch-value*"))))))
     (when (and (string= kind "JSON") (string-empty-p content))
       (user-error "No JSON value at point"))
-    (clutch--view-in-buffer content (or buffer-name "*clutch-value*") setup)))
+    (clutch--view-in-buffer content buffer-name setup)))
 
 (defun clutch--cell-preview-context ()
   "Return the cell preview context at point, or nil."
@@ -3017,23 +2917,6 @@ OP is a short operation description used in user-facing error messages."
         (clutch-result--action-supported-p action)
       t)))
 
-(defun clutch-result--copy-selection-indices (&optional rect)
-  "Return row and column indices for result copy commands.
-RECT, when non-nil, has priority.  Otherwise active regions are treated as a
-rectangle and inactive regions fall back to the current cell."
-  (let ((rect (or rect
-                  (if (use-region-p)
-                      (clutch-result--region-rectangle-indices)
-                    (pcase-let ((`(,ridx ,cidx ,_v)
-                                 (or (clutch--cell-at-point)
-                                     (user-error "No cell at point"))))
-                      (cons (list ridx) (list cidx)))))))
-    (cons (or (car-safe rect)
-              (clutch--selected-row-indices)
-              (user-error "No row at point"))
-          (or (cdr-safe rect)
-              (clutch--visible-columns)))))
-
 (defun clutch-result--copy-lines (kind rows col-indices &optional omit-header)
   "Return copy output lines for KIND using ROWS and COL-INDICES.
 When OMIT-HEADER is non-nil, omit headers from tabular formats."
@@ -3055,12 +2938,8 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
            ((or 'document-insert-one 'document-insert-many
                 'document-replace-one 'document-delete-one
                 'document-update-one-set)
-            (let* ((action (pcase kind
-                             ('document-insert-one 'insert-one)
-                             ('document-insert-many 'insert-many)
-                             ('document-replace-one 'replace-one)
-                             ('document-delete-one 'delete-one)
-                             ('document-update-one-set 'update-one-set)))
+            (let* ((action (plist-get (clutch-result--action-requirement kind)
+                                      :mutation))
                    (op (format "copy %s" kind))
                    (collection (clutch-result--document-source-collection op))
                    (documents (clutch-result--document-source-documents rows op))
@@ -3068,9 +2947,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
                              (clutch--column-names-for-indices col-indices))))
               (clutch-result--require-action kind op)
               (clutch-db-document-mutation-snippets
-               clutch-connection action collection documents fields)))
-           (_
-            (user-error "Unsupported copy format: %s" kind)))))
+               clutch-connection action collection documents fields))))))
     (if omit-header
         (pcase kind
           ((or 'tsv 'csv) (cdr lines))
@@ -3081,7 +2958,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
 (defun clutch-result--copy-rows (kind &optional rect omit-header)
   "Copy selected rows as KIND using optional RECT.
 When OMIT-HEADER is non-nil, omit headers from tabular formats."
-  (let* ((selection (clutch-result--copy-selection-indices rect))
+  (let* ((selection (or rect (clutch-result--selection-rect)))
          (indices (car selection))
          (col-indices (cdr selection))
          (rows (clutch-result--rows-for-display-indices indices))
@@ -3290,19 +3167,16 @@ When OMIT-HEADER is non-nil, omit the column header."
 When OMIT-HEADER is non-nil, omit the column header."
   (clutch--export-delimited-content rows ?\t omit-header))
 
-(defun clutch--delimited-export-coding-choices ()
-  "Return alist of delimited export coding labels to coding systems."
-  (let ((pairs '(("utf-8-bom" . utf-8-with-signature)
-                 ("utf-8" . utf-8)
-                 ("gbk" . gbk)
-                 ("cp936" . cp936))))
-    (cl-loop for (label . coding) in pairs
-             when (coding-system-p coding)
-             collect (cons label coding))))
+(defconst clutch--delimited-export-coding-choices
+  '(("utf-8-bom" . utf-8-with-signature)
+    ("utf-8" . utf-8)
+    ("gbk" . gbk)
+    ("cp936" . cp936))
+  "Alist of delimited export coding labels to coding systems.")
 
 (defun clutch--read-delimited-export-coding-system (kind)
   "Read coding system for delimited file export of KIND."
-  (let* ((choices (clutch--delimited-export-coding-choices))
+  (let* ((choices clutch--delimited-export-coding-choices)
          (default (if (coding-system-p clutch-csv-export-default-coding-system)
                       clutch-csv-export-default-coding-system
                     'utf-8-with-signature))
@@ -3451,8 +3325,7 @@ Return the exported row count."
 (defun clutch--export-result (kind destination &optional omit-header)
   "Export result rows as KIND to DESTINATION.
 When OMIT-HEADER is non-nil, omit headers from delimited formats."
-  (let* ((spec (or (cdr (assq kind clutch--result-export-kinds))
-                   (user-error "Unsupported export kind: %s" kind)))
+  (let* ((spec (cdr (assq kind clutch--result-export-kinds)))
          (content (plist-get spec :content)))
     (pcase destination
       ('clipboard
@@ -3472,9 +3345,7 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
                           kind spec path :coding coding :omit-header omit-header)))
          (apply #'message (plist-get spec :file-message)
                 (append (list row-count (if (= row-count 1) "" "s") path)
-                        (when coding (list coding))))))
-      (_
-       (user-error "Unsupported export destination: %s" destination)))))
+                        (when coding (list coding)))))))))
 
 ;;;; Column navigation and metadata
 

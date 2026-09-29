@@ -2139,20 +2139,35 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
       (when (buffer-live-p other)
         (kill-buffer other)))))
 
-(ert-deftest clutch-test-init-result-state-clears-stale-result-flags ()
-  "Result initialization should not keep stale source or DML metadata."
-  (with-temp-buffer
-    (setq-local clutch--result-source-table "users"
-                clutch--result-server-pageable t
-                clutch--result-server-rewritable t
-                clutch--dml-result t)
-    (clutch-result--init-state
-     'fake-conn "SELECT name FROM users"
-     '((:name "name" :type-category text)) '(("alice")) nil)
-    (should-not clutch--result-source-table)
-    (should-not clutch--result-server-pageable)
-    (should-not clutch--result-server-rewritable)
-    (should-not clutch--dml-result)))
+(ert-deftest clutch-test-display-select-clears-stale-result-state ()
+  "A fresh SELECT should not keep the previous result's state in its buffer."
+  (let ((result-name "*clutch-stale-result*")
+        (result (make-clutch-db-result
+                 :columns '((:name "name" :type-category text))
+                 :rows '(("alice")))))
+    (clutch-test--with-result-buffer (result-name)
+      (clutch-result--display-select
+       'fake-conn "SELECT name FROM orders" result 0
+       :server-pageable t
+       :result-context '(:server-rewritable t :source-table "orders"))
+      (with-current-buffer result-name
+        (should (equal clutch--result-source-table "orders"))
+        (should clutch--result-server-pageable)
+        (should clutch--result-server-rewritable)
+        (setq-local clutch--dml-result t
+                    clutch--where-filter "id > 10"
+                    header-line-format "stale"
+                    mode-line-format "stale"))
+      (clutch-result--display-select
+       'fake-conn "SELECT name FROM users" result 0)
+      (with-current-buffer result-name
+        (should-not clutch--result-source-table)
+        (should-not clutch--result-server-pageable)
+        (should-not clutch--result-server-rewritable)
+        (should-not clutch--dml-result)
+        (should-not clutch--where-filter)
+        (should-not header-line-format)
+        (should-not (local-variable-p 'mode-line-format))))))
 
 (ert-deftest clutch-test-result-source-table-uses-recorded-state ()
   "Result edit paths should use only recorded source table metadata."
@@ -2888,14 +2903,6 @@ header string and column pixel widths, then reused."
          (should (= 3 (length clutch--row-start-positions)))
          (should-not (string-match-p "No matches" (buffer-string))))))))
 
-(ert-deftest clutch-test-reset-result-state-clears-where-filter ()
-  "A fresh result should not inherit the previous query's WHERE filter."
-  (with-temp-buffer
-    (clutch-result-mode)
-    (setq-local clutch--where-filter "id > 10")
-    (clutch-result--reset-state)
-    (should-not clutch--where-filter)))
-
 (ert-deftest clutch-test-filter-apply-state ()
   "Client-side filtering should update display rows and pattern."
   (dolist (case
@@ -2962,7 +2969,7 @@ header string and column pixel widths, then reused."
                 clutch--where-filter nil)
     (let (seen)
       (cl-letf (((symbol-function 'clutch--read-where-filter)
-                 (lambda (_current columns default-col &optional _conn)
+                 (lambda (_current columns default-col _conn)
                    (setq seen (list columns default-col))
                    "id > 1"))
                 ((symbol-function 'clutch--execute) #'ignore))
@@ -6938,10 +6945,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                       clutch--page-total-rows total
                       clutch-result-max-rows page-size)
           (let (executed-page executed-offset)
-            (cl-letf (((symbol-function 'clutch-result--execute-page-at-offset)
-                       (lambda (offset page)
-                         (setq executed-offset offset
-                               executed-page page))))
+            (cl-letf (((symbol-function 'clutch-result--execute-page)
+                       (lambda (page &optional offset)
+                         (setq executed-page page
+                               executed-offset offset))))
               (if error-type
                   (should-error (clutch-result-last-page) :type error-type)
                 (clutch-result-last-page)
