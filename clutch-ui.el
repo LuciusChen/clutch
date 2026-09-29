@@ -25,8 +25,6 @@
   :type 'natnum
   :group 'clutch)
 
-(defvar clutch--executing-p)
-
 (defvar clutch--aggregate-summary)
 (defvar clutch--active-edit-cell)
 (defconst clutch--cell-generated-placeholder :clutch-generated-placeholder
@@ -75,8 +73,8 @@ Assembled from segment caches by `clutch--assemble-footer-display'.")
   "Semantic connection state rendered by this buffer's UI.
 The connection workflow supplies a plist containing only display inputs; it
 must not contain a connection object, params, callbacks, or rendered text.")
-(defvar-local clutch--execution-spinner-frame nil
-  "Current execution spinner frame supplied by the connection workflow.")
+(defvar-local clutch--execution-start-time nil
+  "Start time of the query running in this buffer, or nil when idle.")
 (defvar-local clutch--header-line-crop-cache nil
   "Header crop for the current offset and the inputs it was computed from.
 The value is (HSCROLL FONT-WIDTH HEADER PIXEL-WIDTHS . RESULT).  Redisplay
@@ -478,10 +476,16 @@ not enforce `min-width' consistently across supported Emacs versions."
     (clutch--plain-string-pixel-width string pixel-metric)))
 
 (defun clutch--format-elapsed (seconds)
-  "Format SECONDS as a human-readable duration."
-  (if (< seconds 1.0)
-      (format "%dms" (round (* seconds 1000)))
-    (format "%.3fs" seconds)))
+  "Format SECONDS as milliseconds, or seconds plus milliseconds."
+  (let ((ms (max 0 (round (* seconds 1000)))))
+    (if (< ms 1000)
+        (format "%dms" ms)
+      (format "%ds %03dms" (/ ms 1000) (% ms 1000)))))
+
+(defun clutch--execution-elapsed-seconds ()
+  "Return the running query's elapsed seconds to the tenth, or nil when idle."
+  (when clutch--execution-start-time
+    (/ (floor (* 10 (- (float-time) clutch--execution-start-time))) 10.0)))
 
 (defun clutch--transient-state-display (state choices)
   "Return a transient state display for STATE from CHOICES.
@@ -1801,12 +1805,12 @@ records one-row lookahead."
 
 (defun clutch--footer-timing-part ()
   "Return the dynamic footer timing segment for the current result buffer."
-  (let ((hi 'font-lock-keyword-face))
+  (let ((hi 'font-lock-keyword-face)
+        (running (clutch--execution-elapsed-seconds)))
     (when-let* ((payload (cond
-                          (clutch--executing-p
-                           (and clutch--execution-spinner-frame
-                                (propertize clutch--execution-spinner-frame
-                                            'face 'success)))
+                          (running
+                           (propertize (clutch--format-elapsed running)
+                                       'face 'success))
                           (clutch--query-elapsed
                            (propertize
                             (clutch--format-elapsed clutch--query-elapsed)

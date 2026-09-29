@@ -7361,8 +7361,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
          (source (generate-new-buffer " *clutch-result-workflow-source*"))
          (clutch-result-max-rows 2)
-         (clutch--spinner-timer nil)
-         (clutch--spinner-index 0)
+         (clutch--execution-refresh-timer nil)
          (kill-ring nil)
          (kill-ring-yank-pointer nil)
          result)
@@ -7449,14 +7448,14 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                "name\tscore\nthree\t30\nfour\t40\nfive\t50\n"))
                 (should-not
                  (string-match-p "one\\|two\\|clutch__rid\\|id\t" tsv))))))
-      (clutch--spinner-stop)
+      (clutch--execution-refresh-stop)
       (when (buffer-live-p result)
         (kill-buffer result))
       (when (buffer-live-p source)
         (kill-buffer source))
       (when (clutch-db-live-p conn)
         (clutch-db-disconnect conn))
-      (should-not clutch--spinner-timer))))
+      (should-not clutch--execution-refresh-timer))))
 
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
@@ -8668,17 +8667,17 @@ statement."
           (disconnected nil)
           confirmation-quit
           phase
-          spinner-started
+          refresh-started
           (clutch--tx-state-cache (make-hash-table :test 'eq))
           (clutch-connection 'fake-conn)
-          (clutch--executing-p nil))
+          (clutch--execution-start-time nil))
       (puthash clutch-connection 'dirty clutch--tx-state-cache)
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch--spinner-start)
-                 (lambda () (setq spinner-started t)))
+                ((symbol-function 'clutch--execution-refresh-start)
+                 (lambda () (setq refresh-started t)))
                 ((symbol-function 'clutch--update-mode-line)
-                 (lambda (&optional _spinner-only) nil))
+                 (lambda (&optional _execution-only) nil))
                 ((symbol-function 'clutch--confirm-query-execution)
                  (lambda (_sql)
                    (when (eq phase 'confirm) (signal 'quit nil))))
@@ -8686,7 +8685,7 @@ statement."
                  (lambda (&rest _args) t))
                 ((symbol-function 'clutch--prepare-row-identity-query)
                  (lambda (&rest _args)
-                   (should spinner-started)
+                   (should refresh-started)
                    (signal 'quit nil)))
                 ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
                 ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) nil))
@@ -8711,7 +8710,7 @@ statement."
         ;; Retirement keeps the dirty flag as lost-transaction evidence;
         ;; the next transaction command consumes it and refuses to run.
         (should (gethash 'fake-conn clutch--tx-state-cache))
-        (should-not clutch--executing-p)))))
+        (should-not clutch--execution-start-time)))))
 
 (ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
   "Quit should keep the session when a backend interrupt succeeds."
@@ -8722,11 +8721,11 @@ statement."
            (disconnected nil)
            (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch-connection conn)
-           (clutch--executing-p nil))
+           (clutch--execution-start-time nil))
       (cl-letf (((symbol-function 'clutch--ensure-connection) (lambda () t))
                 ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
                 ((symbol-function 'clutch--update-mode-line)
-                 (lambda (&optional _spinner-only) nil))
+                 (lambda (&optional _execution-only) nil))
                 ((symbol-function 'clutch--execute-statement)
                  (lambda (_sql connection &rest _args)
                    (clutch--handle-query-quit connection)))
@@ -8743,7 +8742,7 @@ statement."
         (should-not disconnected)
         (with-current-buffer buf
           (should (eq clutch-connection conn)))
-        (should-not clutch--executing-p)))))
+        (should-not clutch--execution-start-time)))))
 
 (ert-deftest clutch-test-execute-db-error-preserves-dead-reconnect-anchor ()
   "Query errors should retain a dead connection for the next reconnect."
@@ -8751,7 +8750,7 @@ statement."
     (let* ((conn 'fake-conn)
            (clutch-connection conn)
            (clutch--tx-state-cache (make-hash-table :test 'eq))
-           (clutch--executing-p nil)
+           (clutch--execution-start-time nil)
            (displayed-error nil)
            (error-context nil)
            (preserved nil)
@@ -8789,7 +8788,7 @@ statement."
                  (lambda (connection)
                    (setq details-cleared connection)))
                 ((symbol-function 'clutch--update-mode-line)
-                 (lambda (&optional _spinner-only)
+                 (lambda (&optional _execution-only)
                    (setq mode-line-updates (1+ mode-line-updates)))))
         (should-not (clutch--execute "SELECT SLEEP(60)" conn))
         (should (= executions 1))
@@ -8798,7 +8797,7 @@ statement."
         (should (eq clutch-connection conn))
         (should (eq preserved conn))
         (should (eq details-cleared conn))
-        (should-not clutch--executing-p)
+        (should-not clutch--execution-start-time)
         (should (> mode-line-updates 0))))))
 
 (ert-deftest clutch-test-dead-query-reconnects-on-next-command-without-replay ()
@@ -8864,7 +8863,7 @@ statement."
                       ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
                       ((symbol-function 'clutch--refresh-connection-render-state)
                        #'ignore)
-                      ((symbol-function 'clutch--spinner-start) #'ignore)
+                      ((symbol-function 'clutch--execution-refresh-start) #'ignore)
                       ((symbol-function 'clutch--update-mode-line) #'ignore)
                       ((symbol-function 'redisplay) #'ignore)
                       ((symbol-function 'clutch--connection-key)
