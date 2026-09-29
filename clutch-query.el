@@ -73,7 +73,7 @@ for these queries.  Other destructive SQL keeps its ordinary confirmation."
 
 (defvar-local clutch--executing-p nil
   "Non-nil while a query is executing in this buffer.
-Used to update the mode-line with a spinner during execution.")
+Used to update the mode-line with elapsed time during execution.")
 
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
@@ -1185,8 +1185,9 @@ as required after a preceding statement in the same batch."
            (,source-buffer (current-buffer)))
        (clutch--prepare-query-activity ,conn)
        (clutch-db-with-foreground-connection ,conn
-         (setq clutch--executing-p t)
-         (clutch--spinner-start)
+         (setq clutch--executing-p t
+               clutch--execution-start-time (float-time))
+         (clutch--execution-refresh-start)
          (clutch--update-mode-line)
          (redisplay t)
          (unwind-protect
@@ -1196,7 +1197,8 @@ as required after a preceding statement in the same batch."
              (select-window ,source-window))
            (when (buffer-live-p ,source-buffer)
              (set-buffer ,source-buffer))
-           (setq clutch--executing-p nil)
+           (setq clutch--executing-p nil
+                 clutch--execution-start-time nil)
            (clutch--update-mode-line))))))
 
 (defun clutch--present-statement-outcome (sql connection outcome)
