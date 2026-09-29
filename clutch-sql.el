@@ -365,8 +365,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
                          (string= (downcase normalized) (downcase alias)))
                 (setq alias-pos (+ stmt-beg (match-beginning 1))))))
           (when alias-pos
-            (throw 'found alias-pos))
-          (setq pos (max pos (if (match-end 0) (match-end 0) (1+ pos)))))))))
+            (throw 'found alias-pos)))))))
 
 (defun clutch--find-alias-definition-position (alias)
   "Return buffer position of ALIAS definition in the current statement.

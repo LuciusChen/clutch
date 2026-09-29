@@ -1806,6 +1806,15 @@ Structure is not interpreted here; callers confirm depth and literals through
                   :id "o"
                   :before "orders "
                   :char ?o)
+            (list :label "join alias after an unaliased table"
+                  :sql "SELECT o.total FROM users JOIN orders o ON o.uid = users.id"
+                  :needle "o.total"
+                  :schema 'fake-schema
+                  :aliases '(("o" . "orders"))
+                  :tables '("users" "orders")
+                  :id "o"
+                  :before "orders "
+                  :char ?o)
             (list :label "union branch with cache"
                   :sql "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a"
                   :pre-needle "UNION ALL\n"
