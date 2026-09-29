@@ -894,7 +894,8 @@ unique.  Arbitrary query results are displayed as result sets instead."
   "Return non-nil when EXPR is visibly true without row data."
   (cl-labels
       ((code (expr)
-         (string-trim (clutch-db-sql-mask-literal-or-comment expr)))
+         (string-trim (clutch-db-sql-mask-literal-or-comment
+                       expr (clutch--buffer-sql-dialect))))
        (strip-parens (expr)
          (let ((expr (code expr)))
            (while (and (> (length expr) 1)
