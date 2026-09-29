@@ -1322,7 +1322,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     "REPORTS" [7]
                     (list (cons 1 clutch--cell-default-placeholder)
                           (cons 2 "ready"))
-                    clutch--result-columns identity))
+                    identity))
                   (`(,delete-sql . ,_)
                    (clutch-result--build-delete-stmt-for-identity
                     "REPORTS" [7] identity)))
@@ -1353,7 +1353,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     "DOCUMENTS" ["AAAPr9AAEAAAACXAAA"]
                     '((0 . "{\"message\":\"中文\"}")
                       (1 . "1"))
-                    clutch--result-columns identity)))
+                    identity)))
         (should (equal (mapcar #'clutch-db-param-type params)
                        '("BLOB" "NUMBER" nil)))))))
 
@@ -1398,7 +1398,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                  '((:name "NAME" :backend-type "VARCHAR2")))))
       (pcase-let ((`(,sql . ,_)
                    (clutch-result--build-update-stmt
-                    "USERS" [7] '((0 . "Ada")) '("name") identity)))
+                    "USERS" [7] '((0 . "Ada")) identity)))
         (should (string-search "SET \"NAME\" = ?" sql))))))
 
 (ert-deftest clutch-test-update-uses-canonical-source-behind-alias ()
@@ -1415,7 +1415,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                  '((:name "name" :backend-type "text")))))
       (pcase-let ((`(,sql . ,_)
                    (clutch-result--build-update-stmt
-                    "users" [7] '((0 . "Ada")) '("display_name") identity)))
+                    "users" [7] '((0 . "Ada")) identity)))
         (should (string-search "SET \"name\" = ?" sql))
         (should-not (string-search "display_name" sql))
         (should-not (string-search "\"NAME\"" sql))))))
@@ -4197,7 +4197,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
       (pcase-let ((`(,nullable ,default ,show-null ,show-default) case))
         (setq-local clutch-result-edit--column-detail
                     (list :name "status" :nullable nullable :default default))
-        (let ((header (clutch-result-edit--header-line 0 "status")))
+        (let ((header (clutch-result-edit--header-line)))
           (should (equal (list (and (string-match-p "Set NULL" header) t)
                                (and (string-match-p "Set DEFAULT" header) t))
                          (list show-null show-default))))))
@@ -5284,8 +5284,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             ('edit
              (with-temp-buffer
                (clutch--result-edit-mode 1)
-               (setq-local clutch-result-edit--row-idx 0
-                           clutch-result-edit--column-name "payload"
+               (setq-local clutch-result-edit--column-name "payload"
                            clutch-result-edit--column-def
                            '(:name "payload" :type-category json)
                            clutch-result-edit--column-detail
@@ -5303,8 +5302,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-temp-buffer
     (insert "xx")
     (clutch--result-edit-mode 1)
-    (setq-local clutch-result-edit--row-idx 0
-                clutch-result-edit--column-name "impact_score"
+    (setq-local clutch-result-edit--column-name "impact_score"
                 clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
                 clutch-result-edit--column-detail '(:name "impact_score" :type "decimal(5,1)"))
     (clutch-result-edit--refresh-header-line)
@@ -8869,7 +8867,7 @@ statement."
                                  :result-query-p nil
                                  :source-buffer source))))
                       ((symbol-function 'clutch--show-execution-error)
-                       (lambda (&rest _args) '(:summary "socket lost")))
+                       (lambda (&rest _args) "socket lost"))
                       ((symbol-function 'clutch-result--display) #'ignore)
                       ((symbol-function 'clutch-db-clear-error-details) #'ignore)
                       ((symbol-function 'clutch--prime-schema-cache) #'ignore)

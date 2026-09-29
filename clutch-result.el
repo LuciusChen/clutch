@@ -2864,7 +2864,6 @@ OP is a short operation description used in user-facing error messages."
          (row-identity (clutch-result--row-identity-or-user-error table op))
          (set-col-indices (clutch-result--selected-update-col-indices
                            row-identity col-indices op))
-         (col-names clutch--result-columns)
          statements)
     (clutch-result--ensure-update-source-columns table set-col-indices op)
     (dolist (row rows)
@@ -2873,7 +2872,7 @@ OP is a short operation description used in user-facing error messages."
              (edits (cl-loop for cidx in set-col-indices
                              collect (cons cidx (nth cidx row)))))
         (push (clutch-result--build-update-stmt
-               table identity-vec edits col-names row-identity)
+               table identity-vec edits row-identity)
               statements)))
     (clutch-result--render-statements (nreverse statements))))
 
