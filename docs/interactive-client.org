@@ -472,6 +472,7 @@ Customize these through =M-x customize-group RET clutch RET=:
   - Until the statement finishes, its connection refuses commands that need it, such as another statement, paging, submitting edits or switching schema.
   - A batch from =clutch-execute-region= or =clutch-execute-buffer= runs one statement after another the same way.  Every risky statement in the batch is confirmed before the first one runs.
   - The client-side idle timeout does not apply.  On PostgreSQL and JDBC the database-side statement timeout (=clutch-query-timeout-seconds= or =:query-timeout=) still does, and JDBC drivers also enforce =:read-idle-timeout= as their network timeout; a MySQL statement runs until it finishes or =C-g= cancels it.  JDBC fetches the remaining rows of a result page synchronously once the statement has finished.
+  - Disconnecting a JDBC connection while its statement runs drops it in the agent at once instead of waiting for the statement, which then reports that its outcome is unknown.
 - Other statements block while they run; press =C-g= to interrupt.
   - On JDBC backends, clutch first sends a protocol-level =cancel= for the running statement.
   - On native MySQL, clutch opens a helper connection, issues =KILL QUERY= for the original connection id, drains the interrupted response, and keeps the same session usable.

@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Disconnecting a JDBC connection while its statement runs no longer waits up to five seconds behind the statement while the agent keeps the session; the agent drops the connection at once, and the statement reports that its outcome is unknown.
 - MongoDB null values no longer turn into empty arrays in insertOne, insertMany and replaceOne snippets, in JSON cell display, or in re-rendered helper commands.
 - JSON viewers, describe buffers and JSON sub-editors no longer fail with `void-function` in an Emacs built without tree-sitter; they fall back to `json-mode` or `js-mode`.
 - In MySQL buffers a backslash-escaped quote such as `'it\'s'` no longer hides the rest of the statement from table completion, alias lookup and the always-true `WHERE` check, which let `DELETE ... WHERE name = 'it\'s' OR 1 = 1` run without the high-risk confirmation.

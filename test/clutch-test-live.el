@@ -599,6 +599,34 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
       (clutch-db-query conn (format sleep-sql 0))
       (should (clutch-db-live-p conn)))))
 
+(ert-deftest clutch-test-live-disconnect-ends-running-statement ()
+  :tags '(:clutch-live)
+  "Disconnecting during a statement should return at once and end it once."
+  (unless (clutch-test-live-backend-capability-p :async-cancel)
+    (ert-skip (clutch-test-capability-skip-message :async-cancel)))
+  (clutch-test--with-conn conn
+    (let ((sleep-sql (plist-get (clutch-test-live-backend-descriptor)
+                                :sleep-sql))
+          (start (float-time))
+          shown)
+      (with-temp-buffer
+        (setq-local clutch-connection conn)
+        (cl-letf (((symbol-function 'clutch--show-execution-error)
+                   (lambda (_buffer _conn _sql err &rest _args)
+                     (push err shown)
+                     "failed"))
+                  ((symbol-function 'clutch--confirm-session-close) #'ignore))
+          (clutch--execute (format sleep-sql 30))
+          (should (gethash conn clutch--running-queries))
+          (clutch-disconnect)
+          (should (< (- (float-time) start) 3))
+          (clutch-test--await (lambda () shown))
+          (sleep-for 0.2)
+          (ert-run-idle-timers)
+          (should (= (length shown) 1))
+          (should (eq (caar shown) 'clutch-db-error))
+          (should-not (gethash conn clutch--running-queries)))))))
+
 (ert-deftest clutch-test-live-pg-ctid-edit-via-execute-select-persists ()
   :tags '(:clutch-live)
   "PostgreSQL no-key edit should work through SELECT row identity injection."
