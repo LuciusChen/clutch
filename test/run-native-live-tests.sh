@@ -340,8 +340,8 @@ wait_clickhouse() {
 pgsql_el_dir="${PGSQL_EL_DIR:-}"
 if [[ -z "$pgsql_el_dir" ]]; then
   for candidate in \
-    "$HOME/repos/pgsql.el" \
     "$repo/../pgsql.el" \
+    "$HOME/repos/pgsql.el" \
     "$HOME/.emacs.d/straight/repos/pgsql.el"; do
     if [[ -d "$candidate" ]]; then
       pgsql_el_dir="$candidate"
@@ -367,6 +367,16 @@ emacs_load_args=(
 if [[ -n "$pgsql_el_dir" ]]; then
   emacs_load_args+=(-L "$pgsql_el_dir")
 fi
+
+# Emacs searches -L directories in the order given.
+for ((i = 0; i < ${#emacs_load_args[@]}; i++)); do
+  if [[ "${emacs_load_args[i]}" == -L ]]; then
+    path="${emacs_load_args[i + 1]}"
+    if git -C "$path" rev-parse --show-toplevel >/dev/null 2>&1; then
+      printf 'Dependency: %s @ %s\n' "$path" "$(git -C "$path" rev-parse --short HEAD)"
+    fi
+  fi
+done
 
 prepare_jdbc_runtime() {
   if [[ -z "$jdbc_agent_dir" ]]; then
