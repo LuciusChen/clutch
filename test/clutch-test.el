@@ -2991,12 +2991,13 @@ header string and column pixel widths, then reused."
     (let (captured)
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _args) ""))
                 ((symbol-function 'clutch--execute)
-                 (lambda (sql conn &optional _result-context)
-                   (setq captured (list sql conn)))))
+                 (lambda (sql conn &optional result-context)
+                   (setq captured (list sql conn result-context)))))
         (clutch-result-apply-filter)
-        (should (equal captured '("SELECT * FROM t" fake-conn)))
-        (should-not clutch--where-filter)
-        (should-not clutch--base-query))))
+        ;; The cleared filter state is installed with the new result.
+        (should (equal captured
+                       '("SELECT * FROM t" fake-conn
+                         (:base-query nil :where-filter nil)))))))
   (with-temp-buffer
     (setq-local clutch--result-server-rewritable nil
                 clutch-connection 'fake-conn
