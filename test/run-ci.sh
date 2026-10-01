@@ -124,8 +124,12 @@ run_db_tests_matching() {
 run_byte_compile() {
   (
     cd "$repo"
+    status=0
     run_emacs --eval "(setq byte-compile-error-on-warn t)" \
-      -f batch-byte-compile clutch*.el
+      -f batch-byte-compile clutch*.el || status=$?
+    # A leftover .elc would shadow its edited source in later runs.
+    rm -f clutch*.elc
+    exit "$status"
   )
 }
 
