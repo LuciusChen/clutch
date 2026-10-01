@@ -461,7 +461,7 @@ Customize these through =M-x customize-group RET clutch RET=:
 
 - =clutch-connect-timeout-seconds= controls connect timeout (default: 10s).
 - =clutch-read-idle-timeout-seconds= controls query I/O idle timeout (default: 30s).
-- =clutch-query-timeout-seconds= controls database-side statement timeout for JDBC and native PostgreSQL queries (default: 30s).
+- =clutch-query-timeout-seconds= limits how long a statement may run on JDBC and native PostgreSQL connections (default: nil, no limit; a limit configured on the server still applies).
 - =clutch-jdbc-rpc-timeout-seconds= controls Emacs <-> JDBC agent RPC timeout (default: 30s).
 - MySQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
 - PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
@@ -471,7 +471,7 @@ Customize these through =M-x customize-group RET clutch RET=:
   - =C-g= in the console, REPL or result buffer cancels the running statement.  The marker turns into a red square until the server answers, and the statement then reports the server's verdict: the cancellation error, or its result if it finished first.  A second =C-g=, or =C-g= with nothing running, quits as usual.
   - Until the statement finishes, its connection refuses commands that need it, such as another statement, paging, submitting edits or switching schema.
   - A batch from =clutch-execute-region= or =clutch-execute-buffer= runs one statement after another the same way.  Every risky statement in the batch is confirmed before the first one runs.
-  - The client-side idle timeout does not apply.  On PostgreSQL and JDBC the database-side statement timeout (=clutch-query-timeout-seconds= or =:query-timeout=) still does, and JDBC drivers also enforce =:read-idle-timeout= as their network timeout; a MySQL statement runs until it finishes or =C-g= cancels it.  JDBC fetches the remaining rows of a result page synchronously once the statement has finished.
+  - The client-side idle timeout does not apply, and by default no statement timeout does either: a statement runs until it finishes or =C-g= cancels it, holding its connection, any locks it takes and, on JDBC, one of the agent's execution threads until then.  =clutch-query-timeout-seconds= or =:query-timeout= limits statements on PostgreSQL and JDBC, and a limit configured on the server still applies.  JDBC fetches the remaining rows of a result page synchronously once the statement has finished; that fetch, like paging and other requests Emacs waits for, stays within =clutch-jdbc-rpc-timeout-seconds=.
   - Disconnecting a JDBC connection while its statement runs drops it in the agent at once instead of waiting for the statement, which then reports that its outcome is unknown.
 - Other statements block while they run; press =C-g= to interrupt.
   - On JDBC backends, clutch first sends a protocol-level =cancel= for the running statement.
