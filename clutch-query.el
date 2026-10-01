@@ -1178,7 +1178,7 @@ already confirmed SQL."
   (clutch-result--check-pending-changes))
 
 (defun clutch--region-markers (beg end)
-  "Return a region of markers for BEG..END that follows edits while SQL runs.
+  "Return markers for BEG..END that follow later edits to the buffer.
 Text inserted at either edge stays outside the region."
   (cons (copy-marker beg t) (copy-marker end)))
 
