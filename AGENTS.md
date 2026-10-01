@@ -51,10 +51,14 @@ Choose checks by the actual change. During iteration, start with affected tests;
 | Production code or tests | Focused tests during iteration; `./test/run-ci.sh all` before a code commit. This covers main/backend ERT, byte compilation, package-lint, checkdoc and architecture checks. |
 | Query execution, row identity, result workflows, object metadata or native adapters | Also run `./test/run-ci.sh native-live` through the changed workflow. |
 | JDBC runtime or adapter behavior | Include the affected JDBC live coverage using an explicitly selected jar and isolated runtime; see the development guide. |
+| Material workflow, architecture or compatibility decision | A design record in `postmortem/NNN-slug.md`, using the next unused number, in the same commit; see Documentation and release for what it covers. |
 
 - For a bug fix, reproduce the failure with a focused regression before fixing it, reusing existing coverage where possible. Dispatch bugs need the installed/public path. Behavior-preserving cleanup needs relevant existing tests, not new tests that merely mirror the refactor.
 - Pure presentation needs new tests only when it carries a product contract, such as scope, transaction visibility, destructive-action warnings or accessibility. Export data-path changes require content and encoding coverage.
 - Review the complete intended diff before committing. Run the applicable dependency/surface checks in the development guide. Do not modify tests or fixtures merely to hide a failure; identify unrelated failures separately.
+- Both runners load the protocol packages from sibling checkouts (`../mysql.el`, `../pgsql.el`, `../mongodb.el` and `../redis.el`). Emacs searches `-L` directories in the order given, so a sibling beats a straight copy, and `CLUTCH_EXTRA_LOAD_PATH`, which comes last, cannot override one; `PGSQL_EL_DIR` chooses pgsql.el. Both runners print each dependency with its commit; check each sibling's branch and uncommitted changes before trusting a result.
+- CI installs `mysql` and `pgsql` from MELPA and clones `main` of mongodb.el and redis.el. Clutch code that needs a protocol API those do not provide yet must detect it with `fboundp`, or land after the API reaches them.
+- `native-live` stops at the first failing suite. Report that suite and name the suites that did not run.
 
 ## Documentation and release
 
