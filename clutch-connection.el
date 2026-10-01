@@ -540,11 +540,21 @@ pre-rendered text."
      ((clutch--manual-commit-dirtying-query-p sql)
       (clutch--set-tx-dirty conn)))))
 
+(defvar clutch--running-queries (make-hash-table :test 'eq)
+  "Statements in flight, keyed by connection.
+Each value is a plist with :buffer, :region and :cancelling.")
+
+(defun clutch--refuse-while-running (conn)
+  "Signal a `user-error' when a statement is running on CONN."
+  (when (and conn (gethash conn clutch--running-queries))
+    (user-error "A query is running on this connection; C-g cancels it")))
+
 (defun clutch--run-db-query
     (conn sql &optional params defer-transaction-state)
   "Execute SQL on CONN with optional PARAMS and synchronize transaction state.
 When DEFER-TRANSACTION-STATE is non-nil, leave dirty-state accounting to the
 enclosing atomic-batch workflow."
+  (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before running another query"))
@@ -555,6 +565,81 @@ enclosing atomic-batch workflow."
     (unless defer-transaction-state
       (clutch--record-tx-state-after-query conn sql))
     result))
+
+(defun clutch--run-db-query-async (conn sql region callback)
+  "Run SQL on CONN like `clutch--run-db-query' and call CALLBACK once.
+CALLBACK receives RESULT and ERROR: a `clutch-db-result' and nil, or nil
+and a `clutch-db-error' condition.  When CONN's backend can run SQL
+without blocking, return at once: CONN refuses other foreground work,
+REGION of the current buffer, when non-nil, shows the statement's
+status, and CALLBACK runs later from an idle timer, never inside another
+command.  Otherwise SQL runs synchronously and CALLBACK runs before this
+function returns."
+  (clutch--refuse-while-running conn)
+  (when (clutch--tx-uncertain-p conn)
+    (user-error
+     "Transaction state is uncertain; roll back or reconnect before running another query"))
+  (puthash conn (list :buffer (current-buffer) :region region :cancelling nil)
+           clutch--running-queries)
+  (let (started)
+    (unwind-protect
+        (setq started
+              (clutch-db-query-async
+               conn sql
+               (lambda (result error)
+                 (run-with-idle-timer 0 nil #'clutch--finish-db-query
+                                      conn sql callback result error))))
+      (unless started
+        (remhash conn clutch--running-queries)))
+    (if started
+        (clutch--show-statement-status conn 'running)
+      (pcase-let ((`(,result . ,error)
+                   (condition-case err
+                       (cons (clutch--run-db-query conn sql) nil)
+                     (clutch-db-error (cons nil err)))))
+        (funcall callback result error)))))
+
+(defun clutch--finish-db-query (conn sql callback result error)
+  "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
+No command waits for CALLBACK, so its errors are reported as messages."
+  (remhash conn clutch--running-queries)
+  (when result
+    (clutch--clear-connection-problem-capture conn)
+    (clutch--record-tx-state-after-query conn sql))
+  (condition-case err
+      (funcall callback result error)
+    (error (message "%s" (error-message-string err)))))
+
+(defun clutch--show-statement-status (conn status)
+  "Show STATUS for the statement running on CONN in its source buffer."
+  (let* ((entry (gethash conn clutch--running-queries))
+         (buffer (plist-get entry :buffer))
+         (region (plist-get entry :region)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when region
+          (clutch--mark-sql-status-region (car region) (cdr region) status))
+        (clutch--update-mode-line t)))))
+
+(defun clutch-cancel-query-or-quit ()
+  "Cancel the query running on this buffer's connection, or quit.
+With no query to cancel, or one already being cancelled, run
+`keyboard-quit'.  The query then finishes with the server's verdict."
+  (interactive)
+  (let ((entry (and clutch-connection
+                    (gethash clutch-connection clutch--running-queries))))
+    (if (or (null entry) (plist-get entry :cancelling))
+        (keyboard-quit)
+      (plist-put entry :cancelling t)
+      (clutch--show-statement-status clutch-connection 'cancelling)
+      (unless (condition-case err
+                  (clutch-db-interrupt-query clutch-connection)
+                (clutch-db-error
+                 (message "Cancel failed: %s" (error-message-string err))
+                 nil))
+        (plist-put entry :cancelling nil)
+        (clutch--show-statement-status clutch-connection 'running)
+        (message "The query could not be cancelled and is still running")))))
 
 (defun clutch--discard-lost-transaction (conn)
   "Record that CONN died before its open transaction was committed."
@@ -742,7 +827,9 @@ PRODUCT is the effective SQL product for the new logical session."
 (defun clutch--ensure-connection ()
   "Ensure current buffer has a live connection.
 If the connection has dropped, attempts to reconnect automatically
-using the stored params.  Signals a user-error if not recoverable."
+using the stored params.  Signals a user-error if not recoverable, or
+while a query is running on the connection."
+  (clutch--refuse-while-running clutch-connection)
   (unless (clutch--connection-alive-p clutch-connection)
     (unless (clutch--try-reconnect)
       (user-error
@@ -955,12 +1042,18 @@ the high-frequency execution indicator."
                 ((clutch--query-buffer-p)
                  (or clutch--query-mode-line-name "clutch"))
                 (t "clutch")))
-         (elapsed (clutch--execution-elapsed-seconds)))
+         (elapsed (clutch--execution-elapsed-seconds))
+         (cancelling (and elapsed clutch-connection
+                          (plist-get (gethash clutch-connection
+                                              clutch--running-queries)
+                                     :cancelling))))
     (setq mode-name
           (if elapsed
               (concat base " "
                       (propertize (clutch--format-elapsed elapsed)
-                                  'face 'success))
+                                  'face 'success)
+                      (and cancelling
+                           (propertize " cancelling" 'face 'warning)))
             base)))
   (when (derived-mode-p 'clutch-result-mode)
     (if execution-only

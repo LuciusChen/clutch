@@ -41,6 +41,7 @@
 (declare-function pgsql-escape-literal "pgsql" (value))
 (declare-function pgsql-exec "pgsql" (connection sql))
 (declare-function pgsql-exec-params "pgsql" (connection sql typed-parameters))
+(declare-function pgsql-exec-async "pgsql" (connection sql callback))
 (declare-function pgsql-live-p "pgsql" (connection))
 (declare-function pgsql-host "pgsql" (connection))
 (declare-function pgsql-port "pgsql" (connection))
@@ -681,6 +682,24 @@ manual-commit mode via lazy BEGIN."
    conn sql
    (lambda ()
      (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql)))))
+
+(cl-defmethod clutch-db-query-async
+    ((conn clutch-db-pg--connection) sql callback)
+  "Start SQL on PostgreSQL CONN and pass the outcome to CALLBACK.
+Decline when the installed pgsql.el cannot execute asynchronously."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db-pg--run-query-with-transaction-state
+     conn sql
+     (lambda ()
+       (pgsql-exec-async
+        (clutch-db-pg--connection-client conn) sql
+        (lambda (result error)
+          (funcall callback
+                   (and result (clutch-db-pg--wrap-result conn result))
+                   (and error
+                        (list 'clutch-db-error
+                              (error-message-string error))))))))
+    t))
 
 (cl-defmethod clutch-db-execute-params
     ((conn clutch-db-pg--connection) sql params)
