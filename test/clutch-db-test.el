@@ -6820,6 +6820,24 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
       (should (listp entries))
       (should (> (length entries) 0)))))
 
+(ert-deftest clutch-db-test-jdbc-mssql-live-disconnect-while-running ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "Disconnecting during a statement should return at once and report it."
+  (clutch-db-test--with-mssql conn
+    (let ((start (float-time))
+          outcome)
+      (should (clutch-db-query-async conn "WAITFOR DELAY '00:00:30'"
+                                     (lambda (result error)
+                                       (setq outcome (list result error)))))
+      (sleep-for 0.5)
+      (clutch-db-disconnect conn)
+      (with-timeout (5 (error "No outcome after the disconnect"))
+        (while (not outcome)
+          (accept-process-output nil 0.05)))
+      (should (< (- (float-time) start) 3))
+      (should (string-match-p "outcome is unknown"
+                              (error-message-string (cadr outcome)))))))
+
 (ert-deftest clutch-db-test-sql-interface-mongodb-live-connect ()
   :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface JDBC connection should return a live conn."
@@ -7685,6 +7703,42 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
           (should (gethash 43 clutch-jdbc--ignored-response-ids))
           (should-not (gethash conn clutch-jdbc--error-details-by-conn))
           (should-not (gethash 7 clutch-jdbc--connections-by-id)))))))
+
+(ert-deftest clutch-db-test-jdbc-disconnect-while-running-forces-release ()
+  "Disconnecting during a statement should force-disconnect without waiting.
+The statement should report that its outcome is unknown, and late replies
+should be ignored."
+  (let* ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
+                                      :params '(:driver jdbc :rpc-timeout 12)))
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
+         (next-id 40)
+         sent outcome)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (op _params)
+                 (push op sent)
+                 (cl-incf next-id)))
+              ((symbol-function 'clutch-jdbc--recv-response-nonfatal)
+               (lambda (&rest _args)
+                 (error "Disconnect waited behind the running statement"))))
+      (clutch-db-query-async conn "WAITFOR DELAY '00:00:30'"
+                             (lambda (result error)
+                               (setq outcome (list result error))))
+      (clutch-db-disconnect conn)
+      (should (equal sent '("force-disconnect" "execute")))
+      (should (gethash 41 clutch-jdbc--ignored-response-ids))
+      (should (gethash 42 clutch-jdbc--ignored-response-ids))
+      (accept-process-output nil 0.01)
+      (should-not (car outcome))
+      (should (string-match-p "outcome is unknown"
+                              (error-message-string (cadr outcome))))
+      (should-not (clutch-db-busy-p conn)))))
 
 (ert-deftest clutch-db-test-jdbc-clear-error-details-forgets-conn-cache ()
   "Clearing JDBC diagnostics should remove the connection-scoped cache entry."

@@ -699,10 +699,10 @@ disconnect request.  Preserve connection-scoped diagnostics for the caller."
                clutch-jdbc--connections-by-id))))
 
 (defun clutch-jdbc--release-stuck-connection (conn)
-  "Retire CONN after a request on it went silent, asking the agent to drop it.
+  "Retire CONN while a request on it is unanswered, asking the agent to drop it.
 The release uses force-disconnect, which bypasses the connection's locks
-in the agent: the ordinary disconnect queues behind them, so the very
-call that went silent would block the release forever and pin an agent
+in the agent: the ordinary disconnect queues behind them, so the
+unanswered request could block the release forever and pin an agent
 thread.  The request is sent without waiting and its reply, if any, is
 ignored.  An older agent answers with an unknown-op error, which lands
 in the ignored table the same way."
@@ -1082,16 +1082,21 @@ Returns a `clutch-jdbc-conn'."
 ;;;; Lifecycle methods
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-jdbc-conn))
-  "Disconnect JDBC CONN, releasing it in the agent."
-  (let ((live (clutch-db-live-p conn)))
-    (clutch-jdbc--retire-invalidated-connection conn)
-    (remhash conn clutch-jdbc--error-details-by-conn)
-    (when live
-      (let ((id (clutch-jdbc--send
-                 "disconnect"
-                 `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
-        (clutch-jdbc--recv-response-nonfatal
-         id clutch-jdbc-disconnect-timeout-seconds)))))
+  "Disconnect JDBC CONN, releasing it in the agent.
+While a statement runs on CONN, the agent holds its lock and an ordinary
+disconnect would wait behind it, so CONN is force-disconnected instead and
+the statement reports that its outcome is unknown."
+  (remhash conn clutch-jdbc--error-details-by-conn)
+  (if (clutch-db-busy-p conn)
+      (clutch-jdbc--release-stuck-connection conn)
+    (let ((live (clutch-db-live-p conn)))
+      (clutch-jdbc--retire-invalidated-connection conn)
+      (when live
+        (let ((id (clutch-jdbc--send
+                   "disconnect"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
+          (clutch-jdbc--recv-response-nonfatal
+           id clutch-jdbc-disconnect-timeout-seconds))))))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-jdbc-conn))
   "Return non-nil if the agent process is running and CONN belongs to it.
