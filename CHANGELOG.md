@@ -4,10 +4,11 @@
 
 ### Added
 
-- PostgreSQL, MySQL and JDBC statements run without blocking Emacs. The console, REPL and result buffers stay usable, the running statement's first line shows an amber fringe marker that turns into a red square while it is being cancelled, and `C-g` in those buffers cancels it, reporting the server's verdict. Until it finishes, its connection refuses other commands; a batch runs one statement after another the same way. PostgreSQL needs pgsql.el with `pgsql-exec-async` and MySQL needs mysql.el with `mysql-query-async`; other backends block as before. Such statements have no client-side idle timeout, and a MySQL statement, which has no database-side timeout either, runs until it finishes or is cancelled. JDBC still fetches the rest of a result page synchronously after the statement finishes.
+- PostgreSQL, MySQL and JDBC statements run without blocking Emacs. The console, REPL and result buffers stay usable, the running statement's first line shows an amber fringe marker that turns into a red square while it is being cancelled, and `C-g` in those buffers cancels it, reporting the server's verdict. Until it finishes, its connection refuses other commands; a batch runs one statement after another the same way. PostgreSQL needs pgsql.el with `pgsql-exec-async` and MySQL needs mysql.el with `mysql-query-async`; other backends block as before. Such statements have no client-side idle timeout, and by default no database-side one either, so they run until they finish or are cancelled. JDBC still fetches the rest of a result page synchronously after the statement finishes.
 
 ### Changed
 
+- `clutch-query-timeout-seconds` defaults to nil instead of 30, so PostgreSQL and JDBC statements no longer stop after 30 seconds, or 25 on JDBC, unless a limit is configured; a limit configured on the server still applies. JDBC requests that Emacs waits for, such as fetching a further page, still time out within `clutch-jdbc-rpc-timeout-seconds`.
 - A batch of statements confirms every risky statement before the first one runs, instead of asking between statements, so a declined confirmation runs nothing.
 
 - A running query shows its elapsed time, counting in tenths of a second, in the mode line and the result footer instead of a spinner.

@@ -599,7 +599,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (ert-info ("preserves batch order")
     (let ((batches '((:rows (("alpha" 17) ("beta" 23)) :done nil)
                      (:rows (("omega" -9)) :done t)))
-          (conn (make-clutch-jdbc-conn)))
+          (conn (make-clutch-jdbc-conn :params '(:rpc-timeout 30))))
       (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
                 ((symbol-function 'clutch-jdbc--rpc-on-conn)
                  (lambda (_conn op params &optional _timeout-seconds)
@@ -621,6 +621,16 @@ and a `?' inside a dollar-quoted function body is part of the body."
         (should (equal (clutch-jdbc--fetch-all conn 9) nil))
         (should (equal captured-op "fetch"))
         (should (= (alist-get 'cursor-id captured-params) 9))
+        (should (= (alist-get 'query-timeout-seconds captured-params) 10)))))
+  (ert-info ("fetches within the RPC budget when the connection has no limit")
+    (let ((conn (make-clutch-jdbc-conn :params '(:rpc-timeout 15)))
+          captured-params)
+      (cl-letf (((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                ((symbol-function 'clutch-jdbc--rpc-on-conn)
+                 (lambda (_conn _op params &optional _timeout-seconds)
+                   (setq captured-params params)
+                   '(:rows nil :done t))))
+        (clutch-jdbc--fetch-all conn 9)
         (should (= (alist-get 'query-timeout-seconds captured-params) 10)))))
   (ert-info ("rejects an invalid fetch-size before RPC")
     (let ((conn (make-clutch-jdbc-conn :params '(:rpc-timeout 9))))
@@ -816,19 +826,27 @@ and a `?' inside a dollar-quoted function body is part of the body."
                                 (error-message-string err)))))))
 
 (ert-deftest clutch-db-test-jdbc-query-timeout-contract ()
-  "JDBC queries should send the query timeout clamped inside the RPC timeout."
+  "JDBC queries Emacs waits for should send a timeout inside the RPC budget."
   (dolist (case '((:label "clamps past rpc margin"
                    :conn-id 4 :rpc-timeout 15 :query-timeout 16
-                   :effective-query-timeout 10 :affected-rows 1
+                   :sent-timeout 10 :affected-rows 1
                    :sql "delete from t")
                   (:label "keeps timeout within margin"
                    :conn-id 5 :rpc-timeout 15 :query-timeout 8
-                   :effective-query-timeout 8 :affected-rows 0
+                   :sent-timeout 8 :affected-rows 0
                    :sql "delete from t where 1=0")
                   (:label "clamps to rpc minus five"
                    :conn-id 6 :rpc-timeout 30 :query-timeout 30
-                   :effective-query-timeout 25 :affected-rows 1
-                   :sql "update t set x = 1")))
+                   :sent-timeout 25 :affected-rows 1
+                   :sql "update t set x = 1")
+                  (:label "no limit still waits within the budget"
+                   :conn-id 7 :rpc-timeout 30 :query-timeout nil
+                   :sent-timeout 25 :affected-rows 0
+                   :sql "delete from t where 1=0")
+                  (:label "zero still waits within the budget"
+                   :conn-id 8 :rpc-timeout 3 :query-timeout 0
+                   :sent-timeout 1 :affected-rows 0
+                   :sql "delete from t where 1=0")))
     (ert-info ((format "case: %s" (plist-get case :label)))
       (let ((conn (make-clutch-jdbc-conn
                    :conn-id (plist-get case :conn-id)
@@ -848,9 +866,36 @@ and a `?' inside a dollar-quoted function body is part of the body."
           (let ((result (clutch-db-query conn (plist-get case :sql))))
             (should (equal captured-op "execute"))
             (should (= (alist-get 'query-timeout-seconds captured-params)
-                       (plist-get case :effective-query-timeout)))
+                       (plist-get case :sent-timeout)))
             (should (= (clutch-db-result-affected-rows result)
                        (plist-get case :affected-rows)))))))))
+
+(ert-deftest clutch-db-test-jdbc-async-query-timeout-contract ()
+  "JDBC statements nothing waits for should send their limit as is, else 0."
+  (dolist (case '((:label "no limit" :query-timeout nil :sent-timeout 0)
+                  (:label "zero" :query-timeout 0 :sent-timeout 0)
+                  (:label "limit past the rpc budget"
+                   :query-timeout 16 :sent-timeout 16)))
+    (ert-info ((format "case: %s" (plist-get case :label)))
+      (let ((conn (make-clutch-jdbc-conn
+                   :process 'fake-proc :conn-id 7
+                   :params (list :driver 'jdbc :rpc-timeout 15
+                                 :query-timeout
+                                 (plist-get case :query-timeout))))
+            (clutch-jdbc--agent-process 'fake-proc)
+            (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+            (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+            (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+            captured-params)
+        (puthash 7 conn clutch-jdbc--connections-by-id)
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+                  ((symbol-function 'clutch-jdbc--send)
+                   (lambda (_op params)
+                     (setq captured-params params)
+                     41)))
+          (should (clutch-db-query-async conn "select 1" #'ignore))
+          (should (= (alist-get 'query-timeout-seconds captured-params)
+                     (plist-get case :sent-timeout))))))))
 
 (ert-deftest clutch-db-test-jdbc-manual-commit-p ()
   "JDBC manual-commit defaults should follow driver and global settings."
@@ -4758,7 +4803,14 @@ out, which broke the Oracle statement and left SQL Server unpaged."
             (should (= (plist-get captured-args :connect-timeout) connect))
             (should (= (plist-get captured-args :read-timeout) read))
             (should (equal executed-sql
-                           (format "SET statement_timeout = %d" statement-ms)))))))))
+                           (format "SET statement_timeout = %d" statement-ms)))))
+        ;; The shipped default sets no statement timeout.
+        (let ((clutch-query-timeout-seconds
+               (eval (car (get 'clutch-query-timeout-seconds 'standard-value)) t)))
+          (setq executed-sql nil)
+          (clutch-db-pg-connect '(:host "127.0.0.1" :port 5432 :database "test"
+                                        :user "postgres" :password "secret"))
+          (should-not executed-sql))))))
 
 (ert-deftest clutch-db-test-mysql-connect-wire-params ()
   "MySQL connect should pass only adapter-native params to `mysql-connect'."
@@ -6820,6 +6872,35 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
       (should (listp entries))
       (should (> (length entries) 0)))))
 
+(defun clutch-db-test--query-async-outcome (conn sql)
+  "Run SQL on CONN without blocking and return its (RESULT ERROR) outcome."
+  (let (outcome)
+    (should (clutch-db-query-async conn sql
+                                   (lambda (result error)
+                                     (setq outcome (list result error)))))
+    (with-timeout (30 (error "No outcome for %s" sql))
+      (while (not outcome)
+        (accept-process-output nil 0.05)))
+    outcome))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-statement-limits ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "Only the RPC budget or a configured limit should stop a long statement.
+A request Emacs waits for times out inside the RPC budget, while a
+statement nothing waits for keeps its own limit."
+  (let ((clutch-jdbc-rpc-timeout-seconds 6)
+        (clutch-query-timeout-seconds 30))
+    (clutch-db-test--with-mssql conn
+      ;; The budget is the RPC timeout less five seconds.
+      (should-error (clutch-db-query conn "WAITFOR DELAY '00:00:03'")
+                    :type 'clutch-db-error)
+      (should-not (cadr (clutch-db-test--query-async-outcome
+                         conn "WAITFOR DELAY '00:00:03'")))))
+  (let ((clutch-query-timeout-seconds 1))
+    (clutch-db-test--with-mssql conn
+      (should (cadr (clutch-db-test--query-async-outcome
+                     conn "WAITFOR DELAY '00:00:03'"))))))
+
 (ert-deftest clutch-db-test-jdbc-mssql-live-disconnect-while-running ()
   :tags '(:db-live :jdbc-live :mssql-live)
   "Disconnecting during a statement should return at once and report it."
@@ -8468,9 +8549,11 @@ the statement's terminator and removed, changing the value returned."
 (ert-deftest clutch-db-test-jdbc-stale-handle-cannot-use-reused-id ()
   "Public JDBC operations must reject retired handles before any RPC."
   (let* ((old (make-clutch-jdbc-conn :process 'old-agent :conn-id 7
-                                     :params '(:driver oracle :user "APP")))
+                                     :params '(:driver oracle :user "APP"
+                                               :rpc-timeout 30)))
          (current (make-clutch-jdbc-conn :process 'current-agent :conn-id 7
-                                         :params '(:driver oracle :user "APP")))
+                                         :params '(:driver oracle :user "APP"
+                                                   :rpc-timeout 30)))
          (clutch-jdbc--agent-process 'current-agent)
          (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))

@@ -1130,14 +1130,17 @@ Always non-nil: `clutch-jdbc--apply-timeout-defaults' ensures the value is
 stored in params at connect time."
   (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout))
 
-(defun clutch-jdbc--conn-effective-query-timeout (conn)
-  "Return the effective query timeout in seconds for CONN, or nil.
-The timeout is clamped so the agent-side timeout fires before the outer
-Emacs RPC timeout."
-  (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
-         (rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn)))
-    (when (and query-timeout (> query-timeout 0))
-      (min query-timeout (max 1 (- rpc-timeout 5))))))
+(defun clutch-jdbc--conn-query-timeout (conn &optional async)
+  "Return the query timeout in seconds to send with a request on CONN.
+A request that Emacs waits for gets a positive timeout that fires before
+the RPC timeout: CONN's limit when shorter, else the RPC timeout less
+five seconds.  With ASYNC non-nil nothing waits, so CONN's limit is sent
+as is, or 0, meaning none, when CONN has no positive limit."
+  (let ((limit (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
+        (budget (max 1 (- (clutch-jdbc--conn-rpc-timeout conn) 5))))
+    (cond ((not (and limit (> limit 0))) (if async 0 budget))
+          (async limit)
+          (t (min limit budget)))))
 
 (defun clutch-jdbc--oracle-conn-p (conn)
   "Return non-nil when CONN is an Oracle JDBC connection."
@@ -1372,7 +1375,7 @@ This is allowed in the hot path."
 
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
-  (let ((effective-qt (clutch-jdbc--conn-effective-query-timeout conn))
+  (let ((query-timeout (clutch-jdbc--conn-query-timeout conn))
         (fetch-size (clutch-jdbc--effective-fetch-size))
         batches done)
     (while (not done)
@@ -1381,8 +1384,7 @@ This is allowed in the hot path."
                      "fetch"
                      `((cursor-id  . ,cursor-id)
                        (fetch-size . ,fetch-size)
-                       ,@(when effective-qt
-                           `((query-timeout-seconds . ,effective-qt)))))))
+                       (query-timeout-seconds . ,query-timeout)))))
         (push (plist-get result :rows) batches)
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
@@ -1547,14 +1549,14 @@ JDBC JSON false sentinels become `:false'."
                  (plist-get result :col-types))
        :rows (mapcar #'clutch-jdbc--normalize-row all-rows)))))
 
-(defun clutch-jdbc--execute-params (conn payload)
-  "Return agent parameters that run PAYLOAD on CONN."
-  (let ((effective-qt (clutch-jdbc--conn-effective-query-timeout conn)))
-    (append `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-            payload
-            `((fetch-size . ,(clutch-jdbc--effective-fetch-size)))
-            (when effective-qt
-              `((query-timeout-seconds . ,effective-qt))))))
+(defun clutch-jdbc--execute-params (conn payload &optional async)
+  "Return agent parameters that run PAYLOAD on CONN.
+ASYNC non-nil marks a request that nothing waits for."
+  (append `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+          payload
+          `((fetch-size . ,(clutch-jdbc--effective-fetch-size))
+            (query-timeout-seconds
+             . ,(clutch-jdbc--conn-query-timeout conn async)))))
 
 (defun clutch-jdbc--execute-rpc (conn op payload)
   "Execute JDBC RPC OP with PAYLOAD on CONN and return a database result."
@@ -1569,10 +1571,11 @@ JDBC JSON false sentinels become `:false'."
 (defun clutch-jdbc--execute-rpc-async (conn op payload callback)
   "Start JDBC RPC OP with PAYLOAD on CONN and pass the outcome to CALLBACK.
 CALLBACK receives a database result and nil, or nil and a `clutch-db-error'
-condition, exactly once.  The request has no client timeout;
-`clutch-db-interrupt-query' cancels it."
+condition, exactly once.  The request has no client timeout, and no
+statement timeout unless CONN sets one; `clutch-db-interrupt-query'
+cancels it."
   (setq conn (clutch-jdbc--require-current-connection conn))
-  (let ((id (clutch-jdbc--send op (clutch-jdbc--execute-params conn payload))))
+  (let ((id (clutch-jdbc--send op (clutch-jdbc--execute-params conn payload t))))
     (setf (clutch-jdbc-conn-busy conn) t)
     (puthash conn id clutch-jdbc--busy-request-ids)
     (puthash id
