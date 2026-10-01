@@ -9096,6 +9096,43 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
         (should-not (gethash 'async-conn clutch--running-queries))
         (should-not (clutch-db--foreground-busy-p 'async-conn))))))
 
+(ert-deftest clutch-test-async-markers-follow-edits-while-running ()
+  "Status markers should stay on their statement while the buffer is edited."
+  (cl-flet ((marker-line ()
+              (save-excursion
+                (goto-char (overlay-start clutch--executed-sql-overlay))
+                (buffer-substring-no-properties
+                 (line-beginning-position) (line-end-position)))))
+    (with-temp-buffer
+      (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                  ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t)))
+          (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
+          (goto-char (point-min))
+          (insert "-- typed while it runs\n")
+          (clutch-cancel-query-or-quit)
+          (should (equal (marker-line) "UPDATE t SET n = 1;"))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should (equal (marker-line) "UPDATE t SET n = 1;")))))
+    (with-temp-buffer
+      (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (clutch--execute-statements
+           (clutch--split-statement-specs (buffer-string) (point-min)))
+          (goto-char (point-min))
+          (insert "-- typed while the first one runs\n")
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should (equal (marker-line) "UPDATE b SET n = 2;")))))))
+
 (ert-deftest clutch-test-async-statements-run-one-after-another ()
   "A batch should send each statement after the previous one finishes."
   (with-temp-buffer
