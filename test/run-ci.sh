@@ -150,6 +150,7 @@ run_checkdoc() {
     cd "$repo"
     run_emacs \
       --eval "(require 'checkdoc)" \
+      --eval "(setq checkdoc-verb-check-experimental-flag t)" \
       --eval "(dolist (file (directory-files default-directory t \"^clutch.*\\.el$\")) (checkdoc-file file))" \
       --eval "(dolist (name '(\"*Warnings*\" \"*warn*\")) (when-let ((buf (get-buffer name))) (with-current-buffer buf (goto-char (point-min)) (when (re-search-forward \"^Warning\" nil t) (princ (buffer-string)) (kill-emacs 1)))))"
   )
