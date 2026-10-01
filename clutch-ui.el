@@ -1094,16 +1094,22 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--sql-status-marker-before-string (status)
   "Return the before-string used to mark SQL execution STATUS."
-  (let ((face (if (eq status 'failed)
-                  'clutch-failed-sql-marker-face
-                'clutch-executed-sql-marker-face)))
+  (let ((face (pcase status
+                ('failed 'clutch-failed-sql-marker-face)
+                ('running 'clutch-running-sql-marker-face)
+                ('cancelling 'clutch-cancelling-sql-marker-face)
+                (_ 'clutch-executed-sql-marker-face)))
+        (cancelling (eq status 'cancelling)))
     (if (display-graphic-p)
         (propertize " "
                     'display
-                    `(left-fringe clutch-executed-sql-dot ,face))
+                    `(left-fringe ,(if cancelling
+                                       'clutch-cancelling-sql-square
+                                     'clutch-executed-sql-dot)
+                                  ,face))
       (propertize " " 'display
                   `((margin left-margin)
-                    ,(propertize "●" 'face face))))))
+                    ,(propertize (if cancelling "■" "●") 'face face))))))
 
 (defun clutch--mark-sql-status-region (beg end status &optional message)
   "Mark SQL region BEG..END with execution STATUS.
@@ -1132,10 +1138,13 @@ MESSAGE, when non-nil, is used as hover text for failed SQL."
     (overlay-put clutch--executed-sql-overlay 'before-string
                  (clutch--sql-status-marker-before-string status))
     (overlay-put clutch--executed-sql-overlay 'help-echo
-                 (if (eq status 'failed)
-                     (format "Last failed SQL: %s"
-                             (or message "SQL execution failed"))
-                   (format "Last executed SQL (%d chars)" (- tend tbeg))))))
+                 (pcase status
+                   ('failed (format "Last failed SQL: %s"
+                                    (or message "SQL execution failed")))
+                   ('running "Running SQL; C-g cancels it")
+                   ('cancelling "Cancelling SQL; waiting for the server")
+                   (_ (format "Last executed SQL (%d chars)"
+                              (- tend tbeg)))))))
 
 (defun clutch--mark-executed-sql-region (beg end)
   "Mark the last successfully executed SQL region BEG..END."

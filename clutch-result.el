@@ -865,6 +865,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map [down-mouse-1] #'clutch-result-mouse-set-point)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
     (define-key map (kbd "C-c C-c") #'clutch-result-submit)
+    (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
     (define-key map "g" #'clutch-result-rerun)
     (define-key map "e" #'clutch-result-export)
     (define-key map "C" #'clutch-result-goto-column)

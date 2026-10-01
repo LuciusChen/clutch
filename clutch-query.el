@@ -78,17 +78,9 @@ for these queries.  Other destructive SQL keeps its ordinary confirmation."
   "Latest result buffer produced from this query source buffer.")
 
 (defvar clutch--source-window nil
-  "Window that initiated the current query execution.
-Dynamically bound by `clutch--with-query-activity' so result buffers open
-adjacent to the correct console window.")
-
-(defvar clutch--executing-sql-start nil
-  "Buffer position where the currently executing SQL begins, or nil.
-Dynamically bound by `clutch--execute-and-mark'.")
-
-(defvar clutch--executing-sql-end nil
-  "Buffer position where the currently executing SQL ends, or nil.
-Dynamically bound by `clutch--execute-and-mark'.")
+  "Window showing the buffer whose finished query is being presented.
+Bound while the outcome is presented so result buffers open next to
+that window.")
 
 (declare-function clutch-result--display-error
                   "clutch-result"
@@ -131,6 +123,7 @@ When nil, console persistence falls back to `clutch--console-name'.")
   (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
   (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
   (define-key map (kbd "C-c ?") #'clutch-dispatch)
+  (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
   map)
 
 (defun clutch--query-mode-common-setup (&optional mode-line-name)
@@ -999,103 +992,133 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
      :context context)))
 
 (defun clutch--execute-statement-attempt
-    (sql connection present-result-p &optional result-context)
-  "Attempt one SQL statement on CONNECTION and return an outcome plist.
+    (sql connection present-result-p result-context region k)
+  "Attempt one SQL statement on CONNECTION and call K with an outcome plist.
 When PRESENT-RESULT-P is non-nil, prepare result queries for pagination and
 row identity.  RESULT-CONTEXT carries verified metadata for generated SQL.
-Database failures are returned under :error.  Query-phase quits recover the
-connection and signal `clutch-query-interrupted'."
-  (condition-case nil
-      (let* ((result-query-p (clutch-db-result-query-p connection sql))
-             (prepare-result-p (and result-query-p present-result-p))
-             (source-buffer (current-buffer))
-             (result-context
-              (and prepare-result-p
-                   (append result-context
-                           (clutch-db-query-result-context connection sql))))
-             (row-identity-prep
-              (and prepare-result-p
-                   (or (plist-get result-context :row-identity-prep)
-                       (and (clutch-db-sql-pageable-query-p sql)
-                            (clutch--prepare-row-identity-query
-                             connection sql)))))
-             (identity-sql (or (plist-get row-identity-prep :sql) sql))
-             (server-pageable
-              (and prepare-result-p
-                   (if (plist-member result-context :server-pageable)
-                       (plist-get result-context :server-pageable)
-                     (and (clutch-db-sql-pageable-query-p identity-sql)
-                          (not (clutch-db-sql-has-top-level-row-limit-p identity-sql))))))
-             (execution-sql
-              (if server-pageable
-                  (clutch-db-build-paged-sql
-                   connection identity-sql 0 (1+ clutch-result-max-rows) nil 0)
-                identity-sql))
-             (start (float-time)))
-        (clutch--remember-execute-debug-event
-         connection "start" sql source-buffer nil nil
-         (and prepare-result-p
-              (list :execution-sql (clutch--debug-sql-preview execution-sql)
-                    :server-pageable server-pageable)))
-        (condition-case err
-            (let* ((result (clutch--run-db-query connection execution-sql))
-                   (elapsed (- (float-time) start)))
-              (unless (clutch-db-result-connection result)
-                (setf (clutch-db-result-connection result) connection))
-              (when (clutch-db-result-columns result)
-                (setq result-query-p t))
-              (clutch--remember-execute-debug-event
-               connection "success" sql source-buffer
-               (clutch--query-debug-summary result) elapsed)
-              (unless result-query-p
-                (clutch--forget-row-identities connection)
-                (clutch--note-schema-affecting-query sql connection))
-              (list :result result
-                    :connection connection
-                    :elapsed elapsed
-                    :result-query-p result-query-p
-                    :row-identity-prep row-identity-prep
-                    :server-pageable server-pageable
-                    :result-context result-context
-                    :source-buffer source-buffer))
-          (clutch-db-error
-           (list :error err
-                 :connection connection
-                 :elapsed (- (float-time) start)
-                 :source-buffer source-buffer))))
-    (quit (clutch--handle-query-quit connection))))
+REGION is the statement's source region, or nil.  Database failures reach
+K under :error.  A statement that finishes synchronously calls K after
+this function's quit handling.  Query-phase quits recover the connection
+and signal `clutch-query-interrupted'."
+  (let ((dispatching t) released dispatched inline-outcome)
+    (clutch-db--reserve-connection connection)
+    (cl-labels
+        ((release ()
+           (unless released
+             (setq released t)
+             (clutch-db--release-connection connection))))
+      (unwind-protect
+          (progn
+            (condition-case nil
+		(let* ((result-query-p (clutch-db-result-query-p connection sql))
+		       (prepare-result-p (and result-query-p present-result-p))
+		       (source-buffer (current-buffer))
+		       (result-context
+			(and prepare-result-p
+			     (append result-context
+				     (clutch-db-query-result-context connection sql))))
+		       (row-identity-prep
+			(and prepare-result-p
+			     (or (plist-get result-context :row-identity-prep)
+				 (and (clutch-db-sql-pageable-query-p sql)
+				      (clutch--prepare-row-identity-query
+				       connection sql)))))
+		       (identity-sql (or (plist-get row-identity-prep :sql) sql))
+		       (server-pageable
+			(and prepare-result-p
+			     (if (plist-member result-context :server-pageable)
+				 (plist-get result-context :server-pageable)
+			       (and (clutch-db-sql-pageable-query-p identity-sql)
+				    (not (clutch-db-sql-has-top-level-row-limit-p identity-sql))))))
+		       (execution-sql
+			(if server-pageable
+			    (clutch-db-build-paged-sql
+			     connection identity-sql 0 (1+ clutch-result-max-rows) nil 0)
+			  identity-sql))
+		       (start (float-time)))
+		  (clutch--remember-execute-debug-event
+		   connection "start" sql source-buffer nil nil
+		   (and prepare-result-p
+			(list :execution-sql (clutch--debug-sql-preview execution-sql)
+			      :server-pageable server-pageable)))
+		  (cl-flet ((finish (result err)
+			      (release)
+			      (let* ((elapsed (- (float-time) start))
+				     (outcome
+				      (if err
+					  (list :error err
+						:connection connection
+						:elapsed elapsed
+						:source-buffer source-buffer)
+					(unless (clutch-db-result-connection result)
+					  (setf (clutch-db-result-connection result)
+						connection))
+					(when (clutch-db-result-columns result)
+					  (setq result-query-p t))
+					(clutch--remember-execute-debug-event
+					 connection "success" sql source-buffer
+					 (clutch--query-debug-summary result) elapsed)
+					(unless result-query-p
+					  (clutch--forget-row-identities connection)
+					  (clutch--note-schema-affecting-query
+					   sql connection))
+					(list :result result
+					      :connection connection
+					      :elapsed elapsed
+					      :result-query-p result-query-p
+					      :row-identity-prep row-identity-prep
+					      :server-pageable server-pageable
+					      :result-context result-context
+					      :source-buffer source-buffer))))
+				(if dispatching
+				    (setq inline-outcome outcome)
+				  (funcall k outcome)))))
+		    (condition-case err
+			(clutch--run-db-query-async
+			 connection execution-sql region #'finish)
+		      (clutch-db-error (finish nil err)))))
+	      (quit (clutch--handle-query-quit connection)))
+            (setq dispatched t))
+        (setq dispatching nil)
+        (unless dispatched
+          (release))))
+    (when inline-outcome
+      (funcall k inline-outcome))))
 
 (defun clutch--execute-statement
-    (sql connection present-result-p &optional result-context no-idle-retry-p)
-  "Execute one SQL statement on CONNECTION and return an outcome plist.
+    (sql connection present-result-p region k
+         &optional result-context no-idle-retry-p)
+  "Execute one SQL statement on CONNECTION and call K with its outcome plist.
 When PRESENT-RESULT-P is non-nil, prepare result queries for pagination and
-row identity.  RESULT-CONTEXT carries verified metadata for generated SQL.
+row identity.  REGION is the statement's source region, or nil.
+RESULT-CONTEXT carries verified metadata for generated SQL.
 NO-IDLE-RETRY-P prevents reconnecting after a proven pre-execution failure,
-as required after a preceding statement in the same batch."
-  (clutch--confirm-query-execution sql)
+as required after a preceding statement in the same batch.  The caller has
+already confirmed SQL."
   (setq clutch--last-query sql)
-  (let* ((manual-dirty-p
-          (and (clutch--tx-unresolved-p connection)
-               (clutch-db-manual-commit-p connection)))
-         (outcome
-          (clutch-db-with-foreground-connection connection
-            (clutch--execute-statement-attempt
-             sql connection present-result-p result-context))))
-    (if (and (not no-idle-retry-p)
-             (not manual-dirty-p)
-             (eq connection clutch-connection)
-             (not (clutch--connection-alive-p connection))
-             (eq (car-safe (plist-get outcome :error))
-                 'clutch-db-execution-not-started)
-             (clutch--try-reconnect))
-        (let ((new-connection clutch-connection)
-              (retry-context (copy-sequence result-context)))
-          (when retry-context
-            (cl-remf retry-context :row-identity-prep))
-          (clutch-db-with-foreground-connection new-connection
-            (clutch--execute-statement-attempt
-             sql new-connection present-result-p retry-context)))
-      outcome)))
+  (let ((manual-dirty-p
+         (and (clutch--tx-unresolved-p connection)
+              (clutch-db-manual-commit-p connection)))
+        (source-buffer (current-buffer)))
+    (clutch--execute-statement-attempt
+     sql connection present-result-p result-context region
+     (lambda (outcome)
+       (if (and (not no-idle-retry-p)
+                (not manual-dirty-p)
+                (eq (car-safe (plist-get outcome :error))
+                    'clutch-db-execution-not-started)
+                (buffer-live-p source-buffer)
+                (with-current-buffer source-buffer
+                  (and (eq connection clutch-connection)
+                       (not (clutch--connection-alive-p connection))
+                       (clutch--try-reconnect))))
+           (with-current-buffer source-buffer
+             (let ((retry-context (copy-sequence result-context)))
+               (when retry-context
+                 (cl-remf retry-context :row-identity-prep))
+               (clutch--execute-statement-attempt
+                sql clutch-connection present-result-p retry-context region k)))
+         (funcall k outcome))))))
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
@@ -1154,33 +1177,55 @@ as required after a preceding statement in the same batch."
   (clutch--forget-problem-record (current-buffer) connection)
   (clutch-result--check-pending-changes))
 
-(defmacro clutch--with-query-activity (connection &rest body)
-  "Run BODY as one foreground query activity on CONNECTION."
-  (declare (indent 1) (debug (form body)))
-  (let ((conn (make-symbol "connection"))
-        (source-window (make-symbol "source-window"))
-        (source-buffer (make-symbol "source-buffer")))
-    `(let ((,conn ,connection)
-           (,source-window (selected-window))
-           (,source-buffer (current-buffer)))
-       (clutch--prepare-query-activity ,conn)
-       (clutch-db-with-foreground-connection ,conn
-         (setq clutch--execution-start-time (float-time))
-         (clutch--execution-refresh-start)
-         (clutch--update-mode-line)
-         (redisplay t)
-         (unwind-protect
-             (let ((clutch--source-window ,source-window))
-               ,@body)
-           (when (window-live-p ,source-window)
-             (select-window ,source-window))
-           (when (buffer-live-p ,source-buffer)
-             (set-buffer ,source-buffer))
-           (setq clutch--execution-start-time nil)
-           (clutch--update-mode-line))))))
+(defun clutch--begin-query-activity (connection)
+  "Start a foreground query activity on CONNECTION in the current buffer.
+Return the activity, which `clutch--finish-query-activity' ends."
+  (clutch-db--reserve-connection connection)
+  (setq clutch--execution-start-time (float-time))
+  (clutch--execution-refresh-start)
+  (clutch--update-mode-line)
+  (redisplay t)
+  (list :connection connection :buffer (current-buffer) :ended nil))
 
-(defun clutch--present-statement-outcome (sql connection outcome)
-  "Present OUTCOME for SQL on CONNECTION and return its result, or nil."
+(defun clutch--end-query-activity (activity)
+  "End ACTIVITY once, releasing its connection and execution display."
+  (unless (plist-get activity :ended)
+    (plist-put activity :ended t)
+    (clutch-db--release-connection (plist-get activity :connection))
+    (let ((buffer (plist-get activity :buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq clutch--execution-start-time nil)
+          (clutch--update-mode-line))))))
+
+(defun clutch--dispatch-query-activity (activity dispatch)
+  "Call DISPATCH to start ACTIVITY's work, ending ACTIVITY on a nonlocal exit."
+  (let (dispatched)
+    (unwind-protect
+        (progn
+          (funcall dispatch)
+          (setq dispatched t))
+      (unless dispatched
+        (clutch--end-query-activity activity)))))
+
+(defun clutch--finish-query-activity (activity present)
+  "Call PRESENT in ACTIVITY's buffer, then end ACTIVITY.
+PRESENT keeps the selected window.  When the buffer is gone, the outcome
+is dropped with a message."
+  (unwind-protect
+      (let ((buffer (plist-get activity :buffer)))
+        (if (buffer-live-p buffer)
+            (save-selected-window
+              (with-current-buffer buffer
+                (let ((clutch--source-window (get-buffer-window buffer)))
+                  (funcall present))))
+          (message "Query finished after its buffer was killed")))
+    (clutch--end-query-activity activity)))
+
+(defun clutch--present-statement-outcome (sql connection outcome &optional region)
+  "Present OUTCOME for SQL on CONNECTION and return its result, or nil.
+REGION, when non-nil, is the statement's source region; it is marked as
+executed or failed."
   (setq connection (or (plist-get outcome :connection) connection))
   (if-let* ((err (plist-get outcome :error)))
       (let* ((connection-lost (not (clutch--connection-alive-p connection)))
@@ -1188,39 +1233,56 @@ as required after a preceding statement in the same batch."
                            (clutch--connection-loss-context connection))))
         (clutch--show-execution-error
          (plist-get outcome :source-buffer) connection sql err
-         (plist-get outcome :elapsed) context)
+         (plist-get outcome :elapsed) context region)
         (when connection-lost
           (clutch--retire-query-connection connection))
         nil)
     (let ((result (plist-get outcome :result))
-          (elapsed (plist-get outcome :elapsed)))
+          (elapsed (plist-get outcome :elapsed))
+          (source-buffer (plist-get outcome :source-buffer)))
       (if (plist-get outcome :result-query-p)
           (clutch-result--display-select
            connection sql result elapsed
            :row-identity-prep (plist-get outcome :row-identity-prep)
            :server-pageable (plist-get outcome :server-pageable)
            :result-context (plist-get outcome :result-context)
-           :source-buffer (plist-get outcome :source-buffer))
+           :source-buffer source-buffer)
         (clutch-result--display result sql elapsed))
+      (when (and region (buffer-live-p source-buffer))
+        (with-current-buffer source-buffer
+          (clutch--mark-executed-sql-region (car region) (cdr region))))
       result)))
 
-(defun clutch--execute (sql &optional conn result-context)
+(defun clutch--execute (sql &optional conn result-context region)
   "Execute SQL on CONN (or current buffer connection).
-Times execution and displays results.
-For SELECT queries, applies pagination (LIMIT/OFFSET).
-RESULT-CONTEXT carries internal result metadata for generated SELECT SQL.
-Prompts for confirmation on destructive operations."
+Times execution and displays results when SQL finishes.  For SELECT
+queries, applies pagination (LIMIT/OFFSET).  RESULT-CONTEXT carries
+internal result metadata for generated SELECT SQL.  REGION, when
+non-nil, is SQL's source region and shows its status.  Prompts for
+confirmation on destructive operations."
   (if (and conn (not (eq conn clutch-connection)))
-      (unless (clutch--connection-alive-p conn)
-        (user-error
-         "Connection closed.  Reconnect from the SQL buffer or REPL"))
+      (progn
+        (clutch--refuse-while-running conn)
+        (unless (clutch--connection-alive-p conn)
+          (user-error
+           "Connection closed.  Reconnect from the SQL buffer or REPL")))
     (clutch--ensure-connection))
   (let ((connection (or conn clutch-connection)))
-    (clutch--with-query-activity connection
-      (let ((outcome
-             (clutch--execute-statement sql connection t result-context)))
-        (clutch--present-statement-outcome
-         sql connection outcome)))))
+    (clutch--prepare-query-activity connection)
+    (clutch--confirm-query-execution sql)
+    (let ((activity (clutch--begin-query-activity connection)))
+      (clutch--dispatch-query-activity
+       activity
+       (lambda ()
+         (clutch--execute-statement
+          sql connection t region
+          (lambda (outcome)
+            (clutch--finish-query-activity
+             activity
+             (lambda ()
+               (clutch--present-statement-outcome
+                sql connection outcome region))))
+          result-context))))))
 
 
 (defun clutch--show-execution-error
@@ -1242,12 +1304,7 @@ Return the failure summary."
                        (when (eq (plist-get context :transaction-outcome)
                                  'unknown)
                          clutch--transaction-outcome-unknown-message))))
-         (hint (and hints (string-join hints "\n")))
-         (region (or region
-                     (and clutch--executing-sql-start
-                          clutch--executing-sql-end
-                          (cons clutch--executing-sql-start
-                                clutch--executing-sql-end)))))
+         (hint (and hints (string-join hints "\n"))))
     (when (and (buffer-live-p source-buffer) region)
       (with-current-buffer source-buffer
         (clutch--mark-failed-sql-region
@@ -1261,16 +1318,13 @@ Return the failure summary."
     summary))
 
 (defun clutch--execute-and-mark (sql beg end)
-  "Execute SQL on the current buffer connection and mark BEG..END on success."
+  "Execute SQL on the current buffer connection and mark BEG..END with its status."
   (pcase-let* ((`(,trim-beg . ,trim-end)
                  (or (clutch--trim-sql-bounds beg end)
                      (cons beg end))))
     (clutch--clear-executed-sql-overlay)
     (redisplay t)
-    (when (let ((clutch--executing-sql-start trim-beg)
-                (clutch--executing-sql-end trim-end))
-            (clutch--execute sql))
-      (clutch--mark-executed-sql-region beg end))))
+    (clutch--execute sql nil nil (cons trim-beg trim-end))))
 
 ;;;; Query-at-point detection
 
@@ -1405,64 +1459,116 @@ the last semicolon, is no statement and is dropped unless it contains /*! or
 (defun clutch--execute-statements (stmts)
   "Execute STMTS sequentially.
 DML/DDL statements run silently; the final SELECT (if any) opens a
-result buffer.  Stops and reports on the first error."
+result buffer.  Every statement is confirmed before the first one runs.
+Stops and reports on the first error."
   (let* ((specs (mapcar (lambda (stmt)
                           (if (consp stmt)
                               stmt
                             (list stmt nil nil)))
                         stmts))
+         (connection clutch-connection)
+         (source-buffer (current-buffer))
          (done 0)
-         (source-buffer (current-buffer)))
-    (cl-labels ((report-complete ()
-                  (message "%s statement%s %s"
-                           (clutch--message-count done)
-                           (if (= done 1) "" "s")
-                           (clutch--message-keyword "executed"))))
-      (clutch--with-query-activity clutch-connection
-        (while specs
-          (pcase-let* ((`(,stmt ,beg ,end) (pop specs))
-                       (final-p (null specs))
-                       (outcome nil))
-            (when (and beg end)
-              (with-current-buffer source-buffer
-                (clutch--clear-executed-sql-overlay)
-                (redisplay t)))
-            (setq outcome
-                  (clutch--execute-statement
-                   stmt clutch-connection final-p nil (> done 0)))
-            (if-let* ((err (plist-get outcome :error)))
-                (let* ((connection (or (plist-get outcome :connection)
-                                       clutch-connection))
-                       (connection-lost
-                        (not (clutch--connection-alive-p connection)))
-                       (context
-                        (if connection-lost
-                            (clutch--connection-loss-context
-                             connection (list :statement-index (1+ done)))
-                          (list :statement-index (1+ done))))
-                       (summary
-                        (clutch--show-execution-error
-                         source-buffer connection stmt err
-                         (plist-get outcome :elapsed) context
-                         (and beg end (cons beg end)))))
-                  (when connection-lost
-                    (clutch--retire-query-connection connection))
-                  (user-error "Statement %d failed: %s" (1+ done)
-                              (clutch--debug-workflow-message summary)))
-              (let ((show-result-p
-                     (and final-p (plist-get outcome :result-query-p))))
-                (when (and show-result-p (> done 0))
-                  (report-complete))
-                (if show-result-p
-                    (clutch--present-statement-outcome
-                     stmt clutch-connection outcome)
-                  (cl-incf done))
-                (when (and beg end)
-                  (with-current-buffer source-buffer
-                    (clutch--mark-executed-sql-region beg end)
-                    (redisplay t)))
-                (when (and final-p (not show-result-p))
-                  (report-complete))))))))))
+         waiting
+         activity)
+    (clutch--prepare-query-activity connection)
+    (dolist (spec specs)
+      (clutch--confirm-query-execution (car spec)))
+    (setq activity (clutch--begin-query-activity connection))
+    (cl-labels
+        ((report-complete ()
+           (message "%s statement%s %s"
+                    (clutch--message-count done)
+                    (if (= done 1) "" "s")
+                    (clutch--message-keyword "executed")))
+         (fail (outcome stmt region)
+           (let* ((failed-connection (or (plist-get outcome :connection)
+                                         connection))
+                  (connection-lost
+                   (not (clutch--connection-alive-p failed-connection)))
+                  (context
+                   (if connection-lost
+                       (clutch--connection-loss-context
+                        failed-connection (list :statement-index (1+ done)))
+                     (list :statement-index (1+ done))))
+                  (summary
+                   (clutch--show-execution-error
+                    source-buffer failed-connection stmt
+                    (plist-get outcome :error) (plist-get outcome :elapsed)
+                    context region)))
+             (when connection-lost
+               (clutch--retire-query-connection failed-connection))
+             (format "Statement %d failed: %s" (1+ done)
+                     (clutch--debug-workflow-message summary))))
+         (handle (outcome stmt region final-p)
+           ;; Return non-nil when the next statement should run.
+           (cond
+            ((plist-get outcome :error)
+             (let (failure)
+               (clutch--finish-query-activity
+                activity
+                (lambda () (setq failure (fail outcome stmt region))))
+               ;; Only a command still running can signal to the user.
+               (if waiting
+                   (message "%s" failure)
+                 (user-error "%s" failure)))
+             nil)
+            (final-p
+             (clutch--finish-query-activity
+              activity
+              (lambda ()
+                (if (plist-get outcome :result-query-p)
+                    (progn
+                      (when (> done 0)
+                        (report-complete))
+                      (clutch--present-statement-outcome
+                       stmt connection outcome region))
+                  (cl-incf done)
+                  (when region
+                    (clutch--mark-executed-sql-region
+                     (car region) (cdr region)))
+                  (report-complete))))
+             nil)
+            (t
+             (cl-incf done)
+             (when (and region (buffer-live-p source-buffer))
+               (with-current-buffer source-buffer
+                 (clutch--mark-executed-sql-region (car region) (cdr region))
+                 (redisplay t)))
+             t)))
+         (run ()
+           ;; Run statements until one finishes asynchronously or the batch ends.
+           (catch 'wait
+             (while specs
+               (unless (buffer-live-p source-buffer)
+                 (clutch--end-query-activity activity)
+                 (throw 'wait nil))
+               (pcase-let* ((`(,stmt ,beg ,end) (pop specs))
+                            (region (and beg end (cons beg end)))
+                            (final-p (null specs))
+                            (dispatching t)
+                            (inline nil))
+                 (with-current-buffer source-buffer
+                   (when region
+                     (clutch--clear-executed-sql-overlay)
+                     (redisplay t))
+                   (clutch--execute-statement
+                    stmt connection final-p region
+                    (lambda (outcome)
+                      (if dispatching
+                          (setq inline (list outcome))
+                        (setq waiting t)
+                        (when (handle outcome stmt region final-p)
+                          (condition-case err
+                              (run)
+                            (error
+                             (clutch--end-query-activity activity)
+                             (signal (car err) (cdr err)))))))
+                    nil (> done 0)))
+                 (setq dispatching nil)
+                 (unless (and inline (handle (car inline) stmt region final-p))
+                   (throw 'wait nil)))))))
+      (clutch--dispatch-query-activity activity #'run))))
 
 ;;;###autoload (autoload 'clutch-execute-dwim "clutch" nil t)
 (defun clutch-execute-dwim (beg end)
@@ -1631,6 +1737,7 @@ to execute or \\[clutch-indirect-abort] to abort."
     (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
     (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
+    (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
     map)
   "Keymap for `clutch-repl-mode'.")
 
@@ -1772,71 +1879,85 @@ Accumulates input until a top-level semicolon ends it, then executes."
           (clutch-repl--prompt)))
 
 (defun clutch-repl--execute-and-print (sql)
-  "Execute SQL from the REPL and display the result."
+  "Execute SQL from the REPL and display the result when it finishes."
   (let ((repl-buffer (current-buffer)))
     (cl-labels ((output (text)
                   (when (buffer-live-p repl-buffer)
                     (with-current-buffer repl-buffer
-                      (clutch-repl--output text)))))
+                      (clutch-repl--output text))))
+                (report-error (err)
+                  (if (eq (car err) 'clutch-query-interrupted)
+                      (output (clutch-repl--format-error
+                               (or (cadr err) "Query interrupted")))
+                    (let ((summary
+                           (cdr (clutch--remember-query-error
+                                 repl-buffer clutch-connection "repl" sql err))))
+                      (output (clutch-repl--format-error summary)))))
+                (present (outcome)
+                  (let ((elapsed (plist-get outcome :elapsed)))
+                    (if-let* ((db-error (plist-get outcome :error)))
+                        (let* ((connection (or (plist-get outcome :connection)
+                                               clutch-connection))
+                               (connection-lost
+                                (not (clutch--connection-alive-p connection)))
+                               (context
+                                (and connection-lost
+                                     (clutch--connection-loss-context connection)))
+                               (summary
+                                (cdr (clutch--remember-execute-error
+                                      repl-buffer connection sql db-error context)))
+                               (display-summary
+                                (if (eq (plist-get context :transaction-outcome)
+                                        'unknown)
+                                    (concat summary "\n"
+                                            clutch--transaction-outcome-unknown-message)
+                                  summary)))
+                          (when connection-lost
+                            (clutch--retire-query-connection connection))
+                          (output (clutch-repl--format-error display-summary)))
+                      (let ((result (plist-get outcome :result)))
+                        (if (plist-get outcome :result-query-p)
+                            (let* ((rows (clutch-db-result-rows result))
+                                   (row-count
+                                    (if (plist-get outcome :server-pageable)
+                                        (min (length rows) clutch-result-max-rows)
+                                      (length rows))))
+                              (clutch--present-statement-outcome
+                               sql clutch-connection outcome)
+                              (output
+                               (concat "\n"
+                                       (clutch--message-count row-count)
+                                       " "
+                                       (if (= row-count 1) "row" "rows")
+                                       " shown in "
+                                       (clutch--message-ident "result buffer")
+                                       " in "
+                                       (clutch--message-literal
+                                        (format "%.3fs" elapsed))
+                                       "\n\n"
+                                       (clutch-repl--prompt))))
+                          (output
+                           (clutch-repl--format-dml-result result elapsed))))))))
       (condition-case err
           (progn
             (clutch--ensure-connection)
-            (clutch--with-query-activity clutch-connection
-              (let* ((outcome
-                      (clutch--execute-statement
-                       sql clutch-connection t))
-                     (elapsed (plist-get outcome :elapsed)))
-                (if-let* ((db-error (plist-get outcome :error)))
-                    (let* ((connection (or (plist-get outcome :connection)
-                                           clutch-connection))
-                           (connection-lost
-                            (not (clutch--connection-alive-p connection)))
-                           (context
-                            (and connection-lost
-                                 (clutch--connection-loss-context connection)))
-                           (summary
-                            (cdr (clutch--remember-execute-error
-                                  repl-buffer connection sql db-error context)))
-                           (display-summary
-                            (if (eq (plist-get context :transaction-outcome)
-                                    'unknown)
-                                (concat summary "\n"
-                                        clutch--transaction-outcome-unknown-message)
-                              summary)))
-                      (when connection-lost
-                        (clutch--retire-query-connection connection))
-                      (output (clutch-repl--format-error display-summary)))
-                  (let ((result (plist-get outcome :result)))
-                    (if (plist-get outcome :result-query-p)
-                        (let* ((rows (clutch-db-result-rows result))
-                               (row-count
-                                (if (plist-get outcome :server-pageable)
-                                    (min (length rows) clutch-result-max-rows)
-                                  (length rows))))
-                          (clutch--present-statement-outcome
-                           sql clutch-connection outcome)
-                          (output
-                           (concat "\n"
-                                   (clutch--message-count row-count)
-                                   " "
-                                   (if (= row-count 1) "row" "rows")
-                                   " shown in "
-                                   (clutch--message-ident "result buffer")
-                                   " in "
-                                   (clutch--message-literal
-                                    (format "%.3fs" elapsed))
-                                   "\n\n"
-                                   (clutch-repl--prompt))))
-                      (output
-                       (clutch-repl--format-dml-result result elapsed))))))))
-        (clutch-query-interrupted
-         (output (clutch-repl--format-error
-                  (or (cadr err) "Query interrupted"))))
-        (error
-         (let ((summary
-                (cdr (clutch--remember-query-error
-                      repl-buffer clutch-connection "repl" sql err))))
-           (output (clutch-repl--format-error summary))))))))
+            (clutch--prepare-query-activity clutch-connection)
+            (clutch--confirm-query-execution sql)
+            (let* ((connection clutch-connection)
+                   (activity (clutch--begin-query-activity connection)))
+              (clutch--dispatch-query-activity
+               activity
+               (lambda ()
+                 (clutch--execute-statement
+                  sql connection t nil
+                  (lambda (outcome)
+                    (clutch--finish-query-activity
+                     activity
+                     (lambda ()
+                       (condition-case err
+                           (present outcome)
+                         (error (report-error err)))))))))))
+        (error (report-error err))))))
 
 ;;;###autoload (autoload 'clutch-repl "clutch" nil t)
 (defun clutch-repl ()

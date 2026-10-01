@@ -1032,6 +1032,42 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (clutch-db-set-auto-commit conn t)
       (should-not (clutch-db-manual-commit-p conn)))))
 
+(ert-deftest clutch-db-test-pg-query-async-wraps-outcomes-or-declines ()
+  "PostgreSQL should start SQL without blocking when pgsql.el can."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         (server-error '(pgsql-server-error "boom" (:sqlstate "XX000")))
+         sent finish outcomes)
+    (clutch-db-set-auto-commit conn nil)
+    (clutch-db-test--with-pgsql-client
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (push sql sent)
+                   (setf (plist-get client :transaction-status) 'in-transaction)
+                   (clutch-db-test--make-pg-result)))
+                ((symbol-function 'pgsql-exec-async)
+                 (lambda (actual-client sql callback)
+                   (should (eq actual-client client))
+                   (push sql sent)
+                   (setq finish callback))))
+        (should (clutch-db-query-async
+                 conn "SELECT 1"
+                 (lambda (result error) (push (list result error) outcomes))))
+        ;; Manual mode opens its transaction before the statement is sent.
+        (should (equal (reverse sent) '("BEGIN" "SELECT 1")))
+        (should-not outcomes)
+        (funcall finish (clutch-db-test--make-pg-result
+                         :columns '((:name "n" :type-oid 23)) :rows '((1)))
+                 nil)
+        (should (equal (clutch-db-result-rows (caar outcomes)) '((1))))
+        (funcall finish nil server-error)
+        (should (equal (cadar outcomes)
+                       (list 'clutch-db-error
+                             (error-message-string server-error)))))
+      (cl-letf (((symbol-function 'pgsql-exec-async) nil))
+        (should-not (clutch-db-query-async conn "SELECT 1" #'ignore))))))
+
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
   (require 'clutch-db-pg)
@@ -7435,6 +7471,64 @@ It does so without touching the agent process."
       (should-not (clutch-db-interrupt-query conn))
       (should-not send-called)
       (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
+
+(ert-deftest clutch-db-test-jdbc-foreground-request-always-finishes ()
+  "A foreground JDBC request should finish once, with or without a reply."
+  (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
+                                     :params '(:driver jdbc :rpc-timeout 12)))
+        (clutch-jdbc--agent-process 'fake-proc)
+        (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+        (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (clutch-jdbc--response-queue nil)
+        (next-id 40)
+        outcomes)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (&rest _args) (cl-incf next-id))))
+      (cl-flet ((start (sql)
+                  (clutch-db-query-async
+                   conn sql
+                   (lambda (result error) (push (list result error) outcomes))))
+                (run-timers () (accept-process-output nil 0.01)))
+        ;; The reply arrives after the connection was retired.
+        (should (start "UPDATE t SET n = 1"))
+        (should (clutch-jdbc-conn-busy conn))
+        (remhash 7 clutch-jdbc--connections-by-id)
+        (should (clutch-jdbc--dispatch-async-response
+                 '(:id 41 :ok t :result (:type "dml" :affected-rows 3))))
+        ;; Clearing callbacks before the reply's timer runs finishes nothing twice.
+        (clutch-jdbc--clear-async-callbacks)
+        (run-timers)
+        (should (= (length outcomes) 1))
+        (should (= (clutch-db-result-affected-rows (caar outcomes)) 3))
+        (should-not (clutch-jdbc-conn-busy conn))
+        (should-not (gethash conn clutch-jdbc--busy-request-ids))
+        ;; Cancelling keeps waiting for the request's own verdict.
+        (puthash 7 conn clutch-jdbc--connections-by-id)
+        (start "SELECT pg_sleep(30)")
+        (setq clutch-jdbc--response-queue
+              '((:id 43 :ok t :result (:cancelled t :request-id 42))))
+        (should (clutch-db-interrupt-query conn))
+        (should-not (gethash 42 clutch-jdbc--ignored-response-ids))
+        (should (eql (gethash conn clutch-jdbc--busy-request-ids) 42))
+        ;; An exiting agent finishes foreground requests, not metadata ones.
+        (puthash 99 (list :callback #'ignore :conn conn :op "get-tables")
+                 clutch-jdbc--async-callbacks)
+        (setq outcomes nil)
+        (cl-letf (((symbol-function 'process-live-p) #'ignore)
+                  ((symbol-function 'clutch-jdbc--agent-exit-error-message)
+                   (lambda () "clutch-jdbc-agent exited")))
+          (clutch-jdbc--agent-sentinel 'fake-proc "exited abnormally\n")
+          (run-timers)
+          (should (gethash 99 clutch-jdbc--async-callbacks))
+          (clutch-jdbc--clear-async-callbacks conn)
+          (run-timers))
+        (should (equal outcomes
+                       '((nil (clutch-db-error "clutch-jdbc-agent exited")))))
+        (should-not (gethash 42 clutch-jdbc--async-callbacks))))))
 
 (ert-deftest clutch-db-test-jdbc-interrupt-requires-confirmed-request ()
   "JDBC interrupt should reject unconfirmed or mismatched cancellation results."

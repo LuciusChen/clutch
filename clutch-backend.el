@@ -277,20 +277,27 @@ Values are nesting counts.")
   "Return non-nil when CONN is reserved by foreground Clutch work."
   (gethash conn clutch-db--foreground-connections))
 
+(defun clutch-db--reserve-connection (conn)
+  "Reserve CONN for foreground work; reservations nest."
+  (puthash conn (1+ (or (gethash conn clutch-db--foreground-connections) 0))
+           clutch-db--foreground-connections))
+
+(defun clutch-db--release-connection (conn)
+  "Release one foreground reservation of CONN."
+  (let ((count (1- (or (gethash conn clutch-db--foreground-connections) 1))))
+    (if (> count 0)
+        (puthash conn count clutch-db--foreground-connections)
+      (remhash conn clutch-db--foreground-connections))))
+
 (defmacro clutch-db-with-foreground-connection (conn &rest body)
   "Run BODY while marking CONN reserved for foreground work."
   (declare (indent 1) (debug t))
   (let ((conn-var (make-symbol "conn")))
     `(let ((,conn-var ,conn))
-       (puthash ,conn-var
-                (1+ (or (gethash ,conn-var clutch-db--foreground-connections) 0))
-                clutch-db--foreground-connections)
+       (clutch-db--reserve-connection ,conn-var)
        (unwind-protect
            (progn ,@body)
-         (let ((count (1- (or (gethash ,conn-var clutch-db--foreground-connections) 1))))
-           (if (> count 0)
-               (puthash ,conn-var count clutch-db--foreground-connections)
-             (remhash ,conn-var clutch-db--foreground-connections)))))))
+         (clutch-db--release-connection ,conn-var)))))
 
 ;;;; SQL helpers (literal-or-comment awareness)
 
@@ -1357,6 +1364,17 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
 
 (cl-defgeneric clutch-db-query (conn sql)
   "Execute SQL on CONN and return a `clutch-db-result'.")
+
+(cl-defgeneric clutch-db-query-async (conn sql callback)
+  "Start SQL on CONN without blocking Emacs and return non-nil.
+CALLBACK is later called once with RESULT and ERROR: a
+`clutch-db-result' and nil, or nil and a `clutch-db-error' condition.
+Return nil, without calling CALLBACK, when CONN cannot run SQL without
+blocking.")
+
+(cl-defmethod clutch-db-query-async ((_conn t) _sql _callback)
+  "Return nil because this backend cannot run SQL without blocking."
+  nil)
 
 (cl-defgeneric clutch-db-result-query-p (conn sql)
   "Return non-nil when SQL should render as a tabular result for CONN.")

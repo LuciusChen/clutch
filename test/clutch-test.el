@@ -1008,8 +1008,12 @@ Any statement that returns no result set drops the cached row identities."
           (should (equal (identity-columns) '("id")))
           (dolist (sql '("DROP TABLE t"
                          "CREATE TABLE t (code TEXT PRIMARY KEY, name TEXT)"))
-            (should-not (plist-get (clutch--execute-statement-attempt sql conn t)
-                                   :error)))
+            (should-not
+             (plist-get (clutch-test--await-outcome
+                         (lambda (k)
+                           (clutch--execute-statement-attempt
+                            sql conn t nil nil k)))
+                        :error)))
           (should (equal (identity-columns) '("code"))))
       (clutch-db-disconnect conn)
       (ignore-errors (delete-file db-file)))))
@@ -2103,6 +2107,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     ((symbol-function 'clutch-db-row-identity-candidates)
                      (lambda (&rest _args)
                        (signal (car identity-error) (cdr identity-error))))
+                    ((symbol-function 'clutch-db-query-async) #'ignore)
                     ((symbol-function 'clutch-db-query)
                      (lambda (_conn _sql) result)))
             (clutch-test--execute-and-present
@@ -7363,7 +7368,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         :columns '((:name "value"))
                         :rows '((1))))))
             (let ((outcome
-                   (clutch--execute-statement-attempt sql 'fake-conn t)))
+                   (clutch-test--await-outcome
+                    (lambda (k)
+                      (clutch--execute-statement-attempt
+                       sql 'fake-conn t nil nil k)))))
               (should (plist-get outcome :result-query-p))
               (should (eq (plist-get outcome :server-pageable) pageable))
               (should (eq (and identity-prepared t) pageable))
@@ -8580,11 +8588,10 @@ statement."
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (push (apply #'format fmt args) messages))))
-        (let ((clutch--executing-sql-start (point-min))
-              (clutch--executing-sql-end (point-max)))
-          (clutch--present-statement-outcome
-           "SELECT * FROM missing_users" 'fake-conn
-           (list :error err :elapsed 0.012 :source-buffer (current-buffer))))
+        (clutch--present-statement-outcome
+         "SELECT * FROM missing_users" 'fake-conn
+         (list :error err :elapsed 0.012 :source-buffer (current-buffer))
+         (cons (point-min) (point-max)))
         (should displayed)
         (should (equal (car displayed) "SELECT * FROM missing_users"))
         (should-not messages)
@@ -8807,7 +8814,7 @@ statement."
                 ((symbol-function 'clutch--update-mode-line)
                  (lambda (&optional _execution-only)
                    (setq mode-line-updates (1+ mode-line-updates)))))
-        (should-not (clutch--execute "SELECT SLEEP(60)" conn))
+        (clutch--execute "SELECT SLEEP(60)" conn)
         (should (= executions 1))
         (should (string-match-p "query timed out" displayed-error))
         (should (eq (plist-get error-context :transaction-outcome) 'unknown))
@@ -8862,16 +8869,19 @@ statement."
                          (cl-incf builds)
                          new-conn))
                       ((symbol-function 'clutch--execute-statement)
-                       (lambda (sql connection &rest _args)
+                       (lambda (sql connection _present-result-p _region k
+                                    &rest _args)
                          (push (list sql connection) executions)
-                         (if (eq connection old-conn)
-                             (progn
-                               (setq old-live nil)
-                               (list :error '(clutch-db-error "socket lost")
-                                     :source-buffer source))
-                           (list :result (make-clutch-db-result :affected-rows 1)
-                                 :result-query-p nil
-                                 :source-buffer source))))
+                         (funcall
+                          k
+                          (if (eq connection old-conn)
+                              (progn
+                                (setq old-live nil)
+                                (list :error '(clutch-db-error "socket lost")
+                                      :source-buffer source))
+                            (list :result (make-clutch-db-result :affected-rows 1)
+                                  :result-query-p nil
+                                  :source-buffer source)))))
                       ((symbol-function 'clutch--show-execution-error)
                        (lambda (&rest _args) "socket lost"))
                       ((symbol-function 'clutch-result--display) #'ignore)
@@ -8887,13 +8897,13 @@ statement."
                        (lambda (_connection) "oracle@test"))
                       ((symbol-function 'message) #'ignore))
               (with-current-buffer source
-                (should-not (clutch--execute "SELECT once"))
+                (clutch--execute "SELECT once")
                 (should (= (length executions) 1))
                 (should (= builds 0))
                 (should (= reverts 0))
                 (should (eq clutch-connection old-conn))
                 (setq allow-revert t)
-                (should (clutch--execute "SELECT next"))))
+                (clutch--execute "SELECT next")))
             (should (= builds 1))
             (should (= reverts 1))
             (should (equal (nreverse executions)
@@ -8957,11 +8967,14 @@ statement."
                        (setq clutch-connection 'new-conn)
                        t)))
             (let ((outcome
-                   (clutch--execute-statement
-                    "SELECT side_effect_free" 'old-conn nil)))
+                   (clutch-test--await-outcome
+                    (lambda (k)
+                      (clutch--execute-statement
+                       "SELECT side_effect_free" 'old-conn nil nil k)))))
               (ert-info ((format "case: %s" label))
                 (should (= runs expected-runs))
-                (should (= confirmations 1))
+                ;; Callers confirm once; neither attempt asks again.
+                (should (= confirmations 0))
                 (should (= reconnects expected-reconnects))
                 (should (eq (plist-get outcome :connection)
                             expected-connection))
@@ -9000,15 +9013,148 @@ statement."
                    (setq clutch-connection 'new-conn)
                    t)))
         (let ((outcome
-               (clutch--execute-statement
-                "SELECT * FROM items" 'old-conn t
-                '(:row-identity-prep (:sql "stale-plan")
-                  :server-pageable nil))))
+               (clutch-test--await-outcome
+                (lambda (k)
+                  (clutch--execute-statement
+                   "SELECT * FROM items" 'old-conn t nil k
+                   '(:row-identity-prep (:sql "stale-plan")
+                     :server-pageable nil))))))
           (should (eq (plist-get outcome :connection) 'new-conn))
           (should (equal (nreverse executions)
                          '((old-conn "stale-plan")
                            (new-conn "fresh-plan"))))
           (should (equal prepared-connections '(new-conn))))))))
+
+(defmacro clutch-test--with-async-statements (finishes-var &rest body)
+  "Run BODY with statements finishing only when callbacks in FINISHES-VAR run.
+Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((clutch-db--foreground-connections (make-hash-table :test 'eq))
+         (clutch--running-queries (make-hash-table :test 'eq))
+         (,finishes-var nil))
+     (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+               ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+               ((symbol-function 'clutch--update-mode-line) #'ignore)
+               ((symbol-function 'clutch--execution-refresh-start) #'ignore)
+               ((symbol-function 'clutch--confirm-query-execution) #'ignore)
+               ((symbol-function 'clutch-db-result-query-p) #'ignore)
+               ((symbol-function 'clutch-db-manual-commit-p) #'ignore)
+               ((symbol-function 'clutch--tx-uncertain-p) #'ignore)
+               ((symbol-function 'clutch--record-tx-state-after-query) #'ignore)
+               ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
+               ((symbol-function 'clutch-db-query-async)
+                (lambda (_conn sql callback)
+                  (push (cons sql callback) ,finishes-var)
+                  t)))
+       ,@body)))
+
+(ert-deftest clutch-test-async-execute-presents-after-completion ()
+  "An asynchronous statement should hold its connection until it finishes."
+  (with-temp-buffer
+    (insert "UPDATE t SET n = 1 WHERE id = 1")
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let (displayed)
+        (cl-letf (((symbol-function 'clutch-result--display)
+                   (lambda (result _sql _elapsed) (setq displayed result))))
+          (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+          (should (equal (mapcar #'car finishes) (list (buffer-string))))
+          (should (clutch-db--foreground-busy-p 'async-conn))
+          (should (string-prefix-p
+                   "Running"
+                   (overlay-get clutch--executed-sql-overlay 'help-echo)))
+          (should-error (clutch--execute "SELECT 2") :type 'user-error)
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (should-not displayed)
+          (ert-run-idle-timers)
+          (should (= (clutch-db-result-affected-rows displayed) 1))
+          (should-not (gethash 'async-conn clutch--running-queries))
+          (should-not (clutch-db--foreground-busy-p 'async-conn))
+          (should-not clutch--execution-start-time)
+          (should (string-prefix-p
+                   "Last executed"
+                   (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
+
+(ert-deftest clutch-test-async-execute-drops-outcome-of-killed-buffer ()
+  "A statement finishing after its buffer is killed should only be reported."
+  (let ((buffer (generate-new-buffer " *clutch-async-source*"))
+        messages displayed)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch-result--display)
+                 (lambda (&rest _args) (setq displayed t)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (with-current-buffer buffer
+          (setq-local clutch-connection 'async-conn)
+          (clutch--execute "UPDATE t SET n = 1 WHERE id = 1"))
+        (kill-buffer buffer)
+        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should-not displayed)
+        (should (member "Query finished after its buffer was killed" messages))
+        (should-not (gethash 'async-conn clutch--running-queries))
+        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
+
+(ert-deftest clutch-test-async-statements-run-one-after-another ()
+  "A batch should send each statement after the previous one finishes."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let (messages)
+        (cl-letf (((symbol-function 'clutch--show-execution-error)
+                   (lambda (&rest _args) "duplicate key"))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute-statements
+           '("INSERT INTO t VALUES (1)"
+             "INSERT INTO t VALUES (2)"
+             "INSERT INTO t VALUES (3)"))
+          (should (equal (mapcar #'car finishes) '("INSERT INTO t VALUES (1)")))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should (equal (mapcar #'car finishes)
+                         '("INSERT INTO t VALUES (2)"
+                           "INSERT INTO t VALUES (1)")))
+          (funcall (cdar finishes) nil '(clutch-db-error "duplicate key"))
+          (ert-run-idle-timers)
+          (should (= (length finishes) 2))
+          (should (cl-find-if (lambda (text)
+                                (string-prefix-p
+                                 "Statement 2 failed: duplicate key" text))
+                              messages))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
+(ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()
+  "C-g should ask once to cancel the running query and otherwise quit."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (let ((clutch--running-queries (make-hash-table :test 'eq))
+          (accepted t)
+          interrupts)
+      (cl-letf (((symbol-function 'clutch--update-mode-line) #'ignore)
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'clutch-db-interrupt-query)
+                 (lambda (conn) (push conn interrupts) accepted)))
+        (cl-flet ((press ()
+                    (condition-case nil
+                        (progn (clutch-cancel-query-or-quit) 'cancelled)
+                      (quit 'quit))))
+          (should (eq (press) 'quit))
+          (puthash 'async-conn
+                   (list :buffer (current-buffer) :region nil :cancelling nil)
+                   clutch--running-queries)
+          (setq accepted nil)
+          (should (eq (press) 'cancelled))
+          (should-not (plist-get (gethash 'async-conn clutch--running-queries)
+                                 :cancelling))
+          (setq accepted t)
+          (should (eq (press) 'cancelled))
+          (should (plist-get (gethash 'async-conn clutch--running-queries)
+                             :cancelling))
+          (should (eq (press) 'quit))
+          (should (equal interrupts '(async-conn async-conn))))))))
 
 (ert-deftest clutch-test-present-outcome-uses-executing-connection ()
   "Presentation should use the connection that produced the outcome."
@@ -9109,8 +9255,10 @@ statement."
               ((symbol-function 'clutch--run-db-query)
                (lambda (&rest _) (make-clutch-db-result))))
       (setq outcome
-            (clutch--execute-statement
-             "db.users.find()" 'document-conn nil))
+            (clutch-test--await-outcome
+             (lambda (k)
+               (clutch--execute-statement
+                "db.users.find()" 'document-conn nil nil k))))
       (should (equal captured '(document-conn "db.users.find()")))
       (should (plist-get outcome :result-query-p)))))
 
