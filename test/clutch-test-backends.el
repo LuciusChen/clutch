@@ -15,8 +15,9 @@
   '((:id mysql
      :backend mysql
      :display-name "MySQL"
+     :sleep-sql "SELECT * FROM (SELECT SLEEP(%d)) t"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
-                    :object-describe :duplicate-column-join))
+                    :object-describe :duplicate-column-join :async-cancel))
     (:id pg
      :backend pg
      :display-name "PostgreSQL"
