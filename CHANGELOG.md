@@ -4,7 +4,7 @@
 
 ### Added
 
-- PostgreSQL, MySQL and JDBC statements run without blocking Emacs. The console, REPL and result buffers stay usable, the running statement's first line shows an amber fringe marker that turns into a red square while it is being cancelled, and `C-g` in those buffers cancels it, reporting the server's verdict. Until it finishes, its connection refuses other commands; a batch runs one statement after another the same way. PostgreSQL needs pgsql.el with `pgsql-exec-async` and MySQL needs mysql.el 0.2.5 or later; other backends block as before. Such statements have no client-side idle timeout, and a MySQL statement, which has no database-side timeout either, runs until it finishes or is cancelled. JDBC still fetches the rest of a result page synchronously after the statement finishes.
+- PostgreSQL, MySQL and JDBC statements run without blocking Emacs. The console, REPL and result buffers stay usable, the running statement's first line shows an amber fringe marker that turns into a red square while it is being cancelled, and `C-g` in those buffers cancels it, reporting the server's verdict. Until it finishes, its connection refuses other commands; a batch runs one statement after another the same way. PostgreSQL needs pgsql.el with `pgsql-exec-async` and MySQL needs mysql.el with `mysql-query-async`; other backends block as before. Such statements have no client-side idle timeout, and a MySQL statement, which has no database-side timeout either, runs until it finishes or is cancelled. JDBC still fetches the rest of a result page synchronously after the statement finishes.
 
 ### Changed
 
