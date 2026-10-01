@@ -96,7 +96,7 @@ cleanup() {
   if ((${#started[@]})); then
     for name in "${started[@]}"; do
       log "Removing test container $name"
-      ctr rm -f "$name" >/dev/null 2>&1 || true
+      ctr rm -f -v "$name" >/dev/null 2>&1 || true
     done
   fi
   if ((${#temp_paths[@]})); then
@@ -176,7 +176,7 @@ start_mongo() {
       return
     fi
     log "Replacing MongoDB container $mongo_name without test commands"
-    ctr rm -f "$mongo_name" >/dev/null
+    ctr rm -f -v "$mongo_name" >/dev/null
   fi
   log "Starting MongoDB container $mongo_name on 127.0.0.1:$mongo_port"
   run_container \
