@@ -7528,7 +7528,16 @@ It does so without touching the agent process."
           (run-timers))
         (should (equal outcomes
                        '((nil (clutch-db-error "clutch-jdbc-agent exited")))))
-        (should-not (gethash 42 clutch-jdbc--async-callbacks))))))
+        (should-not (gethash 42 clutch-jdbc--async-callbacks))
+        ;; A reply clears only its own request's busy marker.
+        (start "UPDATE t SET n = 2")
+        (let ((id (gethash conn clutch-jdbc--busy-request-ids)))
+          (puthash conn 'later-request clutch-jdbc--busy-request-ids)
+          (clutch-jdbc--dispatch-async-response
+           `(:id ,id :ok t :result (:type "dml" :affected-rows 1)))
+          (run-timers))
+        (should (eq (gethash conn clutch-jdbc--busy-request-ids)
+                    'later-request))))))
 
 (ert-deftest clutch-db-test-jdbc-interrupt-requires-confirmed-request ()
   "JDBC interrupt should reject unconfirmed or mismatched cancellation results."
