@@ -4863,9 +4863,15 @@ verdict."
       (should disconnected)
       (should (= (mysql-conn-read-idle-timeout conn) 30))
       (setq drained nil captured-sql nil)
-      (cl-letf (((symbol-function 'mysql-async-pending-p)
-                 (lambda (mysql-conn) (eq mysql-conn conn))))
-        (should (clutch-db-interrupt-query conn)))
+      (let ((pending t))
+        (cl-letf (((symbol-function 'mysql-async-pending-p)
+                   (lambda (mysql-conn) (and pending (eq mysql-conn conn))))
+                  ((symbol-function 'mysql-connect)
+                   (lambda (&rest _args)
+                     ;; The query finishes while the killer connects.
+                     (setq pending nil)
+                     killer)))
+          (should (clutch-db-interrupt-query conn))))
       (should (equal captured-sql "KILL QUERY 123"))
       (should-not drained))))
 
