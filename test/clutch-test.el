@@ -825,36 +825,34 @@
 (ert-deftest clutch-test-row-identity-prep-reads-through-ctes ()
   "Row identity should be injected where a CTE chain reads its table."
   (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            (clutch--row-identity-cte-alias-suffix "5e55")
             ((symbol-function 'clutch-db-row-identity-candidates)
              (lambda (_conn _table)
                (list (list :kind 'primary-key :name "PRIMARY"
                            :columns '("id")))))
-            ((symbol-function 'clutch--ensure-column-details)
-             (lambda (_conn _table)
-               '((:name "id") (:name "name") (:name "active"))))
             ((symbol-function 'clutch-db-escape-identifier)
              (lambda (_conn id) (format "\"%s\"" id))))
     (dolist (case
              '(("WITH a AS (SELECT * FROM app.users WHERE active = 1), b AS (SELECT * FROM a) SELECT * FROM b"
-                "WITH a AS (SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM app.users WHERE active = 1), b AS (SELECT * FROM a) SELECT * FROM b"
+                "WITH a AS (SELECT users.*, \"id\" AS \"clutch__rid_0_5e55\" FROM app.users WHERE active = 1), b AS (SELECT * FROM a) SELECT * FROM b"
                 "app.users" star)
                ("WITH c (k, v) AS (SELECT id, name FROM users), d (x) AS (SELECT v FROM c) SELECT x FROM d"
-                "WITH c (k, v, \"clutch__rid_0\") AS (SELECT id, name, \"id\" AS \"clutch__rid_0\" FROM users), d (x, \"clutch__rid_0\") AS (SELECT v, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM c) SELECT x, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM d"
+                "WITH c (k, v, \"clutch__rid_0_5e55\") AS (SELECT id, name, \"id\" AS \"clutch__rid_0_5e55\" FROM users), d (x, \"clutch__rid_0_5e55\") AS (SELECT v, \"clutch__rid_0_5e55\" AS \"clutch__rid_0_5e55\" FROM c) SELECT x, \"clutch__rid_0_5e55\" AS \"clutch__rid_0_5e55\" FROM d"
                 "users" ("name"))
                ("WITH c AS (SELECT id AS k, name AS v, upper(name) AS u FROM users) SELECT v, k, u FROM c x"
-                "WITH c AS (SELECT id AS k, name AS v, upper(name) AS u, \"id\" AS \"clutch__rid_0\" FROM users) SELECT v, k, u, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM c x"
+                "WITH c AS (SELECT id AS k, name AS v, upper(name) AS u, \"id\" AS \"clutch__rid_0_5e55\" FROM users) SELECT v, k, u, \"clutch__rid_0_5e55\" AS \"clutch__rid_0_5e55\" FROM c x"
                 "users" ("name" "id" nil))
                ("WITH c AS (SELECT name FROM users) SELECT * FROM c"
-                "WITH c AS (SELECT name, \"id\" AS \"clutch__rid_0\" FROM users) SELECT * FROM c"
+                "WITH c AS (SELECT name, \"id\" AS \"clutch__rid_0_5e55\" FROM users) SELECT * FROM c"
                 "users" ("name"))
                ("WITH users AS (SELECT * FROM audit) SELECT * FROM users"
-                "WITH users AS (SELECT audit.*, \"id\" AS \"clutch__rid_0\" FROM audit) SELECT * FROM users"
+                "WITH users AS (SELECT audit.*, \"id\" AS \"clutch__rid_0_5e55\" FROM audit) SELECT * FROM users"
                 "audit" star)
                ("WITH c AS (SELECT id, name FROM users) SELECT c.name FROM c"
-                "WITH c AS (SELECT id, name, \"id\" AS \"clutch__rid_0\" FROM users) SELECT c.name, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM c"
+                "WITH c AS (SELECT id, name, \"id\" AS \"clutch__rid_0_5e55\" FROM users) SELECT c.name, \"clutch__rid_0_5e55\" AS \"clutch__rid_0_5e55\" FROM c"
                 "users" ("name"))
                ("WITH ids AS (SELECT id FROM users) SELECT * FROM users WHERE id IN (SELECT id FROM ids)"
-                "WITH ids AS (SELECT id FROM users) SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM users WHERE id IN (SELECT id FROM ids)"
+                "WITH ids AS (SELECT id FROM users) SELECT users.*, \"id\" AS \"clutch__rid_0_5e55\" FROM users WHERE id IN (SELECT id FROM ids)"
                 "users" star)))
       (pcase-let ((`(,sql ,expected ,token ,projection) case))
         (ert-info (sql)
@@ -862,7 +860,8 @@
             (should (plist-get prep :cte))
             (should (equal (plist-get prep :sql) expected))
             (should (equal (plist-get prep :source-token) token))
-            (should (equal (plist-get prep :hidden-aliases) '("clutch__rid_0")))
+            (should (equal (plist-get prep :hidden-aliases)
+                           '("clutch__rid_0_5e55")))
             (should (equal (plist-get prep :writable-projection)
                            projection))))))))
 
@@ -880,8 +879,6 @@
                    "WITH c AS (SELECT DISTINCT team FROM users) SELECT * FROM c"
                    "WITH c AS (SELECT * FROM users) SELECT team, count(*) FROM c GROUP BY team"
                    "WITH b AS (SELECT * FROM shadow), shadow AS (SELECT * FROM users) SELECT * FROM b"
-                   ;; The identity is passed on by name, which this would capture.
-                   "WITH c AS (SELECT name, 2 AS clutch__rid_0 FROM users WHERE id = 1) SELECT name FROM c"
                    ;; An identity column would change what the other reads see.
                    "WITH c AS (SELECT name FROM users) SELECT name FROM c WHERE name IN (SELECT * FROM c)"))
       (ert-info (sql)
@@ -7718,49 +7715,80 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (when (clutch-db-live-p conn)
           (clutch-db-disconnect conn))))))
 
-(ert-deftest clutch-test-cte-result-stays-read-only-over-identity-named-column ()
-  "A table column named like the hidden identity must not be edited through.
-Outer SELECTs pass the identity on by name, so a `*' that brings in the
-table's own clutch__rid_0 made one of them read that instead."
+(ert-deftest clutch-test-cte-result-edits-shown-row-past-identity-like-columns ()
+  "An edit through a CTE should change the row shown whatever columns exist.
+Outer SELECTs pass the identity on by name, so a column named like it must
+not take its place, whether the query names it, the table has it, the
+table sits in another schema, or the column is generated."
   (skip-unless (sqlite-available-p))
-  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-         (source (generate-new-buffer " *clutch-cte-identity-name-source*"))
-         (clutch--execution-refresh-timer nil)
-         result)
-    (unwind-protect
-        (save-window-excursion
-          (clutch-db-query
-           conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER)")
-          (clutch-db-query
-           conn "INSERT INTO people (id, name, clutch__rid_0) VALUES (1, 'alpha', 2), (2, 'beta', 1)")
-          (set-window-buffer (selected-window) source)
-          (with-current-buffer source
-            (clutch-mode)
-            (setq-local clutch-connection conn
-                        clutch--connection-params
-                        '(:backend sqlite :database ":memory:"))
-            (insert "WITH c AS (SELECT * FROM people WHERE id = 1) SELECT name FROM c")
-            (clutch-execute-buffer)
-            (setq result clutch--last-result-buffer))
-          (set-window-buffer (selected-window) result)
-          (with-current-buffer result
-            (should (equal clutch--result-rows '(("alpha"))))
-            (should-not clutch--result-source-table)
-            (should-error (clutch-result--apply-edit
-                           0 0 "edited"
-                           (list :identity nil :original "alpha"
-                                 :original-state (cons nil "alpha")))
-                          :type 'user-error))
-          (should (equal (clutch-db-result-rows
-                          (clutch-db-query conn "SELECT id, name FROM people ORDER BY id"))
-                         '((1 "alpha") (2 "beta")))))
-      (clutch--execution-refresh-stop)
-      (when (buffer-live-p result)
-        (kill-buffer result))
-      (when (buffer-live-p source)
-        (kill-buffer source))
-      (when (clutch-db-live-p conn)
-        (clutch-db-disconnect conn)))))
+  (dolist (case
+           '(("query alias"
+              ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
+               "INSERT INTO people VALUES (1, 'alpha'), (2, 'beta')")
+              "WITH c AS (SELECT name, 2 AS clutch__rid_0 FROM people WHERE id = 1) SELECT name FROM c"
+              "people")
+             ("table column"
+              ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER)"
+               "INSERT INTO people VALUES (1, 'alpha', 2), (2, 'beta', 1)")
+              "WITH c AS (SELECT * FROM people WHERE id = 1) SELECT name FROM c"
+              "people")
+             ("table in another schema"
+              ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
+               "INSERT INTO people VALUES (1, 'alpha'), (2, 'beta')"
+               "ATTACH DATABASE ':memory:' AS aux"
+               "CREATE TABLE aux.people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER)"
+               "INSERT INTO aux.people VALUES (1, 'alpha', 2), (2, 'beta', 1)")
+              "WITH c AS (SELECT * FROM aux.people WHERE id = 1) SELECT name FROM c"
+              "aux.people")
+             ("generated column"
+              ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER GENERATED ALWAYS AS (3 - id) VIRTUAL)"
+               "INSERT INTO people (id, name) VALUES (1, 'alpha'), (2, 'beta')")
+              "WITH c AS (SELECT * FROM people WHERE id = 1) SELECT name FROM c"
+              "people")))
+    (pcase-let ((`(,label ,setup ,sql ,table) case))
+      (ert-info (label)
+        (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+               (source (generate-new-buffer " *clutch-cte-identity-name-source*"))
+               (clutch--execution-refresh-timer nil)
+               result)
+          (unwind-protect
+              (save-window-excursion
+                (dolist (statement setup)
+                  (clutch-db-query conn statement))
+                (set-window-buffer (selected-window) source)
+                (with-current-buffer source
+                  (clutch-mode)
+                  (setq-local clutch-connection conn
+                              clutch--connection-params
+                              '(:backend sqlite :database ":memory:"))
+                  (insert sql)
+                  (clutch-execute-buffer)
+                  (setq result clutch--last-result-buffer))
+                (set-window-buffer (selected-window) result)
+                (with-current-buffer result
+                  (should (equal (mapcar #'car clutch--result-rows) '("alpha")))
+                  (let ((row (car clutch--result-rows)))
+                    (clutch-result--apply-edit
+                     0 0 "edited"
+                     (list :identity (clutch-db-row-identity-values
+                                      row clutch--row-identity)
+                           :original (car row)
+                           :original-state (cons nil (car row)))))
+                  (cl-letf (((symbol-function 'yes-or-no-p)
+                             (lambda (&rest _) t)))
+                    (clutch-result-submit)))
+                (should (equal (clutch-db-result-rows
+                                (clutch-db-query
+                                 conn (format "SELECT id, name FROM %s ORDER BY id"
+                                              table)))
+                               '((1 "edited") (2 "beta")))))
+            (clutch--execution-refresh-stop)
+            (when (buffer-live-p result)
+              (kill-buffer result))
+            (when (buffer-live-p source)
+              (kill-buffer source))
+            (when (clutch-db-live-p conn)
+              (clutch-db-disconnect conn))))))))
 
 (ert-deftest clutch-test-insert-export-names-source-columns-real-sqlite ()
   "INSERT export should name the table's columns, not the result's aliases."
