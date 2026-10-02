@@ -8958,15 +8958,35 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
         (should (equal captured
                        "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
 
+(ert-deftest clutch-test-preview-leaves-the-result-buffer-selected ()
+  "\\`C-c C-c' after \\`C-c C-p' should submit from the result buffer.
+The preview is in `sql-mode', where \\`C-c C-c' sends to an SQL process."
+  (let ((result (generate-new-buffer " *clutch-preview-focus*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (split-window)
+          (switch-to-buffer result)
+          (clutch-result-mode)
+          (cl-letf (((symbol-function 'clutch-result--preview-execution-sql)
+                     (lambda () "UPDATE t SET a = 1 WHERE id = 1;")))
+            (call-interactively (key-binding (kbd "C-c C-p"))))
+          (should (eq (window-buffer (selected-window)) result))
+          (should (eq (key-binding (kbd "C-c C-c")) #'clutch-result-submit))
+          (should (get-buffer-window "*clutch-preview*")))
+      (kill-buffer result)
+      (when-let* ((preview (get-buffer "*clutch-preview*")))
+        (kill-buffer preview)))))
+
 (ert-deftest clutch-test-preview-sql-buffer-uses-local-connection-product ()
   "SQL previews should use their source dialect without changing the default."
   (let ((default-product (default-value 'sql-product))
         preview-buffer)
     (unwind-protect
-        (cl-letf (((symbol-function 'pop-to-buffer)
+        (cl-letf (((symbol-function 'display-buffer)
                    (lambda (buf &rest _args)
                      (setq preview-buffer buf)
-                     buf)))
+                     nil)))
           (clutch--preview-sql-buffer
            "SELECT NVL(name, 0) FROM DUAL" 'oracle)
           (with-current-buffer preview-buffer
