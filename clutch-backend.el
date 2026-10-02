@@ -859,6 +859,152 @@ statement MAIN, or nil when SQL has none."
         (cons (substring normalized 0 main) (substring normalized main))
       (cons nil normalized))))
 
+(defun clutch-db-sql--skip-blank (sql pos)
+  "Return the first position at or after POS in SQL past blanks.
+Whitespace and comments are blanks."
+  (let ((len (length sql))
+        next)
+    (while (and (< pos len)
+                (setq next (if (memq (aref sql pos) '(?\s ?\t ?\n ?\r ?\f))
+                               (1+ pos)
+                             (and (memq (aref sql pos) '(?- ?/))
+                                  (clutch-db-sql-skip-literal-or-comment
+                                   sql pos)))))
+      (setq pos next))
+    pos))
+
+(defun clutch-db-sql--token-end (sql pos)
+  "Return the end of the name or keyword at POS in SQL, or nil.
+A quoted identifier counts as one name."
+  (cond
+   ((>= pos (length sql)) nil)
+   ((memq (aref sql pos) '(?\" ?` ?\[))
+    (clutch-db-sql-skip-literal-or-comment sql pos t))
+   ((eq (string-match "[[:alpha:]_][[:alnum:]_$#@]*" sql pos) pos)
+    (match-end 0))))
+
+(defun clutch-db-sql-cte-definitions (sql)
+  "Return the CTE definitions in the leading WITH clause of normalized SQL.
+Each is a plist: :name as written; :columns, the names its column list
+gives, or nil without one; :columns-end, the position of that list's
+closing parenthesis; and :start and :end, the bounds of its body.  Return
+nil for a recursive WITH clause or one this parser does not follow."
+  (when-let* (((clutch-db-sql-starts-with-keyword-p sql '("WITH")))
+              (main (car (clutch-db-sql--main-op-match sql))))
+    (let ((pos 4)                       ; Past the leading WITH.
+          definitions)
+      (cl-labels
+          ((token ()
+             (setq pos (clutch-db-sql--skip-blank sql pos))
+             (when-let* ((end (clutch-db-sql--token-end sql pos)))
+               (prog1 (substring sql pos end)
+                 (setq pos end))))
+           (keyword (word)
+             ;; Move past WORD when it comes next.
+             (let ((start pos)
+                   (next (token)))
+               (or (and next (string-equal-ignore-case next word))
+                   (progn (setq pos start) nil))))
+           (group ()
+             ;; Move past the parenthesized group that comes next and return
+             ;; the bounds of its contents.
+             (setq pos (clutch-db-sql--skip-blank sql pos))
+             (when-let* (((< pos (length sql)))
+                         ((eq (aref sql pos) ?\())
+                         (close (clutch-db-sql-matching-paren-position
+                                 sql pos)))
+               (prog1 (cons (1+ pos) close)
+                 (setq pos (1+ close)))))
+           (names (start end)
+             (let ((from start)
+                   result)
+               (clutch-db-sql-scan-code
+                sql start end
+                (lambda (comma _char depth)
+                  (when (zerop depth)
+                    (push (string-trim (substring sql from comma)) result)
+                    (setq from (1+ comma)))
+                  nil)
+                nil ",")
+               (nreverse (cons (string-trim (substring sql from end))
+                               result)))))
+        (unless (keyword "RECURSIVE")
+          (catch 'unsupported
+            (while (< pos main)
+              (let* ((name (or (token) (throw 'unsupported nil)))
+                     (columns (group))
+                     (body (and (keyword "AS")
+                                (progn (keyword "NOT")
+                                       (keyword "MATERIALIZED")
+                                       (group)))))
+                (unless body
+                  (throw 'unsupported nil))
+                (push (list :name name
+                            :columns (and columns
+                                          (names (car columns) (cdr columns)))
+                            :columns-end (cdr columns)
+                            :start (car body)
+                            :end (cdr body))
+                      definitions)
+                (setq pos (clutch-db-sql--skip-blank sql pos))
+                (cond
+                 ((and (< pos main) (eq (aref sql pos) ?,))
+                  (cl-incf pos))
+                 ((/= pos main)
+                  (throw 'unsupported nil)))))
+            (nreverse definitions)))))))
+
+(defun clutch-db-sql--same-identifier-p (a b)
+  "Compare identifiers A and B as written.
+Return t when they name the same object, nil when they differ, and
+`ambiguous' when that depends on how the database folds case."
+  (let ((name-a (clutch-db-sql--unquote-identifier a))
+        (name-b (clutch-db-sql--unquote-identifier b)))
+    (cond
+     ((not (string-equal-ignore-case name-a name-b)) nil)
+     ((or (string= a b)
+          (and (equal a name-a) (equal b name-b)))
+      t)
+     (t 'ambiguous))))
+
+(defun clutch-db-sql-source-chain (sql)
+  "Return the path from normalized SQL's main statement to its table.
+SQL starts with a WITH clause.  The value is a plist.  :levels lists
+\(START END DEFINITION) for each SELECT on the way, from the main
+statement inward, where DEFINITION is the CTE whose body it is, or nil
+for the main statement.  :token is the table the last of them reads, as
+written.  Each SELECT must read a single relation.  Return nil when that
+does not lead to a table, including when whether a name refers to a CTE
+depends on the database's case folding."
+  (when-let* ((definitions (clutch-db-sql-cte-definitions sql)))
+    (let ((start (car (clutch-db-sql--main-op-match sql)))
+          (end (length sql))
+          (visible definitions)
+          definition
+          levels)
+      (catch 'done
+        (while t
+          (let ((token (clutch-db-sql--source-table-token
+                        (substring sql start end) t)))
+            (unless token
+              (throw 'done nil))
+            (push (list start end definition) levels)
+            (setq definition
+                  (and (not (clutch-db-sql-table-schema token))
+                       (cl-loop for candidate in visible
+                                for same = (clutch-db-sql--same-identifier-p
+                                            token (plist-get candidate :name))
+                                when (eq same 'ambiguous)
+                                do (throw 'done nil)
+                                when same return candidate)))
+            (unless definition
+              (throw 'done (list :levels (nreverse levels) :token token)))
+            ;; A CTE can only read the ones defined before it.
+            (setq visible (seq-take definitions
+                                    (cl-position definition definitions))
+                  start (plist-get definition :start)
+                  end (plist-get definition :end))))))))
+
 (defun clutch-db-sql-embedded-statements (sql)
   "Return the statements embedded in SQL, each normalized.
 These are the bodies of the CTEs in its leading WITH clause and the
@@ -1065,10 +1211,18 @@ relations return nil."
   (when-let* ((token (clutch-db-sql--source-table-token sql simple-only)))
     (clutch-db-sql-table-name token)))
 
+(defun clutch-db-sql-simple-source-token (sql)
+  "Return the table token of simple query SQL as written, or nil.
+A query with a WITH clause can read the table through its CTEs."
+  (or (clutch-db-sql--source-table-token sql t)
+      (plist-get (clutch-db-sql-source-chain (clutch-db-sql-normalize sql))
+                 :token)))
+
 (defun clutch-db-sql-target-table (conn table sql)
   "Return a SQL reference to TABLE on CONN, retaining its source from SQL.
-Only reuse SQL's relation when it is a simple query of that same TABLE."
-  (or (when-let* ((token (and sql (clutch-db-sql--source-table-token sql t)))
+Only reuse SQL's relation when it is a simple query of that same TABLE,
+directly or through the CTEs of its WITH clause."
+  (or (when-let* ((token (and sql (clutch-db-sql-simple-source-token sql)))
                   ((equal table (clutch-db-sql-table-name token)))
                   ((clutch-db-sql-table-schema token)))
         token)

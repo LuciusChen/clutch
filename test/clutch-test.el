@@ -822,6 +822,63 @@
                            '("clutch__rid_0")))
             (should (equal (plist-get prep :sql) expected))))))))
 
+(ert-deftest clutch-test-row-identity-prep-reads-through-ctes ()
+  "Row identity should be injected where a CTE chain reads its table."
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn _table)
+               (list (list :kind 'primary-key :name "PRIMARY"
+                           :columns '("id")))))
+            ((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn id) (format "\"%s\"" id))))
+    (dolist (case
+             '(("WITH a AS (SELECT * FROM app.users WHERE active = 1), b AS (SELECT * FROM a) SELECT * FROM b"
+                "WITH a AS (SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM app.users WHERE active = 1), b AS (SELECT * FROM a) SELECT * FROM b"
+                "app.users" star)
+               ("WITH c (k, v) AS (SELECT id, name FROM users), d (x) AS (SELECT v FROM c) SELECT x FROM d"
+                "WITH c (k, v, \"clutch__rid_0\") AS (SELECT id, name, \"id\" AS \"clutch__rid_0\" FROM users), d (x, \"clutch__rid_0\") AS (SELECT v, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM c) SELECT x, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM d"
+                "users" ("name"))
+               ("WITH c AS (SELECT id AS k, name AS v, upper(name) AS u FROM users) SELECT v, k, u FROM c x"
+                "WITH c AS (SELECT id AS k, name AS v, upper(name) AS u, \"id\" AS \"clutch__rid_0\" FROM users) SELECT v, k, u, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM c x"
+                "users" ("name" "id" nil))
+               ("WITH c AS (SELECT name FROM users) SELECT * FROM c"
+                "WITH c AS (SELECT name, \"id\" AS \"clutch__rid_0\" FROM users) SELECT * FROM c"
+                "users" ("name"))
+               ("WITH users AS (SELECT * FROM audit) SELECT * FROM users"
+                "WITH users AS (SELECT audit.*, \"id\" AS \"clutch__rid_0\" FROM audit) SELECT * FROM users"
+                "audit" star)
+               ("WITH ids AS (SELECT id FROM users) SELECT * FROM users WHERE id IN (SELECT id FROM ids)"
+                "WITH ids AS (SELECT id FROM users) SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM users WHERE id IN (SELECT id FROM ids)"
+                "users" star)))
+      (pcase-let ((`(,sql ,expected ,token ,projection) case))
+        (ert-info (sql)
+          (let ((prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+            (should (plist-get prep :cte))
+            (should (equal (plist-get prep :sql) expected))
+            (should (equal (plist-get prep :source-token) token))
+            (should (equal (plist-get prep :hidden-aliases) '("clutch__rid_0")))
+            (should (equal (plist-get prep :writable-projection)
+                           projection))))))))
+
+(ert-deftest clutch-test-row-identity-prep-refuses-ctes-it-cannot-follow ()
+  "A CTE query that does not lead to one table should not be looked up."
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn table)
+               (ert-fail (format "Looked up row identity for %s" table)))))
+    (dolist (sql '("WITH c AS (SELECT team, count(*) AS n FROM users GROUP BY team) SELECT * FROM c"
+                   "WITH c AS (SELECT u.id FROM users u JOIN orders o ON o.user_id = u.id) SELECT * FROM c"
+                   "WITH c AS (SELECT id FROM a UNION ALL SELECT id FROM b) SELECT * FROM c"
+                   "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT * FROM r"
+                   "WITH \"Users\" AS (SELECT * FROM audit) SELECT * FROM users"
+                   "WITH c AS (SELECT DISTINCT team FROM users) SELECT * FROM c"
+                   "WITH c AS (SELECT * FROM users) SELECT team, count(*) FROM c GROUP BY team"))
+      (ert-info (sql)
+        (let ((prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+          (should-not (plist-get prep :table))
+          (should-not (plist-get prep :cte))
+          (should (equal (plist-get prep :sql) sql)))))))
+
 (ert-deftest clutch-test-row-identity-prep-uses-backend-source-table-name ()
   "Row identity preparation should canonicalize source tables through the backend."
   (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
@@ -1227,7 +1284,7 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                "SELECT listagg(name, ',') WITHIN GROUP (ORDER BY name) FROM users"
                "SELECT u.name, o.total FROM users u JOIN orders o ON o.user_id = u.id"
                "SELECT * FROM users, orders"
-               "WITH x AS (SELECT * FROM users) SELECT * FROM x"
+               "WITH x AS (SELECT count(*) AS n FROM users) SELECT * FROM x"
                "SELECT * FROM (SELECT * FROM users) u"))
              (row-locator oracle-conn
               (:kind row-locator :name "ROWID"
@@ -7515,12 +7572,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (set-window-buffer (selected-window) result)
           (with-current-buffer result
             (should clutch--result-server-rewritable)
-            (should-not clutch--result-source-table)
-            (should (equal clutch--result-rows '(("one" 10) ("two" 20))))
+            (should (equal clutch--result-source-table "metrics"))
+            (should (equal clutch--result-rows '(("one" 10 1) ("two" 20 2))))
             (clutch-result-count-total)
             (should (= clutch--page-total-rows 5))
             (clutch-result--sort "score" t)
-            (should (equal clutch--result-rows '(("five" 50) ("four" 40))))
+            (should (equal clutch--result-rows '(("five" 50 5) ("four" 40 4))))
             (cl-letf (((symbol-function 'completing-read)
                        (lambda (&rest _args) "score"))
                       ((symbol-function 'read-string)
@@ -7536,6 +7593,72 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (kill-buffer source))
       (when (clutch-db-live-p conn)
         (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-test-cte-result-edits-base-table-real-sqlite-workflow ()
+  "Edits of a CTE result should reach the one base table row they show."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-cte-edit-source*"))
+         (clutch--execution-refresh-timer nil)
+         result)
+    (cl-flet ((table-rows ()
+                (clutch-db-result-rows
+                 (clutch-db-query
+                  conn "SELECT id, name, team FROM people ORDER BY id")))
+              (edit-first-name (value)
+                (let ((row (car clutch--result-rows)))
+                  (clutch-result--apply-edit
+                   0 0 value
+                   (list :identity (clutch-db-row-identity-values
+                                    row clutch--row-identity)
+                         :original (car row)
+                         :original-state (cons nil (car row)))))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (&rest _) t)))
+                  (clutch-result-submit))))
+      (unwind-protect
+          (save-window-excursion
+            (clutch-db-query
+             conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, team TEXT)")
+            (clutch-db-query
+             conn (concat "INSERT INTO people (id, name, team) VALUES "
+                          "(1, 'alpha', 'a'), (2, 'alpha', 'b'), (3, 'beta', 'b')"))
+            (set-window-buffer (selected-window) source)
+            (with-current-buffer source
+              (clutch-mode)
+              (setq-local clutch-connection conn
+                          clutch--connection-params
+                          '(:backend sqlite :database ":memory:"))
+              ;; The key is not projected, and names repeat across rows.
+              (insert "WITH c (n, t) AS (SELECT name, team FROM people) SELECT n, t FROM c ORDER BY t, n")
+              (clutch-execute-buffer)
+              (setq result clutch--last-result-buffer))
+            (set-window-buffer (selected-window) result)
+            (with-current-buffer result
+              (should (equal clutch--result-source-table "people"))
+              (should (equal (clutch--insert-target-table) "people"))
+              (edit-first-name "gamma")
+              (should (equal (table-rows)
+                             '((1 "gamma" "a") (2 "alpha" "b") (3 "beta" "b"))))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _args) "t"))
+                        ((symbol-function 'read-string)
+                         (lambda (&rest _args) "= 'b'")))
+                (clutch-result-apply-filter))
+              (should (plist-get clutch--row-identity :indices))
+              (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
+                                     clutch--result-rows)
+                             '(("alpha" "b") ("beta" "b"))))
+              (edit-first-name "delta")
+              (should (equal (table-rows)
+                             '((1 "gamma" "a") (2 "delta" "b") (3 "beta" "b"))))))
+        (clutch--execution-refresh-stop)
+        (when (buffer-live-p result)
+          (kill-buffer result))
+        (when (buffer-live-p source)
+          (kill-buffer source))
+        (when (clutch-db-live-p conn)
+          (clutch-db-disconnect conn))))))
 
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
