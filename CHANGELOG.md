@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3 - Unreleased
+
+### Fixed
+
+- A SELECT whose WITH clause modifies data, as PostgreSQL allows in `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d`, runs once as written instead of being paged, so moving to another page no longer runs the modification again; all its rows show on one page. It asks for the confirmation that the statement in its WITH clause would, and marks a Manual transaction dirty.
+- A DELETE after a WITH clause, as in `WITH old AS (...) DELETE FROM t WHERE ...`, asks for confirmation like a plain DELETE.
+- A DB2 or H2 SELECT over a data change table, such as `SELECT * FROM FINAL TABLE (INSERT INTO t ...)`, runs once as written instead of being paged, so moving to another page no longer runs its INSERT, UPDATE or DELETE again. It asks for the confirmation that statement would, and marks a Manual transaction dirty.
+- `SELECT ... INTO`, which creates a table on PostgreSQL and SQL Server, runs as written. A query of one table failed with a syntax error after Clutch added a row identity column to it, and any other, such as a join or a query over a CTE, filled the new table with only the first page of rows, 501 by default, without a warning. It now also marks a Manual transaction dirty; MySQL's `SELECT ... INTO` a file or variables does not.
+
 ## 0.5.2 - 2026-10-02
 
 ### Added
