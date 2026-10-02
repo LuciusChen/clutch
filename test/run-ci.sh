@@ -124,8 +124,12 @@ run_db_tests_matching() {
 run_byte_compile() {
   (
     cd "$repo"
+    status=0
     run_emacs --eval "(setq byte-compile-error-on-warn t)" \
-      -f batch-byte-compile clutch*.el
+      -f batch-byte-compile clutch*.el || status=$?
+    # A leftover .elc would shadow its edited source in later runs.
+    rm -f clutch*.elc
+    exit "$status"
   )
 }
 
@@ -146,6 +150,7 @@ run_checkdoc() {
     cd "$repo"
     run_emacs \
       --eval "(require 'checkdoc)" \
+      --eval "(setq checkdoc-verb-check-experimental-flag t)" \
       --eval "(dolist (file (directory-files default-directory t \"^clutch.*\\.el$\")) (checkdoc-file file))" \
       --eval "(dolist (name '(\"*Warnings*\" \"*warn*\")) (when-let ((buf (get-buffer name))) (with-current-buffer buf (goto-char (point-min)) (when (re-search-forward \"^Warning\" nil t) (princ (buffer-string)) (kill-emacs 1)))))"
   )

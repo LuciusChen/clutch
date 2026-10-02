@@ -600,15 +600,12 @@ function returns."
         (funcall callback result error)))))
 
 (defun clutch--finish-db-query (conn sql callback result error)
-  "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
-No command waits for CALLBACK, so its errors are reported as messages."
+  "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR."
   (remhash conn clutch--running-queries)
   (when result
     (clutch--clear-connection-problem-capture conn)
     (clutch--record-tx-state-after-query conn sql))
-  (condition-case err
-      (funcall callback result error)
-    (error (message "%s" (error-message-string err)))))
+  (funcall callback result error))
 
 (defun clutch--show-statement-status (conn status)
   "Show STATUS for the statement running on CONN in its source buffer."
