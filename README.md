@@ -382,7 +382,7 @@ Common entry points:
 - Stateful transient entries highlight their current choice; unavailable actions stay visible but inapt when their surrounding context is still useful
 - `C-c C-j` starts the object workflow
 - `RET` opens record view from a result row
-- Pressing `s` cycles sorting for the result column at point; simple table results use server-side `ORDER BY`, while UNION, grouped, derived, and other non-rewritable results sort the current page locally. Use `C` to jump to another visible column first, or click a result header to cycle it
+- Pressing `s` cycles sorting for the result column at point; simple table results, including a simple query of a CTE, use server-side `ORDER BY`, while UNION, grouped, derived, and other non-rewritable results sort the current page locally. Use `C` to jump to another visible column first, or click a result header to cycle it
 - `i`, `d`, and `C-c C-c` stage and submit row changes in result buffers
 - The result footer keeps transaction state and staged-change counts ahead of row statistics and sorting. Long sort/filter labels are shortened; their full text remains available on hover and through the existing sort/filter commands.
 - `/` filters only the loaded page. The footer keeps the original page range and reports a separate matching-row fraction; an empty filtered page shows how to change or clear the filter. Clearing it restores the page without querying the database.
