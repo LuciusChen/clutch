@@ -884,11 +884,11 @@ Returns non-nil on success, nil on failure."
              (tables (plist-get entry :tables))
              (err (plist-get entry :error)))
         (unless quiet
-          (message (if ok
-                       (format "Schema refreshed%s"
-                               (if tables (format " (%d tables)" tables) ""))
-                     (format "Schema refresh failed%s"
-                             (if err (format ": %s" err) "")))))
+          (if ok
+              (message "Schema refreshed%s"
+                       (if tables (format " (%d tables)" tables) ""))
+            (message "Schema refresh failed%s"
+                     (if err (format ": %s" err) ""))))
         ok)))))
 
 ;;;###autoload

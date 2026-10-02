@@ -1434,9 +1434,9 @@ empty string at the condition prompt to clear the filter."
                                  :source-table source-table
                                  :row-identity-prep
                                  (plist-get plan :row-identity-prep)))))
-    (message (if filter
-                 (format "Filter applied: WHERE %s" input)
-               "Filter cleared"))))
+    (if filter
+        (message "Filter applied: WHERE %s" input)
+      (message "Filter cleared"))))
 
 ;;;; Client-side filter
 
