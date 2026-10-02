@@ -726,6 +726,101 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (should (string-match-p "2" (buffer-string))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-data-modifying-cte-runs-once ()
+  :tags '(:clutch-live)
+  "A SELECT over a data-modifying CTE should run once and dirty Manual mode."
+  (unless (clutch-test-live-backend-capability-p :data-modifying-cte)
+    (ert-skip (clutch-test-capability-skip-message :data-modifying-cte)))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_cte_write_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (count-sql (format "SELECT count(*) FROM %s" table))
+           (cte-sql
+            (format "WITH i AS (INSERT INTO %s SELECT g FROM generate_series(1, 5) g RETURNING id) SELECT * FROM i"
+                    table))
+           (result-name (format " *clutch-cte-write-live-%d*" (emacs-pid))))
+      (cl-flet ((row-count ()
+                  (string-to-number
+                   (format "%s" (caar (clutch-db-result-rows
+                                       (clutch-db-query conn count-sql)))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query conn drop-sql)
+              (clutch-db-query conn (format "CREATE TABLE %s (id int)" table))
+              (clutch-test--with-live-result-buffer result-name
+                (let ((clutch-result-max-rows 2))
+                  (clutch-test--execute-live-select conn cte-sql))
+                (with-current-buffer result-name
+                  (should (= (length clutch--result-rows) 5))
+                  (should-error (clutch-result-next-page) :type 'user-error)))
+              (should (= (row-count) 5))
+              (clutch-db-set-auto-commit conn nil)
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-test--execute-live-select conn cte-sql))
+              (should (clutch--tx-dirty-p conn))
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (should (= (row-count) 5)))
+          (ignore-errors
+            (when (clutch-db-manual-commit-p conn)
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t)))
+          (ignore-errors (clutch-db-query conn drop-sql)))))))
+
+(ert-deftest clutch-test-live-select-into-copies-every-row ()
+  :tags '(:clutch-live)
+  "SELECT INTO should copy every row as written and dirty Manual mode."
+  (unless (clutch-test-live-backend-capability-p :select-into)
+    (ert-skip (clutch-test-capability-skip-message :select-into)))
+  (clutch-test--with-conn conn
+    (let* ((source (format "clutch_into_src_%d" (emacs-pid)))
+           (copies (mapcar (lambda (n) (format "clutch_into_copy%d_%d" n (emacs-pid)))
+                           '(1 2 3)))
+           (result-name (format " *clutch-select-into-live-%d*" (emacs-pid))))
+      (cl-flet ((drop-all ()
+                  (dolist (table (cons source copies))
+                    (ignore-errors
+                      (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table)))))
+                (row-count (table)
+                  (string-to-number
+                   (format "%s" (caar (clutch-db-result-rows
+                                       (clutch-db-query
+                                        conn (format "SELECT COUNT(*) FROM %s" table))))))))
+        (unwind-protect
+            (progn
+              (drop-all)
+              (clutch-db-query conn (clutch-test--live-create-table-sql
+                                     source '((id int primary) (name string))))
+              (clutch-db-query
+               conn (format "INSERT INTO %s (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')"
+                            source))
+              ;; A single-table SELECT drew row identity injection, and a
+              ;; join a pagination tail.
+              (clutch-test--with-live-result-buffer result-name
+                (let ((clutch-result-max-rows 2))
+                  (clutch-test--execute-live-select
+                   conn (format "SELECT * INTO %s FROM %s" (nth 0 copies) source))
+                  (clutch-test--execute-live-select
+                   conn (format "SELECT s.id, s.name INTO %s FROM %s s JOIN %s k ON k.id = s.id"
+                                (nth 1 copies) source source))))
+              (should (= (row-count (nth 0 copies)) 5))
+              (should (= (row-count (nth 1 copies)) 5))
+              (clutch-db-set-auto-commit conn nil)
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-test--execute-live-select
+                 conn (format "SELECT * INTO %s FROM %s" (nth 2 copies) source)))
+              (should (clutch--tx-dirty-p conn))
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t))
+          (ignore-errors
+            (when (clutch-db-manual-commit-p conn)
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t)))
+          (drop-all))))))
+
 (ert-deftest clutch-test-live-edit-field-and-submit-persists ()
   :tags '(:clutch-live)
   "Edit through a real SELECT result and submit the persisted row change."
