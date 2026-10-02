@@ -905,8 +905,11 @@ Keywords inside a function body are literal text, not clauses."
             (list :label "CTE"
                   :sql "WITH x AS (SELECT id FROM t) SELECT * FROM x"
                   :filter "id > 10"
-                  :matches '("^SELECT \\* FROM (WITH x AS"
-                             "WHERE id > 10\\'"))
+                  :equal "WITH x AS (SELECT id FROM t) SELECT * FROM (SELECT * FROM x) AS _clutch_filter WHERE id > 10")
+            (list :label "recursive CTE with SEARCH"
+                  :sql "WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SEARCH DEPTH FIRST BY n SET ord\nSELECT n FROM t ORDER BY ord"
+                  :filter "n > 1"
+                  :equal "WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SEARCH DEPTH FIRST BY n SET ord\nSELECT * FROM (SELECT n FROM t) AS _clutch_filter WHERE n > 1")
             (list :label "UNION"
                   :sql "(SELECT id FROM a) UNION ALL (SELECT id FROM b)"
                   :filter "id > 10"
@@ -939,6 +942,24 @@ Keywords inside a function body are literal text, not clauses."
         (dolist (pattern (plist-get case :not-matches))
           (should-not (string-match-p pattern result)))))))
 
+(ert-deftest clutch-test-server-rewritable-result-contract ()
+  "Server rewrites should need a simple query of one relation, a CTE included."
+  (let ((columns '((:name "id") (:name "name"))))
+    (dolist (case
+             '(("SELECT id, name FROM t" t)
+               ("WITH x AS (SELECT id, name FROM t) SELECT id, name FROM x" t)
+               ("WITH x AS (SELECT id, name FROM t ORDER BY id LIMIT 9) SELECT * FROM x ORDER BY id" t)
+               ("WITH x AS (SELECT id, name FROM t) SELECT id, name FROM x LIMIT 5" nil)
+               ("WITH x AS (SELECT id, name FROM t) SELECT id, max(name) FROM x GROUP BY id" nil)
+               ("WITH x AS (SELECT id, name FROM t) SELECT x.id, y.name FROM x JOIN x y ON y.id = x.id" nil)))
+      (pcase-let ((`(,sql ,expected) case))
+        (ert-info (sql)
+          (should (eq (and (clutch--server-rewritable-result-p sql columns) t)
+                      expected)))))
+    (should-not (clutch--server-rewritable-result-p
+                 "WITH x AS (SELECT id, name FROM t) SELECT id, name AS id FROM x"
+                 '((:name "id") (:name "id"))))))
+
 (ert-deftest clutch-test-count-filtered-ordered-query-strips-inner-order-by ()
   "COUNT over filtered SQL should not keep an invalid inner ORDER BY."
   (let* ((filtered (clutch-db-apply-where
@@ -949,7 +970,14 @@ Keywords inside a function body are literal text, not clauses."
     (should (string-prefix-p
              "SELECT COUNT(*) FROM (SELECT * FROM (SELECT id, name FROM users)"
              result))
-    (should-not (string-match-p "ORDER BY created_at" result))))
+    (should-not (string-match-p "ORDER BY created_at" result)))
+  (let* ((filtered (clutch-db-apply-where
+                    'fake-conn
+                    "WITH u AS (SELECT id, name FROM users) SELECT * FROM u ORDER BY name"
+                    "id > 10"))
+         (result (clutch-db-build-count-sql 'fake-conn filtered)))
+    (should (equal result
+                   "WITH u AS (SELECT id, name FROM users) SELECT COUNT(*) FROM (SELECT * FROM (SELECT * FROM u) AS _clutch_filter WHERE id > 10) AS _clutch_count"))))
 
 (ert-deftest clutch-test-build-count-sql-rewrites-selects ()
   "Count SQL should wrap supported SELECT shapes while preserving bounds."
@@ -960,9 +988,10 @@ Keywords inside a function body are literal text, not clauses."
                   :matches '("^SELECT COUNT(\\*) FROM (SELECT id, name FROM users ORDER BY created_at DESC LIMIT 10 OFFSET 20) AS _clutch_count\\'"))
             (list :label "CTE"
                   :sql "WITH x AS (SELECT id FROM t ORDER BY id) SELECT * FROM x ORDER BY id"
-                  :matches '("^SELECT COUNT(\\*) FROM (WITH x AS"
-                             ") AS _clutch_count\\'")
-                  :not-matches '("ORDER BY id\\s-*) AS _clutch_count\\'"))
+                  :matches '("\\`WITH x AS (SELECT id FROM t ORDER BY id) SELECT COUNT(\\*) FROM (SELECT \\* FROM x) AS _clutch_count\\'"))
+            (list :label "CTE main with row limit"
+                  :sql "WITH x AS (SELECT id FROM t) SELECT * FROM x ORDER BY id LIMIT 5"
+                  :matches '("\\`WITH x AS (SELECT id FROM t) SELECT COUNT(\\*) FROM (SELECT \\* FROM x ORDER BY id LIMIT 5) AS _clutch_count\\'"))
             (list :label "DISTINCT"
                   :sql "SELECT DISTINCT user_id FROM visits ORDER BY user_id"
                   :matches '("^SELECT COUNT(\\*) FROM (SELECT DISTINCT user_id FROM visits) AS _clutch_count\\'"))
@@ -1012,7 +1041,11 @@ Keywords inside a function body are literal text, not clauses."
     (should (equal (clutch-db-apply-where clutch-connection
                                           "SELECT * FROM t"
                                           "id = 1")
-                   "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))))
+                   "SELECT * FROM (SELECT * FROM t) clutch_filter WHERE id = 1"))
+    (should (equal (clutch-db-build-count-sql
+                    clutch-connection
+                    "WITH x AS (SELECT id FROM t) SELECT id FROM x")
+                   "WITH x AS (SELECT id FROM t) SELECT COUNT(*) FROM (SELECT id FROM x) clutch_count"))))
 
 ;;;; SQL parsing — candidate match collection
 

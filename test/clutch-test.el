@@ -7485,6 +7485,58 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (clutch-db-disconnect conn))
       (should-not clutch--execution-refresh-timer))))
 
+(ert-deftest clutch-test-cte-result-rewrites-real-sqlite-workflow ()
+  "A simple query over a CTE should count, sort and filter on the server."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-cte-workflow-source*"))
+         (clutch-result-max-rows 2)
+         (clutch--execution-refresh-timer nil)
+         result)
+    (unwind-protect
+        (save-window-excursion
+          (clutch-db-query
+           conn
+           "CREATE TABLE metrics (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)")
+          (clutch-db-query
+           conn
+           (concat "INSERT INTO metrics (id, name, score) VALUES "
+                   "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30), "
+                   "(4, 'four', 40), (5, 'five', 50)"))
+          (set-window-buffer (selected-window) source)
+          (with-current-buffer source
+            (clutch-mode)
+            (setq-local clutch-connection conn
+                        clutch--connection-params
+                        '(:backend sqlite :database ":memory:"))
+            (insert "WITH m AS (SELECT name, score FROM metrics) SELECT name, score FROM m ORDER BY score")
+            (clutch-execute-buffer)
+            (setq result clutch--last-result-buffer))
+          (set-window-buffer (selected-window) result)
+          (with-current-buffer result
+            (should clutch--result-server-rewritable)
+            (should-not clutch--result-source-table)
+            (should (equal clutch--result-rows '(("one" 10) ("two" 20))))
+            (clutch-result-count-total)
+            (should (= clutch--page-total-rows 5))
+            (clutch-result--sort "score" t)
+            (should (equal clutch--result-rows '(("five" 50) ("four" 40))))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (&rest _args) "score"))
+                      ((symbol-function 'read-string)
+                       (lambda (&rest _args) "< 40")))
+              (clutch-result-apply-filter))
+            (should (string-prefix-p "WITH m AS" clutch--last-query))
+            (clutch-result-count-total)
+            (should (= clutch--page-total-rows 3))))
+      (clutch--execution-refresh-stop)
+      (when (buffer-live-p result)
+        (kill-buffer result))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when (clutch-db-live-p conn)
+        (clutch-db-disconnect conn)))))
+
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
   (let ((measure (symbol-function 'string-width))

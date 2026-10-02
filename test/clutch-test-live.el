@@ -428,97 +428,102 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
             (format
              "INSERT INTO %s (id, name, score) VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'cam', 30), (4, 'dan', 40), (5, 'eve', 50)"
              table))
-           (select-sql (format "SELECT id, name, score FROM %s ORDER BY id" table))
+           (select-sqls
+            (list (format "SELECT id, name, score FROM %s ORDER BY id" table)
+                  (format "WITH r AS (SELECT id, name, score FROM %s) SELECT id, name, score FROM r ORDER BY id"
+                          table)))
            (result-name (format " *clutch-flow-live-%d*" (emacs-pid))))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (clutch-test--with-live-result-buffer result-name
-              (let ((clutch-result-max-rows 2))
-                (clutch-test--execute-live-select conn select-sql))
-              (with-current-buffer result-name
-                (set-window-buffer (selected-window) (current-buffer))
-                (setq-local clutch-result-max-rows 2)
-                (should (equal (clutch-test--live-row-ids clutch--result-rows)
-                               '(1 2)))
-                (should (string-match-p "ann" (buffer-string)))
-                (should clutch--page-has-more)
-                (cl-letf (((symbol-function 'message) #'ignore))
-                  (clutch-result-count-total)
-                  (should (= clutch--page-total-rows 5))
-                  (clutch-result-last-page)
-                  (should (= clutch--page-current 2))
-                  (should (= clutch--page-offset 3))
-                  (should-not clutch--page-has-more)
-                  (should (equal (clutch-test--live-row-ids clutch--result-rows)
-                                 '(4 5)))
-                  (should (string-match-p "eve" (buffer-string)))
-                  (let ((summary clutch--footer-base-string))
-                    (dolist (pattern '("eve" "missing" ""))
+            (dolist (select-sql select-sqls)
+              (ert-info (select-sql)
+                (clutch-test--with-live-result-buffer result-name
+                  (let ((clutch-result-max-rows 2))
+                    (clutch-test--execute-live-select conn select-sql))
+                  (with-current-buffer result-name
+                    (set-window-buffer (selected-window) (current-buffer))
+                    (setq-local clutch-result-max-rows 2)
+                    (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                   '(1 2)))
+                    (should (string-match-p "ann" (buffer-string)))
+                    (should clutch--page-has-more)
+                    (cl-letf (((symbol-function 'message) #'ignore))
+                      (clutch-result-count-total)
+                      (should (= clutch--page-total-rows 5))
+                      (clutch-result-last-page)
+                      (should (= clutch--page-current 2))
+                      (should (= clutch--page-offset 3))
+                      (should-not clutch--page-has-more)
+                      (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                     '(4 5)))
+                      (should (string-match-p "eve" (buffer-string)))
+                      (let ((summary clutch--footer-base-string))
+                        (dolist (pattern '("eve" "missing" ""))
+                          (cl-letf (((symbol-function 'read-string)
+                                     (lambda (&rest _) pattern)))
+                            (progn (call-interactively (key-binding (kbd "/")))
+                               (clutch-test--await-queries)))
+                          (should (equal summary clutch--footer-base-string))
+                          (pcase pattern
+                            ("eve"
+                             (should (equal (clutch-test--live-row-ids
+                                             (clutch--result-display-rows))
+                                            '(5)))
+                             (should (string-match-p
+                                      "1/2 page matches"
+                                      (clutch--footer-mode-line-display))))
+                            ("missing"
+                             (should-not (clutch--result-display-rows))
+                             (should (string-match-p "No matches on this page"
+                                                     (buffer-string))))
+                            (""
+                             (should (= 2 (length (clutch--result-display-rows))))
+                             (should-not (string-match-p "No matches"
+                                                         (buffer-string)))))))
+                      (let ((score-column
+                             (cl-find "score" clutch--result-columns
+                                      :test #'string-equal-ignore-case)))
+                        (should score-column)
+                        (clutch-result--sort score-column t))
+                      (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                     '(5 4)))
+                      (should (string-match-p "dan" (buffer-string)))
+                      (clutch-result-next-page)
+                      (should (= clutch--page-current 1))
+                      (should clutch--page-has-more)
+                      (should (equal (clutch-test--live-row-ids clutch--result-rows)
+                                     '(3 2)))
+                      (let ((score-column
+                             (cl-find "score" clutch--result-columns
+                                      :test #'string-equal-ignore-case)))
+                        (should score-column)
+                        (cl-letf (((symbol-function 'completing-read)
+                                   (lambda (&rest _args) score-column))
+                                  ((symbol-function 'read-string)
+                                   (lambda (&rest _args) "> 20")))
+                          (progn (clutch-result-apply-filter) (clutch-test--await-queries)))
+                        (should (equal clutch--where-filter
+                                       (format "%s > 20"
+                                               (clutch-db-escape-identifier
+                                                conn score-column)))))
+                      (should (= clutch--page-current 0))
+                      (should (equal (sort (clutch-test--live-row-ids
+                                            clutch--result-rows)
+                                           #'<)
+                                     '(3 4)))
+                      (clutch-result-count-total)
+                      (should (= clutch--page-total-rows 3))
                       (cl-letf (((symbol-function 'read-string)
-                                 (lambda (&rest _) pattern)))
+                                 (lambda (&rest _) "missing")))
                         (progn (call-interactively (key-binding (kbd "/")))
-                           (clutch-test--await-queries)))
-                      (should (equal summary clutch--footer-base-string))
-                      (pcase pattern
-                        ("eve"
-                         (should (equal (clutch-test--live-row-ids
-                                         (clutch--result-display-rows))
-                                        '(5)))
-                         (should (string-match-p
-                                  "1/2 page matches"
-                                  (clutch--footer-mode-line-display))))
-                        ("missing"
-                         (should-not (clutch--result-display-rows))
-                         (should (string-match-p "No matches on this page"
-                                                 (buffer-string))))
-                        (""
-                         (should (= 2 (length (clutch--result-display-rows))))
-                         (should-not (string-match-p "No matches"
-                                                     (buffer-string)))))))
-                  (let ((score-column
-                         (cl-find "score" clutch--result-columns
-                                  :test #'string-equal-ignore-case)))
-                    (should score-column)
-                    (clutch-result--sort score-column t))
-                  (should (equal (clutch-test--live-row-ids clutch--result-rows)
-                                 '(5 4)))
-                  (should (string-match-p "dan" (buffer-string)))
-                  (clutch-result-next-page)
-                  (should (= clutch--page-current 1))
-                  (should clutch--page-has-more)
-                  (should (equal (clutch-test--live-row-ids clutch--result-rows)
-                                 '(3 2)))
-                  (let ((score-column
-                         (cl-find "score" clutch--result-columns
-                                  :test #'string-equal-ignore-case)))
-                    (should score-column)
-                    (cl-letf (((symbol-function 'completing-read)
-                               (lambda (&rest _args) score-column))
-                              ((symbol-function 'read-string)
-                               (lambda (&rest _args) "> 20")))
-                      (progn (clutch-result-apply-filter) (clutch-test--await-queries)))
-                    (should (equal clutch--where-filter
-                                   (format "%s > 20"
-                                           (clutch-db-escape-identifier
-                                            conn score-column)))))
-                  (should (= clutch--page-current 0))
-                  (should (equal (sort (clutch-test--live-row-ids
-                                        clutch--result-rows)
-                                       #'<)
-                                 '(3 4)))
-                  (clutch-result-count-total)
-                  (should (= clutch--page-total-rows 3))
-                  (cl-letf (((symbol-function 'read-string)
-                             (lambda (&rest _) "missing")))
-                    (progn (call-interactively (key-binding (kbd "/")))
-                           (clutch-test--await-queries)))
-                  (should-not (clutch--result-display-rows))
-                  (let ((rows (clutch-result--collect-all-export-rows)))
-                    (should (equal (sort (clutch-test--live-row-ids rows) #'<)
-                                   '(3 4 5))))))))
+                               (clutch-test--await-queries)))
+                      (should-not (clutch--result-display-rows))
+                      (let ((rows (clutch-result--collect-all-export-rows)))
+                        (should (equal (sort (clutch-test--live-row-ids rows) #'<)
+                                       '(3 4 5))))))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-mysql-limited-join-duplicate-columns-executes-flat ()

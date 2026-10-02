@@ -838,8 +838,9 @@ same-named projection with Clutch's hidden values."
   "Return non-nil when SQL result COLUMNS are safe for derived-table rewrites.
 The check is intentionally conservative: the SQL must be a simple single-table
 SELECT without its own row limit, and the actual result labels must be
-unique.  Arbitrary query results are displayed as result sets instead."
-  (let* ((analysis-sql (clutch-db-sql-normalize sql))
+unique.  After a WITH clause, the main statement is checked, so a CTE may be
+its table.  Arbitrary query results are displayed as result sets instead."
+  (let* ((analysis-sql (cdr (clutch-db-sql-split-with-clause sql)))
          (table (clutch-db-sql-source-table analysis-sql))
          (seen (make-hash-table :test 'equal)))
     (and table
