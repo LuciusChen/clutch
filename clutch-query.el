@@ -692,26 +692,20 @@ returns them.  Like `clutch--writable-select-projection', the value is
 `star' when every result column keeps its base table column's name, or one
 base column name or nil per result column."
   (cl-labels
-      ((text (level)
-         (substring sql (nth 0 level) (nth 1 level)))
-       (column (rest name)
+      ((column (rest name)
          ;; The base column that column NAME of relation REST reads, or nil.
-         ;; REST is the levels from that relation inward; nil is the table.
+         ;; REST is the parsed levels from that relation inward; nil is the
+         ;; table.
          (if (null rest)
              name
-           (let* ((items (clutch--select-list-items (text (car rest))))
-                  (sources (clutch--writable-select-projection
-                            (text (car rest))))
-                  (names (or (plist-get (nth 2 (car rest)) :columns)
-                             (and (listp sources)
-                                  (mapcar #'clutch--select-item-label items))))
-                  (matches (cl-loop for label in names
-                                    for index from 0
-                                    for same = (and label
-                                                    (clutch-db-sql--same-identifier-p
-                                                     label name))
-                                    when (eq same 'ambiguous) return nil
-                                    when same collect index)))
+           (pcase-let* ((`(,sources ,names ,_) (car rest))
+                        (matches (cl-loop for label in names
+                                          for index from 0
+                                          for same = (and label
+                                                          (clutch-db-sql--same-identifier-p
+                                                           label name))
+                                          when (eq same 'ambiguous) return nil
+                                          when same collect index)))
              (cond
               ((and (eq sources 'star) (null names))
                (column (cdr rest) name))
@@ -726,17 +720,29 @@ base column name or nil per result column."
          (cond
           ((null rest) sources)
           ((eq sources 'star)
-           (let ((inner (clutch--writable-select-projection (text (car rest)))))
-             (if (and (eq inner 'star)
-                      (plist-get (nth 2 (car rest)) :columns))
+           (pcase-let ((`(,inner ,_ ,column-list) (car rest)))
+             (if (and (eq inner 'star) column-list)
                  'none
                (columns (cdr rest) inner))))
           ((listp sources)
            (mapcar (lambda (source) (and source (column rest source)))
                    sources))
           (t 'none))))
-    (columns (cdr levels)
-             (clutch--writable-select-projection (text (car levels))))))
+    ;; Parse each SELECT once rather than once per result column.
+    (let ((parsed
+           (mapcar
+            (lambda (level)
+              (let* ((text (substring sql (nth 0 level) (nth 1 level)))
+                     (sources (clutch--writable-select-projection text))
+                     (column-list (plist-get (nth 2 level) :columns)))
+                (list sources
+                      (or column-list
+                          (and (listp sources)
+                               (mapcar #'clutch--select-item-label
+                                       (clutch--select-list-items text))))
+                      column-list)))
+            levels)))
+      (columns (cdr parsed) (car (car parsed))))))
 
 (defun clutch--relation-name-count (sql name)
   "Return how many times SQL names NAME, its CTE definition included.
