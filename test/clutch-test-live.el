@@ -883,6 +883,115 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                              '(("1" "after"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-cte-result-edit-changes-one-base-row ()
+  :tags '(:clutch-live)
+  "Editing a CTE result should change only the base table row it shows."
+  (unless (clutch-test--updateable-live-backend-p)
+    (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_cte_edit_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (rows-sql (format "SELECT id, name, team FROM %s ORDER BY id" table))
+           (result-name (format " *clutch-cte-edit-live-%d*" (emacs-pid))))
+      (cl-flet ((table-rows ()
+                  (mapcar (lambda (row)
+                            (clutch-test--live-row-prefix-strings row 3))
+                          (clutch-db-result-rows
+                           (clutch-db-query conn rows-sql)))))
+        (unwind-protect
+            (progn
+              (clutch-db-query conn drop-sql)
+              (clutch-db-query conn (clutch-test--live-create-table-sql
+                                     table '((id int primary) (name string)
+                                             (team string))))
+              (clutch-db-query
+               conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
+                            table))
+              ;; Neither query projects the key, and both rows share a name.
+              (cl-loop
+               for (select-sql value)
+               in `((,(format "WITH c (n, t) AS (SELECT name, team FROM %s) SELECT n, t FROM c ORDER BY t"
+                              table)
+                     "gamma")
+                    (,(format "WITH c AS (SELECT name AS n, team AS t FROM %s), d AS (SELECT * FROM c) SELECT x.n, x.t FROM d x ORDER BY x.t"
+                              table)
+                     "delta")
+                    ;; A `*' over the table, which Clutch checks against its
+                    ;; column metadata before passing the identity on by name.
+                    (,(format "WITH c AS (SELECT * FROM %s) SELECT name, team FROM c ORDER BY team"
+                              table)
+                     "epsilon"))
+               do (ert-info (select-sql)
+                    (clutch-test--with-live-result-buffer result-name
+                      (clutch-test--execute-live-select conn select-sql)
+                      (with-current-buffer result-name
+                        (should (string-equal-ignore-case
+                                 clutch--result-source-table table))
+                        (let ((row (car clutch--result-rows)))
+                          (clutch-result--apply-edit
+                           0 0 value
+                           (list :identity (clutch-db-row-identity-values
+                                            row clutch--row-identity)
+                                 :original (car row)
+                                 :original-state (cons nil (car row)))))
+                        (cl-letf (((symbol-function 'yes-or-no-p)
+                                   (lambda (&rest _) t)))
+                          (clutch-result-submit)
+                          (clutch-test--await-queries))
+                        (should-not clutch--pending-edits)))
+                    (should (equal (table-rows)
+                                   `(("1" ,value "a") ("2" "alpha" "b")))))))
+          (ignore-errors (clutch-db-query conn drop-sql)))))))
+
+(ert-deftest clutch-test-live-cte-result-delete-and-insert-reach-base-table ()
+  :tags '(:clutch-live)
+  "Deleting and inserting through a CTE result should change its base table."
+  (unless (clutch-test--updateable-live-backend-p)
+    (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_cte_delete_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (rows-sql (format "SELECT id, name, team FROM %s ORDER BY id" table))
+           (select-sql
+            (format "WITH c (n, t) AS (SELECT name, team FROM %s) SELECT n, t FROM c ORDER BY t"
+                    table))
+           (result-name (format " *clutch-cte-delete-live-%d*" (emacs-pid))))
+      (cl-flet ((table-rows ()
+                  (mapcar (lambda (row)
+                            (clutch-test--live-row-prefix-strings row 3))
+                          (clutch-db-result-rows
+                           (clutch-db-query conn rows-sql)))))
+        (unwind-protect
+            (progn
+              (clutch-db-query conn drop-sql)
+              (clutch-db-query conn (clutch-test--live-create-table-sql
+                                     table '((id int primary) (name string)
+                                             (team string))))
+              (clutch-db-query
+               conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
+                            table))
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-test--execute-live-select conn select-sql)
+                (with-current-buffer result-name
+                  (set-window-buffer (selected-window) (current-buffer))
+                  (cl-letf (((symbol-function 'yes-or-no-p)
+                             (lambda (&rest _) t)))
+                    ;; The second row shown shares its name with the first.
+                    (goto-char (aref clutch--row-start-positions 1))
+                    (clutch-result-delete-rows)
+                    (clutch-result-submit)
+                    (clutch-test--await-queries)
+                    (should (equal (table-rows) '(("1" "alpha" "a"))))
+                    (setq-local clutch--pending-inserts
+                                `(((,(clutch-test--live-column-name "id") . "3")
+                                   (,(clutch-test--live-column-name "name") . "omega")
+                                   (,(clutch-test--live-column-name "team") . "c"))))
+                    (clutch-result-submit)
+                    (clutch-test--await-queries)
+                    (should (equal (table-rows)
+                                   '(("1" "alpha" "a") ("3" "omega" "c"))))))))
+          (ignore-errors (clutch-db-query conn drop-sql)))))))
+
 (ert-deftest clutch-test-live-autocommit-staged-batch-is-atomic ()
   :tags '(:clutch-live)
   "Auto mode should commit or roll back a real staged batch as one submission."

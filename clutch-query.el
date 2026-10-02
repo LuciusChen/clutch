@@ -432,6 +432,13 @@ window rather than replacing the current window."
   (cl-loop for i below count
            collect (format "%s%d" clutch--row-identity-hidden-prefix i)))
 
+(defvar clutch--row-identity-cte-alias-suffix
+  (format "%08x" (random #x100000000))
+  "Random suffix for the hidden identity aliases of a CTE result.
+Outer SELECTs pass those columns on by name, so their names must match no
+column that the query or its table already has.  The suffix holds 32 bits
+drawn at random for the session, which makes such a match very unlikely.")
+
 (defconst clutch--source-column-identifier-pattern
   "\\(?:[[:alpha:]_$][[:alnum:]_$]*\\|`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\)"
   "Conservative SQL identifier pattern accepted for writable projections.")
@@ -667,16 +674,173 @@ CONN supplies identifier escaping for the hidden aliases."
                 (string-trim-left (substring sql from-pos))))
       sql)))
 
+(defun clutch--select-item-label (item)
+  "Return the name that select list ITEM gives its column, or nil.
+That is its AS alias or the column it reads; an implicit alias or an
+expression without an alias fails closed."
+  (let ((ident clutch--source-column-identifier-pattern)
+        (case-fold-search t))
+    (when (or (string-match (concat "\\s-AS\\s-+\\(" ident "\\)\\s-*\\'") item)
+              (string-match (concat "\\(?:\\`\\|\\.\\s-*\\)\\(" ident "\\)\\s-*\\'")
+                            item))
+      (match-string 1 item))))
+
+(defun clutch--cte-writable-projection (sql levels)
+  "Return the writable projection of CTE query SQL read through LEVELS.
+LEVELS run from the main statement inward, as `clutch-db-sql-source-chain'
+returns them.  Like `clutch--writable-select-projection', the value is
+`star' when every result column keeps its base table column's name, or one
+base column name or nil per result column."
+  (cl-labels
+      ((text (level)
+         (substring sql (nth 0 level) (nth 1 level)))
+       (column (rest name)
+         ;; The base column that column NAME of relation REST reads, or nil.
+         ;; REST is the levels from that relation inward; nil is the table.
+         (if (null rest)
+             name
+           (let* ((items (clutch--select-list-items (text (car rest))))
+                  (sources (clutch--writable-select-projection
+                            (text (car rest))))
+                  (names (or (plist-get (nth 2 (car rest)) :columns)
+                             (and (listp sources)
+                                  (mapcar #'clutch--select-item-label items))))
+                  (matches (cl-loop for label in names
+                                    for index from 0
+                                    for same = (and label
+                                                    (clutch-db-sql--same-identifier-p
+                                                     label name))
+                                    when (eq same 'ambiguous) return nil
+                                    when same collect index)))
+             (cond
+              ((and (eq sources 'star) (null names))
+               (column (cdr rest) name))
+              ((and (listp sources) (= (length matches) 1))
+               (when-let* ((source (nth (car matches) sources)))
+                 (column (cdr rest) source)))))))
+       (columns (rest sources)
+         ;; SOURCES is a select list's projection over relation REST.  For a
+         ;; `*' it is REST's own, built from its user's select list, not the
+         ;; one with identity columns appended, so it aligns with the visible
+         ;; result columns.
+         (cond
+          ((null rest) sources)
+          ((eq sources 'star)
+           (let ((inner (clutch--writable-select-projection (text (car rest)))))
+             (if (and (eq inner 'star)
+                      (plist-get (nth 2 (car rest)) :columns))
+                 'none
+               (columns (cdr rest) inner))))
+          ((listp sources)
+           (mapcar (lambda (source) (and source (column rest source)))
+                   sources))
+          (t 'none))))
+    (columns (cdr levels)
+             (clutch--writable-select-projection (text (car levels))))))
+
+(defun clutch--relation-name-count (sql name)
+  "Return how many times SQL names NAME, its CTE definition included.
+Literals, comments and the parts of a dotted name, as in c.id or s.c, do
+not count; a column of the same name does."
+  (let ((masked (clutch-db-sql-mask-literal-or-comment sql))
+        (regexp (concat "\\_<"
+                        (regexp-quote (clutch-db-sql--unquote-identifier name))
+                        "\\_>"))
+        (case-fold-search t)
+        (count 0)
+        (pos 0))
+    (with-syntax-table clutch-db-sql--syntax-table
+      (while (string-match regexp masked pos)
+        (let ((start (match-beginning 0))
+              (end (match-end 0)))
+          (unless (or (string-match-p
+                       "\\.[ \t\n\r\"`[]*\\'"
+                       (substring masked (max 0 (- start 64)) start))
+                      (string-match-p
+                       "\\`[] \t\n\r\"`]*\\."
+                       (substring masked end (min (length masked) (+ end 64)))))
+            (cl-incf count))
+          (setq pos end))))
+    count))
+
+(defun clutch--row-identity-cte-chain (sql)
+  "Return the source chain of CTE query SQL, or nil if it cannot be edited.
+The value is the plist from `clutch-db-sql-source-chain' with :projection
+added.  Every SELECT on the way must be one that row identity can pass
+through: one relation, no aggregate, DISTINCT, GROUP BY or HAVING, no
+comment in its select list, and either `*' or a list without one.  A CTE
+on the way must have no reader besides the next SELECT out, which the
+identity columns would change too."
+  (when-let* ((chain (clutch-db-sql-source-chain sql))
+              ((cl-every
+                (lambda (level)
+                  (let* ((text (substring sql (nth 0 level) (nth 1 level)))
+                         (items (clutch--select-list-items text))
+                         (definition (nth 2 level)))
+                    (and (clutch--row-identity-augmentable-sql-p text t)
+                         (not (clutch--row-identity-select-list-comment-p text))
+                         (or (null (cdr items))
+                             (not (cl-some (lambda (item)
+                                             (string-suffix-p "*" item))
+                                           items)))
+                         (or (null definition)
+                             (= (clutch--relation-name-count
+                                 sql (plist-get definition :name))
+                                2)))))
+                (plist-get chain :levels))))
+    (plist-put chain :projection
+               (clutch--cte-writable-projection sql (plist-get chain :levels)))))
+
+(defun clutch--row-identity-inject-cte (conn sql levels expressions aliases)
+  "Return CTE query SQL with identity EXPRESSIONS carried out through LEVELS.
+The innermost SELECT selects EXPRESSIONS as ALIASES, which CONN escapes.
+Each outer one passes them on: a `*' does so already, a list of columns
+gains the aliases, and so does a CTE column list, so they reach the result
+as its last columns."
+  (let ((references (mapcar (lambda (alias)
+                              (clutch-db-escape-identifier conn alias))
+                            aliases))
+        edits)
+    (cl-loop for (level . rest) on levels
+             for (start end definition) = level
+             for text = (substring sql start end)
+             do (unless (and rest
+                             (eq (clutch--writable-select-projection text)
+                                 'star))
+                  (push (list start end
+                              (clutch--row-identity-inject-select-list
+                               conn text (if rest references expressions)
+                               aliases))
+                        edits))
+             (when-let* ((columns-end (plist-get definition :columns-end)))
+               (push (list columns-end columns-end
+                           (concat ", " (string-join references ", ")))
+                     edits)))
+    ;; Apply the edits from the end so that their positions stay valid.
+    (dolist (edit (sort edits (lambda (a b) (> (car a) (car b)))) sql)
+      (setq sql (concat (substring sql 0 (nth 0 edit))
+                        (nth 2 edit)
+                        (substring sql (nth 1 edit)))))))
+
 (defun clutch--prepare-row-identity-query (conn sql &optional candidate table)
   "Return a row identity preparation plist for executing SQL on CONN.
 The returned plist contains :sql, :table, :candidate, :hidden-aliases,
 :augmented, and :identity-status.  If no identity candidate is available, :sql
 is the original SQL.
-CANDIDATE and TABLE reuse row identity already established by a result buffer."
+CANDIDATE and TABLE reuse row identity already established by a result buffer.
+A query that starts with a WITH clause reads its table as
+`clutch--row-identity-cte-chain' finds it, and :cte is then non-nil.  When
+that finds none, the query has no table, so a CTE's name is never looked up
+as one."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
+         (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
+         (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
          (source-token (or (plist-get candidate :source-token)
                            (and (not table)
-                                (clutch-db-sql--source-table-token analysis-sql))))
+                                (if with-p
+                                    (plist-get chain :token)
+                                  (clutch-db-sql--source-table-token
+                                   analysis-sql)))))
          (table (or table
                     (and source-token
                          (clutch-db--source-table-name conn source-token))))
@@ -723,21 +887,30 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
                              (clutch--row-identity-select-expressions
                               conn candidate)))
            (aliases (and expressions
-                         (clutch--row-identity-hidden-aliases
-                          (length expressions))))
+                         (mapcar (lambda (alias)
+                                   (if chain
+                                       (concat alias "_"
+                                               clutch--row-identity-cte-alias-suffix)
+                                     alias))
+                                 (clutch--row-identity-hidden-aliases
+                                  (length expressions)))))
            (augment-p (and candidate expressions
-                           (clutch--row-identity-augmentable-sql-p
-                            analysis-sql table)
-                           (not (clutch--row-identity-select-list-comment-p
-                                 analysis-sql))))
+                           (or chain
+                               (and (clutch--row-identity-augmentable-sql-p
+                                     analysis-sql table)
+                                    (not (clutch--row-identity-select-list-comment-p
+                                          analysis-sql))))))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
                              (table 'unsupported))))
-      (list :sql (if augment-p
-                     (clutch--row-identity-inject-select-list
-                      conn analysis-sql expressions aliases)
-                   sql)
+      (list :sql (cond
+                  ((not augment-p) sql)
+                  (chain (clutch--row-identity-inject-cte
+                          conn analysis-sql (plist-get chain :levels)
+                          expressions aliases))
+                  (t (clutch--row-identity-inject-select-list
+                      conn analysis-sql expressions aliases)))
             :table table
             :source-token source-token
             :source-schema source-schema
@@ -745,7 +918,10 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer."
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
             :writable-projection
-            (clutch--writable-select-projection analysis-sql)
+            (if chain
+                (plist-get chain :projection)
+              (clutch--writable-select-projection analysis-sql))
+            :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
             :identity-error-message

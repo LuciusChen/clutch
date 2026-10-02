@@ -2,12 +2,17 @@
 
 ## 0.5.3 - Unreleased
 
+### Added
+
+- A result of a simple query of CTEs, such as `WITH c AS (SELECT * FROM t WHERE ...) SELECT * FROM c`, can be edited like a result of `t`. Clutch follows the CTEs to the table they read, selects its row identity there (primary key, unique key, or Oracle ROWID, PostgreSQL ctid or SQLite rowid) and carries it out through each CTE, so an edit changes exactly the row shown even when the query leaves the key out. Column aliases and CTE column lists map back to the table's own columns, and a CTE named like a table hides it as in SQL. CTEs that join, group, aggregate or combine rows, recursive ones, and a CTE that the query reads more than once leave the result read-only, as does a name whose meaning depends on the database, such as one naming a later CTE.
+
 ### Changed
 
-- A simple query of a CTE, such as `WITH r AS (SELECT ...) SELECT id, name FROM r`, counts, filters and sorts on the server like a query of a table, where those commands were refused before. Clutch keeps the WITH clause in front of the derived table it wraps the main statement in, because SQL Server rejects WITH inside a derived table. The result still cannot be edited.
+- A simple query of a CTE, such as `WITH r AS (SELECT ...) SELECT id, name FROM r`, counts, filters and sorts on the server like a query of a table, where those commands were refused before. Clutch keeps the WITH clause in front of the derived table it wraps the main statement in, because SQL Server rejects WITH inside a derived table.
 
 ### Fixed
 
+- INSERT copy and export name a table's own columns where the query renames them, as in `SELECT id AS k FROM t`, instead of the aliases.
 - A SELECT whose WITH clause modifies data, as PostgreSQL allows in `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d`, runs once as written instead of being paged, so moving to another page no longer runs the modification again; all its rows show on one page. It asks for the confirmation that the statement in its WITH clause would, and marks a Manual transaction dirty.
 - A DELETE after a WITH clause, as in `WITH old AS (...) DELETE FROM t WHERE ...`, asks for confirmation like a plain DELETE.
 - A DB2 or H2 SELECT over a data change table, such as `SELECT * FROM FINAL TABLE (INSERT INTO t ...)`, runs once as written instead of being paged, so moving to another page no longer runs its INSERT, UPDATE or DELETE again. It asks for the confirmation that statement would, and marks a Manual transaction dirty.
