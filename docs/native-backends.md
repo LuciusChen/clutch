@@ -242,7 +242,7 @@ PostgreSQL array text with explicit bounds, such as `[0:2]={1,2,3}`, is sent unc
 ### Timeouts
 
 - MySQL supports `:connect-timeout` and `:read-idle-timeout`
-- On native MySQL query read-idle timeout, Clutch tries to cancel and drain the server query; if the protocol stream cannot be resynchronized, the connection is closed and the next query reconnects
+- On native MySQL query read-idle timeout, Clutch tries to cancel and drain the server query; if the protocol stream cannot be resynchronized, the connection is closed and the next query reconnects. With a mysql.el that provides `mysql-query-async` the statements you run do not block and have no idle timeout; metadata queries still do
 - PostgreSQL supports `:connect-timeout`, `:read-idle-timeout`, and `:query-timeout`
 - SQLite does not use the network timeout parameters
 

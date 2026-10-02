@@ -4811,7 +4811,9 @@ out, which broke the Oracle statement and left SQL Server unpaged."
       (should (string-match-p "Conflicting" (error-message-string err))))))
 
 (ert-deftest clutch-db-test-mysql-interrupt-kills-query-and-drains-original-conn ()
-  "MySQL interrupt should use a helper connection and keep the session usable."
+  "MySQL interrupt should kill through a helper connection.
+Only a synchronous query is drained; an asynchronous one reads its own
+verdict."
   (require 'clutch-db-mysql)
   (require 'mysql)
   (let* ((conn (make-mysql-conn :host "127.0.0.1"
@@ -4859,7 +4861,52 @@ out, which broke the Oracle statement and left SQL Server unpaged."
                      clutch-db-mysql-cancel-timeout-seconds))
       (should drained)
       (should disconnected)
-      (should (= (mysql-conn-read-idle-timeout conn) 30)))))
+      (should (= (mysql-conn-read-idle-timeout conn) 30))
+      (setq drained nil captured-sql nil)
+      (let ((pending t))
+        (cl-letf (((symbol-function 'mysql-async-pending-p)
+                   (lambda (mysql-conn) (and pending (eq mysql-conn conn))))
+                  ((symbol-function 'mysql-connect)
+                   (lambda (&rest _args)
+                     ;; The query finishes while the killer connects.
+                     (setq pending nil)
+                     killer)))
+          (should (clutch-db-interrupt-query conn))))
+      (should (equal captured-sql "KILL QUERY 123"))
+      (should-not drained))))
+
+(ert-deftest clutch-db-test-mysql-query-async-wraps-outcomes-or-declines ()
+  "MySQL should start SQL without blocking when mysql.el can."
+  (require 'clutch-db-mysql)
+  (require 'mysql)
+  (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306))
+        (server-error '(mysql-query-error "[1317] Query execution was interrupted"))
+        finish outcomes)
+    (cl-letf (((symbol-function 'mysql-query-async)
+               (lambda (actual-conn sql callback)
+                 (should (eq actual-conn conn))
+                 (should (equal sql "SELECT 1"))
+                 (setq finish callback)
+                 nil)))
+      (should (clutch-db-query-async
+               conn "SELECT 1"
+               (lambda (result error) (push (list result error) outcomes))))
+      (should-not outcomes)
+      (funcall finish (make-mysql-result :connection conn
+                                         :columns '((:name "n" :type 8))
+                                         :rows '((1)))
+               nil)
+      (should (equal (clutch-db-result-rows (caar outcomes)) '((1))))
+      (funcall finish nil server-error)
+      (should (equal (cadar outcomes)
+                     (list 'clutch-db-error
+                           (error-message-string server-error)))))
+    (cl-letf (((symbol-function 'mysql-query-async)
+               (lambda (&rest _) (signal 'mysql-error '("Connection busy")))))
+      (should-error (clutch-db-query-async conn "SELECT 1" #'ignore)
+                    :type 'clutch-db-error))
+    (cl-letf (((symbol-function 'mysql-query-async) nil))
+      (should-not (clutch-db-query-async conn "SELECT 1" #'ignore)))))
 
 (ert-deftest clutch-db-test-pg-interrupt-query-return-contract ()
   "PostgreSQL interrupt should reuse synchronized clients without recancelling."

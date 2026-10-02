@@ -15,8 +15,9 @@
   '((:id mysql
      :backend mysql
      :display-name "MySQL"
+     :sleep-sql "SELECT * FROM (SELECT SLEEP(%d)) t"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
-                    :object-describe :duplicate-column-join))
+                    :object-describe :duplicate-column-join :async-cancel))
     (:id pg
      :backend pg
      :display-name "PostgreSQL"
@@ -38,12 +39,15 @@
     (:id clickhouse
      :backend clickhouse
      :display-name "ClickHouse"
-     :capabilities (:result-workflow :clickhouse-engine))
+     :sleep-sql "SELECT sum(cityHash64(number)) FROM numbers(%d * 1000000000)"
+     :capabilities (:result-workflow :clickhouse-engine :async-cancel))
     (:id duckdb
      :backend jdbc
      :display-name "DuckDB"
      :url-prefix "jdbc:duckdb:"
-     :capabilities (:result-workflow :updateable-workflow))
+     ;; Digits are appended because 30 * 100000000 overflows DuckDB's INTEGER.
+     :sleep-sql "SELECT count(*) FROM range(%d00000000) a, range(100) b"
+     :capabilities (:result-workflow :updateable-workflow :async-cancel))
     (:id jdbc
      :backend jdbc
      :display-name "Generic JDBC"
