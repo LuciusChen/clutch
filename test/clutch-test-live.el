@@ -96,13 +96,14 @@
   "Return non-nil when result workflow SQL is valid for the backend."
   (clutch-test-live-backend-capability-p :result-workflow))
 
-(defun clutch-test--live-supports-with-p (conn table)
-  "Return non-nil when the server behind CONN can read TABLE through WITH.
-MySQL before 8.0 has no WITH clause."
-  (condition-case nil
-      (clutch-db-query
-       conn (format "WITH c AS (SELECT * FROM %s) SELECT * FROM c" table))
-    (clutch-db-error nil)))
+(defun clutch-test--live-supports-with-p (conn)
+  "Return non-nil unless CONN is a MySQL server before 8.0, which has no WITH.
+VERSION() gives MariaDB's own version, such as 10.11."
+  (or (not (eq clutch-test-backend 'mysql))
+      (>= (string-to-number
+           (caar (clutch-db-result-rows
+                  (clutch-db-query conn "SELECT VERSION()"))))
+          8)))
 
 (defun clutch-test--live-create-table-sql (table columns)
   "Return CREATE TABLE SQL for TABLE with COLUMNS.
@@ -446,7 +447,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (dolist (select-sql (if (clutch-test--live-supports-with-p conn table)
+            (dolist (select-sql (if (clutch-test--live-supports-with-p conn)
                                     select-sqls
                                   (butlast select-sqls)))
               (ert-info (select-sql)
@@ -899,6 +900,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
+    (unless (clutch-test--live-supports-with-p conn)
+      (ert-skip "MySQL before 8.0 has no WITH clause"))
     (let* ((table (format "clutch_cte_edit_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (rows-sql (format "SELECT id, name, team FROM %s ORDER BY id" table))
@@ -917,8 +920,6 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-query
                conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
                             table))
-              (unless (clutch-test--live-supports-with-p conn table)
-                (ert-skip "This server cannot run WITH queries"))
               ;; Neither query projects the key, and both rows share a name.
               (cl-loop
                for (select-sql value)
@@ -961,6 +962,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
+    (unless (clutch-test--live-supports-with-p conn)
+      (ert-skip "MySQL before 8.0 has no WITH clause"))
     (let* ((table (format "clutch_cte_delete_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (rows-sql (format "SELECT id, name, team FROM %s ORDER BY id" table))
@@ -982,8 +985,6 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-query
                conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
                             table))
-              (unless (clutch-test--live-supports-with-p conn table)
-                (ert-skip "This server cannot run WITH queries"))
               (clutch-test--with-live-result-buffer result-name
                 (clutch-test--execute-live-select conn select-sql)
                 (with-current-buffer result-name
