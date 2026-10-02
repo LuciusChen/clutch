@@ -30,6 +30,7 @@
 (require 'subr-x)
 (require 'clutch-backend)
 
+(declare-function mysql-async-pending-p "mysql" (conn))
 (declare-function mysql-autocommit-p "mysql" (conn))
 (declare-function mysql-busy-p "mysql" (conn))
 (declare-function mysql-commit "mysql" (conn))
@@ -48,6 +49,7 @@
 (declare-function mysql-live-p "mysql" (conn))
 (declare-function mysql-prepare "mysql" (conn sql))
 (declare-function mysql-query "mysql" (conn sql))
+(declare-function mysql-query-async "mysql" (conn sql callback))
 (declare-function mysql-result-affected-rows "mysql" (object))
 (declare-function mysql-result-columns "mysql" (object))
 (declare-function mysql-result-connection "mysql" (object))
@@ -275,6 +277,10 @@ Return nil when TEXT has no Syntax section."
   "Interrupt the active MySQL query on CONN without dropping the session."
   (let ((thread-id (mysql-connection-id conn))
         (params (gethash conn clutch-db-mysql--connection-params))
+        ;; An asynchronous query reads its own verdict, even one that
+        ;; finishes while the killer connects, so it needs no drain.
+        (async (and (fboundp 'mysql-async-pending-p)
+                    (mysql-async-pending-p conn)))
         killer)
     (and thread-id
          params
@@ -289,7 +295,8 @@ Return nil when TEXT has no Syntax section."
                                    :read-idle-timeout
                                    clutch-db-mysql-cancel-timeout-seconds)))
                      (mysql-query killer (format "KILL QUERY %d" thread-id))
-                     (clutch-db-mysql--drain-interrupted-response conn))
+                     (or async
+                         (clutch-db-mysql--drain-interrupted-response conn)))
                  (when killer
                    (ignore-errors (mysql-disconnect killer)))))
            (mysql-error nil)))))
@@ -367,6 +374,20 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
     (mysql-error
      (signal 'clutch-db-error
              (list (error-message-string err))))))
+
+(cl-defmethod clutch-db-query-async ((conn mysql-conn) sql callback)
+  "Start SQL on MySQL CONN and pass the outcome to CALLBACK.
+Decline when the installed mysql.el cannot execute asynchronously."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--translate-library-error mysql-error
+      (mysql-query-async
+       conn sql
+       (lambda (result error)
+         (funcall callback
+                  (and result (clutch-db-mysql--wrap-result result))
+                  (and error
+                       (list 'clutch-db-error (error-message-string error)))))))
+    t))
 
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
   "Return MySQL HELP metadata for SYMBOL on CONN, or nil when unknown."
