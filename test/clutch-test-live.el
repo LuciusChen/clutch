@@ -96,6 +96,15 @@
   "Return non-nil when result workflow SQL is valid for the backend."
   (clutch-test-live-backend-capability-p :result-workflow))
 
+(defun clutch-test--live-supports-with-p (conn)
+  "Return non-nil unless CONN is a MySQL server before 8.0, which has no WITH.
+VERSION() gives MariaDB's own version, such as 10.11."
+  (or (not (eq clutch-test-backend 'mysql))
+      (>= (string-to-number
+           (caar (clutch-db-result-rows
+                  (clutch-db-query conn "SELECT VERSION()"))))
+          8)))
+
 (defun clutch-test--live-create-table-sql (table columns)
   "Return CREATE TABLE SQL for TABLE with COLUMNS.
 COLUMNS entries have the shape (NAME KIND . ATTRS)."
@@ -438,7 +447,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (dolist (select-sql select-sqls)
+            (dolist (select-sql (if (clutch-test--live-supports-with-p conn)
+                                    select-sqls
+                                  (butlast select-sqls)))
               (ert-info (select-sql)
                 (clutch-test--with-live-result-buffer result-name
                   (let ((clutch-result-max-rows 2))
@@ -889,6 +900,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
+    (unless (clutch-test--live-supports-with-p conn)
+      (ert-skip "MySQL before 8.0 has no WITH clause"))
     (let* ((table (format "clutch_cte_edit_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (rows-sql (format "SELECT id, name, team FROM %s ORDER BY id" table))
@@ -916,8 +929,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                     (,(format "WITH c AS (SELECT name AS n, team AS t FROM %s), d AS (SELECT * FROM c) SELECT x.n, x.t FROM d x ORDER BY x.t"
                               table)
                      "delta")
-                    ;; A `*' over the table, which Clutch checks against its
-                    ;; column metadata before passing the identity on by name.
+                    ;; A `*' over the table, next to which the innermost
+                    ;; SELECT adds the hidden identity.
                     (,(format "WITH c AS (SELECT * FROM %s) SELECT name, team FROM c ORDER BY team"
                               table)
                      "epsilon"))
@@ -949,6 +962,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
+    (unless (clutch-test--live-supports-with-p conn)
+      (ert-skip "MySQL before 8.0 has no WITH clause"))
     (let* ((table (format "clutch_cte_delete_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (rows-sql (format "SELECT id, name, team FROM %s ORDER BY id" table))
