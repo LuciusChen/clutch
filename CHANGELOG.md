@@ -9,6 +9,7 @@
 ### Changed
 
 - `clutch-query-timeout-seconds` defaults to nil instead of 30, so PostgreSQL and JDBC statements no longer stop after 30 seconds, or 25 on JDBC, unless a limit is configured; a limit configured on the server still applies. JDBC requests that Emacs waits for, such as fetching a further page, still time out within `clutch-jdbc-rpc-timeout-seconds`.
+- Pinned the published clutch-jdbc-agent 0.2.26, which reads a query timeout of 0 as no limit and no longer sets its network timeout on the session that runs statements, so a long JDBC statement runs until it finishes or is cancelled.
 - A batch of statements confirms every risky statement before the first one runs, instead of asking between statements, so a declined confirmation runs nothing.
 
 - A running query shows its elapsed time, counting in tenths of a second, in the mode line and the result footer instead of a spinner.
