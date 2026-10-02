@@ -1230,6 +1230,7 @@ and signal `clutch-query-interrupted'."
 					  (list :error err
 						:connection connection
 						:elapsed elapsed
+						:result-context result-context
 						:source-buffer source-buffer)
 					(unless (clutch-db-result-connection result)
 					  (setf (clutch-db-result-connection result)
@@ -1421,9 +1422,18 @@ executed or failed."
       (let* ((connection-lost (not (clutch--connection-alive-p connection)))
              (context (and connection-lost
                            (clutch--connection-loss-context connection))))
-        (clutch--show-execution-error
-         (plist-get outcome :source-buffer) connection sql err
-         (plist-get outcome :elapsed) context region)
+        (if (plist-get (plist-get outcome :result-context) :keep-result-on-error)
+            (pcase-let ((`(,raw . ,summary)
+                         (clutch--remember-execute-error
+                          (plist-get outcome :source-buffer)
+                          connection sql err context)))
+              (message "%s (result unchanged)"
+                       (or (plist-get (clutch--humanize-db-error-parts raw)
+                                      :summary)
+                           summary)))
+          (clutch--show-execution-error
+           (plist-get outcome :source-buffer) connection sql err
+           (plist-get outcome :elapsed) context region))
         (when connection-lost
           (clutch--retire-query-connection connection))
         nil)

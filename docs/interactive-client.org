@@ -40,7 +40,7 @@ SQL execution status marks the statement's starting line with a colored dot: a f
 | =[=            | Scroll left (snap to previous column border)  |
 | ===            | Widen current column                          |
 | =-=            | Narrow current column                         |
-| =W=            | WHERE filter (press again to clear)           |
+| =W=            | WHERE filter: a column and its condition, or a whole condition; an empty condition clears |
 | =/=            | Client-side substring filter (empty to clear)     |
 | =s=            | Cycle current-column sort: unsorted / ASC / DESC |
 | =C=            | Jump to visible column                        |

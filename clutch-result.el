@@ -546,6 +546,8 @@ are produced by the query execution layer."
     (when col-names
       (with-current-buffer buf
         (clutch--refresh-display)))
+    (when-let* ((text (plist-get result-context :success-message)))
+      (message "%s" text))
     buf))
 
 (defun clutch-result--execute-page (page-num &optional page-offset)
@@ -1372,39 +1374,52 @@ Escape COLUMN using the backend identifier rules of CONN."
 
 (defun clutch--read-where-filter (current columns default-col conn)
   "Read a WHERE filter string from CURRENT state, COLUMNS, and DEFAULT-COL.
-CONN supplies identifier escaping for picker-built column filters.  Raw WHERE
-input is passed through unchanged."
-  (if (and columns (not current))
-      (let* ((col (completing-read
-                   (if default-col
-                       (format "Filter column (default %s, empty for raw): "
-                               default-col)
-                     "Filter column (empty for raw): ")
-                   columns nil nil nil nil default-col))
-             (condition
-              (string-trim
-               (read-string
-                (if (string-empty-p col)
-                    "WHERE filter (e.g., age > 18): "
-                  (format "%s (e.g., 42, 'foo', > 18, IS NULL): " col))))))
-        (cond
-         ((string-empty-p condition) "")
-         ((string-empty-p col) condition)
-         (t (clutch--where-filter-column-expression col condition conn))))
-    (string-trim
-     (read-string
-      (if current
-          (format "WHERE filter (current: %s, empty to clear): " current)
-        "WHERE filter (e.g., age > 18): ")
-      nil nil current))))
+With COLUMNS, the first prompt takes a column, DEFAULT-COL when left empty,
+and then reads its condition; any other text there is the whole condition,
+so a condition that is only a column name picks that column.  Without
+COLUMNS or DEFAULT-COL, an empty first answer reads the whole condition.
+An empty condition clears the filter.  CURRENT only shows in the prompts,
+since as a default it would turn an empty answer into the current filter.
+CONN supplies identifier escaping for picker-built column filters."
+  (let* ((notes (delq nil (list (and default-col (format "default %s" default-col))
+                                (and current (format "current: %s" current)))))
+         (answer (and columns
+                      (string-trim
+                       (completing-read
+                        (format "Filter column or WHERE condition%s: "
+                                (if notes
+                                    (format " (%s)" (string-join notes "; "))
+                                  ""))
+                        columns nil nil nil nil default-col))))
+         (column (and answer
+                      (cl-find answer columns :test #'string-equal-ignore-case))))
+    (cond
+     (column
+      (let ((condition
+             (string-trim
+              (read-string
+               (format "%s (e.g., 42, 'foo', > 18, IS NULL; empty clears): "
+                       column)))))
+        (if (string-empty-p condition)
+            ""
+          (clutch--where-filter-column-expression column condition conn))))
+     ((and answer (not (string-empty-p answer)))
+      answer)
+     (t
+      (string-trim
+       (read-string
+        (if current
+            (format "WHERE filter (current: %s; empty clears): " current)
+          "WHERE filter (e.g., age > 18): ")))))))
 
 ;;;###autoload
 (defun clutch-result-apply-filter ()
   "Apply or clear a WHERE filter on the current result query.
-When columns are available, prompts to pick a column first (defaulting
-to the column at point), then asks for the condition.  Enter an empty
-string at the column prompt to write a raw WHERE clause; enter an
-empty string at the condition prompt to clear the filter."
+When columns are available, prompts for a column, defaulting to the column
+at point, and then for its condition; anything other than a column name at
+the first prompt is used as the whole WHERE condition.  An empty condition
+clears the filter.  A filter that the server rejects leaves the current
+result in place."
   (interactive)
   (unless clutch--last-query
     (user-error "No query to filter"))
@@ -1427,16 +1442,18 @@ empty string at the condition prompt to clear the filter."
     (clutch--execute (or (plist-get plan :sql) base)
                      clutch-connection
                      (append
-                      (list :base-query (when filter base) :where-filter filter)
+                      (list :base-query (when filter base) :where-filter filter
+                            :keep-result-on-error t
+                            :success-message
+                            (if filter
+                                (format "Filter applied: WHERE %s" filter)
+                              "Filter cleared"))
                       (and filter
                            (list :server-pageable server-pageable
                                  :server-rewritable t
                                  :source-table source-table
                                  :row-identity-prep
-                                 (plist-get plan :row-identity-prep)))))
-    (if filter
-        (message "Filter applied: WHERE %s" input)
-      (message "Filter cleared"))))
+                                 (plist-get plan :row-identity-prep)))))))
 
 ;;;; Client-side filter
 
