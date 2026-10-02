@@ -3085,6 +3085,26 @@ header string and column pixel widths, then reused."
                                   (error-message-string err))))
         (should-not executed)))))
 
+(ert-deftest clutch-test-apply-filter-message-shows-filter-as-typed ()
+  "The filter message should show a `%' or a backquote in the filter as typed."
+  (with-temp-buffer
+    (setq-local clutch-connection 'fake-conn
+                clutch--last-query "SELECT * FROM t"
+                clutch--base-query "SELECT * FROM t"
+                clutch--result-source-table "t"
+                clutch--result-server-pageable t
+                clutch--result-server-rewritable t
+                clutch--where-filter nil)
+    (let (shown)
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _args) "`name` LIKE 'a%'"))
+                ((symbol-function 'clutch--execute) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown (apply #'format-message fmt args)))))
+        (clutch-result-apply-filter)
+        (should (equal shown "Filter applied: WHERE `name` LIKE 'a%'"))))))
+
 ;;;; Rendering — custom column displayers
 
 (ert-deftest clutch-test-register-column-displayer-replaces-and-unregisters ()
@@ -3722,6 +3742,28 @@ synchronously."
                 (should-not sync-called))
               (should (string-match-p (regexp-quote message-fragment)
                                       seen-message)))))))))
+
+(ert-deftest clutch-test-refresh-schema-failure-message-shows-error-as-is ()
+  "A failed schema refresh should show the error text as it is.
+MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
+  (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
+        (error-text "Access denied for user 'u'@'%' to database 'zj'")
+        seen-message)
+    (cl-letf (((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch--refresh-schema-cache)
+               (lambda (conn)
+                 (puthash conn (list :state 'failed :error error-text)
+                          clutch--schema-status-cache)
+                 nil))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq seen-message (apply #'format-message fmt args)))))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn)
+        (should-not (clutch-refresh-schema))
+        (should (equal seen-message
+                       (concat "Schema refresh failed: " error-text)))))))
 
 (ert-deftest clutch-test-describe-dwim-warns-when-schema-cache-is-stale ()
   "Object prompts should surface stale-schema recovery hints."
