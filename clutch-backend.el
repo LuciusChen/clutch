@@ -48,16 +48,21 @@ Applies to networked backends.  SQLite ignores this setting."
 
 (defcustom clutch-read-idle-timeout-seconds 30
   "Idle timeout in seconds while waiting for query I/O.
-Applies to MySQL, PostgreSQL, and JDBC network I/O.  SQLite ignores this
-setting."
+Applies to MySQL and PostgreSQL I/O that Emacs waits for, and to the JDBC
+network I/O of metadata lookups.  SQLite ignores this setting."
   :type 'natnum
   :group 'clutch)
 
-(defcustom clutch-query-timeout-seconds 30
-  "Timeout in seconds for database-side query execution.
-Currently applied by PostgreSQL and JDBC.  Native MySQL does not yet enforce a
-server-side statement timeout."
-  :type 'natnum
+(defcustom clutch-query-timeout-seconds nil
+  "Timeout in seconds for database-side query execution, or nil for none.
+With nil, Clutch adds no limit of its own: a statement runs until it
+finishes or is cancelled, and a limit configured on the server still
+applies.  A positive number limits PostgreSQL and JDBC statements; on
+PostgreSQL, 0 also lifts a limit the server configures.  JDBC requests
+that Emacs waits for, such as fetching a further page, stay within
+`clutch-jdbc-rpc-timeout-seconds' regardless.  Native MySQL does not
+enforce a server-side statement timeout."
+  :type '(choice (const :tag "No limit" nil) natnum)
   :group 'clutch)
 
 (defcustom clutch-jdbc-rpc-timeout-seconds 30

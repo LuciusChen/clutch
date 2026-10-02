@@ -132,9 +132,9 @@ Not every backend implements every metadata operation.  On the Elisp side, unsup
 - `auto-commit`
 - `validate-after-idle-seconds`
 
-`auto-commit=false` is how clutch requests manual-commit mode for the primary session.  The metadata session stays read-only/autocommit-oriented.
+`auto-commit=false` is how clutch requests manual-commit mode for the primary session.  The metadata session stays read-only/autocommit-oriented.  `network-timeout-seconds` applies to the metadata and bulk sessions only; the primary session, which runs user statements, has no network timeout.
 
-`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp. A metadata request on a metadata or bulk session idle that long is preceded by the same check, and a session that fails it is replaced before the request runs, as after a connection failure. A NAT or firewall that drops an idle connection leaves its socket silent, so without the check the request would wait out `network-timeout-seconds`, and clutch, whose request timeout is no longer, would retire the whole logical connection first.
+`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp. A metadata request on a metadata or bulk session idle that long is preceded by the same check, and a session that fails it is replaced before the request runs, as after a connection failure. A NAT or firewall that drops an idle connection leaves its socket silent, so without the check a metadata request would wait out `network-timeout-seconds` and a statement would hang until its query timeout or a cancel; for a request it waits on, clutch, whose request timeout is no longer, would retire the whole logical connection first.
 
 The connect response returns:
 
@@ -200,6 +200,8 @@ The envelope is deliberately limited to binary parameters. Clutch does not send 
 - `cursor-id`
 
 For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1 through 10,000 and defaults to 500.  Invalid values are rejected before JDBC work or cursor advancement.
+
+`query-timeout-seconds` limits the statement through `Statement.setQueryTimeout`, and the agent waits one second longer for the statement and for each batch it fetches before cancelling it itself.  `0` sets no limit: the agent waits until the statement ends, is cancelled, or its connection is force-disconnected.  Omitting the field keeps a 29-second limit for older clients, and a negative value is rejected before JDBC work or cursor advancement.  Agents before 0.2.26 treat `0` like omission.  clutch sends a statement it runs without blocking the configured limit, or `0` without one; a request it waits on always carries a positive timeout: the configured limit when shorter, otherwise its RPC timeout less five seconds, and at least one second.
 
 ## Table metadata payload
 
