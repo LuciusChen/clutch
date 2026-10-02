@@ -920,7 +920,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-query
                conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
                             table))
-              ;; Neither query projects the key, and both rows share a name.
+              ;; None of the queries projects the key, and both rows share a name.
               (cl-loop
                for (select-sql value)
                in `((,(format "WITH c (n, t) AS (SELECT name, team FROM %s) SELECT n, t FROM c ORDER BY t"
