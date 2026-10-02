@@ -3220,6 +3220,74 @@ connection keeps its warning that the transaction outcome is unknown."
              (regexp-quote clutch--transaction-outcome-unknown-message)
              (or hint "")))))
 
+(ert-deftest clutch-test-rerun-keeps-filter-real-sqlite-workflow ()
+  "\\`g' and the refresh after a submit should keep a server-side filter.
+They ran the filtered SQL without its context, which left the result
+without its filter, \\`W' and row editing."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-rerun-filter-source*"))
+         (clutch--execution-refresh-timer nil)
+         result)
+    (cl-flet ((column (index)
+                (with-current-buffer result
+                  (mapcar (lambda (row) (nth index row)) clutch--result-rows)))
+              (filtered-and-editable-p ()
+                (with-current-buffer result
+                  (and (equal clutch--where-filter "\"score\" > 15")
+                       (clutch-result--server-rewritable-p)
+                       clutch--row-identity
+                       t))))
+      (unwind-protect
+          (save-window-excursion
+            (clutch-db-query conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)")
+            (clutch-db-query conn "INSERT INTO people VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'abe', 30)")
+            (set-window-buffer (selected-window) source)
+            (with-current-buffer source
+              (clutch-mode)
+              (setq-local clutch-connection conn
+                          clutch--connection-params
+                          '(:backend sqlite :database ":memory:"))
+              (insert "SELECT id, name, score FROM people ORDER BY id")
+              (clutch-execute-buffer)
+              (setq result clutch--last-result-buffer))
+            (set-window-buffer (selected-window) result)
+            (with-current-buffer result
+              (clutch-test--with-minibuffer-answers '("score" "> 15")
+                (clutch-result-apply-filter)
+                (clutch-test--await-queries)))
+            (should (equal (column 0) '(2 3)))
+            (with-current-buffer result
+              (clutch-result-rerun)
+              (clutch-test--await-queries))
+            (should (equal (column 0) '(2 3)))
+            (should (filtered-and-editable-p))
+            ;; Submitting an edit refreshes the result the same way.
+            (with-current-buffer result
+              (let ((row (car clutch--result-rows)))
+                (clutch-result--apply-edit
+                 0 1 "bea"
+                 (list :identity (clutch-db-row-identity-values
+                                  row clutch--row-identity)
+                       :original (nth 1 row)
+                       :original-state (cons nil (nth 1 row)))))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (&rest _) t)))
+                (clutch-result-submit)
+                (clutch-test--await-queries)))
+            (should (equal (column 1) '("bea" "abe")))
+            (should (filtered-and-editable-p))
+            (with-current-buffer result
+              (clutch-test--with-minibuffer-answers '("score" "> 25")
+                (clutch-result-apply-filter)
+                (clutch-test--await-queries)))
+            (should (equal (column 0) '(3))))
+        (when (buffer-live-p result)
+          (kill-buffer result))
+        (kill-buffer source)
+        (when (clutch-db-live-p conn)
+          (clutch-db-disconnect conn))))))
+
 ;;;; Rendering — custom column displayers
 
 (ert-deftest clutch-test-register-column-displayer-replaces-and-unregisters ()
@@ -8859,16 +8927,19 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                      (lambda (_conn sql filter)
                        (format "FILTER[%s]{%s}" filter sql)))
                     ((symbol-function 'clutch--execute)
-                     (lambda (sql &optional conn)
-                       (setq captured (list sql conn))))
+                     (lambda (sql &optional conn context)
+                       (setq captured (list sql conn context))))
                     ((symbol-function 'clutch--preview-sql-buffer)
                      (lambda (sql &optional _product)
                        (setq captured sql))))
             (pcase command
               ('rerun
                (clutch-result-rerun)
-               (should (equal captured
-                              '("FILTER[id = 1]{SELECT * FROM t}" nil))))
+               (should (equal (take 2 captured)
+                              '("FILTER[id = 1]{SELECT * FROM t}" nil)))
+               ;; The filter goes with it, so the new result keeps it.
+               (should (equal (plist-get (nth 2 captured) :where-filter)
+                              "id = 1")))
               ('preview
                (clutch-preview-execution-sql)
                (should (equal captured
