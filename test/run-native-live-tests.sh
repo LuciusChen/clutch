@@ -96,7 +96,7 @@ cleanup() {
   if ((${#started[@]})); then
     for name in "${started[@]}"; do
       log "Removing test container $name"
-      ctr rm -f "$name" >/dev/null 2>&1 || true
+      ctr rm -f -v "$name" >/dev/null 2>&1 || true
     done
   fi
   if ((${#temp_paths[@]})); then
@@ -176,7 +176,7 @@ start_mongo() {
       return
     fi
     log "Replacing MongoDB container $mongo_name without test commands"
-    ctr rm -f "$mongo_name" >/dev/null
+    ctr rm -f -v "$mongo_name" >/dev/null
   fi
   log "Starting MongoDB container $mongo_name on 127.0.0.1:$mongo_port"
   run_container \
@@ -340,8 +340,8 @@ wait_clickhouse() {
 pgsql_el_dir="${PGSQL_EL_DIR:-}"
 if [[ -z "$pgsql_el_dir" ]]; then
   for candidate in \
-    "$HOME/repos/pgsql.el" \
     "$repo/../pgsql.el" \
+    "$HOME/repos/pgsql.el" \
     "$HOME/.emacs.d/straight/repos/pgsql.el"; do
     if [[ -d "$candidate" ]]; then
       pgsql_el_dir="$candidate"
@@ -367,6 +367,16 @@ emacs_load_args=(
 if [[ -n "$pgsql_el_dir" ]]; then
   emacs_load_args+=(-L "$pgsql_el_dir")
 fi
+
+# Emacs searches -L directories in the order given.
+for ((i = 0; i < ${#emacs_load_args[@]}; i++)); do
+  if [[ "${emacs_load_args[i]}" == -L ]]; then
+    path="${emacs_load_args[i + 1]}"
+    if git -C "$path" rev-parse --show-toplevel >/dev/null 2>&1; then
+      printf 'Dependency: %s @ %s\n' "$path" "$(git -C "$path" rev-parse --short HEAD)"
+    fi
+  fi
+done
 
 prepare_jdbc_runtime() {
   if [[ -z "$jdbc_agent_dir" ]]; then
