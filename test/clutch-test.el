@@ -3153,6 +3153,16 @@ default returns the default."
             (should (equal (ids) '(1 2 3)))
             (should-not (buffer-local-value 'clutch--where-filter result))
             (should (member "Filter cleared" shown))
+            ;; A mistake without a filter keeps the query, so g and the
+            ;; next filter still start from it.
+            (filter "score >")
+            (should (equal (ids) '(1 2 3)))
+            (with-current-buffer result
+              (clutch-result-rerun)
+              (clutch-test--await-queries))
+            (should (equal (ids) '(1 2 3)))
+            (filter "score" "> 25")
+            (should (equal (ids) '(3)))
             ;; Without a column at point, RET asks for the whole condition.
             (point-on "nothing")
             (filter "" "id = 2")
@@ -3162,6 +3172,53 @@ default returns the default."
         (kill-buffer source)
         (when (clutch-db-live-p conn)
           (clutch-db-disconnect conn))))))
+
+(ert-deftest clutch-test-where-filter-column-prompt-prefers-exact-names ()
+  "A name at the column prompt should pick the column it spells exactly.
+Matching in any case only picks a column when no other one matches."
+  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn name) (format "\"%s\"" name))))
+    (dolist (case '((("SCORE" "score") "score" "\"score\" > 15")
+                    (("SCORE" "score") "SCORE" "\"SCORE\" > 15")
+                    (("SCORE" "name") "score" "\"SCORE\" > 15")))
+      (pcase-let ((`(,columns ,answer ,expected) case))
+        (clutch-test--with-minibuffer-answers (list answer "> 15")
+          (should (equal (clutch--read-where-filter nil columns nil 'conn)
+                         expected)))))
+    ;; Another spelling of two columns that differ only in case names
+    ;; neither, so it is the whole condition.
+    (clutch-test--with-minibuffer-answers '("Score")
+      (should (equal (clutch--read-where-filter nil '("SCORE" "score") nil 'conn)
+                     "Score")))))
+
+(ert-deftest clutch-test-kept-result-error-still-warns-of-unknown-transaction ()
+  "A filter that loses the connection should still show the error page.
+Only a server error on a live connection keeps the result, so a lost
+connection keeps its warning that the transaction outcome is unknown."
+  (let (hint retired)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
+                ((symbol-function 'clutch--tx-unresolved-p) (lambda (_conn) t))
+                ((symbol-function 'clutch--remember-execute-error)
+                 (lambda (&rest _) (cons "Connection closed" "Connection closed")))
+                ((symbol-function 'clutch-result--display-error)
+                 (lambda (_conn _sql _summary _message &optional _elapsed shown)
+                   (setq hint shown)
+                   nil))
+                ((symbol-function 'clutch--retire-query-connection)
+                 (lambda (_conn) (setq retired t)))
+                ((symbol-function 'message) #'ignore))
+        (clutch--present-statement-outcome
+         "SELECT 1" 'fake-conn
+         (list :error '(clutch-db-error "Connection closed")
+               :connection 'fake-conn
+               :elapsed 0.1
+               :result-context '(:keep-result-on-error t)
+               :source-buffer (current-buffer)))))
+    (should retired)
+    (should (string-match-p
+             (regexp-quote clutch--transaction-outcome-unknown-message)
+             (or hint "")))))
 
 ;;;; Rendering — custom column displayers
 

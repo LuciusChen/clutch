@@ -1376,7 +1376,8 @@ Escape COLUMN using the backend identifier rules of CONN."
   "Read a WHERE filter string from CURRENT state, COLUMNS, and DEFAULT-COL.
 With COLUMNS, the first prompt takes a column, DEFAULT-COL when left empty,
 and then reads its condition; any other text there is the whole condition,
-so a condition that is only a column name picks that column.  Without
+so a condition that is only a column name picks that column.  A name
+matches a column as typed, or in any case when only one column does.  Without
 COLUMNS or DEFAULT-COL, an empty first answer reads the whole condition.
 An empty condition clears the filter.  CURRENT only shows in the prompts,
 since as a default it would turn an empty answer into the current filter.
@@ -1392,7 +1393,12 @@ CONN supplies identifier escaping for picker-built column filters."
                                   ""))
                         columns nil nil nil nil default-col))))
          (column (and answer
-                      (cl-find answer columns :test #'string-equal-ignore-case))))
+                      (or (car (member answer columns))
+                          (let ((matches (cl-remove-if-not
+                                          (lambda (name)
+                                            (string-equal-ignore-case name answer))
+                                          columns)))
+                            (and (null (cdr matches)) (car matches)))))))
     (cond
      (column
       (let ((condition
