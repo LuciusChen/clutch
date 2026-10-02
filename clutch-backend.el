@@ -849,6 +849,16 @@ Quoted text, comments and nested queries do not contribute clauses."
   "Return main top-level operation keyword for SQL, or nil."
   (cdr (clutch-db-sql--main-op-match (clutch-db-sql-normalize sql))))
 
+(defun clutch-db-sql-split-with-clause (sql)
+  "Return (WITH-CLAUSE . MAIN) for SQL, normalized.
+WITH-CLAUSE is SQL's leading WITH clause as written, up to its main
+statement MAIN, or nil when SQL has none."
+  (let ((normalized (clutch-db-sql-normalize sql)))
+    (if-let* (((clutch-db-sql-starts-with-keyword-p normalized '("WITH")))
+              (main (car (clutch-db-sql--main-op-match normalized))))
+        (cons (substring normalized 0 main) (substring normalized main))
+      (cons nil normalized))))
+
 (defun clutch-db-sql-embedded-statements (sql)
   "Return the statements embedded in SQL, each normalized.
 These are the bodies of the CTEs in its leading WITH clause and the
@@ -1121,18 +1131,25 @@ targets the user's visible result set."
   "Return a COUNT(*) query for SQL using CONN's derived-table syntax.
 Top-level ORDER BY is removed when there is no top-level row limit because it
 cannot affect the row count.  Limited result sets keep their tail clauses so
-counts target the user's visible result set."
-  (format "SELECT COUNT(*) FROM (%s) %s"
-          (clutch-db-sql-derived-table-body sql)
-          (clutch-db-derived-table-alias conn "_clutch_count")))
+counts target the user's visible result set.  A leading WITH clause stays in
+front, as in `clutch-db-apply-where'."
+  (pcase-let ((`(,with . ,main) (clutch-db-sql-split-with-clause sql)))
+    (concat with
+            (format "SELECT COUNT(*) FROM (%s) %s"
+                    (clutch-db-sql-derived-table-body main)
+                    (clutch-db-derived-table-alias conn "_clutch_count")))))
 
 (defun clutch-db-apply-where (conn sql filter)
   "Return SQL wrapped as a derived table with outer WHERE FILTER.
-CONN supplies the dialect-specific derived-table alias syntax."
-  (format "SELECT * FROM (%s) %s WHERE %s"
-          (clutch-db-sql-derived-table-body sql)
-          (clutch-db-derived-table-alias conn "_clutch_filter")
-          filter))
+CONN supplies the dialect-specific derived-table alias syntax.  Only the
+main statement is wrapped: a leading WITH clause stays in front, because
+SQL Server rejects WITH inside a derived table."
+  (pcase-let ((`(,with . ,main) (clutch-db-sql-split-with-clause sql)))
+    (concat with
+            (format "SELECT * FROM (%s) %s WHERE %s"
+                    (clutch-db-sql-derived-table-body main)
+                    (clutch-db-derived-table-alias conn "_clutch_filter")
+                    filter))))
 
 ;;;; Generic interface
 
