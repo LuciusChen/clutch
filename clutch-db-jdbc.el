@@ -54,13 +54,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.25"
+(defcustom clutch-jdbc-agent-version "0.2.26"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "96a93d02547c3159c093f4cdef79273c82e404386c3c2a1e75238c8346774c75"
+  "2ef3e70b33a194164358808ce28bf6e5ae511c057a109067c1fa253788049fc7"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -699,10 +699,10 @@ disconnect request.  Preserve connection-scoped diagnostics for the caller."
                clutch-jdbc--connections-by-id))))
 
 (defun clutch-jdbc--release-stuck-connection (conn)
-  "Retire CONN after a request on it went silent, asking the agent to drop it.
+  "Retire CONN while a request on it is unanswered, asking the agent to drop it.
 The release uses force-disconnect, which bypasses the connection's locks
-in the agent: the ordinary disconnect queues behind them, so the very
-call that went silent would block the release forever and pin an agent
+in the agent: the ordinary disconnect queues behind them, so the
+unanswered request could block the release forever and pin an agent
 thread.  The request is sent without waiting and its reply, if any, is
 ignored.  An older agent answers with an unknown-op error, which lands
 in the ignored table the same way."
@@ -1082,16 +1082,21 @@ Returns a `clutch-jdbc-conn'."
 ;;;; Lifecycle methods
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-jdbc-conn))
-  "Disconnect JDBC CONN, releasing it in the agent."
-  (let ((live (clutch-db-live-p conn)))
-    (clutch-jdbc--retire-invalidated-connection conn)
-    (remhash conn clutch-jdbc--error-details-by-conn)
-    (when live
-      (let ((id (clutch-jdbc--send
-                 "disconnect"
-                 `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
-        (clutch-jdbc--recv-response-nonfatal
-         id clutch-jdbc-disconnect-timeout-seconds)))))
+  "Disconnect JDBC CONN, releasing it in the agent.
+While a statement runs on CONN, the agent holds its lock and an ordinary
+disconnect would wait behind it, so CONN is force-disconnected instead and
+the statement reports that its outcome is unknown."
+  (remhash conn clutch-jdbc--error-details-by-conn)
+  (if (clutch-db-busy-p conn)
+      (clutch-jdbc--release-stuck-connection conn)
+    (let ((live (clutch-db-live-p conn)))
+      (clutch-jdbc--retire-invalidated-connection conn)
+      (when live
+        (let ((id (clutch-jdbc--send
+                   "disconnect"
+                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
+          (clutch-jdbc--recv-response-nonfatal
+           id clutch-jdbc-disconnect-timeout-seconds))))))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-jdbc-conn))
   "Return non-nil if the agent process is running and CONN belongs to it.
@@ -1125,14 +1130,17 @@ Always non-nil: `clutch-jdbc--apply-timeout-defaults' ensures the value is
 stored in params at connect time."
   (plist-get (clutch-jdbc-conn-params conn) :rpc-timeout))
 
-(defun clutch-jdbc--conn-effective-query-timeout (conn)
-  "Return the effective query timeout in seconds for CONN, or nil.
-The timeout is clamped so the agent-side timeout fires before the outer
-Emacs RPC timeout."
-  (let* ((query-timeout (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
-         (rpc-timeout   (clutch-jdbc--conn-rpc-timeout conn)))
-    (when (and query-timeout (> query-timeout 0))
-      (min query-timeout (max 1 (- rpc-timeout 5))))))
+(defun clutch-jdbc--conn-query-timeout (conn &optional async)
+  "Return the query timeout in seconds to send with a request on CONN.
+A request that Emacs waits for always gets a positive timeout: CONN's
+limit when shorter, else the RPC timeout less five seconds, but at least
+one second.  With ASYNC non-nil nothing waits, so CONN's limit is sent
+as is, or 0, meaning none, when CONN has no positive limit."
+  (let ((limit (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
+        (budget (max 1 (- (clutch-jdbc--conn-rpc-timeout conn) 5))))
+    (cond ((not (and limit (> limit 0))) (if async 0 budget))
+          (async limit)
+          (t (min limit budget)))))
 
 (defun clutch-jdbc--oracle-conn-p (conn)
   "Return non-nil when CONN is an Oracle JDBC connection."
@@ -1367,7 +1375,7 @@ This is allowed in the hot path."
 
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
-  (let ((effective-qt (clutch-jdbc--conn-effective-query-timeout conn))
+  (let ((query-timeout (clutch-jdbc--conn-query-timeout conn))
         (fetch-size (clutch-jdbc--effective-fetch-size))
         batches done)
     (while (not done)
@@ -1376,8 +1384,7 @@ This is allowed in the hot path."
                      "fetch"
                      `((cursor-id  . ,cursor-id)
                        (fetch-size . ,fetch-size)
-                       ,@(when effective-qt
-                           `((query-timeout-seconds . ,effective-qt)))))))
+                       (query-timeout-seconds . ,query-timeout)))))
         (push (plist-get result :rows) batches)
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
@@ -1542,14 +1549,14 @@ JDBC JSON false sentinels become `:false'."
                  (plist-get result :col-types))
        :rows (mapcar #'clutch-jdbc--normalize-row all-rows)))))
 
-(defun clutch-jdbc--execute-params (conn payload)
-  "Return agent parameters that run PAYLOAD on CONN."
-  (let ((effective-qt (clutch-jdbc--conn-effective-query-timeout conn)))
-    (append `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-            payload
-            `((fetch-size . ,(clutch-jdbc--effective-fetch-size)))
-            (when effective-qt
-              `((query-timeout-seconds . ,effective-qt))))))
+(defun clutch-jdbc--execute-params (conn payload &optional async)
+  "Return agent parameters that run PAYLOAD on CONN.
+ASYNC non-nil marks a request that nothing waits for."
+  (append `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+          payload
+          `((fetch-size . ,(clutch-jdbc--effective-fetch-size))
+            (query-timeout-seconds
+             . ,(clutch-jdbc--conn-query-timeout conn async)))))
 
 (defun clutch-jdbc--execute-rpc (conn op payload)
   "Execute JDBC RPC OP with PAYLOAD on CONN and return a database result."
@@ -1564,10 +1571,11 @@ JDBC JSON false sentinels become `:false'."
 (defun clutch-jdbc--execute-rpc-async (conn op payload callback)
   "Start JDBC RPC OP with PAYLOAD on CONN and pass the outcome to CALLBACK.
 CALLBACK receives a database result and nil, or nil and a `clutch-db-error'
-condition, exactly once.  The request has no client timeout;
-`clutch-db-interrupt-query' cancels it."
+condition, exactly once.  The request has no client timeout, and no
+statement timeout unless CONN sets one; `clutch-db-interrupt-query'
+cancels it."
   (setq conn (clutch-jdbc--require-current-connection conn))
-  (let ((id (clutch-jdbc--send op (clutch-jdbc--execute-params conn payload))))
+  (let ((id (clutch-jdbc--send op (clutch-jdbc--execute-params conn payload t))))
     (setf (clutch-jdbc-conn-busy conn) t)
     (puthash conn id clutch-jdbc--busy-request-ids)
     (puthash id
