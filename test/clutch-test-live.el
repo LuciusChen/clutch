@@ -928,8 +928,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                     (,(format "WITH c AS (SELECT name AS n, team AS t FROM %s), d AS (SELECT * FROM c) SELECT x.n, x.t FROM d x ORDER BY x.t"
                               table)
                      "delta")
-                    ;; A `*' over the table, which Clutch checks against its
-                    ;; column metadata before passing the identity on by name.
+                    ;; A `*' over the table, next to which the innermost
+                    ;; SELECT adds the hidden identity.
                     (,(format "WITH c AS (SELECT * FROM %s) SELECT name, team FROM c ORDER BY team"
                               table)
                      "epsilon"))
