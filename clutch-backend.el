@@ -840,13 +840,51 @@ Quoted text, comments and nested queries do not contribute clauses."
     (when (string-match "\\`\\([[:alpha:]]+\\)" trimmed)
       (upcase (match-string 1 trimmed)))))
 
+(defun clutch-db-sql--main-op-match (normalized)
+  "Return (POS . KEYWORD) for the main operation of NORMALIZED SQL, or nil."
+  (clutch-db-sql--top-level-clause-match
+   normalized 0 '("UPDATE" "DELETE" "SELECT" "INSERT" "REPLACE" "MERGE")))
+
 (defun clutch-db-sql-main-op-keyword (sql)
   "Return main top-level operation keyword for SQL, or nil."
-  (let* ((normalized (clutch-db-sql-normalize sql))
-         (match (clutch-db-sql--top-level-clause-match
-                 normalized 0
-                 '("UPDATE" "DELETE" "SELECT" "INSERT" "REPLACE" "MERGE"))))
-    (cdr match)))
+  (cdr (clutch-db-sql--main-op-match (clutch-db-sql-normalize sql))))
+
+(defun clutch-db-sql-embedded-statements (sql)
+  "Return the statements embedded in SQL, each normalized.
+These are the bodies of the CTEs in its leading WITH clause."
+  (let (statements)
+    (when (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
+      (let* ((normalized (clutch-db-sql-normalize sql))
+             (masked (clutch-db-sql-mask-literal-or-comment normalized))
+             (case-fold-search t))
+        ;; Before the main statement, a parenthesized group after AS, or
+        ;; PostgreSQL's AS [NOT] MATERIALIZED, is a CTE body; any other
+        ;; group lists a CTE's columns.
+        (clutch-db-sql-scan-code
+         normalized 0 (car (clutch-db-sql--main-op-match normalized))
+         (lambda (pos _char depth)
+           (when (and (zerop depth)
+                      (with-syntax-table clutch-db-sql--syntax-table
+                        (string-match-p
+                         "\\bAS\\(?:[ \t\n\r]+\\(?:NOT[ \t\n\r]+\\)?MATERIALIZED\\)?[ \t\n\r]*\\'"
+                         (substring masked 0 pos))))
+             (push (clutch-db-sql-normalize
+                    (substring normalized (1+ pos)
+                               (clutch-db-sql-matching-paren-position
+                                normalized pos)))
+                   statements))
+           nil)
+         nil "(")))
+    (nreverse statements)))
+
+(defun clutch-db-sql-modifies-data-p (sql)
+  "Return non-nil when SQL modifies table data.
+That is an INSERT, UPDATE, DELETE, MERGE or REPLACE, either as SQL's main
+statement or embedded in it, as PostgreSQL allows in a WITH clause."
+  (cl-some (lambda (statement)
+             (member (clutch-db-sql-main-op-keyword statement)
+                     '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
+           (cons sql (clutch-db-sql-embedded-statements sql))))
 
 (defun clutch-db-sql-top-level-comma-p (sql start end)
   "Return non-nil when SQL has a top-level comma between START and END."
@@ -1005,9 +1043,15 @@ Only reuse SQL's relation when it is a simple query of that same TABLE."
       (clutch-db-escape-identifier conn table)))
 
 (defun clutch-db-sql-destructive-p (sql)
-  "Return non-nil if SQL is a destructive operation."
-  (clutch-db-sql-starts-with-keyword-p
-   sql '("DELETE" "DROP" "TRUNCATE" "ALTER")))
+  "Return non-nil if SQL is a destructive operation.
+A DELETE counts after a WITH clause or embedded in one."
+  (or (clutch-db-sql-starts-with-keyword-p
+       sql '("DELETE" "DROP" "TRUNCATE" "ALTER"))
+      (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
+           (equal (clutch-db-sql-main-op-keyword sql) "DELETE"))
+      (cl-some (lambda (statement)
+                 (equal (clutch-db-sql-main-op-keyword statement) "DELETE"))
+               (clutch-db-sql-embedded-statements sql))))
 
 (defun clutch-db-sql-schema-affecting-p (sql)
   "Return non-nil if SQL is likely to invalidate cached schema."
@@ -1015,13 +1059,19 @@ Only reuse SQL's relation when it is a simple query of that same TABLE."
    sql '("CREATE" "ALTER" "DROP" "TRUNCATE" "RENAME")))
 
 (defun clutch-db-sql-pageable-query-p (sql)
-  "Return non-nil when SQL is a SELECT that accepts a pagination tail."
+  "Return non-nil when SQL is a SELECT that accepts a pagination tail.
+A SELECT whose WITH clause modifies data does not: each page would modify
+the data again."
   (or (clutch-db-sql-starts-with-keyword-p sql '("SELECT"))
       (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
-           (equal (clutch-db-sql-main-op-keyword sql) "SELECT"))))
+           (equal (clutch-db-sql-main-op-keyword sql) "SELECT")
+           (not (clutch-db-sql-modifies-data-p sql)))))
 
 (defun clutch-db-sql-select-query-p (sql)
-  "Return non-nil for SQL that yields a result set."
+  "Return non-nil for SQL that yields a result set without modifying data.
+Rows returned by a statement that modifies data, such as INSERT ...
+RETURNING or a SELECT whose WITH clause modifies data, display all the
+same."
   (or (clutch-db-sql-pageable-query-p sql)
       (clutch-db-sql-starts-with-keyword-p
        sql '("DESCRIBE" "DESC" "SHOW" "EXPLAIN"))))

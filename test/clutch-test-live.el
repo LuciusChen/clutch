@@ -726,6 +726,48 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (should (string-match-p "2" (buffer-string))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-data-modifying-cte-runs-once ()
+  :tags '(:clutch-live)
+  "A SELECT over a data-modifying CTE should run once and dirty Manual mode."
+  (unless (clutch-test-live-backend-capability-p :data-modifying-cte)
+    (ert-skip (clutch-test-capability-skip-message :data-modifying-cte)))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_cte_write_%d" (emacs-pid)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+           (count-sql (format "SELECT count(*) FROM %s" table))
+           (cte-sql
+            (format "WITH i AS (INSERT INTO %s SELECT g FROM generate_series(1, 5) g RETURNING id) SELECT * FROM i"
+                    table))
+           (result-name (format " *clutch-cte-write-live-%d*" (emacs-pid))))
+      (cl-flet ((row-count ()
+                  (string-to-number
+                   (format "%s" (caar (clutch-db-result-rows
+                                       (clutch-db-query conn count-sql)))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query conn drop-sql)
+              (clutch-db-query conn (format "CREATE TABLE %s (id int)" table))
+              (clutch-test--with-live-result-buffer result-name
+                (let ((clutch-result-max-rows 2))
+                  (clutch-test--execute-live-select conn cte-sql))
+                (with-current-buffer result-name
+                  (should (= (length clutch--result-rows) 5))
+                  (should-error (clutch-result-next-page) :type 'user-error)))
+              (should (= (row-count) 5))
+              (clutch-db-set-auto-commit conn nil)
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-test--execute-live-select conn cte-sql))
+              (should (clutch--tx-dirty-p conn))
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (should (= (row-count) 5)))
+          (ignore-errors
+            (when (clutch-db-manual-commit-p conn)
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t)))
+          (ignore-errors (clutch-db-query conn drop-sql)))))))
+
 (ert-deftest clutch-test-live-edit-field-and-submit-persists ()
   :tags '(:clutch-live)
   "Edit through a real SELECT result and submit the persisted row change."

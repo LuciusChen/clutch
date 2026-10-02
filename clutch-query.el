@@ -916,18 +916,22 @@ unique.  Arbitrary query results are displayed as result sets instead."
                       (cl-every #'true-p parts)))))))
     (true-p expr)))
 
+(defun clutch--risky-dml-reason (sql)
+  "Return why normalized SQL may change every row of its table, or nil."
+  (when (member (clutch-db-sql-main-op-keyword sql) '("UPDATE" "DELETE"))
+    (if-let* ((where (clutch--risky-dml-where-condition sql)))
+        (and (clutch--risky-dml-trivially-true-expression-p where)
+             "WHERE is always true")
+      "no WHERE")))
+
 (defun clutch--high-risk-query-reason (sql)
-  "Return a confirmation reason for high-risk SQL, or nil."
-  (let ((normalized (clutch-db-sql-normalize sql))
-        (leading-op (clutch-db-sql-leading-keyword sql))
-        (main-op (clutch-db-sql-main-op-keyword sql)))
-    (cond
-     ((equal leading-op "TRUNCATE") "TRUNCATE removes all rows")
-     ((member main-op '("UPDATE" "DELETE"))
-      (if-let* ((where (clutch--risky-dml-where-condition normalized)))
-          (and (clutch--risky-dml-trivially-true-expression-p where)
-               "WHERE is always true")
-        "no WHERE")))))
+  "Return a confirmation reason for high-risk SQL, or nil.
+An UPDATE or DELETE embedded in SQL is checked like the main statement."
+  (if (equal (clutch-db-sql-leading-keyword sql) "TRUNCATE")
+      "TRUNCATE removes all rows"
+    (cl-some #'clutch--risky-dml-reason
+             (cons (clutch-db-sql-normalize sql)
+                   (clutch-db-sql-embedded-statements sql)))))
 
 (defun clutch--confirm-high-risk-query (sql)
   "Apply the configured high-risk confirmation to SQL.

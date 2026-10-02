@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 - Unreleased
+
+### Fixed
+
+- A SELECT whose WITH clause modifies data, as PostgreSQL allows in `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d`, runs once as written instead of being paged, so moving to another page no longer runs the modification again; all its rows show on one page. It asks for the confirmation that the statement in its WITH clause would, and marks a Manual transaction dirty.
+- A DELETE after a WITH clause, as in `WITH old AS (...) DELETE FROM t WHERE ...`, asks for confirmation like a plain DELETE.
+
 ## 0.5.2 - 2026-10-02
 
 ### Added

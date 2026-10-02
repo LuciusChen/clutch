@@ -23,7 +23,8 @@
      :display-name "PostgreSQL"
      :sleep-sql "SELECT pg_sleep(%d)"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
-                    :object-describe :ctid-row-identity :async-cancel))
+                    :object-describe :ctid-row-identity :async-cancel
+                    :data-modifying-cte))
     (:id sqlserver
      :backend sqlserver
      :display-name "SQL Server"
