@@ -756,15 +756,17 @@ not count; a column of the same name does."
           (setq pos end))))
     count))
 
-(defun clutch--row-identity-cte-chain (sql)
-  "Return the source chain of CTE query SQL, or nil if it cannot be edited.
+(defun clutch--row-identity-cte-chain (conn sql)
+  "Return the source chain of CTE query SQL on CONN, or nil if not editable.
 The value is the plist from `clutch-db-sql-source-chain' with :projection
 added.  Every SELECT on the way must be one that row identity can pass
 through: one relation, no aggregate, DISTINCT, GROUP BY or HAVING, no
 comment in its select list, and either `*' or a list without one.  A CTE
 on the way must have no reader besides the next SELECT out, which the
 identity columns would change too.  And since outer SELECTs pass those
-columns on by name, no name in SQL may look like one of them."
+columns on by name, no name in SQL may look like one of them, nor may a
+column of the table that a `*' in a CTE brings in; without CONN's
+metadata for that table, the result stays read-only."
   (when-let* ((chain (clutch-db-sql-source-chain sql))
               ((not (let ((case-fold-search t))
                       (string-match-p
@@ -784,7 +786,23 @@ columns on by name, no name in SQL may look like one of them."
                              (= (clutch--relation-name-count
                                  sql (plist-get definition :name))
                                 2)))))
-                (plist-get chain :levels))))
+                (plist-get chain :levels)))
+              ((let* ((levels (plist-get chain :levels))
+                      (base (car (last levels))))
+                 (or (null (cdr levels))
+                     (not (eq (clutch--writable-select-projection
+                               (substring sql (nth 0 base) (nth 1 base)))
+                              'star))
+                     (when-let* ((columns (clutch--ensure-column-details
+                                           conn
+                                           (clutch-db--source-table-name
+                                            conn (plist-get chain :token)))))
+                       (not (cl-some
+                             (lambda (column)
+                               (string-prefix-p
+                                clutch--row-identity-hidden-prefix
+                                (downcase (plist-get column :name))))
+                             columns)))))))
     (plist-put chain :projection
                (clutch--cte-writable-projection sql (plist-get chain :levels)))))
 
@@ -831,7 +849,7 @@ that finds none, the query has no table, so a CTE's name is never looked up
 as one."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
-         (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
+         (chain (and with-p (clutch--row-identity-cte-chain conn analysis-sql)))
          (source-token (or (plist-get candidate :source-token)
                            (and (not table)
                                 (if with-p

@@ -829,6 +829,9 @@
              (lambda (_conn _table)
                (list (list :kind 'primary-key :name "PRIMARY"
                            :columns '("id")))))
+            ((symbol-function 'clutch--ensure-column-details)
+             (lambda (_conn _table)
+               '((:name "id") (:name "name") (:name "active"))))
             ((symbol-function 'clutch-db-escape-identifier)
              (lambda (_conn id) (format "\"%s\"" id))))
     (dolist (case
@@ -7714,6 +7717,50 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (kill-buffer source))
         (when (clutch-db-live-p conn)
           (clutch-db-disconnect conn))))))
+
+(ert-deftest clutch-test-cte-result-stays-read-only-over-identity-named-column ()
+  "A table column named like the hidden identity must not be edited through.
+Outer SELECTs pass the identity on by name, so a `*' that brings in the
+table's own clutch__rid_0 made one of them read that instead."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-cte-identity-name-source*"))
+         (clutch--execution-refresh-timer nil)
+         result)
+    (unwind-protect
+        (save-window-excursion
+          (clutch-db-query
+           conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER)")
+          (clutch-db-query
+           conn "INSERT INTO people (id, name, clutch__rid_0) VALUES (1, 'alpha', 2), (2, 'beta', 1)")
+          (set-window-buffer (selected-window) source)
+          (with-current-buffer source
+            (clutch-mode)
+            (setq-local clutch-connection conn
+                        clutch--connection-params
+                        '(:backend sqlite :database ":memory:"))
+            (insert "WITH c AS (SELECT * FROM people WHERE id = 1) SELECT name FROM c")
+            (clutch-execute-buffer)
+            (setq result clutch--last-result-buffer))
+          (set-window-buffer (selected-window) result)
+          (with-current-buffer result
+            (should (equal clutch--result-rows '(("alpha"))))
+            (should-not clutch--result-source-table)
+            (should-error (clutch-result--apply-edit
+                           0 0 "edited"
+                           (list :identity nil :original "alpha"
+                                 :original-state (cons nil "alpha")))
+                          :type 'user-error))
+          (should (equal (clutch-db-result-rows
+                          (clutch-db-query conn "SELECT id, name FROM people ORDER BY id"))
+                         '((1 "alpha") (2 "beta")))))
+      (clutch--execution-refresh-stop)
+      (when (buffer-live-p result)
+        (kill-buffer result))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when (clutch-db-live-p conn)
+        (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-test-insert-export-names-source-columns-real-sqlite ()
   "INSERT export should name the table's columns, not the result's aliases."

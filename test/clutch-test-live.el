@@ -915,7 +915,12 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                      "gamma")
                     (,(format "WITH c AS (SELECT name AS n, team AS t FROM %s), d AS (SELECT * FROM c) SELECT x.n, x.t FROM d x ORDER BY x.t"
                               table)
-                     "delta"))
+                     "delta")
+                    ;; A `*' over the table, which Clutch checks against its
+                    ;; column metadata before passing the identity on by name.
+                    (,(format "WITH c AS (SELECT * FROM %s) SELECT name, team FROM c ORDER BY team"
+                              table)
+                     "epsilon"))
                do (ert-info (select-sql)
                     (clutch-test--with-live-result-buffer result-name
                       (clutch-test--execute-live-select conn select-sql)
