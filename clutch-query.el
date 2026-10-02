@@ -1536,7 +1536,9 @@ Return the failure summary."
             text (clutch--buffer-sql-dialect)))))
 
 (defun clutch--preview-sql-buffer (sql &optional product)
-  "Display SQL in the *clutch-preview* buffer using SQL PRODUCT."
+  "Display SQL in the *clutch-preview* buffer using SQL PRODUCT.
+The selected window keeps its buffer, so the submit key pressed next still
+reaches the result buffer, not `sql-mode' in the preview."
   (let ((buf (get-buffer-create "*clutch-preview*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -1551,7 +1553,7 @@ Return the failure summary."
         (insert sql)
         (goto-char (point-min))
         (setq buffer-read-only t)))
-    (pop-to-buffer buf)))
+    (display-buffer buf)))
 
 ;;;###autoload (autoload 'clutch-preview-execution-sql "clutch" nil t)
 (defun clutch-preview-execution-sql ()
