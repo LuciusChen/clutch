@@ -487,16 +487,22 @@ answer can change has to invalidate or extend it correctly."
 (ert-deftest clutch-test-execute-statements-marks-final-select ()
   "A final SELECT in a statement batch should keep its source bounds."
   (with-temp-buffer
+    (insert (make-string 50 ?\s))
     (let ((clutch-connection 'fake-conn)
           calls final-select final-mark)
       (cl-letf (((symbol-function 'clutch--execute-statement)
-                 (lambda (sql _conn present-result-p &optional _context no-retry-p)
+                 (lambda (sql _conn present-result-p _region k
+                              &optional _context no-retry-p)
                    (push (list sql present-result-p no-retry-p) calls)
-                   (list :result-query-p (string-prefix-p "SELECT" sql))))
+                   (funcall k (list :result-query-p
+                                    (string-prefix-p "SELECT" sql)))))
                 ((symbol-function 'clutch--present-statement-outcome)
-                 (lambda (sql _conn _outcome) (setq final-select sql)))
+                 (lambda (sql _conn _outcome &optional region)
+                   (setq final-select sql
+                         final-mark (list (+ (car region) 0)
+                                          (+ (cdr region) 0)))))
                 ((symbol-function 'clutch--mark-executed-sql-region)
-                 (lambda (beg end) (setq final-mark (list beg end))))
+                 (lambda (beg end) (setq final-mark (list (+ beg 0) (+ end 0)))))
                 ((symbol-function 'message) #'ignore))
         (clutch--execute-statements
          '(("UPDATE demo SET seen = 1 WHERE id = 1" 1 25)

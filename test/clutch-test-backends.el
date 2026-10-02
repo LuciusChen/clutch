@@ -20,17 +20,21 @@
     (:id pg
      :backend pg
      :display-name "PostgreSQL"
+     :sleep-sql "SELECT pg_sleep(%d)"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
-                    :object-describe :ctid-row-identity))
+                    :object-describe :ctid-row-identity :async-cancel))
     (:id sqlserver
      :backend sqlserver
      :display-name "SQL Server"
-     :capabilities (:result-workflow :updateable-workflow :manual-savepoint))
+     :sleep-sql "WAITFOR DELAY '00:00:%02d'"
+     :capabilities (:result-workflow :updateable-workflow :manual-savepoint
+                    :async-cancel))
     (:id oracle
      :backend oracle
      :display-name "Oracle"
+     :sleep-sql "SELECT COUNT(*) FROM (SELECT LEVEL n FROM dual CONNECT BY LEVEL <= %d00000), (SELECT LEVEL n FROM dual CONNECT BY LEVEL <= 100000)"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
-                    :uppercase-identifiers))
+                    :uppercase-identifiers :async-cancel))
     (:id clickhouse
      :backend clickhouse
      :display-name "ClickHouse"

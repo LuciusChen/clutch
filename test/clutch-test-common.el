@@ -9,6 +9,7 @@
 (require 'cl-lib)
 
 (require 'ert)
+(require 'ert-x)
 
 (require 'clutch-backend)
 
@@ -18,10 +19,33 @@
 
 ;;;; Test helpers
 
+(defun clutch-test--await (predicate)
+  "Run process output and idle timers until PREDICATE returns non-nil."
+  (let ((deadline (+ (float-time) 30)))
+    (while (not (funcall predicate))
+      (when (> (float-time) deadline)
+        (error "Timed out waiting for an asynchronous statement"))
+      (accept-process-output nil 0.05)
+      (ert-run-idle-timers))))
+
+(defun clutch-test--await-queries ()
+  "Wait until no statement runs, so every finished one has been presented."
+  (clutch-test--await
+   (lambda () (zerop (hash-table-count clutch--running-queries)))))
+
+(defun clutch-test--await-outcome (start)
+  "Call START with a continuation and return the value passed to it."
+  (let (outcome done)
+    (funcall start (lambda (value) (setq outcome value done t)))
+    (clutch-test--await (lambda () done))
+    outcome))
+
 (defun clutch-test--execute-and-present (sql connection &optional context)
   "Execute SQL on CONNECTION and present its result using CONTEXT."
   (clutch--present-statement-outcome
-   sql connection (clutch--execute-statement sql connection t context)))
+   sql connection
+   (clutch-test--await-outcome
+    (lambda (k) (clutch--execute-statement sql connection t nil k context)))))
 
 (defun clutch-test--debug-buffer-string ()
   "Return the current dedicated clutch debug buffer contents."

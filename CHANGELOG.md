@@ -2,7 +2,13 @@
 
 ## 0.5.2 - Unreleased
 
+### Added
+
+- PostgreSQL and JDBC statements run without blocking Emacs. The console, REPL and result buffers stay usable, the running statement's first line shows an amber fringe marker that turns into a red square while it is being cancelled, and `C-g` in those buffers cancels it, reporting the server's verdict. Until it finishes, its connection refuses other commands; a batch runs one statement after another the same way. PostgreSQL needs pgsql.el with `pgsql-exec-async`, and other backends block as before. JDBC still fetches the rest of a result page synchronously after the statement finishes.
+
 ### Changed
+
+- A batch of statements confirms every risky statement before the first one runs, instead of asking between statements, so a declined confirmation runs nothing.
 
 - A running query shows its elapsed time, counting in tenths of a second, in the mode line and the result footer instead of a spinner.
 - Durations of one second or more read as seconds plus milliseconds, such as `1s 234ms` instead of `1.234s`, in the result footer and in the rows-loaded, completion, and failure messages.
