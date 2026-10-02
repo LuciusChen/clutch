@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A server-side WHERE filter (`W`) with a `%` in it, such as `name LIKE 'a%'`, no longer ends in "Not enough arguments for format string" after the filter applies, and its message shows a MySQL backquote as typed rather than as a curved quote. A failed schema refresh whose error contains a `%`, as MySQL's `Access denied for user 'u'@'%'` does, reports that error instead.
 - INSERT copy and export name a table's own columns where the query renames them, as in `SELECT id AS k FROM t`, instead of the aliases.
 - A SELECT whose WITH clause modifies data, as PostgreSQL allows in `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d`, runs once as written instead of being paged, so moving to another page no longer runs the modification again; all its rows show on one page. It asks for the confirmation that the statement in its WITH clause would, and marks a Manual transaction dirty.
 - A DELETE after a WITH clause, as in `WITH old AS (...) DELETE FROM t WHERE ...`, asks for confirmation like a plain DELETE.
