@@ -1605,6 +1605,9 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
 (ert-deftest clutch-test-run-db-query-updates-manual-commit-dirty-state ()
   "Query execution should update dirty state from SQL and backend DDL semantics."
   (dolist (case '((dml "UPDATE demo SET x = 1" nil nil t)
+                  (dml-in-with-clause
+                   "WITH i AS (INSERT INTO demo VALUES (1) RETURNING id) SELECT * FROM i"
+                   nil nil t)
                   (transactional-ddl "CREATE TABLE demo (id int)" dirty nil t)
                   (autocommit-ddl "CREATE TABLE demo (id int)" clear t nil)
                   (commit "COMMIT" nil t nil)

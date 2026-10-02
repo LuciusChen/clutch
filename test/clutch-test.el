@@ -7349,6 +7349,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
              ("PRAGMA table_info(users)" nil)
              ("VALUES (1)" nil)
              ("INSERT INTO users (name) VALUES ('Ada') RETURNING id" nil)
+             ("WITH i AS (INSERT INTO users (name) VALUES ('Ada') RETURNING id) SELECT * FROM i" nil)
              ("CALL list_users()" nil)))
     (pcase-let ((`(,sql ,pageable) case))
       (ert-info ((format "sql: %s" sql))
@@ -8094,6 +8095,27 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
         (should-not (clutch--confirm-query-execution
                      "TRUNCATE TABLE users"))
         (should (= simple-prompts (if policy 1 0)))))))
+
+(ert-deftest clutch-test-confirmation-covers-statements-in-with-clause ()
+  "A DELETE in or after a WITH clause should ask as a plain DELETE does."
+  (dolist (case '(("WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
+                   typed)
+                  ("WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
+                   simple)
+                  ("WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
+                   simple)
+                  ("WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
+                   nil)))
+    (pcase-let ((`(,sql ,expected) case))
+      (ert-info ((format "sql: %s" sql))
+        (let ((clutch-high-risk-query-confirmation 'typed)
+              prompts)
+          (cl-letf (((symbol-function 'read-string)
+                     (lambda (&rest _args) (push 'typed prompts) "YES"))
+                    ((symbol-function 'yes-or-no-p)
+                     (lambda (&rest _args) (push 'simple prompts) t)))
+            (clutch--confirm-query-execution sql)
+            (should (equal prompts (and expected (list expected))))))))))
 
 (ert-deftest clutch-test-preview-execution-sql-uses-result-pending-batch ()
   "Preview in result mode should show generated SQL for staged result changes."

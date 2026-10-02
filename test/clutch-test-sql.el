@@ -68,14 +68,32 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "TRUNCATE users"
                     "DELETE FROM users"
                     "delete from users where id=1"
-                    "-- cleanup\nDROP TABLE users")
-                   ("SELECT * FROM users" "UPDATE users SET name='x'"))
+                    "-- cleanup\nDROP TABLE users"
+                    "WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
+                    "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d")
+                   ("SELECT * FROM users" "UPDATE users SET name='x'"
+                    "WITH x AS (SELECT 1) SELECT * FROM x"
+                    "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"))
+                  (modifies-data
+                   clutch-db-sql-modifies-data-p
+                   ("INSERT INTO users VALUES (1)"
+                    "UPDATE users SET name='x'"
+                    "WITH x AS (SELECT 1) DELETE FROM users"
+                    "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
+                    "WITH x (id) AS (SELECT 1), u AS /* rows */ (UPDATE users SET name = 'x' RETURNING id) SELECT * FROM u")
+                   ("SELECT * FROM users"
+                    "WITH x AS (SELECT 1) SELECT * FROM x"
+                    "WITH x (delete) AS (SELECT 1) SELECT * FROM x"
+                    "CREATE TABLE t (id int)"))
                   (select
                    clutch-db-sql-select-query-p
                    ("SELECT * FROM users"
                     "select id from users"
                     "  SELECT * FROM t"
                     "WITH cte AS (SELECT 1) SELECT * FROM cte"
+                    "WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT * FROM t"
+                    "WITH a AS (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT * FROM a, b"
+                    "WITH x AS (SELECT 1 AS id) SELECT id FROM x WINDOW w AS (ORDER BY id)"
                     "-- get users\nSELECT * FROM users"
                     "/* all */\nSELECT * FROM users"
                     "-- a\n-- b\nSELECT 1"
@@ -84,6 +102,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "EXPLAIN SELECT * FROM t")
                    ("WITH cte AS (SELECT 1) UPDATE users SET active = 1"
                     "WITH deleted AS (DELETE FROM users RETURNING id) DELETE FROM audit"
+                    "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
+                    "WITH d AS MATERIALIZED (DELETE FROM users RETURNING id) SELECT * FROM d"
                     "INSERT INTO users VALUES (1)"
                     "UPDATE users SET name='x'"))))
     (pcase-let ((`(,label ,predicate ,matching ,rejected) case))
@@ -113,11 +133,14 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE 1=1 OR id=5"
                  "UPDATE users SET name='x' WHERE id=5 OR 1=1"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1)"
-                 "UPDATE users SET name='x' WHERE 1=1 AND TRUE"))
+                 "UPDATE users SET name='x' WHERE 1=1 AND TRUE"
+                 "WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
+                 "WITH x AS (SELECT 1), u AS (UPDATE users SET name='x' WHERE 1=1 RETURNING id) SELECT * FROM u"))
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
+                 "WITH d AS (DELETE FROM users WHERE id=1 RETURNING id) SELECT * FROM d"
                  "UPDATE users SET name='x' WHERE 1=1 AND id=5"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1) AND status='active'"
                  "UPDATE users SET name='x' WHERE note='1=1'"

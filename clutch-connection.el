@@ -347,11 +347,6 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
 
 ;;;; SQL helpers for transaction state
 
-(defun clutch--manual-commit-dirtying-query-p (sql)
-  "Return non-nil when SQL should mark a manual-commit transaction dirty."
-  (member (clutch-db-sql-main-op-keyword sql)
-          '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
-
 (defun clutch--transaction-control-query-p (sql)
   "Return non-nil when SQL is explicit transaction control."
   (member (clutch-db-sql-leading-keyword sql)
@@ -537,7 +532,7 @@ pre-rendered text."
       (pcase (clutch-db-schema-transaction-effect conn sql)
         ('dirty (clutch--set-tx-dirty conn))
         ('clear (clutch--clear-tx-state conn))))
-     ((clutch--manual-commit-dirtying-query-p sql)
+     ((clutch-db-sql-modifies-data-p sql)
       (clutch--set-tx-dirty conn)))))
 
 (defvar clutch--running-queries (make-hash-table :test 'eq)
