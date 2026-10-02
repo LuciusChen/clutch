@@ -4,7 +4,7 @@
 
 ### Added
 
-- A result of a simple query of CTEs, such as `WITH c AS (SELECT * FROM t WHERE ...) SELECT * FROM c`, can be edited like a result of `t`. Clutch follows the CTEs to the table they read, selects its row identity there (primary key, unique key, or Oracle ROWID, PostgreSQL ctid or SQLite rowid) and carries it out through each CTE, so an edit changes exactly the row shown even when the query leaves the key out. Column aliases and CTE column lists map back to the table's own columns, and a CTE named like a table hides it as in SQL. CTEs that join, group, aggregate or combine rows, recursive ones, and a CTE that the query reads more than once leave the result read-only, as does a name whose meaning depends on the database, such as one naming a later CTE.
+- A result of a simple query of CTEs, such as `WITH c AS (SELECT * FROM t WHERE ...) SELECT * FROM c`, can be edited like a result of `t`. Clutch follows the CTEs to the table they read, selects its row identity there (primary key, unique key, or Oracle ROWID, PostgreSQL ctid or SQLite rowid) and carries it out through each CTE, so an edit changes exactly the row shown even when the query leaves the key out. Column aliases and CTE column lists map back to the table's own columns, and a CTE named like a table hides it as in SQL. CTEs that join, group, aggregate or combine rows, recursive ones, and a CTE that the query reads more than once leave the result read-only, as does a name whose meaning depends on the database, such as one naming a later CTE, or a CTE named like a column, as in `WITH name AS (SELECT name FROM people)`. A CTE column list over `SELECT *` keeps rows deletable but no column editable, because only the table knows the order of `*`.
 
 ### Changed
 
