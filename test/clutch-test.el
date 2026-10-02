@@ -3059,15 +3059,17 @@ header string and column pixel widths, then reused."
                 clutch--result-server-rewritable t
                 clutch--where-filter "id > 5")
     (let (captured)
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _args) ""))
-                ((symbol-function 'clutch--execute)
+      (cl-letf (((symbol-function 'clutch--execute)
                  (lambda (sql conn &optional result-context)
                    (setq captured (list sql conn result-context)))))
-        (clutch-result-apply-filter)
+        (clutch-test--with-minibuffer-answers '("")
+          (clutch-result-apply-filter))
         ;; The cleared filter state is installed with the new result.
         (should (equal captured
                        '("SELECT * FROM t" fake-conn
-                         (:base-query nil :where-filter nil)))))))
+                         (:base-query nil :where-filter nil
+                          :keep-result-on-error t
+                          :success-message "Filter cleared")))))))
   (with-temp-buffer
     (setq-local clutch--result-server-rewritable nil
                 clutch-connection 'fake-conn
@@ -3085,25 +3087,138 @@ header string and column pixel widths, then reused."
                                   (error-message-string err))))
         (should-not executed)))))
 
-(ert-deftest clutch-test-apply-filter-message-shows-filter-as-typed ()
-  "The filter message should show a `%' or a backquote in the filter as typed."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--last-query "SELECT * FROM t"
-                clutch--base-query "SELECT * FROM t"
-                clutch--result-source-table "t"
-                clutch--result-server-pageable t
-                clutch--result-server-rewritable t
-                clutch--where-filter nil)
-    (let (shown)
-      (cl-letf (((symbol-function 'read-string)
-                 (lambda (&rest _args) "`name` LIKE 'a%'"))
-                ((symbol-function 'clutch--execute) #'ignore)
-                ((symbol-function 'message)
-                 (lambda (fmt &rest args)
-                   (setq shown (apply #'format-message fmt args)))))
-        (clutch-result-apply-filter)
-        (should (equal shown "Filter applied: WHERE `name` LIKE 'a%'"))))))
+(ert-deftest clutch-test-where-filter-real-sqlite-workflow ()
+  "\\`W' should change, mistype, write out and clear a filter like a user.
+Answers follow the real readers, where an empty answer to a read with a
+default returns the default."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-where-filter-source*"))
+         (clutch--execution-refresh-timer nil)
+         shown
+         result)
+    (cl-flet ((filter (&rest answers)
+                (with-current-buffer result
+                  (setq shown nil)
+                  (cl-letf (((symbol-function 'message)
+                             (lambda (fmt &rest args)
+                               (when fmt
+                                 (push (apply #'format-message fmt args) shown)))))
+                    (clutch-test--with-minibuffer-answers answers
+                      (clutch-result-apply-filter)
+                      (clutch-test--await-queries)))))
+              (ids ()
+                (with-current-buffer result
+                  (mapcar #'car clutch--result-rows)))
+              (point-on (name)
+                (with-current-buffer result
+                  (setq-local clutch--header-active-col
+                              (cl-position name clutch--result-columns
+                                           :test #'string=)))))
+      (unwind-protect
+          (save-window-excursion
+            (clutch-db-query conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)")
+            (clutch-db-query conn "INSERT INTO people VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'abe', 30)")
+            (set-window-buffer (selected-window) source)
+            (with-current-buffer source
+              (clutch-mode)
+              (setq-local clutch-connection conn
+                          clutch--connection-params
+                          '(:backend sqlite :database ":memory:"))
+              (insert "SELECT id, name, score FROM people ORDER BY id")
+              (clutch-execute-buffer)
+              (setq result clutch--last-result-buffer))
+            (set-window-buffer (selected-window) result)
+            (filter "score" "> 15")
+            (should (equal (ids) '(2 3)))
+            (should (member "Filter applied: WHERE \"score\" > 15" shown))
+            ;; Pressing W again picks a column, matched in any case.
+            (filter "SCORE" "> 25")
+            (should (equal (ids) '(3)))
+            ;; A filter typed wrong keeps the result and the filter it had.
+            (filter "score >")
+            (should (equal (ids) '(3)))
+            (should (equal (buffer-local-value 'clutch--where-filter result)
+                           "\"score\" > 25"))
+            (should (string-suffix-p "(result unchanged)" (car shown)))
+            ;; Text other than a column name is the whole condition, shown
+            ;; as typed once the result arrives.
+            (filter "`name` LIKE 'a%'")
+            (should (equal (ids) '(1 3)))
+            (should (member "Filter applied: WHERE `name` LIKE 'a%'" shown))
+            ;; With point on a column, RET picks it and an empty condition
+            ;; clears the filter.
+            (point-on "score")
+            (filter "" "")
+            (should (equal (ids) '(1 2 3)))
+            (should-not (buffer-local-value 'clutch--where-filter result))
+            (should (member "Filter cleared" shown))
+            ;; A mistake without a filter keeps the query, so g and the
+            ;; next filter still start from it.
+            (filter "score >")
+            (should (equal (ids) '(1 2 3)))
+            (with-current-buffer result
+              (clutch-result-rerun)
+              (clutch-test--await-queries))
+            (should (equal (ids) '(1 2 3)))
+            (filter "score" "> 25")
+            (should (equal (ids) '(3)))
+            ;; Without a column at point, RET asks for the whole condition.
+            (point-on "nothing")
+            (filter "" "id = 2")
+            (should (equal (ids) '(2))))
+        (when (buffer-live-p result)
+          (kill-buffer result))
+        (kill-buffer source)
+        (when (clutch-db-live-p conn)
+          (clutch-db-disconnect conn))))))
+
+(ert-deftest clutch-test-where-filter-column-prompt-prefers-exact-names ()
+  "A name at the column prompt should pick the column it spells exactly.
+Matching in any case only picks a column when no other one matches."
+  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
+             (lambda (_conn name) (format "\"%s\"" name))))
+    (dolist (case '((("SCORE" "score") "score" "\"score\" > 15")
+                    (("SCORE" "score") "SCORE" "\"SCORE\" > 15")
+                    (("SCORE" "name") "score" "\"SCORE\" > 15")))
+      (pcase-let ((`(,columns ,answer ,expected) case))
+        (clutch-test--with-minibuffer-answers (list answer "> 15")
+          (should (equal (clutch--read-where-filter nil columns nil 'conn)
+                         expected)))))
+    ;; Another spelling of two columns that differ only in case names
+    ;; neither, so it is the whole condition.
+    (clutch-test--with-minibuffer-answers '("Score")
+      (should (equal (clutch--read-where-filter nil '("SCORE" "score") nil 'conn)
+                     "Score")))))
+
+(ert-deftest clutch-test-kept-result-error-still-warns-of-unknown-transaction ()
+  "A filter that loses the connection should still show the error page.
+Only a server error on a live connection keeps the result, so a lost
+connection keeps its warning that the transaction outcome is unknown."
+  (let (hint retired)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
+                ((symbol-function 'clutch--tx-unresolved-p) (lambda (_conn) t))
+                ((symbol-function 'clutch--remember-execute-error)
+                 (lambda (&rest _) (cons "Connection closed" "Connection closed")))
+                ((symbol-function 'clutch-result--display-error)
+                 (lambda (_conn _sql _summary _message &optional _elapsed shown)
+                   (setq hint shown)
+                   nil))
+                ((symbol-function 'clutch--retire-query-connection)
+                 (lambda (_conn) (setq retired t)))
+                ((symbol-function 'message) #'ignore))
+        (clutch--present-statement-outcome
+         "SELECT 1" 'fake-conn
+         (list :error '(clutch-db-error "Connection closed")
+               :connection 'fake-conn
+               :elapsed 0.1
+               :result-context '(:keep-result-on-error t)
+               :source-buffer (current-buffer)))))
+    (should retired)
+    (should (string-match-p
+             (regexp-quote clutch--transaction-outcome-unknown-message)
+             (or hint "")))))
 
 ;;;; Rendering — custom column displayers
 
