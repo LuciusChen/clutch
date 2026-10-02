@@ -24,13 +24,13 @@
      :sleep-sql "SELECT pg_sleep(%d)"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
                     :object-describe :ctid-row-identity :async-cancel
-                    :data-modifying-cte))
+                    :data-modifying-cte :select-into))
     (:id sqlserver
      :backend sqlserver
      :display-name "SQL Server"
      :sleep-sql "WAITFOR DELAY '00:00:%02d'"
      :capabilities (:result-workflow :updateable-workflow :manual-savepoint
-                    :async-cancel))
+                    :async-cancel :select-into))
     (:id oracle
      :backend oracle
      :display-name "Oracle"

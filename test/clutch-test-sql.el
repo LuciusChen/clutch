@@ -80,10 +80,15 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "UPDATE users SET name='x'"
                     "WITH x AS (SELECT 1) DELETE FROM users"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
-                    "WITH x (id) AS (SELECT 1), u AS /* rows */ (UPDATE users SET name = 'x' RETURNING id) SELECT * FROM u")
+                    "WITH x (id) AS (SELECT 1), u AS /* rows */ (UPDATE users SET name = 'x' RETURNING id) SELECT * FROM u"
+                    "SELECT * INTO users_copy FROM users"
+                    "SELECT u.* INTO TEMP recent FROM users u JOIN orders o ON o.uid = u.id")
                    ("SELECT * FROM users"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH x (delete) AS (SELECT 1) SELECT * FROM x"
+                    "SELECT 'INTO' FROM users"
+                    "SELECT id INTO @last_id FROM users"
+                    "SELECT * FROM users INTO OUTFILE '/tmp/users.csv'"
                     "CREATE TABLE t (id int)"))
                   (select
                    clutch-db-sql-select-query-p
@@ -104,6 +109,9 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "WITH deleted AS (DELETE FROM users RETURNING id) DELETE FROM audit"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
                     "WITH d AS MATERIALIZED (DELETE FROM users RETURNING id) SELECT * FROM d"
+                    "SELECT * INTO users_copy FROM users"
+                    "WITH x AS (SELECT * FROM users) SELECT * INTO users_copy FROM x"
+                    "SELECT id INTO @last_id FROM users"
                     "INSERT INTO users VALUES (1)"
                     "UPDATE users SET name='x'"))))
     (pcase-let ((`(,label ,predicate ,matching ,rejected) case))

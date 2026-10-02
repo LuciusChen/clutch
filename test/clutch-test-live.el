@@ -768,6 +768,59 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-set-auto-commit conn t)))
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 
+(ert-deftest clutch-test-live-select-into-copies-every-row ()
+  :tags '(:clutch-live)
+  "SELECT INTO should copy every row as written and dirty Manual mode."
+  (unless (clutch-test-live-backend-capability-p :select-into)
+    (ert-skip (clutch-test-capability-skip-message :select-into)))
+  (clutch-test--with-conn conn
+    (let* ((source (format "clutch_into_src_%d" (emacs-pid)))
+           (copies (mapcar (lambda (n) (format "clutch_into_copy%d_%d" n (emacs-pid)))
+                           '(1 2 3)))
+           (result-name (format " *clutch-select-into-live-%d*" (emacs-pid))))
+      (cl-flet ((drop-all ()
+                  (dolist (table (cons source copies))
+                    (ignore-errors
+                      (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table)))))
+                (row-count (table)
+                  (string-to-number
+                   (format "%s" (caar (clutch-db-result-rows
+                                       (clutch-db-query
+                                        conn (format "SELECT COUNT(*) FROM %s" table))))))))
+        (unwind-protect
+            (progn
+              (drop-all)
+              (clutch-db-query conn (clutch-test--live-create-table-sql
+                                     source '((id int primary) (name string))))
+              (clutch-db-query
+               conn (format "INSERT INTO %s (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')"
+                            source))
+              ;; A single-table SELECT drew row identity injection, and a
+              ;; join a pagination tail.
+              (clutch-test--with-live-result-buffer result-name
+                (let ((clutch-result-max-rows 2))
+                  (clutch-test--execute-live-select
+                   conn (format "SELECT * INTO %s FROM %s" (nth 0 copies) source))
+                  (clutch-test--execute-live-select
+                   conn (format "SELECT s.id, s.name INTO %s FROM %s s JOIN %s k ON k.id = s.id"
+                                (nth 1 copies) source source))))
+              (should (= (row-count (nth 0 copies)) 5))
+              (should (= (row-count (nth 1 copies)) 5))
+              (clutch-db-set-auto-commit conn nil)
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-test--execute-live-select
+                 conn (format "SELECT * INTO %s FROM %s" (nth 2 copies) source)))
+              (should (clutch--tx-dirty-p conn))
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t))
+          (ignore-errors
+            (when (clutch-db-manual-commit-p conn)
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t)))
+          (drop-all))))))
+
 (ert-deftest clutch-test-live-edit-field-and-submit-persists ()
   :tags '(:clutch-live)
   "Edit through a real SELECT result and submit the persisted row change."
