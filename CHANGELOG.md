@@ -2,6 +2,10 @@
 
 ## 0.5.3 - Unreleased
 
+### Changed
+
+- A simple query of a CTE, such as `WITH r AS (SELECT ...) SELECT id, name FROM r`, counts, filters and sorts on the server like a query of a table, where those commands were refused before. Clutch keeps the WITH clause in front of the derived table it wraps the main statement in, because SQL Server rejects WITH inside a derived table. The result still cannot be edited.
+
 ### Fixed
 
 - A SELECT whose WITH clause modifies data, as PostgreSQL allows in `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d`, runs once as written instead of being paged, so moving to another page no longer runs the modification again; all its rows show on one page. It asks for the confirmation that the statement in its WITH clause would, and marks a Manual transaction dirty.
