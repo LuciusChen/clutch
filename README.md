@@ -65,7 +65,7 @@ Clutch stages `UPDATE` and `DELETE` only when it can identify a stable source ro
 | Oracle JDBC | Non-null unique keys, then `ROWID` for confirmed base tables |
 | Other JDBC backends | Non-null unique keys only |
 
-Joined, grouped, derived, or otherwise ambiguous result sets remain read-only unless Clutch can identify one source table and a matching row identity. Schema-qualified JDBC sources retain their schema for identity lookup and staged mutations; Oracle views and synonyms, including dictionary relations such as `USER_TABLES`, remain read-only and skip unsafe identity probes.
+Joined, grouped, derived, or otherwise ambiguous result sets remain read-only unless Clutch can identify one source table and a matching row identity. A simple query of CTEs that read one table edits that table: Clutch carries the table's row identity out through each CTE and maps column aliases and CTE column lists back to the table's columns. Schema-qualified JDBC sources retain their schema for identity lookup and staged mutations; Oracle views and synonyms, including dictionary relations such as `USER_TABLES`, remain read-only and skip unsafe identity probes.
 
 ## Backend Support
 

@@ -506,8 +506,9 @@ are produced by the query execution layer."
          (prepared-source-table (plist-get row-identity-prep :table))
          (source-table
           (or (plist-get result-context :source-table)
-              (and (clutch--row-identity-augmentable-sql-p
-                    analysis-sql prepared-source-table)
+              (and (or (plist-get row-identity-prep :cte)
+                       (clutch--row-identity-augmentable-sql-p
+                        analysis-sql prepared-source-table))
                    prepared-source-table)))
          (page (if server-pageable
                    (clutch-result--split-page-lookahead-rows
@@ -2821,10 +2822,12 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 (defun clutch--insert-target-table ()
   "Return a safe target table name for INSERT copy/export.
-Simple single-table result sets use the detected table name.  Ambiguous
-results use `clutch--insert-placeholder-table' instead."
-  (or (when clutch--last-query
-        (clutch-db-sql-source-table clutch--last-query t))
+Simple single-table result sets use the detected table name, including one
+read through CTEs.  Ambiguous results use `clutch--insert-placeholder-table'
+instead."
+  (or (when-let* ((sql clutch--last-query)
+                  (token (clutch-db-sql-simple-source-token sql)))
+        (clutch-db-sql-table-name token))
       clutch--insert-placeholder-table))
 
 (defun clutch-result--selected-update-col-indices (row-identity col-indices op)

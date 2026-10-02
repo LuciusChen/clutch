@@ -126,6 +126,41 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
         (dolist (sql rejected)
           (should-not (funcall predicate sql)))))))
 
+(ert-deftest clutch-test-cte-definitions-and-source-chain ()
+  "CTE definitions and the chain to their table should follow SQL scoping."
+  (let ((sql "WITH c (k, \"V\") AS MATERIALIZED (SELECT id, name FROM t) /* next */, d AS (SELECT * FROM c) SELECT * FROM d"))
+    (should (equal (mapcar (lambda (definition)
+                             (list (plist-get definition :name)
+                                   (plist-get definition :columns)
+                                   (substring sql (plist-get definition :start)
+                                              (plist-get definition :end))))
+                           (clutch-db-sql-cte-definitions sql))
+                   '(("c" ("k" "\"V\"") "SELECT id, name FROM t")
+                     ("d" nil "SELECT * FROM c")))))
+  (should-not (clutch-db-sql-cte-definitions
+               "WITH RECURSIVE r (n) AS (SELECT 1) SELECT * FROM r"))
+  (should-not (clutch-db-sql-cte-definitions
+               "WITH r (n) AS (SELECT 1 FROM dual) SEARCH DEPTH FIRST BY n SET o SELECT * FROM r"))
+  (dolist (case
+           '(("WITH a AS (SELECT * FROM s.t), b AS (SELECT * FROM a) SELECT * FROM b"
+              "s.t" 3)
+             ("WITH ids AS (SELECT id FROM t) SELECT * FROM t WHERE id IN (SELECT id FROM ids)"
+              "t" 1)
+             ;; A CTE hides a table of its name, but only from what follows it.
+             ("WITH t AS (SELECT * FROM audit) SELECT * FROM t" "audit" 2)
+             ("WITH b AS (SELECT * FROM a), a AS (SELECT * FROM t) SELECT * FROM b"
+              "a" 2)
+             ("WITH c AS (SELECT * FROM t) SELECT * FROM s.c" "s.c" 1)
+             ;; Whether quoting changes the name depends on the database.
+             ("WITH \"Orders\" AS (SELECT * FROM audit) SELECT * FROM orders" nil 0)
+             ("WITH c AS (SELECT a.id FROM a JOIN b ON b.id = a.id) SELECT * FROM c"
+              nil 0)))
+    (pcase-let* ((`(,sql ,token ,levels) case)
+                 (chain (clutch-db-sql-source-chain sql)))
+      (ert-info (sql)
+        (should (equal (plist-get chain :token) token))
+        (should (= (length (plist-get chain :levels)) levels))))))
+
 (ert-deftest clutch-test-embedded-statements ()
   "CTE bodies and data change tables should be the embedded statements."
   (dolist (case
