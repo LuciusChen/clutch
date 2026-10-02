@@ -434,10 +434,10 @@ window rather than replacing the current window."
 
 (defvar clutch--row-identity-cte-alias-suffix
   (format "%08x" (random #x100000000))
-  "Suffix that makes the hidden identity aliases of a CTE result unique.
+  "Random suffix for the hidden identity aliases of a CTE result.
 Outer SELECTs pass those columns on by name, so their names must match no
-column that the query or its table already has; a suffix drawn at random
-for the session cannot be one of them.")
+column that the query or its table already has.  The suffix holds 32 bits
+drawn at random for the session, which makes such a match very unlikely.")
 
 (defconst clutch--source-column-identifier-pattern
   "\\(?:[[:alpha:]_$][[:alnum:]_$]*\\|`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\)"
