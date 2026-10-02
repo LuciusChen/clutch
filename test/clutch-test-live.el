@@ -511,11 +511,10 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                              (cl-find "score" clutch--result-columns
                                       :test #'string-equal-ignore-case)))
                         (should score-column)
-                        (cl-letf (((symbol-function 'completing-read)
-                                   (lambda (&rest _args) score-column))
-                                  ((symbol-function 'read-string)
-                                   (lambda (&rest _args) "> 20")))
-                          (progn (clutch-result-apply-filter) (clutch-test--await-queries)))
+                        (clutch-test--with-minibuffer-answers
+                            (list score-column "> 20")
+                          (clutch-result-apply-filter)
+                          (clutch-test--await-queries))
                         (should (equal clutch--where-filter
                                        (format "%s > 20"
                                                (clutch-db-escape-identifier
@@ -534,7 +533,26 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                       (should-not (clutch--result-display-rows))
                       (let ((rows (clutch-result--collect-all-export-rows)))
                         (should (equal (sort (clutch-test--live-row-ids rows) #'<)
-                                       '(3 4 5))))))))))
+                                       '(3 4 5))))
+                      ;; Pressing W again changes the condition, and an empty
+                      ;; condition clears the filter.
+                      (let ((score-column
+                             (cl-find "score" clutch--result-columns
+                                      :test #'string-equal-ignore-case)))
+                        (clutch-test--with-minibuffer-answers
+                            (list score-column "> 40")
+                          (clutch-result-apply-filter)
+                          (clutch-test--await-queries))
+                        (should (equal (clutch-test--live-row-ids
+                                        clutch--result-rows)
+                                       '(5)))
+                        (clutch-test--with-minibuffer-answers
+                            (list score-column "")
+                          (clutch-result-apply-filter)
+                          (clutch-test--await-queries))
+                        (should-not clutch--where-filter)
+                        (should (memq 1 (clutch-test--live-row-ids
+                                         clutch--result-rows))))))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-mysql-limited-join-duplicate-columns-executes-flat ()

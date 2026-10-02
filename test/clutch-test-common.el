@@ -33,6 +33,33 @@
   (clutch-test--await
    (lambda () (zerop (hash-table-count clutch--running-queries)))))
 
+(defvar clutch-test--minibuffer-answers nil
+  "Answers left for `clutch-test--with-minibuffer-answers'.")
+
+(defun clutch-test--minibuffer-answer (default)
+  "Return the next minibuffer answer, or DEFAULT when that answer is empty."
+  (let ((answer (or (pop clutch-test--minibuffer-answers)
+                    (error "No minibuffer answer left"))))
+    (if (and (string-empty-p answer) default)
+        (if (consp default) (car default) default)
+      answer)))
+
+(defmacro clutch-test--with-minibuffer-answers (answers &rest body)
+  "Run BODY answering `read-string' and `completing-read' with ANSWERS.
+Like the real readers, an empty answer to a read with a default returns
+the default, which is what a user who just presses RET gets."
+  (declare (indent 1))
+  `(let ((clutch-test--minibuffer-answers (copy-sequence ,answers)))
+     (cl-letf (((symbol-function 'read-string)
+                (lambda (_prompt &optional _initial _history default &rest _)
+                  (clutch-test--minibuffer-answer default)))
+               ((symbol-function 'completing-read)
+                (lambda (_prompt _collection &optional _predicate _require-match
+                                 _initial _history default &rest _)
+                  (clutch-test--minibuffer-answer default))))
+       ,@body
+       (should-not clutch-test--minibuffer-answers))))
+
 (defun clutch-test--await-outcome (start)
   "Call START with a continuation and return the value passed to it."
   (let (outcome done)
