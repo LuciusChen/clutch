@@ -1277,7 +1277,9 @@ RESULT-CONTEXT carries verified metadata for generated SQL.
 NO-IDLE-RETRY-P prevents reconnecting after a proven pre-execution failure,
 as required after a preceding statement in the same batch.  The caller has
 already confirmed SQL."
-  (setq clutch--last-query sql)
+  ;; A result kept on failure keeps its query; a new result records its own.
+  (unless (plist-get result-context :keep-result-on-error)
+    (setq clutch--last-query sql))
   (let ((manual-dirty-p
          (and (clutch--tx-unresolved-p connection)
               (clutch-db-manual-commit-p connection)))
@@ -1422,7 +1424,9 @@ executed or failed."
       (let* ((connection-lost (not (clutch--connection-alive-p connection)))
              (context (and connection-lost
                            (clutch--connection-loss-context connection))))
-        (if (plist-get (plist-get outcome :result-context) :keep-result-on-error)
+        (if (and (plist-get (plist-get outcome :result-context)
+                            :keep-result-on-error)
+                 (not connection-lost))
             (pcase-let ((`(,raw . ,summary)
                          (clutch--remember-execute-error
                           (plist-get outcome :source-buffer)
