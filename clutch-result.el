@@ -1053,11 +1053,17 @@ Triggers a COUNT(*) query if total rows are not yet known."
 
 ;;;###autoload
 (defun clutch-result-rerun ()
-  "Re-execute the last query that produced this result buffer."
+  "Re-execute the last query that produced this result buffer.
+A server-side filter stays applied, with the row identity it had."
   (interactive)
-  (if-let* ((sql (clutch-result--effective-query)))
-      (clutch--execute sql)
-    (user-error "No query to re-execute")))
+  (let* ((filter (and clutch--base-query clutch--where-filter))
+         (plan (clutch-result--current-query-plan))
+         (sql (or (plist-get plan :sql)
+                  (user-error "No query to re-execute"))))
+    (clutch--execute sql nil
+                     (and filter
+                          (clutch-result--filter-context
+                           clutch--base-query filter plan)))))
 
 (defun clutch-result--revert (_ignore-auto _noconfirm)
   "Revert function for result buffer — re-executes the query."
@@ -1433,8 +1439,6 @@ result in place."
     (user-error "Server-side filter is not available for this query result"))
   (let* ((base (or clutch--base-query
                    clutch--last-query))
-         (source-table clutch--result-source-table)
-         (server-pageable (clutch-result--server-pageable-p))
          (current clutch--where-filter)
          (visible-col-indices (clutch--visible-columns))
          (columns (clutch--column-names-for-indices visible-col-indices))
@@ -1448,18 +1452,24 @@ result in place."
     (clutch--execute (or (plist-get plan :sql) base)
                      clutch-connection
                      (append
-                      (list :base-query (when filter base) :where-filter filter
-                            :keep-result-on-error t
+                      (clutch-result--filter-context base filter plan)
+                      (list :keep-result-on-error t
                             :success-message
                             (if filter
                                 (format "Filter applied: WHERE %s" filter)
-                              "Filter cleared"))
-                      (and filter
-                           (list :server-pageable server-pageable
-                                 :server-rewritable t
-                                 :source-table source-table
-                                 :row-identity-prep
-                                 (plist-get plan :row-identity-prep)))))))
+                              "Filter cleared"))))))
+
+(defun clutch-result--filter-context (base filter plan)
+  "Return the result context of BASE filtered by FILTER through PLAN.
+It restores the filter and keeps the current result's paging, server-side
+rewrites, source table and the row identity of PLAN, which the filtered SQL
+alone would lose.  With FILTER nil it only clears the filter."
+  (append (list :base-query (when filter base) :where-filter filter)
+          (and filter
+               (list :server-pageable (clutch-result--server-pageable-p)
+                     :server-rewritable t
+                     :source-table clutch--result-source-table
+                     :row-identity-prep (plist-get plan :row-identity-prep)))))
 
 ;;;; Client-side filter
 
