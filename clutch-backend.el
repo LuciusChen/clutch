@@ -880,11 +880,17 @@ These are the bodies of the CTEs in its leading WITH clause."
 (defun clutch-db-sql-modifies-data-p (sql)
   "Return non-nil when SQL modifies table data.
 That is an INSERT, UPDATE, DELETE, MERGE or REPLACE, either as SQL's main
-statement or embedded in it, as PostgreSQL allows in a WITH clause."
-  (cl-some (lambda (statement)
-             (member (clutch-db-sql-main-op-keyword statement)
-                     '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
-           (cons sql (clutch-db-sql-embedded-statements sql))))
+statement or embedded in it, as PostgreSQL allows in a WITH clause, or a
+SELECT INTO a table.  MySQL's SELECT INTO a file or variables is not."
+  (or (cl-some (lambda (statement)
+                 (member (clutch-db-sql-main-op-keyword statement)
+                         '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
+               (cons sql (clutch-db-sql-embedded-statements sql)))
+      (when-let* ((into (clutch-db-sql-find-top-level-clause sql "INTO")))
+        (let ((case-fold-search t))
+          (not (eq (string-match-p
+                    "INTO[ \t\n\r]+\\(?:OUTFILE\\|DUMPFILE\\|@\\)" sql into)
+                   into))))))
 
 (defun clutch-db-sql-top-level-comma-p (sql start end)
   "Return non-nil when SQL has a top-level comma between START and END."
@@ -1060,18 +1066,18 @@ A DELETE counts after a WITH clause or embedded in one."
 
 (defun clutch-db-sql-pageable-query-p (sql)
   "Return non-nil when SQL is a SELECT that accepts a pagination tail.
-A SELECT whose WITH clause modifies data does not: each page would modify
-the data again."
-  (or (clutch-db-sql-starts-with-keyword-p sql '("SELECT"))
-      (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
-           (equal (clutch-db-sql-main-op-keyword sql) "SELECT")
-           (not (clutch-db-sql-modifies-data-p sql)))))
+A SELECT that writes does not.  The tail would cut SELECT INTO short, and
+each page would run a WITH clause that modifies data again."
+  (and (or (clutch-db-sql-starts-with-keyword-p sql '("SELECT"))
+           (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
+                (equal (clutch-db-sql-main-op-keyword sql) "SELECT")))
+       (not (clutch-db-sql-find-top-level-clause sql "INTO"))
+       (not (clutch-db-sql-modifies-data-p sql))))
 
 (defun clutch-db-sql-select-query-p (sql)
-  "Return non-nil for SQL that yields a result set without modifying data.
-Rows returned by a statement that modifies data, such as INSERT ...
-RETURNING or a SELECT whose WITH clause modifies data, display all the
-same."
+  "Return non-nil for SQL that yields a result set without writing.
+Rows returned by a statement that writes, such as INSERT ... RETURNING or
+a SELECT whose WITH clause modifies data, display all the same."
   (or (clutch-db-sql-pageable-query-p sql)
       (clutch-db-sql-starts-with-keyword-p
        sql '("DESCRIBE" "DESC" "SHOW" "EXPLAIN"))))

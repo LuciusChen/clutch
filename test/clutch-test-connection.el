@@ -1608,6 +1608,8 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
                   (dml-in-with-clause
                    "WITH i AS (INSERT INTO demo VALUES (1) RETURNING id) SELECT * FROM i"
                    nil nil t)
+                  (select-into-table "SELECT * INTO demo_copy FROM demo" nil nil t)
+                  (select-into-variable "SELECT x INTO @x FROM demo" nil nil nil)
                   (transactional-ddl "CREATE TABLE demo (id int)" dirty nil t)
                   (autocommit-ddl "CREATE TABLE demo (id int)" clear t nil)
                   (commit "COMMIT" nil t nil)
