@@ -731,23 +731,59 @@ base column name or nil per result column."
     (columns (cdr levels)
              (clutch--writable-select-projection (text (car levels))))))
 
+(defun clutch--relation-name-count (sql name)
+  "Return how many times SQL names NAME, its CTE definition included.
+Literals, comments and the parts of a dotted name, as in c.id or s.c, do
+not count; a column of the same name does."
+  (let ((masked (clutch-db-sql-mask-literal-or-comment sql))
+        (regexp (concat "\\_<"
+                        (regexp-quote (clutch-db-sql--unquote-identifier name))
+                        "\\_>"))
+        (case-fold-search t)
+        (count 0)
+        (pos 0))
+    (with-syntax-table clutch-db-sql--syntax-table
+      (while (string-match regexp masked pos)
+        (let ((start (match-beginning 0))
+              (end (match-end 0)))
+          (unless (or (string-match-p
+                       "\\.[ \t\n\r\"`[]*\\'"
+                       (substring masked (max 0 (- start 64)) start))
+                      (string-match-p
+                       "\\`[] \t\n\r\"`]*\\."
+                       (substring masked end (min (length masked) (+ end 64)))))
+            (cl-incf count))
+          (setq pos end))))
+    count))
+
 (defun clutch--row-identity-cte-chain (sql)
   "Return the source chain of CTE query SQL, or nil if it cannot be edited.
 The value is the plist from `clutch-db-sql-source-chain' with :projection
 added.  Every SELECT on the way must be one that row identity can pass
 through: one relation, no aggregate, DISTINCT, GROUP BY or HAVING, no
-comment in its select list, and either `*' or a list without one."
+comment in its select list, and either `*' or a list without one.  A CTE
+on the way must have no reader besides the next SELECT out, which the
+identity columns would change too.  And since outer SELECTs pass those
+columns on by name, no name in SQL may look like one of them."
   (when-let* ((chain (clutch-db-sql-source-chain sql))
+              ((not (let ((case-fold-search t))
+                      (string-match-p
+                       (regexp-quote clutch--row-identity-hidden-prefix) sql))))
               ((cl-every
                 (lambda (level)
                   (let* ((text (substring sql (nth 0 level) (nth 1 level)))
-                         (items (clutch--select-list-items text)))
+                         (items (clutch--select-list-items text))
+                         (definition (nth 2 level)))
                     (and (clutch--row-identity-augmentable-sql-p text t)
                          (not (clutch--row-identity-select-list-comment-p text))
                          (or (null (cdr items))
                              (not (cl-some (lambda (item)
                                              (string-suffix-p "*" item))
-                                           items))))))
+                                           items)))
+                         (or (null definition)
+                             (= (clutch--relation-name-count
+                                 sql (plist-get definition :name))
+                                2)))))
                 (plist-get chain :levels))))
     (plist-put chain :projection
                (clutch--cte-writable-projection sql (plist-get chain :levels)))))

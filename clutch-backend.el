@@ -975,7 +975,8 @@ statement inward, where DEFINITION is the CTE whose body it is, or nil
 for the main statement.  :token is the table the last of them reads, as
 written.  Each SELECT must read a single relation.  Return nil when that
 does not lead to a table, including when whether a name refers to a CTE
-depends on the database's case folding."
+depends on the database, through its case folding or because the CTE is
+the reader itself or defined after it."
   (when-let* ((definitions (clutch-db-sql-cte-definitions sql)))
     (let ((start (car (clutch-db-sql--main-op-match sql)))
           (end (length sql))
@@ -991,7 +992,7 @@ depends on the database's case folding."
             (push (list start end definition) levels)
             (setq definition
                   (and (not (clutch-db-sql-table-schema token))
-                       (cl-loop for candidate in visible
+                       (cl-loop for candidate in definitions
                                 for same = (clutch-db-sql--same-identifier-p
                                             token (plist-get candidate :name))
                                 when (eq same 'ambiguous)
@@ -999,7 +1000,10 @@ depends on the database's case folding."
                                 when same return candidate)))
             (unless definition
               (throw 'done (list :levels (nreverse levels) :token token)))
-            ;; A CTE can only read the ones defined before it.
+            ;; Whether a CTE can read itself or a later one depends on the
+            ;; database: SQLite lets it, PostgreSQL reads a table instead.
+            (unless (memq definition visible)
+              (throw 'done nil))
             (setq visible (seq-take definitions
                                     (cl-position definition definitions))
                   start (plist-get definition :start)
