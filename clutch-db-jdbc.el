@@ -1588,21 +1588,33 @@ cancels it."
 
 (defun clutch-jdbc--finish-foreground (conn op id response callback)
   "Finish foreground request ID for OP on CONN, then call CALLBACK.
-RESPONSE is the agent's reply, or nil when no reply will arrive."
+RESPONSE is the agent's reply, or nil when no reply will arrive.  Every
+failure reaches CALLBACK as a `clutch-db-error'.  Rows the result still
+owes are fetched first; a quit while fetching them retires CONN, whose
+fetch and cursor are then in an unknown state."
   (pcase-let ((`(,result . ,error)
                (condition-case err
-                   (cons (clutch-jdbc--rpc-result
-                          conn
-                          (if response
-                              (clutch-jdbc--response-result-or-signal
-                               conn op response)
-                            (signal 'clutch-db-error
-                                    (list
-                                     (if (clutch-jdbc--agent-live-p)
-                                         "JDBC request ended without a response; its outcome is unknown"
-                                       (clutch-jdbc--agent-exit-error-message))))))
-                         nil)
-                 (clutch-db-error (cons nil err)))))
+                   ;; Timers run with quitting inhibited; let C-g stop a
+                   ;; long fetch of the remaining rows.
+                   (if-let* ((result
+                              (with-local-quit
+                                (clutch-jdbc--rpc-result
+                                 conn
+                                 (if response
+                                     (clutch-jdbc--response-result-or-signal
+                                      conn op response)
+                                   (signal 'clutch-db-error
+                                           (list
+                                            (if (clutch-jdbc--agent-live-p)
+                                                "JDBC request ended without a response; its outcome is unknown"
+                                              (clutch-jdbc--agent-exit-error-message)))))))))
+                       (cons result nil)
+                     (clutch-jdbc--release-stuck-connection conn)
+                     (cons nil '(clutch-db-error
+                                 "Query interrupted while fetching its rows")))
+                 (clutch-db-error (cons nil err))
+                 (error (cons nil (list 'clutch-db-error
+                                        (error-message-string err)))))))
     (when (eql (gethash conn clutch-jdbc--busy-request-ids) id)
       (remhash conn clutch-jdbc--busy-request-ids))
     (setf (clutch-jdbc-conn-busy conn) nil)

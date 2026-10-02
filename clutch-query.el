@@ -1177,21 +1177,30 @@ already confirmed SQL."
   (clutch--forget-problem-record (current-buffer) connection)
   (clutch-result--check-pending-changes))
 
-(defun clutch--begin-query-activity (connection)
+(defun clutch--region-markers (beg end)
+  "Return markers for BEG..END that follow later edits to the buffer.
+Text inserted at either edge stays outside the region."
+  (cons (copy-marker beg t) (copy-marker end)))
+
+(defun clutch--begin-query-activity (connection &optional markers)
   "Start a foreground query activity on CONNECTION in the current buffer.
-Return the activity, which `clutch--finish-query-activity' ends."
+MARKERS locate its statements in the buffer; ending the activity releases
+them.  Return the activity, which `clutch--finish-query-activity' ends."
   (clutch-db--reserve-connection connection)
   (setq clutch--execution-start-time (float-time))
   (clutch--execution-refresh-start)
   (clutch--update-mode-line)
   (redisplay t)
-  (list :connection connection :buffer (current-buffer) :ended nil))
+  (list :connection connection :buffer (current-buffer) :markers markers
+        :ended nil))
 
 (defun clutch--end-query-activity (activity)
-  "End ACTIVITY once, releasing its connection and execution display."
+  "End ACTIVITY once, releasing its connection, markers and execution display."
   (unless (plist-get activity :ended)
     (plist-put activity :ended t)
     (clutch-db--release-connection (plist-get activity :connection))
+    (dolist (marker (plist-get activity :markers))
+      (set-marker marker nil))
     (let ((buffer (plist-get activity :buffer)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
@@ -1270,7 +1279,10 @@ confirmation on destructive operations."
   (let ((connection (or conn clutch-connection)))
     (clutch--prepare-query-activity connection)
     (clutch--confirm-query-execution sql)
-    (let ((activity (clutch--begin-query-activity connection)))
+    (let* ((region (and region
+                        (clutch--region-markers (car region) (cdr region))))
+           (activity (clutch--begin-query-activity
+                      connection (and region (list (car region) (cdr region))))))
       (clutch--dispatch-query-activity
        activity
        (lambda ()
@@ -1474,7 +1486,17 @@ Stops and reports on the first error."
     (clutch--prepare-query-activity connection)
     (dolist (spec specs)
       (clutch--confirm-query-execution (car spec)))
-    (setq activity (clutch--begin-query-activity connection))
+    (let (markers)
+      ;; Markers follow edits made while earlier statements run.
+      (setq specs (mapcar (pcase-lambda (`(,stmt ,beg ,end))
+                            (if (and beg end)
+                                (let ((region (clutch--region-markers beg end)))
+                                  (push (car region) markers)
+                                  (push (cdr region) markers)
+                                  (list stmt (car region) (cdr region)))
+                              (list stmt nil nil)))
+                          specs)
+            activity (clutch--begin-query-activity connection markers)))
     (cl-labels
         ((report-complete ()
            (message "%s statement%s %s"

@@ -7648,6 +7648,48 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
       (should-not send-called)
       (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
 
+(ert-deftest clutch-db-test-jdbc-foreground-fetch-failure-still-finishes ()
+  "A foreground request should finish even when fetching its rows fails.
+An unexpected error reaches the callback as a database error.  A quit
+while fetching retires the connection, whose cursor state is unknown,
+and leaves the quit for Emacs to process afterwards."
+  (pcase-dolist (`(,label ,fetch ,message ,retired)
+                 `(("error" ,(lambda (&rest _)
+                               (signal 'wrong-type-argument '(listp 1)))
+                    "Wrong type argument: listp, 1" nil)
+                   ("quit" ,(lambda (&rest _) (signal 'quit nil))
+                    "Query interrupted while fetching its rows" t)))
+    (ert-info (label)
+      (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
+                                         :params '(:driver jdbc)))
+            (clutch-jdbc--agent-process 'fake-proc)
+            (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+            (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+            (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
+            (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+            outcomes requested-quit)
+        (puthash 7 conn clutch-jdbc--connections-by-id)
+        (puthash conn 42 clutch-jdbc--busy-request-ids)
+        (setf (clutch-jdbc-conn-busy conn) t)
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'clutch-jdbc--send) (lambda (&rest _) 99))
+                  ((symbol-function 'clutch-jdbc--fetch-all) fetch))
+          ;; The handler runs from a timer, where quitting is inhibited.
+          (let ((inhibit-quit t))
+            (clutch-jdbc--finish-foreground
+             conn "execute" 42
+             '(:id 42 :ok t :result (:type "query" :columns ("n")
+                                     :col-types ("INT") :rows ((1))
+                                     :cursor-id 5 :done :false))
+             (lambda (result error) (push (list result error) outcomes)))
+            (setq requested-quit quit-flag
+                  quit-flag nil)))
+        (should (equal outcomes `((nil (clutch-db-error ,message)))))
+        (should-not (clutch-jdbc-conn-busy conn))
+        (should-not (gethash conn clutch-jdbc--busy-request-ids))
+        (should (eq (null (gethash 7 clutch-jdbc--connections-by-id)) retired))
+        (should (eq requested-quit retired))))))
+
 (ert-deftest clutch-db-test-jdbc-foreground-request-always-finishes ()
   "A foreground JDBC request should finish once, with or without a reply."
   (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
@@ -7703,7 +7745,16 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
           (run-timers))
         (should (equal outcomes
                        '((nil (clutch-db-error "clutch-jdbc-agent exited")))))
-        (should-not (gethash 42 clutch-jdbc--async-callbacks))))))
+        (should-not (gethash 42 clutch-jdbc--async-callbacks))
+        ;; A reply clears only its own request's busy marker.
+        (start "UPDATE t SET n = 2")
+        (let ((id (gethash conn clutch-jdbc--busy-request-ids)))
+          (puthash conn 'later-request clutch-jdbc--busy-request-ids)
+          (clutch-jdbc--dispatch-async-response
+           `(:id ,id :ok t :result (:type "dml" :affected-rows 1)))
+          (run-timers))
+        (should (eq (gethash conn clutch-jdbc--busy-request-ids)
+                    'later-request))))))
 
 (ert-deftest clutch-db-test-jdbc-interrupt-requires-confirmed-request ()
   "JDBC interrupt should reject unconfirmed or mismatched cancellation results."
