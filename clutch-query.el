@@ -432,6 +432,13 @@ window rather than replacing the current window."
   (cl-loop for i below count
            collect (format "%s%d" clutch--row-identity-hidden-prefix i)))
 
+(defvar clutch--row-identity-cte-alias-suffix
+  (format "%08x" (random #x100000000))
+  "Suffix that makes the hidden identity aliases of a CTE result unique.
+Outer SELECTs pass those columns on by name, so their names must match no
+column that the query or its table already has; a suffix drawn at random
+for the session cannot be one of them.")
+
 (defconst clutch--source-column-identifier-pattern
   "\\(?:[[:alpha:]_$][[:alnum:]_$]*\\|`[^`]+`\\|\"[^\"]+\"\\|\\[[^]]+\\]\\)"
   "Conservative SQL identifier pattern accepted for writable projections.")
@@ -756,21 +763,15 @@ not count; a column of the same name does."
           (setq pos end))))
     count))
 
-(defun clutch--row-identity-cte-chain (conn sql)
-  "Return the source chain of CTE query SQL on CONN, or nil if not editable.
+(defun clutch--row-identity-cte-chain (sql)
+  "Return the source chain of CTE query SQL, or nil if it cannot be edited.
 The value is the plist from `clutch-db-sql-source-chain' with :projection
 added.  Every SELECT on the way must be one that row identity can pass
 through: one relation, no aggregate, DISTINCT, GROUP BY or HAVING, no
 comment in its select list, and either `*' or a list without one.  A CTE
 on the way must have no reader besides the next SELECT out, which the
-identity columns would change too.  And since outer SELECTs pass those
-columns on by name, no name in SQL may look like one of them, nor may a
-column of the table that a `*' in a CTE brings in; without CONN's
-metadata for that table, the result stays read-only."
+identity columns would change too."
   (when-let* ((chain (clutch-db-sql-source-chain sql))
-              ((not (let ((case-fold-search t))
-                      (string-match-p
-                       (regexp-quote clutch--row-identity-hidden-prefix) sql))))
               ((cl-every
                 (lambda (level)
                   (let* ((text (substring sql (nth 0 level) (nth 1 level)))
@@ -786,23 +787,7 @@ metadata for that table, the result stays read-only."
                              (= (clutch--relation-name-count
                                  sql (plist-get definition :name))
                                 2)))))
-                (plist-get chain :levels)))
-              ((let* ((levels (plist-get chain :levels))
-                      (base (car (last levels))))
-                 (or (null (cdr levels))
-                     (not (eq (clutch--writable-select-projection
-                               (substring sql (nth 0 base) (nth 1 base)))
-                              'star))
-                     (when-let* ((columns (clutch--ensure-column-details
-                                           conn
-                                           (clutch-db--source-table-name
-                                            conn (plist-get chain :token)))))
-                       (not (cl-some
-                             (lambda (column)
-                               (string-prefix-p
-                                clutch--row-identity-hidden-prefix
-                                (downcase (plist-get column :name))))
-                             columns)))))))
+                (plist-get chain :levels))))
     (plist-put chain :projection
                (clutch--cte-writable-projection sql (plist-get chain :levels)))))
 
@@ -849,7 +834,7 @@ that finds none, the query has no table, so a CTE's name is never looked up
 as one."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
-         (chain (and with-p (clutch--row-identity-cte-chain conn analysis-sql)))
+         (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
          (source-token (or (plist-get candidate :source-token)
                            (and (not table)
                                 (if with-p
@@ -902,8 +887,13 @@ as one."
                              (clutch--row-identity-select-expressions
                               conn candidate)))
            (aliases (and expressions
-                         (clutch--row-identity-hidden-aliases
-                          (length expressions))))
+                         (mapcar (lambda (alias)
+                                   (if chain
+                                       (concat alias "_"
+                                               clutch--row-identity-cte-alias-suffix)
+                                     alias))
+                                 (clutch--row-identity-hidden-aliases
+                                  (length expressions)))))
            (augment-p (and candidate expressions
                            (or chain
                                (and (clutch--row-identity-augmentable-sql-p
