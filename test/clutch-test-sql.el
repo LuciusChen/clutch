@@ -146,10 +146,13 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
               "s.t" 3)
              ("WITH ids AS (SELECT id FROM t) SELECT * FROM t WHERE id IN (SELECT id FROM ids)"
               "t" 1)
-             ;; A CTE hides a table of its name, but only from what follows it.
+             ;; A CTE hides a table of its name.
              ("WITH t AS (SELECT * FROM audit) SELECT * FROM t" "audit" 2)
+             ;; Whether a CTE sees a later one, or itself, depends on the
+             ;; database: SQLite says it does, PostgreSQL that it does not.
              ("WITH b AS (SELECT * FROM a), a AS (SELECT * FROM t) SELECT * FROM b"
-              "a" 2)
+              nil 0)
+             ("WITH t AS (SELECT * FROM t) SELECT * FROM t" nil 0)
              ("WITH c AS (SELECT * FROM t) SELECT * FROM s.c" "s.c" 1)
              ;; Whether quoting changes the name depends on the database.
              ("WITH \"Orders\" AS (SELECT * FROM audit) SELECT * FROM orders" nil 0)

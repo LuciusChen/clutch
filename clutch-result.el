@@ -2795,9 +2795,16 @@ Selects JSON, XML, or binary string view based on column type and content."
 ;;;; SQL and document copy builders
 
 (defun clutch-result--build-insert-statements-for-rows (rows col-indices table)
-  "Return INSERT statements for ROWS using COL-INDICES into TABLE."
+  "Return INSERT statements for ROWS using COL-INDICES into TABLE.
+A column that reads a source column under another name, such as an alias,
+is named after that source column."
   (let* ((conn      clutch-connection)
-         (col-names (clutch--column-names-for-indices col-indices))
+         (col-names (cl-loop for cidx in col-indices
+                             for name in (clutch--column-names-for-indices
+                                          col-indices)
+                             collect (or (plist-get (nth cidx clutch--result-column-defs)
+                                                    :source-column)
+                                         name)))
          (cols      (mapconcat (lambda (c) (clutch-db-escape-identifier conn c))
                                col-names ", "))
          (target    (and rows (clutch-db-sql-target-table

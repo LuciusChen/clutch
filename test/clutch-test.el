@@ -847,6 +847,9 @@
                ("WITH users AS (SELECT * FROM audit) SELECT * FROM users"
                 "WITH users AS (SELECT audit.*, \"id\" AS \"clutch__rid_0\" FROM audit) SELECT * FROM users"
                 "audit" star)
+               ("WITH c AS (SELECT id, name FROM users) SELECT c.name FROM c"
+                "WITH c AS (SELECT id, name, \"id\" AS \"clutch__rid_0\" FROM users) SELECT c.name, \"clutch__rid_0\" AS \"clutch__rid_0\" FROM c"
+                "users" ("name"))
                ("WITH ids AS (SELECT id FROM users) SELECT * FROM users WHERE id IN (SELECT id FROM ids)"
                 "WITH ids AS (SELECT id FROM users) SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM users WHERE id IN (SELECT id FROM ids)"
                 "users" star)))
@@ -872,7 +875,12 @@
                    "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT * FROM r"
                    "WITH \"Users\" AS (SELECT * FROM audit) SELECT * FROM users"
                    "WITH c AS (SELECT DISTINCT team FROM users) SELECT * FROM c"
-                   "WITH c AS (SELECT * FROM users) SELECT team, count(*) FROM c GROUP BY team"))
+                   "WITH c AS (SELECT * FROM users) SELECT team, count(*) FROM c GROUP BY team"
+                   "WITH b AS (SELECT * FROM shadow), shadow AS (SELECT * FROM users) SELECT * FROM b"
+                   ;; The identity is passed on by name, which this would capture.
+                   "WITH c AS (SELECT name, 2 AS clutch__rid_0 FROM users WHERE id = 1) SELECT name FROM c"
+                   ;; An identity column would change what the other reads see.
+                   "WITH c AS (SELECT name FROM users) SELECT name FROM c WHERE name IN (SELECT * FROM c)"))
       (ert-info (sql)
         (let ((prep (clutch--prepare-row-identity-query 'fake-conn sql)))
           (should-not (plist-get prep :table))
@@ -7706,6 +7714,42 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (kill-buffer source))
         (when (clutch-db-live-p conn)
           (clutch-db-disconnect conn))))))
+
+(ert-deftest clutch-test-insert-export-names-source-columns-real-sqlite ()
+  "INSERT export should name the table's columns, not the result's aliases."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-insert-export-source*"))
+         (clutch--execution-refresh-timer nil))
+    (unwind-protect
+        (save-window-excursion
+          (clutch-db-query conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)")
+          (clutch-db-query conn "INSERT INTO people (id, name) VALUES (1, 'alpha')")
+          (set-window-buffer (selected-window) source)
+          (dolist (sql '("SELECT id AS k, name AS v FROM people"
+                         "WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"))
+            (ert-info (sql)
+              (let (result)
+                (with-current-buffer source
+                  (clutch-mode)
+                  (setq-local clutch-connection conn
+                              clutch--connection-params
+                              '(:backend sqlite :database ":memory:"))
+                  (erase-buffer)
+                  (insert sql)
+                  (clutch-execute-buffer)
+                  (setq result clutch--last-result-buffer))
+                (with-current-buffer result
+                  (should (equal (clutch-result--build-insert-statements-for-rows
+                                  clutch--result-rows (clutch--visible-columns)
+                                  (clutch--insert-target-table))
+                                 '("INSERT INTO \"people\" (\"id\", \"name\") VALUES (1, 'alpha');")))
+                  (kill-buffer result))))))
+      (clutch--execution-refresh-stop)
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when (clutch-db-live-p conn)
+        (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
