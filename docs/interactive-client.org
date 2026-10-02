@@ -466,7 +466,7 @@ Customize these through =M-x customize-group RET clutch RET=:
 - MySQL connections can override via =:connect-timeout= and =:read-idle-timeout=.
 - PostgreSQL connections can override via =:connect-timeout=, =:read-idle-timeout=, and =:query-timeout=.
 - JDBC connections can override via =:connect-timeout=, =:read-idle-timeout=, =:query-timeout=, and =:rpc-timeout=.
-- Statements on native MySQL and PostgreSQL connections and on JDBC connections run without blocking Emacs.  MySQL needs a mysql.el that provides =mysql-query-async= and PostgreSQL a pgsql.el that provides =pgsql-exec-async=; with an older library their statements block as before.
+- Statements on native MySQL and PostgreSQL connections and on JDBC connections run without blocking Emacs.  MySQL needs a mysql.el that provides =mysql-query-async= and PostgreSQL pgsql.el 0.2.0 or later; with an older library their statements block as before.
   - While a statement runs, other buffers stay usable, its first line in the console shows an amber dot in the fringe (=●= in the margin of a terminal), and the mode line counts the elapsed time.
   - =C-g= in the console, REPL or result buffer cancels the running statement.  The marker turns into a red square until the server answers, and the statement then reports the server's verdict: the cancellation error, or its result if it finished first.  A second =C-g=, or =C-g= with nothing running, quits as usual.
   - On a JDBC connection, the rows a result still owes when its statement finishes are fetched before the result is shown.  =C-g= during that fetch stops it and closes the connection, whose cursor is then in an unknown state; the next statement reconnects.
