@@ -242,14 +242,18 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 (defvar clutch-jdbc--agent-process nil
   "The running clutch-jdbc-agent process, or nil if not started.")
 
-(defvar clutch-jdbc--response-queue nil
-  "List of parsed synchronous JSON responses, oldest first.")
+(defvar clutch-jdbc--protocol-error nil
+  "Why the agent's output could not be read, or nil.
+Unreadable output stops the agent, and the requests that were waiting
+report this message.")
 
 (defvar-local clutch-jdbc--agent-scan-position nil
   "Buffer position where the JDBC agent filter should resume line scanning.")
 
 (defvar clutch-jdbc--async-callbacks (make-hash-table :test 'eql)
-  "Map of JDBC request ids to asynchronous callbacks.")
+  "Map of JDBC request ids to the requests waiting for their replies.
+A synchronous request's entry holds a :reply cell, a foreground
+request's a :handler, and a metadata request's callbacks and timer.")
 
 (defvar clutch-jdbc--busy-request-ids (make-hash-table :test 'eq)
   "Map of JDBC connection objects to their current in-flight request id.")
@@ -265,12 +269,6 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
 
 (defconst clutch-jdbc--json-false (make-symbol "clutch-jdbc-json-false")
   "Sentinel used to represent JSON false distinctly from nil.")
-
-(defun clutch-jdbc--protocol-error-response (message)
-  "Return a synthetic response for JDBC protocol error MESSAGE."
-  (list :protocol-error t
-        :ok clutch-jdbc--json-false
-        :error message))
 
 (defconst clutch-jdbc--object-category-specs
   '((indexes . (:op "get-indexes" :key :indexes))
@@ -371,17 +369,21 @@ Metadata callbacks keep their own timeouts."
   (clrhash clutch-jdbc--connections-by-id))
 
 (defun clutch-jdbc--dispatch-async-response (response)
-  "Dispatch asynchronous RESPONSE when a callback is registered.
-Return non-nil when RESPONSE was consumed asynchronously."
+  "Deliver RESPONSE to the request registered under its id.
+Return non-nil when a request was waiting for it."
   (let* ((id (plist-get response :id))
          (entry (and id (gethash id clutch-jdbc--async-callbacks))))
     (when entry
       (remhash id clutch-jdbc--async-callbacks)
       (when-let* ((timer (plist-get entry :timer)))
         (cancel-timer timer))
-      (if-let* ((handler (plist-get entry :handler)))
-          ;; A foreground request is told even when its connection is gone.
-          (run-at-time 0 nil handler response)
+      (cond
+       ((plist-get entry :reply)
+        (setcar (plist-get entry :reply) response))
+       ;; A foreground request is told even when its connection is gone.
+       ((plist-get entry :handler)
+        (run-at-time 0 nil (plist-get entry :handler) response))
+       (t
         (let ((callback (plist-get entry :callback))
               (errback (plist-get entry :errback))
               (conn (plist-get entry :conn))
@@ -406,17 +408,16 @@ Return non-nil when RESPONSE was consumed asynchronously."
                          (message "clutch-jdbc async error: %s" message))))
                  (error
                   (message "clutch-jdbc async callback failed: %s"
-                           (error-message-string err)))))))))
+                           (error-message-string err))))))))))
       t)))
 
 (defun clutch-jdbc--agent-filter (proc string)
-  "Process filter: collect complete JSON lines from PROC output STRING."
+  "Process filter: deliver complete JSON lines from PROC output STRING."
   (let ((buf (process-buffer proc)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (goto-char (point-max))
         (insert string)
-        ;; Collect complete lines into the response queue.
         (goto-char (min (or clutch-jdbc--agent-scan-position (point-min))
                         (point-max)))
         (while (search-forward "\n" nil t)
@@ -424,27 +425,26 @@ Return non-nil when RESPONSE was consumed asynchronously."
             (delete-region (point-min) (point))
             (goto-char (point-min))
             (unless (string-empty-p line)
-              (let ((parsed (condition-case err
-                                (json-parse-string line :object-type 'plist
-                                                   :array-type 'list
-                                                   :null-object nil
-                                                   :false-object clutch-jdbc--json-false)
-                              (error
-                               (clutch-jdbc--protocol-error-response
-                                (format "clutch-jdbc-agent emitted invalid JSON: %s"
-                                        (error-message-string err)))))))
-                (when parsed
-                  (let ((id (plist-get parsed :id)))
-                    (cond
-                     ((clutch-jdbc--dispatch-async-response parsed)
-                      nil)
-                     ((and id (gethash id clutch-jdbc--ignored-response-ids))
-                      (remhash id clutch-jdbc--ignored-response-ids))
-                     (t
-                      (setq clutch-jdbc--response-queue
-                            (nconc clutch-jdbc--response-queue
-                                   (list parsed)))))))))))
-        (setq clutch-jdbc--agent-scan-position (point-max))))))
+              (let ((response
+                     (condition-case err
+                         (json-parse-string line :object-type 'plist
+                                            :array-type 'list
+                                            :null-object nil
+                                            :false-object clutch-jdbc--json-false)
+                       (error
+                        (setq clutch-jdbc--protocol-error
+                              (format "clutch-jdbc-agent emitted invalid JSON: %s"
+                                      (error-message-string err)))
+                        nil))))
+                (when (and response
+                           (not (clutch-jdbc--dispatch-async-response response)))
+                  ;; Nobody waits for the reply to an abandoned request.
+                  (when-let* ((id (plist-get response :id)))
+                    (remhash id clutch-jdbc--ignored-response-ids)))))))
+        (setq clutch-jdbc--agent-scan-position (point-max)))
+      ;; Unreadable output leaves the protocol unsynchronized.
+      (when clutch-jdbc--protocol-error
+        (clutch-jdbc--stop-agent)))))
 
 (defun clutch-jdbc--start-agent ()
   "Start the clutch-jdbc-agent process and wait for its ready signal."
@@ -475,8 +475,8 @@ Return non-nil when RESPONSE was consumed asynchronously."
                     :sentinel #'clutch-jdbc--agent-sentinel
                     :stderr stderr
                     :noquery t))))
-      (setq clutch-jdbc--agent-process proc)
-      (setq clutch-jdbc--response-queue nil)
+      (setq clutch-jdbc--agent-process proc
+            clutch-jdbc--protocol-error nil)
       (clutch-jdbc--clear-async-callbacks)
       (clutch-jdbc--clear-request-state)
       ;; Wait for the ready message (id=0).
@@ -498,8 +498,7 @@ its process."
   "Stop the shared clutch-jdbc-agent process, if running."
   (when clutch-jdbc--agent-process
     (clutch-jdbc--kill-agent-process clutch-jdbc--agent-process))
-  (setq clutch-jdbc--agent-process nil
-        clutch-jdbc--response-queue nil)
+  (setq clutch-jdbc--agent-process nil)
   (clutch-jdbc--clear-async-callbacks)
   (clutch-jdbc--clear-request-state))
 
@@ -529,10 +528,11 @@ Return nil when stderr is empty."
      "\n")))
 
 (defun clutch-jdbc--agent-exit-error-message ()
-  "Return a user-facing error string when the JDBC agent exited early."
+  "Return a user-facing error string when the JDBC agent stopped early."
   (let ((stderr (clutch-jdbc--agent-stderr-string))
         (stderr-tail (clutch-jdbc--agent-stderr-tail)))
     (cond
+     (clutch-jdbc--protocol-error)
      ((and stderr
            (string-match-p "UnsupportedClassVersionError" stderr))
       (format "clutch-jdbc-agent requires a newer Java runtime than `%s'. Update `clutch-jdbc-agent-java-executable' or JAVA_HOME.\n%s"
@@ -566,26 +566,6 @@ Return nil when stderr is empty."
     (process-send-string clutch-jdbc--agent-process (concat msg "\n"))
     id))
 
-(defun clutch-jdbc--take-queued-response (id)
-  "Remove and return queued response matching ID, preserving other responses."
-  (let (response remaining)
-    (while (and (not response) clutch-jdbc--response-queue)
-      (let ((parsed (pop clutch-jdbc--response-queue)))
-        (cond
-         ((and parsed
-               (plist-get parsed :protocol-error))
-          (setq response parsed))
-         ((and parsed
-               (gethash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
-          (remhash (plist-get parsed :id) clutch-jdbc--ignored-response-ids))
-         ((and parsed (eql (plist-get parsed :id) id))
-          (setq response parsed))
-         (t
-          (push parsed remaining)))))
-    (setq clutch-jdbc--response-queue
-          (nconc (nreverse remaining) clutch-jdbc--response-queue))
-    response))
-
 (defun clutch-jdbc--recv-response (id &optional timeout-seconds op conn)
   "Wait for and return the response with matching ID as a plist.
 TIMEOUT-SECONDS defaults to `clutch-jdbc-rpc-timeout-seconds'.
@@ -594,90 +574,68 @@ CONN, when non-nil, is the connection the request ran on; a timeout with
 a live agent then condemns only that connection instead of the process."
   (let ((deadline (+ (float-time)
                      (or timeout-seconds clutch-jdbc-rpc-timeout-seconds)))
-        response
+        (reply (list nil))
         failure-message)
-    (while (and (not response) (< (float-time) deadline))
-      ;; Drain any queued responses while preserving unmatched entries.
-      (when clutch-jdbc--response-queue
-        (setq response (clutch-jdbc--take-queued-response id)))
-      (unless response
-        (if (and clutch-jdbc--agent-process
-                 (not (process-live-p clutch-jdbc--agent-process)))
-            (setq failure-message (clutch-jdbc--agent-exit-error-message)
-                  response :agent-exited)
-          (accept-process-output clutch-jdbc--agent-process 0.05)
-          (sit-for 0 t))))
-    (when (eq response :agent-exited)
-      (setq response nil))
-    (when (and (not response)
-               (not failure-message)
-               clutch-jdbc--agent-process
-               (not (process-live-p clutch-jdbc--agent-process)))
+    (puthash id (list :reply reply) clutch-jdbc--async-callbacks)
+    (unwind-protect
+        (while (and (not (car reply))
+                    (not failure-message)
+                    (< (float-time) deadline))
+          (if (clutch-jdbc--agent-live-p)
+              (progn
+                (accept-process-output clutch-jdbc--agent-process 0.05)
+                (sit-for 0 t))
+            (setq failure-message (clutch-jdbc--agent-exit-error-message))))
+      (remhash id clutch-jdbc--async-callbacks))
+    (unless (or (car reply) failure-message (clutch-jdbc--agent-live-p))
       (setq failure-message (clutch-jdbc--agent-exit-error-message)))
-    (when (and response (plist-get response :protocol-error))
-      (clutch-jdbc--stop-agent)
-      (signal 'clutch-db-error
-              (list (plist-get response :error))))
-    (unless response
-      (if (and (clutch-jdbc-conn-p conn)
-               (not failure-message)
-               (process-live-p clutch-jdbc--agent-process))
-          ;; One request went silent but the agent process is alive.  The
-          ;; agent serves requests on a thread pool, so a stuck JDBC call
-          ;; wedges only the session it ran on; killing the process would
-          ;; also destroy every other connection's sessions and any open
-          ;; transactions.  Condemn the owning connection alone.
-          (progn
-            (puthash id t clutch-jdbc--ignored-response-ids)
-            (clutch-jdbc--release-stuck-connection conn)
-            (signal 'clutch-db-error
-                    (list "Connection lost — reconnect with C-c C-e")))
-        ;; The agent process died, or the silent request has no owning
-        ;; connection (startup handshake, connect), so there is nothing
-        ;; narrower to reset than the process and every registration
-        ;; hanging off it.
-        (clutch-jdbc--stop-agent)
-        (signal 'clutch-db-error
-                (list (or failure-message
-                          (if (equal op "connect")
-                              "Connection attempt timed out or JDBC agent became unresponsive"
-                            "Connection lost — reconnect with C-c C-e"))))))
-    response))
+    (or (car reply)
+        (if (and (clutch-jdbc-conn-p conn) (not failure-message))
+            ;; One request went silent but the agent process is alive.  The
+            ;; agent serves requests on a thread pool, so a stuck JDBC call
+            ;; wedges only the session it ran on; killing the process would
+            ;; also destroy every other connection's sessions and any open
+            ;; transactions.  Condemn the owning connection alone.
+            (progn
+              (puthash id t clutch-jdbc--ignored-response-ids)
+              (clutch-jdbc--release-stuck-connection conn)
+              (signal 'clutch-db-error
+                      (list "Connection lost — reconnect with C-c C-e")))
+          ;; The agent stopped, or the silent request has no owning
+          ;; connection (startup handshake, connect), so there is nothing
+          ;; narrower to reset than the process and every registration
+          ;; hanging off it.
+          (clutch-jdbc--stop-agent)
+          (signal 'clutch-db-error
+                  (list (or failure-message
+                            (if (equal op "connect")
+                                "Connection attempt timed out or JDBC agent became unresponsive"
+                              "Connection lost — reconnect with C-c C-e"))))))))
 
 (defun clutch-jdbc--recv-response-nonfatal (id timeout-seconds)
   "Wait for response ID up to TIMEOUT-SECONDS.
 Return the response plist, or nil on timeout/quit.
 Unlike `clutch-jdbc--recv-response', this never kills the agent process."
-  (let ((inhibit-quit t))
-    (let ((deadline (+ (float-time) timeout-seconds))
-          response
-          agent-exited
-          gave-up)
-      (while (and (not response) (not agent-exited) (not gave-up)
-                  (< (float-time) deadline))
-        ;; Drain any queued responses while preserving unmatched entries.
-        (when clutch-jdbc--response-queue
-          (setq response (clutch-jdbc--take-queued-response id)))
-        (unless response
-          (if (or (null clutch-jdbc--agent-process)
-                  (not (process-live-p clutch-jdbc--agent-process)))
-              (setq agent-exited t)
-            (let ((output
-                   (with-local-quit
-                     (accept-process-output clutch-jdbc--agent-process 0.05))))
-              (sit-for 0 t)
-              (when (and (not output) quit-flag)
-                (setq gave-up t
-                      quit-flag nil))))))
-      (when (and (not response)
-                 (not agent-exited)
-                 clutch-jdbc--agent-process
-                 (not (process-live-p clutch-jdbc--agent-process)))
-        (setq agent-exited t))
-      (when (and (not response) (not agent-exited))
-        (puthash id t clutch-jdbc--ignored-response-ids))
-      (unless agent-exited
-        response))))
+  (let ((inhibit-quit t)
+        (deadline (+ (float-time) timeout-seconds))
+        (reply (list nil))
+        gave-up)
+    (puthash id (list :reply reply) clutch-jdbc--async-callbacks)
+    (while (and (not (car reply)) (not gave-up)
+                (clutch-jdbc--agent-live-p)
+                (< (float-time) deadline))
+      (let ((output (with-local-quit
+                      (accept-process-output clutch-jdbc--agent-process 0.05))))
+        (sit-for 0 t)
+        (when (and (not output) quit-flag)
+          (setq gave-up t
+                quit-flag nil))))
+    (remhash id clutch-jdbc--async-callbacks)
+    (cond
+     ((car reply))
+     ((clutch-jdbc--agent-live-p)
+      (puthash id t clutch-jdbc--ignored-response-ids)
+      nil))))
 
 (defun clutch-jdbc--rpc (conn op params &optional timeout-seconds)
   "Send OP with PARAMS for CONN and return the result plist.
