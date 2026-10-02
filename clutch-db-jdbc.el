@@ -1132,9 +1132,9 @@ stored in params at connect time."
 
 (defun clutch-jdbc--conn-query-timeout (conn &optional async)
   "Return the query timeout in seconds to send with a request on CONN.
-A request that Emacs waits for gets a positive timeout that fires before
-the RPC timeout: CONN's limit when shorter, else the RPC timeout less
-five seconds.  With ASYNC non-nil nothing waits, so CONN's limit is sent
+A request that Emacs waits for always gets a positive timeout: CONN's
+limit when shorter, else the RPC timeout less five seconds, but at least
+one second.  With ASYNC non-nil nothing waits, so CONN's limit is sent
 as is, or 0, meaning none, when CONN has no positive limit."
   (let ((limit (plist-get (clutch-jdbc-conn-params conn) :query-timeout))
         (budget (max 1 (- (clutch-jdbc--conn-rpc-timeout conn) 5))))

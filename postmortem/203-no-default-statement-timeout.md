@@ -10,7 +10,7 @@ A review of the first proposal found two more limits. Agent 0.2.25 fell back to 
 
 - `clutch-query-timeout-seconds` defaults to nil: Clutch adds no limit of its own, and a limit configured on the server still applies. PostgreSQL sets `statement_timeout` only for a number, as before, so 0 there still lifts a server-configured limit.
 - A JDBC statement that Clutch runs without blocking sends its configured limit as is, or 0 without one. Agent 0.2.26 reads 0 as no limit and waits until the statement ends, is cancelled or is force-disconnected; omission keeps its 29 seconds for older clients. It also sets the network timeout on the metadata and bulk sessions only.
-- A JDBC request that Emacs waits for always sends a positive timeout: the configured limit when shorter, else the RPC timeout less five seconds. With nil or 0 it keeps the budget it had.
+- A JDBC request that Emacs waits for always sends a positive timeout: the configured limit when shorter, else the RPC timeout less five seconds, but at least one second. With nil or 0 it keeps the budget it had.
 - Disconnecting a JDBC connection whose statement is running uses force-disconnect. The ordinary disconnect queues behind the statement's lock in the agent, so Emacs waited five seconds and the agent kept the session. The statement then reports that its outcome is unknown, and nothing is replayed.
 
 ## Limits
