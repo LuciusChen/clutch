@@ -528,6 +528,10 @@ are produced by the query execution layer."
              :server-pageable server-pageable
              :server-rewritable server-rewritable
              :source-table source-table))
+      ;; A server-side filter result restores the query it filters.
+      (when (plist-member result-context :where-filter)
+        (setq-local clutch--base-query (plist-get result-context :base-query)
+                    clutch--where-filter (plist-get result-context :where-filter)))
       (if-let* ((identity-error
                  (plist-get row-identity-prep :identity-error)))
         (clutch--remember-buffer-query-error-details
@@ -861,6 +865,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map [down-mouse-1] #'clutch-result-mouse-set-point)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
     (define-key map (kbd "C-c C-c") #'clutch-result-submit)
+    (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
     (define-key map "g" #'clutch-result-rerun)
     (define-key map "e" #'clutch-result-export)
     (define-key map "C" #'clutch-result-goto-column)
@@ -1420,14 +1425,14 @@ empty string at the condition prompt to clear the filter."
          (plan (and filter (clutch-result--query-plan base filter))))
     (clutch--execute (or (plist-get plan :sql) base)
                      clutch-connection
-                     (and filter
-                          (list :server-pageable server-pageable
-                                :server-rewritable t
-                                :source-table source-table
-                                :row-identity-prep
-                                (plist-get plan :row-identity-prep))))
-    (setq clutch--base-query (when filter base))
-    (setq clutch--where-filter filter)
+                     (append
+                      (list :base-query (when filter base) :where-filter filter)
+                      (and filter
+                           (list :server-pageable server-pageable
+                                 :server-rewritable t
+                                 :source-table source-table
+                                 :row-identity-prep
+                                 (plist-get plan :row-identity-prep)))))
     (message (if filter
                  (format "Filter applied: WHERE %s" input)
                "Filter cleared"))))

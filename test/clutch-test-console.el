@@ -306,8 +306,10 @@
                         ((symbol-function 'clutch--refresh-connection-render-state)
                          #'ignore))
                 (let ((outcome
-                       (clutch--execute-statement
-                        "CREATE TABLE users (id INT)" conn nil)))
+                       (clutch-test--await-outcome
+                        (lambda (k)
+                          (clutch--execute-statement
+                           "CREATE TABLE users (id INT)" conn nil nil k)))))
                   (should (clutch-db-result-p
                            (plist-get outcome :result)))))
               (should (equal executed
@@ -324,8 +326,8 @@
       (setq-local clutch-connection conn)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                 ((symbol-function 'clutch--execute-statement)
-                 (lambda (&rest _args)
-                   (list :error '(clutch-db-error "socket lost"))))
+                 (lambda (_sql _conn _present-result-p _region k &rest _args)
+                   (funcall k (list :error '(clutch-db-error "socket lost")))))
                 ((symbol-function 'clutch--connection-alive-p)
                  (lambda (_connection) nil))
                 ((symbol-function 'clutch--remember-execute-error)

@@ -423,7 +423,7 @@ Local SQLite filenames are resolved against the command's source directory durin
 
 ### Timeouts, Interrupts, and Customization
 
-Timeouts can be configured globally or per connection, and long-running queries can be interrupted with `C-g`. Backend-specific cancel behavior, debug workflow, result displayers, schema warmup, CSV/TSV encoding, and completion customization are documented in [Query Timeout and Interrupt](docs/interactive-client.org#query-timeout-and-interrupt).
+Timeouts can be configured globally or per connection. On PostgreSQL and JDBC connections a statement runs without blocking Emacs, and `C-g` in the console, REPL or result buffer cancels it; on other backends the statement blocks and `C-g` interrupts it. Backend-specific cancel behavior, debug workflow, result displayers, schema warmup, CSV/TSV encoding, and completion customization are documented in [Query Timeout and Interrupt](docs/interactive-client.org#query-timeout-and-interrupt).
 
 ## Testing
 

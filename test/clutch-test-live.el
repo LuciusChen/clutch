@@ -459,7 +459,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                     (dolist (pattern '("eve" "missing" ""))
                       (cl-letf (((symbol-function 'read-string)
                                  (lambda (&rest _) pattern)))
-                        (call-interactively (key-binding (kbd "/"))))
+                        (progn (call-interactively (key-binding (kbd "/")))
+                           (clutch-test--await-queries)))
                       (should (equal summary clutch--footer-base-string))
                       (pcase pattern
                         ("eve"
@@ -498,7 +499,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                                (lambda (&rest _args) score-column))
                               ((symbol-function 'read-string)
                                (lambda (&rest _args) "> 20")))
-                      (clutch-result-apply-filter))
+                      (progn (clutch-result-apply-filter) (clutch-test--await-queries)))
                     (should (equal clutch--where-filter
                                    (format "%s > 20"
                                            (clutch-db-escape-identifier
@@ -512,7 +513,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                   (should (= clutch--page-total-rows 3))
                   (cl-letf (((symbol-function 'read-string)
                              (lambda (&rest _) "missing")))
-                    (call-interactively (key-binding (kbd "/"))))
+                    (progn (call-interactively (key-binding (kbd "/")))
+                           (clutch-test--await-queries)))
                   (should-not (clutch--result-display-rows))
                   (let ((rows (clutch-result--collect-all-export-rows)))
                     (should (equal (sort (clutch-test--live-row-ids rows) #'<)
@@ -567,6 +569,36 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
         (ignore-errors (clutch-db-query conn drop-b))
         (ignore-errors (clutch-db-query conn drop-a))))))
 
+(ert-deftest clutch-test-live-long-statement-runs-in-background-and-cancels ()
+  :tags '(:clutch-live)
+  "A long statement should leave Emacs free and stop when C-g cancels it."
+  (unless (clutch-test-live-backend-capability-p :async-cancel)
+    (ert-skip (clutch-test-capability-skip-message :async-cancel)))
+  (clutch-test--with-conn conn
+    (let ((sleep-sql (plist-get (clutch-test-live-backend-descriptor)
+                                :sleep-sql))
+          (start (float-time))
+          timer-fired shown)
+      (with-temp-buffer
+        (setq-local clutch-connection conn)
+        (cl-letf (((symbol-function 'clutch--show-execution-error)
+                   (lambda (_buffer _conn _sql err &rest _args)
+                     (setq shown err)
+                     "cancelled")))
+          (clutch--execute (format sleep-sql 30))
+          (should-not shown)
+          (should (gethash conn clutch--running-queries))
+          (run-at-time 0.2 nil (lambda () (setq timer-fired t)))
+          (clutch-test--await (lambda () timer-fired))
+          (should (gethash conn clutch--running-queries))
+          (clutch-cancel-query-or-quit)
+          (clutch-test--await (lambda () shown))
+          (should (eq (car shown) 'clutch-db-error))
+          (should (< (- (float-time) start) 20))
+          (should-not (gethash conn clutch--running-queries))))
+      (clutch-db-query conn (format sleep-sql 0))
+      (should (clutch-db-live-p conn)))))
+
 (ert-deftest clutch-test-live-pg-ctid-edit-via-execute-select-persists ()
   :tags '(:clutch-live)
   "PostgreSQL no-key edit should work through SELECT row identity injection."
@@ -601,7 +633,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                       :original (car row)
                       :original-state (cons nil (car row)))))
                   (should clutch--pending-edits)
-                  (clutch-result-submit)
+                  (progn (clutch-result-submit) (clutch-test--await-queries))
                   (should-not clutch--pending-edits)
                   (should (equal (caar clutch--result-rows) "after")))))
             (let ((rows (clutch-db-result-rows
@@ -709,7 +741,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                       :original (nth 1 row)
                       :original-state (cons nil (nth 1 row)))))
                   (should clutch--pending-edits)
-                  (clutch-result-submit)
+                  (progn (clutch-result-submit) (clutch-test--await-queries))
                   (should-not clutch--pending-edits)
                   (should (equal (clutch-test--live-row-prefix-strings
                                   (car clutch--result-rows) 2)
@@ -754,7 +786,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-submit))
+                  (progn (clutch-result-submit) (clutch-test--await-queries)))
                 (should-not clutch--pending-inserts)
                 (should-not (clutch-db-manual-commit-p conn))
                 (setq-local
@@ -764,7 +796,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (should-error (clutch-result-submit) :type 'user-error))
+                  (should-error (progn (clutch-result-submit) (clutch-test--await-queries)) :type 'user-error))
                 (should (= (length clutch--pending-inserts) 2))
                 (should-not (clutch-db-manual-commit-p conn))))
             (should
@@ -812,7 +844,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (should-error (clutch-result-submit) :type 'user-error))
+                  (should-error (progn (clutch-result-submit) (clutch-test--await-queries)) :type 'user-error))
                 (should (= (length clutch--pending-inserts) 2))
                 (should (clutch--tx-dirty-p conn))
                 (should
@@ -829,7 +861,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-submit))
+                  (progn (clutch-result-submit) (clutch-test--await-queries)))
                 (should-not clutch--pending-inserts)
                 (should
                  (equal
@@ -896,7 +928,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-submit))
+                  (progn (clutch-result-submit) (clutch-test--await-queries)))
                 (should-not clutch--pending-inserts))
               (should (equal (mapcar (lambda (row)
                                        (clutch-test--live-row-prefix-strings
@@ -920,7 +952,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t))
                           ((symbol-function 'message) #'ignore))
-                  (clutch-result-submit))
+                  (progn (clutch-result-submit) (clutch-test--await-queries)))
                 (should-not clutch--pending-deletes)))
             (should-not (clutch-db-result-rows
                          (clutch-db-query conn select-sql))))
