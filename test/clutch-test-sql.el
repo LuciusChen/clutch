@@ -70,7 +70,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "delete from users where id=1"
                     "-- cleanup\nDROP TABLE users"
                     "WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
-                    "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d")
+                    "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
+                    "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id = 1)")
                    ("SELECT * FROM users" "UPDATE users SET name='x'"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"))
@@ -82,13 +83,16 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
                     "WITH x (id) AS (SELECT 1), u AS /* rows */ (UPDATE users SET name = 'x' RETURNING id) SELECT * FROM u"
                     "SELECT * INTO users_copy FROM users"
-                    "SELECT u.* INTO TEMP recent FROM users u JOIN orders o ON o.uid = u.id")
+                    "SELECT u.* INTO TEMP recent FROM users u JOIN orders o ON o.uid = u.id"
+                    "SELECT * FROM FINAL TABLE (INSERT INTO users (name) VALUES ('Ada'))"
+                    "select id from new table (update users set name = 'x' where id = 1)")
                    ("SELECT * FROM users"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH x (delete) AS (SELECT 1) SELECT * FROM x"
                     "SELECT 'INTO' FROM users"
                     "SELECT id INTO @last_id FROM users"
                     "SELECT * FROM users INTO OUTFILE '/tmp/users.csv'"
+                    "SELECT 'FINAL TABLE (DELETE FROM users)' FROM users"
                     "CREATE TABLE t (id int)"))
                   (select
                    clutch-db-sql-select-query-p
@@ -112,6 +116,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "SELECT * INTO users_copy FROM users"
                     "WITH x AS (SELECT * FROM users) SELECT * INTO users_copy FROM x"
                     "SELECT id INTO @last_id FROM users"
+                    "SELECT * FROM FINAL TABLE (INSERT INTO users (name) VALUES ('Ada'))"
                     "INSERT INTO users VALUES (1)"
                     "UPDATE users SET name='x'"))))
     (pcase-let ((`(,label ,predicate ,matching ,rejected) case))
@@ -120,6 +125,20 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
           (should (funcall predicate sql)))
         (dolist (sql rejected)
           (should-not (funcall predicate sql)))))))
+
+(ert-deftest clutch-test-embedded-statements ()
+  "CTE bodies and data change tables should be the embedded statements."
+  (dolist (case
+           '(("WITH x (id) AS (SELECT 1), d AS /* gone */ (DELETE FROM t RETURNING id) SELECT * FROM x WINDOW w AS (ORDER BY id)"
+              ("SELECT 1" "DELETE FROM t RETURNING id"))
+             ("SELECT id FROM OLD TABLE (DELETE FROM t WHERE id = 1)"
+              ("DELETE FROM t WHERE id = 1"))
+             ("SELECT 'FINAL TABLE (DELETE FROM t)' FROM t" nil)
+             ("CREATE TRIGGER audit AFTER DELETE ON t REFERENCING OLD TABLE AS gone FOR EACH STATEMENT EXECUTE FUNCTION log_gone()"
+              nil)))
+    (ert-info ((car case))
+      (should (equal (clutch-db-sql-embedded-statements (car case))
+                     (cadr case))))))
 
 (ert-deftest clutch-test-high-risk-query-reason ()
   "High-risk SQL should include TRUNCATE and unbounded UPDATE/DELETE."
@@ -143,12 +162,14 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1)"
                  "UPDATE users SET name='x' WHERE 1=1 AND TRUE"
                  "WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
-                 "WITH x AS (SELECT 1), u AS (UPDATE users SET name='x' WHERE 1=1 RETURNING id) SELECT * FROM u"))
+                 "WITH x AS (SELECT 1), u AS (UPDATE users SET name='x' WHERE 1=1 RETURNING id) SELECT * FROM u"
+                 "SELECT * FROM OLD TABLE (DELETE FROM users)"))
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
                  "WITH d AS (DELETE FROM users WHERE id=1 RETURNING id) SELECT * FROM d"
+                 "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id=1)"
                  "UPDATE users SET name='x' WHERE 1=1 AND id=5"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1) AND status='active'"
                  "UPDATE users SET name='x' WHERE note='1=1'"

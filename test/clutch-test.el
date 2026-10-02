@@ -7351,6 +7351,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
              ("INSERT INTO users (name) VALUES ('Ada') RETURNING id" nil)
              ("WITH i AS (INSERT INTO users (name) VALUES ('Ada') RETURNING id) SELECT * FROM i" nil)
              ("SELECT * INTO users_copy FROM users" nil)
+             ("SELECT * FROM FINAL TABLE (INSERT INTO users (name) VALUES ('Ada'))" nil)
              ("CALL list_users()" nil)))
     (pcase-let ((`(,sql ,pageable) case))
       (ert-info ((format "sql: %s" sql))
