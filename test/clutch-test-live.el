@@ -96,6 +96,14 @@
   "Return non-nil when result workflow SQL is valid for the backend."
   (clutch-test-live-backend-capability-p :result-workflow))
 
+(defun clutch-test--live-supports-with-p (conn table)
+  "Return non-nil when the server behind CONN can read TABLE through WITH.
+MySQL before 8.0 has no WITH clause."
+  (condition-case nil
+      (clutch-db-query
+       conn (format "WITH c AS (SELECT * FROM %s) SELECT * FROM c" table))
+    (clutch-db-error nil)))
+
 (defun clutch-test--live-create-table-sql (table columns)
   "Return CREATE TABLE SQL for TABLE with COLUMNS.
 COLUMNS entries have the shape (NAME KIND . ATTRS)."
@@ -438,7 +446,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
             (clutch-db-query conn drop-sql)
             (clutch-db-query conn create-sql)
             (clutch-db-query conn insert-sql)
-            (dolist (select-sql select-sqls)
+            (dolist (select-sql (if (clutch-test--live-supports-with-p conn table)
+                                    select-sqls
+                                  (butlast select-sqls)))
               (ert-info (select-sql)
                 (clutch-test--with-live-result-buffer result-name
                   (let ((clutch-result-max-rows 2))
@@ -907,6 +917,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-query
                conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
                             table))
+              (unless (clutch-test--live-supports-with-p conn table)
+                (ert-skip "This server cannot run WITH queries"))
               ;; Neither query projects the key, and both rows share a name.
               (cl-loop
                for (select-sql value)
@@ -970,6 +982,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-query
                conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
                             table))
+              (unless (clutch-test--live-supports-with-p conn table)
+                (ert-skip "This server cannot run WITH queries"))
               (clutch-test--with-live-result-buffer result-name
                 (clutch-test--execute-live-select conn select-sql)
                 (with-current-buffer result-name
