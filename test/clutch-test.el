@@ -7660,6 +7660,53 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (when (clutch-db-live-p conn)
           (clutch-db-disconnect conn))))))
 
+(ert-deftest clutch-test-cte-result-deletes-and-inserts-real-sqlite-workflow ()
+  "Deletes and inserts through a CTE result should reach its base table."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+         (source (generate-new-buffer " *clutch-cte-delete-source*"))
+         (clutch--execution-refresh-timer nil)
+         result)
+    (cl-flet ((table-rows ()
+                (clutch-db-result-rows
+                 (clutch-db-query
+                  conn "SELECT id, name, team FROM people ORDER BY id"))))
+      (unwind-protect
+          (save-window-excursion
+            (clutch-db-query
+             conn "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, team TEXT)")
+            (clutch-db-query
+             conn "INSERT INTO people (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')")
+            (set-window-buffer (selected-window) source)
+            (with-current-buffer source
+              (clutch-mode)
+              (setq-local clutch-connection conn
+                          clutch--connection-params
+                          '(:backend sqlite :database ":memory:"))
+              (insert "WITH c (n, t) AS (SELECT name, team FROM people) SELECT n, t FROM c ORDER BY t")
+              (clutch-execute-buffer)
+              (setq result clutch--last-result-buffer))
+            (set-window-buffer (selected-window) result)
+            (with-current-buffer result
+              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                ;; The second row shown shares its name with the first.
+                (goto-char (aref clutch--row-start-positions 1))
+                (clutch-result-delete-rows)
+                (clutch-result-submit)
+                (should (equal (table-rows) '((1 "alpha" "a"))))
+                (setq-local clutch--pending-inserts
+                            '((("id" . "3") ("name" . "omega") ("team" . "c"))))
+                (clutch-result-submit)
+                (should (equal (table-rows)
+                               '((1 "alpha" "a") (3 "omega" "c")))))))
+        (clutch--execution-refresh-stop)
+        (when (buffer-live-p result)
+          (kill-buffer result))
+        (when (buffer-live-p source)
+          (kill-buffer source))
+        (when (clutch-db-live-p conn)
+          (clutch-db-disconnect conn))))))
+
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
   (let ((measure (symbol-function 'string-width))
