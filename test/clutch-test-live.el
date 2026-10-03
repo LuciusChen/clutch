@@ -1233,6 +1233,331 @@ A quote inside the CTE's quoted name must not hide the modification."
           (kill-buffer insert-buf))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+;;;; XTDB
+
+(defvar clutch-test--xtdb-table-counter 0
+  "Number of tables created by XTDB live tests in this Emacs.")
+
+(defun clutch-test--xtdb-table (prefix)
+  "Return a new table name starting with PREFIX.
+XTDB has no DROP TABLE, and a table keeps its column types after its
+rows are erased, so each test writes to tables of its own."
+  (format "clutch_%s_%d_%d" prefix (emacs-pid)
+          (cl-incf clutch-test--xtdb-table-counter)))
+
+(defun clutch-test--xtdb-rows (conn sql)
+  "Return the rows of SQL on CONN."
+  (clutch-db-result-rows (clutch-db-query conn sql)))
+
+(defun clutch-test--xtdb-column-type (conn table column)
+  "Return XTDB's own type of COLUMN in TABLE on CONN."
+  (caar (clutch-test--xtdb-rows
+         conn
+         (format "SELECT data_type FROM information_schema.columns WHERE table_name = '%s' AND column_name = '%s'"
+                 table column))))
+
+(defun clutch-test--xtdb-edit (ridx column value)
+  "Stage VALUE for COLUMN of row RIDX through an edit buffer.
+The current buffer is the result."
+  (set-window-buffer (selected-window) (current-buffer))
+  (clutch--goto-cell ridx (cl-position column clutch--result-columns
+                                       :test #'string=))
+  (with-current-buffer (clutch-result-edit-cell)
+    (erase-buffer)
+    (insert value)
+    (clutch-result-edit-finish)))
+
+(defun clutch-test--xtdb-stage-insert (fields)
+  "Stage a row of FIELDS, an alist of columns and values, from the insert form.
+The current buffer is the result."
+  (set-window-buffer (selected-window) (current-buffer))
+  (clutch-result-insert-row)
+  (with-current-buffer (window-buffer (selected-window))
+    (pcase-dolist (`(,name . ,value) fields)
+      (clutch-test--set-insert-field-value name value))
+    (clutch-result-insert-stage)))
+
+(defun clutch-test--xtdb-submit ()
+  "Submit the staged changes of the current result."
+  (set-window-buffer (selected-window) (current-buffer))
+  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+    (clutch-result-submit)
+    (clutch-test--await-queries)))
+
+(defun clutch-test--xtdb-execute (conn sql)
+  "Run SQL on CONN as a command does and return its confirmation prompts."
+  (let (prompts)
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (push prompt prompts) t)))
+      (with-temp-buffer
+        (let ((clutch-connection conn)
+              (clutch--source-window (selected-window))
+              (clutch-high-risk-query-confirmation 'yes-or-no))
+          (clutch--execute sql conn)
+          (clutch-test--await-queries))))
+    prompts))
+
+(ert-deftest clutch-test-live-xtdb-reads-its-own-catalog ()
+  :tags '(:xtdb-live)
+  "XTDB should connect as its own backend and read its catalog as XTDB has it."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((table (clutch-test--xtdb-table "meta")))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, age, name) VALUES ('a', 1, 'x')" table))
+      (should (eq (clutch-db-backend-key conn) 'xtdb))
+      (should (member table (clutch-db-list-tables conn)))
+      (should-not (clutch-db-list-schemas conn))
+      (dolist (category '(indexes sequences procedures functions triggers))
+        (should-not (clutch-db-list-objects conn category)))
+      (should (equal (clutch-db-primary-key-columns conn table) '("_id")))
+      (cl-flet ((detail (name key)
+                  (plist-get (cl-find name (clutch-db-column-details conn table)
+                                      :key (lambda (d) (plist-get d :name))
+                                      :test #'equal)
+                             key)))
+        (should (equal (detail "age" :backend-type) "int8"))
+        (should (equal (detail "name" :backend-type) "text"))
+        (should-not (detail "_id" :nullable))
+        (should (detail "_valid_from" :generated))
+        (should (detail "_system_from" :generated)))))
+  (let ((err (should-error
+              (clutch-db-connect 'xtdb (append '(:schema "public")
+                                               (clutch-test--live-connect-params))))))
+    (should (string-match-p "cannot switch its current schema"
+                            (error-message-string err)))))
+
+(ert-deftest clutch-test-live-xtdb-staged-changes-keep-column-types ()
+  :tags '(:xtdb-live)
+  "An insert, an edit and a deletion should keep their columns' types.
+XTDB stores a value with the type it is sent as."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((table (clutch-test--xtdb-table "staff"))
+          (result-name (format " *clutch-xtdb-staff-%d*" (emacs-pid))))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, age, name) VALUES ('a1', 12, 'Ann'), ('a2', 15, 'Max')"
+                    table))
+      (clutch-test--with-live-result-buffer result-name
+        (clutch-test--execute-live-select
+         conn (format "SELECT * FROM %s ORDER BY _id" table))
+        (with-current-buffer result-name
+          (should (eq (plist-get clutch--row-identity :kind) 'primary-key))
+          (clutch-test--xtdb-stage-insert
+           '(("_id" . "a3") ("age" . "17") ("name" . "Annie")))
+          (clutch-test--xtdb-edit 0 "name" "Ann2")
+          (clutch--goto-cell 1 0)
+          (clutch-result-delete-rows)
+          (clutch-test--xtdb-submit)))
+      (should (equal (clutch-test--xtdb-rows
+                      conn (format "SELECT _id, age, name FROM %s ORDER BY _id" table))
+                     '(("a1" 12 "Ann2") ("a3" 17 "Annie"))))
+      (should (equal (clutch-test--xtdb-column-type conn table "age") ":i64"))
+      (should (equal (clutch-test--xtdb-column-type conn table "name") ":utf8")))))
+
+(ert-deftest clutch-test-live-xtdb-manual-mode-refuses-staged-changes ()
+  :tags '(:xtdb-live)
+  "Staged changes should need Auto mode, since XTDB has no savepoints."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((table (clutch-test--xtdb-table "manual"))
+          (result-name (format " *clutch-xtdb-manual-%d*" (emacs-pid))))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, name) VALUES ('a1', 'Ann')" table))
+      (clutch-db-set-auto-commit conn nil)
+      (clutch-test--with-live-result-buffer result-name
+        (clutch-test--execute-live-select conn (format "SELECT * FROM %s" table))
+        (with-current-buffer result-name
+          (clutch-test--xtdb-edit 0 "name" "Ann3")
+          (should (string-match-p
+                   "no savepoints"
+                   (error-message-string
+                    (should-error (clutch-test--xtdb-submit)
+                                  :type 'user-error))))))
+      (clutch-db-set-auto-commit conn t)
+      (should (equal (clutch-test--xtdb-rows conn (format "SELECT name FROM %s" table))
+                     '(("Ann")))))))
+
+(ert-deftest clutch-test-live-xtdb-time-and-union-columns ()
+  :tags '(:xtdb-live)
+  "A time column should take times, and a union column should refuse a value.
+XTDB reports both as json, and stores a JSON string as a string."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((rota (clutch-test--xtdb-table "rota"))
+          (mixed (clutch-test--xtdb-table "mixed"))
+          (result-name (format " *clutch-xtdb-time-%d*" (emacs-pid))))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, starts) VALUES ('r1', TIME '09:30:00')" rota))
+      (clutch-db-query conn (format "INSERT INTO %s (_id, v) VALUES ('m1', 1)" mixed))
+      (clutch-db-query conn (format "INSERT INTO %s (_id, v) VALUES ('m2', 'one')" mixed))
+      (clutch-test--with-live-result-buffer result-name
+        (clutch-test--execute-live-select
+         conn (format "SELECT * FROM %s ORDER BY _id" rota))
+        (with-current-buffer result-name
+          (clutch-test--xtdb-stage-insert '(("_id" . "r2") ("starts" . "11:00:00")))
+          (clutch-test--xtdb-submit)
+          ;; A time can be given with or without seconds.
+          (dolist (value '("10:15:00" "10:20"))
+            (clutch-test--xtdb-edit 0 "starts" value)
+            (clutch-test--xtdb-submit))
+          (clutch-test--xtdb-edit 1 "starts" "\"10:45\"")
+          (should-error (clutch-test--xtdb-submit)))
+        (clutch-test--execute-live-select
+         conn (format "SELECT * FROM %s ORDER BY _id" mixed))
+        (with-current-buffer result-name
+          (clutch-test--xtdb-edit 0 "v" "2")
+          (should-error (clutch-test--xtdb-submit))))
+      (should (equal (clutch-test--xtdb-rows
+                      conn (format "SELECT _id, starts FROM %s ORDER BY _id" rota))
+                     '(("r1" "10:20") ("r2" "11:00"))))
+      (should (equal (clutch-test--xtdb-column-type conn rota "starts")
+                     "[:time-local :nano]"))
+      (should (equal (clutch-test--xtdb-rows
+                      conn (format "SELECT _id, v FROM %s ORDER BY _id" mixed))
+                     '(("m1" 1) ("m2" "one")))))))
+
+(ert-deftest clutch-test-live-xtdb-timestamptz-keeps-the-time-shown ()
+  :tags '(:xtdb-live)
+  "A timestamptz should be written as the time shown, with Emacs's offset.
+The insert form should set a row's valid time through _valid_from."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (unwind-protect
+      (progn
+        (set-time-zone-rule "Asia/Shanghai")
+        (clutch-test--with-conn conn
+          (let ((events (clutch-test--xtdb-table "events"))
+                (staff (clutch-test--xtdb-table "valid"))
+                (result-name (format " *clutch-xtdb-tz-%d*" (emacs-pid))))
+            (clutch-db-query
+             conn (format "INSERT INTO %s (_id, tz) VALUES ('e1', TIMESTAMP '2026-01-02T11:04:05+08:00')"
+                          events))
+            (clutch-db-query
+             conn (format "INSERT INTO %s (_id, name) VALUES ('a1', 'Ann')" staff))
+            (clutch-test--with-live-result-buffer result-name
+              (clutch-test--execute-live-select
+               conn (format "SELECT * FROM %s ORDER BY _id" events))
+              (with-current-buffer result-name
+                (clutch-test--xtdb-edit 0 "tz" "2026-01-02 11:04:06")
+                (clutch-test--xtdb-stage-insert
+                 '(("_id" . "e2") ("tz" . "2026-05-01 12:00:00")))
+                (clutch-test--xtdb-submit))
+              (clutch-test--execute-live-select
+               conn (format "SELECT *, _valid_from FROM %s ORDER BY _id" staff))
+              (with-current-buffer result-name
+                (clutch-test--xtdb-stage-insert
+                 '(("_id" . "a9") ("name" . "Vic")
+                   ("_valid_from" . "2020-05-01 00:00:00")))
+                (clutch-test--xtdb-submit)))
+            (should (equal (clutch-test--xtdb-rows
+                            conn (format "SELECT _id, CAST(tz AS VARCHAR) FROM %s ORDER BY _id"
+                                         events))
+                           '(("e1" "2026-01-02T11:04:06+08:00")
+                             ("e2" "2026-05-01T12:00+08:00"))))
+            (should (equal (clutch-test--xtdb-column-type conn events "tz")
+                           "[:timestamp-tz :micro \"+08:00\"]"))
+            (should (equal (clutch-test--xtdb-rows
+                            conn (format "SELECT CAST(_valid_from AS VARCHAR) FROM %s WHERE _id = 'a9'"
+                                         staff))
+                           '(("2020-04-30T16:00Z[UTC]")))))))
+    (set-time-zone-rule (getenv "TZ"))))
+
+(ert-deftest clutch-test-live-xtdb-history-results-are-read-only ()
+  :tags '(:xtdb-live)
+  "A row of a query of past versions should refuse edits; a current one not.
+Its _id names the current version, which an edit would change."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((table (clutch-test--xtdb-table "history"))
+          (result-name (format " *clutch-xtdb-history-%d*" (emacs-pid))))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, name) VALUES ('one', 'OLD')" table))
+      (clutch-db-query
+       conn (format "UPDATE %s SET name = 'NEW' WHERE _id = 'one'" table))
+      (clutch-test--with-live-result-buffer result-name
+        (pcase-dolist
+            (`(,label ,sql ,column)
+             `(("plain"
+                ,(format "SELECT _id, name FROM %s FOR SYSTEM_TIME ALL WHERE name = 'OLD'" table)
+                "name")
+               ("cte"
+                ,(format "WITH h AS (SELECT _id, name FROM %s FOR SYSTEM_TIME ALL) SELECT * FROM h WHERE name = 'OLD'" table)
+                "name")
+               ("setting"
+                ,(format "SETTING DEFAULT VALID_TIME TO ALL SELECT _id, name FROM %s WHERE name = 'OLD'" table)
+                "name")
+               ("block comment"
+                ,(format "SELECT _id, name\nFROM %s FOR /* history */ SYSTEM_TIME ALL\nWHERE name = 'OLD' LIMIT 10" table)
+                "name")
+               ("line comment"
+                ,(format "SELECT _id, name\nFROM %s FOR -- history\nSYSTEM_TIME ALL\nWHERE name = 'OLD' LIMIT 10" table)
+                "name")
+               ("quoted alias"
+                ,(format "SELECT _id, name AS \"customer's name\"\nFROM %s FOR SYSTEM_TIME ALL\nWHERE name = 'OLD' LIMIT 10" table)
+                "customer's name")))
+          (ert-info (label)
+            (clutch-test--execute-live-select conn sql)
+            (with-current-buffer result-name
+              (should (equal (nth (cl-position column clutch--result-columns
+                                               :test #'string=)
+                                  (car clutch--result-rows))
+                             "OLD"))
+              (should-not clutch--row-identity)
+              (should-error (clutch-test--xtdb-edit 0 column "EDITED_OLD")
+                            :type 'user-error))))
+        (should (equal (clutch-test--xtdb-rows
+                        conn (format "SELECT name FROM %s FOR SYSTEM_TIME ALL ORDER BY name"
+                                     table))
+                       '(("NEW") ("OLD"))))
+        (clutch-test--execute-live-select
+         conn (format "SELECT _id, name AS \"FOR SYSTEM_TIME ALL\" FROM %s" table))
+        (with-current-buffer result-name
+          (should (eq (plist-get clutch--row-identity :kind) 'primary-key))
+          (clutch-test--xtdb-edit 0 "FOR SYSTEM_TIME ALL" "EDITED")
+          (clutch-test--xtdb-submit)))
+      (should (equal (clutch-test--xtdb-rows conn (format "SELECT name FROM %s" table))
+                     '(("EDITED")))))))
+
+(ert-deftest clutch-test-live-xtdb-erase-asks-once-and-dirties-manual-mode ()
+  :tags '(:xtdb-live)
+  "ERASE should ask once, as a DELETE does, and dirty Manual mode."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((auto (clutch-test--xtdb-table "erase"))
+          (manual (clutch-test--xtdb-table "erase_manual"))
+          (result-name (format " *clutch-xtdb-erase-%d*" (emacs-pid))))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, v) VALUES ('e1', 1), ('e2', 2)" auto))
+      (clutch-db-query conn (format "INSERT INTO %s (_id, v) VALUES ('m1', 1)" manual))
+      (clutch-test--with-live-result-buffer result-name
+        (let ((prompts (clutch-test--xtdb-execute
+                        conn (format "ERASE FROM %s WHERE _id = 'e1'" auto))))
+          (should (= (length prompts) 1))
+          (should (string-prefix-p "Execute destructive query?" (car prompts))))
+        (let ((prompts (clutch-test--xtdb-execute
+                        conn (format "ERASE FROM %s WHERE true" auto))))
+          (should (= (length prompts) 1))
+          (should (string-prefix-p "Execute high-risk query (WHERE is always true)?"
+                                   (car prompts))))
+        (should-not (clutch-test--xtdb-rows
+                     conn (format "SELECT _id FROM %s FOR SYSTEM_TIME ALL" auto)))
+        (clutch-db-set-auto-commit conn nil)
+        (clutch-test--xtdb-execute
+         conn (format "ERASE FROM %s WHERE _id = 'm1'" manual))
+        (should (clutch--tx-dirty-p conn))
+        (clutch-db-rollback conn)
+        (clutch--clear-tx-state conn)
+        (clutch-db-set-auto-commit conn t))
+      (should (equal (clutch-test--xtdb-rows conn (format "SELECT _id FROM %s" manual))
+                     '(("m1")))))))
+
 (provide 'clutch-test-live)
 
 ;;; clutch-test-live.el ends here
