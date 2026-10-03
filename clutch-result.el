@@ -2888,39 +2888,24 @@ to preserve the existing copy/export UPDATE behavior."
       (user-error "Cannot %s: no writable source columns selected" op))
     set-col-indices))
 
-(defun clutch-result--ensure-update-source-columns (table col-indices op)
-  "Ensure COL-INDICES map to writable source columns for TABLE during OP."
-  (let* ((details (or (clutch--ensure-column-details clutch-connection table t)
-                      (user-error "Cannot %s: source column metadata is unavailable"
-                                  op)))
-         (invalid (cl-loop for cidx in col-indices
-                           for col-name = (nth cidx clutch--result-columns)
-                           for detail =
-                           (clutch-result--writable-source-detail
-                            table cidx op details)
-                           unless (and detail (not (plist-get detail :generated)))
-                           collect col-name)))
-    (when invalid
-      (user-error "Cannot %s: selected columns are not writable source columns: %s"
-                  op
-                  (string-join invalid ", ")))))
-
 (defun clutch-result--build-update-statements-for-rows (rows col-indices op)
   "Return UPDATE preview statements for ROWS using COL-INDICES.
 OP is a short operation description used in user-facing error messages."
   (let* ((table (clutch--result-source-table-or-user-error op))
          (row-identity (clutch-result--row-identity-or-user-error table op))
-         (set-col-indices (clutch-result--selected-update-col-indices
-                           row-identity col-indices op))
+         (columns (clutch-result--update-source-columns
+                   table
+                   (clutch-result--selected-update-col-indices
+                    row-identity col-indices op)
+                   op))
          statements)
-    (clutch-result--ensure-update-source-columns table set-col-indices op)
     (dolist (row rows)
       (let* ((identity-vec (clutch-db-row-identity-values
                             row row-identity))
-             (edits (cl-loop for cidx in set-col-indices
+             (edits (cl-loop for (cidx . _) in columns
                              collect (cons cidx (nth cidx row)))))
         (push (clutch-result--build-update-stmt
-               table identity-vec edits row-identity)
+               table identity-vec edits row-identity columns)
               statements)))
     (clutch-result--render-statements (nreverse statements))))
 
