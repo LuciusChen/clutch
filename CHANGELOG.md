@@ -4,7 +4,7 @@
 
 ### Added
 
-- An `xtdb` backend connects to XTDB 2 over the PostgreSQL protocol through `pgsql.el`. Query results can be edited: `_id` identifies each row, and staged values are sent with the PostgreSQL type of their column, mapped from XTDB's own types, since XTDB refuses untyped DML parameters and keeps a value in the type it was sent as; a column that XTDB reports as `json` in a result, such as a `time`, takes its type from the column too. Staged changes are submitted in Auto mode, because XTDB has no savepoints, and without a row-count check, because XTDB reports zero affected rows for any DML. Clutch's PostgreSQL catalog queries that XTDB lacks, for comments, keys and objects other than tables, are not sent, and neither switching schemas nor `:schema` is available, since XTDB keeps its current schema at `public`. Columns of several types are changed with SQL. XTDB's `ERASE`, which removes rows with their history, asks for confirmation like a `DELETE` and counts as an uncommitted change in Manual mode.
+- An `xtdb` backend connects to XTDB 2 over the PostgreSQL protocol through `pgsql.el`, and query results can be edited, with `_id` as the row identity. Staged changes need Auto mode and skip the row-count check, since XTDB has no savepoints and reports no affected rows; columns of several types are changed with SQL; schema switching is unavailable; and `ERASE` asks for confirmation like a `DELETE`. The XTDB section of `docs/native-backends.md` has the details.
 
 ### Fixed
 

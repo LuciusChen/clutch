@@ -85,7 +85,7 @@
 (declare-function clutch-db-pg--column-details-row
                   "clutch-db-pg" (row pk-cols fks))
 (declare-function clutch-db-pg--format-column-ddl "clutch-db-pg" (column))
-(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
+(declare-function clutch-db-pg--result-columns "clutch-db-pg" (conn pg-columns))
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (conn result))
 (declare-function clutch-db-pg--make-connection "clutch-db-pg" (&rest args))
 (declare-function clutch-db-pg--make-xtdb-connection "clutch-db-pg" (&rest args))
@@ -4148,7 +4148,8 @@ orai18n warning."
   (let* ((pg-cols '((:name "id" :type-oid 23)
                     (:name "data" :type-oid 3802)
                     (:name "created" :type-oid 1114)))
-         (converted (clutch-db-pg--convert-columns pg-cols)))
+         (converted (clutch-db-pg--result-columns
+                     (clutch-db-test--make-pg-connection) pg-cols)))
     (should (= (length converted) 3))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
     (should (eq (plist-get (nth 0 converted) :type-category) 'numeric))
@@ -4161,7 +4162,8 @@ orai18n warning."
   "PostgreSQL column conversion should keep backend type metadata."
   (require 'clutch-db-pg)
   (let ((converted
-         (clutch-db-pg--convert-columns
+         (clutch-db-pg--result-columns
+          (clutch-db-test--make-pg-connection)
           `((:name "precision"
              :type-oid ,clutch-db-test--pg-oid-int4-array)))))
     (should (equal (plist-get (car converted) :name) "precision"))
