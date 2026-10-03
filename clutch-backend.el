@@ -463,9 +463,11 @@ selection fails closed.  This parser is linear and does not alter match data."
 (defun clutch-db-sql-mask-literal-or-comment (sql &optional dialect)
   "Return a string the same length as SQL with literals/comments blanked.
 Single-quoted content (between the quotes) and comment text become spaces.
-Quote delimiters are preserved.  Double-quoted identifiers and backticks
-are left intact.  DIALECT is a `clutch-db-sql-dialect' plist deciding where
-a literal ends.  Safe for multibyte strings (avoids `aset').  Code between
+Quote delimiters are preserved.  Double-quoted and backtick-quoted
+identifiers are left intact, and a quote or `--' inside one opens nothing.
+Brackets are not taken for quoted identifiers, since they also index
+arrays.  DIALECT is a `clutch-db-sql-dialect' plist deciding where a
+literal ends.  Safe for multibyte strings (avoids `aset').  Code between
 literals is copied by searching for the next possible opener, so the cost
 follows the number of literals and comments rather than the length of SQL."
   (let ((pieces nil)
@@ -474,22 +476,27 @@ follows the number of literals and comments rather than the length of SQL."
         (len (length sql)))
     (save-match-data
       (while (and (< pos len)
-                  (setq pos (string-match "[-'/$]" sql pos)))
+                  (setq pos (string-match "[-'/$\"`]" sql pos)))
         (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
-                         sql pos nil dialect)))
-            (if (= (aref sql pos) ?\')
-                ;; String literal: preserve quote delimiters, blank content.
-                (let* ((has-close (and (> skip (1+ pos))
+                         sql pos t dialect)))
+            (pcase (aref sql pos)
+              ((or ?\" ?`)
+               ;; Quoted identifier: keep it as written.
+               (setq pos skip))
+              (?\'
+               ;; String literal: preserve quote delimiters, blank content.
+               (let* ((has-close (and (> skip (1+ pos))
                                       (= (aref sql (1- skip)) ?\')))
-                       (content-end (if has-close (1- skip) skip)))
-                  (push (substring sql copy-from (1+ pos)) pieces)
-                  (push (make-string (- content-end (1+ pos)) ?\s) pieces)
-                  (when has-close (push "'" pieces))
-                  (setq copy-from skip pos skip))
-              ;; Comment: blank entirely.
-              (push (substring sql copy-from pos) pieces)
-              (push (make-string (- skip pos) ?\s) pieces)
-              (setq copy-from skip pos skip))
+                      (content-end (if has-close (1- skip) skip)))
+                 (push (substring sql copy-from (1+ pos)) pieces)
+                 (push (make-string (- content-end (1+ pos)) ?\s) pieces)
+                 (when has-close (push "'" pieces))
+                 (setq copy-from skip pos skip)))
+              (_
+               ;; Comment: blank entirely.
+               (push (substring sql copy-from pos) pieces)
+               (push (make-string (- skip pos) ?\s) pieces)
+               (setq copy-from skip pos skip)))
           (cl-incf pos))))
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))

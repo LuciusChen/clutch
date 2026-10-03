@@ -72,7 +72,9 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
                     "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
                     "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id = 1)"
-                    "ERASE FROM users WHERE id = 1")
+                    "ERASE FROM users WHERE id = 1"
+                    "WITH \"customer's rows\" AS (DELETE FROM users RETURNING id) SELECT * FROM \"customer's rows\""
+                    "WITH \"customer--rows\" AS (DELETE FROM users RETURNING id) SELECT * FROM \"customer--rows\"")
                    ("SELECT * FROM users" "UPDATE users SET name='x'"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"))
@@ -87,7 +89,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "SELECT u.* INTO TEMP recent FROM users u JOIN orders o ON o.uid = u.id"
                     "SELECT * FROM FINAL TABLE (INSERT INTO users (name) VALUES ('Ada'))"
                     "select id from new table (update users set name = 'x' where id = 1)"
-                    "erase from users where id = 1")
+                    "erase from users where id = 1"
+                    "WITH \"customer's rows\" AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM \"customer's rows\"")
                    ("SELECT * FROM users"
                     "SELECT erase FROM users"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
@@ -135,6 +138,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "WITH deleted AS (DELETE FROM users RETURNING id) DELETE FROM audit"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
                     "WITH d AS MATERIALIZED (DELETE FROM users RETURNING id) SELECT * FROM d"
+                    "WITH \"customer's rows\" AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM \"customer's rows\""
                     "SELECT * INTO users_copy FROM users"
                     "WITH x AS (SELECT * FROM users) SELECT * INTO users_copy FROM x"
                     "SELECT id INTO @last_id FROM users"
@@ -224,7 +228,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
                  "WITH x AS (SELECT 1), u AS (UPDATE users SET name='x' WHERE 1=1 RETURNING id) SELECT * FROM u"
                  "SELECT * FROM OLD TABLE (DELETE FROM users)"
-                 "ERASE FROM users WHERE true"))
+                 "ERASE FROM users WHERE true"
+                 "WITH \"customer--rows\" AS (DELETE FROM users RETURNING id) SELECT * FROM \"customer--rows\""))
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
@@ -756,6 +761,12 @@ Otherwise the scanner skips past the JOIN token and misses the joined table."
                   ("string literal FROM"
                    "select 'from users' from orders o"
                    ("orders") (("o" . "orders")))
+                  ("quote in a quoted column"
+                   "SELECT \"customer's name\" FROM users"
+                   ("users") nil)
+                  ("dashes in a quoted column"
+                   "SELECT \"customer--name\" FROM users"
+                   ("users") nil)
                   ("quoted identifiers"
                    "select * from `order_items` oi join \"users\" u"
                    ("order_items" "users")
@@ -915,6 +926,11 @@ Keywords inside a function body are literal text, not clauses."
   (let ((masked (clutch-db-sql-mask-literal-or-comment
                  "select * from \"User Table\" u")))
     (should (string-match-p "\"User Table\"" masked)))
+  ;; A quote or -- inside a quoted identifier opens no literal or comment.
+  (dolist (sql '("WITH \"customer's rows\" AS (DELETE FROM t RETURNING *) SELECT 1"
+                 "WITH \"customer--rows\" AS (DELETE FROM t RETURNING *) SELECT 1"
+                 "WITH `customer's rows` AS (DELETE FROM t RETURNING *) SELECT 1"))
+    (should (equal (clutch-db-sql-mask-literal-or-comment sql) sql)))
   ;; Multibyte string content must not trigger aset errors.
   (let* ((sql "select case when '全提' then '即存' end from t")
          (masked (clutch-db-sql-mask-literal-or-comment sql)))

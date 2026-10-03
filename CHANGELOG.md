@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.5 - Unreleased
+
+### Fixed
+
+- A quote or `--` inside a quoted identifier, as in `WITH "customer's rows" AS (DELETE FROM t RETURNING *) SELECT * FROM "customer's rows"`, no longer hides the rest of the statement from Clutch's checks. Such a statement that writes asks for confirmation, runs once instead of being paged, and leaves an uncommitted change in Manual mode, and completion finds the tables of a query that selects such a column.
+
 ## 0.5.4 - 2026-10-03
 
 ### Added
