@@ -220,6 +220,13 @@
                 (lambda (client) (plist-get client :database))))
        ,@body)))
 
+(defmacro clutch-db-test--with-time-zone (zone &rest body)
+  "Run BODY with Emacs's local time zone set to ZONE."
+  (declare (indent 1) (debug t))
+  `(unwind-protect
+       (progn (set-time-zone-rule ,zone) ,@body)
+     (set-time-zone-rule (getenv "TZ"))))
+
 (defun clutch-db-test--live-name (prefix)
   "Return an isolated live database object name using PREFIX."
   (format "%s_%d_%d"
@@ -4186,6 +4193,32 @@ orai18n warning."
                     (list (clutch-db-typed-param "[0:2]={1,2,3}" "_int4")))
                    (list (cons "[0:2]={1,2,3}" "_int4"))))))
 
+(ert-deftest clutch-db-test-pg-timestamptz-params-carry-the-local-offset ()
+  "A timestamptz param without an offset should carry Emacs's offset then.
+Clutch shows a timestamptz in Emacs's local time, and PostgreSQL would read
+text without an offset in its session time zone.  The preview should show
+the text that is sent."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-time-zone "America/New_York"
+    (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+      (pcase-dolist (`(,value ,sent)
+                     '(("2026-01-15 12:00:00" "2026-01-15 12:00:00-05:00")
+                       ("2026-07-15 12:00" "2026-07-15 12:00-04:00")
+                       ((:year 2026 :month 7 :day 15
+                         :hours 12 :minutes 0 :seconds 0)
+                        "2026-07-15 12:00:00-04:00")
+                       ("2026-07-15 12:00:00+00" "2026-07-15 12:00:00+00")
+                       ("infinity" "infinity")))
+        (let ((param (clutch-db-typed-param value "timestamptz")))
+          (should (equal (clutch-db-pg--typed-arguments (list param))
+                         (list (cons sent "timestamptz"))))
+          (should (equal (clutch-db-value-to-literal conn param)
+                         (format "'%s'" sent)))))
+      (should (equal (clutch-db-pg--typed-arguments
+                      (list (clutch-db-typed-param "2026-01-15 12:00:00"
+                                                   "timestamp")))
+                     (list (cons "2026-01-15 12:00:00" "timestamp")))))))
+
 (ert-deftest clutch-db-test-pg-execute-params-uses-public-value-contract ()
   "PostgreSQL parameter execution should use pgsql.el's typed public API."
   (require 'clutch-db-pg)
@@ -5489,6 +5522,28 @@ Skips if `clutch-db-test-pg-password' is nil."
                0))
     (clutch-db-set-auto-commit conn t)
     (should-not (clutch-db-manual-commit-p conn))))
+
+(ert-deftest clutch-db-test-pg-live-timestamptz-params-keep-emacs-local-time ()
+  :tags '(:db-live :pg-live)
+  "A timestamptz written back should be the time Clutch showed for it.
+The session time zone differs from Emacs's here, as it often does."
+  (clutch-db-test--with-pg conn
+    (clutch-db-test--with-time-zone "Asia/Shanghai"
+      (clutch-db-query conn "SET TIME ZONE 'UTC'")
+      (let* ((shown (car (clutch-db-result-rows
+                          (clutch-db-query
+                           conn "SELECT timestamptz '2026-01-02 03:04:05+00'"))))
+             (row (car (clutch-db-result-rows
+                        (clutch-db-execute-params
+                         conn
+                         "SELECT ? = timestamptz '2026-01-02 03:04:05+00', to_char(? AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+                         (list (clutch-db-typed-param (car shown) "timestamptz")
+                               (clutch-db-typed-param "2026-01-02 11:04:06"
+                                                      "timestamptz")))))))
+        (should (equal (car shown)
+                       '(:year 2026 :month 1 :day 2
+                         :hours 11 :minutes 4 :seconds 5)))
+        (should (equal row '(t "2026-01-02 03:04:06")))))))
 
 (ert-deftest clutch-db-test-pg-live-keyboard-quit-keeps-connection-usable ()
   :tags '(:db-live :pg-live)
