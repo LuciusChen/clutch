@@ -887,6 +887,25 @@
           (should-not (plist-get prep :cte))
           (should (equal (plist-get prep :sql) sql)))))))
 
+(ert-deftest clutch-test-row-identity-prep-skips-queries-of-table-history ()
+  "A query of its table as of another time should get no row identity.
+Its rows may be past versions, while an edit by key changes the current one."
+  (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
+            ((symbol-function 'clutch-db-row-identity-candidates)
+             (lambda (_conn table)
+               (ert-fail (format "Looked up row identity for %s" table)))))
+    (dolist (sql '("SELECT * FROM users FOR SYSTEM_TIME ALL"
+                   "SELECT * FROM users FOR /* history */ SYSTEM_TIME ALL WHERE name = 'OLD'"
+                   "SELECT id, name AS \"customer's name\" FROM users FOR SYSTEM_TIME ALL WHERE name = 'OLD'"
+                   "SELECT * FROM users FOR VALID_TIME AS OF DATE '2020-01-01' WHERE id = 1"
+                   "WITH c AS (SELECT * FROM users FOR SYSTEM_TIME ALL) SELECT * FROM c"
+                   "SETTING DEFAULT VALID_TIME TO ALL SELECT * FROM users"))
+      (ert-info (sql)
+        (let ((prep (clutch--prepare-row-identity-query 'fake-conn sql)))
+          (should (equal (plist-get prep :table) "users"))
+          (should (eq (plist-get prep :identity-status) 'unsupported))
+          (should (equal (plist-get prep :sql) sql)))))))
+
 (ert-deftest clutch-test-row-identity-prep-uses-backend-source-table-name ()
   "Row identity preparation should canonicalize source tables through the backend."
   (let ((clutch--row-identity-cache (make-hash-table :test 'eq))
@@ -4603,13 +4622,17 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
               "Cannot edit cell: no primary, unique, or row locator identity available for table users")
              (metadata-error
               error "metadata failed"
-              "Cannot edit cell: row identity metadata failed for table users: metadata failed")))
-    (pcase-let ((`(,label ,status ,message ,expected) case))
+              "Cannot edit cell: row identity metadata failed for table users: metadata failed")
+             (table-history
+              nil nil
+              "Cannot edit cell: the query reads table users as of another time"
+              "SELECT * FROM users FOR SYSTEM_TIME ALL")))
+    (pcase-let ((`(,label ,status ,message ,expected ,query) case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-result-state-buffer result-buf
             (:connection-params '(:backend mysql)
              :source-table "users"
-             :last-query "SELECT * FROM users"
+             :last-query (or query "SELECT * FROM users")
              :columns '("id" "name")
              :column-defs '((:name "id" :type-category numeric)
                             (:name "name" :type-category text))

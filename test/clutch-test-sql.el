@@ -71,7 +71,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "-- cleanup\nDROP TABLE users"
                     "WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
                     "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
-                    "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id = 1)")
+                    "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id = 1)"
+                    "ERASE FROM users WHERE id = 1")
                    ("SELECT * FROM users" "UPDATE users SET name='x'"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"))
@@ -85,8 +86,10 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "SELECT * INTO users_copy FROM users"
                     "SELECT u.* INTO TEMP recent FROM users u JOIN orders o ON o.uid = u.id"
                     "SELECT * FROM FINAL TABLE (INSERT INTO users (name) VALUES ('Ada'))"
-                    "select id from new table (update users set name = 'x' where id = 1)")
+                    "select id from new table (update users set name = 'x' where id = 1)"
+                    "erase from users where id = 1")
                    ("SELECT * FROM users"
+                    "SELECT erase FROM users"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH x (delete) AS (SELECT 1) SELECT * FROM x"
                     "SELECT 'INTO' FROM users"
@@ -94,6 +97,25 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "SELECT * FROM users INTO OUTFILE '/tmp/users.csv'"
                     "SELECT 'FINAL TABLE (DELETE FROM users)' FROM users"
                     "CREATE TABLE t (id int)"))
+                  (reads-table-history
+                   clutch-db-sql-reads-table-history-p
+                   ("SELECT * FROM users FOR SYSTEM_TIME ALL"
+                    "SELECT * FROM users FOR /* history */ SYSTEM_TIME ALL"
+                    "SELECT * FROM users FOR -- history\nSYSTEM_TIME ALL"
+                    "SELECT id, name AS \"customer's name\" FROM users FOR SYSTEM_TIME ALL WHERE name = 'OLD'"
+                    "select * from users for valid_time as of date '2020-01-01'"
+                    "SELECT * FROM users FOR ALL VALID_TIME WHERE id = 1"
+                    "SELECT * FROM users FOR BUSINESS_TIME AS OF '2020-01-01'"
+                    "WITH c AS (SELECT * FROM users FOR SYSTEM_TIME ALL) SELECT * FROM c"
+                    "SETTING DEFAULT VALID_TIME TO ALL SELECT * FROM users"
+                    "SELECT * FROM users AS OF TIMESTAMP SYSTIMESTAMP"
+                    "SELECT * FROM users VERSIONS BETWEEN SCN MINVALUE AND MAXVALUE")
+                   ("SELECT * FROM users"
+                    "SELECT * FROM users FOR UPDATE"
+                    "SELECT valid_time FROM users"
+                    "SELECT * FROM users WHERE note = 'FOR SYSTEM_TIME ALL'"
+                    "SELECT * FROM users -- FOR SYSTEM_TIME ALL"
+                    "SELECT name AS \"FOR SYSTEM_TIME ALL\" FROM users"))
                   (select
                    clutch-db-sql-select-query-p
                    ("SELECT * FROM users"
@@ -201,7 +223,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE 1=1 AND TRUE"
                  "WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
                  "WITH x AS (SELECT 1), u AS (UPDATE users SET name='x' WHERE 1=1 RETURNING id) SELECT * FROM u"
-                 "SELECT * FROM OLD TABLE (DELETE FROM users)"))
+                 "SELECT * FROM OLD TABLE (DELETE FROM users)"
+                 "ERASE FROM users WHERE true"))
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
@@ -211,6 +234,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE 1=1 AND id=5"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1) AND status='active'"
                  "UPDATE users SET name='x' WHERE note='1=1'"
+                 "ERASE FROM users WHERE id=1"
                  "DELETE FROM users WHERE status='active'"
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))

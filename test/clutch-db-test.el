@@ -85,9 +85,12 @@
 (declare-function clutch-db-pg--column-details-row
                   "clutch-db-pg" (row pk-cols fks))
 (declare-function clutch-db-pg--format-column-ddl "clutch-db-pg" (column))
-(declare-function clutch-db-pg--convert-columns "clutch-db-pg" (columns))
+(declare-function clutch-db-pg--result-columns "clutch-db-pg" (conn pg-columns))
 (declare-function clutch-db-pg--wrap-result "clutch-db-pg" (conn result))
 (declare-function clutch-db-pg--make-connection "clutch-db-pg" (&rest args))
+(declare-function clutch-db-pg--make-xtdb-connection "clutch-db-pg" (&rest args))
+(declare-function clutch-db-pg--xtdb-connection-p "clutch-db-pg" (object))
+(declare-function clutch-db-pg-xtdb-connect "clutch-db-pg" (params))
 (declare-function clutch-db-pg--connection-client "clutch-db-pg" (conn))
 (declare-function clutch-db-pg--rewrite-param-sql "clutch-db-pg"
                   (sql &optional param-count))
@@ -4145,7 +4148,8 @@ orai18n warning."
   (let* ((pg-cols '((:name "id" :type-oid 23)
                     (:name "data" :type-oid 3802)
                     (:name "created" :type-oid 1114)))
-         (converted (clutch-db-pg--convert-columns pg-cols)))
+         (converted (clutch-db-pg--result-columns
+                     (clutch-db-test--make-pg-connection) pg-cols)))
     (should (= (length converted) 3))
     (should (equal (plist-get (nth 0 converted) :name) "id"))
     (should (eq (plist-get (nth 0 converted) :type-category) 'numeric))
@@ -4158,7 +4162,8 @@ orai18n warning."
   "PostgreSQL column conversion should keep backend type metadata."
   (require 'clutch-db-pg)
   (let ((converted
-         (clutch-db-pg--convert-columns
+         (clutch-db-pg--result-columns
+          (clutch-db-test--make-pg-connection)
           `((:name "precision"
              :type-oid ,clutch-db-test--pg-oid-int4-array)))))
     (should (equal (plist-get (car converted) :name) "precision"))
@@ -4274,6 +4279,138 @@ the text that is sent."
                  nil nil)))
     (should (equal (plist-get detail :type) "ARRAY"))
     (should (equal (plist-get detail :backend-type) "_int4"))))
+
+;;;; XTDB
+
+(ert-deftest clutch-db-test-xtdb-column-details-map-xtdb-types ()
+  "XTDB columns should carry the PostgreSQL types that its parameters take.
+_id is the key, any other column may be left out, system columns are
+generated, and a type with no single PostgreSQL type keeps its XTDB name."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-pg--make-xtdb-connection
+                 :client (clutch-db-test--make-pg-client))))
+      (cl-letf (((symbol-function 'pgsql-escape-literal)
+                 (lambda (value) (format "'%s'" value)))
+                ((symbol-function 'clutch-db-pg--exec)
+                 (lambda (_conn _sql)
+                   (clutch-db-test--make-pg-result
+                    :rows '(("_id" ":utf8")
+                            ("_valid_from" ":instant")
+                            ("age" ":i64")
+                            ("born" "[:? :date :day]")
+                            ("seen" "[:union [:? :timestamp-tz :micro \"+08:00\"] [:timestamp-tz :micro \"Z\"]]")
+                            ("mixed" "[:union [:? :i32] :i16]")
+                            ("tags" "[:? [:list :utf8]]"))))))
+        (let ((details (clutch-db-column-details conn "people")))
+          (cl-flet ((get (name key)
+                      (plist-get (cl-find name details
+                                          :key (lambda (detail)
+                                                 (plist-get detail :name))
+                                          :test #'equal)
+                                 key)))
+            (should (equal (get "_id" :backend-type) "text"))
+            (should (get "_id" :primary-key))
+            (should-not (get "_id" :nullable))
+            (should (get "_valid_from" :generated))
+            (should (equal (get "age" :type) "bigint"))
+            (should (equal (get "age" :backend-type) "int8"))
+            (should (get "age" :nullable))
+            (should (equal (get "born" :backend-type) "date"))
+            (should (equal (get "seen" :backend-type) "timestamptz"))
+            (should-not (get "mixed" :backend-type))
+            (should (equal (get "tags" :type) "[:? [:list :utf8]]"))
+            (should-not (get "tags" :backend-type))))))))
+
+(ert-deftest clutch-db-test-xtdb-connects-through-the-postgresql-adapter ()
+  "The xtdb backend should open a pgsql.el connection keyed as XTDB.
+A :schema, which XTDB cannot switch to, should be refused before connecting."
+  (require 'clutch-db-pg)
+  (should (eq (plist-get (clutch-backend-feature 'xtdb) :sql-product)
+              'postgres))
+  (let ((connects 0))
+    (cl-letf (((symbol-function 'pgsql-connect)
+               (lambda (&rest args)
+                 (cl-incf connects)
+                 (clutch-db-test--make-pg-client
+                  :host (plist-get args :host)
+                  :database (plist-get args :database)))))
+      (should-error (clutch-db-pg-xtdb-connect '(:host "xt" :schema "public"))
+                    :type 'user-error)
+      (should (= connects 0))
+      (let ((conn (clutch-db-pg-xtdb-connect '(:host "xt" :database "xtdb"))))
+        (should (clutch-db-pg--xtdb-connection-p conn))
+        (should (eq (clutch-db-backend-key conn) 'xtdb))
+        (should (equal (clutch-db-primary-key-columns conn "people")
+                       '("_id")))))))
+
+(ert-deftest clutch-db-test-xtdb-result-json-columns-carry-no-type ()
+  "XTDB reports a column with no PostgreSQL type, such as a time, as json.
+Such a result column should carry no type, so a staged value takes the
+type of the column details; on PostgreSQL a json column stays json."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((pg-result (clutch-db-test--make-pg-result
+                      :columns
+                      `((:name "age" :type-oid ,clutch-db-test--pg-oid-int8)
+                        (:name "starts" :type-oid ,clutch-db-test--pg-oid-json)))))
+      (cl-flet ((columns (conn)
+                  (clutch-db-result-columns
+                   (clutch-db-pg--wrap-result conn pg-result))))
+        (let ((xtdb (columns (clutch-db-pg--make-xtdb-connection
+                              :client (clutch-db-test--make-pg-client))))
+              (pg (columns (clutch-db-test--make-pg-connection))))
+          (should (equal (plist-get (car xtdb) :backend-type) "int8"))
+          (should (equal (cadr xtdb) '(:name "starts")))
+          (should (equal (plist-get (cadr pg) :backend-type) "json"))
+          (should (eq (plist-get (cadr pg) :type-category) 'json)))))))
+
+(ert-deftest clutch-db-test-xtdb-staged-dml-leaves-affected-rows-unknown ()
+  "XTDB reports zero rows for any DML, so the count should be unknown.
+A PostgreSQL connection keeps the reported count."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-client
+    (cl-letf (((symbol-function 'pgsql-exec-params)
+               (lambda (&rest _)
+                 (clutch-db-test--make-pg-result :command-tag "UPDATE 0"
+                                                 :affected-rows 0))))
+      (let ((params (list (clutch-db-typed-param "Ann" "text")
+                          (clutch-db-typed-param "p1" "text")))
+            (sql "UPDATE people SET name = ? WHERE _id = ?"))
+        (should-not
+         (clutch-db-result-affected-rows
+          (clutch-db-execute-params
+           (clutch-db-pg--make-xtdb-connection
+            :client (clutch-db-test--make-pg-client))
+           sql params)))
+        (should
+         (eql (clutch-db-result-affected-rows
+               (clutch-db-execute-params
+                (clutch-db-test--make-pg-connection) sql params))
+              0))))))
+
+(ert-deftest clutch-db-test-xtdb-refuses-staged-changes-in-manual-mode ()
+  "Staged changes should need Auto mode on XTDB, which has no savepoints."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-pg--make-xtdb-connection
+               :client (clutch-db-test--make-pg-client)
+               :manual-commit t))
+        called)
+    (should-error (clutch-db-call-with-atomic-batch conn (lambda () (setq called t)))
+                  :type 'user-error)
+    (should-not called)))
+
+(ert-deftest clutch-db-test-xtdb-lists-no-objects-or-schemas ()
+  "XTDB has no objects but tables and no schema to switch to.
+Listing them should send no catalog query."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-pg--make-xtdb-connection
+               :client (clutch-db-test--make-pg-client))))
+    (cl-letf (((symbol-function 'clutch-db-pg--exec)
+               (lambda (_conn sql) (error "Unexpected query: %s" sql))))
+      (dolist (category '(indexes sequences procedures functions triggers))
+        (should-not (clutch-db-list-objects conn category)))
+      (should-not (clutch-db-list-schemas conn)))))
 
 (ert-deftest clutch-db-test-pg-metadata-normalizes-null-sentinels ()
   "PostgreSQL metadata should not expose pgsql.el's SQL NULL sentinel."
