@@ -2,6 +2,10 @@
 
 ## 0.5.5 - Unreleased
 
+### Changed
+
+- Copying or exporting rows as `UPDATE` statements looks up each column's source and type once rather than for every cell, so 500 rows of 200 SQLite columns take 0.32 s instead of 1.6 s. Submitting staged edits looks their columns up the same way, and an edit of a column that became generated or left the table after it was staged is refused with the message that copy and export give.
+
 ### Fixed
 
 - A quote or `--` inside a quoted identifier, as in `WITH "customer's rows" AS (DELETE FROM t RETURNING *) SELECT * FROM "customer's rows"`, no longer hides the rest of the statement from Clutch's checks. Such a statement that writes asks for confirmation, runs once instead of being paged, and leaves an uncommitted change in Manual mode, and completion finds the tables of a query that selects such a column.

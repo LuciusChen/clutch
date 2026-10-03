@@ -1415,7 +1415,9 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     "REPORTS" [7]
                     (list (cons 1 clutch--cell-default-placeholder)
                           (cons 2 "ready"))
-                    identity))
+                    identity
+                    (clutch-result--update-source-columns
+                     "REPORTS" '(1 2) "test")))
                   (`(,delete-sql . ,_)
                    (clutch-result--build-delete-stmt-for-identity
                     "REPORTS" [7] identity)))
@@ -1446,7 +1448,9 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                     "DOCUMENTS" ["AAAPr9AAEAAAACXAAA"]
                     '((0 . "{\"message\":\"中文\"}")
                       (1 . "1"))
-                    identity)))
+                    identity
+                    (clutch-result--update-source-columns
+                     "DOCUMENTS" '(0 1) "test"))))
         (should (equal (mapcar #'clutch-db-param-type params)
                        '("BLOB" "NUMBER" nil)))))))
 
@@ -1491,7 +1495,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                  '((:name "NAME" :backend-type "VARCHAR2")))))
       (pcase-let ((`(,sql . ,_)
                    (clutch-result--build-update-stmt
-                    "USERS" [7] '((0 . "Ada")) identity)))
+                    "USERS" [7] '((0 . "Ada")) identity
+                    (clutch-result--update-source-columns "USERS" '(0) "test"))))
         (should (string-search "SET \"NAME\" = ?" sql))))))
 
 (ert-deftest clutch-test-update-uses-canonical-source-behind-alias ()
@@ -1508,7 +1513,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                  '((:name "name" :backend-type "text")))))
       (pcase-let ((`(,sql . ,_)
                    (clutch-result--build-update-stmt
-                    "users" [7] '((0 . "Ada")) identity)))
+                    "users" [7] '((0 . "Ada")) identity
+                    (clutch-result--update-source-columns "users" '(0) "test"))))
         (should (string-search "SET \"name\" = ?" sql))
         (should-not (string-search "display_name" sql))
         (should-not (string-search "\"NAME\"" sql))))))
@@ -6568,6 +6574,32 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
             (should (string-match-p
                      (regexp-quote (plist-get case :message))
                      (error-message-string err)))))))))
+
+(ert-deftest clutch-test-staged-update-rejects-non-writable-source-columns ()
+  "A staged edit should not build an UPDATE of a column no longer writable.
+Editing refuses such a column, so this happens when the table changes
+after the edit is staged."
+  (dolist (case '(("generated" ((:name "id") (:name "name" :generated t)))
+                  ("missing" ((:name "id")))))
+    (ert-info ((car case))
+      (with-temp-buffer
+        (setq-local clutch-connection 'fake-conn
+                    clutch--result-columns '("id" "name")
+                    clutch--result-column-defs
+                    '((:name "id" :backend-type "int4" :source-column "id")
+                      (:name "name" :source-column "name"))
+                    clutch--result-source-table "users"
+                    clutch--row-identity (clutch-test--primary-row-identity
+                                          "users" '("id") '(0))
+                    clutch--pending-edits '((([1] . 1) . "alice")))
+        (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                   (lambda (_conn _table &optional _strict) (cadr case)))
+                  ((symbol-function 'clutch-db-escape-identifier)
+                   (lambda (_conn name) name)))
+          (should (equal (error-message-string
+                          (should-error (clutch-result--build-update-statements)
+                                        :type 'user-error))
+                         "Cannot build UPDATE: selected columns are not writable source columns: name")))))))
 
 (ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
   "Staged SQL copy should mirror the staged submit batch."
