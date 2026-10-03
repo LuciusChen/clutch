@@ -801,19 +801,23 @@ START defaults to 0."
   (car (clutch-db-sql--top-level-clause-match
         sql (or start 0) (list pattern))))
 
+(defconst clutch-db-sql--keyword-gap-regexp
+  (concat "\\(?:"
+          (rx (or (in " \t\r\n")
+                  (seq "/*"
+                       (* (or (not (in "*"))
+                              (seq (+ "*") (not (in "*/")))))
+                       (+ "*") "/")
+                  (seq "--" (* (not (in "\n"))) "\n")))
+          "\\)")
+  "Regexp matching one blank between SQL keywords: a space or a comment.")
+
 (defun clutch-db-sql-has-top-level-row-limit-p (sql)
   "Return non-nil when SQL has a top-level row-limit clause.
 Check TOP's SELECT modifier position and FETCH's FIRST/NEXT count syntax.
 Preserve the established LIMIT and OFFSET checks across dialects.
 Quoted text, comments and nested queries do not contribute clauses."
-  (let* ((gap (concat "\\(?:"
-                      (rx (or (in " \t\r\n")
-                              (seq "/*"
-                                   (* (or (not (in "*"))
-                                          (seq (+ "*") (not (in "*/")))))
-                                   (+ "*") "/")
-                              (seq "--" (* (not (in "\n"))) "\n")))
-                      "\\)"))
+  (let* ((gap clutch-db-sql--keyword-gap-regexp)
          (pattern
           (concat "\\b\\(?:LIMIT\\b\\|OFFSET\\b\\|FETCH" gap "+"
                   "\\(?:FIRST\\|NEXT\\)" gap "+"
@@ -1246,10 +1250,11 @@ change table.  XTDB's ERASE removes rows with their history."
                (clutch-db-sql-embedded-statements sql))))
 
 (defconst clutch-db-sql--table-history-regexp
-  (concat "\\bFOR[ \t\n\r\f]+\\(?:ALL[ \t\n\r\f]+\\)?"
-          "\\(?:SYSTEM_TIME\\|VALID_TIME\\|BUSINESS_TIME\\|APPLICATION_TIME\\)\\b"
-          "\\|\\bAS[ \t\n\r\f]+OF[ \t\n\r\f]+\\(?:TIMESTAMP\\|SCN\\)\\b"
-          "\\|\\bVERSIONS[ \t\n\r\f]+BETWEEN\\b")
+  (let ((gap (concat clutch-db-sql--keyword-gap-regexp "+")))
+    (concat "\\bFOR" gap "\\(?:ALL" gap "\\)?"
+            "\\(?:SYSTEM_TIME\\|VALID_TIME\\|BUSINESS_TIME\\|APPLICATION_TIME\\)\\b"
+            "\\|\\bAS" gap "OF" gap "\\(?:TIMESTAMP\\|SCN\\)\\b"
+            "\\|\\bVERSIONS" gap "BETWEEN\\b"))
   "Regexp matching a clause that reads a table as of another time.")
 
 (defun clutch-db-sql-reads-table-history-p (sql)
@@ -1257,13 +1262,16 @@ change table.  XTDB's ERASE removes rows with their history."
 That is a temporal clause, as in FOR SYSTEM_TIME ALL of SQL:2011, SQL
 Server, MariaDB, DB2 and XTDB, or Oracle's AS OF TIMESTAMP, anywhere in
 SQL, or XTDB's SETTING before a query.  A row of such a result may be a
-past version, which an edit by key would not reach.  Comments between the
-clause's keywords count as blanks, and literals do not count."
+past version, which an edit by key would not reach.  The clause must
+start in code, not in a literal, a quoted identifier or a comment, and
+comments between its keywords count as blanks."
   (or (clutch-db-sql-starts-with-keyword-p sql '("SETTING"))
-      (let ((case-fold-search t))
-        (with-syntax-table clutch-db-sql--syntax-table
-          (string-match-p clutch-db-sql--table-history-regexp
-                          (clutch-db-sql-mask-literal-or-comment sql))))))
+      (let ((positions (clutch-db-sql-code-match-positions
+                        sql 0 nil clutch-db-sql--table-history-regexp)))
+        (unless (zerop (hash-table-count positions))
+          (clutch-db-sql-scan-code
+           sql 0 nil (lambda (pos _char _depth) (gethash pos positions))
+           nil positions)))))
 
 (defun clutch-db-sql-schema-affecting-p (sql)
   "Return non-nil if SQL is likely to invalidate cached schema."
