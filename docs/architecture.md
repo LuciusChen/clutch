@@ -90,6 +90,7 @@ flowchart LR
   subgraph Relational["Relational SQL data model"]
     MySQLCore["mysql<br/>core SQL"]
     PGCore["pg<br/>core SQL"]
+    XTDBBasic["xtdb<br/>basic SQL over the<br/>PostgreSQL protocol"]
     SQLiteCore["sqlite<br/>core SQL"]
     OracleCore["oracle<br/>core SQL via JDBC"]
     SQLServerCore["sqlserver<br/>core SQL via JDBC"]
@@ -109,12 +110,15 @@ flowchart LR
 
   Registry --> MySQLCore
   Registry --> PGCore
+  Registry --> XTDBBasic
   Registry --> SQLiteCore
   Registry --> OracleCore
   Registry --> SQLServerCore
   Registry --> GenericJDBC
   Registry --> MongoBackend
   Registry --> RedisBackend
+
+  XTDBBasic -.->|PostgreSQL adapter| PGCore
 
   MongoBackend --> MongoNative
   MongoBackend --> MongoSQL
@@ -125,7 +129,7 @@ flowchart LR
   RedisNative --> RedisExt["redis.el native RESP client"]
 ```
 
-`mongodb` is one backend. Ordinary MongoDB uses the native document surface. MongoDB SQL Interface is a `:surface sql-interface` path on the same backend. It is not a second public backend, driver, feature, or manual chooser entry. `redis` is a separate key/value backend with a native command surface. It is not a document backend and should not reuse MongoDB collection/document actions. SQL-only result and staged-mutation actions are gated by the registered relational data model or by an explicit SQL Interface surface; native document and key/value surfaces keep only backend-neutral grid actions unless their adapter exposes a dedicated capability. DuckDB currently has a JDBC driver source and URL/runtime helpers, but no registered backend symbol; use it through the generic `jdbc` path.
+`mongodb` is one backend. Ordinary MongoDB uses the native document surface. MongoDB SQL Interface is a `:surface sql-interface` path on the same backend. It is not a second public backend, driver, feature, or manual chooser entry. `redis` is a separate key/value backend with a native command surface. It is not a document backend and should not reuse MongoDB collection/document actions. SQL-only result and staged-mutation actions are gated by the registered relational data model or by an explicit SQL Interface surface; native document and key/value surfaces keep only backend-neutral grid actions unless their adapter exposes a dedicated capability. DuckDB currently has a JDBC driver source and URL/runtime helpers, but no registered backend symbol; use it through the generic `jdbc` path. `xtdb` is a backend of its own for XTDB 2, which speaks the PostgreSQL protocol: it reuses the PostgreSQL adapter, whose connection subtype overrides it where XTDB differs (postmortem 208).
 
 ## Connection Flow
 
@@ -178,10 +182,15 @@ sequenceDiagram
 
   Buffer->>Query: Execute statement, region, or buffer
   Query->>Query: Find statement bounds and execution context
-  Query->>Backend: clutch-db-query
+  Query->>Backend: clutch-db-query-async, through clutch--run-db-query-async
   Backend->>Adapter: Dispatch by connection/backend type
-  Adapter-->>Backend: clutch-db-result
-  Backend-->>Query: Rows, columns, and result context
+  alt Adapter runs SQL without blocking (MySQL, PostgreSQL, JDBC)
+    Adapter-->>Query: Started, and the statement shows as running
+    Adapter-->>Query: clutch-db-result or error, from an idle timer
+  else Adapter cannot (SQLite, MongoDB, Redis)
+    Query->>Backend: clutch-db-query, blocking Emacs
+    Adapter-->>Query: clutch-db-result or error
+  end
   Query->>Result: Install result state
   Result->>UI: Render shared grid, header, and footer
   opt Result-grid action needs backend support
@@ -214,7 +223,7 @@ sequenceDiagram
   end
 ```
 
-The result grid is shared across SQL, document, and key/value query results. Query buffers differ by language helper and statement-boundary rules, but query execution always converges in `clutch-query.el` before calling the generic backend API. Object browsing is intentionally separate: `clutch-object.el` asks the adapter for metadata, definitions, native actions, or browse command text. Browse command text is opened in the matching query-buffer mode instead of pretending that every backend has SQL tables. Result-buffer actions use a single action registry owned by `clutch-result.el`, so SQL rewrite/edit/export stays on SQL surfaces while native document/key/value surfaces expose only adapter-supported operations.
+The result grid is shared across SQL, document, and key/value query results. Query buffers differ by language helper and statement-boundary rules, but query execution always converges in `clutch-query.el` before calling the generic backend API. A statement starts through `clutch-db-query-async`: an adapter that can run SQL without blocking, as the MySQL, PostgreSQL and JDBC ones do, returns at once and delivers the result from an idle timer, while the connection refuses other foreground work; the others decline, and the statement runs through `clutch-db-query`, blocking Emacs until it ends. Object browsing is intentionally separate: `clutch-object.el` asks the adapter for metadata, definitions, native actions, or browse command text. Browse command text is opened in the matching query-buffer mode instead of pretending that every backend has SQL tables. Result-buffer actions use a single action registry owned by `clutch-result.el`, so SQL rewrite/edit/export stays on SQL surfaces while native document/key/value surfaces expose only adapter-supported operations.
 
 ## JDBC Runtime Shape
 
@@ -225,6 +234,7 @@ flowchart LR
   Agent["clutch-jdbc-agent.jar"]
   Primary["Primary JDBC session<br/>foreground SQL, transactions, DDL"]
   Metadata["Metadata JDBC session<br/>schema/object introspection"]
+  Bulk["Bulk JDBC session<br/>Oracle only, opened on first use<br/>schema-wide listings"]
   Driver["JDBC driver jar"]
   DB["Database endpoint"]
 
@@ -232,9 +242,11 @@ flowchart LR
   JDBCAdapter --> Agent
   Agent --> Primary
   Agent --> Metadata
+  Agent -.-> Bulk
   Primary --> Driver
   Metadata --> Driver
+  Bulk -.-> Driver
   Driver --> DB
 ```
 
-JDBC uses a JVM sidecar because those databases are exposed through JDBC drivers, not through pure Elisp protocol packages. The sidecar keeps foreground queries separate from metadata refresh where the driver/database benefits from separate sessions.
+JDBC uses a JVM sidecar because those databases are exposed through JDBC drivers, not through pure Elisp protocol packages. The sidecar keeps foreground queries separate from metadata refresh where the driver/database benefits from separate sessions. On Oracle it opens a third, bulk session on first use for schema-wide listings, so a listing that takes seconds on a large schema does not hold the metadata session that a lookup before a query waits on; `docs/jdbc-agent-protocol.md` describes the sessions.
