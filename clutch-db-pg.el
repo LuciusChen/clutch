@@ -23,7 +23,8 @@
 
 ;; PostgreSQL backend for the clutch generic database interface.  A small
 ;; adapter-owned wrapper keeps Clutch state separate from pgsql.el's opaque
-;; protocol connection.
+;; protocol connection.  The xtdb backend reuses this adapter for XTDB 2,
+;; which speaks the same protocol.
 
 ;;; Code:
 
@@ -176,6 +177,14 @@
                 column)))
           pg-columns))
 
+(cl-defgeneric clutch-db-pg--result-columns (conn pg-columns)
+  "Return `clutch-db' column plists for PG-COLUMNS of a result on CONN.")
+
+(cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--connection)
+                                           pg-columns)
+  "Convert PG-COLUMNS of a result on a PostgreSQL connection."
+  (clutch-db-pg--convert-columns pg-columns))
+
 (defun clutch-db-pg--normalize-date-value (value)
   "Normalize PostgreSQL DATE VALUE to clutch's date plist representation."
   (if (string-match "\\`\\([0-9]+\\)-\\([0-9][0-9]\\)-\\([0-9][0-9]\\)\\'" value)
@@ -264,7 +273,7 @@
 (defun clutch-db-pg--wrap-result (conn pg-result)
   "Convert PG-RESULT from CONN to a `clutch-db-result'."
   (let* ((raw-cols (pgsql-result-columns pg-result))
-         (cols (when raw-cols (clutch-db-pg--convert-columns raw-cols)))
+         (cols (when raw-cols (clutch-db-pg--result-columns conn raw-cols)))
          (rows (if cols
                    (mapcar (lambda (row)
                              (clutch-db-pg--normalize-row row cols))
@@ -334,11 +343,13 @@
 
 ;;;; Connect function
 
-(defun clutch-db-pg-connect (params)
+(defun clutch-db-pg-connect (params &optional make-connection)
   "Connect to PostgreSQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
 :sslmode, :schema, :connect-timeout, :read-idle-timeout, :query-timeout.
-`:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name."
+`:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name.
+MAKE-CONNECTION, when non-nil, builds the connection from its :client, for a
+backend such as XTDB that speaks the PostgreSQL protocol."
   (clutch-db-pg--ensure-client-api)
   (setq params (clutch-db-pg--apply-timeout-defaults
                 (clutch-db-pg--normalize-connect-params
@@ -362,7 +373,9 @@ PARAMS keys: :host, :port, :user, :password, :database, :tls,
                  :connect-timeout connect-timeout
                  :read-timeout read-idle-timeout
                  :application-name "clutch")
-                conn (clutch-db-pg--make-connection :client client))
+                conn (funcall (or make-connection
+                                  #'clutch-db-pg--make-connection)
+                              :client client))
           (when query-timeout
             (clutch-db-pg--exec
              conn (format "SET statement_timeout = %d" (* query-timeout 1000))))
@@ -1195,6 +1208,169 @@ ORDER BY c.ordinal_position"
 (cl-defmethod clutch-db-database ((conn clutch-db-pg--connection))
   "Return the database for PostgreSQL CONN."
   (pgsql-database (clutch-db-pg--connection-client conn)))
+
+;;;; XTDB
+
+;; XTDB 2 speaks the PostgreSQL wire protocol, so the xtdb backend is this
+;; adapter with the methods below overridden where XTDB differs: its
+;; catalog has no comment functions and no array casts, every table is
+;; keyed by _id, it reports its own column types, and json for a result
+;; column that PostgreSQL has no type for, it needs typed DML parameters,
+;; it reports no affected-row counts, it has no savepoints, and it has no
+;; objects but tables and no schema to switch to.
+
+(cl-defstruct (clutch-db-pg--xtdb-connection
+               (:include clutch-db-pg--connection)
+               (:constructor clutch-db-pg--make-xtdb-connection)
+               (:copier nil))
+  "Clutch-owned state for one XTDB connection over pgsql.el.")
+
+(defun clutch-db-pg-xtdb-connect (params)
+  "Connect to XTDB using PARAMS, which take the PostgreSQL keys.
+XTDB cannot switch its current schema, so PARAMS may not set :schema."
+  (when (plist-get params :schema)
+    (user-error "XTDB cannot switch its current schema; remove :schema"))
+  (clutch-db-pg-connect params #'clutch-db-pg--make-xtdb-connection))
+
+(cl-defmethod clutch-db-backend-key ((_conn clutch-db-pg--xtdb-connection))
+  "Return the registered backend key for XTDB connections."
+  'xtdb)
+
+(defconst clutch-db-pg--xtdb-types
+  '((:utf8 "text" "text")
+    (:i64 "bigint" "int8")
+    (:i32 "integer" "int4")
+    (:i16 "smallint" "int2")
+    (:f64 "double precision" "float8")
+    (:f32 "real" "float4")
+    (:bool "boolean" "bool")
+    (:decimal "numeric" "numeric")
+    (:date "date" "date")
+    (:instant "timestamp with time zone" "timestamptz")
+    (:timestamp-tz "timestamp with time zone" "timestamptz")
+    (:timestamp-local "timestamp without time zone" "timestamp")
+    (:time-local "time without time zone" "time")
+    (:uuid "uuid" "uuid")
+    (:varbinary "bytea" "bytea"))
+  "XTDB base types with their PostgreSQL type and parameter type names.
+XTDB stores a parameter with the type it is sent as, so a column keeps its
+own type only when each parameter names the matching one.")
+
+(defconst clutch-db-pg--xtdb-system-columns
+  '("_system_from" "_system_to" "_valid_from" "_valid_to")
+  "Columns that XTDB maintains for every row.
+No UPDATE may set them, though an INSERT may set _valid_from and _valid_to.")
+
+(defun clutch-db-pg--xtdb-base-types (type)
+  "Return the base type keywords of XTDB TYPE, as read from its printed form.
+A nullable type such as [:? :date :day] has the type after `:?', and a
+union has the base types of each member."
+  (cond
+   ((keywordp type) (list type))
+   ((and (vectorp type) (> (length type) 0))
+    (pcase (aref type 0)
+      (:? (and (> (length type) 1)
+               (clutch-db-pg--xtdb-base-types (aref type 1))))
+      (:union (mapcan #'clutch-db-pg--xtdb-base-types (cdr (append type nil))))
+      (head (list head))))))
+
+(defun clutch-db-pg--xtdb-pg-type (xtdb-type)
+  "Return (DATA-TYPE PARAMETER-TYPE) for the printed XTDB-TYPE, or nil.
+A union maps only when all of its members map to the same type."
+  (let* ((type (condition-case nil (car (read-from-string xtdb-type))
+                 (error nil)))
+         (mapped (delete-dups
+                  (mapcar (lambda (base)
+                            (cdr (assq base clutch-db-pg--xtdb-types)))
+                          (clutch-db-pg--xtdb-base-types type)))))
+    (and mapped (null (cdr mapped)) (car mapped))))
+
+(cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--xtdb-connection)
+                                           _pg-columns)
+  "Return result columns, dropping the type of XTDB's json columns.
+XTDB reports a column as json when PostgreSQL has no type for it, such as
+a time or a union, and stores a json parameter as the value it decodes to.
+A staged value for such a column takes its type from the column details
+instead, or has none and is refused."
+  (mapcar (lambda (column)
+            (if (equal (plist-get column :backend-type) "json")
+                (list :name (plist-get column :name))
+              column))
+          (cl-call-next-method)))
+
+(cl-defmethod clutch-db-primary-key-columns ((_conn clutch-db-pg--xtdb-connection)
+                                            _table)
+  "Return _id, the key of every XTDB table."
+  (list "_id"))
+
+(cl-defmethod clutch-db-column-details ((conn clutch-db-pg--xtdb-connection) table)
+  "Return detailed column info for TABLE on XTDB CONN.
+Column types map to the PostgreSQL types that XTDB parameters take, so a
+staged value is sent with its column's type; a type that does not map keeps
+its XTDB name and no parameter type, which XTDB then refuses.  A row may
+omit any column but _id, so every other column is nullable."
+  (clutch-db--translate-library-error pgsql-error
+    (let ((result (clutch-db-pg--exec
+                   conn
+                   (format "SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = %s AND table_schema = current_schema()
+ORDER BY ordinal_position"
+                           (pgsql-escape-literal table)))))
+      (mapcar
+       (lambda (row)
+         (pcase-let* ((`(,name ,xtdb-type) row)
+                      (`(,data-type ,parameter-type)
+                       (clutch-db-pg--xtdb-pg-type xtdb-type)))
+           (clutch-db-pg--column-details-row
+            (list name (or data-type xtdb-type) parameter-type
+                  (if (equal name "_id") "NO" "YES")
+                  nil nil nil nil
+                  (and (member name clutch-db-pg--xtdb-system-columns) "YES")
+                  nil)
+            '("_id") nil)))
+       (clutch-db-pg--metadata-rows result)))))
+
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-db-pg--xtdb-connection))
+  "Return table entry plists for the current XTDB schema on CONN.
+XTDB has no table comments."
+  (let ((schema (clutch-db-current-schema conn)))
+    (mapcar (lambda (name)
+              (list :name name :type "TABLE"
+                    :schema schema :source-schema schema))
+            (clutch-db-list-tables conn))))
+
+(cl-defmethod clutch-db-table-comment ((_conn clutch-db-pg--xtdb-connection) _table
+                                       &optional _schema)
+  "Return nil, since XTDB has no table comments."
+  nil)
+
+(cl-defmethod clutch-db-list-objects ((_conn clutch-db-pg--xtdb-connection) _category)
+  "Return nil, since XTDB has no indexes, sequences, routines or triggers."
+  nil)
+
+(cl-defmethod clutch-db-list-schemas ((_conn clutch-db-pg--xtdb-connection))
+  "Return nil, since XTDB cannot switch its current schema."
+  nil)
+
+(cl-defmethod clutch-db-execute-params ((_conn clutch-db-pg--xtdb-connection)
+                                        _sql _params)
+  "Execute parameterized SQL, leaving its affected-row count unknown.
+XTDB reports zero rows for every INSERT, UPDATE and DELETE, so a staged
+UPDATE or DELETE cannot be checked against its one row."
+  (let ((result (cl-call-next-method)))
+    (setf (clutch-db-result-affected-rows result) nil)
+    result))
+
+(cl-defmethod clutch-db-call-with-atomic-batch
+    ((conn clutch-db-pg--xtdb-connection) _function)
+  "Run a staged batch in a transaction on XTDB CONN.
+Manual mode would run it inside the user's transaction through a
+savepoint, which XTDB lacks, so it is refused there."
+  (when (clutch-db-manual-commit-p conn)
+    (user-error
+     "XTDB has no savepoints; switch to Auto mode to submit staged changes"))
+  (cl-call-next-method))
 
 (provide 'clutch-db-pg)
 ;;; clutch-db-pg.el ends here

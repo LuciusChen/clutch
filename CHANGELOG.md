@@ -2,6 +2,10 @@
 
 ## 0.5.4 - Unreleased
 
+### Added
+
+- An `xtdb` backend connects to XTDB 2 over the PostgreSQL protocol through `pgsql.el`. Query results can be edited: `_id` identifies each row, and staged values are sent with the PostgreSQL type of their column, mapped from XTDB's own types, since XTDB refuses untyped DML parameters and keeps a value in the type it was sent as; a column that XTDB reports as `json` in a result, such as a `time`, takes its type from the column too. Staged changes are submitted in Auto mode, because XTDB has no savepoints, and without a row-count check, because XTDB reports zero affected rows for any DML. Clutch's PostgreSQL catalog queries that XTDB lacks, for comments, keys and objects other than tables, are not sent, and neither switching schemas nor `:schema` is available, since XTDB keeps its current schema at `public`. Columns of several types are changed with SQL.
+
 ### Fixed
 
 - A PostgreSQL `timestamptz` edited in a result, entered in the insert form or copied as an `INSERT` keeps the time Clutch shows. Clutch shows a `timestamptz` in Emacs's local time without an offset and sent it without one, so PostgreSQL read it in the session time zone: where that differed from Emacs's, as with a server in UTC, the stored time moved by the difference, and a `timestamptz` key matched no row. Such a value is now sent, and previewed, with the offset of Emacs's time zone at that time.

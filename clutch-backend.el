@@ -2192,6 +2192,14 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
                :data-model relational
                :update-default t
                :sql-product postgres))
+    (xtdb   . (:require clutch-db-pg
+               :connect-fn clutch-db-pg-xtdb-connect
+               :display-name "XTDB"
+               :default-port 5432
+               :support-level basic
+               :data-model relational
+               :update-default t
+               :sql-product postgres))
     (sqlite . (:require clutch-db-sqlite
                :connect-fn clutch-db-sqlite-connect
                :display-name "SQLite"
