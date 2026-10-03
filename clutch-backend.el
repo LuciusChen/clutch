@@ -1257,14 +1257,13 @@ change table.  XTDB's ERASE removes rows with their history."
 That is a temporal clause, as in FOR SYSTEM_TIME ALL of SQL:2011, SQL
 Server, MariaDB, DB2 and XTDB, or Oracle's AS OF TIMESTAMP, anywhere in
 SQL, or XTDB's SETTING before a query.  A row of such a result may be a
-past version, which an edit by key would not reach."
+past version, which an edit by key would not reach.  Comments between the
+clause's keywords count as blanks, and literals do not count."
   (or (clutch-db-sql-starts-with-keyword-p sql '("SETTING"))
-      (let ((positions (clutch-db-sql-code-match-positions
-                        sql 0 nil clutch-db-sql--table-history-regexp)))
-        (unless (zerop (hash-table-count positions))
-          (clutch-db-sql-scan-code
-           sql 0 nil (lambda (pos _char _depth) (gethash pos positions))
-           nil positions)))))
+      (let ((case-fold-search t))
+        (with-syntax-table clutch-db-sql--syntax-table
+          (string-match-p clutch-db-sql--table-history-regexp
+                          (clutch-db-sql-mask-literal-or-comment sql))))))
 
 (defun clutch-db-sql-schema-affecting-p (sql)
   "Return non-nil if SQL is likely to invalidate cached schema."
