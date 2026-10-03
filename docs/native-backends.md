@@ -196,6 +196,8 @@ Each parameter is a value/type pair. `pgsql-null` is SQL NULL, while Lisp `nil` 
 
 PostgreSQL array text with explicit bounds, such as `[0:2]={1,2,3}`, is sent unchanged, so the server receives the requested lower bound. Result decoding normalizes arrays to Lisp vectors and therefore does not preserve explicit bound metadata; inspect bounds with `array_lower` when they matter instead of relying on an edit round trip through a result cell.
 
+A `timestamptz` is shown in Emacs's local time, without an offset. A `timestamptz` value that Clutch sends or previews without an offset, from a cell edit, the insert form or a key, gains the offset of Emacs's time zone at that time, so the server stores the time shown whatever its session time zone. During the hour that a change from daylight saving time repeats, a time is taken as standard time. Text inside a `timestamptz[]` array is sent as written.
+
 ### Transaction Control in clutch
 
 - PostgreSQL does not expose a session autocommit toggle like MySQL

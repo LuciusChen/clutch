@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4 - Unreleased
+
+### Fixed
+
+- A PostgreSQL `timestamptz` edited in a result, entered in the insert form or copied as an `INSERT` keeps the time Clutch shows. Clutch shows a `timestamptz` in Emacs's local time without an offset and sent it without one, so PostgreSQL read it in the session time zone: where that differed from Emacs's, as with a server in UTC, the stored time moved by the difference, and a `timestamptz` key matched no row. Such a value is now sent, and previewed, with the offset of Emacs's time zone at that time.
+
 ## 0.5.3 - 2026-10-02
 
 ### Added
