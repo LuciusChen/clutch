@@ -459,6 +459,24 @@ value prepared for pgsql.el.  Signal `user-error' when TRIMMED is neither."
     (user-error "PostgreSQL array value for %s must be a sequence, JSON array, or curly-brace array literal"
                 type))))
 
+(defconst clutch-db-pg--datetime-without-offset-regexp
+  (concat "\\`[0-9]\\{4\\}-[0-9][0-9]-[0-9][0-9][ T]"
+          "[0-9][0-9]:[0-9][0-9]\\(?::[0-9][0-9]\\(?:\\.[0-9]+\\)?\\)?\\'")
+  "Regexp matching a date and a time with no UTC offset.")
+
+(defun clutch-db-pg--timestamptz-text (value)
+  "Return timestamptz VALUE as text with its UTC offset, or nil.
+VALUE is a temporal plist from a result or text typed for one.  Clutch
+shows a timestamptz in Emacs's local time without an offset, and
+PostgreSQL reads text without one in the session time zone, which may
+differ, so such text gains the offset of Emacs's time zone at that time."
+  (when-let* ((text (or (clutch-db-format-temporal value)
+                        (and (stringp value) value))))
+    (if (string-match-p clutch-db-pg--datetime-without-offset-regexp text)
+        (concat text
+                (format-time-string "%:z" (encode-time (parse-time-string text))))
+      text)))
+
 (defun clutch-db-pg--typed-argument (param)
   "Return PARAM as one pgsql.el typed argument."
   (let* ((value (clutch-db-param-value param))
@@ -469,6 +487,8 @@ value prepared for pgsql.el.  Signal `user-error' when TRIMMED is neither."
     (cons (cond
            ((null value) pgsql-null)
            ((eq value :false) nil)
+           ((equal type "timestamptz")
+            (or (clutch-db-pg--timestamptz-text value) value))
            (temporal temporal)
            (array-type-p
             (if (stringp value)
@@ -752,6 +772,10 @@ Decline when the installed pgsql.el cannot execute asynchronously."
     (clutch-db-escape-literal
      conn
      (clutch-db-pg--array-literal-string value type)))
+   ((equal type "timestamptz")
+    (if-let* ((text (clutch-db-pg--timestamptz-text value)))
+        (clutch-db-escape-literal conn text)
+      (clutch-db--basic-value-to-literal conn value fallback-format-fn)))
    (t
     (clutch-db--basic-value-to-literal conn value fallback-format-fn))))
 
