@@ -973,35 +973,49 @@ the parameter list."
        param-values
        param-types))))
 
-(defun clutch-result--build-update-stmt (table identity-vec edits row-identity)
+(defun clutch-result--update-source-columns (table col-indices op)
+  "Return the source columns of TABLE to update for COL-INDICES.
+Each element is (CIDX NAME . BACKEND-TYPE), with NAME as TABLE spells it.
+Signal a `user-error' for OP when a column is not a writable source column."
+  (let ((details (or (clutch--ensure-column-details clutch-connection table t)
+                     (user-error "Cannot %s: source column metadata is unavailable"
+                                 op)))
+        columns invalid)
+    (dolist (cidx col-indices)
+      (let ((detail (clutch-result--writable-source-detail table cidx op details)))
+        (if (and detail (not (plist-get detail :generated)))
+            (let ((name (plist-get detail :name)))
+              (push (cons cidx (cons name (clutch-result--column-backend-type
+                                           table name cidx)))
+                    columns))
+          (push (nth cidx clutch--result-columns) invalid))))
+    (when invalid
+      (user-error "Cannot %s: selected columns are not writable source columns: %s"
+                  op (string-join (nreverse invalid) ", ")))
+    (nreverse columns)))
+
+(defun clutch-result--build-update-stmt
+    (table identity-vec edits row-identity columns)
   "Build an UPDATE statement spec for TABLE.
 IDENTITY-VEC is the row identity vector, EDITS is a list of
-\(cidx . value), and ROW-IDENTITY describes the WHERE predicate."
+\(cidx . value), and ROW-IDENTITY describes the WHERE predicate.
+COLUMNS, from `clutch-result--update-source-columns', gives the source
+column of each cidx."
   (let ((conn clutch-connection))
     (let ((set-parts nil)
           (set-params nil)
           (where-spec (clutch--row-identity-where-parts
                        conn row-identity identity-vec)))
       (dolist (edit edits)
-        (let* ((cidx (car edit))
-               (op "build UPDATE")
-               (detail
-                (or (clutch-result--writable-source-detail table cidx op)
-                    (user-error
-                     "Cannot %s: source column %s is missing from table metadata"
-                     op (clutch-result--writable-source-column cidx op))))
-               (col-name (plist-get detail :name))
-               (value (cdr edit))
-               (escaped-column
-                (clutch-db-escape-identifier conn col-name)))
-          (when (plist-get detail :generated)
-            (user-error "Cannot %s: source column %s is generated"
-                        op col-name))
+        (pcase-let* ((`(,col-name . ,type) (alist-get (car edit) columns))
+                     (value (cdr edit))
+                     (escaped-column
+                      (clutch-db-escape-identifier conn col-name)))
           (if (eq value clutch--cell-default-placeholder)
               (push (format "%s = DEFAULT" escaped-column) set-parts)
             (push (format "%s = ?" escaped-column) set-parts)
-            (push (clutch-result--typed-param-for-column
-                   table col-name value cidx)
+            (push (clutch-db-typed-param
+                   (clutch-db-require-complete-value value) type)
                   set-params))))
       (cons (format "UPDATE %s SET %s WHERE %s"
                     (or (plist-get row-identity :source-token)
@@ -1014,6 +1028,9 @@ IDENTITY-VEC is the row identity vector, EDITS is a list of
   "Build UPDATE statement specs from staged edits."
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
          (row-identity (clutch-result--row-identity-or-user-error table "Build UPDATE"))
+         (columns (clutch-result--update-source-columns
+                   table (delete-dups (mapcar #'cdar clutch--pending-edits))
+                   "build UPDATE"))
          (by-identity (make-hash-table :test 'equal))
          statements)
     (pcase-dolist (`((,identity-vec . ,cidx) . ,val) clutch--pending-edits)
@@ -1021,7 +1038,7 @@ IDENTITY-VEC is the row identity vector, EDITS is a list of
     (maphash
      (lambda (identity-vec edits)
        (push (clutch-result--build-update-stmt
-              table identity-vec edits row-identity)
+              table identity-vec edits row-identity columns)
              statements))
      by-identity)
     statements))
