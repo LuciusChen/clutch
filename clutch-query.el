@@ -837,7 +837,9 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer.
 A query that starts with a WITH clause reads its table as
 `clutch--row-identity-cte-chain' finds it, and :cte is then non-nil.  When
 that finds none, the query has no table, so a CTE's name is never looked up
-as one."
+as one.  A query of its table as of another time, as found by
+`clutch-db-sql-reads-table-history-p', gets no candidate, since an edit by
+key would change the current row instead of the one shown."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
          (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
@@ -859,7 +861,7 @@ as one."
     (cond
      (candidate
       (setq candidates (list candidate)))
-     (table
+     ((and table (not (clutch-db-sql-reads-table-history-p analysis-sql)))
       (let* ((start (float-time))
              (cached (clutch--cached-row-identity
                       conn table source-schema source-catalog)))

@@ -1244,6 +1244,27 @@ change table."
                  (equal (clutch-db-sql-main-op-keyword statement) "DELETE"))
                (clutch-db-sql-embedded-statements sql))))
 
+(defconst clutch-db-sql--table-history-regexp
+  (concat "\\bFOR[ \t\n\r\f]+\\(?:ALL[ \t\n\r\f]+\\)?"
+          "\\(?:SYSTEM_TIME\\|VALID_TIME\\|BUSINESS_TIME\\|APPLICATION_TIME\\)\\b"
+          "\\|\\bAS[ \t\n\r\f]+OF[ \t\n\r\f]+\\(?:TIMESTAMP\\|SCN\\)\\b"
+          "\\|\\bVERSIONS[ \t\n\r\f]+BETWEEN\\b")
+  "Regexp matching a clause that reads a table as of another time.")
+
+(defun clutch-db-sql-reads-table-history-p (sql)
+  "Return non-nil when SQL is a query of a table as of another time.
+That is a temporal clause, as in FOR SYSTEM_TIME ALL of SQL:2011, SQL
+Server, MariaDB, DB2 and XTDB, or Oracle's AS OF TIMESTAMP, anywhere in
+SQL, or XTDB's SETTING before a query.  A row of such a result may be a
+past version, which an edit by key would not reach."
+  (or (clutch-db-sql-starts-with-keyword-p sql '("SETTING"))
+      (let ((positions (clutch-db-sql-code-match-positions
+                        sql 0 nil clutch-db-sql--table-history-regexp)))
+        (unless (zerop (hash-table-count positions))
+          (clutch-db-sql-scan-code
+           sql 0 nil (lambda (pos _char _depth) (gethash pos positions))
+           nil positions)))))
+
 (defun clutch-db-sql-schema-affecting-p (sql)
   "Return non-nil if SQL is likely to invalidate cached schema."
   (clutch-db-sql-starts-with-keyword-p

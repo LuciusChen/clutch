@@ -9,6 +9,7 @@
 ### Fixed
 
 - A PostgreSQL `timestamptz` edited in a result, entered in the insert form or copied as an `INSERT` keeps the time Clutch shows. Clutch shows a `timestamptz` in Emacs's local time without an offset and sent it without one, so PostgreSQL read it in the session time zone: where that differed from Emacs's, as with a server in UTC, the stored time moved by the difference, and a `timestamptz` key matched no row. Such a value is now sent, and previewed, with the offset of Emacs's time zone at that time.
+- A query that reads a table as of another time gives a read-only result. Such a query has a temporal clause, as in `FOR SYSTEM_TIME ALL` on SQL Server, MariaDB, DB2 and XTDB, or Oracle's `AS OF TIMESTAMP` or `VERSIONS BETWEEN`, or starts with XTDB's `SETTING`. Its rows may be past versions, and an edit or deletion by key changed the current row instead.
 
 ## 0.5.3 - 2026-10-02
 
