@@ -163,8 +163,12 @@
   (or (alist-get oid clutch-db-pg--type-category-alist)
       'text))
 
-(defun clutch-db-pg--convert-columns (pg-columns)
-  "Convert PG-COLUMNS to `clutch-db' column plists."
+(cl-defgeneric clutch-db-pg--result-columns (conn pg-columns)
+  "Return `clutch-db' column plists for PG-COLUMNS of a result on CONN.")
+
+(cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--connection)
+                                           pg-columns)
+  "Convert PG-COLUMNS of a result on a PostgreSQL connection."
   (mapcar (lambda (col)
             (let* ((name (pgsql-column-name col))
                    (type-oid (pgsql-column-type-oid col))
@@ -176,14 +180,6 @@
                   (plist-put column :backend-type type-name)
                 column)))
           pg-columns))
-
-(cl-defgeneric clutch-db-pg--result-columns (conn pg-columns)
-  "Return `clutch-db' column plists for PG-COLUMNS of a result on CONN.")
-
-(cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--connection)
-                                           pg-columns)
-  "Convert PG-COLUMNS of a result on a PostgreSQL connection."
-  (clutch-db-pg--convert-columns pg-columns))
 
 (defun clutch-db-pg--normalize-date-value (value)
   "Normalize PostgreSQL DATE VALUE to clutch's date plist representation."
