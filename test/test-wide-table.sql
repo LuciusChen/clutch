@@ -1,4 +1,5 @@
--- Test wide table for column paging
+-- MySQL sample tables with many columns, for trying result display by hand.
+-- No test loads this file.
 DROP TABLE IF EXISTS order_items;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
