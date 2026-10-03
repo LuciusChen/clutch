@@ -215,6 +215,25 @@ A `timestamptz` is shown in Emacs's local time, without an offset. A `timestampt
 - In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled query keeps the same session usable for the next SQL.
 - Native SQLite does not currently provide the same recoverable interrupt path; clutch falls back to disconnect/reconnect semantics there.
 
+## XTDB (`:backend xtdb`, `pgsql.el`)
+
+XTDB 2 speaks the PostgreSQL wire protocol, so this backend connects through `pgsql.el` with the PostgreSQL connection keys and reuses the PostgreSQL adapter.  It differs where XTDB does:
+
+- Every table is keyed by `_id`, which is the row identity for edits and deletes.  `_id` names a row's current version, so a query of past versions, with `FOR SYSTEM_TIME`, `FOR VALID_TIME` or `SETTING`, is read-only.
+- Column types come from `information_schema.columns`, where XTDB reports its own names such as `:utf8`, `:i64` or `[:? :date :day]`.  Clutch maps them to the PostgreSQL types that XTDB parameters accept and sends each staged value with its column's type, because XTDB requires typed parameters in DML and stores a value with the type it is sent as.  XTDB reports a result column as `json` when PostgreSQL has no type for it, as for a `time` or a union, so Clutch takes the type of such a column from these details.  A column whose type maps to no single PostgreSQL type, such as a union of an integer and a string or a list, has no parameter type, and XTDB refuses a staged value for it; change such a column with SQL.
+- XTDB refuses a `timestamptz` value without a UTC offset.  Clutch sends the offset of Emacs's time zone, as on PostgreSQL, and XTDB keeps a value's offset as part of its type, so a column whose values have another offset, such as `Z`, then holds both offsets; the times are unchanged, and the column still reads and edits as `timestamptz`.
+- `_system_from`, `_system_to`, `_valid_from` and `_valid_to` are generated, since XTDB refuses to update them, and any column but `_id` may be left out of an inserted row.  An `INSERT` may set `_valid_from` and `_valid_to`, as the insert form of a result that selects them does.
+- XTDB has no savepoints, so staged changes are submitted in Auto mode; Manual mode refuses them.
+- `ERASE` removes rows with their history.  Clutch asks before running it, as before a `DELETE`, asks again when its `WHERE` is always true, and counts it as an uncommitted change in Manual mode.
+- XTDB reports zero affected rows for every `INSERT`, `UPDATE` and `DELETE`, so Clutch cannot check that a staged `UPDATE` or `DELETE` changed exactly one row, as it does elsewhere.  `_id` is unique, so it matches at most one.
+- XTDB has no table or column comments, and no indexes, sequences, views, routines or triggers, so the object browser lists tables only.
+- XTDB keeps its current schema at `public`, so switching schemas is not available, and a connection that sets `:schema` is refused.
+
+```elisp
+("xt" . (:backend xtdb :host "127.0.0.1" :port 5432
+         :user "xtdb" :database "xtdb"))
+```
+
 ## SQLite
 
 ### Scope

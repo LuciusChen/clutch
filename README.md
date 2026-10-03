@@ -9,7 +9,7 @@
 
 <p align="center"><strong>Query and browse databases—and stage SQL row edits—without leaving Emacs.</strong></p>
 
-Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and other databases.
+Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and other databases.
 
 ![Clutch query console with a result grid and XML value viewer](docs/screenshots/clutch-overview.png)
 
@@ -61,11 +61,12 @@ Clutch stages `UPDATE` and `DELETE` only when it can identify a stable source ro
 |---|---|
 | MySQL native | Non-null unique keys; no physical row-locator fallback |
 | PostgreSQL native | Non-null unique keys, then `ctid` for ordinary heap tables |
+| XTDB native | Not needed: every XTDB table is keyed by `_id` |
 | SQLite native | Non-null unique keys, then `rowid` for tables not declared `WITHOUT ROWID` |
 | Oracle JDBC | Non-null unique keys, then `ROWID` for confirmed base tables |
 | Other JDBC backends | Non-null unique keys only |
 
-Joined, grouped, derived, or otherwise ambiguous result sets remain read-only unless Clutch can identify one source table and a matching row identity. A simple query of CTEs that read one table edits that table: Clutch carries the table's row identity out through each CTE and maps column aliases and CTE column lists back to the table's columns. It stays read-only when a CTE on the way joins, groups, aggregates or combines rows, is recursive, is read more than once, or has the name of a column, as in `WITH name AS (SELECT name FROM people) SELECT * FROM name`, because Clutch counts every use of the name; renaming the CTE makes it editable. A CTE column list over `SELECT *`, as in `WITH c (k, v) AS (SELECT * FROM t)`, keeps rows deletable but no column editable, because only the table knows the order of `*`. Schema-qualified JDBC sources retain their schema for identity lookup and staged mutations; Oracle views and synonyms, including dictionary relations such as `USER_TABLES`, remain read-only and skip unsafe identity probes.
+Joined, grouped, derived, or otherwise ambiguous result sets remain read-only unless Clutch can identify one source table and a matching row identity. A simple query of CTEs that read one table edits that table: Clutch carries the table's row identity out through each CTE and maps column aliases and CTE column lists back to the table's columns. It stays read-only when a CTE on the way joins, groups, aggregates or combines rows, is recursive, is read more than once, or has the name of a column, as in `WITH name AS (SELECT name FROM people) SELECT * FROM name`, because Clutch counts every use of the name; renaming the CTE makes it editable. A CTE column list over `SELECT *`, as in `WITH c (k, v) AS (SELECT * FROM t)`, keeps rows deletable but no column editable, because only the table knows the order of `*`. A query of a table as of another time, with a temporal clause such as `FOR SYSTEM_TIME ALL` or Oracle's `AS OF TIMESTAMP`, stays read-only, because its rows may be past versions while an edit by key changes the current row. Schema-qualified JDBC sources retain their schema for identity lookup and staged mutations; Oracle views and synonyms, including dictionary relations such as `USER_TABLES`, remain read-only and skip unsafe identity probes.
 
 ## Backend Support
 
@@ -73,6 +74,7 @@ Joined, grouped, derived, or otherwise ambiguous result sets remain read-only un
 |---|---|---|
 | MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, MySQL 8.4 LTS, and MariaDB 10.11 |
 | PostgreSQL | Core SQL support | Requires [`pgsql`](https://melpa.org/#/pgsql), available from MELPA |
+| XTDB | Basic SQL support over the PostgreSQL protocol | Requires [`pgsql`](https://melpa.org/#/pgsql); staged changes are submitted in Auto mode, and mixed-type columns are changed with SQL |
 | SQLite | Core SQL support | Uses Emacs 29.1+ built-in `sqlite-*` functions; no external dependency |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |
@@ -90,6 +92,7 @@ The SQLite Quick Start has no optional dependency. For other backends, install o
 |---|---|
 | `:backend mysql` | [mysql.el](https://github.com/LuciusChen/mysql.el) |
 | `:backend pg` | [`pgsql`](https://melpa.org/#/pgsql) |
+| `:backend xtdb` | [`pgsql`](https://melpa.org/#/pgsql) |
 | `:backend mongodb` | [mongodb.el](https://github.com/LuciusChen/mongodb.el) |
 | `:backend redis` | [redis.el](https://github.com/LuciusChen/redis.el) |
 | `:backend sqlite` | None; Emacs 29.1+ provides SQLite |

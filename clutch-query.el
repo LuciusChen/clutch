@@ -837,7 +837,9 @@ CANDIDATE and TABLE reuse row identity already established by a result buffer.
 A query that starts with a WITH clause reads its table as
 `clutch--row-identity-cte-chain' finds it, and :cte is then non-nil.  When
 that finds none, the query has no table, so a CTE's name is never looked up
-as one."
+as one.  A query of its table as of another time, as found by
+`clutch-db-sql-reads-table-history-p', gets no candidate, since an edit by
+key would change the current row instead of the one shown."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
          (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
@@ -859,7 +861,7 @@ as one."
     (cond
      (candidate
       (setq candidates (list candidate)))
-     (table
+     ((and table (not (clutch-db-sql-reads-table-history-p analysis-sql)))
       (let* ((start (float-time))
              (cached (clutch--cached-row-identity
                       conn table source-schema source-catalog)))
@@ -1101,7 +1103,8 @@ its table.  Arbitrary query results are displayed as result sets instead."
 
 (defun clutch--risky-dml-reason (sql)
   "Return why normalized SQL may change every row of its table, or nil."
-  (when (member (clutch-db-sql-main-op-keyword sql) '("UPDATE" "DELETE"))
+  (when (or (member (clutch-db-sql-main-op-keyword sql) '("UPDATE" "DELETE"))
+            (clutch-db-sql-starts-with-keyword-p sql '("ERASE")))
     (if-let* ((where (clutch--risky-dml-where-condition sql)))
         (and (clutch--risky-dml-trivially-true-expression-p where)
              "WHERE is always true")

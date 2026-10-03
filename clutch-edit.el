@@ -865,6 +865,10 @@ Refresh the affected row and footer in place when possible."
                     (clutch--debug-workflow-message
                      (or clutch--row-identity-error-message
                          "unknown error"))))
+      (when (and clutch--last-query
+                 (clutch-db-sql-reads-table-history-p clutch--last-query))
+        (user-error "Cannot %s: the query reads table %s as of another time, so a row may be a past version"
+                    op table))
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
 

@@ -801,19 +801,23 @@ START defaults to 0."
   (car (clutch-db-sql--top-level-clause-match
         sql (or start 0) (list pattern))))
 
+(defconst clutch-db-sql--keyword-gap-regexp
+  (concat "\\(?:"
+          (rx (or (in " \t\r\n")
+                  (seq "/*"
+                       (* (or (not (in "*"))
+                              (seq (+ "*") (not (in "*/")))))
+                       (+ "*") "/")
+                  (seq "--" (* (not (in "\n"))) "\n")))
+          "\\)")
+  "Regexp matching one blank between SQL keywords: a space or a comment.")
+
 (defun clutch-db-sql-has-top-level-row-limit-p (sql)
   "Return non-nil when SQL has a top-level row-limit clause.
 Check TOP's SELECT modifier position and FETCH's FIRST/NEXT count syntax.
 Preserve the established LIMIT and OFFSET checks across dialects.
 Quoted text, comments and nested queries do not contribute clauses."
-  (let* ((gap (concat "\\(?:"
-                      (rx (or (in " \t\r\n")
-                              (seq "/*"
-                                   (* (or (not (in "*"))
-                                          (seq (+ "*") (not (in "*/")))))
-                                   (+ "*") "/")
-                              (seq "--" (* (not (in "\n"))) "\n")))
-                      "\\)"))
+  (let* ((gap clutch-db-sql--keyword-gap-regexp)
          (pattern
           (concat "\\b\\(?:LIMIT\\b\\|OFFSET\\b\\|FETCH" gap "+"
                   "\\(?:FIRST\\|NEXT\\)" gap "+"
@@ -1056,9 +1060,10 @@ FINAL TABLE (INSERT ...)."
   "Return non-nil when SQL modifies table data.
 That is an INSERT, UPDATE, DELETE, MERGE or REPLACE, either as SQL's main
 statement or embedded in it, as PostgreSQL allows in a WITH clause and
-DB2 in a data change table, or a SELECT INTO a table.  MySQL's SELECT
-INTO a file or variables is not."
-  (or (cl-some (lambda (statement)
+DB2 in a data change table, XTDB's ERASE, or a SELECT INTO a table.
+MySQL's SELECT INTO a file or variables is not."
+  (or (clutch-db-sql-starts-with-keyword-p sql '("ERASE"))
+      (cl-some (lambda (statement)
                  (member (clutch-db-sql-main-op-keyword statement)
                          '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
                (cons sql (clutch-db-sql-embedded-statements sql)))
@@ -1235,14 +1240,38 @@ directly or through the CTEs of its WITH clause."
 (defun clutch-db-sql-destructive-p (sql)
   "Return non-nil if SQL is a destructive operation.
 A DELETE counts after a WITH clause, and embedded in a CTE or in a data
-change table."
+change table.  XTDB's ERASE removes rows with their history."
   (or (clutch-db-sql-starts-with-keyword-p
-       sql '("DELETE" "DROP" "TRUNCATE" "ALTER"))
+       sql '("DELETE" "DROP" "TRUNCATE" "ALTER" "ERASE"))
       (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
            (equal (clutch-db-sql-main-op-keyword sql) "DELETE"))
       (cl-some (lambda (statement)
                  (equal (clutch-db-sql-main-op-keyword statement) "DELETE"))
                (clutch-db-sql-embedded-statements sql))))
+
+(defconst clutch-db-sql--table-history-regexp
+  (let ((gap (concat clutch-db-sql--keyword-gap-regexp "+")))
+    (concat "\\bFOR" gap "\\(?:ALL" gap "\\)?"
+            "\\(?:SYSTEM_TIME\\|VALID_TIME\\|BUSINESS_TIME\\|APPLICATION_TIME\\)\\b"
+            "\\|\\bAS" gap "OF" gap "\\(?:TIMESTAMP\\|SCN\\)\\b"
+            "\\|\\bVERSIONS" gap "BETWEEN\\b"))
+  "Regexp matching a clause that reads a table as of another time.")
+
+(defun clutch-db-sql-reads-table-history-p (sql)
+  "Return non-nil when SQL is a query of a table as of another time.
+That is a temporal clause, as in FOR SYSTEM_TIME ALL of SQL:2011, SQL
+Server, MariaDB, DB2 and XTDB, or Oracle's AS OF TIMESTAMP, anywhere in
+SQL, or XTDB's SETTING before a query.  A row of such a result may be a
+past version, which an edit by key would not reach.  The clause must
+start in code, not in a literal, a quoted identifier or a comment, and
+comments between its keywords count as blanks."
+  (or (clutch-db-sql-starts-with-keyword-p sql '("SETTING"))
+      (let ((positions (clutch-db-sql-code-match-positions
+                        sql 0 nil clutch-db-sql--table-history-regexp)))
+        (unless (zerop (hash-table-count positions))
+          (clutch-db-sql-scan-code
+           sql 0 nil (lambda (pos _char _depth) (gethash pos positions))
+           nil positions)))))
 
 (defun clutch-db-sql-schema-affecting-p (sql)
   "Return non-nil if SQL is likely to invalidate cached schema."
@@ -2189,6 +2218,14 @@ E.g., \"MySQL\" or \"PostgreSQL\".")
                :display-name "PostgreSQL"
                :default-port 5432
                :support-level core
+               :data-model relational
+               :update-default t
+               :sql-product postgres))
+    (xtdb   . (:require clutch-db-pg
+               :connect-fn clutch-db-pg-xtdb-connect
+               :display-name "XTDB"
+               :default-port 5432
+               :support-level basic
                :data-model relational
                :update-default t
                :sql-product postgres))
