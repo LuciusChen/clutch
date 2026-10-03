@@ -1056,9 +1056,10 @@ FINAL TABLE (INSERT ...)."
   "Return non-nil when SQL modifies table data.
 That is an INSERT, UPDATE, DELETE, MERGE or REPLACE, either as SQL's main
 statement or embedded in it, as PostgreSQL allows in a WITH clause and
-DB2 in a data change table, or a SELECT INTO a table.  MySQL's SELECT
-INTO a file or variables is not."
-  (or (cl-some (lambda (statement)
+DB2 in a data change table, XTDB's ERASE, or a SELECT INTO a table.
+MySQL's SELECT INTO a file or variables is not."
+  (or (clutch-db-sql-starts-with-keyword-p sql '("ERASE"))
+      (cl-some (lambda (statement)
                  (member (clutch-db-sql-main-op-keyword statement)
                          '("INSERT" "UPDATE" "DELETE" "MERGE" "REPLACE")))
                (cons sql (clutch-db-sql-embedded-statements sql)))
@@ -1235,9 +1236,9 @@ directly or through the CTEs of its WITH clause."
 (defun clutch-db-sql-destructive-p (sql)
   "Return non-nil if SQL is a destructive operation.
 A DELETE counts after a WITH clause, and embedded in a CTE or in a data
-change table."
+change table.  XTDB's ERASE removes rows with their history."
   (or (clutch-db-sql-starts-with-keyword-p
-       sql '("DELETE" "DROP" "TRUNCATE" "ALTER"))
+       sql '("DELETE" "DROP" "TRUNCATE" "ALTER" "ERASE"))
       (and (clutch-db-sql-starts-with-keyword-p sql '("WITH"))
            (equal (clutch-db-sql-main-op-keyword sql) "DELETE"))
       (cl-some (lambda (statement)

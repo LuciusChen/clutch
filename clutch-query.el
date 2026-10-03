@@ -1103,7 +1103,8 @@ its table.  Arbitrary query results are displayed as result sets instead."
 
 (defun clutch--risky-dml-reason (sql)
   "Return why normalized SQL may change every row of its table, or nil."
-  (when (member (clutch-db-sql-main-op-keyword sql) '("UPDATE" "DELETE"))
+  (when (or (member (clutch-db-sql-main-op-keyword sql) '("UPDATE" "DELETE"))
+            (clutch-db-sql-starts-with-keyword-p sql '("ERASE")))
     (if-let* ((where (clutch--risky-dml-where-condition sql)))
         (and (clutch--risky-dml-trivially-true-expression-p where)
              "WHERE is always true")
