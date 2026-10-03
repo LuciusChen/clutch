@@ -94,6 +94,21 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "SELECT * FROM users INTO OUTFILE '/tmp/users.csv'"
                     "SELECT 'FINAL TABLE (DELETE FROM users)' FROM users"
                     "CREATE TABLE t (id int)"))
+                  (reads-table-history
+                   clutch-db-sql-reads-table-history-p
+                   ("SELECT * FROM users FOR SYSTEM_TIME ALL"
+                    "select * from users for valid_time as of date '2020-01-01'"
+                    "SELECT * FROM users FOR ALL VALID_TIME WHERE id = 1"
+                    "SELECT * FROM users FOR BUSINESS_TIME AS OF '2020-01-01'"
+                    "WITH c AS (SELECT * FROM users FOR SYSTEM_TIME ALL) SELECT * FROM c"
+                    "SETTING DEFAULT VALID_TIME TO ALL SELECT * FROM users"
+                    "SELECT * FROM users AS OF TIMESTAMP SYSTIMESTAMP"
+                    "SELECT * FROM users VERSIONS BETWEEN SCN MINVALUE AND MAXVALUE")
+                   ("SELECT * FROM users"
+                    "SELECT * FROM users FOR UPDATE"
+                    "SELECT valid_time FROM users"
+                    "SELECT * FROM users WHERE note = 'FOR SYSTEM_TIME ALL'"
+                    "SELECT * FROM users -- FOR SYSTEM_TIME ALL"))
                   (select
                    clutch-db-sql-select-query-p
                    ("SELECT * FROM users"
