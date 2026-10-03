@@ -33,6 +33,6 @@ Checked by hand against XTDB 2.1.0:
 - `date`, `timestamp` and `time` columns inserted and edited, a time given as `HH:MM:SS` and as `HH:MM`; a JSON string for a time refused by XTDB.
 - `timestamptz` cells edited and inserted in a column of `+08:00` values and in one of `Z` values, each stored as the time shown; `_valid_from` set from the insert form.
 - A value for a union column refused, leaving the row and the column type unchanged.
-- A row of a `FOR SYSTEM_TIME ALL` query, of such a query inside a CTE and of a `SETTING` query refused for editing, leaving the current and past versions unchanged.
+- A row of a `FOR SYSTEM_TIME ALL` query, also with a block or a line comment between its keywords, of such a query inside a CTE and of a `SETTING` query refused for editing, leaving the current and past versions unchanged.
 - An `ERASE` by key asking for confirmation, and one with `WHERE true` asking as a high-risk query; in Manual mode, the transaction marked as changed, and a rollback restoring the row.
 - A submission in Manual mode refused, leaving the row unchanged.

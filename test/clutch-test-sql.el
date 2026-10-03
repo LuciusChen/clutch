@@ -100,6 +100,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                   (reads-table-history
                    clutch-db-sql-reads-table-history-p
                    ("SELECT * FROM users FOR SYSTEM_TIME ALL"
+                    "SELECT * FROM users FOR /* history */ SYSTEM_TIME ALL"
+                    "SELECT * FROM users FOR -- history\nSYSTEM_TIME ALL"
                     "select * from users for valid_time as of date '2020-01-01'"
                     "SELECT * FROM users FOR ALL VALID_TIME WHERE id = 1"
                     "SELECT * FROM users FOR BUSINESS_TIME AS OF '2020-01-01'"

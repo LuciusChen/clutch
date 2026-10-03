@@ -895,6 +895,7 @@ Its rows may be past versions, while an edit by key changes the current one."
              (lambda (_conn table)
                (ert-fail (format "Looked up row identity for %s" table)))))
     (dolist (sql '("SELECT * FROM users FOR SYSTEM_TIME ALL"
+                   "SELECT * FROM users FOR /* history */ SYSTEM_TIME ALL WHERE name = 'OLD'"
                    "SELECT * FROM users FOR VALID_TIME AS OF DATE '2020-01-01' WHERE id = 1"
                    "WITH c AS (SELECT * FROM users FOR SYSTEM_TIME ALL) SELECT * FROM c"
                    "SETTING DEFAULT VALID_TIME TO ALL SELECT * FROM users"))
