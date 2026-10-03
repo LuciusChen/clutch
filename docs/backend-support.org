@@ -8,7 +8,7 @@ Clutch separates database support by the surface it can honestly expose, not onl
 |-------+---------+----------|
 | Core SQL support | SQL-first database where clutch targets the normal query, metadata, result grid, completion, pagination, and staged mutation workflows where the backend can provide row identity and transactions. | MySQL, PostgreSQL, SQLite, Oracle, SQL Server |
 | Core SQL model, generic entry | SQL-first database that fits the core clutch model, but currently enters through generic JDBC configuration instead of a dedicated manual backend prompt. | DuckDB |
-| Basic SQL / query-first support | JDBC-backed SQL or SQL-like database where querying and metadata are supported, while edits, transactions, row identity, or dialect behavior may be partial. | ClickHouse, Snowflake, Redshift, DB2, generic JDBC |
+| Basic SQL / query-first support | SQL or SQL-like database, reached through JDBC or another database's protocol, where querying and metadata are supported, while edits, transactions, row identity, or dialect behavior may be partial. | ClickHouse, Snowflake, Redshift, DB2, generic JDBC, XTDB via =pgsql= |
 | Basic document support | Non-relational backend with a read-oriented grid/metadata mapping, but not the SQL row-editing model. | MongoDB via =mongodb= |
 | Basic key/value support | Command-oriented key/value and data-structure backend with key browsing and type-aware value display, but not SQL row editing, joins, or row identity. | Redis via =redis= |
 | SQL Interface surface | A SQL/JDBC endpoint for a non-relational database. It is useful only when that product actually provides the SQL surface. | MongoDB SQL Interface via =(:backend mongodb :surface sql-interface)= |
