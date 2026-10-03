@@ -224,7 +224,7 @@ XTDB 2 speaks the PostgreSQL wire protocol, so this backend connects through `pg
 - XTDB refuses a `timestamptz` value without a UTC offset.  Clutch sends the offset of Emacs's time zone, as on PostgreSQL, and XTDB keeps a value's offset as part of its type, so a column whose values have another offset, such as `Z`, then holds both offsets; the times are unchanged, and the column still reads and edits as `timestamptz`.
 - `_system_from`, `_system_to`, `_valid_from` and `_valid_to` are generated, since XTDB refuses to update them, and any column but `_id` may be left out of an inserted row.  An `INSERT` may set `_valid_from` and `_valid_to`, as the insert form of a result that selects them does.
 - XTDB has no savepoints, so staged changes are submitted in Auto mode; Manual mode refuses them.
-- `ERASE` removes rows with their history.  Clutch asks before running it, as before a `DELETE`, asks again when its `WHERE` is always true, and counts it as an uncommitted change in Manual mode.
+- `ERASE` removes rows with their history.  Clutch asks once before running it, as before a `DELETE`: with the high-risk confirmation when its `WHERE` is missing or always true, and with the ordinary one otherwise.  It counts as an uncommitted change in Manual mode.
 - XTDB reports zero affected rows for every `INSERT`, `UPDATE` and `DELETE`, so Clutch cannot check that a staged `UPDATE` or `DELETE` changed exactly one row, as it does elsewhere.  `_id` is unique, so it matches at most one.
 - XTDB has no table or column comments, and no indexes, sequences, views, routines or triggers, so the object browser lists tables only.
 - XTDB keeps its current schema at `public`, so switching schemas is not available, and a connection that sets `:schema` is refused.
