@@ -59,7 +59,7 @@ For changes requiring native live coverage:
 ./test/run-ci.sh native-live
 ```
 
-The runner starts or reuses local containers, preferring Podman on Linux and OrbStack-backed Docker on macOS. Its native baseline covers UI PostgreSQL/MySQL and backend PostgreSQL/MySQL/cross-SQL/MongoDB/Redis. Verify that selected fixtures are disposable before allowing writes; do not point the runner at arbitrary user databases.
+The runner starts or reuses local containers, preferring Podman on Linux and OrbStack-backed Docker on macOS. Its native baseline covers UI PostgreSQL/MySQL/XTDB and backend PostgreSQL/MySQL/cross-SQL/MongoDB/Redis. Verify that selected fixtures are disposable before allowing writes; do not point the runner at arbitrary user databases.
 
 JDBC coverage requires explicit artifact selection. Replace the example paths with the intended jar and an isolated runtime containing the required drivers:
 

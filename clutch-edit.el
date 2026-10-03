@@ -43,13 +43,9 @@
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 
-(defun clutch-edit--sql-surface-p ()
-  "Return non-nil when SQL staged mutation is available in this result."
-  (clutch-db-sql-surface-p clutch-connection clutch--connection-params))
-
 (defun clutch-edit--require-sql-staged-mutation (op)
   "Signal unless SQL staged mutation OP is available for this result."
-  (unless (clutch-edit--sql-surface-p)
+  (unless (clutch-db-sql-surface-p clutch-connection clutch--connection-params)
     (user-error
      "%s is SQL-only and is not available for non-SQL results" op)))
 
