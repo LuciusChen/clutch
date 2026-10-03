@@ -71,7 +71,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "-- cleanup\nDROP TABLE users"
                     "WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
                     "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
-                    "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id = 1)")
+                    "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id = 1)"
+                    "ERASE FROM users WHERE id = 1")
                    ("SELECT * FROM users" "UPDATE users SET name='x'"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"))
@@ -85,8 +86,10 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                     "SELECT * INTO users_copy FROM users"
                     "SELECT u.* INTO TEMP recent FROM users u JOIN orders o ON o.uid = u.id"
                     "SELECT * FROM FINAL TABLE (INSERT INTO users (name) VALUES ('Ada'))"
-                    "select id from new table (update users set name = 'x' where id = 1)")
+                    "select id from new table (update users set name = 'x' where id = 1)"
+                    "erase from users where id = 1")
                    ("SELECT * FROM users"
+                    "SELECT erase FROM users"
                     "WITH x AS (SELECT 1) SELECT * FROM x"
                     "WITH x (delete) AS (SELECT 1) SELECT * FROM x"
                     "SELECT 'INTO' FROM users"
@@ -216,7 +219,8 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE 1=1 AND TRUE"
                  "WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
                  "WITH x AS (SELECT 1), u AS (UPDATE users SET name='x' WHERE 1=1 RETURNING id) SELECT * FROM u"
-                 "SELECT * FROM OLD TABLE (DELETE FROM users)"))
+                 "SELECT * FROM OLD TABLE (DELETE FROM users)"
+                 "ERASE FROM users WHERE true"))
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
@@ -226,6 +230,7 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
                  "UPDATE users SET name='x' WHERE 1=1 AND id=5"
                  "UPDATE users SET name='x' WHERE (id=5 OR 1=1) AND status='active'"
                  "UPDATE users SET name='x' WHERE note='1=1'"
+                 "ERASE FROM users WHERE id=1"
                  "DELETE FROM users WHERE status='active'"
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))
