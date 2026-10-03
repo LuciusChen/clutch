@@ -19,6 +19,8 @@ mssql_name="${CLUTCH_TEST_MSSQL_CONTAINER:-clutch-mssql-live}"
 mssql_port="${CLUTCH_TEST_MSSQL_PORT:-51433}"
 clickhouse_name="${CLUTCH_TEST_CLICKHOUSE_CONTAINER:-clutch-clickhouse-live}"
 clickhouse_port="${CLUTCH_TEST_CLICKHOUSE_PORT:-58123}"
+xtdb_name="${CLUTCH_TEST_XTDB_CONTAINER:-clutch-xtdb-live}"
+xtdb_port="${CLUTCH_TEST_XTDB_PORT:-55490}"
 pg_image="${CLUTCH_TEST_PG_IMAGE:-docker.io/library/postgres:16}"
 mysql_image="${CLUTCH_TEST_MYSQL_IMAGE:-docker.io/library/mysql:8.0}"
 mongo_image="${CLUTCH_TEST_MONGO_IMAGE:-docker.io/library/mongo:7}"
@@ -26,6 +28,7 @@ redis_image="${CLUTCH_TEST_REDIS_IMAGE:-docker.io/library/redis:7-alpine}"
 oracle_image="${CLUTCH_TEST_ORACLE_IMAGE:-docker.io/gvenzl/oracle-free:slim-faststart}"
 mssql_image="${CLUTCH_TEST_MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
 clickhouse_image="${CLUTCH_TEST_CLICKHOUSE_IMAGE:-docker.io/clickhouse/clickhouse-server:latest}"
+xtdb_image="${CLUTCH_TEST_XTDB_IMAGE:-ghcr.io/xtdb/xtdb:2.1.0}"
 
 oracle_password="Clutch_test1!"
 mssql_password="Clutch_test1!"
@@ -201,6 +204,19 @@ start_redis() {
   started+=("$redis_name")
 }
 
+start_xtdb() {
+  if container_running_p "$xtdb_name"; then
+    log "Reusing XTDB container $xtdb_name"
+    return
+  fi
+  log "Starting XTDB container $xtdb_name on 127.0.0.1:$xtdb_port"
+  run_container \
+    --name "$xtdb_name" \
+    -p "127.0.0.1:${xtdb_port}:5432" \
+    "$xtdb_image"
+  started+=("$xtdb_name")
+}
+
 start_oracle() {
   if container_running_p "$oracle_name"; then
     log "Reusing Oracle container $oracle_name"
@@ -293,6 +309,19 @@ wait_redis() {
     sleep 0.5
   done
   echo "Redis container did not become ready" >&2
+  return 1
+}
+
+wait_xtdb() {
+  log "Waiting for XTDB readiness"
+  for _ in {1..240}; do
+    if ctr logs "$xtdb_name" 2>&1 | grep -F "Node started" >/dev/null; then
+      log "XTDB ready: $(container_summary "$xtdb_name")"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "XTDB container did not become ready" >&2
   return 1
 }
 
@@ -427,6 +456,14 @@ run_clutch_live_pg() {
     "'(tag :clutch-live)"
 }
 
+run_clutch_live_xtdb() {
+  run_ert_live \
+    "Running UI live tests against XTDB" \
+    clutch-test-live \
+    "(setq clutch-test-backend 'xtdb clutch-test-host \"127.0.0.1\" clutch-test-port ${xtdb_port} clutch-test-user \"xtdb\" clutch-test-password \"xtdb\" clutch-test-database \"xtdb\" clutch-test-url nil clutch-test-display-name nil clutch-test-props nil)" \
+    "'(tag :xtdb-live)"
+}
+
 run_clutch_live_oracle() {
   run_ert_live \
     "Running UI live tests against Oracle JDBC" \
@@ -530,6 +567,7 @@ start_pg
 start_mysql
 start_mongo
 start_redis
+start_xtdb
 if ((jdbc_live_enabled)); then
   start_oracle
   start_mssql
@@ -539,6 +577,7 @@ wait_pg
 wait_mysql
 wait_mongo
 wait_redis
+wait_xtdb
 if ((jdbc_live_enabled)); then
   wait_oracle
   wait_mssql
@@ -550,6 +589,7 @@ fi
 
 run_clutch_live_pg
 run_clutch_live_mysql
+run_clutch_live_xtdb
 if ((jdbc_live_enabled)); then
   run_clutch_live_oracle
   run_clutch_live_mssql
