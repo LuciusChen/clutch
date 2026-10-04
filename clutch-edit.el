@@ -44,10 +44,13 @@
   "List of field alists staged for insertion.")
 
 (defun clutch-edit--require-sql-staged-mutation (op)
-  "Signal unless SQL staged mutation OP is available for this result."
+  "Signal unless SQL staged mutation OP is available for this result.
+It is not while a query runs on the connection, since a page arriving
+then would drop what was staged."
   (unless (clutch-db-sql-surface-p clutch-connection clutch--connection-params)
     (user-error
-     "%s is SQL-only and is not available for non-SQL results" op)))
+     "%s is SQL-only and is not available for non-SQL results" op))
+  (clutch--refuse-while-running clutch-connection))
 
 ;;;; Cell editing (C-c ')
 
@@ -821,6 +824,7 @@ relying on the selected window."
   "Record edit for row RIDX, column CIDX with NEW-VALUE.
 TARGET-ROW is a plist captured when the edit buffer opened.
 Refresh the affected row and footer in place when possible."
+  (clutch--refuse-while-running clutch-connection)
   (let* ((table (clutch--result-source-table-or-user-error "Stage UPDATE"))
          (row-identity (clutch-result--row-identity-or-user-error table "Stage UPDATE"))
          (display-rows (clutch--result-display-rows))
@@ -2373,6 +2377,8 @@ Use \\[clutch-result-submit] in the result buffer to submit."
          (pending-index clutch-result-insert--pending-index))
     (unless fields (user-error "No values entered"))
     (clutch-result-insert--ensure-live-result-context)
+    (with-current-buffer result-buf
+      (clutch--refuse-while-running clutch-connection))
     (when pending-index
       (with-current-buffer result-buf
         (unless (nthcdr pending-index clutch--pending-inserts)
