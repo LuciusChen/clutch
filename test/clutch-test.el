@@ -8423,9 +8423,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 
 (ert-deftest clutch-test-file-export-replaces-file-once-all-pages-arrive ()
   "A file export should fetch its pages without blocking.
-The file changes only once every page has arrived; a failed page, or a
-killed result buffer, leaves it and no temporary file behind."
-  (dolist (outcome '(success page-error killed))
+The file changes only once every page has arrived.  A failed page, a
+cancel that meets a page as it arrives, a quit while a page is written,
+or a killed result buffer, leaves it and no temporary file behind."
+  (dolist (outcome '(success page-error cancelled quit killed))
     (ert-info ((symbol-name outcome))
       (let* ((dir (make-temp-file "clutch-export-async-" t))
              (path (expand-file-name "out.csv" dir))
@@ -8463,6 +8464,25 @@ killed result buffer, leaves it and no temporary file behind."
                      (funcall (cdar finishes) (make-clutch-db-result :rows '((3))) nil))
                     ('page-error
                      (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
+                    ('cancelled
+                     (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                                (lambda (_conn) t)))
+                       (clutch-cancel-query-or-quit))
+                     (funcall (cdar finishes) (make-clutch-db-result :rows '((3))) nil))
+                    ('quit
+                     (let ((write-region (symbol-function 'write-region)))
+                       (cl-letf (((symbol-function 'write-region)
+                                  (lambda (&rest args)
+                                    (if (string-match-p "out\\.csv\\.clutch-"
+                                                        (nth 2 args))
+                                        (signal 'quit nil)
+                                      (apply write-region args)))))
+                         (funcall (cdar finishes)
+                                  (make-clutch-db-result :rows '((3))) nil)
+                         ;; ERT does not fail a test that quits.
+                         (should-not (condition-case nil
+                                         (progn (ert-run-idle-timers) nil)
+                                       (quit t))))))
                     ('killed
                      (let ((finish (cdar finishes)))
                        (kill-buffer result-buffer)
@@ -10047,6 +10067,30 @@ result as it was."
                                 (string-prefix-p
                                  "Statement 2 failed: duplicate key" text))
                               messages))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
+(ert-deftest clutch-test-async-batch-stops-when-cancel-meets-a-finished-statement ()
+  "C-g should stop a batch even when its statement finishes first.
+A statement's result can arrive before the cancel; that statement keeps
+its outcome and the next one does not run."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let (messages)
+        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (_conn) t))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute-statements
+           '("UPDATE t SET n = 1 WHERE id = 1"
+             "DELETE FROM t WHERE id = 2"))
+          (clutch-cancel-query-or-quit)
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should (equal (mapcar #'car finishes)
+                         '("UPDATE t SET n = 1 WHERE id = 1")))
+          (should (member "1 statement executed, then cancelled" messages))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()

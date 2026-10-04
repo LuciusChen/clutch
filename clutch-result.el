@@ -565,7 +565,7 @@ it was unless QUERY succeeds."
      (lambda ()
        (clutch--run-db-query-async
         conn query nil
-        (lambda (result error)
+        (lambda (result error &optional _cancelled)
           (clutch--finish-query-activity
            activity
            (lambda ()
@@ -3277,10 +3277,11 @@ may run after this function returns."
   "Fetch QUERY for an export of SQL and call EMIT with its rows, then DONE.
 PAGE-SIZE pages QUERY, or nil fetches it whole.  DONE gets nil after the
 last page, or the error that stopped the export.  The pages run as one
-query activity, so \\[clutch-cancel-query-or-quit] cancels the export.  A
-page that the backend runs synchronously continues the loop instead of
-nesting the next one, so many pages need no deeper stack.  An error is
-signaled while the command runs and only reported once it has returned."
+query activity, so \\[clutch-cancel-query-or-quit] cancels the export, also
+when the page it cancels arrives first.  A page that the backend runs
+synchronously continues the loop instead of nesting the next one, so many
+pages need no deeper stack.  An error or a quit is signaled while the
+command runs and only reported once it has returned."
   (let ((conn clutch-connection)
         (buffer (current-buffer))
         (order-by clutch--order-by)
@@ -3298,9 +3299,9 @@ signaled while the command runs and only reported once it has returned."
                (if (buffer-live-p buffer)
                    (with-current-buffer buffer (funcall done err))
                  (funcall done err))
-             (error (report done-error)))
+             ((error quit) (report done-error)))
            nil)
-         (handle (result error)
+         (handle (result error &optional cancelled)
            ;; Return non-nil when the next page should be fetched.
            (cond
             ((not (buffer-live-p buffer))
@@ -3313,6 +3314,9 @@ signaled while the command runs and only reported once it has returned."
                                :source-buffer buffer
                                :result-context '(:keep-result-on-error t))))
              (settle error))
+            (cancelled
+             (message "Export cancelled")
+             (settle '(error "Export cancelled")))
             (t
              (let ((rows (clutch-db-result-rows result)))
                (condition-case emit-error
@@ -3322,7 +3326,7 @@ signaled while the command runs and only reported once it has returned."
                      (if (and page-size (= (length rows) page-size))
                          (cl-incf page-num)
                        (settle nil)))
-                 (error
+                 ((error quit)
                   (settle emit-error)
                   (report emit-error)
                   nil))))))
@@ -3340,14 +3344,14 @@ signaled while the command runs and only reported once it has returned."
                          conn query page-num page-size order-by)
                       query)
                     nil
-                    (lambda (result error)
+                    (lambda (result error &optional cancelled)
                       (if dispatching
                           (setq inline (list result error))
                         (setq waiting t)
-                        (when (handle result error)
+                        (when (handle result error cancelled)
                           (condition-case run-error
                               (run)
-                            (error
+                            ((error quit)
                              (settle run-error)
                              (report run-error))))))))
                  (setq dispatching nil)
