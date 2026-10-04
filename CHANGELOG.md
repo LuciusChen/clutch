@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- A result of a table in an attached SQLite database, as in `SELECT * FROM aux.people`, takes its key and columns from that table. It took them from the table of the same name that SQLite finds first, such as `main.people`, so an edit could name that table's key and fail the one-row check, and a column that only the attached table has could not be edited.
 - A quote or `--` inside a quoted identifier, as in `WITH "customer's rows" AS (DELETE FROM t RETURNING *) SELECT * FROM "customer's rows"`, no longer hides the rest of the statement from Clutch's checks. Such a statement that writes asks for confirmation, runs once instead of being paged, and leaves an uncommitted change in Manual mode, and completion finds the tables of a query that selects such a column.
 
 ## 0.5.4 - 2026-10-03

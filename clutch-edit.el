@@ -187,8 +187,9 @@ the SELECT projection cannot be proven writable."
 
 (defun clutch-result--writable-source-detail (table cidx op &optional details)
   "Return canonical source-column metadata for CIDX in TABLE during OP.
-An exact metadata name wins.  Otherwise, accept a single case-insensitive
-match so unquoted identifiers can be reconciled with backend canonical case.
+TABLE is a metadata key from `clutch--table-key'.  An exact metadata name
+wins.  Otherwise, accept a single case-insensitive match so unquoted
+identifiers can be reconciled with backend canonical case.
 Return nil when no metadata column matches, and reject ambiguous matches."
   (let* ((source-column (clutch-result--writable-source-column cidx op))
          (details
@@ -623,7 +624,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
          (iidx (- ridx nrows)))
     (unless (< iidx (length clutch--pending-inserts))
       (user-error "No staged insert at this row"))
-    (let ((table (or clutch--result-source-table
+    (let ((table (or (clutch--result-source-key)
                      (user-error "Cannot detect source table")))
           (fields (nth iidx clutch--pending-inserts)))
       (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
@@ -642,7 +643,8 @@ RETURN-BUFFER is the buffer that invoked the edit command."
              (col-name (nth cidx clutch--result-columns))
              (col-def (nth cidx clutch--result-column-defs))
              (detail
-              (or (clutch-result--writable-source-detail table cidx op)
+              (or (clutch-result--writable-source-detail
+                   (clutch--result-source-key) cidx op)
                   (user-error
                    "Cannot %s: source column %s is missing from table metadata"
                    op (clutch-result--writable-source-column cidx op))))
@@ -874,7 +876,7 @@ Populates `clutch--fk-info' with an alist mapping
 column indices to their referenced table and column."
   (setq clutch--fk-info nil)
   (when-let* ((conn clutch-connection)
-              (table clutch--result-source-table)
+              (table (clutch--result-source-key))
               (col-names clutch--result-columns))
     (when (clutch--foreign-keys-cached-p conn table)
       (setq clutch--fk-info
@@ -892,7 +894,8 @@ column indices to their referenced table and column."
                   (truncate-string-to-width (string-trim stmt) 120 nil nil "…")))))
 
 (defun clutch-result--column-backend-type (table col-name &optional cidx)
-  "Return backend type metadata for COL-NAME in TABLE, or nil."
+  "Return backend type metadata for COL-NAME in TABLE, or nil.
+TABLE is a metadata key from `clutch--table-key'."
   (or (when (integerp cidx)
         (plist-get (nth cidx clutch--result-column-defs) :backend-type))
       (when (integerp cidx)
@@ -909,14 +912,17 @@ column indices to their referenced table and column."
         (plist-get detail :backend-type))))
 
 (defun clutch-result--typed-param-for-column (table col-name value &optional cidx)
-  "Return VALUE tagged with backend type metadata for TABLE.COL-NAME."
+  "Return VALUE tagged with backend type metadata for TABLE.COL-NAME.
+TABLE is a metadata key from `clutch--table-key'."
   (clutch-db-typed-param
    (clutch-db-require-complete-value value)
    (clutch-result--column-backend-type table col-name cidx)))
 
 (defun clutch-result--row-identity-param-types (row-identity)
   "Return backend type metadata aligned with ROW-IDENTITY values."
-  (let* ((table (plist-get row-identity :table))
+  (let* ((table (clutch--table-key (plist-get row-identity :table)
+                                   (plist-get row-identity :source-schema)
+                                   (plist-get row-identity :source-catalog)))
          (columns (plist-get row-identity :columns))
          (indices (plist-get row-identity :indices))
          (source-indices (plist-get row-identity :source-indices)))
@@ -975,7 +981,8 @@ the parameter list."
 
 (defun clutch-result--update-source-columns (table col-indices op)
   "Return the source columns of TABLE to update for COL-INDICES.
-Each element is (CIDX NAME . BACKEND-TYPE), with NAME as TABLE spells it.
+TABLE is a metadata key from `clutch--table-key'.  Each element is
+\(CIDX NAME . BACKEND-TYPE), with NAME as the table spells it.
 Signal a `user-error' for OP when a column is not a writable source column."
   (let ((details (or (clutch--ensure-column-details clutch-connection table t)
                      (user-error "Cannot %s: source column metadata is unavailable"
@@ -1029,7 +1036,8 @@ column of each cidx."
   (let* ((table (clutch--result-source-table-or-user-error "Build UPDATE"))
          (row-identity (clutch-result--row-identity-or-user-error table "Build UPDATE"))
          (columns (clutch-result--update-source-columns
-                   table (delete-dups (mapcar #'cdar clutch--pending-edits))
+                   (clutch--result-source-key)
+                   (delete-dups (mapcar #'cdar clutch--pending-edits))
                    "build UPDATE"))
          (by-identity (make-hash-table :test 'equal))
          statements)
@@ -1045,7 +1053,7 @@ column of each cidx."
 
 (defun clutch-result--build-pending-insert-statements ()
   "Build INSERT statement specs for staged new rows."
-  (let ((table (or clutch--result-source-table
+  (let ((table (or (clutch--result-source-key)
                    (user-error "Cannot detect source table"))))
     (mapcar (lambda (fields)
               (clutch-result-insert--build-sql clutch-connection table fields))
@@ -1279,7 +1287,7 @@ Use \\[clutch-result-submit] in the result buffer to submit."
   "Reference to the parent result buffer (Insert buffer local).")
 
 (defvar-local clutch-result-insert--table nil
-  "Table name for the INSERT (Insert buffer local).")
+  "Metadata key of the table for the INSERT (Insert buffer local).")
 
 (defvar-local clutch-result-insert--pending-index nil
   "Staged insert index being edited, or nil for a new insert.")
@@ -1825,7 +1833,8 @@ If nothing handles the completion, fall back to `completing-read'."
     (let ((value (clutch-result--json-normalize-string raw field-name)))
       (let ((buf (clutch--open-json-sub-editor
                   (format "*clutch-insert-json: %s.%s*"
-                          clutch-result-insert--table field-name)
+                          (clutch--table-key-name clutch-result-insert--table)
+                          field-name)
                   value field-name
                   #'clutch-result-insert-json-finish
                   #'clutch-result-insert-json-cancel)))
@@ -1904,7 +1913,8 @@ DETAIL is the column detail plist when available."
 
 (defun clutch-result-insert--filter-clone-fields (table fields)
   "Return cloned insert FIELDS with generated and primary-key columns removed.
-TABLE is used to resolve column details for the current result buffer."
+TABLE, a metadata key from `clutch--table-key', resolves column details
+for the current result buffer."
   (let ((details (when clutch-connection
                    (clutch--ensure-column-details clutch-connection table))))
     (cl-loop for col in clutch--result-columns
@@ -1922,7 +1932,8 @@ TABLE is used to resolve column details for the current result buffer."
 (defun clutch-result-insert--open-buffer
     (table result-buf &optional fields pending-index)
   "Open an insert buffer for TABLE backed by RESULT-BUF.
-FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
+TABLE is a metadata key from `clutch--table-key'.  FIELDS prefill the
+buffer.  PENDING-INDEX re-edits an existing staged insert."
   (let* ((field-state
           (with-current-buffer result-buf
             (let* ((indices (clutch--visible-columns))
@@ -1944,7 +1955,8 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
                                                       :test #'string=)
                                      :error-overlay nil
                                      :error-message nil)))))
-         (buf (get-buffer-create (format "*clutch-insert: %s*" table))))
+         (buf (get-buffer-create (format "*clutch-insert: %s*"
+                                         (clutch--table-key-name table)))))
     (with-current-buffer buf
       (let ((inhibit-read-only t)
             (inhibit-modification-hooks t))
@@ -1967,7 +1979,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
-      (unless (equal clutch--result-source-table source-table)
+      (unless (equal (clutch--result-source-key) source-table)
         (user-error "Result table changed; reopen the insert buffer")))))
 
 ;;;###autoload
@@ -1975,7 +1987,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
   "Open an edit buffer to INSERT a new row into the current table."
   (interactive)
   (clutch-edit--require-sql-staged-mutation "Stage insert")
-  (let* ((table (or clutch--result-source-table
+  (let* ((table (or (clutch--result-source-key)
                     (user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
@@ -1995,7 +2007,8 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
     values))
 
 (defun clutch-result-insert--clone-fields-from-row-values (table row-values)
-  "Return prefilled insert fields for TABLE from ROW-VALUES."
+  "Return prefilled insert fields for TABLE from ROW-VALUES.
+TABLE is a metadata key from `clutch--table-key'."
   (let ((details (when clutch-connection
                    (clutch--ensure-column-details clutch-connection table)))
         fields)
@@ -2019,7 +2032,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
 (defun clutch-result-insert--clone-fields-from-result-row (result-buf ridx)
   "Return prefilled insert fields for result row RIDX in RESULT-BUF."
   (with-current-buffer result-buf
-    (let* ((table (or clutch--result-source-table
+    (let* ((table (or (clutch--result-source-key)
                       (user-error "Cannot detect source table")))
            (display-rows (clutch--result-display-rows))
            (nrows (length display-rows)))
@@ -2053,7 +2066,7 @@ FIELDS prefill the buffer.  PENDING-INDEX re-edits an existing staged insert."
     (with-current-buffer result-buf
       (clutch-edit--require-sql-staged-mutation "Clone row to insert"))
     (let* ((table (with-current-buffer result-buf
-                    (or clutch--result-source-table
+                    (or (clutch--result-source-key)
                         (user-error "Cannot detect source table"))))
            (fields
             (if record-source-p
@@ -2333,7 +2346,8 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
 
 (defun clutch-result-insert--build-sql (conn table fields)
   "Build an INSERT statement spec for TABLE with FIELDS using CONN.
-FIELDS is an alist of (column-name . value), with nil for SQL NULL."
+TABLE is a metadata key from `clutch--table-key'.  FIELDS is an alist of
+\(column-name . value), with nil for SQL NULL."
   (let ((cols (mapconcat (lambda (field)
                            (clutch-db-escape-identifier conn (car field)))
                          fields ", "))
@@ -2343,7 +2357,8 @@ FIELDS is an alist of (column-name . value), with nil for SQL NULL."
                            table (car field) (cdr field)))
                         fields)))
     (cons (format "INSERT INTO %s (%s) VALUES (%s)"
-                  (clutch-db-sql-target-table conn table clutch--last-query)
+                  (clutch-db-sql-target-table
+                   conn (clutch--table-key-name table) clutch--last-query)
                   cols
                   placeholders)
           params)))

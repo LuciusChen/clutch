@@ -1590,14 +1590,16 @@ that many seconds before it may run.")
   "Backends without asynchronous schema refresh support return nil."
   nil)
 
-(cl-defgeneric clutch-db-column-details-async (conn table callback &optional errback)
+(cl-defgeneric clutch-db-column-details-async
+    (conn table callback &optional errback schema catalog)
   "Start an asynchronous column-detail fetch for TABLE on CONN.
 CALLBACK receives the column detail plist list on success.  ERRBACK
-receives an error message string on failure.  Return non-nil when async
-fetch was started, nil when unsupported.")
+receives an error message string on failure.  SCHEMA and CATALOG qualify
+TABLE as in `clutch-db-column-details'.  Return non-nil when async fetch
+was started, nil when unsupported.")
 
 (cl-defmethod clutch-db-column-details-async ((_conn t) _table _callback
-                                              &optional _errback)
+                                              &optional _errback _schema _catalog)
   "Backends without asynchronous column detail support return nil."
   nil)
 
@@ -1612,14 +1614,16 @@ started, nil when unsupported.")
   "Backends without asynchronous column-name support return nil."
   nil)
 
-(cl-defgeneric clutch-db-foreign-keys-async (conn table callback &optional errback)
+(cl-defgeneric clutch-db-foreign-keys-async
+    (conn table callback &optional errback schema catalog)
   "Start an asynchronous foreign-key fetch for TABLE on CONN.
 CALLBACK receives the foreign-key alist on success.  ERRBACK receives an
-error message string on failure.  Return non-nil when async fetch was
-started, nil when unsupported.")
+error message string on failure.  SCHEMA and CATALOG qualify TABLE as in
+`clutch-db-column-details'.  Return non-nil when async fetch was started,
+nil when unsupported.")
 
 (cl-defmethod clutch-db-foreign-keys-async ((_conn t) _table _callback
-                                             &optional _errback)
+                                             &optional _errback _schema _catalog)
   "Backends without asynchronous foreign-key metadata support return nil."
   nil)
 
@@ -2115,11 +2119,13 @@ BACKEND-NAME is used only in generated docstrings."
         conn callback errback #'clutch-db-list-columns nil table))
 
      (cl-defmethod clutch-db-column-details-async ((conn ,type) table callback
-                                                   &optional errback)
+                                                   &optional errback
+                                                   schema catalog)
        ,(format "Fetch %s column details on the main thread when idle."
                 backend-name)
-       (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-column-details nil table))
+       (apply #'clutch-db--schedule-idle-metadata-call
+              conn callback errback #'clutch-db-column-details nil table
+              (clutch-db--namespace-arguments schema catalog)))
 
      (cl-defmethod clutch-db-table-comment-async ((conn ,type) table callback
                                                   &optional errback)
@@ -2129,11 +2135,13 @@ BACKEND-NAME is used only in generated docstrings."
         conn callback errback #'clutch-db-table-comment nil table))
 
      (cl-defmethod clutch-db-foreign-keys-async ((conn ,type) table callback
-                                                 &optional errback)
+                                                 &optional errback
+                                                 schema catalog)
        ,(format "Fetch %s foreign keys on the main thread when idle."
                 backend-name)
-       (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-foreign-keys nil table))
+       (apply #'clutch-db--schedule-idle-metadata-call
+              conn callback errback #'clutch-db-foreign-keys nil table
+              (clutch-db--namespace-arguments schema catalog)))
 
      (cl-defmethod clutch-db-list-objects-async ((conn ,type) category callback
                                                  &optional errback)
@@ -2142,10 +2150,18 @@ BACKEND-NAME is used only in generated docstrings."
        (clutch-db--schedule-idle-metadata-call
         conn callback errback #'clutch-db-list-objects nil category))))
 
-(cl-defgeneric clutch-db-primary-key-columns (conn table)
-  "Return a list of primary key column name strings for TABLE on CONN.")
+(defun clutch-db--namespace-arguments (schema catalog)
+  "Return the optional arguments that qualify a table by SCHEMA and CATALOG.
+A table qualified by neither passes none, so it reaches every metadata
+method as before."
+  (and (or schema catalog) (list schema catalog)))
 
-(cl-defmethod clutch-db-primary-key-columns ((_conn t) _table)
+(cl-defgeneric clutch-db-primary-key-columns (conn table &optional schema catalog)
+  "Return a list of primary key column name strings for TABLE on CONN.
+SCHEMA and CATALOG qualify TABLE as in `clutch-db-column-details'.")
+
+(cl-defmethod clutch-db-primary-key-columns ((_conn t) _table
+                                             &optional _schema _catalog)
   "Return nil because CONN has no default primary-key metadata support."
   nil)
 
@@ -2160,19 +2176,24 @@ that can be hidden in SELECT results and :where-sql as the predicate used by
 UPDATE and DELETE.")
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn t) table
-                                                 &optional _schema _catalog)
-  "Return the primary-key row identity candidate for CONN and TABLE."
-  (when-let* ((pk-cols (clutch-db-primary-key-columns conn table)))
+                                                 &optional schema catalog)
+  "Return the primary-key row identity candidate for CONN and TABLE.
+SCHEMA and CATALOG qualify TABLE."
+  (when-let* ((pk-cols (apply #'clutch-db-primary-key-columns conn table
+                              (clutch-db--namespace-arguments schema catalog))))
     (list (list :kind 'primary-key
                 :name "PRIMARY"
                 :columns pk-cols))))
 
-(cl-defgeneric clutch-db-foreign-keys (conn table)
+(cl-defgeneric clutch-db-foreign-keys (conn table &optional schema catalog)
   "Return foreign key info for TABLE on CONN.
+SCHEMA and CATALOG qualify TABLE as in `clutch-db-column-details'.
 Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")
 
-(cl-defgeneric clutch-db-column-details (conn table)
+(cl-defgeneric clutch-db-column-details (conn table &optional schema catalog)
   "Return detailed column info for TABLE on CONN.
+SCHEMA and CATALOG name the namespace of a table that the SQL qualified;
+without them TABLE is the one CONN's current namespace resolves.
 Returns a list of plists with keys:
   :name STR  :type STR  :nullable BOOL
   :primary-key BOOL  :foreign-key PLIST-OR-NIL  :comment STR-OR-NIL
