@@ -9,6 +9,7 @@
 ### Fixed
 
 - A quote or `--` inside a quoted identifier, as in `WITH "customer's rows" AS (DELETE FROM t RETURNING *) SELECT * FROM "customer's rows"`, no longer hides the rest of the statement from Clutch's checks. Such a statement that writes asks for confirmation, runs once instead of being paged, and leaves an uncommitted change in Manual mode, and completion finds the tables of a query that selects such a column.
+- A PostgreSQL generated column, as in `doubled int GENERATED ALWAYS AS (price * 2) STORED`, cannot be edited in a result, as an identity column cannot. Clutch staged the edit, and PostgreSQL refused the UPDATE with "column can only be updated to DEFAULT".
 
 ## 0.5.4 - 2026-10-03
 
