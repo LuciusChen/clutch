@@ -10,13 +10,15 @@ A result of a table that the query qualified by its schema took its key and colu
 - The table metadata cache keys a qualified table by `(CATALOG SCHEMA TABLE)`, as the row identity cache does, and an unqualified one by its name. `people` and `aux.people` may be different tables, so they are cached apart, and clearing a table by name drops both. The cache functions take this key where they took the table name, so their signatures stay.
 - A result keeps the schema and catalog with its source table, through refreshing and filtering, and every metadata lookup for it, from cell edits and staged statements to the insert form and foreign keys, uses its key. SQL text still names the table as the query did.
 - SQLite reads a qualified table in its attached database, prefixing PRAGMA and `sqlite_master` with the schema.
+- PostgreSQL names a source table as it stores it: an unquoted part folds to lower case and a quoted one keeps its case, as JDBC upper-cases unquoted Oracle names. Each metadata query resolves the quoted name, qualified by its schema when the query qualified it, to an oid with `regclass`, so a qualified table is read in its schema and an unqualified one through the search path, as the query read it. Keys already resolved this way, while column details and foreign keys looked only in `current_schema()` and matched the name as written. Describing a table passes its schema, and the table comment uses it. XTDB, which has no foreign keys and resolves no `regclass`, returns none.
 
 ## Limits
 
-- PostgreSQL, MySQL's `db.table` and JDBC column details still read the bare name. PostgreSQL also folds unquoted names to lower case, which the qualified lookup has to follow, so it comes in its own change.
+- MySQL's `db.table` and JDBC column details still read the bare name.
 - Foreign keys that reference a table in another schema, completion and Eldoc stay unqualified.
 
 ## Verification
 
 - A real SQLite test attaches a database whose `people` has another key and an extra column, and checks that a result of `aux.people` takes its key, and that a staged UPDATE, DELETE and INSERT name `aux.people` with that key and leave `main.people` empty after submitting. It fails on 9c21ff3, where the key came from `main.people`.
-- Unit tests cover the key helpers, clearing a table by name, and a metadata update that refreshes only the results of its qualified table.
+- Unit tests cover the key helpers, clearing a table by name, a metadata update that refreshes only the results of its qualified table, and PostgreSQL's folding.
+- A PostgreSQL live test edits `other.people`, whose schema is off the search path while `public` has a table of the same name keyed by another column, through an upper-cased unquoted name, and a quoted `"Qual"."People"`; both change their own rows and `public` stays empty. It fails without the PostgreSQL change, where the key came from `public`.
