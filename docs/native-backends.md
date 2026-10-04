@@ -154,6 +154,7 @@ For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS 
 - Simple-query and parameterized extended-query execution
 - OID-based decoding for scalar, temporal, JSON, `bytea`, and array values
 - Structured server errors, `ReadyForQuery` transaction state, and protocol-level cancellation
+- A result of a table that the query qualifies by its schema, as in `SELECT * FROM other.people`, takes its key and columns from that schema, whether or not it is on the search path; an unquoted name folds to lower case and a quoted one keeps its case, as PostgreSQL reads them
 
 ### Connection Example
 

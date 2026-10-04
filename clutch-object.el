@@ -1153,7 +1153,8 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
                                          (clutch--ensure-table-comment
                                           conn name schema))))
                 (cons "Comment" (list (format "  %s" comment))))
-              (when-let* ((details (or (clutch--ensure-column-details conn name t)
+              (when-let* ((details (or (clutch--ensure-column-details
+                                        conn (clutch--table-key name schema) t)
                                        (clutch-db-list-columns conn name))))
                 (cons "Columns"
                       (mapcar (if (and details (plist-get (car-safe details) :name))
