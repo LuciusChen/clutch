@@ -1161,13 +1161,15 @@ ORDER BY pk.ord"
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
                                       &optional schema _catalog)
   "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN.
-The query keeps the keys that reference a table in TABLE's schema, so
-with SCHEMA each carries it as :ref-schema."
+The query keeps the keys that reference a table in TABLE's schema, and
+each carries that schema as :ref-schema, also when the search path found
+TABLE."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT
     kcu.column_name,
     ccu.table_name AS referenced_table,
-    ccu.column_name AS referenced_column
+    ccu.column_name AS referenced_column,
+    n.nspname AS referenced_schema
 FROM information_schema.table_constraints tc
 JOIN information_schema.key_column_usage kcu
     ON tc.constraint_name = kcu.constraint_name
@@ -1184,10 +1186,10 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
+           (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema) row))
              (cons col-name
-                   (append (list :ref-table ref-table :ref-column ref-column)
-                           (and schema (list :ref-schema schema))))))
+                   (list :ref-table ref-table :ref-column ref-column
+                         :ref-schema ref-schema))))
          (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
