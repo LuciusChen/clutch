@@ -8,6 +8,7 @@
 - `C-g` during a batch of statements stops the batch even when the running statement finishes before the cancel reaches it, as it can when its result has just arrived; the statements after it used to run.
 - Paging a result, sorting it on the server and counting its rows no longer block Emacs on MySQL, PostgreSQL and JDBC connections: they run as statements do, with the elapsed time in the mode line, and `C-g` cancels them. The result keeps its page, sort and staged changes until the new page or count arrives, and a failure or cancellation leaves it as it was, where a failed sort used to leave its new order on the old rows. Staging an edit is refused while such a query runs.
 - Copying or exporting rows as `UPDATE` statements looks up each column's source and type once rather than for every cell, so 500 rows of 200 SQLite columns take 0.32 s instead of 1.6 s. Submitting staged edits looks their columns up the same way, and an edit of a column that became generated or left the table after it was staged is refused with the message that copy and export give.
+- A result is no longer drawn a second time when its table's foreign keys finish loading in the background, unless they mark one of its columns. This happened the first time a table was shown on a connection, and drawing 500 rows of 200 columns again took about 0.6 s.
 
 ### Fixed
 
