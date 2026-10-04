@@ -5,6 +5,7 @@
 ### Changed
 
 - Copying or exporting rows as `UPDATE` statements looks up each column's source and type once rather than for every cell, so 500 rows of 200 SQLite columns take 0.32 s instead of 1.6 s. Submitting staged edits looks their columns up the same way, and an edit of a column that became generated or left the table after it was staged is refused with the message that copy and export give.
+- A result is no longer drawn a second time when its table's foreign keys finish loading in the background, unless they mark one of its columns. This happened the first time a table was shown on a connection, and drawing 500 rows of 200 columns again took about 0.6 s.
 
 ### Fixed
 
