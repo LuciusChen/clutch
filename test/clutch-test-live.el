@@ -769,45 +769,48 @@ quoted ones keep their case, as PostgreSQL reads them."
                              (format "DROP TABLE IF EXISTS public.%s" table)))
             (ignore-errors (clutch-db-query conn sql))))))))
 
-(ert-deftest clutch-test-live-pg-qualified-result-follows-keys-in-its-schema ()
+(ert-deftest clutch-test-live-pg-result-follows-keys-in-its-schema ()
   :tags '(:clutch-live)
-  "Following a foreign key of a table in another schema should stay in it.
-public has a parent table of the same name, and the schema is not on the
-search path."
+  "Following a foreign key should open the parent in the child's schema.
+The query either qualifies the child or finds it through the search path,
+whose first schema, public, has a parent table of the same name."
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "Live backend is not PostgreSQL"))
   (clutch-test--with-conn conn
     (let* ((schema (format "clutch_fk_%d" (emacs-pid)))
            (parents (format "parents_%d" (emacs-pid)))
-           (result-name (format " *clutch-pg-qualified-fk-%d*" (emacs-pid)))
-           followed)
-      (unwind-protect
-          (progn
-            (dolist (sql (list (format "CREATE TABLE public.%s (id int PRIMARY KEY, label text)"
-                                       parents)
-                               (format "INSERT INTO public.%s VALUES (1, 'public')" parents)
-                               (format "CREATE SCHEMA %s" schema)
-                               (format "CREATE TABLE %s.%s (id int PRIMARY KEY, label text)"
-                                       schema parents)
-                               (format "INSERT INTO %s.%s VALUES (1, 'own')" schema parents)
-                               (format "CREATE TABLE %s.children (id int PRIMARY KEY, parent_id int REFERENCES %s.%s (id))"
-                                       schema schema parents)
-                               (format "INSERT INTO %s.children VALUES (1, 1)" schema)))
-              (clutch-db-query conn sql))
-            (clutch-test--with-live-result-buffer result-name
-              (clutch-test--execute-live-select
-               conn (format "SELECT * FROM %s.children" schema))
-              (with-current-buffer result-name
-                (clutch-test--await (lambda () (assq 1 clutch--fk-info)))
-                (cl-letf (((symbol-function 'clutch--execute)
-                           (lambda (sql &rest _) (setq followed sql))))
-                  (clutch-record--follow-fk
-                   (cdr (assq 1 clutch--fk-info)) 1 (current-buffer)))))
-            (should (equal (clutch-db-result-rows (clutch-db-query conn followed))
-                           '((1 "own")))))
-        (dolist (sql (list (format "DROP SCHEMA IF EXISTS %s CASCADE" schema)
-                           (format "DROP TABLE IF EXISTS public.%s" parents)))
-          (ignore-errors (clutch-db-query conn sql)))))))
+           (result-name (format " *clutch-pg-fk-%d*" (emacs-pid))))
+      (cl-flet ((follow (query)
+                  (let (followed)
+                    (clutch-test--with-live-result-buffer result-name
+                      (clutch-test--execute-live-select conn query)
+                      (with-current-buffer result-name
+                        (clutch-test--await (lambda () (assq 1 clutch--fk-info)))
+                        (cl-letf (((symbol-function 'clutch--execute)
+                                   (lambda (sql &rest _) (setq followed sql))))
+                          (clutch-record--follow-fk
+                           (cdr (assq 1 clutch--fk-info)) 1 (current-buffer)))))
+                    (clutch-db-result-rows (clutch-db-query conn followed)))))
+        (unwind-protect
+            (progn
+              (dolist (sql (list (format "CREATE TABLE public.%s (id int PRIMARY KEY, label text)"
+                                         parents)
+                                 (format "INSERT INTO public.%s VALUES (1, 'public')" parents)
+                                 (format "CREATE SCHEMA %s" schema)
+                                 (format "CREATE TABLE %s.%s (id int PRIMARY KEY, label text)"
+                                         schema parents)
+                                 (format "INSERT INTO %s.%s VALUES (1, 'own')" schema parents)
+                                 (format "CREATE TABLE %s.children (id int PRIMARY KEY, parent_id int REFERENCES %s.%s (id))"
+                                         schema schema parents)
+                                 (format "INSERT INTO %s.children VALUES (1, 1)" schema)))
+                (clutch-db-query conn sql))
+              (should (equal (follow (format "SELECT * FROM %s.children" schema))
+                             '((1 "own"))))
+              (clutch-db-query conn (format "SET search_path TO public, %s" schema))
+              (should (equal (follow "SELECT * FROM children") '((1 "own")))))
+          (dolist (sql (list (format "DROP SCHEMA IF EXISTS %s CASCADE" schema)
+                             (format "DROP TABLE IF EXISTS public.%s" parents)))
+            (ignore-errors (clutch-db-query conn sql))))))))
 
 (ert-deftest clutch-test-live-pg-ctid-aggregate-select-skips-row-identity-injection ()
   :tags '(:clutch-live)
