@@ -4251,10 +4251,10 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
                           clutch--result-source-schema (cadr spec)
                           clutch--last-query "select * from people")))
           (clutch--handle-table-metadata-updated
-           'conn (clutch--table-key "people" "aux") 'column-details)
+           'conn '(nil "aux" "people") 'column-details)
           (with-current-buffer aux
             (should (equal clutch--result-column-details
-                           (list (clutch--table-key "people" "aux")))))
+                           '((nil "aux" "people")))))
           (with-current-buffer plain
             (should-not clutch--result-column-details)))
       (kill-buffer plain)
