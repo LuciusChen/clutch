@@ -588,15 +588,16 @@ information_schema type."
 
 (defun clutch-db-pg--column-details-row (row pk-cols fks)
   "Convert a column-details ROW to a clutch-db column plist.
+ROW's ninth value is \"YES\" for an identity or generated column.
 PK-COLS is a list of primary key column names.
 FKS is an alist of (column-name . fk-plist)."
   (pcase-let ((`(,name ,dtype ,backend-type ,nullable-str ,max-len
-                 ,num-prec ,num-scale ,default-val ,identity-str ,comment) row))
+                 ,num-prec ,num-scale ,default-val ,generated-str ,comment) row))
     (let* ((type     (clutch-db-pg--format-type dtype max-len num-prec num-scale))
            (nullable (equal nullable-str "YES"))
            (pk-p     (member name pk-cols))
            (fk       (cdr (assoc name fks)))
-           (generated (or (equal identity-str "YES")
+           (generated (or (equal generated-str "YES")
                           (and (stringp default-val)
                                (string-match-p "\\`nextval(" default-val)))))
       (let ((detail (list :name name :type type :nullable nullable
@@ -1201,7 +1202,9 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                conn
                (format "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
 c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
-c.column_default, c.is_identity, col_description(pc.oid, a.attnum) \
+c.column_default, \
+CASE WHEN c.is_identity = 'YES' OR c.is_generated = 'ALWAYS' THEN 'YES' END, \
+col_description(pc.oid, a.attnum) \
 FROM information_schema.columns c \
 JOIN pg_class pc ON pc.relname = c.table_name \
 JOIN pg_namespace pn ON pn.oid = pc.relnamespace \

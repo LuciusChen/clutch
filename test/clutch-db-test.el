@@ -5808,6 +5808,32 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
               (should-not (string-match-p "pgsql-null" ddl))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-db-test-pg-live-stored-generated-columns-are-generated ()
+  :tags '(:db-live :pg-live)
+  "A stored generated column should be generated, as an identity column is.
+PostgreSQL refuses a value for either."
+  (clutch-db-test--with-pg conn
+    (let* ((table (clutch-db-test--live-name "clutch_generated"))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn drop-sql)
+            (clutch-db-query
+             conn
+             (format "CREATE TABLE %s (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
+                     table))
+            (cl-flet ((generated-p (name)
+                        (plist-get (cl-find name (clutch-db-column-details conn table)
+                                            :key (lambda (detail)
+                                                   (plist-get detail :name))
+                                            :test #'equal)
+                                   :generated)))
+              (should (generated-p "id"))
+              (should-not (generated-p "price"))
+              (should (generated-p "doubled"))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
+
 (ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()
   :tags '(:db-live :pg-live)
   "PostgreSQL should use CTID when no logical key exists."
