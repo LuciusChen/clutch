@@ -1,5 +1,7 @@
 # 201 — Statements Run Without Blocking Emacs
 
+_Updated after 0.5.4: paging, server-side sorting and counting a result's rows run through the same pipeline. A page or count changes the result only when it arrives, a server-side sort is passed to the page load that applies it rather than set before it, and staging is refused while such a query runs, since the arriving page drops staged changes. Export batches and JDBC's remaining rows still block._
+
 ## Evidence
 
 Issue #25 asked for queries that do not freeze Emacs, and a PostgreSQL user raised it again. Every statement waited in `accept-process-output`, so a long query held the whole editor until it finished or the client-side idle timeout expired, and that timeout misreported outcomes. On PostgreSQL 16, an `UPDATE` that slept four seconds under a two-second `:read-idle-timeout` was reported as failed and its connection closed without a cancel, while the row was updated anyway (n went from 0 to 1). A quit whose cancel did not reach the statement in time was shown as "Query interrupted" while the `UPDATE` committed (n went from 1 to 11).
