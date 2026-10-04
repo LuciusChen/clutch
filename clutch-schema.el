@@ -102,6 +102,35 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
      :context context
      :elapsed elapsed)))
 
+(defun clutch--table-key (table &optional schema catalog)
+  "Return the metadata key of TABLE in SCHEMA and CATALOG.
+An unqualified table is keyed by its name, which resolves in the
+connection's current namespace, and a qualified one by
+\(CATALOG SCHEMA TABLE), as row identities are."
+  (if (or schema catalog) (list catalog schema table) table))
+
+(defun clutch--table-key-arguments (key)
+  "Return the arguments that name the table of metadata KEY to a method.
+They are its name, followed by its schema and catalog when it has them."
+  (pcase key
+    (`(,catalog ,schema ,table) (list table schema catalog))
+    (_ (list key))))
+
+(defun clutch--table-key-name (key)
+  "Return the table name of metadata KEY."
+  (car (clutch--table-key-arguments key)))
+
+(defun clutch--table-key-label (key)
+  "Return metadata KEY as text for messages, such as aux.people."
+  (if (consp key) (string-join (delq nil (copy-sequence key)) ".") key))
+
+(defun clutch--table-metadata-async (method conn key callback errback)
+  "Start async metadata METHOD for the table of KEY on CONN.
+METHOD gets CALLBACK and ERRBACK, then the table's schema and catalog when
+KEY has them."
+  (pcase-let ((`(,table . ,namespace) (clutch--table-key-arguments key)))
+    (apply method conn table callback errback namespace)))
+
 (defun clutch--metadata-debug-table-event (conn op phase table summary
                                                 &optional elapsed)
   "Record a metadata debug event for TABLE and OP on CONN.
@@ -291,35 +320,6 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 (defun clutch--table-comment-key (conn table &optional schema)
   "Return the schema-qualified cache key for TABLE on CONN."
   (cons (or schema (clutch-db-current-schema conn)) table))
-
-(defun clutch--table-key (table &optional schema catalog)
-  "Return the metadata key of TABLE in SCHEMA and CATALOG.
-An unqualified table is keyed by its name, which resolves in the
-connection's current namespace, and a qualified one by
-\(CATALOG SCHEMA TABLE), as row identities are."
-  (if (or schema catalog) (list catalog schema table) table))
-
-(defun clutch--table-key-arguments (key)
-  "Return the arguments that name the table of metadata KEY to a method.
-They are its name, followed by its schema and catalog when it has them."
-  (pcase key
-    (`(,catalog ,schema ,table) (list table schema catalog))
-    (_ (list key))))
-
-(defun clutch--table-key-name (key)
-  "Return the table name of metadata KEY."
-  (car (clutch--table-key-arguments key)))
-
-(defun clutch--table-key-label (key)
-  "Return metadata KEY as text for messages, such as aux.people."
-  (if (consp key) (string-join (delq nil (copy-sequence key)) ".") key))
-
-(defun clutch--table-metadata-async (method conn key callback errback)
-  "Start async metadata METHOD for the table of KEY on CONN.
-METHOD gets CALLBACK and ERRBACK, then the table's schema and catalog when
-KEY has them."
-  (pcase-let ((`(,table . ,namespace) (clutch--table-key-arguments key)))
-    (apply method conn table callback errback namespace)))
 
 (defun clutch--cached-row-identity (conn table schema catalog)
   "Return TABLE's cached row identity candidates on CONN, wrapped in a list.
