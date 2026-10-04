@@ -569,7 +569,10 @@ without blocking, return at once: CONN refuses other foreground work,
 REGION of the current buffer, when non-nil, shows the statement's
 status, and CALLBACK runs later from an idle timer, never inside another
 command.  Otherwise SQL runs synchronously and CALLBACK runs before this
-function returns."
+function returns.
+A third argument to CALLBACK is non-nil when \\[clutch-cancel-query-or-quit]
+asked to cancel SQL.  SQL may still have succeeded, its result arriving
+first, so a caller with more SQL to run stops instead."
   (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
@@ -595,12 +598,15 @@ function returns."
         (funcall callback result error)))))
 
 (defun clutch--finish-db-query (conn sql callback result error)
-  "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR."
-  (remhash conn clutch--running-queries)
-  (when result
-    (clutch--clear-connection-problem-capture conn)
-    (clutch--record-tx-state-after-query conn sql))
-  (funcall callback result error))
+  "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
+CALLBACK also gets whether cancelling SQL was asked for."
+  (let ((cancelled (plist-get (gethash conn clutch--running-queries)
+                              :cancelling)))
+    (remhash conn clutch--running-queries)
+    (when result
+      (clutch--clear-connection-problem-capture conn)
+      (clutch--record-tx-state-after-query conn sql))
+    (funcall callback result error cancelled)))
 
 (defun clutch--show-statement-status (conn status)
   "Show STATUS for the statement running on CONN in its source buffer."

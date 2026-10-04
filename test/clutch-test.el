@@ -6181,9 +6181,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                                (setq written-coding coding-system-for-write)
                                (apply write-region-function write-args)))
                             ((symbol-function 'clutch-result--collect-all-export-rows)
-                             (lambda () '((1 "a,b"))))
+                             (lambda (on-rows) (funcall on-rows '((1 "a,b")))))
                             ((symbol-function 'clutch-result--map-export-batches)
-                             (lambda (function) (funcall function '((1 "a,b")))))
+                             (lambda (function done)
+                               (funcall function '((1 "a,b")))
+                               (funcall done nil)))
                             ((symbol-function 'clutch--ensure-column-details)
                              (lambda (_conn _table &optional _strict)
                                (list (list :name "id")
@@ -8224,7 +8226,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
           (setq-local clutch--result-columns '("id" "name"))
           (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
                     ((symbol-function 'clutch-result--collect-all-export-rows)
-                     (lambda () (ert-fail "File export collected all rows"))))
+                     (lambda (_on-rows) (ert-fail "File export collected all rows"))))
             (dolist (coding '(utf-8-with-signature utf-8 gb18030
                                                    utf-16 utf-16-dos utf-16le utf-16be
                                                    utf-16le-with-signature
@@ -8232,9 +8234,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
               (cl-letf (((symbol-function 'clutch--read-delimited-export-coding-system)
                          (lambda (_) coding))
                         ((symbol-function 'clutch-result--map-export-batches)
-                         (lambda (function)
+                         (lambda (function done)
                            (funcall function (seq-take rows 2))
-                           (funcall function (last rows)))))
+                           (funcall function (last rows))
+                           (funcall done nil))))
                 (clutch--export-result 'csv 'file))
               (unless (string-empty-p suffix)
                 (should (equal (with-temp-buffer
@@ -8252,11 +8255,12 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
             (let ((before (with-temp-buffer
                             (insert-file-contents-literally path)
                             (buffer-string))))
-              (dolist (exit '(error quit incomplete))
+              ;; A failure reported to DONE, as a failed page is, returns.
+              (dolist (exit '(error quit incomplete failed))
                 (cl-letf (((symbol-function 'clutch--read-delimited-export-coding-system)
                            (lambda (_) 'utf-8))
                           ((symbol-function 'clutch-result--map-export-batches)
-                           (lambda (function)
+                           (lambda (function done)
                              (funcall function (list (car rows)))
                              (pcase exit
                                ('error (error "Second page failed"))
@@ -8265,8 +8269,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                 (funcall function
                                          (list (list 2 (make-clutch-db-value-preview
                                                         :type 'clob :length 100
-                                                        :text "preview")))))))))
-                  (should (eq (condition-case err (clutch--export-result 'csv 'file)
+                                                        :text "preview")))))
+                               ('failed (funcall done '(error "Second page failed")))))))
+                  (should (eq (condition-case err
+                                  (progn (clutch--export-result 'csv 'file) 'failed)
                                 (error (car err)) (quit 'quit))
                               (pcase exit ('incomplete 'user-error) (_ exit))))
                   (should (equal before (with-temp-buffer
@@ -8329,14 +8335,15 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                    (cons (cons "\\.clutch-test\\'" handler)
                          file-name-handler-alist)))
               (cl-letf (((symbol-function 'clutch-result--map-export-batches)
-                         (lambda (function)
+                         (lambda (function done)
                            (funcall function (list (car rows)))
-                           (funcall function (cdr rows)))))
+                           (funcall function (cdr rows))
+                           (funcall done nil))))
                 (should (eq (condition-case err
                                 (progn
                                   (clutch-result--write-export-file
                                    'csv (cdr (assq 'csv clutch--result-export-kinds))
-                                   path :coding 'utf-8-with-signature)
+                                   path #'ignore :coding 'utf-8-with-signature)
                                   'success)
                               (file-error (car err))
                               (quit 'quit))
@@ -8379,7 +8386,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                         ((symbol-function 'clutch--read-delimited-export-coding-system)
                          (lambda (_) 'utf-8))
                         ((symbol-function 'clutch-result--map-export-batches)
-                         (lambda (function)
+                         (lambda (function done)
                            (funcall function '(("new")))
                            (pcase outcome
                              ('error (error "Second page failed"))
@@ -8389,7 +8396,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                        (list (list (make-clutch-db-value-preview
                                                     :type 'clob :length 1000
                                                     :text "preview")))))
-                             (_ (funcall function '(("last"))))))))
+                             (_ (funcall function '(("last")))
+                                (funcall done nil))))))
                 (should (eq (condition-case err
                                 (progn (clutch--export-result 'csv 'file) 'success)
                               (error (car err))
@@ -8461,6 +8469,115 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
       (delete-file path)
       (clutch-db-disconnect conn))))
 
+(ert-deftest clutch-test-file-export-replaces-file-once-all-pages-arrive ()
+  "A file export should fetch its pages without blocking.
+The file changes only once every page has arrived.  A failed page, a
+cancel that meets a page as it arrives, a quit while a page is written,
+or a killed result buffer, leaves it and no temporary file behind."
+  (dolist (outcome '(success page-error cancelled quit killed))
+    (ert-info ((symbol-name outcome))
+      (let* ((dir (make-temp-file "clutch-export-async-" t))
+             (path (expand-file-name "out.csv" dir))
+             (result-buffer (generate-new-buffer " *clutch-export-async*"))
+             exported)
+        (unwind-protect
+            (clutch-test--with-async-statements finishes
+              (write-region "old\n" nil path nil 'silent)
+              (with-current-buffer result-buffer
+                (clutch-test--init-result-state
+                 (list :columns '("id")
+                       :rows '((1) (2))
+                       :connection 'async-conn
+                       :base-query "SELECT id FROM t"
+                       :server-pageable t
+                       :result-max-rows 2))
+                (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                          ((symbol-function 'clutch-db-build-paged-sql)
+                           (lambda (_conn _sql page-num &rest _)
+                             (format "SELECT id FROM t PAGE %d" page-num)))
+                          ((symbol-function 'message) #'ignore))
+                  (clutch-result--write-export-file
+                   'csv (cdr (assq 'csv clutch--result-export-kinds)) path
+                   (lambda (row-count) (setq exported row-count))
+                   :coding 'utf-8)
+                  (should (equal (mapcar #'car finishes) '("SELECT id FROM t PAGE 0")))
+                  (funcall (cdar finishes) (make-clutch-db-result :rows '((1) (2))) nil)
+                  (ert-run-idle-timers)
+                  (should (equal (car (car finishes)) "SELECT id FROM t PAGE 1"))
+                  (should (equal (with-temp-buffer (insert-file-contents path)
+                                                   (buffer-string))
+                                 "old\n"))
+                  (pcase outcome
+                    ('success
+                     (funcall (cdar finishes) (make-clutch-db-result :rows '((3))) nil))
+                    ('page-error
+                     (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
+                    ('cancelled
+                     (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                                (lambda (_conn) t)))
+                       (clutch-cancel-query-or-quit))
+                     (funcall (cdar finishes) (make-clutch-db-result :rows '((3))) nil))
+                    ('quit
+                     (let ((write-region (symbol-function 'write-region)))
+                       (cl-letf (((symbol-function 'write-region)
+                                  (lambda (&rest args)
+                                    (if (string-match-p "out\\.csv\\.clutch-"
+                                                        (nth 2 args))
+                                        (signal 'quit nil)
+                                      (apply write-region args)))))
+                         (funcall (cdar finishes)
+                                  (make-clutch-db-result :rows '((3))) nil)
+                         ;; ERT does not fail a test that quits.
+                         (should-not (condition-case nil
+                                         (progn (ert-run-idle-timers) nil)
+                                       (quit t))))))
+                    ('killed
+                     (let ((finish (cdar finishes)))
+                       (kill-buffer result-buffer)
+                       (funcall finish (make-clutch-db-result :rows '((3))) nil))))
+                  (ert-run-idle-timers)))
+              (should-not (gethash 'async-conn clutch--running-queries))
+              (should-not (clutch-db--foreground-busy-p 'async-conn))
+              (should (equal exported (and (eq outcome 'success) 3)))
+              (should (equal (with-temp-buffer (insert-file-contents path)
+                                               (buffer-string))
+                             (if (eq outcome 'success) "id\n1\n2\n3\n" "old\n")))
+              (should (equal (directory-files dir nil "\\`[^.]") '("out.csv"))))
+          (when (buffer-live-p result-buffer)
+            (kill-buffer result-buffer))
+          (delete-directory dir t))))))
+
+(ert-deftest clutch-test-file-export-of-many-pages-keeps-a-flat-stack ()
+  "An export should fetch many synchronous pages without nesting them.
+SQLite runs each page before its callback returns, which a recursive page
+loop turns into a stack as deep as the pages are many."
+  (require 'clutch-db-sqlite)
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (path (make-temp-file "clutch-export-many-"))
+        exported)
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE n(i INTEGER PRIMARY KEY)")
+          (clutch-db-query
+           conn "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 800) INSERT INTO n SELECT i FROM c")
+          (clutch-test--with-result-state
+              (:connection conn :base-query "SELECT i FROM n ORDER BY i"
+               :last-query "SELECT i FROM n ORDER BY i"
+               :server-pageable t :columns '("i"))
+            ;; Far fewer frames than pages: a page that nested the next
+            ;; would run out of depth long before the last.
+            (let ((clutch-result-max-rows 1)
+                  (max-lisp-eval-depth 1000))
+              (cl-letf (((symbol-function 'message) #'ignore))
+                (clutch-result--write-export-file
+                 'csv (cdr (assq 'csv clutch--result-export-kinds)) path
+                 (lambda (row-count) (setq exported row-count))
+                 :coding 'utf-8))))
+          (should (eql exported 800)))
+      (delete-file path)
+      (clutch-db-disconnect conn))))
+
 (ert-deftest clutch-test-collect-all-export-rows-contract ()
   "Export row collection should page, reuse local rows, and reconnect when needed."
   (dolist (case '(("plain limit"
@@ -8489,7 +8606,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                        (lambda (_conn _sql)
                          (cl-incf queries)
                          (make-clutch-db-result :rows rows))))
-              (should (equal (clutch-result--collect-all-export-rows) rows))
+              (let (collected)
+                (clutch-result--collect-all-export-rows
+                 (lambda (all) (setq collected all)))
+                (should (equal collected rows)))
               (should (= queries 0))
               (should-not paginated)))))))
   (ert-info ("reconnect before querying")
@@ -8507,7 +8627,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                    (lambda (conn _sql)
                      (setq captured-conn conn)
                      (make-clutch-db-result :rows '((1))))))
-          (should (equal (clutch-result--collect-all-export-rows) '((1))))
+          (let (collected)
+            (clutch-result--collect-all-export-rows
+             (lambda (all) (setq collected all)))
+            (should (equal collected '((1)))))
           (should ensured)
           (should (eq captured-conn 'new-conn)))))))
 
@@ -9992,6 +10115,30 @@ result as it was."
                                 (string-prefix-p
                                  "Statement 2 failed: duplicate key" text))
                               messages))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
+(ert-deftest clutch-test-async-batch-stops-when-cancel-meets-a-finished-statement ()
+  "C-g should stop a batch even when its statement finishes first.
+A statement's result can arrive before the cancel; that statement keeps
+its outcome and the next one does not run."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let (messages)
+        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (_conn) t))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute-statements
+           '("UPDATE t SET n = 1 WHERE id = 1"
+             "DELETE FROM t WHERE id = 2"))
+          (clutch-cancel-query-or-quit)
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should (equal (mapcar #'car finishes)
+                         '("UPDATE t SET n = 1 WHERE id = 1")))
+          (should (member "1 statement executed, then cancelled" messages))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()

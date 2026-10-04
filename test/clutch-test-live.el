@@ -536,7 +536,10 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                         (progn (call-interactively (key-binding (kbd "/")))
                                (clutch-test--await-queries)))
                       (should-not (clutch--result-display-rows))
-                      (let ((rows (clutch-result--collect-all-export-rows)))
+                      (let (rows)
+                        (clutch-result--collect-all-export-rows
+                         (lambda (all) (setq rows all)))
+                        (clutch-test--await-queries)
                         (should (equal (sort (clutch-test--live-row-ids rows) #'<)
                                        '(3 4 5))))
                       ;; Pressing W again changes the condition, and an empty
