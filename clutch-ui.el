@@ -97,6 +97,8 @@ the header cell was rendered.")
 (defvar clutch--pending-inserts)
 (defvar clutch--query-elapsed)
 (defvar clutch--result-source-table)
+(defvar clutch--result-source-schema)
+(defvar clutch--result-source-catalog)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-columns)
 (defvar clutch--result-rows)
@@ -1285,10 +1287,10 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
              clutch-connection
              clutch--result-source-table)
     (let ((details (clutch--cached-column-details
-                    clutch-connection clutch--result-source-table)))
+                    clutch-connection (clutch--result-source-key))))
       (unless details
         (clutch--ensure-column-details-async
-         clutch-connection clutch--result-source-table))
+         clutch-connection (clutch--result-source-key)))
       (if details
           (mapcar (lambda (col-name)
                     (when-let* ((detail (cl-find col-name details
@@ -2255,6 +2257,15 @@ Priority: region rows, then current row."
   (or clutch--result-source-table
       (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
                   op)))
+
+(defun clutch--result-source-key ()
+  "Return the metadata key of the current result's source table, or nil.
+It keeps the schema and catalog that qualify the table in the query, so
+metadata comes from the table the result shows."
+  (and clutch--result-source-table
+       (clutch--table-key clutch--result-source-table
+                          clutch--result-source-schema
+                          clutch--result-source-catalog)))
 
 (defun clutch--cell-at (pos)
   "Return (ROW-IDX COL-IDX FULL-VALUE) at buffer position POS, or nil."

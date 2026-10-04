@@ -113,6 +113,10 @@ Nil means derive the offset from `clutch--page-current'.")
   "Elapsed time in seconds for the last query execution.")
 (defvar-local clutch--result-source-table nil
   "Detected source table name for the current result buffer, or nil.")
+(defvar-local clutch--result-source-schema nil
+  "Schema that qualifies the source table in the query, or nil.")
+(defvar-local clutch--result-source-catalog nil
+  "Catalog that qualifies the source table in the query, or nil.")
 (defvar-local clutch--result-server-pageable nil
   "Non-nil when server-side page navigation is safe for this result.")
 (defvar-local clutch--result-server-rewritable nil
@@ -186,13 +190,14 @@ missing table metadata."
               col-names))))
 
 (defun clutch--handle-table-metadata-updated (conn table kind)
-  "Refresh result UI for CONN/TABLE metadata KIND."
+  "Refresh result UI for CONN/TABLE metadata KIND.
+TABLE is a metadata key from `clutch--table-key'."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
       (when (and (derived-mode-p 'clutch-result-mode)
                  (eq clutch-connection conn)
                  clutch--result-columns
-                 (equal clutch--result-source-table table))
+                 (equal (clutch--result-source-key) table))
         (pcase kind
           ('column-details
            (setq-local clutch--result-column-details
@@ -320,6 +325,8 @@ so callers cannot apply WHERE before hidden identity columns are injected."
                       clutch--result-source-table)
                    (list :sql base
                          :table clutch--result-source-table
+                         :source-schema clutch--result-source-schema
+                         :source-catalog clutch--result-source-catalog
                          :identity-status clutch--row-identity-status
                          :identity-error-message
                          clutch--row-identity-error-message)))
@@ -459,18 +466,22 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
 (cl-defun clutch-result--init-state
     (sql columns rows elapsed
          &key row-identity-prep page-offset page-has-more
-         server-pageable server-rewritable source-table)
+         server-pageable server-rewritable source-table source-schema
+         source-catalog)
   "Initialize buffer-local state for a fresh query result.
 SQL is the original query, COLUMNS and ROWS the result data, ELAPSED the
 query time.  ROW-IDENTITY-PREP describes any hidden row identity columns in
 COLUMNS.  PAGE-OFFSET is the zero-based row offset for ROWS, and
 PAGE-HAS-MORE records one-row lookahead.
 SERVER-PAGEABLE, SERVER-REWRITABLE, and SOURCE-TABLE describe whether clutch
-may treat the result as a re-executable relation source.
+may treat the result as a re-executable relation source, and SOURCE-SCHEMA
+and SOURCE-CATALOG qualify SOURCE-TABLE as the query does.
 Returns column names."
   (setq-local clutch--last-query sql
               clutch--base-query sql
               clutch--result-source-table source-table
+              clutch--result-source-schema source-schema
+              clutch--result-source-catalog source-catalog
               clutch--result-server-pageable server-pageable
               clutch--result-server-rewritable server-rewritable
               clutch--page-total-rows (and (not server-pageable)
@@ -510,6 +521,9 @@ are produced by the query execution layer."
                        (clutch--row-identity-augmentable-sql-p
                         analysis-sql prepared-source-table))
                    prepared-source-table)))
+         (namespace (if (plist-get result-context :source-table)
+                        result-context
+                      row-identity-prep))
          (page (if server-pageable
                    (clutch-result--split-page-lookahead-rows
                     (clutch-db-result-rows result) page-size)
@@ -528,7 +542,9 @@ are produced by the query execution layer."
              :page-has-more has-more
              :server-pageable server-pageable
              :server-rewritable server-rewritable
-             :source-table source-table))
+             :source-table source-table
+             :source-schema (plist-get namespace :source-schema)
+             :source-catalog (plist-get namespace :source-catalog)))
       ;; A server-side filter result restores the query it filters.
       (when (plist-member result-context :where-filter)
         (setq-local clutch--base-query (plist-get result-context :base-query)
@@ -1469,6 +1485,8 @@ alone would lose.  With FILTER nil it only clears the filter."
                (list :server-pageable (clutch-result--server-pageable-p)
                      :server-rewritable t
                      :source-table clutch--result-source-table
+                     :source-schema clutch--result-source-schema
+                     :source-catalog clutch--result-source-catalog
                      :row-identity-prep (plist-get plan :row-identity-prep)))))
 
 ;;;; Client-side filter
@@ -2894,7 +2912,7 @@ OP is a short operation description used in user-facing error messages."
   (let* ((table (clutch--result-source-table-or-user-error op))
          (row-identity (clutch-result--row-identity-or-user-error table op))
          (columns (clutch-result--update-source-columns
-                   table
+                   (clutch--result-source-key)
                    (clutch-result--selected-update-col-indices
                     row-identity col-indices op)
                    op))
@@ -3429,7 +3447,7 @@ When details are not yet cached, attempts to load them from the database."
       (user-error "No column at point"))
     ;; Try to populate details on demand if missing.
     (unless clutch--result-column-details
-      (when-let* ((table clutch--result-source-table)
+      (when-let* ((table (clutch--result-source-key))
                   (cols clutch--result-columns))
         (setq-local clutch--result-column-details
                     (clutch--result-column-details
