@@ -201,10 +201,11 @@ missing table metadata."
            (when clutch--pending-inserts
              (clutch--refresh-display)))
           ('foreign-keys
-           (setq-local clutch--fk-info
-                       (clutch--foreign-key-column-info
-                        clutch-connection table clutch--result-columns))
-           (clutch--refresh-display)))))))
+           (let ((fk-info (clutch--foreign-key-column-info
+                           clutch-connection table clutch--result-columns)))
+             (unless (equal fk-info clutch--fk-info)
+               (setq-local clutch--fk-info fk-info)
+               (clutch--refresh-display)))))))))
 
 (add-hook 'clutch--table-metadata-updated-hook
           #'clutch--handle-table-metadata-updated)
