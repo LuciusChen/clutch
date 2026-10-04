@@ -4295,6 +4295,50 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
        (when (buffer-live-p buf)
          (kill-buffer buf))))))
 
+(ert-deftest clutch-test-foreign-key-refresh-redraws-only-marked-results ()
+  "Async foreign keys should redraw a result only when they mark its columns."
+  (dolist (case '(unmarked marked))
+    (clutch-test--with-isolated-metadata-caches
+     (let ((buf (generate-new-buffer " *clutch-result-fk*"))
+           (render (symbol-function 'clutch--render-result))
+           (renders 0)
+           callback)
+       (unwind-protect
+           (let ((clutch--table-metadata-updated-hook
+                  (list #'clutch--handle-table-metadata-updated)))
+             (cl-letf (((symbol-function 'clutch-db-live-p)
+                        (lambda (_conn) t))
+                       ((symbol-function 'clutch-db-foreign-keys-async)
+                        (lambda (_conn _table cb &optional _errback)
+                          (setq callback cb)
+                          t)))
+               (with-current-buffer buf
+                 (clutch-test--init-result-state
+                  (list :connection 'fake-conn
+                        :columns '("id" "account_id")
+                        :rows '((1 7))
+                        :source-table "users"
+                        :column-widths [12 12]
+                        :render t))
+                 (clutch--load-fk-info))
+               (should callback)
+               (cl-letf (((symbol-function 'clutch--render-result)
+                          (lambda ()
+                            (cl-incf renders)
+                            (funcall render))))
+                 (funcall callback
+                          (and (eq case 'marked)
+                               '(("account_id" :ref-table "accounts"
+                                  :ref-column "id")))))
+               (with-current-buffer buf
+                 (should (= renders (if (eq case 'marked) 1 0)))
+                 (let ((line (clutch-test--rendered-line-at 0)))
+                   (should (eq (get-text-property (string-match "7" line)
+                                                  'face line)
+                               (and (eq case 'marked) 'clutch-fk-face)))))))
+         (when (buffer-live-p buf)
+           (kill-buffer buf)))))))
+
 (ert-deftest clutch-test-column-info-string-contract ()
   "Column info strings should format detail text, faces, and missing metadata."
   (with-temp-buffer
