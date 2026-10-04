@@ -330,7 +330,8 @@ WHERE type='table' AND name=%s"
 
 (defun clutch-db-sqlite--fk-alist (handle table schema)
   "Return FK alist for TABLE in SCHEMA from HANDLE.
-Result: ((from-col :ref-table T :ref-column C) ...)"
+Result: ((from-col :ref-table T :ref-column C) ...), with :ref-schema
+SCHEMA when SCHEMA is given, since a foreign key stays in its database."
   ;; foreign_key_list row: (id seq table from to on_update on_delete match)
   (let ((rows (clutch-db-sqlite--pragma-strict
                handle
@@ -341,8 +342,10 @@ Result: ((from-col :ref-table T :ref-column C) ...)"
              collect (pcase-let ((`(,_id ,_seq ,ref-table ,from-col ,ref-column . ,_)
                                   row))
                        (cons from-col
-                             (list :ref-table ref-table
-                                   :ref-column ref-column))))))
+                             (append (list :ref-table ref-table
+                                           :ref-column ref-column)
+                                     (and schema
+                                          (list :ref-schema schema))))))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-sqlite-conn) table
                                       &optional schema _catalog)

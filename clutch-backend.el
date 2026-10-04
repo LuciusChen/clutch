@@ -2188,7 +2188,8 @@ SCHEMA and CATALOG qualify TABLE."
 (cl-defgeneric clutch-db-foreign-keys (conn table &optional schema catalog)
   "Return foreign key info for TABLE on CONN.
 SCHEMA and CATALOG qualify TABLE as in `clutch-db-column-details'.
-Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)).")
+Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)), with
+:ref-schema S when the referenced table is known to be in schema S.")
 
 (cl-defgeneric clutch-db-column-details (conn table &optional schema catalog)
   "Return detailed column info for TABLE on CONN.
