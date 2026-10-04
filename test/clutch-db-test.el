@@ -356,6 +356,25 @@ authinfo, and PARAMS are explicit connection parameters."
             (dolist (key absent)
               (should-not (plist-member params key)))))))))
 
+(ert-deftest clutch-db-test-pg-source-table-names-fold-as-postgresql-does ()
+  "A PostgreSQL source table should be named as PostgreSQL stores it.
+An unquoted name folds to lower case and a quoted one keeps its case, and
+the relation is resolved with both quoted."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-pg--make-connection :client 'fake-pgsql-client)))
+    (pcase-dolist (`(,token ,name ,schema)
+                   '(("People" "people" nil)
+                     ("Other.People" "people" "other")
+                     ("\"Other\".\"People\"" "People" "Other")
+                     ("other.\"MiXed\"" "MiXed" "other")))
+      (ert-info (token)
+        (should (equal (clutch-db--source-table-name conn token) name))
+        (should (equal (clutch-db--source-table-schema conn token) schema))))
+    (should (equal (clutch-db-pg--relation "MiXed" "other")
+                   "'\"other\".\"MiXed\"'::regclass"))
+    (should (equal (clutch-db-pg--relation "people" nil)
+                   "'\"people\"'::regclass"))))
+
 (ert-deftest clutch-db-test-pg-param-rewrite-skips-quoted-identifiers ()
   "PostgreSQL parameter rewriting should ignore quoted identifier text."
   (require 'clutch-db-pg)

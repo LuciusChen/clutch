@@ -530,8 +530,8 @@ differ, so such text gains the offset of Emacs's time zone at that time."
                             '("NOT NULL")))))
       (format "    %s" (mapconcat #'identity parts " ")))))
 
-(defun clutch-db-pg--unique-not-null-identities (conn table)
-  "Return unique-not-null row identity candidates for TABLE on CONN."
+(defun clutch-db-pg--unique-not-null-identities (conn table &optional schema)
+  "Return unique-not-null row identity candidates for TABLE in SCHEMA on CONN."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT idx.relname,
        string_agg(a.attname, E'\\x1f' ORDER BY keys.ord) AS columns
@@ -539,7 +539,7 @@ FROM pg_index i
 JOIN pg_class idx ON idx.oid = i.indexrelid
 JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS keys(attnum, ord) ON true
 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = keys.attnum
-WHERE i.indrelid = %s::regclass
+WHERE i.indrelid = %s
   AND i.indisunique
   AND NOT i.indisprimary
   AND i.indpred IS NULL
@@ -547,7 +547,7 @@ WHERE i.indrelid = %s::regclass
 GROUP BY idx.relname
 HAVING bool_and(a.attnotnull)
 ORDER BY idx.relname"
-                        (pgsql-escape-literal table)))
+                        (clutch-db-pg--relation table schema)))
            (result (clutch-db-pg--exec conn sql)))
       (mapcar (lambda (row)
                 (pcase-let ((`(,name ,columns) row))
@@ -556,13 +556,13 @@ ORDER BY idx.relname"
                         :columns (split-string columns "\x1f" t))))
               (clutch-db-pg--metadata-rows result)))))
 
-(defun clutch-db-pg--ctid-identity (conn table)
-  "Return a CTID row locator candidate for TABLE on CONN, or nil."
+(defun clutch-db-pg--ctid-identity (conn table &optional schema)
+  "Return a CTID row locator candidate for TABLE in SCHEMA on CONN, or nil."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT c.relkind::text
 FROM pg_class c
-WHERE c.oid = %s::regclass"
-                        (pgsql-escape-literal table)))
+WHERE c.oid = %s"
+                        (clutch-db-pg--relation table schema)))
            (result (clutch-db-pg--exec conn sql))
            (relkind (car (car (clutch-db-pg--metadata-rows result)))))
       (when (equal relkind "r")
@@ -767,6 +767,34 @@ Decline when the installed pgsql.el cannot execute asynchronously."
     ((_conn clutch-db-pg--connection) value)
   "Escape VALUE as a PostgreSQL string literal."
   (pgsql-escape-literal value))
+
+(defun clutch-db-pg--fold-identifier (raw)
+  "Return identifier RAW in its PostgreSQL catalog form.
+A quoted identifier keeps its case, and an unquoted one folds to lower case."
+  (if (string-prefix-p "\"" raw)
+      (clutch-db-sql--unquote-identifier raw)
+    (downcase raw)))
+
+(cl-defmethod clutch-db--source-table-name ((_conn clutch-db-pg--connection) token)
+  "Return the name of the table that SQL table TOKEN names."
+  (clutch-db-pg--fold-identifier (clutch-db-sql-table-qualifier token)))
+
+(cl-defmethod clutch-db--source-table-schema ((_conn clutch-db-pg--connection) token)
+  "Return the schema that SQL table TOKEN names, or nil."
+  (let ((parts (clutch-db-sql--table-raw-parts token)))
+    (when (cdr parts)
+      (clutch-db-pg--fold-identifier (car (last parts 2))))))
+
+(defun clutch-db-pg--relation (table schema)
+  "Return SQL that resolves TABLE in SCHEMA to its oid.
+TABLE and SCHEMA are names as PostgreSQL stores them.  Without SCHEMA, the
+search path resolves TABLE, as it did for the query."
+  (format "%s::regclass"
+          (pgsql-escape-literal
+           (if schema
+               (concat (pgsql-escape-identifier schema) "."
+                       (pgsql-escape-identifier table))
+             (pgsql-escape-identifier table)))))
 
 (cl-defmethod clutch-db-value-to-typed-literal
     ((conn clutch-db-pg--connection) value type fallback-format-fn)
@@ -1093,24 +1121,21 @@ WHERE schemaname = current_schema()
                          (pgsql-escape-literal name))))))
         (_ nil)))))
 
-(cl-defmethod clutch-db-table-comment ((conn clutch-db-pg--connection) table &optional _schema)
-  "Return the comment for TABLE on PostgreSQL CONN, or nil if none."
+(cl-defmethod clutch-db-table-comment ((conn clutch-db-pg--connection) table &optional schema)
+  "Return the comment for TABLE in SCHEMA on PostgreSQL CONN, or nil if none."
   (clutch-db--translate-library-error pgsql-error
     (let* ((result (clutch-db-pg--exec
                       conn
-                      (format "SELECT obj_description(c.oid) \
-FROM pg_class c \
-JOIN pg_namespace n ON n.oid = c.relnamespace \
-WHERE c.relname = %s AND n.nspname = current_schema()"
-                              (pgsql-escape-literal table))))
+                      (format "SELECT obj_description(%s, 'pg_class')"
+                              (clutch-db-pg--relation table schema))))
              (row (car (clutch-db-pg--metadata-rows result)))
              (comment (car row)))
       (when (and comment (not (string-empty-p comment)))
         comment))))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-pg--connection) table
-                                             &optional _schema _catalog)
-  "Return primary key column names for TABLE on PostgreSQL CONN."
+                                             &optional schema _catalog)
+  "Return primary key column names for TABLE in SCHEMA on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let ((result (clutch-db-pg--exec
                    conn
@@ -1118,24 +1143,24 @@ WHERE c.relname = %s AND n.nspname = current_schema()"
 FROM (SELECT i.indrelid, i.indkey::smallint[] AS key_array,
              generate_subscripts(i.indkey::smallint[], 1) AS ord
       FROM pg_index i
-      WHERE i.indrelid = %s::regclass AND i.indisprimary) pk
+      WHERE i.indrelid = %s AND i.indisprimary) pk
 JOIN pg_attribute a
   ON a.attrelid = pk.indrelid AND a.attnum = pk.key_array[pk.ord]
 ORDER BY pk.ord"
-                           (pgsql-escape-literal table)))))
+                           (clutch-db-pg--relation table schema)))))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-pg--connection) table
-                                                 &optional _schema _catalog)
-  "Return row identity candidates for TABLE on PostgreSQL CONN."
+                                                 &optional schema _catalog)
+  "Return row identity candidates for TABLE in SCHEMA on PostgreSQL CONN."
   (or (cl-call-next-method)
-      (clutch-db-pg--unique-not-null-identities conn table)
-      (when-let* ((ctid (clutch-db-pg--ctid-identity conn table)))
+      (clutch-db-pg--unique-not-null-identities conn table schema)
+      (when-let* ((ctid (clutch-db-pg--ctid-identity conn table schema)))
         (list ctid))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
-                                      &optional _schema _catalog)
-  "Return foreign key info for TABLE on PostgreSQL CONN."
+                                      &optional schema _catalog)
+  "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT
     kcu.column_name,
@@ -1148,10 +1173,12 @@ JOIN information_schema.key_column_usage kcu
 JOIN information_schema.constraint_column_usage ccu
     ON ccu.constraint_name = tc.constraint_name
     AND ccu.table_schema = tc.table_schema
+JOIN pg_class c ON c.oid = %s
+JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE tc.constraint_type = 'FOREIGN KEY'
-    AND tc.table_name = %s
-    AND tc.table_schema = current_schema()"
-                          (pgsql-escape-literal table)))
+    AND tc.table_name = c.relname
+    AND tc.table_schema = n.nspname"
+                          (clutch-db-pg--relation table schema)))
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
          (lambda (row)
@@ -1161,8 +1188,8 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
          (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
-                                        &optional _schema _catalog)
-  "Return detailed column info for TABLE on PostgreSQL CONN."
+                                        &optional schema _catalog)
+  "Return detailed column info for TABLE in SCHEMA on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let* ((col-result
               (clutch-db-pg--exec
@@ -1175,12 +1202,13 @@ JOIN pg_class pc ON pc.relname = c.table_name \
 JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
   AND pn.nspname = c.table_schema \
 JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name \
-WHERE c.table_name = %s AND c.table_schema = current_schema() \
+WHERE pc.oid = %s \
 ORDER BY c.ordinal_position"
-                       (pgsql-escape-literal table))))
+                       (clutch-db-pg--relation table schema))))
              (col-rows (clutch-db-pg--metadata-rows col-result))
-             (pk-cols  (clutch-db-primary-key-columns conn table))
-             (fks      (clutch-db-foreign-keys conn table)))
+             (namespace (clutch-db--namespace-arguments schema nil))
+             (pk-cols  (apply #'clutch-db-primary-key-columns conn table namespace))
+             (fks      (apply #'clutch-db-foreign-keys conn table namespace)))
       (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
               col-rows))))
 
@@ -1343,6 +1371,11 @@ XTDB has no table comments."
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-pg--xtdb-connection) _table
                                        &optional _schema)
   "Return nil, since XTDB has no table comments."
+  nil)
+
+(cl-defmethod clutch-db-foreign-keys ((_conn clutch-db-pg--xtdb-connection) _table
+                                      &optional _schema _catalog)
+  "Return nil, since XTDB has no foreign keys."
   nil)
 
 (cl-defmethod clutch-db-list-objects ((_conn clutch-db-pg--xtdb-connection) _category)
