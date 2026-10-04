@@ -3242,10 +3242,13 @@ When OMIT-HEADER is non-nil, omit the column header."
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
-(defun clutch-result--map-export-batches (function)
-  "Call FUNCTION with each bounded export batch, auto-paging when needed.
-Call it once with nil for an empty result.  Each batch has its own list
-spine, so consumers may collect batches without mutating cached rows."
+(defun clutch-result--map-export-batches (function done)
+  "Call FUNCTION with each bounded export batch, then DONE.
+Call FUNCTION once with nil for an empty result.  Each batch has its own
+list spine, so consumers may collect batches without mutating cached
+rows.  DONE gets nil after the last batch, or the error that stopped the
+export.  Pages are fetched without blocking, as statements run, so DONE
+may run after this function returns."
   (clutch--ensure-connection)
   (let* ((plan (clutch-result--current-query-plan))
          (effective-sql (plist-get plan :sql))
@@ -3258,29 +3261,111 @@ spine, so consumers may collect batches without mutating cached rows."
                     (funcall function nil))))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))
-          (emit clutch--result-rows)
-        (let* ((row-identity-prep (plist-get plan :row-identity-prep))
-               (identity-sql (plist-get row-identity-prep :sql)))
-          (if (or (null clutch--base-query)
-                  (and (null clutch--order-by)
-                       (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
-              (emit (clutch-db-result-rows
-                     (clutch--run-db-query clutch-connection identity-sql)))
-            (cl-loop for page-num from 0
-                     for paged-sql = (clutch-db-build-paged-sql
-                                      clutch-connection identity-sql page-num
-                                      page-size clutch--order-by)
-                     for result = (clutch--run-db-query
-                                   clutch-connection paged-sql)
-                     for batch = (clutch-db-result-rows result)
-                     do (emit batch)
-                     until (< (length batch) page-size))))))))
+          (progn
+            (emit clutch--result-rows)
+            (funcall done nil))
+        (clutch-result--export-pages
+         effective-sql
+         (plist-get (plist-get plan :row-identity-prep) :sql)
+         (and clutch--base-query
+              (or clutch--order-by
+                  (not (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
+              page-size)
+         #'emit done)))))
 
-(defun clutch-result--collect-all-export-rows ()
-  "Return all rows for current result by auto-paging when needed."
+(defun clutch-result--export-pages (sql query page-size emit done)
+  "Fetch QUERY for an export of SQL and call EMIT with its rows, then DONE.
+PAGE-SIZE pages QUERY, or nil fetches it whole.  DONE gets nil after the
+last page, or the error that stopped the export.  The pages run as one
+query activity, so \\[clutch-cancel-query-or-quit] cancels the export.  A
+page that the backend runs synchronously continues the loop instead of
+nesting the next one, so many pages need no deeper stack.  An error is
+signaled while the command runs and only reported once it has returned."
+  (let ((conn clutch-connection)
+        (buffer (current-buffer))
+        (order-by clutch--order-by)
+        (activity (clutch--begin-query-activity clutch-connection))
+        (page-num 0)
+        waiting)
+    (cl-labels
+        ((report (err)
+           (if waiting
+               (message "%s" (error-message-string err))
+             (signal (car err) (cdr err))))
+         (settle (err)
+           (clutch--end-query-activity activity)
+           (condition-case done-error
+               (if (buffer-live-p buffer)
+                   (with-current-buffer buffer (funcall done err))
+                 (funcall done err))
+             (error (report done-error)))
+           nil)
+         (handle (result error)
+           ;; Return non-nil when the next page should be fetched.
+           (cond
+            ((not (buffer-live-p buffer))
+             (message "Export stopped: its result buffer was killed")
+             (settle '(error "Export stopped: its result buffer was killed")))
+            (error
+             (with-current-buffer buffer
+               (clutch--present-statement-outcome
+                sql conn (list :error error
+                               :source-buffer buffer
+                               :result-context '(:keep-result-on-error t))))
+             (settle error))
+            (t
+             (let ((rows (clutch-db-result-rows result)))
+               (condition-case emit-error
+                   (progn
+                     (with-current-buffer buffer
+                       (funcall emit rows))
+                     (if (and page-size (= (length rows) page-size))
+                         (cl-incf page-num)
+                       (settle nil)))
+                 (error
+                  (settle emit-error)
+                  (report emit-error)
+                  nil))))))
+         (run ()
+           ;; Fetch pages until one finishes asynchronously or the export ends.
+           (catch 'wait
+             (while (buffer-live-p buffer)
+               (let ((dispatching t)
+                     inline)
+                 (with-current-buffer buffer
+                   (clutch--run-db-query-async
+                    conn
+                    (if page-size
+                        (clutch-db-build-paged-sql
+                         conn query page-num page-size order-by)
+                      query)
+                    nil
+                    (lambda (result error)
+                      (if dispatching
+                          (setq inline (list result error))
+                        (setq waiting t)
+                        (when (handle result error)
+                          (condition-case run-error
+                              (run)
+                            (error
+                             (settle run-error)
+                             (report run-error))))))))
+                 (setq dispatching nil)
+                 (unless (and inline (apply #'handle inline))
+                   (throw 'wait nil))))
+             (handle nil nil))))
+      (clutch--dispatch-query-activity activity #'run))))
+
+(defun clutch-result--collect-all-export-rows (on-rows)
+  "Call ON-ROWS with all rows of the current result, auto-paging when needed.
+Pages are fetched without blocking, so ON-ROWS may run after this function
+returns, and it does not run when the export fails."
   (let (batches)
-    (clutch-result--map-export-batches (lambda (batch) (push batch batches)))
-    (apply #'nconc (nreverse batches))))
+    (clutch-result--map-export-batches
+     (lambda (batch) (push batch batches))
+     (lambda (err)
+       (unless err
+         (funcall on-rows (apply #'nconc (nreverse batches))))))))
 
 (defun clutch--export-insert-content (rows)
   "Return INSERT statement export text for ROWS using current result metadata."
@@ -3316,15 +3401,18 @@ spine, so consumers may collect batches without mutating cached rows."
       "")))
 
 (cl-defun clutch-result--write-export-file
-    (kind spec path &key coding omit-header)
-  "Write KIND using SPEC to PATH with CODING and OMIT-HEADER.
+    (kind spec path done &key coding omit-header)
+  "Write KIND using SPEC to PATH with CODING and OMIT-HEADER, then call DONE.
 Format one batch at a time, following symbolic links in PATH.
 PATH's filename-specific handlers receive the complete encoded output once.
-Replace the destination only after successful completion.
-Return the exported row count."
+Replace the destination only after successful completion, then call DONE
+with the exported row count.  Pages are fetched without blocking, so DONE
+may run after this function returns; a failure leaves PATH as it was."
   (let* ((path (expand-file-name path))
          (target (file-truename path))
          transformed
+         documents
+         returned
          (row-count 0)
          (first t)
          (coding (or coding coding-system-for-write 'utf-8-unix))
@@ -3339,42 +3427,56 @@ Return the exported row count."
                       (and (integerp eol) eol)))
             coding))
          (temporary (make-nearby-temp-file (concat target ".clutch-"))))
-    (unwind-protect
-        (progn
-          (cl-labels
-              ((write-batch (rows)
-                 (let ((text (if (memq kind '(csv tsv))
-                                 (funcall (plist-get spec :content)
-                                          rows (or omit-header (not first)))
-                               (funcall (plist-get spec :content) rows)))
-                       (coding-system-for-write
-                        (if first coding append-coding)))
-                   (write-region text nil temporary (not first) 'silent)
-                   (cl-incf row-count (length rows))
-                   (setq first nil))))
-            (if (eq kind 'document-insert-many)
-                (write-batch (clutch-result--collect-all-export-rows))
-              (clutch-result--map-export-batches #'write-batch)))
-          (unless (eq (find-file-name-handler path 'write-region)
-                      (find-file-name-handler temporary 'write-region))
-            (setq transformed
-                  (make-nearby-temp-file
-                   (expand-file-name "clutch-" (file-name-directory target))
-                   nil (concat "-" (file-name-nondirectory path))))
-            (with-temp-buffer
-              (set-buffer-multibyte nil)
-              (insert-file-contents-literally temporary)
-              (let ((coding-system-for-write 'no-conversion))
-                (write-region (point-min) (point-max) transformed nil 'silent))))
-          (let ((output (or transformed temporary)))
-            (when (file-exists-p target)
-              (set-file-modes output (file-modes target)))
-            (rename-file output target t))
-          row-count)
-      (when (file-exists-p temporary)
-        (delete-file temporary))
-      (when (and transformed (file-exists-p transformed))
-        (delete-file transformed)))))
+    (cl-labels
+        ((cleanup ()
+           (when (file-exists-p temporary)
+             (delete-file temporary))
+           (when (and transformed (file-exists-p transformed))
+             (delete-file transformed)))
+         (write-batch (rows)
+           (let ((text (if (memq kind '(csv tsv))
+                           (funcall (plist-get spec :content)
+                                    rows (or omit-header (not first)))
+                         (funcall (plist-get spec :content) rows)))
+                 (coding-system-for-write
+                  (if first coding append-coding)))
+             (write-region text nil temporary (not first) 'silent)
+             (cl-incf row-count (length rows))
+             (setq first nil)))
+         (finish (err)
+           (unwind-protect
+               (unless err
+                 (when (eq kind 'document-insert-many)
+                   (write-batch (apply #'nconc (nreverse documents))))
+                 (unless (eq (find-file-name-handler path 'write-region)
+                             (find-file-name-handler temporary 'write-region))
+                   (setq transformed
+                         (make-nearby-temp-file
+                          (expand-file-name "clutch-" (file-name-directory target))
+                          nil (concat "-" (file-name-nondirectory path))))
+                   (with-temp-buffer
+                     (set-buffer-multibyte nil)
+                     (insert-file-contents-literally temporary)
+                     (let ((coding-system-for-write 'no-conversion))
+                       (write-region (point-min) (point-max) transformed nil 'silent))))
+                 (let ((output (or transformed temporary)))
+                   (when (file-exists-p target)
+                     (set-file-modes output (file-modes target)))
+                   (rename-file output target t))
+                 (funcall done row-count))
+             (cleanup))))
+      ;; A quit or an error before the export returns leaves no file behind;
+      ;; afterwards FINISH does.
+      (unwind-protect
+          (progn
+            (clutch-result--map-export-batches
+             (if (eq kind 'document-insert-many)
+                 (lambda (rows) (push rows documents))
+               #'write-batch)
+             #'finish)
+            (setq returned t))
+        (unless returned
+          (cleanup))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
   "Export result rows as KIND to DESTINATION.
@@ -3383,23 +3485,27 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
          (content (plist-get spec :content)))
     (pcase destination
       ('clipboard
-       (let ((rows (clutch-result--collect-all-export-rows)))
-         (kill-new (if (memq kind '(csv tsv))
-                       (funcall content rows omit-header)
-                     (funcall content rows)))
-         (message (plist-get spec :copy-message)
-                  (length rows) (if (= (length rows) 1) "" "s"))))
+       (clutch-result--collect-all-export-rows
+        (lambda (rows)
+          (kill-new (if (memq kind '(csv tsv))
+                        (funcall content rows omit-header)
+                      (funcall content rows)))
+          (message (plist-get spec :copy-message)
+                   (length rows) (if (= (length rows) 1) "" "s")))))
       ('file
        (let* ((coding (when (eq (plist-get spec :file-coding) 'delimited)
                         (clutch--read-delimited-export-coding-system kind)))
               (path (read-file-name (plist-get spec :file-prompt)
                                     nil nil nil
-                                    (plist-get spec :default-file)))
-              (row-count (clutch-result--write-export-file
-                          kind spec path :coding coding :omit-header omit-header)))
-         (apply #'message (plist-get spec :file-message)
-                (append (list row-count (if (= row-count 1) "" "s") path)
-                        (when coding (list coding)))))))))
+                                    (plist-get spec :default-file))))
+         (message "Exporting to %s..." path)
+         (clutch-result--write-export-file
+          kind spec path
+          (lambda (row-count)
+            (apply #'message (plist-get spec :file-message)
+                   (append (list row-count (if (= row-count 1) "" "s") path)
+                           (when coding (list coding)))))
+          :coding coding :omit-header omit-header))))))
 
 ;;;; Column navigation and metadata
 
