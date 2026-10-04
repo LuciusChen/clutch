@@ -662,7 +662,8 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
       (when (and comment (not (string-empty-p comment)))
         comment))))
 
-(cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table)
+(cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table
+                                             &optional _schema _catalog)
   "Return primary key column names for TABLE on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
     (let* ((result (mysql-query
@@ -681,7 +682,8 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
   (or (cl-call-next-method)
       (clutch-db-mysql--unique-not-null-identities conn table)))
 
-(cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table)
+(cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table
+                                      &optional _schema _catalog)
   "Return foreign key info for TABLE on MySQL CONN.
 Returns alist of (COL-NAME . (:ref-table T :ref-column C))."
   (clutch-db--translate-library-error mysql-error
@@ -701,7 +703,8 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
 
 ;;;; Column details
 
-(cl-defmethod clutch-db-column-details ((conn mysql-conn) table)
+(cl-defmethod clutch-db-column-details ((conn mysql-conn) table
+                                        &optional _schema _catalog)
   "Return detailed column info for TABLE on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
     (let* ((col-result (mysql-query

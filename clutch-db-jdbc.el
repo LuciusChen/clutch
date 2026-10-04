@@ -2077,7 +2077,7 @@ the metadata request."
     t))
 
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
-                                              &optional errback)
+                                              &optional errback _schema _catalog)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-columns"
@@ -2117,7 +2117,7 @@ the metadata request."
           (plist-get result :foreign-keys)))
 
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback
-                                            &optional errback)
+                                            &optional errback _schema _catalog)
   "Fetch foreign-key info for TABLE on JDBC CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-foreign-keys"
@@ -2320,7 +2320,8 @@ the metadata request."
        (clutch-db-search-table-entries metadata-conn table)
        (clutch-jdbc--conn-schema metadata-conn)))))
 
-(cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table)
+(cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table
+                                             &optional _schema _catalog)
   "Return primary key columns for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   conn "get-primary-keys"
@@ -2414,14 +2415,16 @@ without a unique index never asks for them."
                               metadata-conn table)))
             (list rowid))))))
 
-(cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table)
+(cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table
+                                      &optional _schema _catalog)
   "Return foreign key info for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   conn "get-foreign-keys"
                   (clutch-jdbc--table-metadata-params conn table))))
     (clutch-jdbc--foreign-keys-from-result result)))
 
-(cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table)
+(cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table
+                                        &optional _schema _catalog)
   "Return detailed column info for TABLE on JDBC CONN."
   (let* ((pk-cols (clutch-db-primary-key-columns conn table))
          (fks     (clutch-db-foreign-keys conn table))
