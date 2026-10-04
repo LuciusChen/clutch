@@ -214,7 +214,8 @@ The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=
 3. N / P      Next page / previous page
 4. M->        Jump to the last row window, e.g. "Σ 735-1234 of 1234 rows"
 5. #          Query total rows → mode-line shows "Σ 1-500 of 1234 rows"
-6. ] / [      Page horizontally with column-aligned snapping
+6. ] / [      Page horizontally with column-aligned snapping; point moves to the
+              first column of the new view, so TAB continues from there
               → all columns stay searchable because they remain in the buffer
 7. W          Pick column (defaults to column at point), enter value or condition
               e.g., select "status" then type: pending   → WHERE status = 'pending'
