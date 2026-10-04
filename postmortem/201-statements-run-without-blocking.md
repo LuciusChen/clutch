@@ -1,6 +1,6 @@
 # 201 — Statements Run Without Blocking Emacs
 
-_Updated after 0.5.4: paging, server-side sorting and counting a result's rows run through the same pipeline. A page or count changes the result only when it arrives, a server-side sort is passed to the page load that applies it rather than set before it, and staging is refused while such a query runs, since the arriving page drops staged changes. Export batches and JDBC's remaining rows still block._
+_Updated after 0.5.4: paging, server-side sorting and counting a result's rows run through the same pipeline. A page or count changes the result only when it arrives, a server-side sort is passed to the page load that applies it rather than set before it, and staging is refused while such a query runs, since the arriving page drops staged changes. Exporting all rows runs the same way, as one activity whose pages continue in a loop when a backend finishes them synchronously, so an export of many pages needs no deeper stack; a file export replaces its destination only once every page has arrived. A cancel that meets a statement or page whose result has already arrived lets it report that result, and the batch or export stops before its next query: the cancel request reaches the query's callback. JDBC's remaining rows still block._
 
 ## Evidence
 

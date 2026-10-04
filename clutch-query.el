@@ -1231,7 +1231,7 @@ and signal `clutch-query-interrupted'."
 		   (and prepare-result-p
 			(list :execution-sql (clutch--debug-sql-preview execution-sql)
 			      :server-pageable server-pageable)))
-		  (cl-flet ((finish (result err)
+		  (cl-flet ((finish (result err &optional cancelled)
 			      (release)
 			      (let* ((elapsed (- (float-time) start))
 				     (outcome
@@ -1260,7 +1260,8 @@ and signal `clutch-query-interrupted'."
 					      :row-identity-prep row-identity-prep
 					      :server-pageable server-pageable
 					      :result-context result-context
-					      :source-buffer source-buffer))))
+					      :source-buffer source-buffer
+					      :cancelled cancelled))))
 				(if dispatching
 				    (setq inline-outcome outcome)
 				  (funcall k outcome)))))
@@ -1763,7 +1764,17 @@ Stops and reports on the first error."
                (with-current-buffer source-buffer
                  (clutch--mark-executed-sql-region (car region) (cdr region))
                  (redisplay t)))
-             t)))
+             (if (not (plist-get outcome :cancelled))
+                 t
+               ;; The cancel met this statement's result; stop the batch.
+               (clutch--finish-query-activity
+                activity
+                (lambda ()
+                  (message "%s statement%s %s, then cancelled"
+                           (clutch--message-count done)
+                           (if (= done 1) "" "s")
+                           (clutch--message-keyword "executed"))))
+               nil))))
          (run ()
            ;; Run statements until one finishes asynchronously or the batch ends.
            (catch 'wait
