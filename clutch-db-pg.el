@@ -1160,7 +1160,9 @@ ORDER BY pk.ord"
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
                                       &optional schema _catalog)
-  "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN."
+  "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN.
+The query keeps the keys that reference a table in TABLE's schema, so
+with SCHEMA each carries it as :ref-schema."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT
     kcu.column_name,
@@ -1184,7 +1186,8 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
          (lambda (row)
            (pcase-let ((`(,col-name ,ref-table ,ref-column) row))
              (cons col-name
-                   (list :ref-table ref-table :ref-column ref-column))))
+                   (append (list :ref-table ref-table :ref-column ref-column)
+                           (and schema (list :ref-schema schema))))))
          (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
