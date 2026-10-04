@@ -566,69 +566,97 @@ are produced by the query execution layer."
       (message "%s" text))
     buf))
 
-(defun clutch-result--execute-page (page-num &optional page-offset)
-  "Execute PAGE-NUM and refresh the current result buffer.
-PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination."
+(defun clutch-result--run-query (sql query on-result)
+  "Run QUERY for the current result without blocking, as statements run.
+SQL is the statement the user sees, which a failure reports.  ON-RESULT
+gets QUERY's result and its elapsed seconds in this buffer.  While QUERY
+runs, \\[clutch-cancel-query-or-quit] cancels it, and the result stays as
+it was unless QUERY succeeds."
+  (let ((conn clutch-connection)
+        (buffer (current-buffer))
+        (start (float-time))
+        (activity (clutch--begin-query-activity clutch-connection)))
+    (clutch--dispatch-query-activity
+     activity
+     (lambda ()
+       (clutch--run-db-query-async
+        conn query nil
+        (lambda (result error)
+          (clutch--finish-query-activity
+           activity
+           (lambda ()
+             (when error
+               (clutch--present-statement-outcome
+                sql conn (list :error error
+                               :source-buffer buffer
+                               :result-context '(:keep-result-on-error t))))))
+          ;; After the activity ends, so a query that ON-RESULT starts
+          ;; counts its own time.
+          (when (and (not error) (buffer-live-p buffer))
+            (with-current-buffer buffer
+              (funcall on-result result (- (float-time) start))))))))))
+
+(cl-defun clutch-result--execute-page
+    (page-num &optional page-offset &key (sort nil sort-p) success-message)
+  "Load PAGE-NUM into the current result buffer without blocking.
+PAGE-OFFSET, when non-nil, overrides PAGE-NUM for last-window pagination.
+SORT, when given, is the server-side sort to load the page with, as
+\(COLUMN . DESCENDING), or nil for none, and it becomes the result's sort
+with the page.  SUCCESS-MESSAGE replaces the message about the rows
+loaded."
   (unless (clutch-result--server-pageable-p)
     (user-error "Server-side pagination is not available for this query result"))
   (let* ((plan (clutch-result--current-query-plan))
-         (source-buffer (current-buffer))
          (effective-sql (plist-get plan :sql))
+         (row-identity-prep (plist-get plan :row-identity-prep))
          (page-size clutch-result-max-rows)
          (offset (or page-offset (* page-num page-size)))
-         (fetch-size (1+ page-size)))
+         (order-by (if sort-p
+                       (and sort (cons (car sort) (if (cdr sort) "DESC" "ASC")))
+                     clutch--order-by)))
     (unless effective-sql
       (user-error "Pagination not available for this query"))
     (clutch--ensure-connection)
     (clutch-result--confirm-discard-pending
      "Discard staged changes and change page? " "Page change cancelled")
-    (clutch-db-with-foreground-connection clutch-connection
-      (let* ((row-identity-prep (plist-get plan :row-identity-prep))
-             (identity-sql (plist-get row-identity-prep :sql))
-             (paged-sql (clutch-db-build-paged-sql
-                         clutch-connection identity-sql page-num fetch-size
-                         clutch--order-by offset))
-             (start (float-time))
-             (result (condition-case err
-                         (clutch--run-db-query clutch-connection paged-sql)
-                       (clutch-db-error
-                        (let* ((failure
-                                (clutch--remember-execute-error
-                                 source-buffer
-                                 clutch-connection
-                                 effective-sql
-                                 err
-                                 (list :page-num page-num
-                                       :page-offset offset
-                                       :paged-sql
-                                       (clutch--debug-sql-preview paged-sql))))
-                               (summary (cdr failure)))
-                          (user-error "%s" (clutch--debug-workflow-message summary))))))
-             (elapsed (- (float-time) start))
-             (page (clutch-result--split-page-lookahead-rows
-                    (clutch-db-result-rows result) page-size))
-             (rows (car page))
-             (has-more (cdr page)))
-        (clutch-result--install-page-state
-         (clutch-db-result-columns result) rows elapsed
-         page-num
-         :row-identity-prep row-identity-prep
-         :page-offset offset
-         :page-has-more has-more)
-        (when (and clutch--sort-column (null clutch--order-by))
-          (setq clutch--local-sort-original-rows
-                (copy-sequence clutch--result-rows))
-          (clutch-result--sort-local-page
-           clutch--sort-column clutch--sort-descending
-           clutch--local-sort-column-index))
-        (clutch--refresh-display)
-        (message "Rows %s loaded (%s, %s row%s)"
-                 (clutch--message-count
-                  (format "%d-%d" (if rows (1+ offset) 0)
-                          (+ offset (length rows))))
-                 (clutch--message-literal (clutch--format-elapsed elapsed))
-                 (clutch--message-count (length rows))
-                 (if (= (length rows) 1) "" "s"))))))
+    (clutch-result--run-query
+     effective-sql
+     (clutch-db-build-paged-sql
+      clutch-connection (plist-get row-identity-prep :sql) page-num
+      (1+ page-size) order-by offset)
+     (lambda (result elapsed)
+       (pcase-let ((`(,rows . ,has-more)
+                    (clutch-result--split-page-lookahead-rows
+                     (clutch-db-result-rows result) page-size)))
+         (when sort-p
+           (setq clutch--sort-column (car sort)
+                 clutch--sort-descending (cdr sort)
+                 clutch--order-by order-by
+                 clutch--local-sort-original-rows nil
+                 clutch--local-sort-column-index nil))
+         (clutch-result--install-page-state
+          (clutch-db-result-columns result) rows elapsed
+          page-num
+          :row-identity-prep row-identity-prep
+          :page-offset offset
+          :page-has-more has-more)
+         (when (and clutch--sort-column (null clutch--order-by))
+           (setq clutch--local-sort-original-rows
+                 (copy-sequence clutch--result-rows))
+           (clutch-result--sort-local-page
+            clutch--sort-column clutch--sort-descending
+            clutch--local-sort-column-index))
+         (clutch--refresh-display)
+         (message "%s"
+                  (or success-message
+                      (format "Rows %s loaded (%s, %s row%s)"
+                              (clutch--message-count
+                               (format "%d-%d" (if rows (1+ offset) 0)
+                                       (+ offset (length rows))))
+                              (clutch--message-literal
+                               (clutch--format-elapsed elapsed))
+                              (clutch--message-count (length rows))
+                              (if (= (length rows) 1) "" "s")))))))))
 
 (defun clutch-result--display-dml (result sql elapsed)
   "Render a DML RESULT (INSERT/UPDATE/DELETE) with SQL and ELAPSED time."
@@ -1019,53 +1047,53 @@ Edit:
 ;;;###autoload
 (defun clutch-result-last-page ()
   "Go to the last data page.
-Triggers a COUNT(*) query if total rows are not yet known."
+Counts the rows first when their total is not yet known."
   (interactive)
-  (unless clutch--page-total-rows
-    (clutch-result-count-total))
-  (when clutch--page-total-rows
-    (let* ((page-size clutch-result-max-rows)
-           (last-page (max 0 (1- (ceiling clutch--page-total-rows
-                                           (float page-size)))))
-           (last-offset (max 0 (- clutch--page-total-rows page-size))))
-      (if (and (= clutch--page-current last-page)
-               (= (or clutch--page-offset
-                      (* clutch--page-current page-size))
-                  last-offset))
-          (user-error "Already on last page")
-        (clutch-result--execute-page last-page last-offset)))))
+  (if clutch--page-total-rows
+      (unless (clutch-result--load-last-page)
+        (user-error "Already on last page"))
+    (clutch-result-count-total
+     (lambda ()
+       (unless (clutch-result--load-last-page)
+         (message "Already on last page"))))))
+
+(defun clutch-result--load-last-page ()
+  "Load the last page of the counted rows unless it is shown.
+Return non-nil when the page starts loading."
+  (let* ((page-size clutch-result-max-rows)
+         (last-page (max 0 (1- (ceiling clutch--page-total-rows
+                                         (float page-size)))))
+         (last-offset (max 0 (- clutch--page-total-rows page-size))))
+    (unless (and (= clutch--page-current last-page)
+                 (= (or clutch--page-offset
+                        (* clutch--page-current page-size))
+                    last-offset))
+      (clutch-result--execute-page last-page last-offset)
+      t)))
 
 ;;;###autoload
-(defun clutch-result-count-total ()
-  "Query the total row count for the current base query."
+(defun clutch-result-count-total (&optional then)
+  "Query the total row count for the current base query without blocking.
+THEN, when non-nil, is called in this buffer once the count arrives."
   (interactive)
   (unless (clutch-result--server-rewritable-p)
     (user-error "Server-side count is not available for this query result"))
-  (let* (conn
-         (base (clutch-result--effective-query)))
+  (let ((base (clutch-result--effective-query)))
     (clutch--ensure-connection)
-    (setq conn clutch-connection)
-    (let* ((count-sql (clutch-db-build-count-sql conn base))
-           (result (condition-case err
-                       (clutch--run-db-query conn count-sql)
-                     (clutch-db-error
-                      (pcase-let ((`(,_message . ,summary)
-                                   (clutch--remember-query-error
-                                    (current-buffer) conn "count" count-sql err
-                                    (list :generated-sql count-sql)
-                                    (list :category "query" :op "count"))))
-                        (user-error "%s"
-                                            (clutch--debug-workflow-message
-                                             (format "COUNT query error: %s"
-                                                     summary)))))))
-           (count-val (caar (clutch-db-result-rows result))))
-      (setq-local clutch--page-total-rows
-                  (if (numberp count-val) count-val
-                    (string-to-number (format "%s" count-val))))
-      (clutch--refresh-footer-line)
-      (force-mode-line-update)
-      (message "Total rows: %s"
-               (clutch--message-count clutch--page-total-rows)))))
+    (let ((count-sql (clutch-db-build-count-sql clutch-connection base)))
+      (clutch-result--run-query
+       count-sql count-sql
+       (lambda (result _elapsed)
+         (let ((count-val (caar (clutch-db-result-rows result))))
+           (setq-local clutch--page-total-rows
+                       (if (numberp count-val) count-val
+                         (string-to-number (format "%s" count-val)))))
+         (clutch--refresh-footer-line)
+         (force-mode-line-update)
+         (message "Total rows: %s"
+                  (clutch--message-count clutch--page-total-rows))
+         (when then
+           (funcall then)))))))
 
 ;;;###autoload
 (defun clutch-result-rerun ()
@@ -1236,18 +1264,14 @@ COL-INDEX disambiguates duplicate result labels for local sorting."
     (unless idx
       (user-error "Column %s not found" col-name))
     (let ((direction (if descending "DESC" "ASC")))
-      (setq clutch--sort-column col-name
-            clutch--sort-descending descending)
       (if (clutch-result--server-rewritable-p)
-          (progn
-            (setq clutch--order-by (cons col-name direction)
-                  clutch--local-sort-original-rows nil
-                  clutch--local-sort-column-index nil
-                  clutch--page-current 0)
-            (clutch-result--execute-page 0)
-            (message "Sorted by %s %s"
-                     (clutch--message-ident col-name)
-                     (clutch--message-keyword direction)))
+          (clutch-result--execute-page
+           0 nil :sort (cons col-name descending)
+           :success-message (format "Sorted by %s %s"
+                                    (clutch--message-ident col-name)
+                                    (clutch--message-keyword direction)))
+        (setq clutch--sort-column col-name
+              clutch--sort-descending descending)
         (unless clutch--local-sort-original-rows
           (setq clutch--local-sort-original-rows
                 (copy-sequence clutch--result-rows)))
@@ -1294,27 +1318,25 @@ The cycle is unsorted, ascending, descending, then unsorted again."
       (clutch-result--sort col-name nil (and (not server-sort-p) resolved-idx)))
      ((not clutch--sort-descending)
       (clutch-result--sort col-name t (and (not server-sort-p) resolved-idx)))
+     (server-sort-p
+      (clutch-result--execute-page 0 nil :sort nil
+                                   :success-message "Sort cleared"))
      (t
       (let ((original-rows clutch--local-sort-original-rows))
+        (unless original-rows
+          (error "Local sort snapshot is missing"))
         (setq clutch--sort-column nil
               clutch--sort-descending nil
               clutch--order-by nil
               clutch--local-sort-original-rows nil
-              clutch--local-sort-column-index nil)
-        (if server-sort-p
-            (progn
-              (setq clutch--page-current 0)
-              (clutch-result--execute-page 0)
-              (message "Sort cleared"))
-          (unless original-rows
-            (error "Local sort snapshot is missing"))
-          (setq clutch--result-rows (copy-sequence original-rows))
-          (when clutch--filter-pattern
-            (setq clutch--filtered-rows
-                  (clutch-result--client-filter-rows
-                   clutch--result-rows clutch--filter-pattern)))
-          (clutch--refresh-display)
-          (message "Current-page sort cleared")))))))
+              clutch--local-sort-column-index nil
+              clutch--result-rows (copy-sequence original-rows))
+        (when clutch--filter-pattern
+          (setq clutch--filtered-rows
+                (clutch-result--client-filter-rows
+                 clutch--result-rows clutch--filter-pattern)))
+        (clutch--refresh-display)
+        (message "Current-page sort cleared"))))))
 
 (defun clutch-result--column-name-at-point ()
   "Return the visible result column name at point, or nil."

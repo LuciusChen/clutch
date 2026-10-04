@@ -7357,6 +7357,28 @@ after the edit is staged."
                 (should (= executed-page expected-page))
                 (should (= executed-offset expected-offset))))))))))
 
+(defmacro clutch-test--with-instant-pages (pages-var &rest body)
+  "Run BODY with every result page load succeeding at once.
+Each loaded page number is pushed onto PAGES-VAR, and every page holds the
+result's current rows."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((,pages-var nil))
+     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+               ((symbol-function 'clutch-db-build-paged-sql)
+                (lambda (_conn _sql page-num &rest _)
+                  (push page-num ,pages-var)
+                  "SELECT 1"))
+               ((symbol-function 'clutch-result--run-query)
+                (lambda (_sql _query on-result)
+                  (funcall on-result
+                           (make-clutch-db-result
+                            :columns clutch--result-column-defs
+                            :rows clutch--result-rows)
+                           0)))
+               ((symbol-function 'clutch--refresh-display) #'ignore)
+               ((symbol-function 'message) #'ignore))
+       ,@body)))
+
 (ert-deftest clutch-test-sort-by-column-state-machine ()
   "Keyboard sorting should cycle column state and reject non-column points."
   (dolist (case '((toggle "name" 1 "name" nil nil nil ("name" t nil))
@@ -7373,6 +7395,8 @@ after the edit is staged."
                             (:name "name")
                             (:name "age"))
              :server-rewritable t
+             :server-pageable t
+             :base-query "SELECT id, name, age FROM t"
              :sort-column sort-column
              :sort-descending sort-descending
              :page-current 4)
@@ -7382,33 +7406,31 @@ after the edit is staged."
                                  (list 'clutch-col-idx col-idx))
             (goto-char (point-min)))
           (setq-local clutch--order-by order-by)
-          (let (pages sort-args)
-            (cl-letf (((symbol-function 'completing-read)
-                       (lambda (&rest _)
-                         (error "unexpected sort column prompt")))
-                      ((symbol-function 'clutch-result--sort)
-                       (lambda (col desc &optional idx)
-                         (setq sort-args (list col desc idx))))
-                      ((symbol-function 'clutch-result--execute-page)
-                       (lambda (page &rest _)
-                         (push page pages))))
-              (pcase expected-state
-                ('error
-                 (let ((err (should-error (clutch-result-sort-by-column)
-                                          :type 'user-error)))
-                   (should (string-match-p "No column at point"
-                                           (error-message-string err)))))
-                ('clear
-                 (clutch-result-sort-by-column)
-                 (should-not clutch--sort-column)
-                 (should-not clutch--sort-descending)
-                 (should-not clutch--order-by)
-                 (should (= clutch--page-current 0))
-                 (should (equal pages '(0)))
-                 (should-not sort-args))
-                (_
-                 (clutch-result-sort-by-column)
-                 (should (equal sort-args expected-sort)))))))))))
+          (let (sort-args)
+            (clutch-test--with-instant-pages pages
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _)
+                           (error "unexpected sort column prompt")))
+                        ((symbol-function 'clutch-result--sort)
+                         (lambda (col desc &optional idx)
+                           (setq sort-args (list col desc idx)))))
+                (pcase expected-state
+                  ('error
+                   (let ((err (should-error (clutch-result-sort-by-column)
+                                            :type 'user-error)))
+                     (should (string-match-p "No column at point"
+                                             (error-message-string err)))))
+                  ('clear
+                   (clutch-result-sort-by-column)
+                   (should-not clutch--sort-column)
+                   (should-not clutch--sort-descending)
+                   (should-not clutch--order-by)
+                   (should (= clutch--page-current 0))
+                   (should (equal pages '(0)))
+                   (should-not sort-args))
+                  (_
+                   (clutch-result-sort-by-column)
+                   (should (equal sort-args expected-sort))))))))))))
 
 (ert-deftest clutch-test-auto-commit-transient-description-shows-state ()
   "Auto-commit transient label should show manual and automatic states."
@@ -7580,15 +7602,13 @@ after the edit is staged."
   (clutch-test--with-result-state
       (:columns '("id" "name")
        :server-rewritable t
-       :server-pageable t)
-    (let (pages)
-      (cl-letf (((symbol-function 'clutch-result--execute-page)
-                 (lambda (page &rest _)
-                   (push page pages))))
-        (clutch-result--sort-by-column-index 99 "name")
-        (should (equal clutch--sort-column "name"))
-        (should (equal clutch--order-by '("name" . "ASC")))
-        (should (equal pages '(0))))))
+       :server-pageable t
+       :base-query "SELECT id, name FROM t")
+    (clutch-test--with-instant-pages pages
+      (clutch-result--sort-by-column-index 99 "name")
+      (should (equal clutch--sort-column "name"))
+      (should (equal clutch--order-by '("name" . "ASC")))
+      (should (equal pages '(0)))))
   (clutch-test--with-result-state
       (:columns '("id" "age")
        :column-defs '((:name "id") (:name "age")))
@@ -7606,29 +7626,27 @@ after the edit is staged."
       (:columns '("id" "name")
        :server-rewritable t
        :server-pageable t
+       :base-query "SELECT id, name FROM t"
        :page-current 3)
-    (let (pages)
-      (cl-letf (((symbol-function 'clutch-result--execute-page)
-                 (lambda (page &rest _)
-                   (push page pages))))
-        (clutch-result--sort-by-column-index 1)
-        (should (equal clutch--sort-column "name"))
-        (should-not clutch--sort-descending)
-        (should (equal clutch--order-by '("name" . "ASC")))
-        (should (= clutch--page-current 0))
-        (clutch-result--sort-by-column-index 1)
-        (should (equal clutch--sort-column "name"))
-        (should clutch--sort-descending)
-        (should (equal clutch--order-by '("name" . "DESC")))
-        (clutch-result--sort-by-column-index 1)
-        (should-not clutch--sort-column)
-        (should-not clutch--sort-descending)
-        (should-not clutch--order-by)
-        (clutch-result--sort-by-column-index 0)
-        (should (equal clutch--sort-column "id"))
-        (should-not clutch--sort-descending)
-        (should (equal clutch--order-by '("id" . "ASC")))
-        (should (equal (nreverse pages) '(0 0 0 0)))))))
+    (clutch-test--with-instant-pages pages
+      (clutch-result--sort-by-column-index 1)
+      (should (equal clutch--sort-column "name"))
+      (should-not clutch--sort-descending)
+      (should (equal clutch--order-by '("name" . "ASC")))
+      (should (= clutch--page-current 0))
+      (clutch-result--sort-by-column-index 1)
+      (should (equal clutch--sort-column "name"))
+      (should clutch--sort-descending)
+      (should (equal clutch--order-by '("name" . "DESC")))
+      (clutch-result--sort-by-column-index 1)
+      (should-not clutch--sort-column)
+      (should-not clutch--sort-descending)
+      (should-not clutch--order-by)
+      (clutch-result--sort-by-column-index 0)
+      (should (equal clutch--sort-column "id"))
+      (should-not clutch--sort-descending)
+      (should (equal clutch--order-by '("id" . "ASC")))
+      (should (equal (nreverse pages) '(0 0 0 0))))))
 
 (ert-deftest clutch-test-sort-rejects-hidden-row-identity-column ()
   "Server-side sort should only accept visible user columns."
@@ -8954,17 +8972,24 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
             (should (eq captured-conn 'new-conn))))))))
 
 (ert-deftest clutch-test-execute-page-remembers-error-details-and-debug-event ()
-  "Paging failures should populate `current-buffer' error details and trace."
+  "Paging failures should populate `current-buffer' error details and trace.
+The page stays, and the message says so."
   (with-temp-buffer
     (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/debug.db"))
           (clutch-debug-mode t)
-          (raw-message "Connection refused (host=db.example.com, port=3306)"))
+          (raw-message "Connection refused (host=db.example.com, port=3306)")
+          messages)
       (clutch--clear-debug-capture)
       (setq-local clutch-connection conn
                   clutch--base-query "SELECT * FROM t"
                   clutch--result-server-pageable t
+                  clutch--result-rows '((1))
                   clutch-result-max-rows 100)
       (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages)))
                 ((symbol-function 'clutch-db-build-paged-sql)
                  (lambda (_conn _sql _page-num _page-size
                               &optional _order-by _page-offset)
@@ -8979,7 +9004,9 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                    (signal 'clutch-db-error (list raw-message))
                  (clutch-db-error
                   (clutch--humanize-db-error (error-message-string err))))))
-          (should-error (clutch-result--execute-page 0) :type 'user-error)
+          (clutch-result--execute-page 0)
+          (should (equal clutch--result-rows '((1))))
+          (should (string-suffix-p "(result unchanged)" (car messages)))
           (let* ((details clutch--buffer-error-details)
                  (diag (plist-get details :diag))
                  (debug-text (clutch-test--debug-buffer-string)))
@@ -9790,6 +9817,94 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
           (should (string-prefix-p
                    "Last executed"
                    (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
+
+(ert-deftest clutch-test-page-load-keeps-result-until-it-succeeds ()
+  "A page load should leave the page, its sort and staging until it succeeds.
+It runs without blocking, staging waits for it, and a failure leaves the
+result as it was."
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows '((1 "a") (2 "b"))
+       :connection 'async-conn
+       :base-query "SELECT id, name FROM t"
+       :server-pageable t
+       :server-rewritable t)
+    (clutch-test--with-async-statements finishes
+      (let (messages)
+        (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                  ((symbol-function 'clutch-db-sql-surface-p) (lambda (&rest _) t))
+                  ((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (&rest _) "SELECT id, name FROM t ORDER BY name DESC"))
+                  ((symbol-function 'clutch--refresh-display) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch-result--sort "name" t)
+          (should (= (length finishes) 1))
+          (should-not clutch--sort-column)
+          (should-not clutch--order-by)
+          (should (equal clutch--result-rows '((1 "a") (2 "b"))))
+          (should (string-match-p
+                   "A query is running"
+                   (error-message-string
+                    (should-error (clutch-edit--require-sql-staged-mutation
+                                   "Edit / re-edit")
+                                  :type 'user-error))))
+          ;; An edit opened before the page load cannot be staged either.
+          (should (string-match-p
+                   "A query is running"
+                   (error-message-string
+                    (should-error (clutch-result--apply-edit
+                                   0 1 "z" (list :identity [1] :original "a"
+                                                 :original-state (cons nil "a")))
+                                  :type 'user-error))))
+          (funcall (cdar finishes) nil '(clutch-db-error "relation does not exist"))
+          (ert-run-idle-timers)
+          (should-not clutch--sort-column)
+          (should-not clutch--order-by)
+          (should (equal clutch--result-rows '((1 "a") (2 "b"))))
+          (should (string-suffix-p "(result unchanged)" (car messages)))
+          (clutch-result--sort "name" t)
+          (funcall (cdar finishes)
+                   (make-clutch-db-result :columns clutch--result-column-defs
+                                          :rows '((2 "b") (1 "a")))
+                   nil)
+          (ert-run-idle-timers)
+          (should (equal clutch--sort-column "name"))
+          (should (equal clutch--order-by '("name" . "DESC")))
+          (should (equal clutch--result-rows '((2 "b") (1 "a"))))
+          (should (equal (car messages) "Sorted by name DESC")))))))
+
+(ert-deftest clutch-test-last-page-counts-rows-first-without-blocking ()
+  "The last page of an uncounted result should load once the count arrives."
+  (clutch-test--with-result-state
+      (:columns '("id")
+       :rows '((1) (2))
+       :connection 'async-conn
+       :base-query "SELECT id FROM t"
+       :server-pageable t
+       :server-rewritable t
+       :page-total-rows nil
+       :result-max-rows 2)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch-db-build-count-sql)
+                 (lambda (&rest _) "SELECT count(*) FROM t"))
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn _sql page-num &rest _)
+                   (format "SELECT id FROM t PAGE %d" page-num)))
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch-result-last-page)
+        (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
+        (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
+        (ert-run-idle-timers)
+        (should (= clutch--page-total-rows 5))
+        (should (equal (mapcar #'car finishes)
+                       '("SELECT id FROM t PAGE 2" "SELECT count(*) FROM t")))
+        ;; The page load counts its own time once the count's has ended.
+        (should clutch--execution-start-time)))))
 
 (ert-deftest clutch-test-async-execute-drops-outcome-of-killed-buffer ()
   "A statement finishing after its buffer is killed should only be reported."
