@@ -10,6 +10,7 @@ A result of a table that the query qualified by its schema took its key and colu
 - The table metadata cache keys a qualified table by `(CATALOG SCHEMA TABLE)`, as the row identity cache does, and an unqualified one by its name. `people` and `aux.people` may be different tables, so they are cached apart, and clearing a table by name drops both. The cache functions take this key where they took the table name, so their signatures stay.
 - A result keeps the schema and catalog with its source table, through refreshing and filtering, and every metadata lookup for it, from cell edits and staged statements to the insert form and foreign keys, uses its key. SQL text still names the table as the query did.
 - SQLite reads a qualified table in its attached database, prefixing PRAGMA and `sqlite_master` with the schema.
+- A foreign key names the referenced table without its schema, which a qualified result resolved in the default namespace once it had its own foreign keys: following one of `aux.children` ran `SELECT * FROM "parents" WHERE "id" = 1` and opened `main.parents`. Foreign keys of a qualified table carry the referenced table's schema as `:ref-schema` where the backend knows it, and following one names that schema. SQLite keeps a foreign key within its database, so the schema is the table's own.
 
 ## Limits
 
@@ -19,4 +20,5 @@ A result of a table that the query qualified by its schema took its key and colu
 ## Verification
 
 - A real SQLite test attaches a database whose `people` has another key and an extra column, and checks that a result of `aux.people` takes its key, and that a staged UPDATE, DELETE and INSERT name `aux.people` with that key and leave `main.people` empty after submitting. It fails on 9c21ff3, where the key came from `main.people`.
+- A real SQLite test follows a foreign key of `aux.children` beside a `main.parents` with the same key, and checks that it opens `aux.parents`. It fails on 3d534d1, which opened `main.parents`.
 - Unit tests cover the key helpers, clearing a table by name, and a metadata update that refreshes only the results of its qualified table.

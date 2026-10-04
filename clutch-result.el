@@ -3718,15 +3718,18 @@ the label column width."
     (goto-char (point-min))))
 
 (defun clutch-record--follow-fk (fk val result-buf)
-  "Navigate to the FK-referenced row for VAL using FK plist, via RESULT-BUF."
+  "Navigate to the FK-referenced row for VAL using FK plist, via RESULT-BUF.
+The referenced table is qualified by FK's :ref-schema when it has one."
   (when (null val)
     (user-error "NULL value — cannot follow"))
   (when-let* ((placeholder (clutch--cell-placeholder-value val)))
     (user-error "%s value — cannot follow" placeholder))
   (with-current-buffer result-buf
-    (let ((c (buffer-local-value 'clutch-connection result-buf)))
+    (let ((c (buffer-local-value 'clutch-connection result-buf))
+          (schema (plist-get fk :ref-schema)))
       (clutch--execute
-       (format "SELECT * FROM %s WHERE %s = %s"
+       (format "SELECT * FROM %s%s WHERE %s = %s"
+               (if schema (concat (clutch-db-escape-identifier c schema) ".") "")
                (clutch-db-escape-identifier c (plist-get fk :ref-table))
                (clutch-db-escape-identifier c (plist-get fk :ref-column))
                (clutch-db-value-to-literal c val #'clutch--format-value))
