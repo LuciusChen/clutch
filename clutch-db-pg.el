@@ -1108,7 +1108,8 @@ WHERE c.relname = %s AND n.nspname = current_schema()"
       (when (and comment (not (string-empty-p comment)))
         comment))))
 
-(cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-pg--connection) table)
+(cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-pg--connection) table
+                                             &optional _schema _catalog)
   "Return primary key column names for TABLE on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let ((result (clutch-db-pg--exec
@@ -1132,7 +1133,8 @@ ORDER BY pk.ord"
       (when-let* ((ctid (clutch-db-pg--ctid-identity conn table)))
         (list ctid))))
 
-(cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table)
+(cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
+                                      &optional _schema _catalog)
   "Return foreign key info for TABLE on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT
@@ -1158,7 +1160,8 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                    (list :ref-table ref-table :ref-column ref-column))))
          (clutch-db-pg--metadata-rows result)))))
 
-(cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table)
+(cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
+                                        &optional _schema _catalog)
   "Return detailed column info for TABLE on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let* ((col-result
@@ -1295,11 +1298,12 @@ instead, or has none and is refused."
           (cl-call-next-method)))
 
 (cl-defmethod clutch-db-primary-key-columns ((_conn clutch-db-pg--xtdb-connection)
-                                            _table)
+                                            _table &optional _schema _catalog)
   "Return _id, the key of every XTDB table."
   (list "_id"))
 
-(cl-defmethod clutch-db-column-details ((conn clutch-db-pg--xtdb-connection) table)
+(cl-defmethod clutch-db-column-details ((conn clutch-db-pg--xtdb-connection) table
+                                        &optional _schema _catalog)
   "Return detailed column info for TABLE on XTDB CONN.
 Column types map to the PostgreSQL types that XTDB parameters take, so a
 staged value is sent with its column's type; a type that does not map keeps

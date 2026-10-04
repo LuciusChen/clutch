@@ -189,6 +189,16 @@ Return a `clutch-db-result'."
   "Escape NAME as a SQLite identifier (double-quoted)."
   (clutch-db-sqlite--escape-id name))
 
+(cl-defmethod clutch-db--source-table-schema ((_conn clutch-db-sqlite-conn) token)
+  "Return the attached database that SQL table TOKEN names, or nil."
+  (clutch-db-sql-table-schema token))
+
+(defun clutch-db-sqlite--schema-prefix (schema)
+  "Return the prefix that puts a name in attached database SCHEMA.
+It is empty when SCHEMA is nil, which leaves the name to SQLite's search
+of main, temp and the attached databases."
+  (if schema (concat (clutch-db-sqlite--escape-id schema) ".") ""))
+
 (cl-defmethod clutch-db-escape-literal ((_conn clutch-db-sqlite-conn) value)
   "Escape VALUE as a SQLite string literal (single-quoted)."
   (clutch-db-sqlite--escape-lit value))
@@ -240,31 +250,34 @@ WHERE type='table' AND name=%s"
   "Return nil; SQLite does not support table comments."
   nil)
 
-(cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-sqlite-conn) table)
-  "Return primary key column names for TABLE on SQLite CONN."
+(cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-sqlite-conn) table
+                                             &optional schema _catalog)
+  "Return primary key column names for TABLE in SCHEMA on SQLite CONN."
   ;; table_info row: (cid name type notnull dflt_value pk)
   ;; pk is 1-based position in composite PK; 0 means not in PK.
   (let* ((handle (clutch-db-sqlite-conn-handle conn))
          (rows   (clutch-db-sqlite--pragma-strict
                   handle
-                  (format "PRAGMA table_info(%s)"
+                  (format "PRAGMA %stable_info(%s)"
+                          (clutch-db-sqlite--schema-prefix schema)
                           (clutch-db-sqlite--escape-id table)))))
     (cl-loop for row in rows
              when (> (nth 5 row) 0)
              collect (nth 1 row))))
 
-(defun clutch-db-sqlite--unique-not-null-identities (conn table)
-  "Return unique-not-null row identity candidates for TABLE on CONN."
+(defun clutch-db-sqlite--unique-not-null-identities (conn table schema)
+  "Return unique-not-null row identity candidates for TABLE in SCHEMA on CONN."
   (let* ((handle (clutch-db-sqlite-conn-handle conn))
+         (prefix (clutch-db-sqlite--schema-prefix schema))
          (table-info (clutch-db-sqlite--pragma-strict
                       handle
-                      (format "PRAGMA table_info(%s)"
-                              (clutch-db-sqlite--escape-id table))))
+                      (format "PRAGMA %stable_info(%s)"
+                              prefix (clutch-db-sqlite--escape-id table))))
          (not-null (make-hash-table :test 'equal))
          (indexes (clutch-db-sqlite--pragma-strict
                    handle
-                   (format "PRAGMA index_list(%s)"
-                           (clutch-db-sqlite--escape-id table)))))
+                   (format "PRAGMA %sindex_list(%s)"
+                           prefix (clutch-db-sqlite--escape-id table)))))
     (dolist (row table-info)
       ;; table_info row: (cid name type notnull dflt_value pk)
       (puthash (nth 1 row) (> (nth 3 row) 0) not-null))
@@ -279,8 +292,8 @@ WHERE type='table' AND name=%s"
                          (lambda (info-row) (nth 2 info-row))
                          (clutch-db-sqlite--pragma-strict
                           handle
-                          (format "PRAGMA index_info(%s)"
-                                  (clutch-db-sqlite--escape-id name))))
+                          (format "PRAGMA %sindex_info(%s)"
+                                  prefix (clutch-db-sqlite--escape-id name))))
              when (and cols
                        (cl-every (lambda (col)
                                    (gethash col not-null))
@@ -289,13 +302,14 @@ WHERE type='table' AND name=%s"
                            :name name
                            :columns cols))))
 
-(defun clutch-db-sqlite--rowid-identity (conn table)
-  "Return a rowid row locator candidate for TABLE on CONN, or nil."
+(defun clutch-db-sqlite--rowid-identity (conn table schema)
+  "Return a rowid row locator candidate for TABLE in SCHEMA on CONN, or nil."
   (clutch-db--translate-library-error sqlite-error
     (let* ((handle (clutch-db-sqlite-conn-handle conn))
            (rows (sqlite-select
                   handle
-                  (format "SELECT sql FROM sqlite_master WHERE type='table' AND name=%s"
+                  (format "SELECT sql FROM %ssqlite_master WHERE type='table' AND name=%s"
+                          (clutch-db-sqlite--schema-prefix schema)
                           (clutch-db-sqlite--escape-lit table))))
            (ddl (caar rows)))
       (when (and ddl
@@ -307,37 +321,44 @@ WHERE type='table' AND name=%s"
               :where-sql "rowid = ?")))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table
-                                                 &optional _schema _catalog)
-  "Return row identity candidates for TABLE on SQLite CONN."
+                                                 &optional schema _catalog)
+  "Return row identity candidates for TABLE in SCHEMA on SQLite CONN."
   (or (cl-call-next-method)
-      (clutch-db-sqlite--unique-not-null-identities conn table)
-      (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table)))
+      (clutch-db-sqlite--unique-not-null-identities conn table schema)
+      (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table schema)))
         (list rowid))))
 
-(defun clutch-db-sqlite--fk-alist (handle table)
-  "Return FK alist for TABLE from HANDLE.
-Result: ((from-col :ref-table T :ref-column C) ...)"
+(defun clutch-db-sqlite--fk-alist (handle table schema)
+  "Return FK alist for TABLE in SCHEMA from HANDLE.
+Result: ((from-col :ref-table T :ref-column C) ...), with :ref-schema
+SCHEMA when SCHEMA is given, since a foreign key stays in its database."
   ;; foreign_key_list row: (id seq table from to on_update on_delete match)
   (let ((rows (clutch-db-sqlite--pragma-strict
                handle
-               (format "PRAGMA foreign_key_list(%s)"
+               (format "PRAGMA %sforeign_key_list(%s)"
+                       (clutch-db-sqlite--schema-prefix schema)
                        (clutch-db-sqlite--escape-id table)))))
     (cl-loop for row in rows
              collect (pcase-let ((`(,_id ,_seq ,ref-table ,from-col ,ref-column . ,_)
                                   row))
                        (cons from-col
-                             (list :ref-table ref-table
-                                   :ref-column ref-column))))))
+                             (append (list :ref-table ref-table
+                                           :ref-column ref-column)
+                                     (and schema
+                                          (list :ref-schema schema))))))))
 
-(cl-defmethod clutch-db-foreign-keys ((conn clutch-db-sqlite-conn) table)
-  "Return foreign key info for TABLE on SQLite CONN."
-  (clutch-db-sqlite--fk-alist (clutch-db-sqlite-conn-handle conn) table))
+(cl-defmethod clutch-db-foreign-keys ((conn clutch-db-sqlite-conn) table
+                                      &optional schema _catalog)
+  "Return foreign key info for TABLE in SCHEMA on SQLite CONN."
+  (clutch-db-sqlite--fk-alist (clutch-db-sqlite-conn-handle conn) table schema))
 
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-db-sqlite-conn) table
-                                            callback &optional errback)
-  "Fetch SQLite foreign key info for TABLE on CONN when idle."
-  (clutch-db--schedule-idle-metadata-call
-   conn callback errback #'clutch-db-foreign-keys nil table))
+                                            callback &optional errback
+                                            schema catalog)
+  "Fetch SQLite foreign key info for TABLE in SCHEMA on CONN when idle."
+  (apply #'clutch-db--schedule-idle-metadata-call
+         conn callback errback #'clutch-db-foreign-keys nil table
+         (clutch-db--namespace-arguments schema catalog)))
 
 (defun clutch-db-sqlite--column-detail (row pk-cols fks)
   "Convert a table_info ROW to a clutch-db column plist.
@@ -356,15 +377,18 @@ PK-COLS is a list of pk column names.  FKS is an FK alist."
             :generated   (and generated t)
             :comment     nil))))
 
-(cl-defmethod clutch-db-column-details ((conn clutch-db-sqlite-conn) table)
-  "Return detailed column info for TABLE on SQLite CONN."
+(cl-defmethod clutch-db-column-details ((conn clutch-db-sqlite-conn) table
+                                        &optional schema _catalog)
+  "Return detailed column info for TABLE in SCHEMA on SQLite CONN."
   (let* ((handle  (clutch-db-sqlite-conn-handle conn))
          (rows    (clutch-db-sqlite--pragma-strict
                    handle
-                   (format "PRAGMA table_info(%s)"
+                   (format "PRAGMA %stable_info(%s)"
+                           (clutch-db-sqlite--schema-prefix schema)
                            (clutch-db-sqlite--escape-id table))))
-         (pk-cols (clutch-db-primary-key-columns conn table))
-         (fks     (clutch-db-sqlite--fk-alist handle table)))
+         (pk-cols (apply #'clutch-db-primary-key-columns conn table
+                         (clutch-db--namespace-arguments schema nil)))
+         (fks     (clutch-db-sqlite--fk-alist handle table schema)))
     (mapcar (lambda (row)
               (clutch-db-sqlite--column-detail row pk-cols fks))
             rows)))

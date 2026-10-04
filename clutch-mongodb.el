@@ -1584,7 +1584,8 @@ display them in their Extended JSON spelling."
   (clutch-db--schedule-idle-metadata-call
    conn callback errback #'clutch-db-list-columns nil collection))
 
-(cl-defmethod clutch-db-column-details ((conn clutch-mongodb-conn) collection)
+(cl-defmethod clutch-db-column-details ((conn clutch-mongodb-conn) collection
+                                        &optional _schema _catalog)
   "Return sampled column details for MongoDB COLLECTION on CONN."
   (clutch-mongodb--column-details-for-docs
    (clutch-mongodb--sample-documents conn collection)))
@@ -1871,7 +1872,8 @@ of top-level field names for field-scoped snippets."
   "Return nil; MongoDB collections have no SQL table comments."
   nil)
 
-(cl-defmethod clutch-db-foreign-keys ((_conn clutch-mongodb-conn) _table)
+(cl-defmethod clutch-db-foreign-keys ((_conn clutch-mongodb-conn) _table
+                                      &optional _schema _catalog)
   "Return nil; MongoDB has no SQL foreign-key metadata."
   nil)
 

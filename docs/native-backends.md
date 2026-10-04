@@ -257,6 +257,7 @@ XTDB 2 speaks the PostgreSQL wire protocol, so this backend connects through `pg
 - Network timeout settings do not apply
 - `:ssh-host` and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
 - Schema/database switching is not part of the SQLite path
+- A result of a table in an attached database, as in `SELECT * FROM aux.people`, takes its key and columns from that database
 
 ## Shared Native-Backend Notes
 

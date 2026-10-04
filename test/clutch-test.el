@@ -1121,6 +1121,29 @@ Any statement that returns no result set drops the cached row identities."
       (clutch--prepare-row-identity-query conn "SELECT * FROM orders")
       (should (= calls 3)))))
 
+(ert-deftest clutch-test-table-metadata-keys-keep-namespaces-apart ()
+  "A qualified table should be cached apart from its bare name.
+Clearing a table by name drops both, and no other table."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn 'fake-conn)
+          (qualified (clutch--table-key "people" "aux")))
+      (should (equal (clutch--table-key "people") "people"))
+      (should (equal (clutch--table-key-arguments "people") '("people")))
+      (should (equal (clutch--table-key-arguments qualified) '("people" "aux" nil)))
+      (should (equal (clutch--table-key-label qualified) "aux.people"))
+      (dolist (key (list "people" qualified "orders"))
+        (clutch--set-table-metadata conn key :column-details (list key)))
+      (clutch--set-table-metadata conn (cons "public" "people") :comment "c")
+      (clutch--set-column-details-queue conn (list qualified "orders"))
+      (should (equal (clutch--cached-column-details conn qualified)
+                     (list qualified)))
+      (clutch--clear-table-metadata-caches conn "people")
+      (should-not (clutch--column-details-cached-p conn "people"))
+      (should-not (clutch--column-details-cached-p conn qualified))
+      (should-not (clutch--table-metadata conn (cons "public" "people")))
+      (should (clutch--column-details-cached-p conn "orders"))
+      (should (equal (clutch--column-details-queue conn) '("orders"))))))
+
 (ert-deftest clutch-test-row-identity-cache-key-runs-no-query ()
   "Keying the cache must not query the connection.
 On DuckDB the current schema is a query on the session, so a failure there
@@ -4211,6 +4234,31 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
         (kill-buffer buf-a))
       (when (buffer-live-p buf-b)
         (kill-buffer buf-b)))))
+
+(ert-deftest clutch-test-metadata-update-refreshes-only-its-qualified-table ()
+  "Column details of aux.people should refresh results of aux.people only."
+  (let ((plain (generate-new-buffer " *clutch-result-plain*"))
+        (aux (generate-new-buffer " *clutch-result-aux*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'clutch--result-column-details)
+                   (lambda (_conn table _col-names) (list table))))
+          (dolist (spec (list (list plain nil) (list aux "aux")))
+            (with-current-buffer (car spec)
+              (clutch-result-mode)
+              (setq-local clutch-connection 'conn
+                          clutch--result-columns '("id")
+                          clutch--result-source-table "people"
+                          clutch--result-source-schema (cadr spec)
+                          clutch--last-query "select * from people")))
+          (clutch--handle-table-metadata-updated
+           'conn '(nil "aux" "people") 'column-details)
+          (with-current-buffer aux
+            (should (equal clutch--result-column-details
+                           '((nil "aux" "people")))))
+          (with-current-buffer plain
+            (should-not clutch--result-column-details)))
+      (kill-buffer plain)
+      (kill-buffer aux))))
 
 (ert-deftest clutch-test-column-details-refresh-redraws-pending-insert-placeholders ()
   "Async column details should redraw staged insert metadata placeholders."
@@ -10081,6 +10129,95 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
           (dolist (buf (list insert-buf result-buf))
             (when (buffer-live-p buf) (kill-buffer buf)))
           (clutch-db-disconnect conn))))))
+
+(ert-deftest clutch-test-qualified-sqlite-result-changes-its-own-table ()
+  "Every change staged on a result of aux.people should go to aux.people.
+Its key and columns come from aux.people, not from main.people, which
+SQLite finds first for the bare name, has another key and lacks a column."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        result-buf)
+    (unwind-protect
+        (progn
+          (dolist (sql '("CREATE TABLE main.people (id TEXT PRIMARY KEY, name TEXT)"
+                         "ATTACH DATABASE ':memory:' AS aux"
+                         "CREATE TABLE aux.people (pk INTEGER PRIMARY KEY, id TEXT, name TEXT, nick TEXT)"
+                         "INSERT INTO aux.people VALUES (1, 'same', 'Ann', 'a'), (2, 'same', 'Bob', 'b')"))
+            (clutch-db-query conn sql))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (let ((source (current-buffer)))
+              (clutch-test--execute-and-present
+               "SELECT * FROM aux.people ORDER BY pk" conn)
+              (setq result-buf
+                    (buffer-local-value 'clutch--last-result-buffer source))))
+          (with-current-buffer result-buf
+            (should (equal (plist-get clutch--row-identity :columns) '("pk")))
+            (let ((rows clutch--result-rows))
+              (clutch-result--apply-edit
+               0 (cl-position "nick" clutch--result-columns :test #'string=) "A"
+               (list :identity (clutch-db-row-identity-values
+                                (nth 0 rows) clutch--row-identity)
+                     :original "a"
+                     :original-state (cons nil "a")))
+              (setq-local clutch--pending-deletes
+                          (list (clutch-db-row-identity-values
+                                 (nth 1 rows) clutch--row-identity))
+                          clutch--pending-inserts
+                          '((("pk" . "3") ("id" . "x") ("name" . "Cy") ("nick" . "c")))))
+            (should (equal (clutch-result--pending-sql-statements)
+                           '("INSERT INTO aux.people (\"pk\", \"id\", \"name\", \"nick\") VALUES ('3', 'x', 'Cy', 'c')"
+                             "UPDATE aux.people SET \"nick\" = 'A' WHERE \"pk\" = 1"
+                             "DELETE FROM aux.people WHERE \"pk\" = 2")))
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+              (clutch-result-submit)
+              (clutch-test--await-queries)))
+          (should (equal (clutch-db-result-rows
+                          (clutch-db-query conn "SELECT * FROM aux.people ORDER BY pk"))
+                         '((1 "same" "Ann" "A") (3 "x" "Cy" "c"))))
+          (should-not (clutch-db-result-rows
+                       (clutch-db-query conn "SELECT * FROM main.people"))))
+      (when (buffer-live-p result-buf)
+        (kill-buffer result-buf))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-qualified-sqlite-result-follows-keys-in-its-schema ()
+  "Following a foreign key of aux.children should open aux.parents.
+SQLite finds main.parents first for the bare name, with a row of the same key."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        result-buf followed)
+    (unwind-protect
+        (progn
+          (dolist (sql '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
+                         "INSERT INTO main.parents VALUES (1, 'main')"
+                         "ATTACH DATABASE ':memory:' AS aux"
+                         "CREATE TABLE aux.parents (id INTEGER PRIMARY KEY, label TEXT)"
+                         "INSERT INTO aux.parents VALUES (1, 'aux')"
+                         "CREATE TABLE aux.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))"
+                         "INSERT INTO aux.children VALUES (1, 1)"))
+            (clutch-db-query conn sql))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (let ((source (current-buffer)))
+              (clutch-test--execute-and-present "SELECT * FROM aux.children" conn)
+              (setq result-buf
+                    (buffer-local-value 'clutch--last-result-buffer source))))
+          (ert-run-idle-timers)
+          (with-current-buffer result-buf
+            (cl-letf (((symbol-function 'clutch--execute)
+                       (lambda (sql &rest _) (setq followed sql))))
+              (clutch-record--follow-fk
+               (cdr (assq 1 clutch--fk-info)) 1 result-buf)))
+          (should (equal followed
+                         "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
+          (should (equal (clutch-db-result-rows (clutch-db-query conn followed))
+                         '((1 "aux")))))
+      (when (buffer-live-p result-buf)
+        (kill-buffer result-buf))
+      (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-test-json-cancel-retains-null-on-clone ()
   "Opening and cancelling a JSON editor preserves SQL NULL on submission."

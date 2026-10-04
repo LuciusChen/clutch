@@ -102,12 +102,42 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
      :context context
      :elapsed elapsed)))
 
+(defun clutch--table-key (table &optional schema catalog)
+  "Return the metadata key of TABLE in SCHEMA and CATALOG.
+An unqualified table is keyed by its name, which resolves in the
+connection's current namespace, and a qualified one by
+\(CATALOG SCHEMA TABLE), as row identities are."
+  (if (or schema catalog) (list catalog schema table) table))
+
+(defun clutch--table-key-arguments (key)
+  "Return the arguments that name the table of metadata KEY to a method.
+They are its name, followed by its schema and catalog when it has them."
+  (pcase key
+    (`(,catalog ,schema ,table) (list table schema catalog))
+    (_ (list key))))
+
+(defun clutch--table-key-name (key)
+  "Return the table name of metadata KEY."
+  (car (clutch--table-key-arguments key)))
+
+(defun clutch--table-key-label (key)
+  "Return metadata KEY as text for messages, such as aux.people."
+  (if (consp key) (string-join (delq nil (copy-sequence key)) ".") key))
+
+(defun clutch--table-metadata-async (method conn key callback errback)
+  "Start async metadata METHOD for the table of KEY on CONN.
+METHOD gets CALLBACK and ERRBACK, then the table's schema and catalog when
+KEY has them."
+  (pcase-let ((`(,table . ,namespace) (clutch--table-key-arguments key)))
+    (apply method conn table callback errback namespace)))
+
 (defun clutch--metadata-debug-table-event (conn op phase table summary
                                                 &optional elapsed)
   "Record a metadata debug event for TABLE and OP on CONN.
 ELAPSED, when non-nil, is the operation's duration in seconds."
   (clutch--metadata-debug-event conn op phase summary
-                                (list :table table) elapsed))
+                                (list :table (clutch--table-key-label table))
+                                elapsed))
 
 (defun clutch--oracle-i18n-missing-p (err)
   "Return non-nil when ERR indicates Oracle needs orai18n.jar."
@@ -162,22 +192,24 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
     (unless (eq (gethash table schema 'missing) 'missing)
       (puthash table nil schema)))
   (clutch--forget-row-identities conn table)
-  (when-let* ((cache (gethash conn clutch--table-metadata-cache)))
-    (remhash table cache)
-    (let (comment-keys)
-      (maphash (lambda (cache-key _value)
-                 (when (equal (cdr-safe cache-key) table)
-                   (push cache-key comment-keys)))
-               cache)
-      (dolist (comment-key comment-keys)
-        (remhash comment-key cache))))
-  (when-let* ((queue (gethash conn clutch--column-details-queue-cache)))
-    (puthash conn
-             (cl-remove table queue :test #'equal)
-             clutch--column-details-queue-cache))
-  (when-let* ((active (gethash conn clutch--column-details-active-cache)))
-    (when (equal (car active) table)
-      (remhash conn clutch--column-details-active-cache))))
+  (cl-flet ((of-table-p (key)
+              (equal (clutch--table-key-name key) table)))
+    (when-let* ((cache (gethash conn clutch--table-metadata-cache)))
+      (let (keys)
+        (maphash (lambda (key _value)
+                   ;; Table comments are keyed by (SCHEMA . TABLE).
+                   (when (or (of-table-p key) (equal (cdr-safe key) table))
+                     (push key keys)))
+                 cache)
+        (dolist (key keys)
+          (remhash key cache))))
+    (when-let* ((queue (gethash conn clutch--column-details-queue-cache)))
+      (puthash conn
+               (cl-remove-if #'of-table-p queue)
+               clutch--column-details-queue-cache))
+    (when-let* ((active (gethash conn clutch--column-details-active-cache)))
+      (when (of-table-p (car active))
+        (remhash conn clutch--column-details-active-cache)))))
 
 (defun clutch--begin-metadata-ticket ()
   "Issue a new table metadata freshness ticket."
@@ -521,7 +553,8 @@ identify the request."
       t
     (clutch--metadata-debug-table-event
      conn op "stale-drop" table
-     (format "Ignored stale %s for %s" outcome table))
+     (format "Ignored stale %s for %s" outcome
+             (clutch--table-key-label table)))
     nil))
 
 (defun clutch--start-table-metadata-request
@@ -544,7 +577,8 @@ message after its failed state is recorded."
                      table op "result")
                 (clutch--metadata-debug-table-event
                  conn op "success" table
-                 (format "Loaded %s for %s" op table))
+                 (format "Loaded %s for %s" op
+                         (clutch--table-key-label table)))
                 (clutch--clear-metadata-status conn key status-property)
                 (funcall install value)
                 (clutch--notify-metadata-state-changed conn)))
@@ -563,7 +597,8 @@ message after its failed state is recorded."
       (when started
         (clutch--metadata-debug-table-event
          conn op "submit" table
-         (format "Queued background %s for %s" op table)))
+         (format "Queued background %s for %s" op
+                 (clutch--table-key-label table))))
       started)))
 
 (defun clutch--ensure-columns-async (conn schema table)
@@ -606,14 +641,15 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
           (when strict
             (let* ((message (or (plist-get status :error)
                                 (format "Failed to load column details for %s"
-                                        table)))
+                                        (clutch--table-key-label table))))
                    (details (clutch-db-error-details conn)))
               (signal 'clutch-db-error
                       (if details
                           (list message (copy-tree details))
                         (list message)))))
         (condition-case err
-            (let ((details (clutch-db-column-details conn table)))
+            (let ((details (apply #'clutch-db-column-details
+                                  conn (clutch--table-key-arguments table))))
               (clutch--set-table-metadata conn table :column-details details)
               (clutch--clear-metadata-status
                conn table :column-details-status)
@@ -647,8 +683,8 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
       (clutch--set-metadata-status
        conn table :column-details-status 'loading nil ticket)
       (let ((started
-             (clutch-db-column-details-async
-              conn table
+             (clutch--table-metadata-async
+              #'clutch-db-column-details-async conn table
               (lambda (details)
                 (if (clutch--metadata-callback-current-p
                      conn ticket
@@ -659,7 +695,8 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
                       (clutch--metadata-debug-table-event
                        conn "column-details" "success" table
                        (format "Loaded %d column details for %s"
-                               (length details) table))
+                               (length details)
+                               (clutch--table-key-label table)))
                       (clutch--set-table-metadata
                        conn table :column-details details)
                       (clutch--clear-metadata-status
@@ -692,7 +729,8 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
         (when started
           (clutch--metadata-debug-table-event
            conn "column-details" "submit" table
-           (format "Queued background column-detail preheat for %s" table)))
+           (format "Queued background column-detail preheat for %s"
+                   (clutch--table-key-label table))))
         (unless started
           (clutch--ensure-column-details conn table)
           (clutch--clear-column-details-active conn)
@@ -778,7 +816,8 @@ Returns a string or nil."
       (let ((started
              (clutch--start-table-metadata-request
               conn table table :foreign-keys-status "foreign-keys"
-              #'clutch-db-foreign-keys-async
+              (apply-partially #'clutch--table-metadata-async
+                               #'clutch-db-foreign-keys-async)
               (lambda (fks)
                 (clutch--set-table-metadata conn table :foreign-keys fks)
                 (run-hook-with-args
@@ -788,7 +827,7 @@ Returns a string or nil."
                 (clutch--remember-recoverable-metadata-warning
                  conn "foreign-key metadata"
                  `(clutch-db-error ,message)
-                 `(:table ,table))))))
+                 `(:table ,(clutch--table-key-label table)))))))
         (unless started
           (clutch--set-table-metadata conn table :foreign-keys nil)
           (clutch--clear-metadata-status conn table :foreign-keys-status)))
