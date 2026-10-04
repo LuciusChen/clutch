@@ -10182,6 +10182,43 @@ SQLite finds first for the bare name, has another key and lacks a column."
         (kill-buffer result-buf))
       (clutch-db-disconnect conn))))
 
+(ert-deftest clutch-test-qualified-sqlite-result-follows-keys-in-its-schema ()
+  "Following a foreign key of aux.children should open aux.parents.
+SQLite finds main.parents first for the bare name, with a row of the same key."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        result-buf followed)
+    (unwind-protect
+        (progn
+          (dolist (sql '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
+                         "INSERT INTO main.parents VALUES (1, 'main')"
+                         "ATTACH DATABASE ':memory:' AS aux"
+                         "CREATE TABLE aux.parents (id INTEGER PRIMARY KEY, label TEXT)"
+                         "INSERT INTO aux.parents VALUES (1, 'aux')"
+                         "CREATE TABLE aux.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))"
+                         "INSERT INTO aux.children VALUES (1, 1)"))
+            (clutch-db-query conn sql))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (let ((source (current-buffer)))
+              (clutch-test--execute-and-present "SELECT * FROM aux.children" conn)
+              (setq result-buf
+                    (buffer-local-value 'clutch--last-result-buffer source))))
+          (ert-run-idle-timers)
+          (with-current-buffer result-buf
+            (cl-letf (((symbol-function 'clutch--execute)
+                       (lambda (sql &rest _) (setq followed sql))))
+              (clutch-record--follow-fk
+               (cdr (assq 1 clutch--fk-info)) 1 result-buf)))
+          (should (equal followed
+                         "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
+          (should (equal (clutch-db-result-rows (clutch-db-query conn followed))
+                         '((1 "aux")))))
+      (when (buffer-live-p result-buf)
+        (kill-buffer result-buf))
+      (clutch-db-disconnect conn))))
+
 (ert-deftest clutch-test-json-cancel-retains-null-on-clone ()
   "Opening and cancelling a JSON editor preserves SQL NULL on submission."
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
