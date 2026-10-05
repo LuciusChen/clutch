@@ -1010,6 +1010,10 @@ Edit:
     (face-remap-add-relative 'mode-line-inactive
                              :background background :box nil))
   (setq-local text-scale-remap-header-line t)
+  ;; A theme may draw the header line in a proportional font, but the
+  ;; column header lines up with the rows only in their font.
+  (face-remap-add-relative 'header-line
+                           :family (face-attribute 'default :family nil t))
   (setq-local revert-buffer-function #'clutch-result--revert)
   (setq-local clutch--header-sort-function #'clutch-result--sort-by-column-index)
   (add-hook 'post-command-hook
