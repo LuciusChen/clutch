@@ -7549,6 +7549,53 @@ result's current rows."
                              'face description)
                             'transient-value))))))))))
 
+(ert-deftest clutch-test-query-console-sqli-keys ()
+  "Console keys use Clutch results instead of an unrelated SQLi process."
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (other (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (source (generate-new-buffer " *clutch-console-keys*"))
+        result)
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer source)
+          (clutch-mode)
+          (setq-local clutch-connection conn)
+          (should (eq (key-binding (kbd "C-c C-n")) #'undefined))
+          (should-error (call-interactively (key-binding (kbd "C-c C-z")))
+                        :type 'user-error)
+          (dolist (sql '("CREATE TABLE probe (id INTEGER)" "SELECT 1"))
+            (switch-to-buffer source)
+            (erase-buffer)
+            (insert sql)
+            (clutch-execute-buffer)
+            (setq result (get-buffer (clutch-result--buffer-name)))
+            (with-current-buffer result
+              (should (derived-mode-p 'clutch-result-mode)))
+            (switch-to-buffer source)
+            (call-interactively (key-binding (kbd "C-c C-z")))
+            (should (eq (window-buffer (selected-window)) result)))
+          ;; A closed result window comes back below the console, where
+          ;; queries show results, even where the frame would split sideways.
+          (switch-to-buffer source)
+          (delete-other-windows)
+          (let ((split-width-threshold 20))
+            (call-interactively (key-binding (kbd "C-c C-z"))))
+          (let ((below (window-in-direction 'below (get-buffer-window source))))
+            (should below)
+            (should (eq (window-buffer below) result)))
+          ;; The result belongs to this connection, not every SQL console.
+          (switch-to-buffer source)
+          (let ((clutch-connection other))
+            (should-error (call-interactively (key-binding (kbd "C-c C-z")))
+                          :type 'user-error))
+          (kill-buffer result)
+          (should-error (call-interactively (key-binding (kbd "C-c C-z")))
+                        :type 'user-error))
+      (when (buffer-live-p result) (kill-buffer result))
+      (kill-buffer source)
+      (clutch-db-disconnect other)
+      (when (clutch-db-live-p conn) (clutch-db-disconnect conn)))))
+
 (ert-deftest clutch-test-query-dispatches-route-x-to-dwim ()
   "SQL and MongoDB dispatch menus should share the DWIM execute route."
   (should (eq (lookup-key clutch-mode-map (kbd "C-c ?"))

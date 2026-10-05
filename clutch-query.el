@@ -91,6 +91,7 @@ that window.")
                   "clutch-result"
                   (connection sql result elapsed &rest keyword-args))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
+(declare-function clutch-result--show-buffer "clutch-result" (buf))
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
@@ -2214,10 +2215,25 @@ Accumulates input until a top-level semicolon ends it, then executes."
 
 ;;;; Query editing major mode
 
+;;;###autoload (autoload 'clutch-show-result "clutch" nil t)
+(defun clutch-show-result ()
+  "Show the existing result buffer for this console's connection.
+It appears where a query shows its result."
+  (interactive)
+  (unless (and clutch-connection
+               (buffer-live-p clutch--last-result-buffer)
+               (eq clutch-connection
+                   (buffer-local-value 'clutch-connection
+                                       clutch--last-result-buffer)))
+    (user-error "No result buffer for this connection"))
+  (clutch-result--show-buffer clutch--last-result-buffer))
+
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
     (clutch--install-query-keybindings map)
+    (define-key map (kbd "C-c C-z") #'clutch-show-result)
+    (define-key map (kbd "C-c C-n") #'undefined)
     (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
     (define-key map (kbd "C-c <tab>") #'clutch-complete-at-point)
     (define-key map (kbd "TAB") #'clutch-complete-qualified-or-indent)
@@ -2231,6 +2247,7 @@ Accumulates input until a top-level semicolon ends it, then executes."
 
 \\<clutch-mode-map>
 Key bindings:
+  \\[clutch-show-result]  Show the current connection's result buffer
   \\[clutch-execute-dwim]	Execute region or statement/query at point
   \\[clutch-execute-region]	Execute region
   \\[clutch-execute-buffer]	Execute buffer
