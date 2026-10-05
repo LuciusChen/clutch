@@ -10411,6 +10411,24 @@ Otherwise the connection stays reserved and the mode line keeps counting."
           (should (= calls 2))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
+(ert-deftest clutch-test-async-batch-failure-after-buffer-kill-says-nothing-odd ()
+  "A batch statement that fails after its buffer is killed should not say nil."
+  (let ((source (generate-new-buffer " *clutch-batch-killed*"))
+        messages)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (with-current-buffer source
+          (setq-local clutch-connection 'async-conn)
+          (clutch--execute-statements
+           '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2")))
+        (kill-buffer source)
+        (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
+        (ert-run-idle-timers)
+        (should-not (member "nil" messages))
+        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
+
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()
   "C-g should ask once to cancel the running query and otherwise quit."
   (with-temp-buffer
