@@ -1427,7 +1427,7 @@ is dropped with a message."
     (clutch--end-query-activity activity)))
 
 (defun clutch--present-statement-outcome (sql connection outcome &optional region)
-  "Present OUTCOME for SQL on CONNECTION and return its result, or nil.
+  "Present OUTCOME for SQL on CONNECTION.
 REGION, when non-nil, is the statement's source region; it is marked as
 executed or failed."
   (setq connection (or (plist-get outcome :connection) connection))
@@ -1450,8 +1450,7 @@ executed or failed."
            (plist-get outcome :source-buffer) connection sql err
            (plist-get outcome :elapsed) context region))
         (when connection-lost
-          (clutch--retire-query-connection connection))
-        nil)
+          (clutch--retire-query-connection connection)))
     (let ((result (plist-get outcome :result))
           (elapsed (plist-get outcome :elapsed))
           (source-buffer (plist-get outcome :source-buffer)))
@@ -1463,10 +1462,9 @@ executed or failed."
            :result-context (plist-get outcome :result-context)
            :source-buffer source-buffer)
         (clutch-result--display result sql elapsed))
-      (when (and region (buffer-live-p source-buffer))
+      (when region
         (with-current-buffer source-buffer
-          (clutch--mark-executed-sql-region (car region) (cdr region))))
-      result)))
+          (clutch--mark-executed-sql-region (car region) (cdr region)))))))
 
 (defun clutch--execute (sql &optional conn result-context region)
   "Execute SQL on CONN (or current buffer connection).
@@ -1537,12 +1535,9 @@ Return the failure summary."
 
 (defun clutch--execute-and-mark (sql beg end)
   "Execute SQL on the current buffer connection and mark BEG..END with its status."
-  (pcase-let* ((`(,trim-beg . ,trim-end)
-                 (or (clutch--trim-sql-bounds beg end)
-                     (cons beg end))))
-    (clutch--clear-executed-sql-overlay)
-    (redisplay t)
-    (clutch--execute sql nil nil (cons trim-beg trim-end))))
+  (clutch--clear-executed-sql-overlay)
+  (redisplay t)
+  (clutch--execute sql nil nil (cons beg end)))
 
 ;;;; Query-at-point detection
 
@@ -1712,8 +1707,7 @@ Stops and reports on the first error."
                     (if (= done 1) "" "s")
                     (clutch--message-keyword "executed")))
          (fail (outcome stmt region)
-           (let* ((failed-connection (or (plist-get outcome :connection)
-                                         connection))
+           (let* ((failed-connection (plist-get outcome :connection))
                   (connection-lost
                    (not (clutch--connection-alive-p failed-connection)))
                   (context
@@ -2137,8 +2131,7 @@ Accumulates input until a top-level semicolon ends it, then executes."
                 (present (outcome)
                   (let ((elapsed (plist-get outcome :elapsed)))
                     (if-let* ((db-error (plist-get outcome :error)))
-                        (let* ((connection (or (plist-get outcome :connection)
-                                               clutch-connection))
+                        (let* ((connection (plist-get outcome :connection))
                                (connection-lost
                                 (not (clutch--connection-alive-p connection)))
                                (context
