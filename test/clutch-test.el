@@ -5545,6 +5545,31 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should-not reverted)
         (should (equal clutch--pending-edits '(edit)))))))
 
+(ert-deftest clutch-test-submit-refuses-while-a-query-runs ()
+  "Submitting staged changes should be refused while a statement runs.
+JDBC opens the batch with a synchronous call that waits for the running
+statement, so the refusal has to come before the prompt and the batch."
+  (clutch-test--with-result-state
+      (:pending-edits '(edit))
+    (let ((clutch--running-queries (make-hash-table :test 'eq))
+          prompted batched)
+      (puthash clutch-connection (list :buffer (current-buffer)) clutch--running-queries)
+      (cl-letf (((symbol-function 'clutch-result--build-update-statements)
+                 (lambda ()
+                   '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) (setq prompted t)))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (&rest _) (setq batched t))))
+        (should (string-match-p
+                 "A query is running"
+                 (error-message-string
+                  (should-error (clutch-result-submit) :type 'user-error))))
+        (should-not prompted)
+        (should-not batched)
+        (should (equal clutch--pending-edits '(edit)))))))
+
 (ert-deftest clutch-test-submit-manual-batch-uses-atomic-backend-boundary ()
   "Manual staged submit should be atomic without committing the user transaction."
   (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
