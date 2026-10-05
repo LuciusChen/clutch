@@ -18,4 +18,4 @@ The same review also found that a declaration needed on an existing boundary had
 
 ## Consequence
 
-The 0.5.5 review produced eight fixes in one pull request, and a separate convergence that removed 60 production lines and 48 test lines net. AGENTS.md carries the three rules.
+The 0.5.5 review produced eight fixes in one pull request, and a separate convergence that removed 57 production lines and 19 test lines net. One removal there, a trim that the status marker seemed to repeat, moved where a running statement's markers sit; review caught it where the gates could not, and it was restored with a test. AGENTS.md carries the three rules.

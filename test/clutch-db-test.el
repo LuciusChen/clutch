@@ -8213,6 +8213,20 @@ told that no reply will arrive."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest clutch-db-test-jdbc-agent-filter-drops-unregistered-replies ()
+  "A reply that no request waits for should be dropped and others delivered."
+  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+        (reply (list nil)))
+    (puthash 42 (list :reply reply) clutch-jdbc--async-callbacks)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf)))
+          (clutch-jdbc--agent-filter 'fake-proc
+                                     "{\"id\":41,\"ok\":false,\"error\":\"Query cancelled\"}\n{\"id\":42,\"ok\":true}\n")
+          (should (equal (car reply) '(:id 42 :ok t))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 ;;;; Regression tests restored after the main/refactor merge
 
 (ert-deftest clutch-db-test-jdbc-atomic-batch-keeps-user-mode ()
