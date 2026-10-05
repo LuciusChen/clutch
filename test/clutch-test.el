@@ -6862,6 +6862,18 @@ after the edit is staged."
         (let ((spec (cadr (assq face face-remapping-alist))))
           (should-not (eq (plist-get spec :inherit) 'default)))))))
 
+(ert-deftest clutch-test-result-mode-draws-header-in-the-row-font ()
+  "Result headers should keep the rows' font under a proportional theme.
+A theme such as modus with `modus-themes-variable-pitch-ui' gives the
+header line a proportional font, while header padding follows the rows.
+Only the family is remapped, so text scaling still applies once."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (let ((spec (cadr (assq 'header-line face-remapping-alist))))
+      (should (equal (plist-get spec :family)
+                     (face-attribute 'default :family nil t)))
+      (should-not (plist-member spec :inherit)))))
+
 (ert-deftest clutch-test-result-mouse-click-below-table-preserves-point ()
   "Clicking below the rendered table should not move the current cell."
   (should (eq (lookup-key clutch-result-mode-map [mouse-1])
