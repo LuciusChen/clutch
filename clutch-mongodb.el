@@ -793,24 +793,36 @@ CHAIN contains parsed cursor helper calls, when present."
        (unless (<= 2 (length args) 3)
          (signal 'clutch-db-error
                  (list "updateOne() expects filter, update, and optional options")))
-       (mongodb-update
-        client database collection
-        (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
-        (clutch-mongodb--mql-document-arg (nth 1 args) method 2)
-        nil
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 2 args) method 3)))
+       (let* ((update (clutch-mongodb--mql-document-arg (nth 1 args) method 2))
+              (fields (mongodb-document-elements update)))
+         (unless (and fields
+                      (cl-every (lambda (field)
+                                  (string-prefix-p "$" (car field)))
+                                fields))
+           (signal 'clutch-db-error
+                   (list "updateOne() requires update operators such as $set; use replaceOne() to replace a document")))
+         (mongodb-update
+          client database collection
+          (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
+          update nil
+          (clutch-mongodb--mql-optional-document-arg
+           (nth 2 args) method 3))))
       ("replaceOne"
        (unless (<= 2 (length args) 3)
          (signal 'clutch-db-error
                  (list "replaceOne() expects filter, replacement, and optional options")))
-       (mongodb-update
-        client database collection
-        (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
-        (clutch-mongodb--mql-document-arg (nth 1 args) method 2)
-        nil
-        (clutch-mongodb--mql-optional-document-arg
-         (nth 2 args) method 3)))
+       (let ((replacement
+              (clutch-mongodb--mql-document-arg (nth 1 args) method 2)))
+         (when (cl-some (lambda (field) (string-prefix-p "$" (car field)))
+                        (mongodb-document-elements replacement))
+           (signal 'clutch-db-error
+                   (list "replaceOne() does not accept update operators; use updateOne() instead")))
+         (mongodb-update
+          client database collection
+          (clutch-mongodb--mql-document-arg (nth 0 args) method 1)
+          replacement nil
+          (clutch-mongodb--mql-optional-document-arg
+           (nth 2 args) method 3))))
       (_
        (signal 'clutch-db-error
                (list (format "Unsupported MongoDB collection helper: %s"

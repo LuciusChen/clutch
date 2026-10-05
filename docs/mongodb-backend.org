@@ -66,6 +66,8 @@ Database selection uses the shared =clutch-switch-schema= workflow.  Dedicated M
 
 Write helpers validate their documented argument shape before calling =mongodb.el=.  =insertOne= accepts one document, =insertMany= accepts one document array, and =deleteOne= requires one explicit filter document.
 
+=updateOne= requires a nonempty document whose top-level keys are update operators, such as ={$set: {name: 'Ann'}}=. Plain documents and mixed operator/field documents are rejected; use =replaceOne= for a replacement document. =replaceOne= rejects top-level update operators. Update pipelines remain unsupported by the helper parser.
+
 =ObjectId()= and =ISODate()= encode the common non-JSON query literals as native BSON wrapper values before being sent to =mongodb.el=.
 
 This parser is intentionally not a general JavaScript runtime.  Unsupported helpers and Mongo shell-only syntax such as regex literals should fail clearly instead of being passed to a shell process.

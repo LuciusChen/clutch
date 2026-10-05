@@ -377,6 +377,7 @@ Detailed key bindings, result-browser workflows, object navigation, Embark integ
 Common entry points:
 
 - `C-c C-c` executes the region or statement at point
+- In SQL consoles, `C-c C-z` shows the current connection's existing result buffer; the inherited SQLi-only `C-c C-n` binding is disabled.
 - Standard completion completes SQL identifiers at point, including empty column positions; `C-c TAB` invokes it explicitly
 - SQL table/alias context is cached per statement and refreshed after edits or scope changes; incomplete statements do not scan other statements to infer source tables.
 - `M-.` jumps SQL aliases to their statement definition; object lookup uses `C-c C-d` / `C-c C-j`
@@ -402,6 +403,8 @@ Common entry points:
 ### MongoDB Backend
 
 MongoDB is basic native document support through `mongodb.el`: ordinary MongoDB deployments, supported MongoDB Shell / MQL helper commands, and shared object/result workflows. It is not a full `mongosh` JavaScript runtime. MongoDB SQL Interface stays on the same `mongodb` backend as `:surface sql-interface` and requires the JDBC sidecar plus MongoDB JDBC driver jar. See [docs/mongodb-backend.org](docs/mongodb-backend.org).
+
+Native MongoDB `updateOne` requires update operators such as `$set`; use `replaceOne` for a replacement document. Clutch rejects a plain document passed to `updateOne` before it can replace existing fields.
 
 The shared `clutch-switch-schema` command lists databases visible to the current MongoDB user and changes Clutch's logical database without reconnecting.
 
