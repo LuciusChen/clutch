@@ -7843,6 +7843,21 @@ result's current rows."
       (should (equal clutch--order-by '("id" . "ASC")))
       (should (equal (nreverse pages) '(0 0 0 0))))))
 
+(ert-deftest clutch-test-local-sort-cycles-on-an-empty-page ()
+  "Sorting an empty page locally should cycle back to unsorted."
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows nil)
+    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (clutch-result--sort-by-column-index 1)
+      (should (equal clutch--sort-column "name"))
+      (clutch-result--sort-by-column-index 1)
+      (should clutch--sort-descending)
+      (clutch-result--sort-by-column-index 1)
+      (should-not clutch--sort-column)
+      (should-not clutch--sort-descending))))
+
 (ert-deftest clutch-test-sort-rejects-hidden-row-identity-column ()
   "Server-side sort should only accept visible user columns."
   (clutch-test--with-result-state

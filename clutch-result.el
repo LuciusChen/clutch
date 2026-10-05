@@ -1329,8 +1329,6 @@ The cycle is unsorted, ascending, descending, then unsorted again."
                                    :success-message "Sort cleared"))
      (t
       (let ((original-rows clutch--local-sort-original-rows))
-        (unless original-rows
-          (error "Local sort snapshot is missing"))
         (setq clutch--sort-column nil
               clutch--sort-descending nil
               clutch--order-by nil
