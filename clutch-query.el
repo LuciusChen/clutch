@@ -1739,8 +1739,9 @@ Stops and reports on the first error."
                 activity
                 (lambda () (setq failure (fail outcome stmt region))))
                ;; Only a command still running can signal to the user.
+               ;; A killed buffer has already said the outcome was dropped.
                (if waiting
-                   (message "%s" failure)
+                   (when failure (message "%s" failure))
                  (user-error "%s" failure)))
              nil)
             (final-p
