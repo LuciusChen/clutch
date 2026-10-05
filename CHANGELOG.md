@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A batch of statements whose first statement reconnects after an idle disconnect runs the rest on the new connection. They ran on the closed one, and the batch failed at statement 2 with "Database operation did not start".
 - Native MongoDB `updateOne` rejects replacement documents before execution, preventing omitted fields from being lost. Empty or mixed operator/field updates and operator-bearing `replaceOne` documents are also rejected.
 - SQL console `C-c C-z` shows the current connection's result buffer, and `C-c C-n` is disabled. These keys inherited SQLi commands that failed even with a working Clutch connection.
 - `]` and `[` move point to the first column of the result page they show. Point stayed in the column it was in, so `TAB` or another cell move scrolled straight back to the old page.

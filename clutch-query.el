@@ -1792,8 +1792,9 @@ Stops and reports on the first error."
                    (when region
                      (clutch--clear-executed-sql-overlay)
                      (redisplay t))
+                   ;; An idle reconnect replaces the buffer's connection.
                    (clutch--execute-statement
-                    stmt connection final-p region
+                    stmt clutch-connection final-p region
                     (lambda (outcome)
                       (if dispatching
                           (setq inline (list outcome))
