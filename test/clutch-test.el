@@ -5273,6 +5273,31 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
                                   (buffer-string))))))))
 
+(ert-deftest clutch-test-insert-import-refuses-while-a-query-runs ()
+  "Importing rows should be refused while a statement runs, as staging is.
+The page that statement brings would replace the staged rows."
+  (clutch-test--with-pop-to-buffer-capture insert-buf
+    (clutch-test--with-insert-result-buffer result-buf
+        (:columns '("severity" "owner")
+         :column-defs '((:name "severity" :type-category text)
+                        (:name "owner" :type-category text))
+         :connection 'fake-conn
+         :source-table "shipping_incidents")
+      (let ((clutch--running-queries (make-hash-table :test 'eq)))
+        (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                   (lambda (_conn _table)
+                     (list (list :name "severity" :type "text" :nullable t)
+                           (list :name "owner" :type "text" :nullable t))))
+                  ((symbol-function 'clutch--refresh-display) #'ignore))
+          (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+          (puthash 'fake-conn (list :buffer result-buf) clutch--running-queries)
+          (with-current-buffer insert-buf
+            (should-error (clutch-result-insert-import-delimited
+                           "owner\tseverity\nbob\thigh\nann\tlow\n")
+                          :type 'user-error))
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-inserts)))))))
+
 ;;;; Edit — staged mutations (row identity)
 
 (ert-deftest clutch-test-insert-stage-replaces-existing-pending-insert ()
