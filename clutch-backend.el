@@ -294,16 +294,6 @@ Values are nesting counts.")
         (puthash conn count clutch-db--foreground-connections)
       (remhash conn clutch-db--foreground-connections))))
 
-(defmacro clutch-db-with-foreground-connection (conn &rest body)
-  "Run BODY while marking CONN reserved for foreground work."
-  (declare (indent 1) (debug t))
-  (let ((conn-var (make-symbol "conn")))
-    `(let ((,conn-var ,conn))
-       (clutch-db--reserve-connection ,conn-var)
-       (unwind-protect
-           (progn ,@body)
-         (clutch-db--release-connection ,conn-var)))))
-
 ;;;; SQL helpers (literal-or-comment awareness)
 
 (defun clutch-db-sql-strip-leading-comments (sql)
