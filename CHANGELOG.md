@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Importing delimited rows into the insert form is refused while a statement runs on the connection, as staging one row is. The rows were staged, and the page the statement brought dropped them.
 - Submitting staged changes while a statement runs on the connection is refused at once, as staging is. On JDBC, Emacs waited for the running statement before reaching the refusal.
 - A batch of statements whose first statement reconnects after an idle disconnect runs the rest on the new connection. They ran on the closed one, and the batch failed at statement 2 with "Database operation did not start".
 - Native MongoDB `updateOne` rejects replacement documents before execution, preventing omitted fields from being lost. Empty or mixed operator/field updates and operator-bearing `replaceOne` documents are also rejected.

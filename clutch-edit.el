@@ -1978,14 +1978,16 @@ buffer.  PENDING-INDEX re-edits an existing staged insert."
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--ensure-live-result-context ()
-  "Signal when the parent result buffer no longer matches this insert form."
+  "Signal when the parent result buffer no longer matches this insert form.
+Staging is also refused while a statement runs on its connection."
   (let ((result-buf clutch-result-insert--result-buffer)
         (source-table clutch-result-insert--table))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
       (unless (equal (clutch--result-source-key) source-table)
-        (user-error "Result table changed; reopen the insert buffer")))))
+        (user-error "Result table changed; reopen the insert buffer"))
+      (clutch--refuse-while-running clutch-connection))))
 
 ;;;###autoload
 (defun clutch-result-insert-row ()
@@ -2378,8 +2380,6 @@ Use \\[clutch-result-submit] in the result buffer to submit."
          (pending-index clutch-result-insert--pending-index))
     (unless fields (user-error "No values entered"))
     (clutch-result-insert--ensure-live-result-context)
-    (with-current-buffer result-buf
-      (clutch--refuse-while-running clutch-connection))
     (when pending-index
       (with-current-buffer result-buf
         (unless (nthcdr pending-index clutch--pending-inserts)
