@@ -203,10 +203,15 @@ of main, temp and the attached databases."
   "Escape VALUE as a SQLite string literal (single-quoted)."
   (clutch-db-sqlite--escape-lit value))
 
-(defun clutch-db-sqlite--pragma-strict (handle pragma-sql)
-  "Run PRAGMA-SQL on HANDLE and surface SQLite errors."
+(defun clutch-db-sqlite--pragma-strict (handle pragma name &optional schema)
+  "Run PRAGMA on NAME in SCHEMA on HANDLE and surface SQLite errors.
+NAME is the PRAGMA's argument, a table or an index."
   (clutch-db--translate-library-error sqlite-error
-    (sqlite-select handle pragma-sql)))
+    (sqlite-select handle
+                   (format "PRAGMA %s%s(%s)"
+                           (clutch-db-sqlite--schema-prefix schema)
+                           pragma
+                           (clutch-db-sqlite--escape-id name)))))
 
 ;;;; Schema methods
 
@@ -224,10 +229,7 @@ WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
   "Return column names for TABLE on SQLite CONN."
   (clutch-db--translate-library-error sqlite-error
     (let* ((handle (clutch-db-sqlite-conn-handle conn))
-           (rows (clutch-db-sqlite--pragma-strict
-                  handle
-                  (format "PRAGMA table_info(%s)"
-                          (clutch-db-sqlite--escape-id table)))))
+           (rows (clutch-db-sqlite--pragma-strict handle "table_info" table)))
       (mapcar (lambda (row) (nth 1 row)) rows))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
@@ -257,10 +259,7 @@ WHERE type='table' AND name=%s"
   ;; pk is 1-based position in composite PK; 0 means not in PK.
   (let* ((handle (clutch-db-sqlite-conn-handle conn))
          (rows   (clutch-db-sqlite--pragma-strict
-                  handle
-                  (format "PRAGMA %stable_info(%s)"
-                          (clutch-db-sqlite--schema-prefix schema)
-                          (clutch-db-sqlite--escape-id table)))))
+                  handle "table_info" table schema)))
     (cl-loop for row in rows
              when (> (nth 5 row) 0)
              collect (nth 1 row))))
@@ -268,16 +267,11 @@ WHERE type='table' AND name=%s"
 (defun clutch-db-sqlite--unique-not-null-identities (conn table schema)
   "Return unique-not-null row identity candidates for TABLE in SCHEMA on CONN."
   (let* ((handle (clutch-db-sqlite-conn-handle conn))
-         (prefix (clutch-db-sqlite--schema-prefix schema))
          (table-info (clutch-db-sqlite--pragma-strict
-                      handle
-                      (format "PRAGMA %stable_info(%s)"
-                              prefix (clutch-db-sqlite--escape-id table))))
+                      handle "table_info" table schema))
          (not-null (make-hash-table :test 'equal))
          (indexes (clutch-db-sqlite--pragma-strict
-                   handle
-                   (format "PRAGMA %sindex_list(%s)"
-                           prefix (clutch-db-sqlite--escape-id table)))))
+                   handle "index_list" table schema)))
     (dolist (row table-info)
       ;; table_info row: (cid name type notnull dflt_value pk)
       (puthash (nth 1 row) (> (nth 3 row) 0) not-null))
@@ -291,9 +285,7 @@ WHERE type='table' AND name=%s"
              for cols = (mapcar
                          (lambda (info-row) (nth 2 info-row))
                          (clutch-db-sqlite--pragma-strict
-                          handle
-                          (format "PRAGMA %sindex_info(%s)"
-                                  prefix (clutch-db-sqlite--escape-id name))))
+                          handle "index_info" name schema))
              when (and cols
                        (cl-every (lambda (col)
                                    (gethash col not-null))
@@ -334,10 +326,7 @@ Result: ((from-col :ref-table T :ref-column C) ...), with :ref-schema
 SCHEMA when SCHEMA is given, since a foreign key stays in its database."
   ;; foreign_key_list row: (id seq table from to on_update on_delete match)
   (let ((rows (clutch-db-sqlite--pragma-strict
-               handle
-               (format "PRAGMA %sforeign_key_list(%s)"
-                       (clutch-db-sqlite--schema-prefix schema)
-                       (clutch-db-sqlite--escape-id table)))))
+               handle "foreign_key_list" table schema)))
     (cl-loop for row in rows
              collect (pcase-let ((`(,_id ,_seq ,ref-table ,from-col ,ref-column . ,_)
                                   row))
@@ -360,9 +349,9 @@ SCHEMA when SCHEMA is given, since a foreign key stays in its database."
          conn callback errback #'clutch-db-foreign-keys nil table
          (clutch-db--namespace-arguments schema catalog)))
 
-(defun clutch-db-sqlite--column-detail (row pk-cols fks)
+(defun clutch-db-sqlite--column-detail (row fks)
   "Convert a table_info ROW to a clutch-db column plist.
-PK-COLS is a list of pk column names.  FKS is an FK alist."
+FKS is an FK alist."
   ;; Row: (cid name type notnull dflt_value pk)
   (pcase-let ((`(,_cid ,name ,type ,notnull ,dflt-val ,pk) row))
     (let* ((type-name (downcase (or type "text")))
@@ -371,7 +360,7 @@ PK-COLS is a list of pk column names.  FKS is an FK alist."
       (list :name        name
             :type        type-name
             :nullable    (= notnull 0)
-            :primary-key (and (member name pk-cols) t)
+            :primary-key (> pk 0)
             :foreign-key (cdr (assoc name fks))
             :default     (and dflt-val (not generated) dflt-val)
             :generated   (and generated t)
@@ -382,15 +371,10 @@ PK-COLS is a list of pk column names.  FKS is an FK alist."
   "Return detailed column info for TABLE in SCHEMA on SQLite CONN."
   (let* ((handle  (clutch-db-sqlite-conn-handle conn))
          (rows    (clutch-db-sqlite--pragma-strict
-                   handle
-                   (format "PRAGMA %stable_info(%s)"
-                           (clutch-db-sqlite--schema-prefix schema)
-                           (clutch-db-sqlite--escape-id table))))
-         (pk-cols (apply #'clutch-db-primary-key-columns conn table
-                         (clutch-db--namespace-arguments schema nil)))
+                   handle "table_info" table schema))
          (fks     (clutch-db-sqlite--fk-alist handle table schema)))
     (mapcar (lambda (row)
-              (clutch-db-sqlite--column-detail row pk-cols fks))
+              (clutch-db-sqlite--column-detail row fks))
             rows)))
 
 ;;;; Re-entrancy guard
