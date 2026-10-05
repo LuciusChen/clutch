@@ -10389,6 +10389,28 @@ its outcome and the next one does not run."
           (should (member "1 statement executed, then cancelled" messages))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
+(ert-deftest clutch-test-async-batch-releases-its-connection-on-a-quit ()
+  "A quit while a batch starts its next statement should end the batch.
+Otherwise the connection stays reserved and the mode line keeps counting."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let ((execute (symbol-function 'clutch--execute-statement))
+            (calls 0))
+        (cl-letf (((symbol-function 'message) #'ignore)
+                  ((symbol-function 'clutch--execute-statement)
+                   (lambda (&rest args)
+                     (if (= (cl-incf calls) 2)
+                         (signal 'quit nil)
+                       (apply execute args)))))
+          (clutch--execute-statements
+           '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2"))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          ;; ERT does not fail a test that quits, so take the quit here.
+          (condition-case nil (ert-run-idle-timers) (quit nil))
+          (should (= calls 2))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()
   "C-g should ask once to cancel the running query and otherwise quit."
   (with-temp-buffer
