@@ -1799,12 +1799,11 @@ Stops and reports on the first error."
                       (if dispatching
                           (setq inline (list outcome))
                         (setq waiting t)
-                        (when (handle outcome stmt region final-p)
-                          (condition-case err
-                              (run)
-                            (error
-                             (clutch--end-query-activity activity)
-                             (signal (car err) (cdr err)))))))
+                        (clutch--dispatch-query-activity
+                         activity
+                         (lambda ()
+                           (when (handle outcome stmt region final-p)
+                             (run))))))
                     nil (> done 0)))
                  (setq dispatching nil)
                  (unless (and inline (handle (car inline) stmt region final-p))
