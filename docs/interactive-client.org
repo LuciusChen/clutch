@@ -8,6 +8,7 @@
 | =C-c C-r=   | Execute selected region; multiple =;=-delimited statements run sequentially |
 | =C-c C-b=   | Execute entire buffer; multiple =;=-delimited statements run sequentially |
 | =C-c C-e=   | Connect; query consoles reconnect their current connection |
+| =C-c C-z=   | Show the current connection's existing result buffer |
 | =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions for the current object, or prompt |
@@ -19,6 +20,8 @@
 | =C-c C-a=   | Toggle auto-commit on/off when supported |
 | =C-c TAB=   | Invoke SQL identifier completion explicitly, including empty column positions |
 | =C-c ?=     | Transient menu             |
+
+=C-c C-n= is disabled in =clutch-mode= because the inherited =sql-mode= command requires a SQLi process. Use =C-c C-c= to execute the statement at point. =C-c C-z= reports when no result buffer exists for the current connection; it does not execute a query or open a REPL.
 
 Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-.= through the buffer-local xref backend for SQL alias navigation, so =M-.= on =u= or =u.name= jumps to the alias definition in the current statement. Schema-qualified table names such as =schema.table= are not treated as aliases; use =C-c C-d= or =C-c C-j= for object lookup and table description.  CAPF completion handles SQL identifiers, including empty column positions such as =select | from users=.  =TAB= completes columns after a table or alias dot, then falls back to indentation elsewhere; other completion stays on normal CAPF keys such as =M-TAB= inherited from Emacs.
 

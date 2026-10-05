@@ -735,6 +735,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
         (clutch-result--display-select
          (clutch-db-result-connection result) sql result elapsed
          :source-buffer (current-buffer))
+      (setq-local clutch--last-result-buffer buf)
       (with-current-buffer buf
         (clutch-result-mode)
         (setq-local clutch--last-query sql)

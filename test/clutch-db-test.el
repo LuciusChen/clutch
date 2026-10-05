@@ -2656,6 +2656,12 @@ passes validation fails the test instead of failing on the fake client."
                        "db.users.aggregate([]).sort({_id: 1})"
                        "db.users.countDocuments('name')"
                        "db.users.updateOne({}, 'name')"
+                       "db.users.updateOne({}, {name: 'Ann'})"
+                       "db.users.updateOne({}, {})"
+                       "db.users.updateOne({}, {$set: {name: 'Ann'}, extra: 1})"
+                       "db.users.updateOne({}, {extra: 1, $set: {name: 'Ann'}})"
+                       "db.users.replaceOne({}, {$set: {name: 'Ann'}})"
+                       "db.users.replaceOne({}, {name: 'Ann', $set: {x: 1}})"
                        "db.users.deleteOne({}).limit(1)"
                        "db.users.find({}).allowDiskUse('yes')"
                        "db.users.find({}).explain({mode: 'executionStats'})"
@@ -2672,7 +2678,7 @@ passes validation fails the test instead of failing on the fake client."
                        "db.users.find({}).limit(0)"
                        "db.users.find({}).limit(51)"))
         (ert-info ((format "query: %s" query))
-          (should-error (clutch-mongodb--eval conn query)
+          (should-error (clutch-db-query conn query)
                         :type 'clutch-db-error))))))
 
 (ert-deftest clutch-db-test-mongodb-eval-translates-aggregate-options ()
@@ -6098,6 +6104,42 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
                              '("_id" "createdAt")))
               (should (equal (clutch-db-test--visible-result-rows result)
                              '(("a" "{\"$date\":1704164645678}"))))))
+        (clutch-db-test--mongodb-live-drop-collection conn collection)))))
+
+(ert-deftest clutch-db-test-mongodb-live-update-versus-replacement ()
+  :tags '(:db-live :mongodb-live)
+  "Reject replacement-shaped updates without losing existing fields."
+  (clutch-db-test--with-mongodb conn
+    (let* ((collection (clutch-db-test--mongodb-live-collection "update_shape"))
+           (helper (format "db.getCollection(%S)" collection)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (concat helper ".insertOne({_id: 1, n: 1, keep: 7})"))
+            (should-error
+             (clutch-db-query conn (concat helper ".updateOne({_id: 1}, {n: 2})"))
+             :type 'clutch-db-error)
+            (should-error
+             (clutch-db-query conn (concat helper ".replaceOne({_id: 1}, {$set: {n: 2}})"))
+             :type 'clutch-db-error)
+            (should (equal
+                     (clutch-db-test--visible-result-rows
+                      (clutch-db-query conn (concat helper ".findOne({_id: 1})")))
+                     '((1 1 7))))
+            (clutch-db-query conn (concat helper ".updateOne({_id: 1}, {$set: {n: 2}})"))
+            (should (equal
+                     (clutch-db-test--visible-result-rows
+                      (clutch-db-query conn (concat helper ".findOne({_id: 1})")))
+                     '((1 2 7))))
+            (clutch-db-query conn (concat helper ".replaceOne({_id: 1}, {n: 3})"))
+            (should (equal
+                     (clutch-db-test--visible-result-rows
+                      (clutch-db-query conn (concat helper ".findOne({_id: 1})")))
+                     '((1 3))))
+            (clutch-db-query conn (concat helper ".replaceOne({_id: 1}, {})"))
+            (should (equal
+                     (clutch-db-test--visible-result-rows
+                      (clutch-db-query conn (concat helper ".findOne({_id: 1})")))
+                     '((1)))))
         (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-schema ()
