@@ -15,6 +15,7 @@ Emacs 29.1 `face-remap.el` confirms that `text-scale-mode` remaps `default` and,
 - Measure strings after applying the current buffer's relative default-face remappings to the measured copy. This preserves one implementation across the supported version range and keeps the existing newline that settles trailing display specifications.
 - Use exact pixel spaces for header centering, right-aligned values, and empty cells. Keep `min-width` only on non-empty left-aligned result-body content from Emacs 30 onward, where it materially improves mixed-glyph layout. Emacs 29 retains exact body padding.
 - Reuse the existing pixel-metric signature refresh reached during header evaluation. No new hook, timer, advice, cache layer, or version-specific refresh path is needed.
+- Draw the result header line in the rows' font family. A theme can give `header-line` a proportional font, as modus-themes and ef-themes do with their variable-pitch UI option, and the header's padding, measured in the rows' font, then misses the rows' borders (issue #91). Remapping only `:family` leaves the header's colors to the theme and its height to the text-scale remap above; inheriting `default` would scale it twice.
 
 ## Verification
 
@@ -31,6 +32,8 @@ Fresh native NS graphical processes rendered both a mixed Latin/CJK/Japanese/Kor
 The issue #27 fixture retained raw logical widths `[6 5 6]`, confirming that the displayed `<null>` value participates in width calculation. A legacy control using mode-line inheritance failed on Emacs 29.4 at every tested scale, including scale zero, which distinguishes the remap error from ordinary rounding drift. Focused ERT coverage passed under every binary above.
 
 The first Emacs 30 graphical run produced an eager macro-expansion cycle in `map.el` and `comp.el`. That was a test-launcher error: globally forcing `load-suffixes` to `(".el")` made Emacs load its own source files instead of their compiled forms. The corrected launcher copies only Clutch source into a temporary source-only load directory and leaves Emacs's core load policy untouched; no product fallback was added for this harness failure.
+
+A graphical probe for issue #91 loaded `modus-operandi` with `modus-themes-variable-pitch-ui` and compared the header's border pixels with the first row's. Before the family remap, Emacs 30.2 drew the header in Helvetica at `(8 35 79 150 198 268 326)` against rows at `(8 50 106 197 260 337 414)`, and 32.0.50 in Tahoma at `(8 40 89 168 220 296 361)`; with it, the header used the rows' Menlo and matched them on 29.4, 30.2 and 32.0.50. Without the variable-pitch option the borders matched before and after.
 
 ## Removal Conditions
 
