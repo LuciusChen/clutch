@@ -197,6 +197,10 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
               ("SELECT 1" "DELETE FROM t RETURNING id"))
              ("SELECT id FROM OLD TABLE (DELETE FROM t WHERE id = 1)"
               ("DELETE FROM t WHERE id = 1"))
+             ("SELECT * FROM FINAL /* c */ TABLE (INSERT INTO t VALUES (1))"
+              ("INSERT INTO t VALUES (1)"))
+             ("SELECT * FROM NEW TABLE -- c\n (INSERT INTO t VALUES (1))"
+              ("INSERT INTO t VALUES (1)"))
              ("SELECT 'FINAL TABLE (DELETE FROM t)' FROM t" nil)
              ("CREATE TRIGGER audit AFTER DELETE ON t REFERENCING OLD TABLE AS gone FOR EACH STATEMENT EXECUTE FUNCTION log_gone()"
               nil)))

@@ -1029,7 +1029,9 @@ FINAL TABLE (INSERT ...)."
          (data-change-tables
           (clutch-db-sql-code-match-positions
            normalized 0 nil
-           "\\b\\(?:FINAL\\|NEW\\|OLD\\)[ \t\n\r]+TABLE[ \t\n\r]*("))
+           (concat "\\b\\(?:FINAL\\|NEW\\|OLD\\)"
+                   clutch-db-sql--keyword-gap-regexp "+TABLE"
+                   clutch-db-sql--keyword-gap-regexp "*(")))
          statements)
     (cl-flet ((collect (open)
                 (push (clutch-db-sql-normalize
