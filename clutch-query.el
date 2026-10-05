@@ -91,6 +91,7 @@ that window.")
                   "clutch-result"
                   (connection sql result elapsed &rest keyword-args))
 (declare-function clutch-result--preview-execution-sql "clutch-result" ())
+(declare-function clutch-result--show-buffer "clutch-result" (buf))
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
@@ -2216,7 +2217,8 @@ Accumulates input until a top-level semicolon ends it, then executes."
 
 ;;;###autoload (autoload 'clutch-show-result "clutch" nil t)
 (defun clutch-show-result ()
-  "Show the existing result buffer for this console's connection."
+  "Show the existing result buffer for this console's connection.
+It appears where a query shows its result."
   (interactive)
   (unless (and clutch-connection
                (buffer-live-p clutch--last-result-buffer)
@@ -2224,7 +2226,7 @@ Accumulates input until a top-level semicolon ends it, then executes."
                    (buffer-local-value 'clutch-connection
                                        clutch--last-result-buffer)))
     (user-error "No result buffer for this connection"))
-  (pop-to-buffer clutch--last-result-buffer))
+  (clutch-result--show-buffer clutch--last-result-buffer))
 
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
