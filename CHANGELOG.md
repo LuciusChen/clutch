@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A statement after a comment written as `/*/ ... */`, or after a form feed, keeps its first keyword, so a `DELETE` there asks for confirmation. The comment's end was found inside its own opening, and a form feed was not taken for whitespace.
 - A quit while a batch of statements moves on to its next statement ends the batch. The connection stayed reserved, the mode line kept counting, and idle metadata loading waited for good.
 - A data change table with a comment in it, as in `SELECT * FROM FINAL /* new rows */ TABLE (INSERT ...)`, is recognized as writing, so the statement runs once instead of being paged and rerunning the INSERT on each page.
 - A third sort press on a result page with no rows clears the sort instead of failing with "Local sort snapshot is missing".
