@@ -1535,9 +1535,12 @@ Return the failure summary."
 
 (defun clutch--execute-and-mark (sql beg end)
   "Execute SQL on the current buffer connection and mark BEG..END with its status."
-  (clutch--clear-executed-sql-overlay)
-  (redisplay t)
-  (clutch--execute sql nil nil (cons beg end)))
+  (pcase-let* ((`(,trim-beg . ,trim-end)
+                 (or (clutch--trim-sql-bounds beg end)
+                     (cons beg end))))
+    (clutch--clear-executed-sql-overlay)
+    (redisplay t)
+    (clutch--execute sql nil nil (cons trim-beg trim-end))))
 
 ;;;; Query-at-point detection
 
