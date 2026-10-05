@@ -9990,6 +9990,46 @@ statement."
                 (should (eq (car-safe (plist-get outcome :error))
                             expected-error))))))))))
 
+(ert-deftest clutch-test-batch-continues-on-the-reconnected-connection ()
+  "Statements after an idle reconnect in a batch should use the new connection."
+  (with-temp-buffer
+    (let ((clutch-connection 'old-conn)
+          (clutch--tx-state-cache (make-hash-table :test 'eq))
+          (clutch-db--foreground-connections (make-hash-table :test 'eq))
+          (old-live t)
+          executions)
+      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-result-query-p) #'ignore)
+                ((symbol-function 'clutch-db-manual-commit-p) #'ignore)
+                ((symbol-function 'clutch--forget-row-identities) #'ignore)
+                ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
+                ((symbol-function 'clutch--execution-refresh-start) #'ignore)
+                ((symbol-function 'clutch--update-mode-line) #'ignore)
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (symbol-name conn)))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (if (eq conn 'old-conn) old-live t)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (conn sql &rest _args)
+                   (push (list sql conn) executions)
+                   (if (eq conn 'old-conn)
+                       (progn
+                         (setq old-live nil)
+                         (signal 'clutch-db-execution-not-started
+                                 '("idle validation failed")))
+                     (make-clutch-db-result :affected-rows 1))))
+                ((symbol-function 'clutch--try-reconnect)
+                 (lambda ()
+                   (setq clutch-connection 'new-conn)
+                   t)))
+        (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
+        (should (equal (nreverse executions)
+                       '(("UPDATE a SET n = 1" old-conn)
+                         ("UPDATE a SET n = 1" new-conn)
+                         ("UPDATE b SET n = 2" new-conn))))))))
+
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
   "A physical reconnect should not reuse the old connection's identity plan."
   (with-temp-buffer
