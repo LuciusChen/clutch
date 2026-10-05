@@ -162,7 +162,7 @@ Its success response returns:
 - `request-id` when a running statement was found
 - `cancelled` (`true` when a statement was cancelled, `false` when nothing was running)
 
-The cancelled `execute`/`fetch` request may still produce a late response after the client has already committed to the interrupt path.  The Elisp side tracks request ids explicitly so those late responses can be dropped instead of polluting the next request.  The connection remains usable only when the cancel response reports `cancelled=true` for that exact request id.
+The cancelled `execute`/`fetch` request may still produce a late response after the client has already committed to the interrupt path.  The Elisp side registers each request it waits for by id, so a late response that nothing waits for is dropped instead of polluting the next request.  The connection remains usable only when the cancel response reports `cancelled=true` for that exact request id.
 
 The current Elisp client closes cursor state implicitly by fetching until the agent replies with `done=true`; it does not issue a separate `close-cursor` RPC.
 

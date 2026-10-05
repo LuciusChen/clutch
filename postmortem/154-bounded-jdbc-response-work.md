@@ -1,5 +1,7 @@
 # 154 - Bound JDBC response work without a request framework
 
+_Updated after 0.5.4: the table of ignored response ids is gone. Since postmortem 202 every reply is dispatched through the request registry, and one with no registered waiter is dropped, so recording ids to ignore protected nothing; nothing read the table._
+
 ## Context
 
 The JDBC process filter searched for a newline from the start of its buffer on every fragment. A large response arriving in small chunks therefore rescanned the same incomplete JSON repeatedly. At 4 KiB fragments, a synthetic 2 MiB response took about 300 ms to collect.

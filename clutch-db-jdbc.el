@@ -258,9 +258,6 @@ request's a :handler, and a metadata request's callbacks and timer.")
 (defvar clutch-jdbc--busy-request-ids (make-hash-table :test 'eq)
   "Map of JDBC connection objects to their current in-flight request id.")
 
-(defvar clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql)
-  "Set of JDBC response ids to drop because the request was interrupted.")
-
 (defvar clutch-jdbc--connections-by-id (make-hash-table :test 'eql)
   "Map of JDBC connection ids to their live connection structs.")
 
@@ -328,16 +325,14 @@ If verification is disabled, return non-nil."
 
 (defun clutch-jdbc--clear-async-callbacks (&optional conn)
   "Cancel pending asynchronous JDBC callbacks.
-When CONN is non-nil, clear only callbacks for that connection and ignore their
-late responses.  Otherwise clear every callback.  Foreground requests are told
-that no response will arrive."
+When CONN is non-nil, clear only callbacks for that connection.  Otherwise
+clear every callback.  Foreground requests are told that no response will
+arrive."
   (let (entries)
     (maphash (lambda (id entry)
                (when (or (null conn) (eq conn (plist-get entry :conn)))
                  (when-let* ((timer (plist-get entry :timer)))
                    (cancel-timer timer))
-                 (when conn
-                   (puthash id t clutch-jdbc--ignored-response-ids))
                  (push (cons id entry) entries)))
              clutch-jdbc--async-callbacks)
     (pcase-dolist (`(,id . ,entry) entries)
@@ -365,7 +360,6 @@ Metadata callbacks keep their own timeouts."
 (defun clutch-jdbc--clear-request-state ()
   "Clear connections and request bookkeeping owned by the retired agent."
   (clrhash clutch-jdbc--busy-request-ids)
-  (clrhash clutch-jdbc--ignored-response-ids)
   (clrhash clutch-jdbc--connections-by-id))
 
 (defun clutch-jdbc--dispatch-async-response (response)
@@ -436,11 +430,10 @@ Return non-nil when a request was waiting for it."
                               (format "clutch-jdbc-agent emitted invalid JSON: %s"
                                       (error-message-string err)))
                         nil))))
-                (when (and response
-                           (not (clutch-jdbc--dispatch-async-response response)))
-                  ;; Nobody waits for the reply to an abandoned request.
-                  (when-let* ((id (plist-get response :id)))
-                    (remhash id clutch-jdbc--ignored-response-ids)))))))
+                ;; A reply that nobody waits for, as to an abandoned
+                ;; request, is dropped.
+                (when response
+                  (clutch-jdbc--dispatch-async-response response))))))
         (setq clutch-jdbc--agent-scan-position (point-max)))
       ;; Unreadable output leaves the protocol unsynchronized.
       (when clutch-jdbc--protocol-error
@@ -597,7 +590,6 @@ a live agent then condemns only that connection instead of the process."
             ;; also destroy every other connection's sessions and any open
             ;; transactions.  Condemn the owning connection alone.
             (progn
-              (puthash id t clutch-jdbc--ignored-response-ids)
               (clutch-jdbc--release-stuck-connection conn)
               (signal 'clutch-db-error
                       (list "Connection lost — reconnect with C-c C-e")))
@@ -631,11 +623,7 @@ Unlike `clutch-jdbc--recv-response', this never kills the agent process."
           (setq gave-up t
                 quit-flag nil))))
     (remhash id clutch-jdbc--async-callbacks)
-    (cond
-     ((car reply))
-     ((clutch-jdbc--agent-live-p)
-      (puthash id t clutch-jdbc--ignored-response-ids)
-      nil))))
+    (car reply)))
 
 (defun clutch-jdbc--rpc (conn op params &optional timeout-seconds)
   "Send OP with PARAMS for CONN and return the result plist.
@@ -703,16 +691,13 @@ disconnect request.  Preserve connection-scoped diagnostics for the caller."
 The release uses force-disconnect, which bypasses the connection's locks
 in the agent: the ordinary disconnect queues behind them, so the
 unanswered request could block the release forever and pin an agent
-thread.  The request is sent without waiting and its reply, if any, is
-ignored.  An older agent answers with an unknown-op error, which lands
-in the ignored table the same way."
+thread.  The request is sent without waiting; its reply, if any, finds
+nobody waiting and is dropped, as is an older agent's unknown-op error."
   (let ((live (clutch-db-live-p conn)))
     (clutch-jdbc--retire-invalidated-connection conn)
     (when live
-      (puthash (clutch-jdbc--send
-                "force-disconnect"
-                `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))
-               t clutch-jdbc--ignored-response-ids))))
+      (clutch-jdbc--send "force-disconnect"
+                         `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))))))
 
 (defun clutch-jdbc--response-result-or-signal (conn op response)
   "Return RESPONSE's result or signal `clutch-db-error' for OP.
@@ -792,7 +777,6 @@ connection-scoped diagnostics when non-nil.  Return the request id."
                    (let ((entry (gethash id clutch-jdbc--async-callbacks)))
                      (when entry
                        (remhash id clutch-jdbc--async-callbacks)
-                       (puthash id t clutch-jdbc--ignored-response-ids)
                        (when-let* ((timeout-errback (plist-get entry :errback)))
                          (funcall timeout-errback
                                   (format "clutch-jdbc-agent: timeout waiting for async response to request %d"
@@ -1579,7 +1563,7 @@ cancels it."
     (setf (clutch-jdbc-conn-busy conn) t)
     (puthash conn id clutch-jdbc--busy-request-ids)
     (puthash id
-             (list :conn conn :op op
+             (list :conn conn
                    :handler (lambda (response)
                               (clutch-jdbc--finish-foreground
                                conn op id response callback)))
@@ -1692,10 +1676,10 @@ fetch and cursor are then in an unknown state."
   (when-let* ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
     (clutch-jdbc--require-current-connection conn)
     ;; A foreground asynchronous request still reports the server's verdict;
-    ;; a synchronous one was abandoned by the quit and ignores its reply.
+    ;; a synchronous one was abandoned by the quit, so nothing waits for its
+    ;; reply.
     (unless (plist-get (gethash request-id clutch-jdbc--async-callbacks)
                        :handler)
-      (puthash request-id t clutch-jdbc--ignored-response-ids)
       (remhash conn clutch-jdbc--busy-request-ids))
     (let* ((id (clutch-jdbc--send "cancel"
                                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))))
