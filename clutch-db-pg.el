@@ -49,8 +49,6 @@
 (declare-function pgsql-result-affected-rows "pgsql" (result))
 (declare-function pgsql-result-columns "pgsql" (result))
 (declare-function pgsql-result-rows "pgsql" (result))
-(declare-function pgsql-set-connect-timeout "pgsql" (connection seconds))
-(declare-function pgsql-set-read-timeout "pgsql" (connection seconds))
 (declare-function pgsql-transaction-status "pgsql" (connection))
 (declare-function pgsql-type-name "pgsql" (oid))
 (declare-function pgsql-user "pgsql" (connection))
@@ -237,8 +235,8 @@
      ((equal backend-type "bool") (if (null value) :false value))
      ((and (clutch-db-pg--array-type-name-p backend-type)
            (vectorp value))
-      (let ((boolean-p (member backend-type '("_bool" "bool[]")))
-            (timestamptz-p (member backend-type '("_timestamptz" "timestamptz[]"))))
+      (let ((boolean-p (equal backend-type "_bool"))
+            (timestamptz-p (equal backend-type "_timestamptz")))
         (cl-labels
             ((normalize-element
               (element)
