@@ -522,9 +522,6 @@ are produced by the query execution layer."
                        (clutch--row-identity-augmentable-sql-p
                         analysis-sql prepared-source-table))
                    prepared-source-table)))
-         (namespace (if (plist-get result-context :source-table)
-                        result-context
-                      row-identity-prep))
          (page (if server-pageable
                    (clutch-result--split-page-lookahead-rows
                     (clutch-db-result-rows result) page-size)
@@ -544,8 +541,8 @@ are produced by the query execution layer."
              :server-pageable server-pageable
              :server-rewritable server-rewritable
              :source-table source-table
-             :source-schema (plist-get namespace :source-schema)
-             :source-catalog (plist-get namespace :source-catalog)))
+             :source-schema (plist-get row-identity-prep :source-schema)
+             :source-catalog (plist-get row-identity-prep :source-catalog)))
       ;; A server-side filter result restores the query it filters.
       (when (plist-member result-context :where-filter)
         (setq-local clutch--base-query (plist-get result-context :base-query)
@@ -1511,8 +1508,6 @@ alone would lose.  With FILTER nil it only clears the filter."
                (list :server-pageable (clutch-result--server-pageable-p)
                      :server-rewritable t
                      :source-table clutch--result-source-table
-                     :source-schema clutch--result-source-schema
-                     :source-catalog clutch--result-source-catalog
                      :row-identity-prep (plist-get plan :row-identity-prep)))))
 
 ;;;; Client-side filter
