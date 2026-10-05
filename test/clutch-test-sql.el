@@ -190,6 +190,17 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
         (should (equal (plist-get chain :token) token))
         (should (= (length (plist-get chain :levels)) levels))))))
 
+(ert-deftest clutch-test-leading-comments-keep-the-first-keyword ()
+  "A statement after leading comments should keep its first keyword.
+A comment written as /*/ ... */ and a form feed hid it, so a DELETE
+after them asked for no confirmation."
+  (dolist (sql '("/* x */ DELETE FROM t" "/*/ x */ DELETE FROM t"
+                 "\f DELETE FROM t" "-- note\n DELETE FROM t"))
+    (ert-info (sql)
+      (should (equal (clutch-db-sql-strip-leading-comments sql)
+                     "DELETE FROM t"))
+      (should (clutch-db-sql-destructive-p sql)))))
+
 (ert-deftest clutch-test-embedded-statements ()
   "CTE bodies and data change tables should be the embedded statements."
   (dolist (case
