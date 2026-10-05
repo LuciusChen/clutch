@@ -3532,9 +3532,10 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
 
 ;;;; Column navigation and metadata
 
-(defun clutch-result--goto-col-idx (col-idx)
+(defun clutch-result--goto-col-idx (col-idx &optional keep-view)
   "Move point to COL-IDX in the current row, preserving the row position.
-When point is at line-end or a border, scan backward to find the row."
+When point is at line-end or a border, scan backward to find the row.
+The column is centered in the window unless KEEP-VIEW is non-nil."
   (let ((ridx (or (clutch--row-idx-at-line)
                    (get-text-property (point) 'clutch-row-idx)
                    (and (not (bolp))
@@ -3551,7 +3552,8 @@ When point is at line-end or a border, scan backward to find the row."
       (when-let* ((found (text-property-search-forward
                           'clutch-col-idx col-idx #'eq)))
         (goto-char (prop-match-beginning found))))
-    (clutch--center-column-in-window col-idx)))
+    (unless keep-view
+      (clutch--center-column-in-window col-idx))))
 
 ;;;###autoload
 (defun clutch-result-first-column ()
@@ -3605,12 +3607,25 @@ When details are not yet cached, attempts to load them from the database."
 
 ;;;; Horizontal scrolling and width adjustment
 
+(defun clutch-result--goto-first-column-in-view (win)
+  "Move point to the first column whose border is within WIN's view.
+Point left outside the view would scroll it back at the next move."
+  (let ((hscroll (window-hscroll win))
+        (widths (clutch--effective-widths))
+        (nw (clutch--row-number-digits)))
+    (when-let* ((cidx (cl-find-if
+                       (lambda (cidx)
+                         (>= (clutch--column-border-position cidx widths nw)
+                             hscroll))
+                       (clutch--visible-columns))))
+      (clutch-result--goto-col-idx cidx t))))
+
 ;;;###autoload
 (defun clutch-result-scroll-right ()
   "Page the result window right with one-column overlap.
 The last column whose border falls within the current viewport becomes
 the first column of the new view, so partially visible edge columns
-remain visible after paging."
+remain visible after paging.  Point moves to that column."
   (interactive)
   (when-let* ((win (get-buffer-window (current-buffer))))
     (let* ((hs (window-hscroll win))
@@ -3628,17 +3643,18 @@ remain visible after paging."
             (setq last-in-view border))
            ((and (>= border right-edge) (null first-past))
             (setq first-past border)))))
-      (cond
-       (last-in-view (set-window-hscroll win last-in-view))
-       (first-past   (set-window-hscroll win first-past))
-       (t (message "Already at rightmost columns"))))))
+      (if-let* ((target (or last-in-view first-past)))
+          (progn
+            (set-window-hscroll win target)
+            (clutch-result--goto-first-column-in-view win))
+        (message "Already at rightmost columns")))))
 
 ;;;###autoload
 (defun clutch-result-scroll-left ()
   "Page the result window left with one-column overlap.
 The column at the current left edge remains visible near the right
 edge of the new view, so partially visible edge columns stay visible
-after paging."
+after paging.  Point moves to the first column of the new view."
   (interactive)
   (when-let* ((win (get-buffer-window (current-buffer))))
     (let* ((hs (window-hscroll win))
@@ -3661,7 +3677,8 @@ after paging."
               (let ((border (clutch--column-border-position i widths nw)))
                 (when (and (> border min-new) (< border hs) (null target))
                   (setq target border)))))
-          (set-window-hscroll win (max 0 (or target 0))))))))
+          (set-window-hscroll win (max 0 (or target 0)))
+          (clutch-result--goto-first-column-in-view win))))))
 
 ;;;###autoload
 (defun clutch-result-widen-column ()

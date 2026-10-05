@@ -1669,6 +1669,46 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
     (clutch-result-next-cell)
     (should (= (get-text-property (point) 'clutch-col-idx) 3))))
 
+(ert-deftest clutch-test-horizontal-paging-moves-point-into-view ()
+  "`]' and `[' should leave point in the first column of the new view.
+Point left behind made the next cell command scroll back to it."
+  (let ((buf (generate-new-buffer " *clutch-paging*"))
+        (clutch-column-padding 1))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) buf)
+          (with-current-buffer buf
+            (clutch-test--init-result-state
+             (list :columns (mapcar (lambda (i) (format "column_%02d" i))
+                                    (number-sequence 1 20))
+                   :rows (list (mapcar (lambda (i) (format "value_%02d" i))
+                                       (number-sequence 1 20)))
+                   :column-widths (make-vector 20 9)
+                   :render t))
+            (cl-flet ((point-column ()
+                        (get-text-property (point) 'clutch-col-idx))
+                      (first-in-view-p ()
+                        (let ((cidx (get-text-property (point) 'clutch-col-idx)))
+                          (and (>= (clutch--column-border-position cidx)
+                                   (window-hscroll))
+                               (or (zerop cidx)
+                                   (< (clutch--column-border-position (1- cidx))
+                                      (window-hscroll)))))))
+              (goto-char (aref clutch--row-start-positions 0))
+              (clutch-result-first-column)
+              (clutch-result-scroll-right)
+              (let ((hscroll (window-hscroll))
+                    (cidx (point-column)))
+                (should (> hscroll 0))
+                (should (first-in-view-p))
+                (clutch-result-next-cell)
+                (should (= (point-column) (1+ cidx)))
+                (should (= (window-hscroll) hscroll))
+                (clutch-result-scroll-left)
+                (should (< (window-hscroll) hscroll))
+                (should (first-in-view-p))))))
+      (kill-buffer buf))))
+
 (ert-deftest clutch-test-column-width-commands-throttle-redraws ()
   "Repeated column width commands should update widths before one redraw."
   (let ((next-timer 0)
