@@ -7574,6 +7574,15 @@ result's current rows."
             (switch-to-buffer source)
             (call-interactively (key-binding (kbd "C-c C-z")))
             (should (eq (window-buffer (selected-window)) result)))
+          ;; A closed result window comes back below the console, where
+          ;; queries show results, even where the frame would split sideways.
+          (switch-to-buffer source)
+          (delete-other-windows)
+          (let ((split-width-threshold 20))
+            (call-interactively (key-binding (kbd "C-c C-z"))))
+          (let ((below (window-in-direction 'below (get-buffer-window source))))
+            (should below)
+            (should (eq (window-buffer below) result)))
           ;; The result belongs to this connection, not every SQL console.
           (switch-to-buffer source)
           (let ((clutch-connection other))
