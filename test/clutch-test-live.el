@@ -1539,7 +1539,7 @@ XTDB reports both as json, and stores a JSON string as a string."
 (ert-deftest clutch-test-live-xtdb-number-union-columns-take-each-value ()
   :tags '(:xtdb-live)
   "A column of integers and fractions should take either through edits.
-Each value goes as the member type it fits, so the column's union does not
+Each value goes as a member type that holds it, so the column's union does not
 grow, also after it gains a NULL; a value that is no number is refused."
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
@@ -1572,6 +1572,44 @@ grow, also after it gains a NULL; a value that is no number is refused."
                      '(("s1" 8.25) ("s2" nil) ("s3" 4))))
       (should (equal (clutch-test--xtdb-column-type conn table "n")
                      "[:union :i64 :f64 [:? :null]]")))))
+
+(ert-deftest clutch-test-live-xtdb-number-union-values-keep-every-digit ()
+  :tags '(:xtdb-live)
+  "A number should go as a member of its column that holds it whole.
+A long fraction takes the decimal member before the float, and an integer
+out of the integer member's range takes the float."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn conn
+    (let ((exact (clutch-test--xtdb-table "exact"))
+          (small (clutch-test--xtdb-table "small"))
+          (result-name (format " *clutch-xtdb-fit-%d*" (emacs-pid)))
+          (digits "0.12345678901234567890123456789"))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, n) VALUES ('e1', 1.5::decimal), ('e2', 2.5)"
+                    exact))
+      (clutch-db-query
+       conn (format "INSERT INTO %s (_id, n) VALUES ('m1', 1::smallint), ('m2', 2.5::real)"
+                    small))
+      (clutch-test--with-live-result-buffer result-name
+        (clutch-test--execute-live-select
+         conn (format "SELECT * FROM %s ORDER BY _id" exact))
+        (with-current-buffer result-name
+          (clutch-test--xtdb-edit 0 "n" digits)
+          (clutch-test--xtdb-submit))
+        (clutch-test--execute-live-select
+         conn (format "SELECT * FROM %s ORDER BY _id" small))
+        (with-current-buffer result-name
+          (clutch-test--xtdb-edit 0 "n" "32768")
+          (clutch-test--xtdb-submit)))
+      (should (equal (clutch-test--xtdb-rows
+                      conn (format "SELECT CAST(n AS VARCHAR) FROM %s WHERE _id = 'e1'"
+                                   exact))
+                     (list (list digits))))
+      (should (equal (clutch-test--xtdb-rows
+                      conn (format "SELECT CAST(n AS VARCHAR) FROM %s WHERE _id = 'm1'"
+                                   small))
+                     '(("32768.0")))))))
 
 (ert-deftest clutch-test-live-xtdb-timestamptz-keeps-the-time-shown ()
   :tags '(:xtdb-live)
