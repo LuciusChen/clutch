@@ -349,20 +349,26 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
 
 (defun clutch--transaction-end-query-p (sql)
   "Return non-nil when SQL ends the current transaction.
-That is a COMMIT, or a ROLLBACK followed by nothing but WORK, TRANSACTION
-and chaining options.  A rollback to a savepoint keeps the work done
-before it, and so may SQL Server's ROLLBACK TRANSACTION with a name,
-which can name a savepoint."
+That is a COMMIT, or a ROLLBACK of the whole transaction: ROLLBACK [WORK]
+[AND [NO] CHAIN] [[NO] RELEASE], or ROLLBACK TRANSACTION or TRAN [AND [NO]
+CHAIN].  A rollback to a savepoint keeps the work done before it, and so
+may SQL Server's ROLLBACK TRANSACTION with a name, which can name a
+savepoint, even one called CHAIN."
   (pcase (clutch-db-sql-leading-keyword sql)
     ((or "COMMIT" "END" "ABORT") t)
     ("ROLLBACK"
-     (cl-every (lambda (word)
-                 (member (upcase word)
-                         '("WORK" "TRAN" "TRANSACTION"
-                           "AND" "NO" "CHAIN" "RELEASE")))
-               (cdr (split-string
-                     (clutch-db-sql-trim-end
-                      (clutch-db-sql-strip-leading-comments sql))))))))
+     (let* ((case-fold-search t)
+            (space "[ \t\n\r\f]+")
+            (chain (concat "\\(?:" space "AND\\(?:" space "NO\\)?"
+                           space "CHAIN\\)?")))
+       (string-match-p
+        (concat "\\`ROLLBACK\\(?:"
+                "\\(?:" space "WORK\\)?" chain
+                "\\(?:\\(?:" space "NO\\)?" space "RELEASE\\)?"
+                "\\|" space "TRAN\\(?:SACTION\\)?" chain
+                "\\)\\'")
+        (clutch-db-sql-trim-end
+         (clutch-db-sql-strip-leading-comments sql)))))))
 
 ;;;; Transaction state
 
