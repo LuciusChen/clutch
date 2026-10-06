@@ -315,7 +315,7 @@
   (let ((case-fold-search t)
         (trimmed (clutch-db-sql-strip-leading-comments sql)))
     (string-match-p
-     "\\`\\s-*\\(?:BEGIN\\|START\\s-+TRANSACTION\\|COMMIT\\|END\\|ABORT\\|ROLLBACK\\|SAVEPOINT\\|RELEASE\\)\\b"
+     "\\`\\(?:BEGIN\\|START\\s-+TRANSACTION\\|COMMIT\\|END\\|ABORT\\|ROLLBACK\\|SAVEPOINT\\|RELEASE\\)\\b"
      trimmed)))
 
 (defun clutch-db-pg--ensure-foreground-transaction (conn sql)
