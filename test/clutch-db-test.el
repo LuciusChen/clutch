@@ -4422,12 +4422,24 @@ A PostgreSQL connection keeps the reported count."
               0))))))
 
 (ert-deftest clutch-db-test-xtdb-number-union-values-take-a-member-type ()
-  "A value for a column of several number types should take one of them.
-An integer takes an integer type and a fraction a fractional one, so the
-column's union does not grow; a value that is no number takes none."
+  "A value for a column of several number types should take one that holds it.
+An integer takes an integer type whose range holds it, and otherwise a
+number takes the decimal type, which keeps every digit, before a float; a
+value that is no number takes none."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-client
-    (let (sent)
+    (let ((cases '(("7" ("int8" "float8") "int8")
+                   (" 3.5 " ("int8" "float8") "float8")
+                   (2 ("int8" "float8") "int8")
+                   (nil ("int8" "float8") "int8")
+                   ("x" ("int8" "float8") nil)
+                   ("99999999999999999999" ("int8" "float8") "float8")
+                   ("32768" ("int2" "float4") "float4")
+                   ("40000" ("int2" "int8") "int8")
+                   ("7" ("float8" "numeric") "numeric")
+                   ("0.12345678901234567890123456789" ("numeric" "float8")
+                    "numeric")))
+          sent)
       (cl-letf (((symbol-function 'pgsql-exec-params)
                  (lambda (_client _sql arguments)
                    (setq sent arguments)
@@ -4436,14 +4448,15 @@ column's union does not grow; a value that is no number takes none."
         (clutch-db-execute-params
          (clutch-db-pg--make-xtdb-connection
           :client (clutch-db-test--make-pg-client))
-         "UPDATE t SET a = ?, b = ?, c = ?, d = ?, e = ?, f = ? WHERE _id = ?"
-         (append (mapcar (lambda (value)
-                           (clutch-db-typed-param value '("int8" "float8")))
-                         '("7" " 3.5 " 2 nil "x"))
-                 (list (clutch-db-typed-param "2.5" '("int8" "numeric"))
-                       (clutch-db-typed-param "p1" "text"))))
+         (format "UPDATE t SET %s WHERE _id = ?"
+                 (mapconcat (lambda (_case) "n = ?") cases ", "))
+         (append (mapcar (lambda (case)
+                           (clutch-db-typed-param (nth 0 case) (nth 1 case)))
+                         cases)
+                 (list (clutch-db-typed-param "p1" "text"))))
         (should (equal (mapcar #'cdr sent)
-                       '("int8" "float8" "int8" "int8" nil "numeric" "text")))))))
+                       (append (mapcar (lambda (case) (nth 2 case)) cases)
+                               '("text"))))))))
 
 (ert-deftest clutch-db-test-xtdb-refuses-staged-changes-in-manual-mode ()
   "Staged changes should need Auto mode on XTDB, which has no savepoints."

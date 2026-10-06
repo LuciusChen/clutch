@@ -1,6 +1,6 @@
 # 208 — XTDB Reuses the PostgreSQL Adapter
 
-_Updated after 0.5.4: an always-true `WHERE` does not make an `ERASE` ask again, as the Decision section says; it gets the high-risk confirmation in place of the ordinary one, as Verification has it. The native live suite now covers XTDB. A column of several number types is no longer changed with SQL only: each value is sent as the member type it fits._
+_Updated after 0.5.4: an always-true `WHERE` does not make an `ERASE` ask again, as the Decision section says; it gets the high-risk confirmation in place of the ordinary one, as Verification has it. The native live suite now covers XTDB. A column of several number types is no longer changed with SQL only: each value is sent as a member type that holds it._
 
 ## Evidence
 

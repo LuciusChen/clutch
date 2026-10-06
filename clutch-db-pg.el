@@ -1313,13 +1313,19 @@ when a NULL is stored only makes the column nullable, so it has none."
 
 (defconst clutch-db-pg--xtdb-number-types
   '("int8" "int4" "int2" "numeric" "float8" "float4")
-  "Parameter types of XTDB's number types, in the order an integer takes them.")
+  "Parameter types of XTDB's number types.")
+
+(defconst clutch-db-pg--xtdb-integer-ranges
+  '(("int8" -9223372036854775808 9223372036854775807)
+    ("int4" -2147483648 2147483647)
+    ("int2" -32768 32767))
+  "XTDB's integer parameter types with the least and greatest value each holds.")
 
 (defun clutch-db-pg--xtdb-pg-type (xtdb-type)
   "Return (DATA-TYPE PARAMETER-TYPE) for the printed XTDB-TYPE, or nil.
 A union maps when all of its members map to the same type.  A union of
 number types has no DATA-TYPE, and its PARAMETER-TYPE is the list of its
-members' types, of which each value takes the one it fits."
+members' types, of which each value takes one that holds it."
   (let* ((type (condition-case nil (car (read-from-string xtdb-type))
                  (error nil)))
          (mapped (delete-dups
@@ -1335,20 +1341,25 @@ members' types, of which each value takes the one it fits."
       (list nil (mapcar #'cadr mapped))))))
 
 (defun clutch-db-pg--xtdb-number-type (value types)
-  "Return the type among number TYPES that VALUE fits, or nil.
-An integer takes an integer type and any other number a fractional one, so
-a column whose type is a union of TYPES gains no member.  NULL takes any of
-TYPES, and a value that is no number takes none, which XTDB refuses."
+  "Return the type among number TYPES that can hold VALUE, or nil.
+An integer takes an integer type whose range holds it.  Any other number,
+and an integer no such type holds, takes the decimal type, which keeps
+every digit, before a float, which rounds.  NULL takes any of TYPES, and a
+value that is no number takes none, which XTDB refuses."
   (let ((text (cond ((numberp value) (number-to-string value))
                     ((stringp value) (string-trim value)))))
-    (cl-find-if (lambda (type) (member type types))
-                (cond
-                 ((null value) types)
-                 ((not (and text (string-match-p clutch-db-number-regexp text)))
-                  nil)
-                 ((string-match-p "\\`[+-]?[0-9]+\\'" text)
-                  clutch-db-pg--xtdb-number-types)
-                 (t '("float8" "float4" "numeric"))))))
+    (cl-find-if
+     (lambda (type) (member type types))
+     (cond
+      ((null value) types)
+      ((not (and text (string-match-p clutch-db-number-regexp text))) nil)
+      (t (append
+          (and (string-match-p "\\`[+-]?[0-9]+\\'" text)
+               (let ((number (string-to-number text)))
+                 (cl-loop for (type least greatest)
+                          in clutch-db-pg--xtdb-integer-ranges
+                          when (<= least number greatest) collect type)))
+          '("numeric" "float8" "float4")))))))
 
 (cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--xtdb-connection)
                                            _pg-columns)
@@ -1437,8 +1448,8 @@ XTDB has no table comments."
   "Execute SQL with PARAMS on XTDB CONN, leaving its affected-row count unknown.
 XTDB reports zero rows for every INSERT, UPDATE and DELETE, so a staged
 UPDATE or DELETE cannot be checked against its one row.  A parameter for a
-union of number types, whose type is a list, takes the member its value
-fits."
+union of number types, whose type is a list, takes a member that holds
+its value."
   (let ((result
          (cl-call-next-method
           conn sql
