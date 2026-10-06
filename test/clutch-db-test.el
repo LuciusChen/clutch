@@ -6520,6 +6520,29 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
           (clutch-db-query conn (format "DEL %S %S %S"
                                         string-key hash-key list-key)))))))
 
+(ert-deftest clutch-db-test-redis-live-select-switches-the-database ()
+  :tags '(:db-live :redis-live)
+  "A Redis SELECT should move the connection and its parameters to its database.
+The connection went on reporting the database it was opened with, and its
+parameters reopened that database."
+  (clutch-db-test--with-redis conn
+    (let ((key (clutch-db-test--redis-live-key "select")))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn "SELECT 1")
+            (clutch-db-query conn (format "SET %S one" key))
+            (should (equal (clutch-db-current-schema conn) "1"))
+            (let ((reopened (clutch-db-connect
+                             'redis
+                             (clutch-db-update-namespace-params
+                              conn (clutch-db-test--redis-live-params)))))
+              (unwind-protect
+                  (should (equal (clutch-db-result-rows
+                                  (clutch-db-query reopened (format "GET %S" key)))
+                                 '(("one"))))
+                (clutch-db-disconnect reopened))))
+        (ignore-errors (clutch-db-query conn (format "DEL %S" key)))))))
+
 (ert-deftest clutch-db-test-redis-live-schema ()
   :tags '(:db-live :redis-live)
   "Redis metadata should expose keys as KEY objects."

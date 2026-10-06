@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- A Redis `SELECT` moves the console's session to the database it selects: the mode line shows that database, completion and browsing offer its keys, and a reconnect selects it again. All three stayed on the database the connection was opened with. Showing the new database needs the redis.el that records it.
 - On JDBC connections, following a foreign key into another schema opens the referenced table in that schema. It opened the table of the same name in the connection's own schema.
 - On JDBC connections, the columns, primary key and foreign keys of a table that a query names with its schema, as in `SELECT * FROM alt.people`, come from that table. They came from the table of the same name in the connection's own schema, so an edit of a column only the named table has was refused as missing from it.
 - A rollback to a savepoint, such as `ROLLBACK TO SAVEPOINT s`, keeps the transaction's uncommitted work known, so a disconnect still asks first. It cleared it, and a disconnect then lost the work done before the savepoint without asking.
