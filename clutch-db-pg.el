@@ -1297,8 +1297,10 @@ No UPDATE may set them, though an INSERT may set _valid_from and _valid_to.")
 (defun clutch-db-pg--xtdb-base-types (type)
   "Return the base type keywords of XTDB TYPE, as read from its printed form.
 A nullable type such as [:? :date :day] has the type after `:?', and a
-union has the base types of each member."
+union has the base types of each member.  The :null that a union gains
+when a NULL is stored only makes the column nullable, so it has none."
   (cond
+   ((eq type :null) nil)
    ((keywordp type) (list type))
    ((and (vectorp type) (> (length type) 0))
     (pcase (aref type 0)
@@ -1307,16 +1309,55 @@ union has the base types of each member."
       (:union (mapcan #'clutch-db-pg--xtdb-base-types (cdr (append type nil))))
       (head (list head))))))
 
+(defconst clutch-db-pg--xtdb-number-types
+  '("int8" "int4" "int2" "numeric" "float8" "float4")
+  "Parameter types of XTDB's number types.")
+
+(defconst clutch-db-pg--xtdb-integer-ranges
+  '(("int8" -9223372036854775808 9223372036854775807)
+    ("int4" -2147483648 2147483647)
+    ("int2" -32768 32767))
+  "XTDB's integer parameter types with the least and greatest value each holds.")
+
 (defun clutch-db-pg--xtdb-pg-type (xtdb-type)
   "Return (DATA-TYPE PARAMETER-TYPE) for the printed XTDB-TYPE, or nil.
-A union maps only when all of its members map to the same type."
+A union maps when all of its members map to the same type.  A union of
+number types has no DATA-TYPE, and its PARAMETER-TYPE is the list of its
+members' types, of which each value takes one that holds it."
   (let* ((type (condition-case nil (car (read-from-string xtdb-type))
                  (error nil)))
          (mapped (delete-dups
                   (mapcar (lambda (base)
                             (cdr (assq base clutch-db-pg--xtdb-types)))
                           (clutch-db-pg--xtdb-base-types type)))))
-    (and mapped (null (cdr mapped)) (car mapped))))
+    (cond
+     ((and mapped (null (cdr mapped))) (car mapped))
+     ((and mapped
+           (cl-every (lambda (pg-type)
+                       (member (cadr pg-type) clutch-db-pg--xtdb-number-types))
+                     mapped))
+      (list nil (mapcar #'cadr mapped))))))
+
+(defun clutch-db-pg--xtdb-number-type (value types)
+  "Return the type among number TYPES that can hold VALUE, or nil.
+An integer takes an integer type whose range holds it.  Any other number,
+and an integer no such type holds, takes the decimal type, which keeps
+every digit, before a float, which rounds.  NULL takes any of TYPES, and a
+value that is no number takes none, which XTDB refuses."
+  (let ((text (cond ((numberp value) (number-to-string value))
+                    ((stringp value) (string-trim value)))))
+    (cl-find-if
+     (lambda (type) (member type types))
+     (cond
+      ((null value) types)
+      ((not (and text (string-match-p clutch-db-number-regexp text))) nil)
+      (t (append
+          (and (string-match-p "\\`[+-]?[0-9]+\\'" text)
+               (let ((number (string-to-number text)))
+                 (cl-loop for (type least greatest)
+                          in clutch-db-pg--xtdb-integer-ranges
+                          when (<= least number greatest) collect type)))
+          '("numeric" "float8" "float4")))))))
 
 (cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--xtdb-connection)
                                            _pg-columns)
@@ -1341,8 +1382,10 @@ instead, or has none and is refused."
   "Return detailed column info for TABLE on XTDB CONN.
 Column types map to the PostgreSQL types that XTDB parameters take, so a
 staged value is sent with its column's type; a type that does not map keeps
-its XTDB name and no parameter type, which XTDB then refuses.  A row may
-omit any column but _id, so every other column is nullable."
+its XTDB name and no parameter type, which XTDB then refuses.  A union of
+number types keeps its XTDB name too, with the list of its members' types
+as the parameter type.  A row may omit any column but _id, so every other
+column is nullable."
   (clutch-db--translate-library-error pgsql-error
     (let ((result (clutch-db-pg--exec
                    conn
@@ -1355,14 +1398,20 @@ ORDER BY ordinal_position"
        (lambda (row)
          (pcase-let* ((`(,name ,xtdb-type) row)
                       (`(,data-type ,parameter-type)
-                       (clutch-db-pg--xtdb-pg-type xtdb-type)))
-           (clutch-db-pg--column-details-row
-            (list name (or data-type xtdb-type) parameter-type
-                  (if (equal name "_id") "NO" "YES")
-                  nil nil nil nil
-                  (and (member name clutch-db-pg--xtdb-system-columns) "YES")
-                  nil)
-            '("_id") nil)))
+                       (clutch-db-pg--xtdb-pg-type xtdb-type))
+                      (detail
+                       (clutch-db-pg--column-details-row
+                        (list name (or data-type xtdb-type) parameter-type
+                              (if (equal name "_id") "NO" "YES")
+                              nil nil nil nil
+                              (and (member name clutch-db-pg--xtdb-system-columns)
+                                   "YES")
+                              nil)
+                        '("_id") nil)))
+           ;; The details row takes a single type name only.
+           (if (consp parameter-type)
+               (plist-put detail :backend-type parameter-type)
+             detail)))
        (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-db-pg--xtdb-connection))
@@ -1392,12 +1441,24 @@ XTDB has no table comments."
   "Return nil, since XTDB cannot switch its current schema."
   nil)
 
-(cl-defmethod clutch-db-execute-params ((_conn clutch-db-pg--xtdb-connection)
-                                        _sql _params)
-  "Execute parameterized SQL, leaving its affected-row count unknown.
+(cl-defmethod clutch-db-execute-params ((conn clutch-db-pg--xtdb-connection)
+                                        sql params)
+  "Execute SQL with PARAMS on XTDB CONN, leaving its affected-row count unknown.
 XTDB reports zero rows for every INSERT, UPDATE and DELETE, so a staged
-UPDATE or DELETE cannot be checked against its one row."
-  (let ((result (cl-call-next-method)))
+UPDATE or DELETE cannot be checked against its one row.  A parameter for a
+union of number types, whose type is a list, takes a member that holds
+its value."
+  (let ((result
+         (cl-call-next-method
+          conn sql
+          (mapcar (lambda (param)
+                    (let ((type (clutch-db-param-type param))
+                          (value (clutch-db-param-value param)))
+                      (if (consp type)
+                          (clutch-db-typed-param
+                           value (clutch-db-pg--xtdb-number-type value type))
+                        param)))
+                  params))))
     (setf (clutch-db-result-affected-rows result) nil)
     result))
 

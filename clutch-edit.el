@@ -2296,9 +2296,7 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
 
 (defun clutch-result-insert--valid-numeric-value-p (value)
   "Return non-nil for VALUE matching a numeric literal."
-  (string-match-p
-   "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\(?:[eE][+-]?[0-9]+\\)?\\'"
-   value))
+  (string-match-p clutch-db-number-regexp value))
 
 (defun clutch-result--validate-field-value (field-name value col-def detail)
   "Validate VALUE for FIELD-NAME using COL-DEF and schema DETAIL."

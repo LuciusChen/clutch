@@ -4306,7 +4306,9 @@ the text that is sent."
 (ert-deftest clutch-db-test-xtdb-column-details-map-xtdb-types ()
   "XTDB columns should carry the PostgreSQL types that its parameters take.
 _id is the key, any other column may be left out, system columns are
-generated, and a type with no single PostgreSQL type keeps its XTDB name."
+generated, and a type with no single PostgreSQL type keeps its XTDB name.
+A union of number types takes the types of its members, one of which each
+value is sent as, and the :null a union gains with a NULL adds none."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-pg--make-xtdb-connection
@@ -4322,6 +4324,8 @@ generated, and a type with no single PostgreSQL type keeps its XTDB name."
                             ("born" "[:? :date :day]")
                             ("seen" "[:union [:? :timestamp-tz :micro \"+08:00\"] [:timestamp-tz :micro \"Z\"]]")
                             ("mixed" "[:union [:? :i32] :i16]")
+                            ("score" "[:union :i64 :f64 [:? :null]]")
+                            ("label" "[:union :i64 :utf8]")
                             ("tags" "[:? [:list :utf8]]"))))))
         (let ((details (clutch-db-column-details conn "people")))
           (cl-flet ((get (name key)
@@ -4339,7 +4343,10 @@ generated, and a type with no single PostgreSQL type keeps its XTDB name."
             (should (get "age" :nullable))
             (should (equal (get "born" :backend-type) "date"))
             (should (equal (get "seen" :backend-type) "timestamptz"))
-            (should-not (get "mixed" :backend-type))
+            (should (equal (get "mixed" :type) "[:union [:? :i32] :i16]"))
+            (should (equal (get "mixed" :backend-type) '("int4" "int2")))
+            (should (equal (get "score" :backend-type) '("int8" "float8")))
+            (should-not (get "label" :backend-type))
             (should (equal (get "tags" :type) "[:? [:list :utf8]]"))
             (should-not (get "tags" :backend-type))))))))
 
@@ -4409,6 +4416,43 @@ A PostgreSQL connection keeps the reported count."
                (clutch-db-execute-params
                 (clutch-db-test--make-pg-connection) sql params))
               0))))))
+
+(ert-deftest clutch-db-test-xtdb-number-union-values-take-a-member-type ()
+  "A value for a column of several number types should take one that holds it.
+An integer takes an integer type whose range holds it, and otherwise a
+number takes the decimal type, which keeps every digit, before a float; a
+value that is no number takes none."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-client
+    (let ((cases '(("7" ("int8" "float8") "int8")
+                   (" 3.5 " ("int8" "float8") "float8")
+                   (2 ("int8" "float8") "int8")
+                   (nil ("int8" "float8") "int8")
+                   ("x" ("int8" "float8") nil)
+                   ("99999999999999999999" ("int8" "float8") "float8")
+                   ("32768" ("int2" "float4") "float4")
+                   ("40000" ("int2" "int8") "int8")
+                   ("7" ("float8" "numeric") "numeric")
+                   ("0.12345678901234567890123456789" ("numeric" "float8")
+                    "numeric")))
+          sent)
+      (cl-letf (((symbol-function 'pgsql-exec-params)
+                 (lambda (_client _sql arguments)
+                   (setq sent arguments)
+                   (clutch-db-test--make-pg-result :command-tag "UPDATE 0"
+                                                   :affected-rows 0))))
+        (clutch-db-execute-params
+         (clutch-db-pg--make-xtdb-connection
+          :client (clutch-db-test--make-pg-client))
+         (format "UPDATE t SET %s WHERE _id = ?"
+                 (mapconcat (lambda (_case) "n = ?") cases ", "))
+         (append (mapcar (lambda (case)
+                           (clutch-db-typed-param (nth 0 case) (nth 1 case)))
+                         cases)
+                 (list (clutch-db-typed-param "p1" "text"))))
+        (should (equal (mapcar #'cdr sent)
+                       (append (mapcar (lambda (case) (nth 2 case)) cases)
+                               '("text"))))))))
 
 (ert-deftest clutch-db-test-xtdb-refuses-staged-changes-in-manual-mode ()
   "Staged changes should need Auto mode on XTDB, which has no savepoints."
