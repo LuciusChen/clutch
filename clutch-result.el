@@ -2141,9 +2141,7 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
    ((numberp val) val)
    ((stringp val)
     (let ((s (string-trim val)))
-      (when (and (not (string-empty-p s))
-                 (string-match-p
-                  "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\'" s))
+      (when (string-match-p clutch-db-number-regexp s)
         (string-to-number s))))
    (t nil)))
 
@@ -3365,12 +3363,12 @@ command runs and only reported once it has returned."
                       (if dispatching
                           (setq inline (list result error))
                         (setq waiting t)
-                        (when (handle result error cancelled)
-                          (condition-case run-error
-                              (run)
-                            ((error quit)
-                             (settle run-error)
-                             (report run-error))))))))
+                        (condition-case run-error
+                            (when (handle result error cancelled)
+                              (run))
+                          ((error quit)
+                           (settle run-error)
+                           (report run-error)))))))
                  (setq dispatching nil)
                  (unless (and inline (apply #'handle inline))
                    (throw 'wait nil))))
