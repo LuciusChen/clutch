@@ -8755,6 +8755,31 @@ or a killed result buffer, leaves it and no temporary file behind."
             (kill-buffer result-buffer))
           (delete-directory dir t))))))
 
+(ert-deftest clutch-test-export-ends-once-when-its-failure-cannot-be-shown ()
+  "An export should end once even when showing a page's failure fails.
+Its connection is released and its completion runs once, as a batch ends
+when its continuation fails."
+  (with-temp-buffer
+    (clutch-test--with-async-statements finishes
+      (clutch-test--init-result-state
+       (list :columns '("id") :rows '((1)) :connection 'async-conn
+             :base-query "SELECT id FROM t" :server-pageable t
+             :result-max-rows 2))
+      (let (completions)
+        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (_conn _sql page-num &rest _)
+                     (format "SELECT id FROM t PAGE %d" page-num)))
+                  ((symbol-function 'clutch--present-statement-outcome)
+                   (lambda (&rest _) (error "Display failed")))
+                  ((symbol-function 'message) #'ignore))
+          (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
+                                       #'ignore
+                                       (lambda (err) (push err completions)))
+          (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
+          (ignore-errors (ert-run-idle-timers))
+          (should (= (length completions) 1))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
 (ert-deftest clutch-test-file-export-of-many-pages-keeps-a-flat-stack ()
   "An export should fetch many synchronous pages without nesting them.
 SQLite runs each page before its callback returns, which a recursive page
