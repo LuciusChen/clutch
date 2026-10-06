@@ -787,7 +787,7 @@ START defaults to 0."
 
 (defconst clutch-db-sql--keyword-gap-regexp
   (concat "\\(?:"
-          (rx (or (in " \t\r\n")
+          (rx (or (in " \t\r\n\f")
                   (seq "/*"
                        (* (or (not (in "*"))
                               (seq (+ "*") (not (in "*/")))))

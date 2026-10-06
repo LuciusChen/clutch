@@ -7060,6 +7060,12 @@ Only the family is remapped, so text scaling still applies once."
                    nil nil ((0 2) 1) (0 1 "1")
                    ("Aggregate \\[score\\]" "sum=4" "avg=2"
                     "\\[rows=2 cells=2 skipped=0\\]")
+                   nil)
+                  (scientific t
+                   ("id" "score")
+                   ((1 "1E+3") (2 "2.5"))
+                   nil nil ((0 1) 1) (0 1 "1E+3")
+                   ("sum=1002.5" "\\[rows=2 cells=2 skipped=0\\]")
                    nil)))
     (pcase-let ((`(,name ,region-active ,columns ,rows ,filter ,filtered
                          ,rect ,cell ,expected ,absent)
@@ -8754,6 +8760,31 @@ or a killed result buffer, leaves it and no temporary file behind."
           (when (buffer-live-p result-buffer)
             (kill-buffer result-buffer))
           (delete-directory dir t))))))
+
+(ert-deftest clutch-test-export-ends-once-when-its-failure-cannot-be-shown ()
+  "An export should end once even when showing a page's failure fails.
+Its connection is released and its completion runs once, as a batch ends
+when its continuation fails."
+  (with-temp-buffer
+    (clutch-test--with-async-statements finishes
+      (clutch-test--init-result-state
+       (list :columns '("id") :rows '((1)) :connection 'async-conn
+             :base-query "SELECT id FROM t" :server-pageable t
+             :result-max-rows 2))
+      (let (completions)
+        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (_conn _sql page-num &rest _)
+                     (format "SELECT id FROM t PAGE %d" page-num)))
+                  ((symbol-function 'clutch--present-statement-outcome)
+                   (lambda (&rest _) (error "Display failed")))
+                  ((symbol-function 'message) #'ignore))
+          (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
+                                       #'ignore
+                                       (lambda (err) (push err completions)))
+          (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
+          (ignore-errors (ert-run-idle-timers))
+          (should (= (length completions) 1))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
 (ert-deftest clutch-test-file-export-of-many-pages-keeps-a-flat-stack ()
   "An export should fetch many synchronous pages without nesting them.

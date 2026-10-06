@@ -573,7 +573,9 @@ command.  Otherwise SQL runs synchronously and CALLBACK runs before this
 function returns.
 A third argument to CALLBACK is non-nil when \\[clutch-cancel-query-or-quit]
 asked to cancel SQL.  SQL may still have succeeded, its result arriving
-first, so a caller with more SQL to run stops instead."
+first, so a caller with more SQL to run stops instead.  SQL that fails
+once CONN is closed under it has an unknown outcome instead, since the
+server may still finish it."
   (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
@@ -587,10 +589,15 @@ first, so a caller with more SQL to run stops instead."
               (clutch-db-query-async
                conn sql
                (lambda (result error)
-                 ;; An outcome that arrived before a disconnect stands.
+                 ;; The server may still finish a statement whose
+                 ;; connection was closed under it; an error that came
+                 ;; before the close stands.
+                 (when (and error (plist-get entry :disconnected))
+                   (setq error
+                         '(clutch-db-error
+                           "Disconnected while the statement ran; its outcome is unknown")))
                  (run-with-idle-timer 0 nil #'clutch--finish-db-query
-                                      conn sql callback result error
-                                      (plist-get entry :disconnected)))))
+                                      conn sql callback result error))))
       (unless started
         (remhash conn clutch--running-queries)))
     (if started
@@ -601,18 +608,12 @@ first, so a caller with more SQL to run stops instead."
                      (clutch-db-error (cons nil err)))))
         (funcall callback result error)))))
 
-(defun clutch--finish-db-query
-    (conn sql callback result error &optional disconnected)
+(defun clutch--finish-db-query (conn sql callback result error)
   "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
-CALLBACK also gets whether cancelling SQL was asked for.  DISCONNECTED says
-that CONN was closed under SQL before its outcome arrived; a failure then
-has an unknown outcome instead, since the server may still finish SQL."
+CALLBACK also gets whether cancelling SQL was asked for."
   (let ((cancelled (plist-get (gethash conn clutch--running-queries)
                               :cancelling)))
     (remhash conn clutch--running-queries)
-    (when (and error disconnected)
-      (setq error '(clutch-db-error
-                    "Disconnected while the statement ran; its outcome is unknown")))
     (when result
       (clutch--clear-connection-problem-capture conn)
       (clutch--record-tx-state-after-query conn sql))
@@ -2372,53 +2373,54 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                    (plist-get context :connection)
                    (user-error "No active connection")))
          (params (or clutch--connection-params
-                     (plist-get context :params)))
-         (namespaces (clutch-db-list-schemas conn))
-         (current (clutch-db-current-schema conn)))
-    (unless namespaces
-      (user-error
-       "Runtime schema/database switching is not available for this connection"))
-    (let ((namespace
-           (completing-read
-            (if current
-                (format "Switch schema/database (current %s): " current)
-              "Switch schema/database: ")
-            namespaces nil t nil nil current)))
-      (unless (string-empty-p namespace)
-        (if (and current (string-equal-ignore-case namespace current))
-            (message "Already on schema/database %s" current)
-          (if-let* ((replacement-params
-                     (clutch-db-namespace-reconnect-params
-                      conn params namespace)))
-              (progn
-                (when (clutch--connection-alive-p conn)
-                  (clutch--confirm-session-close
-                   conn "Switch database? "))
-                (clutch--replace-connection
-                 conn replacement-params (plist-get context :product))
-                (message "Current schema/database: %s" namespace))
-            (condition-case err
+                     (plist-get context :params))))
+    (clutch--refuse-while-running conn)
+    (let ((namespaces (clutch-db-list-schemas conn))
+          (current (clutch-db-current-schema conn)))
+      (unless namespaces
+        (user-error
+         "Runtime schema/database switching is not available for this connection"))
+      (let ((namespace
+             (completing-read
+              (if current
+                  (format "Switch schema/database (current %s): " current)
+                "Switch schema/database: ")
+              namespaces nil t nil nil current)))
+        (unless (string-empty-p namespace)
+          (if (and current (string-equal-ignore-case namespace current))
+              (message "Already on schema/database %s" current)
+            (if-let* ((replacement-params
+                       (clutch-db-namespace-reconnect-params
+                        conn params namespace)))
                 (progn
-                  (clutch-db-set-current-schema conn namespace)
-                  (clutch--clear-connection-problem-capture conn)
-                  (clutch--update-connection-params-for-buffers
-                   conn
-                   (lambda (connection-params)
-                     (clutch-db-update-namespace-params
-                      conn connection-params)))
-                  (clutch--clear-connection-metadata-caches conn)
-                  (clutch--refresh-current-schema t)
+                  (when (clutch--connection-alive-p conn)
+                    (clutch--confirm-session-close
+                     conn "Switch database? "))
+                  (clutch--replace-connection
+                   conn replacement-params (plist-get context :product))
                   (message "Current schema/database: %s" namespace))
-              (clutch-db-error
-               (let ((summary
-                      (cdr
-                       (clutch--remember-query-error
-                        (current-buffer) conn "schema-switch" nil err
-                        (list :schema namespace
-                              :current-schema current)))))
-                 (user-error "%s"
-                             (clutch--debug-workflow-message
-                              summary)))))))))))
+              (condition-case err
+                  (progn
+                    (clutch-db-set-current-schema conn namespace)
+                    (clutch--clear-connection-problem-capture conn)
+                    (clutch--update-connection-params-for-buffers
+                     conn
+                     (lambda (connection-params)
+                       (clutch-db-update-namespace-params
+                        conn connection-params)))
+                    (clutch--clear-connection-metadata-caches conn)
+                    (clutch--refresh-current-schema t)
+                    (message "Current schema/database: %s" namespace))
+                (clutch-db-error
+                 (let ((summary
+                        (cdr
+                         (clutch--remember-query-error
+                          (current-buffer) conn "schema-switch" nil err
+                          (list :schema namespace
+                                :current-schema current)))))
+                   (user-error "%s"
+                               (clutch--debug-workflow-message
+                                summary))))))))))))
 
 ;;;; Interactive connect/disconnect
 
