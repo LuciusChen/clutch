@@ -3365,12 +3365,12 @@ command runs and only reported once it has returned."
                       (if dispatching
                           (setq inline (list result error))
                         (setq waiting t)
-                        (when (handle result error cancelled)
-                          (condition-case run-error
-                              (run)
-                            ((error quit)
-                             (settle run-error)
-                             (report run-error))))))))
+                        (condition-case run-error
+                            (when (handle result error cancelled)
+                              (run))
+                          ((error quit)
+                           (settle run-error)
+                           (report run-error)))))))
                  (setq dispatching nil)
                  (unless (and inline (apply #'handle inline))
                    (throw 'wait nil))))
