@@ -1706,11 +1706,12 @@ Stops and reports on the first error."
                           specs)
             activity (clutch--begin-query-activity connection markers)))
     (cl-labels
-        ((report-complete ()
-           (message "%s statement%s %s"
+        ((report-complete (&optional ending)
+           (message "%s statement%s %s%s"
                     (clutch--message-count done)
                     (if (= done 1) "" "s")
-                    (clutch--message-keyword "executed")))
+                    (clutch--message-keyword "executed")
+                    (or ending "")))
          (fail (outcome stmt region)
            (let* ((failed-connection (or (plist-get outcome :connection)
                                          connection))
@@ -1762,6 +1763,8 @@ Stops and reports on the first error."
              nil)
             (t
              (cl-incf done)
+             ;; After an idle reconnect the statement ran on the new connection.
+             (setq connection (plist-get outcome :connection))
              (when (and region (buffer-live-p source-buffer))
                (with-current-buffer source-buffer
                  (clutch--mark-executed-sql-region (car region) (cdr region))
@@ -1771,11 +1774,7 @@ Stops and reports on the first error."
                ;; The cancel met this statement's result; stop the batch.
                (clutch--finish-query-activity
                 activity
-                (lambda ()
-                  (message "%s statement%s %s, then cancelled"
-                           (clutch--message-count done)
-                           (if (= done 1) "" "s")
-                           (clutch--message-keyword "executed"))))
+                (lambda () (report-complete ", then cancelled")))
                nil))))
          (run ()
            ;; Run statements until one finishes asynchronously or the batch ends.
@@ -1783,6 +1782,15 @@ Stops and reports on the first error."
              (while specs
                (unless (buffer-live-p source-buffer)
                  (clutch--end-query-activity activity)
+                 (throw 'wait nil))
+               ;; The rest of the batch must not follow its buffer to
+               ;; another connection.
+               (unless (eq (buffer-local-value 'clutch-connection source-buffer)
+                           connection)
+                 (clutch--finish-query-activity
+                  activity
+                  (lambda ()
+                    (report-complete ", then stopped: the connection changed")))
                  (throw 'wait nil))
                (pcase-let* ((`(,stmt ,beg ,end) (pop specs))
                             (region (and beg end (cons beg end)))
@@ -1793,9 +1801,8 @@ Stops and reports on the first error."
                    (when region
                      (clutch--clear-executed-sql-overlay)
                      (redisplay t))
-                   ;; An idle reconnect replaces the buffer's connection.
                    (clutch--execute-statement
-                    stmt clutch-connection final-p region
+                    stmt connection final-p region
                     (lambda (outcome)
                       (if dispatching
                           (setq inline (list outcome))
