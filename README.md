@@ -74,7 +74,7 @@ Joined, grouped, derived, or otherwise ambiguous result sets remain read-only un
 |---|---|---|
 | MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, MySQL 8.4 LTS, and MariaDB 10.11 |
 | PostgreSQL | Core SQL support | Requires [`pgsql`](https://melpa.org/#/pgsql), available from MELPA |
-| XTDB | Basic SQL support over the PostgreSQL protocol | Requires [`pgsql`](https://melpa.org/#/pgsql); staged changes are submitted in Auto mode, and mixed-type columns are changed with SQL |
+| XTDB | Basic SQL support over the PostgreSQL protocol | Requires [`pgsql`](https://melpa.org/#/pgsql); staged changes are submitted in Auto mode, and a column of mixed types, unless they are all numbers, is changed with SQL |
 | SQLite | Core SQL support | Uses Emacs 29.1+ built-in `sqlite-*` functions; no external dependency |
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |

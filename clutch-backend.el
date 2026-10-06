@@ -1753,6 +1753,10 @@ when non-nil."
   "Return the default SQL derived-table alias clause for ALIAS."
   (format "AS %s" alias))
 
+(defconst clutch-db-number-regexp
+  "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\(?:[eE][+-]?[0-9]+\\)?\\'"
+  "Regexp matching a number typed as text, with an optional fraction and exponent.")
+
 (cl-defstruct (clutch-db-param
                (:constructor clutch-db-param-create)
                (:conc-name clutch-db-param--))
