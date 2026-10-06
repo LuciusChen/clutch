@@ -643,7 +643,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
 
 (ert-deftest clutch-test-live-disconnect-ends-running-statement ()
   :tags '(:clutch-live)
-  "Disconnecting during a statement should return at once and end it once."
+  "Disconnecting during a statement should return at once and end it once.
+The server may still finish the statement, so its outcome is unknown."
   (unless (clutch-test-live-backend-capability-p :async-cancel)
     (ert-skip (clutch-test-capability-skip-message :async-cancel)))
   (clutch-test--with-conn conn
@@ -667,6 +668,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
           (ert-run-idle-timers)
           (should (= (length shown) 1))
           (should (eq (caar shown) 'clutch-db-error))
+          (should (string-match-p "outcome is unknown" (cadar shown)))
           (should-not (gethash conn clutch--running-queries)))))))
 
 (ert-deftest clutch-test-live-pg-ctid-edit-via-execute-select-persists ()

@@ -308,20 +308,7 @@ Values are nesting counts.")
 
 (defun clutch-db-sql-strip-leading-comments (sql)
   "Strip leading SQL comments and whitespace from SQL."
-  (let ((s (string-trim-left sql)))
-    (while (or (string-prefix-p "--" s)
-               (string-prefix-p "/*" s))
-      (setq s (string-trim-left
-               (cond
-                ((string-prefix-p "--" s)
-                 (if-let* ((nl (string-search "\n" s)))
-                     (substring s (1+ nl))
-                   ""))
-                ((string-prefix-p "/*" s)
-                 (if-let* ((end (string-search "*/" s)))
-                     (substring s (+ end 2))
-                   ""))))))
-    s))
+  (substring sql (clutch-db-sql--skip-blank sql 0)))
 
 (defun clutch-db-sql-trim-end (sql)
   "Return SQL without trailing whitespace and its final semicolon.
@@ -1029,7 +1016,9 @@ FINAL TABLE (INSERT ...)."
          (data-change-tables
           (clutch-db-sql-code-match-positions
            normalized 0 nil
-           "\\b\\(?:FINAL\\|NEW\\|OLD\\)[ \t\n\r]+TABLE[ \t\n\r]*("))
+           (concat "\\b\\(?:FINAL\\|NEW\\|OLD\\)"
+                   clutch-db-sql--keyword-gap-regexp "+TABLE"
+                   clutch-db-sql--keyword-gap-regexp "*(")))
          statements)
     (cl-flet ((collect (open)
                 (push (clutch-db-sql-normalize

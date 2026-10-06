@@ -2608,6 +2608,53 @@ replacement connection would run the statement against an empty transaction."
       (should clutch-connection)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-connect-refuses-while-a-query-runs ()
+  "Connecting elsewhere should wait for the statement running on the buffer.
+The server finished a statement whose connection was closed under it."
+  (let ((clutch-connection 'fake-conn)
+        (clutch--running-queries (make-hash-table :test 'eq))
+        prompted disconnected)
+    (puthash clutch-connection (list :buffer (current-buffer))
+             clutch--running-queries)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--connect-params-for-current-buffer)
+               (lambda () (setq prompted t) nil))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq disconnected t))))
+      (should-error (clutch-connect) :type 'user-error)
+      (should-not prompted)
+      (should-not disconnected)
+      (should (eq clutch-connection 'fake-conn)))))
+
+(ert-deftest clutch-test-disconnect-leaves-a-running-statement-unknown ()
+  "A statement whose connection is closed under it should not report failure.
+The server may still finish it, so its outcome is unknown; an error that
+arrived before the disconnect, waiting to be shown, keeps its message."
+  (require 'clutch-db-sqlite)
+  (let ((clutch--running-queries (make-hash-table :test 'eq))
+        reply errors)
+    (cl-letf (((symbol-function 'clutch-db-query-async)
+               (lambda (_conn _sql callback) (setq reply callback) t))
+              ((symbol-function 'clutch--show-statement-status) #'ignore))
+      (cl-flet ((run (reply-first err)
+                  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+                    (clutch--run-db-query-async
+                     conn "UPDATE t SET n = 1" nil
+                     (lambda (_result error &optional _cancelled)
+                       (push error errors)))
+                    (if reply-first
+                        (progn (funcall reply nil err)
+                               (clutch--do-disconnect conn))
+                      (clutch--do-disconnect conn)
+                      (funcall reply nil err))
+                    (ert-run-idle-timers))))
+        (run t '(clutch-db-error "Deadlock found"))
+        (run nil '(clutch-db-error "Connection closed"))
+        (should (equal (nreverse errors)
+                       '((clutch-db-error "Deadlock found")
+                         (clutch-db-error
+                          "Disconnected while the statement ran; its outcome is unknown"))))))))
+
 (ert-deftest clutch-test-disconnect-refreshes-derived-result-footer ()
   "Disconnect should refresh result chrome without replacing its table header."
   (require 'clutch-db-sqlite)
