@@ -569,7 +569,8 @@ are produced by the query execution layer."
 SQL is the statement the user sees, which a failure reports.  ON-RESULT
 gets QUERY's result and its elapsed seconds in this buffer.  While QUERY
 runs, \\[clutch-cancel-query-or-quit] cancels it, and the result stays as
-it was unless QUERY succeeds."
+it was unless QUERY succeeds while the buffer still holds the connection
+that QUERY ran on."
   (let ((conn clutch-connection)
         (buffer (current-buffer))
         (start (float-time))
@@ -589,8 +590,11 @@ it was unless QUERY succeeds."
                                :source-buffer buffer
                                :result-context '(:keep-result-on-error t))))))
           ;; After the activity ends, so a query that ON-RESULT starts
-          ;; counts its own time.
-          (when (and (not error) (buffer-live-p buffer))
+          ;; counts its own time.  A buffer that shows a result of another
+          ;; connection by now keeps it.
+          (when (and (not error)
+                     (buffer-live-p buffer)
+                     (eq (buffer-local-value 'clutch-connection buffer) conn))
             (with-current-buffer buffer
               (funcall on-result result (- (float-time) start))))))))))
 
