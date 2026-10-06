@@ -1415,6 +1415,31 @@ A later activity in ACTIVITY's buffer keeps its own display."
       (unless dispatched
         (clutch--end-query-activity activity)))))
 
+(cl-defun clutch--query-activity-reply
+    (activity connection handle &key moved killed)
+  "Call HANDLE for a reply to ACTIVITY that came from CONNECTION.
+The reply counts while ACTIVITY's buffer is live and holds CONNECTION.
+After an idle reconnect that is the new connection, not ACTIVITY's own
+:connection, the one it reserved.  Otherwise MOVED or KILLED is called,
+while ACTIVITY's markers still place its statements, and then ACTIVITY
+ends; without KILLED, a killed buffer's reply is dropped with a message.
+A nonlocal exit from HANDLE ends ACTIVITY."
+  (let ((buffer (plist-get activity :buffer)))
+    (cond
+     ((not (buffer-live-p buffer))
+      (unwind-protect
+          (if killed
+              (funcall killed)
+            (message "Query finished after its buffer was killed"))
+        (clutch--end-query-activity activity)))
+     ((not (eq (buffer-local-value 'clutch-connection buffer) connection))
+      (unwind-protect
+          (when moved
+            (funcall moved))
+        (clutch--end-query-activity activity)))
+     (t
+      (clutch--dispatch-query-activity activity handle)))))
+
 (defun clutch--finish-query-activity (activity present)
   "Call PRESENT in ACTIVITY's buffer, then end ACTIVITY.
 PRESENT keeps the selected window.  When the buffer is gone, the outcome

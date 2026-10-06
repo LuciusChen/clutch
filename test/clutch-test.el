@@ -10362,6 +10362,48 @@ the buffer to the closed connection."
             (should (equal clutch--result-rows '((10) (20))))
             (should (eq clutch-connection 'other-conn))))))))
 
+(ert-deftest clutch-test-query-activity-reply-needs-its-buffer-on-its-connection ()
+  "A reply should reach its handler only while its buffer holds its connection.
+That is the connection the reply came from, which an idle reconnect puts in
+the buffer in place of the reserved one.  A buffer that holds another
+connection, or none, ends the activity and calls MOVED; a killed buffer ends
+it and says so; a handler that exits nonlocally ends it too."
+  (let ((clutch-db--foreground-connections (make-hash-table :test 'eq))
+        messages)
+    (cl-letf (((symbol-function 'clutch--update-mode-line) #'ignore)
+              ((symbol-function 'clutch--execution-refresh-start) #'ignore)
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (cl-flet ((reply (buffer-holds reply-from &optional kill handle)
+                  (let ((buffer (generate-new-buffer " *clutch-reply*"))
+                        activity events)
+                    (with-current-buffer buffer
+                      (setq-local clutch-connection 'old-conn)
+                      (setq activity (clutch--begin-query-activity 'old-conn))
+                      (setq-local clutch-connection buffer-holds))
+                    (when kill
+                      (kill-buffer buffer))
+                    (condition-case nil
+                        (clutch--query-activity-reply
+                         activity reply-from
+                         (or handle (lambda () (push 'handled events)))
+                         :moved (lambda () (push 'moved events)))
+                      (error (push 'signalled events)))
+                    (when (buffer-live-p buffer)
+                      (kill-buffer buffer))
+                    (list (nreverse events)
+                          (and (plist-get activity :ended) t)))))
+        (should (equal (reply 'old-conn 'old-conn) '((handled) nil)))
+        (should (equal (reply 'new-conn 'new-conn) '((handled) nil)))
+        (should (equal (reply 'other-conn 'old-conn) '((moved) t)))
+        (should (equal (reply nil 'old-conn) '((moved) t)))
+        (should (equal (reply 'old-conn 'old-conn t) '(nil t)))
+        (should (member "Query finished after its buffer was killed" messages))
+        (should (equal (reply 'old-conn 'old-conn nil
+                              (lambda () (error "Boom")))
+                       '((signalled) t)))))))
+
 (ert-deftest clutch-test-query-activity-end-keeps-a-later-ones-time ()
   "Ending a query activity should leave the time of a later one in its buffer.
 A page load that ends after its buffer moved to another connection and
