@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- A rollback to a savepoint, such as `ROLLBACK TO SAVEPOINT s`, keeps the transaction's uncommitted work known, so a disconnect still asks first. It cleared it, and a disconnect then lost the work done before the savepoint without asking.
 - A statement that ends after its buffer has left its connection, as after `clutch-disconnect`, draws no result or error page: in a console or a batch it marks its line and gives its outcome in the echo area, and in the REPL it prints its outcome. Its error page, or a SELECT's rows from the REPL, went to the result buffer that the buffer's new connection, or none, names, and bound that buffer to the old connection.
 - SQL run from an indirect edit (`clutch-edit-indirect`) runs in a buffer that holds its connection: another one when there is one, or else the edit itself, which is then buried instead of killed. It ran in the source buffer the edit returned to, whose mode line then read "clutch" for good, and its result went to a result buffer of no connection.
 - Aggregating selected cells counts a number in scientific notation, such as `1E+3`, which it skipped as text. Sorting and the insert form already read such numbers.
