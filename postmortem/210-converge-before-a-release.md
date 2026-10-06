@@ -13,7 +13,7 @@ The same review also found that a declaration needed on an existing boundary had
 ## Decision
 
 - Keep copies of one mechanism in step. A fix to one copy reaches the others, or its commit says why it does not. Two copies stay separate; the shared part is extracted when a third would appear.
-- Raise the declaration baseline only for a declaration that compilation needs on a boundary that already exists, with the reason in the commit message, and lower it when declarations go away. #94 raised it from 17 to 18 for `C-c C-z`, the eighth declaration on the query-to-result boundary.
+- Raise the declaration baseline only for a declaration that compilation needs on a boundary that already exists, with the reason in the commit message, and lower it when declarations go away. #94 raised it from 17 to 18 for `C-c C-z`, the seventh declaration on the query-to-result boundary.
 - Before a release, review the range since the previous release tag for guards that no longer protect anything, copies that have drifted apart and code without callers, and converge them in commits of their own. Bugs found this way are fixed first, each with a failing test.
 
 ## Consequence
