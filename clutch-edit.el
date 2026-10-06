@@ -22,13 +22,10 @@
   :group 'clutch)
 
 (defvar clutch--row-identity)
-(defvar clutch--filtered-rows)
 (defvar clutch--active-edit-cell)
 (defvar clutch--result-column-defs)
 (defvar clutch--result-column-details)
 (defvar clutch--result-columns)
-(defvar clutch--result-rows)
-(defvar clutch--result-source-table)
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
 (defvar clutch-record--result-buffer)
@@ -867,8 +864,7 @@ Refresh the affected row and footer in place when possible."
                     (clutch--debug-workflow-message
                      (or clutch--row-identity-error-message
                          "unknown error"))))
-      (when (and clutch--last-query
-                 (clutch-db-sql-reads-table-history-p clutch--last-query))
+      (when (clutch-db-sql-reads-table-history-p clutch--last-query)
         (user-error "Cannot %s: the query reads table %s as of another time, so a row may be a past version"
                     op table))
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"

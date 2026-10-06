@@ -68,11 +68,12 @@ the default, which is what a user who just presses RET gets."
     outcome))
 
 (defun clutch-test--execute-and-present (sql connection &optional context)
-  "Execute SQL on CONNECTION and present its result using CONTEXT."
-  (clutch--present-statement-outcome
-   sql connection
-   (clutch-test--await-outcome
-    (lambda (k) (clutch--execute-statement sql connection t nil k context)))))
+  "Execute SQL on CONNECTION, present it using CONTEXT and return its result."
+  (let ((outcome (clutch-test--await-outcome
+                  (lambda (k)
+                    (clutch--execute-statement sql connection t nil k context)))))
+    (clutch--present-statement-outcome sql connection outcome)
+    (plist-get outcome :result)))
 
 (defun clutch-test--debug-buffer-string ()
   "Return the current dedicated clutch debug buffer contents."
