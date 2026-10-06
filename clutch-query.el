@@ -1442,16 +1442,14 @@ A nonlocal exit from HANDLE ends ACTIVITY."
 
 (defun clutch--finish-query-activity (activity present)
   "Call PRESENT in ACTIVITY's buffer, then end ACTIVITY.
-PRESENT keeps the selected window.  When the buffer is gone, the outcome
-is dropped with a message."
+PRESENT keeps the selected window.  A reply reaches this through
+`clutch--query-activity-reply', which has made sure the buffer is live."
   (unwind-protect
       (let ((buffer (plist-get activity :buffer)))
-        (if (buffer-live-p buffer)
-            (save-selected-window
-              (with-current-buffer buffer
-                (let ((clutch--source-window (get-buffer-window buffer)))
-                  (funcall present))))
-          (message "Query finished after its buffer was killed")))
+        (save-selected-window
+          (with-current-buffer buffer
+            (let ((clutch--source-window (get-buffer-window buffer)))
+              (funcall present)))))
     (clutch--end-query-activity activity)))
 
 (defun clutch--present-statement-outcome (sql connection outcome &optional region)
@@ -1778,6 +1776,20 @@ Stops and reports on the first error."
                (clutch--retire-query-connection failed-connection))
              (format "Statement %d failed: %s" (1+ done)
                      (clutch--debug-workflow-message summary))))
+         (stop-moved (outcome stmt region)
+           ;; The statement in flight ran on the connection the buffer left.
+           (let ((failure (and (plist-get outcome :error)
+                               (clutch--report-moved-outcome
+                                stmt outcome region))))
+             (unless failure
+               (cl-incf done)
+               (when region
+                 (with-current-buffer source-buffer
+                   (clutch--mark-executed-sql-region (car region) (cdr region)))))
+             (report-complete
+              (concat ", then stopped: the connection changed"
+                      (and failure
+                           (format "; statement %d: %s" (1+ done) failure))))))
          (handle (outcome stmt region final-p)
            ;; Return non-nil when the next statement should run.
            (cond
@@ -1827,18 +1839,6 @@ Stops and reports on the first error."
            ;; Run statements until one finishes asynchronously or the batch ends.
            (catch 'wait
              (while specs
-               (unless (buffer-live-p source-buffer)
-                 (clutch--end-query-activity activity)
-                 (throw 'wait nil))
-               ;; The rest of the batch must not follow its buffer to
-               ;; another connection.
-               (unless (eq (buffer-local-value 'clutch-connection source-buffer)
-                           connection)
-                 (clutch--finish-query-activity
-                  activity
-                  (lambda ()
-                    (report-complete ", then stopped: the connection changed")))
-                 (throw 'wait nil))
                (pcase-let* ((`(,stmt ,beg ,end) (pop specs))
                             (region (and beg end (cons beg end)))
                             (final-p (null specs))
@@ -1854,11 +1854,13 @@ Stops and reports on the first error."
                       (if dispatching
                           (setq inline (list outcome))
                         (setq waiting t)
-                        (clutch--dispatch-query-activity
-                         activity
+                        (clutch--query-activity-reply
+                         activity (plist-get outcome :connection)
                          (lambda ()
                            (when (handle outcome stmt region final-p)
-                             (run))))))
+                             (run)))
+                         :moved (lambda ()
+                                  (stop-moved outcome stmt region)))))
                     nil (> done 0)))
                  (setq dispatching nil)
                  (unless (and inline (handle (car inline) stmt region final-p))

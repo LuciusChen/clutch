@@ -10183,6 +10183,44 @@ statement."
                           messages))
           (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
 
+(ert-deftest clutch-test-batch-reports-a-statement-that-failed-after-its-buffer-moved ()
+  "A batch statement that fails after its buffer moved should only be reported.
+The disconnect that moved the buffer closed the connection, so the statement
+in flight failed with an unknown outcome; drawing that put an error page in
+a result buffer of another connection, or of none."
+  (with-temp-buffer
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (let ((a-alive t) shown messages)
+        (cl-letf (((symbol-function 'clutch--connection-key)
+                   (lambda (conn) (if conn (symbol-name conn) "none")))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (or a-alive (not (eq conn 'conn-a)))))
+                  ((symbol-function 'clutch--show-execution-error)
+                   (lambda (&rest _) (setq shown t) "failed"))
+                  ((symbol-function 'clutch--retire-query-connection) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          ;; Statement 2 runs; a disconnect then clears the buffer's connection.
+          (setq a-alive nil)
+          (setq-local clutch-connection nil)
+          (funcall (cdar finishes) nil
+                   '(clutch-db-error
+                     "Disconnected while the statement ran; its outcome is unknown"))
+          (ert-run-idle-timers)
+          (should-not shown)
+          (should (cl-some
+                   (lambda (text)
+                     (string-match-p
+                      "\\`1 statement executed, then stopped: the connection changed; statement 2: .*outcome is unknown"
+                      text))
+                   messages))
+          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
   "A physical reconnect should not reuse the old connection's identity plan."
   (with-temp-buffer
