@@ -578,17 +578,19 @@ first, so a caller with more SQL to run stops instead."
   (when (clutch--tx-uncertain-p conn)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before running another query"))
-  (puthash conn (list :buffer (current-buffer) :region region :cancelling nil
-                      :disconnected nil)
-           clutch--running-queries)
-  (let (started)
+  (let ((entry (list :buffer (current-buffer) :region region :cancelling nil
+                     :disconnected nil))
+        started)
+    (puthash conn entry clutch--running-queries)
     (unwind-protect
         (setq started
               (clutch-db-query-async
                conn sql
                (lambda (result error)
+                 ;; An outcome that arrived before a disconnect stands.
                  (run-with-idle-timer 0 nil #'clutch--finish-db-query
-                                      conn sql callback result error))))
+                                      conn sql callback result error
+                                      (plist-get entry :disconnected)))))
       (unless started
         (remhash conn clutch--running-queries)))
     (if started
@@ -599,15 +601,16 @@ first, so a caller with more SQL to run stops instead."
                      (clutch-db-error (cons nil err)))))
         (funcall callback result error)))))
 
-(defun clutch--finish-db-query (conn sql callback result error)
+(defun clutch--finish-db-query
+    (conn sql callback result error &optional disconnected)
   "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
-CALLBACK also gets whether cancelling SQL was asked for.  SQL that fails
-once CONN was closed under it has an unknown outcome instead, since the
-server may still finish it."
-  (let* ((entry (gethash conn clutch--running-queries))
-         (cancelled (plist-get entry :cancelling)))
+CALLBACK also gets whether cancelling SQL was asked for.  DISCONNECTED says
+that CONN was closed under SQL before its outcome arrived; a failure then
+has an unknown outcome instead, since the server may still finish SQL."
+  (let ((cancelled (plist-get (gethash conn clutch--running-queries)
+                              :cancelling)))
     (remhash conn clutch--running-queries)
-    (when (and error (plist-get entry :disconnected))
+    (when (and error disconnected)
       (setq error '(clutch-db-error
                     "Disconnected while the statement ran; its outcome is unknown")))
     (when result
