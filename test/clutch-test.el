@@ -10476,6 +10476,35 @@ buffer's new connection names, and bound that buffer to the old connection."
                            messages))
           (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
 
+(ert-deftest clutch-test-redis-select-moves-the-session-to-its-database ()
+  "A Redis SELECT should move the session to the database it selects.
+A reconnect selected the database the connection was opened with, and the
+cached keys and their metadata stayed that database's."
+  (require 'redis)
+  (require 'clutch-redis)
+  (with-temp-buffer
+    ;; The client reports the database that the SELECT moves it to, as
+    ;; redis.el does once the server accepts it.
+    (let ((conn (make-clutch-redis-conn :client (make-redis-conn :database "1")))
+          primed)
+      (setq-local clutch-connection conn)
+      (setq-local clutch--connection-params '(:backend redis :database 0))
+      (clutch-test--with-async-statements finishes
+        (let ((clutch--schema-cache (make-hash-table :test 'eq)))
+          (puthash conn 'keys-of-database-0 clutch--schema-cache)
+          (cl-letf (((symbol-function 'clutch-result--display-select) #'ignore)
+                    ((symbol-function 'clutch--prime-schema-cache)
+                     (lambda (connection) (setq primed connection))))
+            (clutch--execute "SELECT 1")
+            (funcall (cdar finishes)
+                     (make-clutch-db-result :columns '((:name "value"))
+                                            :rows '(("OK")))
+                     nil)
+            (ert-run-idle-timers)
+            (should (equal (plist-get clutch--connection-params :database) "1"))
+            (should-not (gethash conn clutch--schema-cache))
+            (should (eq primed conn))))))))
+
 (ert-deftest clutch-test-repl-reply-after-the-repl-moved-draws-no-result ()
   "A REPL statement's reply after the REPL left its connection draws no result.
 Showing the SELECT put the old connection's rows in the result buffer that
