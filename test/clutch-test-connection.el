@@ -2626,6 +2626,22 @@ The server finished a statement whose connection was closed under it."
       (should-not disconnected)
       (should (eq clutch-connection 'fake-conn)))))
 
+(ert-deftest clutch-test-switch-schema-refuses-while-a-query-runs ()
+  "Switching schema should wait for the statement running on the connection.
+It should not ask the connection for its schemas first: JDBC waited behind
+the statement, and a switch that reconnects closed the connection under it."
+  (let ((clutch-connection 'fake-conn)
+        (clutch--running-queries (make-hash-table :test 'eq))
+        asked)
+    (puthash clutch-connection (list :buffer (current-buffer))
+             clutch--running-queries)
+    (cl-letf (((symbol-function 'clutch-db-list-schemas)
+               (lambda (_conn) (setq asked t) '("a" "b")))
+              ((symbol-function 'clutch-db-current-schema)
+               (lambda (_conn) (setq asked t) "a")))
+      (should-error (clutch-switch-schema) :type 'user-error)
+      (should-not asked))))
+
 (ert-deftest clutch-test-disconnect-leaves-a-running-statement-unknown ()
   "A statement whose connection is closed under it should not report failure.
 The server may still finish it, so its outcome is unknown; an error that
