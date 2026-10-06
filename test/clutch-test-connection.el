@@ -2626,6 +2626,34 @@ The server finished a statement whose connection was closed under it."
       (should-not disconnected)
       (should (eq clutch-connection 'fake-conn)))))
 
+(ert-deftest clutch-test-disconnect-leaves-a-running-statement-unknown ()
+  "A statement whose connection is closed under it should not report failure.
+The server may still finish it, so its outcome is unknown; a statement that
+fails on its own keeps its error."
+  (require 'clutch-db-sqlite)
+  (let ((clutch--running-queries (make-hash-table :test 'eq))
+        (conn (clutch-db-sqlite-connect '(:database ":memory:")))
+        errors)
+    (cl-flet ((start ()
+                (puthash conn (list :buffer (current-buffer) :region nil
+                                    :cancelling nil :disconnected nil)
+                         clutch--running-queries))
+              (finish (err)
+                (clutch--finish-db-query
+                 conn "UPDATE t SET n = 1"
+                 (lambda (_result error &optional _cancelled)
+                   (push error errors))
+                 nil err)))
+      (start)
+      (finish '(clutch-db-error "Deadlock found"))
+      (start)
+      (clutch--do-disconnect conn)
+      (finish '(clutch-db-error "Connection closed"))
+      (should (equal (nreverse errors)
+                     '((clutch-db-error "Deadlock found")
+                       (clutch-db-error
+                        "Disconnected while the statement ran; its outcome is unknown")))))))
+
 (ert-deftest clutch-test-disconnect-refreshes-derived-result-footer ()
   "Disconnect should refresh result chrome without replacing its table header."
   (require 'clutch-db-sqlite)

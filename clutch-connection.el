@@ -537,7 +537,8 @@ pre-rendered text."
 
 (defvar clutch--running-queries (make-hash-table :test 'eq)
   "Statements in flight, keyed by connection.
-Each value is a plist with :buffer, :region and :cancelling.")
+Each value is a plist with :buffer, :region, :cancelling and :disconnected,
+which is set when the connection is closed under the statement.")
 
 (defun clutch--refuse-while-running (conn)
   "Signal a `user-error' when a statement is running on CONN."
@@ -577,7 +578,8 @@ first, so a caller with more SQL to run stops instead."
   (when (clutch--tx-uncertain-p conn)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before running another query"))
-  (puthash conn (list :buffer (current-buffer) :region region :cancelling nil)
+  (puthash conn (list :buffer (current-buffer) :region region :cancelling nil
+                      :disconnected nil)
            clutch--running-queries)
   (let (started)
     (unwind-protect
@@ -599,10 +601,15 @@ first, so a caller with more SQL to run stops instead."
 
 (defun clutch--finish-db-query (conn sql callback result error)
   "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
-CALLBACK also gets whether cancelling SQL was asked for."
-  (let ((cancelled (plist-get (gethash conn clutch--running-queries)
-                              :cancelling)))
+CALLBACK also gets whether cancelling SQL was asked for.  SQL that fails
+once CONN was closed under it has an unknown outcome instead, since the
+server may still finish it."
+  (let* ((entry (gethash conn clutch--running-queries))
+         (cancelled (plist-get entry :cancelling)))
     (remhash conn clutch--running-queries)
+    (when (and error (plist-get entry :disconnected))
+      (setq error '(clutch-db-error
+                    "Disconnected while the statement ran; its outcome is unknown")))
     (when result
       (clutch--clear-connection-problem-capture conn)
       (clutch--record-tx-state-after-query conn sql))
@@ -2563,7 +2570,9 @@ attached buffers onto a new connection rather than ending the session."
       (clutch--clear-tx-state conn))
     (clutch--clear-connection-metadata-caches conn)
     (when closing
-      (clutch--record-disconnect-debug-event conn))
+      (clutch--record-disconnect-debug-event conn)
+      (when-let* ((entry (gethash conn clutch--running-queries)))
+        (plist-put entry :disconnected t)))
     (unless keep-anchors
       (clutch--forget-problem-record nil conn))
     (unwind-protect
