@@ -10303,27 +10303,34 @@ result as it was."
 (ert-deftest clutch-test-page-load-leaves-a-result-of-another-connection ()
   "A page that arrives once its buffer shows another connection's result is dropped.
 Showing it there would pair one database's rows with another's connection,
-and an edit would then change the other database by the first one's keys."
-  (clutch-test--with-result-state
-      (:columns '("id") :rows '((1) (2)) :connection 'async-conn
-       :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch-db-build-paged-sql)
-                 (lambda (&rest _) "SELECT id FROM t PAGE 1"))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result--execute-page 1)
-        (funcall (cdar finishes)
-                 (make-clutch-db-result :columns clutch--result-column-defs
-                                        :rows '((3) (4)))
-                 nil)
-        ;; Before the page is shown, the buffer shows another result.
-        (setq-local clutch-connection 'other-conn
-                    clutch--result-rows '((10) (20)))
-        (ert-run-idle-timers)
-        (should (equal clutch--result-rows '((10) (20))))
-        (should (eq clutch-connection 'other-conn))))))
+and an edit would then change the other database by the first one's keys.
+A failure is dropped too: its error page would replace that result and bind
+the buffer to the closed connection."
+  (dolist (reply (list (list (make-clutch-db-result :rows '((3) (4))) nil)
+                       (list nil '(clutch-db-error "connection closed"))))
+    (clutch-test--with-result-state
+        (:columns '("id") :rows '((1) (2)) :connection 'async-conn
+         :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
+      (clutch-test--with-async-statements finishes
+        (let (shown)
+          (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (&rest _) "SELECT id FROM t PAGE 1"))
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (not (eq conn 'async-conn))))
+                    ((symbol-function 'clutch--show-execution-error)
+                     (lambda (&rest _) (setq shown t) "failed"))
+                    ((symbol-function 'clutch--refresh-display) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch-result--execute-page 1)
+            (apply (cdar finishes) reply)
+            ;; Before the reply is handled, the buffer shows another result.
+            (setq-local clutch-connection 'other-conn
+                        clutch--result-rows '((10) (20)))
+            (ert-run-idle-timers)
+            (should-not shown)
+            (should (equal clutch--result-rows '((10) (20))))
+            (should (eq clutch-connection 'other-conn))))))))
 
 (ert-deftest clutch-test-last-page-stops-when-its-count-is-cancelled ()
   "C-g during the count of a last-page move should stop the page load.
