@@ -2141,9 +2141,7 @@ Result is a cons cell (ROW-INDICES . COL-INDICES)."
    ((numberp val) val)
    ((stringp val)
     (let ((s (string-trim val)))
-      (when (and (not (string-empty-p s))
-                 (string-match-p
-                  "\\`[+-]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\'" s))
+      (when (string-match-p clutch-db-number-regexp s)
         (string-to-number s))))
    (t nil)))
 
