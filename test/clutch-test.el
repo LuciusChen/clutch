@@ -8820,6 +8820,41 @@ a buffer that holds no connection, or holds another one."
                                   (error-message-string (car completions))))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
+(ert-deftest clutch-test-export-stops-when-its-result-moves-during-a-synchronous-page ()
+  "An export should stop when its result loses its connection during a page.
+A backend that waits on the network synchronously runs timers while a page
+runs, and a disconnect from one of them clears the result's connection."
+  (require 'clutch-db-sqlite)
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (run-db-query (symbol-function 'clutch--run-db-query))
+        pages completions)
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE n(i INTEGER PRIMARY KEY)")
+          (clutch-db-query conn "INSERT INTO n VALUES (1), (2), (3), (4)")
+          (clutch-test--with-result-state
+              (:connection conn :base-query "SELECT i FROM n ORDER BY i"
+               :last-query "SELECT i FROM n ORDER BY i"
+               :server-pageable t :columns '("i"))
+            (cl-letf (((symbol-function 'clutch--run-db-query)
+                       (lambda (&rest args)
+                         (push (nth 1 args) pages)
+                         (prog1 (apply run-db-query args)
+                           ;; A timer that runs while the page waits
+                           ;; disconnects the result's connection.
+                           (with-temp-buffer
+                             (clutch--invalidate-derived-buffers conn)))))
+                      ((symbol-function 'message) #'ignore))
+              (clutch-result--export-pages
+               "SELECT i FROM n ORDER BY i" "SELECT i FROM n ORDER BY i" 2
+               #'ignore (lambda (err) (push err completions)))))
+          (should (= (length pages) 1))
+          (should (= (length completions) 1))
+          (should (string-match-p "connection changed"
+                                  (error-message-string (car completions)))))
+      (clutch-db-disconnect conn))))
+
 (ert-deftest clutch-test-file-export-of-many-pages-keeps-a-flat-stack ()
   "An export should fetch many synchronous pages without nesting them.
 SQLite runs each page before its callback returns, which a recursive page
