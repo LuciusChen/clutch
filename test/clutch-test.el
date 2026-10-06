@@ -10332,6 +10332,33 @@ the buffer to the closed connection."
             (should (equal clutch--result-rows '((10) (20))))
             (should (eq clutch-connection 'other-conn))))))))
 
+(ert-deftest clutch-test-query-activity-end-keeps-a-later-ones-time ()
+  "Ending a query activity should leave the time of a later one in its buffer.
+A page load that ends after its buffer moved to another connection and
+started loading a page there cleared the time of that running load."
+  (clutch-test--with-result-state
+      (:columns '("id") :rows '((1) (2)) :connection 'async-conn
+       :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (&rest _) "SELECT id FROM t PAGE 1"))
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch-result--execute-page 1)
+        (funcall (cdar finishes) nil '(clutch-db-error "connection closed"))
+        (setq-local clutch-connection 'other-conn)
+        (clutch-result--execute-page 1)
+        (ert-run-idle-timers)
+        (should (gethash 'other-conn clutch--running-queries))
+        (should clutch--execution-start-time)
+        (funcall (cdar finishes)
+                 (make-clutch-db-result :columns clutch--result-column-defs
+                                        :rows '((3) (4)))
+                 nil)
+        (ert-run-idle-timers)
+        (should-not clutch--execution-start-time)))))
+
 (ert-deftest clutch-test-last-page-stops-when-its-count-is-cancelled ()
   "C-g during the count of a last-page move should stop the page load.
 The cancel may meet a count that has already finished; the move stops
