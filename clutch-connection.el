@@ -573,7 +573,9 @@ command.  Otherwise SQL runs synchronously and CALLBACK runs before this
 function returns.
 A third argument to CALLBACK is non-nil when \\[clutch-cancel-query-or-quit]
 asked to cancel SQL.  SQL may still have succeeded, its result arriving
-first, so a caller with more SQL to run stops instead."
+first, so a caller with more SQL to run stops instead.  SQL that fails
+once CONN is closed under it has an unknown outcome instead, since the
+server may still finish it."
   (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
@@ -587,10 +589,15 @@ first, so a caller with more SQL to run stops instead."
               (clutch-db-query-async
                conn sql
                (lambda (result error)
-                 ;; An outcome that arrived before a disconnect stands.
+                 ;; The server may still finish a statement whose
+                 ;; connection was closed under it; an error that came
+                 ;; before the close stands.
+                 (when (and error (plist-get entry :disconnected))
+                   (setq error
+                         '(clutch-db-error
+                           "Disconnected while the statement ran; its outcome is unknown")))
                  (run-with-idle-timer 0 nil #'clutch--finish-db-query
-                                      conn sql callback result error
-                                      (plist-get entry :disconnected)))))
+                                      conn sql callback result error))))
       (unless started
         (remhash conn clutch--running-queries)))
     (if started
@@ -601,18 +608,12 @@ first, so a caller with more SQL to run stops instead."
                      (clutch-db-error (cons nil err)))))
         (funcall callback result error)))))
 
-(defun clutch--finish-db-query
-    (conn sql callback result error &optional disconnected)
+(defun clutch--finish-db-query (conn sql callback result error)
   "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
-CALLBACK also gets whether cancelling SQL was asked for.  DISCONNECTED says
-that CONN was closed under SQL before its outcome arrived; a failure then
-has an unknown outcome instead, since the server may still finish SQL."
+CALLBACK also gets whether cancelling SQL was asked for."
   (let ((cancelled (plist-get (gethash conn clutch--running-queries)
                               :cancelling)))
     (remhash conn clutch--running-queries)
-    (when (and error disconnected)
-      (setq error '(clutch-db-error
-                    "Disconnected while the statement ran; its outcome is unknown")))
     (when result
       (clutch--clear-connection-problem-capture conn)
       (clutch--record-tx-state-after-query conn sql))
