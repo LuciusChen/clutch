@@ -582,27 +582,24 @@ failure."
        (clutch--run-db-query-async
         conn query nil
         (lambda (result error &optional cancelled)
-          ;; A buffer that shows a result of another connection by now
-          ;; keeps it, whatever this query brought.
-          (let ((current (and (buffer-live-p buffer)
-                              (eq (buffer-local-value 'clutch-connection buffer)
-                                  conn))))
-            (clutch--finish-query-activity
-             activity
-             (lambda ()
-               (when current
-                 (cond
-                  (error
-                   (clutch--present-statement-outcome
-                    sql conn (list :error error
-                                   :source-buffer buffer
-                                   :result-context '(:keep-result-on-error t))))
-                  (cancelled (message "Query cancelled (result unchanged)"))))))
-            ;; After the activity ends, so a query that ON-RESULT starts
-            ;; counts its own time.
-            (when (and current (not error) (not cancelled))
-              (with-current-buffer buffer
-                (funcall on-result result (- (float-time) start)))))))))))
+          (clutch--query-activity-reply
+           activity conn
+           (lambda ()
+             (clutch--finish-query-activity
+              activity
+              (lambda ()
+                (cond
+                 (error
+                  (clutch--present-statement-outcome
+                   sql conn (list :error error
+                                  :source-buffer buffer
+                                  :result-context '(:keep-result-on-error t))))
+                 (cancelled (message "Query cancelled (result unchanged)")))))
+             ;; After the activity ends, so a query that ON-RESULT starts
+             ;; counts its own time.
+             (unless (or error cancelled)
+               (with-current-buffer buffer
+                 (funcall on-result result (- (float-time) start))))))))))))
 
 (cl-defun clutch-result--execute-page
     (page-num &optional page-offset &key (sort nil sort-p) success-message)
