@@ -112,12 +112,10 @@ Use \":memory:\" for a transient in-memory database."
 (defun clutch-db-sqlite--select-p (sql)
   "Return non-nil for row-yielding SQL statements.
 Leading comments are stripped first: routing a commented SELECT to
-`sqlite-execute' would run it and discard the rows.  Whitespace is matched
-explicitly because `\\s-' resolves against the caller's syntax table, and
-`sql-mode' classifies newline as a comment ending rather than whitespace."
+`sqlite-execute' would run it and discard the rows."
   (let ((case-fold-search t)
         (trimmed (clutch-db-sql-strip-leading-comments sql)))
-    (or (string-match-p "\\`[ \t\r\n\f]*\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\|VALUES\\)"
+    (or (string-match-p "\\`\\(SELECT\\|WITH\\|EXPLAIN\\|PRAGMA\\|VALUES\\)"
                         trimmed)
         (clutch-db-sql-find-top-level-clause sql "RETURNING"))))
 
