@@ -10325,6 +10325,34 @@ and an edit would then change the other database by the first one's keys."
         (should (equal clutch--result-rows '((10) (20))))
         (should (eq clutch-connection 'other-conn))))))
 
+(ert-deftest clutch-test-last-page-stops-when-its-count-is-cancelled ()
+  "C-g during the count of a last-page move should stop the page load.
+The cancel may meet a count that has already finished; the move stops
+there, and the result keeps its rows and its unknown total."
+  (clutch-test--with-result-state
+      (:columns '("id") :rows '((1) (2)) :connection 'async-conn
+       :base-query "SELECT id FROM t" :server-pageable t :server-rewritable t
+       :page-total-rows nil :result-max-rows 2)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                ((symbol-function 'clutch-db-build-count-sql)
+                 (lambda (&rest _) "SELECT count(*) FROM t"))
+                ((symbol-function 'clutch-db-build-paged-sql)
+                 (lambda (_conn _sql page-num &rest _)
+                   (format "SELECT id FROM t PAGE %d" page-num)))
+                ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
+                ((symbol-function 'clutch--refresh-display) #'ignore)
+                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch-result-last-page)
+        (clutch-cancel-query-or-quit)
+        (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
+        (ert-run-idle-timers)
+        (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
+        (should-not clutch--page-total-rows)
+        (should (equal clutch--result-rows '((1) (2))))
+        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
+
 (ert-deftest clutch-test-last-page-counts-rows-first-without-blocking ()
   "The last page of an uncounted result should load once the count arrives."
   (clutch-test--with-result-state
