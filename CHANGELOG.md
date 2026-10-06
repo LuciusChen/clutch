@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- SQL run from an indirect edit (`clutch-edit-indirect`) runs in a buffer that holds its connection. It ran in the source buffer the edit returned to, whose mode line then read "clutch" for good, and its result went to a result buffer of no connection.
 - Aggregating selected cells counts a number in scientific notation, such as `1E+3`, which it skipped as text. Sorting and the insert form already read such numbers.
 - A form feed between `FETCH` and `FIRST`, or between `FINAL`, `NEW` or `OLD` and `TABLE`, counts as whitespace, as one before a statement does. The row limit was missed, and a data change table was not seen as writing, so its statement was paged and ran its `DELETE` again on each page.
 - Switching schema is refused while a statement runs on the connection, as the guide says. On JDBC the switch waited behind the statement, and where switching reconnects, as on ClickHouse, it closed the connection under the statement.

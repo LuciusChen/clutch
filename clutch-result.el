@@ -1117,7 +1117,7 @@ A server-side filter stays applied, with the row identity it had."
          (plan (clutch-result--current-query-plan))
          (sql (or (plist-get plan :sql)
                   (user-error "No query to re-execute"))))
-    (clutch--execute sql nil
+    (clutch--execute sql
                      (and filter
                           (clutch-result--filter-context
                            clutch--base-query filter plan)))))
@@ -1499,7 +1499,6 @@ result in place."
          (filter (unless (string-empty-p input) input))
          (plan (and filter (clutch-result--query-plan base filter))))
     (clutch--execute (or (plist-get plan :sql) base)
-                     clutch-connection
                      (append
                       (clutch-result--filter-context base filter plan)
                       (list :keep-result-on-error t
@@ -3888,8 +3887,7 @@ The referenced table is qualified by FK's :ref-schema when it has one."
                (if schema (concat (clutch-db-escape-identifier c schema) ".") "")
                (clutch-db-escape-identifier c (plist-get fk :ref-table))
                (clutch-db-escape-identifier c (plist-get fk :ref-column))
-               (clutch-db-value-to-literal c val #'clutch--format-value))
-       clutch-connection))))
+               (clutch-db-value-to-literal c val #'clutch--format-value))))))
 
 (defun clutch-record--field-action-context ()
   "Return the action context for the Record field at point, or nil."
