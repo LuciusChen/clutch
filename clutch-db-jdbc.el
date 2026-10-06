@@ -2095,11 +2095,16 @@ the metadata request."
   t)
 
 (defun clutch-jdbc--foreign-keys-from-result (result)
-  "Return normalized foreign keys from JDBC metadata RESULT."
+  "Return normalized foreign keys from JDBC metadata RESULT.
+A referenced table names its schema as :ref-schema; a driver without
+schemas reports an empty one, which is left out."
   (mapcar (lambda (fk)
-            (cons (plist-get fk :fk-column)
-                  (list :ref-table (plist-get fk :pk-table)
-                        :ref-column (plist-get fk :pk-column))))
+            (let ((schema (plist-get fk :pk-schema)))
+              (cons (plist-get fk :fk-column)
+                    `(:ref-table ,(plist-get fk :pk-table)
+                      :ref-column ,(plist-get fk :pk-column)
+                      ,@(and (stringp schema) (not (string-empty-p schema))
+                             (list :ref-schema schema))))))
           (plist-get result :foreign-keys)))
 
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback

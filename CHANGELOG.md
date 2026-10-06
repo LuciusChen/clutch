@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- On JDBC connections, following a foreign key into another schema opens the referenced table in that schema. It opened the table of the same name in the connection's own schema.
 - On JDBC connections, the columns, primary key and foreign keys of a table that a query names with its schema, as in `SELECT * FROM alt.people`, come from that table. They came from the table of the same name in the connection's own schema, so an edit of a column only the named table has was refused as missing from it.
 - A rollback to a savepoint, such as `ROLLBACK TO SAVEPOINT s`, keeps the transaction's uncommitted work known, so a disconnect still asks first. It cleared it, and a disconnect then lost the work done before the savepoint without asking.
 - A statement that ends after its buffer has left its connection, as after `clutch-disconnect`, draws no result or error page: in a console or a batch it marks its line and gives its outcome in the echo area, and in the REPL it prints its outcome. Its error page, or a SELECT's rows from the REPL, went to the result buffer that the buffer's new connection, or none, names, and bound that buffer to the old connection.
