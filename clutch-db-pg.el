@@ -1309,15 +1309,14 @@ when a NULL is stored only makes the column nullable, so it has none."
       (:union (mapcan #'clutch-db-pg--xtdb-base-types (cdr (append type nil))))
       (head (list head))))))
 
-(defconst clutch-db-pg--xtdb-number-types
-  '("int8" "int4" "int2" "numeric" "float8" "float4")
-  "Parameter types of XTDB's number types.")
-
 (defconst clutch-db-pg--xtdb-integer-ranges
   '(("int8" -9223372036854775808 9223372036854775807)
     ("int4" -2147483648 2147483647)
     ("int2" -32768 32767))
   "XTDB's integer parameter types with the least and greatest value each holds.")
+
+(defconst clutch-db-pg--xtdb-fraction-types '("numeric" "float8" "float4")
+  "XTDB's other number parameter types, the decimal type before the floats.")
 
 (defun clutch-db-pg--xtdb-pg-type (xtdb-type)
   "Return (DATA-TYPE PARAMETER-TYPE) for the printed XTDB-TYPE, or nil.
@@ -1331,11 +1330,12 @@ members' types, of which each value takes one that holds it."
                             (cdr (assq base clutch-db-pg--xtdb-types)))
                           (clutch-db-pg--xtdb-base-types type)))))
     (cond
-     ((and mapped (null (cdr mapped))) (car mapped))
-     ((and mapped
-           (cl-every (lambda (pg-type)
-                       (member (cadr pg-type) clutch-db-pg--xtdb-number-types))
-                     mapped))
+     ((null (cdr mapped)) (car mapped))
+     ((cl-every (lambda (pg-type)
+                  (let ((name (cadr pg-type)))
+                    (or (assoc name clutch-db-pg--xtdb-integer-ranges)
+                        (member name clutch-db-pg--xtdb-fraction-types))))
+                mapped)
       (list nil (mapcar #'cadr mapped))))))
 
 (defun clutch-db-pg--xtdb-number-type (value types)
@@ -1357,7 +1357,7 @@ value that is no number takes none, which XTDB refuses."
                  (cl-loop for (type least greatest)
                           in clutch-db-pg--xtdb-integer-ranges
                           when (<= least number greatest) collect type)))
-          '("numeric" "float8" "float4")))))))
+          clutch-db-pg--xtdb-fraction-types))))))
 
 (cl-defmethod clutch-db-pg--result-columns ((_conn clutch-db-pg--xtdb-connection)
                                            _pg-columns)
