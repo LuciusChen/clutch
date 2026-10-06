@@ -568,8 +568,10 @@ are produced by the query execution layer."
   "Run QUERY for the current result without blocking, as statements run.
 SQL is the statement the user sees, which a failure reports.  ON-RESULT
 gets QUERY's result and its elapsed seconds in this buffer.  While QUERY
-runs, \\[clutch-cancel-query-or-quit] cancels it, and the result stays as
-it was unless QUERY succeeds."
+runs, \\[clutch-cancel-query-or-quit] cancels it.  The result stays as it
+was unless QUERY succeeds before any cancel.  A buffer that holds another
+connection by the time QUERY ends shows nothing of it, not even its
+failure."
   (let ((conn clutch-connection)
         (buffer (current-buffer))
         (start (float-time))
@@ -579,20 +581,28 @@ it was unless QUERY succeeds."
      (lambda ()
        (clutch--run-db-query-async
         conn query nil
-        (lambda (result error &optional _cancelled)
-          (clutch--finish-query-activity
-           activity
-           (lambda ()
-             (when error
-               (clutch--present-statement-outcome
-                sql conn (list :error error
-                               :source-buffer buffer
-                               :result-context '(:keep-result-on-error t))))))
-          ;; After the activity ends, so a query that ON-RESULT starts
-          ;; counts its own time.
-          (when (and (not error) (buffer-live-p buffer))
-            (with-current-buffer buffer
-              (funcall on-result result (- (float-time) start))))))))))
+        (lambda (result error &optional cancelled)
+          ;; A buffer that shows a result of another connection by now
+          ;; keeps it, whatever this query brought.
+          (let ((current (and (buffer-live-p buffer)
+                              (eq (buffer-local-value 'clutch-connection buffer)
+                                  conn))))
+            (clutch--finish-query-activity
+             activity
+             (lambda ()
+               (when current
+                 (cond
+                  (error
+                   (clutch--present-statement-outcome
+                    sql conn (list :error error
+                                   :source-buffer buffer
+                                   :result-context '(:keep-result-on-error t))))
+                  (cancelled (message "Query cancelled (result unchanged)"))))))
+            ;; After the activity ends, so a query that ON-RESULT starts
+            ;; counts its own time.
+            (when (and current (not error) (not cancelled))
+              (with-current-buffer buffer
+                (funcall on-result result (- (float-time) start)))))))))))
 
 (cl-defun clutch-result--execute-page
     (page-num &optional page-offset &key (sort nil sort-p) success-message)
