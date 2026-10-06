@@ -8786,6 +8786,40 @@ when its continuation fails."
           (should (= (length completions) 1))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
+(ert-deftest clutch-test-export-stops-when-its-result-loses-its-connection ()
+  "An export whose result lost its connection should stop without showing the page.
+The disconnect that cleared the result's connection also closed it, and the
+page in flight then failed; showing that failure would put an error page in
+a buffer that holds no connection, or holds another one."
+  (clutch-test--with-result-state
+      (:columns '("id") :rows '((1)) :connection 'async-conn
+       :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
+    (clutch-test--with-async-statements finishes
+      (let (shown completions)
+        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (_conn _sql page-num &rest _)
+                     (format "SELECT id FROM t PAGE %d" page-num)))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (not (eq conn 'async-conn))))
+                  ((symbol-function 'clutch--show-execution-error)
+                   (lambda (&rest _) (setq shown t) "failed"))
+                  ((symbol-function 'message) #'ignore))
+          (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
+                                       #'ignore
+                                       (lambda (err) (push err completions)))
+          ;; A disconnect elsewhere clears the result's connection.
+          (with-temp-buffer
+            (clutch--invalidate-derived-buffers 'async-conn))
+          (funcall (cdar finishes) nil
+                   '(clutch-db-error
+                     "Disconnected while the statement ran; its outcome is unknown"))
+          (ert-run-idle-timers)
+          (should-not shown)
+          (should (= (length completions) 1))
+          (should (string-match-p "connection changed"
+                                  (error-message-string (car completions))))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
 (ert-deftest clutch-test-file-export-of-many-pages-keeps-a-flat-stack ()
   "An export should fetch many synchronous pages without nesting them.
 SQLite runs each page before its callback returns, which a recursive page
