@@ -10280,6 +10280,37 @@ holds no connection for the statement to belong to."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest clutch-test-statement-reply-after-its-buffer-moved-is-only-reported ()
+  "A statement's reply after its buffer left its connection should only be reported.
+Drawing it put the old connection's error page in the result buffer that the
+buffer's new connection names, and bound that buffer to the old connection."
+  (with-temp-buffer
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (let ((a-alive t) rendered messages)
+        (cl-letf (((symbol-function 'clutch--connection-key)
+                   (lambda (conn) (if conn (symbol-name conn) "none")))
+                  ((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (or a-alive (not (eq conn 'conn-a)))))
+                  ((symbol-function 'clutch--retire-query-connection) #'ignore)
+                  ((symbol-function 'clutch-result--display-error)
+                   (lambda (&rest _) (setq rendered t) nil))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute "UPDATE t SET n = 1 WHERE id = 1")
+          ;; Disconnected and connected elsewhere while the reply waits.
+          (setq a-alive nil)
+          (setq-local clutch-connection 'conn-b)
+          (funcall (cdar finishes) nil
+                   '(clutch-db-error
+                     "Disconnected while the statement ran; its outcome is unknown"))
+          (ert-run-idle-timers)
+          (should-not rendered)
+          (should (cl-some (lambda (text) (string-match-p "outcome is unknown" text))
+                           messages))
+          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+
 (ert-deftest clutch-test-async-execute-presents-after-completion ()
   "An asynchronous statement should hold its connection until it finishes."
   (with-temp-buffer

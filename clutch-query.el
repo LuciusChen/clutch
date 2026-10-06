@@ -1494,6 +1494,25 @@ executed or failed."
         (with-current-buffer source-buffer
           (clutch--mark-executed-sql-region (car region) (cdr region)))))))
 
+(defun clutch--report-moved-outcome (sql outcome &optional region)
+  "Report OUTCOME of SQL, whose buffer has left the statement's connection.
+REGION, when non-nil, is marked with the outcome, which the echo area also
+gives, and a failure is recorded for diagnostics.  No result or error page
+is drawn: the buffer's result buffer now belongs to another connection, or
+to none."
+  (with-current-buffer (plist-get outcome :source-buffer)
+    (let ((connection (plist-get outcome :connection)))
+      (if-let* ((err (plist-get outcome :error)))
+          (let ((summary (cdr (clutch--remember-execute-error
+                               (current-buffer) connection sql err))))
+            (when region
+              (clutch--mark-failed-sql-region (car region) (cdr region) summary))
+            (message "%s" summary))
+        (when region
+          (clutch--mark-executed-sql-region (car region) (cdr region)))
+        (message "Statement on %s finished after this buffer left it; its result is not shown"
+                 (clutch--connection-key connection))))))
+
 (defun clutch--execute (sql &optional result-context region)
   "Execute SQL on the current buffer's connection.
 Times execution and displays results when SQL finishes.  For SELECT
@@ -1515,11 +1534,16 @@ confirmation on destructive operations."
          (clutch--execute-statement
           sql connection t region
           (lambda (outcome)
-            (clutch--finish-query-activity
-             activity
+            (clutch--query-activity-reply
+             activity (plist-get outcome :connection)
              (lambda ()
-               (clutch--present-statement-outcome
-                sql connection outcome region))))
+               (clutch--finish-query-activity
+                activity
+                (lambda ()
+                  (clutch--present-statement-outcome
+                   sql connection outcome region))))
+             :moved (lambda ()
+                      (clutch--report-moved-outcome sql outcome region))))
           result-context))))))
 
 
