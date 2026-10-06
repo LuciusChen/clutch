@@ -8848,6 +8848,7 @@ the statement's terminator and removed, changing the value returned."
                    "SELECT id FROM audit ORDER BY id DESC FETCH FIRST 1 ROW ONLY"
                    "SELECT id FROM audit FETCH /* count */ NEXT 2 ROWS ONLY"
                    "SELECT id FROM audit FETCH FIRST ROW ONLY"
+                   "SELECT id FROM audit FETCH\fFIRST 1 ROW ONLY"
                    "SELECT -- page\nTOP (2) id FROM audit"
                    "SELECT id FROM audit ORDER BY id OFFSET 2 ROWS FETCH NEXT 1 ROW ONLY"))
       (should (equal (clutch-db-sql-derived-table-body sql) sql))
