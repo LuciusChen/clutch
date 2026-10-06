@@ -3148,13 +3148,13 @@ header string and column pixel widths, then reused."
                 clutch--where-filter "id > 5")
     (let (captured)
       (cl-letf (((symbol-function 'clutch--execute)
-                 (lambda (sql conn &optional result-context)
-                   (setq captured (list sql conn result-context)))))
+                 (lambda (sql &optional result-context)
+                   (setq captured (list sql result-context)))))
         (clutch-test--with-minibuffer-answers '("")
           (clutch-result-apply-filter))
         ;; The cleared filter state is installed with the new result.
         (should (equal captured
-                       '("SELECT * FROM t" fake-conn
+                       '("SELECT * FROM t"
                          (:base-query nil :where-filter nil
                           :keep-result-on-error t
                           :success-message "Filter cleared")))))))
@@ -9419,18 +9419,18 @@ The page stays, and the message says so."
                      (lambda (_conn sql filter)
                        (format "FILTER[%s]{%s}" filter sql)))
                     ((symbol-function 'clutch--execute)
-                     (lambda (sql &optional conn context)
-                       (setq captured (list sql conn context))))
+                     (lambda (sql &optional context)
+                       (setq captured (list sql context))))
                     ((symbol-function 'clutch--preview-sql-buffer)
                      (lambda (sql &optional _product)
                        (setq captured sql))))
             (pcase command
               ('rerun
                (clutch-result-rerun)
-               (should (equal (take 2 captured)
-                              '("FILTER[id = 1]{SELECT * FROM t}" nil)))
+               (should (equal (car captured)
+                              "FILTER[id = 1]{SELECT * FROM t}"))
                ;; The filter goes with it, so the new result keeps it.
-               (should (equal (plist-get (nth 2 captured) :where-filter)
+               (should (equal (plist-get (nth 1 captured) :where-filter)
                               "id = 1")))
               ('preview
                (clutch-preview-execution-sql)
@@ -9822,14 +9822,14 @@ statement."
                  (lambda (_conn) (setq disconnected t))))
         (setq phase 'confirm)
         (condition-case nil
-            (clutch--execute "SELECT 1" clutch-connection)
+            (clutch--execute "SELECT 1")
           (quit (setq confirmation-quit t)))
         (should confirmation-quit)
         (should-not disconnected)
         (should (eq clutch-connection 'fake-conn))
         (setq phase 'query)
         (let ((error (should-error
-                      (clutch--execute "SELECT 1" clutch-connection)
+                      (clutch--execute "SELECT 1")
                       :type 'user-error)))
           (should (equal (cadr error)
                          clutch--transaction-outcome-unknown-message)))
@@ -9865,7 +9865,7 @@ statement."
                    t))
                 ((symbol-function 'clutch-db-disconnect)
                  (lambda (_conn) (setq disconnected t))))
-        (should-error (clutch--execute "SELECT pg_sleep(10)" clutch-connection)
+        (should-error (clutch--execute "SELECT pg_sleep(10)")
                       :type 'user-error)
         (should interrupted)
         (should-not disconnected)
@@ -9919,7 +9919,7 @@ statement."
                 ((symbol-function 'clutch--update-mode-line)
                  (lambda (&optional _execution-only)
                    (setq mode-line-updates (1+ mode-line-updates)))))
-        (clutch--execute "SELECT SLEEP(60)" conn)
+        (clutch--execute "SELECT SLEEP(60)")
         (should (= executions 1))
         (should (string-match-p "query timed out" displayed-error))
         (should (eq (plist-get error-context :transaction-outcome) 'unknown))
@@ -10215,6 +10215,36 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
                   (push (cons sql callback) ,finishes-var)
                   t)))
        ,@body)))
+
+(ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
+  "SQL from an indirect edit should run in a buffer that holds its connection.
+Closing the edit shows a buffer of another kind, such as source code, which
+holds no connection for the statement to belong to."
+  (let ((console (generate-new-buffer " *clutch-test-console*"))
+        (code (generate-new-buffer " *clutch-test-code*"))
+        (indirect (generate-new-buffer " *clutch-test-indirect*"))
+        ran-in)
+    (unwind-protect
+        (progn
+          (with-current-buffer console
+            (setq-local clutch-connection 'indirect-conn))
+          (with-current-buffer indirect
+            (setq-local clutch-connection 'indirect-conn)
+            (insert "SELECT 1"))
+          (switch-to-buffer code)
+          (switch-to-buffer indirect)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) t))
+                    ((symbol-function 'clutch--execute)
+                     (lambda (sql &rest _)
+                       (setq ran-in (list (current-buffer) sql)))))
+            (with-current-buffer indirect
+              (clutch-indirect-execute)))
+          (should-not (buffer-live-p indirect))
+          (should (equal ran-in (list console "SELECT 1"))))
+      (dolist (buffer (list console code indirect))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest clutch-test-async-execute-presents-after-completion ()
   "An asynchronous statement should hold its connection until it finishes."

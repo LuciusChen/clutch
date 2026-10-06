@@ -1410,7 +1410,7 @@ The current buffer is the result."
         (let ((clutch-connection conn)
               (clutch--source-window (selected-window))
               (clutch-high-risk-query-confirmation 'yes-or-no))
-          (clutch--execute sql conn)
+          (clutch--execute sql)
           (clutch-test--await-queries))))
     prompts))
 

@@ -1469,21 +1469,15 @@ executed or failed."
         (with-current-buffer source-buffer
           (clutch--mark-executed-sql-region (car region) (cdr region)))))))
 
-(defun clutch--execute (sql &optional conn result-context region)
-  "Execute SQL on CONN (or current buffer connection).
+(defun clutch--execute (sql &optional result-context region)
+  "Execute SQL on the current buffer's connection.
 Times execution and displays results when SQL finishes.  For SELECT
 queries, applies pagination (LIMIT/OFFSET).  RESULT-CONTEXT carries
 internal result metadata for generated SELECT SQL.  REGION, when
 non-nil, is SQL's source region and shows its status.  Prompts for
 confirmation on destructive operations."
-  (if (and conn (not (eq conn clutch-connection)))
-      (progn
-        (clutch--refuse-while-running conn)
-        (unless (clutch--connection-alive-p conn)
-          (user-error
-           "Connection closed.  Reconnect from the SQL buffer or REPL")))
-    (clutch--ensure-connection))
-  (let ((connection (or conn clutch-connection)))
+  (clutch--ensure-connection)
+  (let ((connection clutch-connection))
     (clutch--prepare-query-activity connection)
     (clutch--confirm-query-execution sql)
     (let* ((region (and region
@@ -1543,7 +1537,7 @@ Return the failure summary."
                      (cons beg end))))
     (clutch--clear-executed-sql-overlay)
     (redisplay t)
-    (clutch--execute sql nil nil (cons trim-beg trim-end))))
+    (clutch--execute sql nil (cons trim-beg trim-end))))
 
 ;;;; Query-at-point detection
 
@@ -1907,23 +1901,29 @@ Key bindings:
 
 ;;;###autoload (autoload 'clutch-indirect-execute "clutch" nil t)
 (defun clutch-indirect-execute ()
-  "Execute the SQL in the indirect buffer, then close it."
+  "Execute the SQL in the indirect buffer, then close it.
+The SQL runs in another buffer that holds the connection, as a statement
+run there would."
   (interactive)
-  (let ((sql (string-trim
-              (buffer-substring-no-properties (point-min) (point-max))))
-        (conn (or clutch-connection
-                  (clutch--find-connection))))
+  (let* ((sql (string-trim
+               (buffer-substring-no-properties (point-min) (point-max))))
+         (conn (or clutch-connection
+                   (clutch--find-connection)))
+         (indirect (current-buffer))
+         (home (and conn
+                    (cl-find-if
+                     (lambda (buffer)
+                       (and (not (eq buffer indirect))
+                            (eq (buffer-local-value 'clutch-connection buffer)
+                                conn)))
+                     (buffer-list)))))
     (when (string-empty-p sql)
       (user-error "No SQL to execute"))
-    (unless conn
+    (unless home
       (user-error "No active connection"))
     (quit-window 'kill)
-    ;; `quit-window' kills the indirect buffer, leaving the Lisp execution
-    ;; context in a dead buffer.  Any subsequent `with-current-buffer' call
-    ;; would fail when `save-current-buffer' tries to restore that dead buffer.
-    ;; Explicitly switch to the live buffer now selected after the kill.
-    (with-current-buffer (window-buffer (selected-window))
-      (clutch--execute sql conn))))
+    (with-current-buffer home
+      (clutch--execute sql))))
 
 ;;;###autoload (autoload 'clutch-indirect-abort "clutch" nil t)
 (defun clutch-indirect-abort ()
