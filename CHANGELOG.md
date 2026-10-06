@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A statement that `clutch-disconnect` ends while it runs on PostgreSQL or MySQL reports that its outcome is unknown, as on JDBC. It failed with "connection closed", although the server may finish such a statement and, in Auto mode, commit it.
 - `clutch-connect` is refused while a statement runs on the buffer's connection, as staging an edit is: `C-g` cancels the statement, and `clutch-disconnect` still ends it. Connecting elsewhere closed the connection under the statement, which PostgreSQL and MySQL then finished and, in Auto mode, committed.
 - A statement after a comment written as `/*/ ... */`, or after a form feed, keeps its first keyword, so a `DELETE` there asks for confirmation. The comment's end was found inside its own opening, and a form feed was not taken for whitespace.
 - A quit while a batch of statements moves on to its next statement ends the batch. The connection stayed reserved, the mode line kept counting, and idle metadata loading waited for good.
