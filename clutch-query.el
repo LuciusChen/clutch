@@ -1160,8 +1160,8 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
 
 (defun clutch--note-namespace-switch (connection)
   "Follow a statement that switched CONNECTION to another namespace.
-As after `clutch-switch-schema', a reconnect selects that namespace, and
-its schema replaces the cached metadata of the old one."
+As after `clutch-switch-schema', the automatic reconnect selects that
+namespace, and its schema replaces the cached metadata of the old one."
   (clutch--update-connection-params-for-buffers
    connection
    (lambda (params)
