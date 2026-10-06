@@ -5695,17 +5695,23 @@ statement, so the refusal has to come before the prompt and the batch."
   "Only a rollback of the whole transaction should clear its uncommitted work.
 A rollback to a savepoint keeps the work done before the savepoint, which a
 disconnect then lost without asking.  SQL Server's ROLLBACK TRANSACTION with
-a name may name a savepoint, so it keeps the work too."
+a name may name a savepoint, so it keeps the work too, also when the name is
+a word that ends a whole rollback, such as CHAIN."
   (pcase-dolist (`(,sql ,state)
                  '(("ROLLBACK TO SAVEPOINT s" dirty)
                    ("rollback to s;" dirty)
                    ("ROLLBACK WORK TO SAVEPOINT s" dirty)
                    ("ROLLBACK TRANSACTION TO SAVEPOINT s" dirty)
                    ("ROLLBACK TRAN s" dirty)
+                   ("ROLLBACK TRANSACTION chain" dirty)
+                   ("ROLLBACK TRAN release" dirty)
+                   ("ROLLBACK TRAN no" dirty)
                    ("ROLLBACK" nil)
                    ("rollback work;" nil)
                    ("ROLLBACK TRANSACTION" nil)
+                   ("ROLLBACK TRANSACTION AND CHAIN" nil)
                    ("ROLLBACK AND NO CHAIN" nil)
+                   ("ROLLBACK WORK AND CHAIN NO RELEASE" nil)
                    ("-- done\nROLLBACK" nil)
                    ("COMMIT" nil)))
     (ert-info (sql)
