@@ -10318,6 +10318,31 @@ holds no connection for the statement to belong to."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest clutch-test-indirect-execute-runs-in-the-edit-holding-its-connection-alone ()
+  "SQL from an indirect edit that alone holds its connection should run there.
+Connecting in the edit leaves no other buffer to run the SQL in.  The edit is
+buried instead of killed, since its statement's reply needs it."
+  (let ((code (generate-new-buffer " *clutch-test-code*"))
+        (indirect (generate-new-buffer " *clutch-test-indirect*"))
+        ran-in)
+    (unwind-protect
+        (progn
+          (with-current-buffer indirect
+            (setq-local clutch-connection 'edit-conn)
+            (insert "SELECT 41"))
+          (switch-to-buffer code)
+          (switch-to-buffer indirect)
+          (cl-letf (((symbol-function 'clutch--execute)
+                     (lambda (sql &rest _)
+                       (setq ran-in (list (current-buffer) sql)))))
+            (with-current-buffer indirect
+              (clutch-indirect-execute)))
+          (should (buffer-live-p indirect))
+          (should (equal ran-in (list indirect "SELECT 41"))))
+      (dolist (buffer (list code indirect))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest clutch-test-statement-reply-after-its-buffer-moved-is-only-reported ()
   "A statement's reply after its buffer left its connection should only be reported.
 Drawing it put the old connection's error page in the result buffer that the

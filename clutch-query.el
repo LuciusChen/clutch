@@ -1958,27 +1958,29 @@ Key bindings:
 (defun clutch-indirect-execute ()
   "Execute the SQL in the indirect buffer, then close it.
 The SQL runs in another buffer that holds the connection, as a statement
-run there would."
+run there would.  When only this buffer holds it, as after connecting
+here, the SQL runs here and the buffer is buried instead of killed."
   (interactive)
-  (let* ((sql (string-trim
-               (buffer-substring-no-properties (point-min) (point-max))))
-         (conn (or clutch-connection
-                   (clutch--find-connection)))
-         (indirect (current-buffer))
-         (home (and conn
-                    (cl-find-if
+  (let ((sql (string-trim
+              (buffer-substring-no-properties (point-min) (point-max))))
+        (conn (or clutch-connection
+                  (clutch--find-connection)))
+        (indirect (current-buffer)))
+    (when (string-empty-p sql)
+      (user-error "No SQL to execute"))
+    (unless conn
+      (user-error "No active connection"))
+    (let ((home (or (cl-find-if
                      (lambda (buffer)
                        (and (not (eq buffer indirect))
                             (eq (buffer-local-value 'clutch-connection buffer)
                                 conn)))
-                     (buffer-list)))))
-    (when (string-empty-p sql)
-      (user-error "No SQL to execute"))
-    (unless home
-      (user-error "No active connection"))
-    (quit-window 'kill)
-    (with-current-buffer home
-      (clutch--execute sql))))
+                     (buffer-list))
+                    indirect)))
+      ;; Killing the buffer the statement runs in would drop its reply.
+      (quit-window (not (eq home indirect)))
+      (with-current-buffer home
+        (clutch--execute sql)))))
 
 ;;;###autoload (autoload 'clutch-indirect-abort "clutch" nil t)
 (defun clutch-indirect-abort ()
