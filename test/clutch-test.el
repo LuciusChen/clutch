@@ -10311,6 +10311,30 @@ buffer's new connection names, and bound that buffer to the old connection."
                            messages))
           (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
 
+(ert-deftest clutch-test-repl-reply-after-the-repl-moved-draws-no-result ()
+  "A REPL statement's reply after the REPL left its connection draws no result.
+Showing the SELECT put the old connection's rows in the result buffer that
+the REPL's new connection names, bound to the old connection."
+  (with-temp-buffer
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (let (displayed output)
+        (cl-letf (((symbol-function 'clutch--connection-key)
+                   (lambda (conn) (if conn (symbol-name conn) "none")))
+                  ((symbol-function 'clutch-result--display-select)
+                   (lambda (&rest _) (setq displayed t)))
+                  ((symbol-function 'clutch-repl--output)
+                   (lambda (text) (push text output)))
+                  ((symbol-function 'message) #'ignore))
+          (clutch-repl--execute-and-print "SELECT 1")
+          (setq-local clutch-connection 'conn-b)
+          (funcall (cdar finishes)
+                   (make-clutch-db-result :columns '((:name "1")) :rows '((1)))
+                   nil)
+          (ert-run-idle-timers)
+          (should-not displayed)
+          (should (string-match-p "not shown" (car output))))))))
+
 (ert-deftest clutch-test-async-execute-presents-after-completion ()
   "An asynchronous statement should hold its connection until it finishes."
   (with-temp-buffer

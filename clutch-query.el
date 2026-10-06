@@ -1499,19 +1499,23 @@ executed or failed."
 REGION, when non-nil, is marked with the outcome, which the echo area also
 gives, and a failure is recorded for diagnostics.  No result or error page
 is drawn: the buffer's result buffer now belongs to another connection, or
-to none."
+to none.  Return the text the echo area gives."
   (with-current-buffer (plist-get outcome :source-buffer)
-    (let ((connection (plist-get outcome :connection)))
-      (if-let* ((err (plist-get outcome :error)))
-          (let ((summary (cdr (clutch--remember-execute-error
-                               (current-buffer) connection sql err))))
-            (when region
-              (clutch--mark-failed-sql-region (car region) (cdr region) summary))
-            (message "%s" summary))
-        (when region
-          (clutch--mark-executed-sql-region (car region) (cdr region)))
-        (message "Statement on %s finished after this buffer left it; its result is not shown"
-                 (clutch--connection-key connection))))))
+    (let* ((connection (plist-get outcome :connection))
+           (text
+            (if-let* ((err (plist-get outcome :error)))
+                (let ((summary (cdr (clutch--remember-execute-error
+                                     (current-buffer) connection sql err))))
+                  (when region
+                    (clutch--mark-failed-sql-region
+                     (car region) (cdr region) summary))
+                  summary)
+              (when region
+                (clutch--mark-executed-sql-region (car region) (cdr region)))
+              (format "Statement on %s finished after this buffer left it; its result is not shown"
+                      (clutch--connection-key connection)))))
+      (message "%s" text)
+      text)))
 
 (defun clutch--execute (sql &optional result-context region)
   "Execute SQL on the current buffer's connection.
@@ -2247,12 +2251,22 @@ Accumulates input until a top-level semicolon ends it, then executes."
                  (clutch--execute-statement
                   sql connection t nil
                   (lambda (outcome)
-                    (clutch--finish-query-activity
-                     activity
+                    (clutch--query-activity-reply
+                     activity (plist-get outcome :connection)
                      (lambda ()
-                       (condition-case err
-                           (present outcome)
-                         (error (report-error err)))))))))))
+                       (clutch--finish-query-activity
+                        activity
+                        (lambda ()
+                          (condition-case err
+                              (present outcome)
+                            (error (report-error err))))))
+                     :moved
+                     (lambda ()
+                       (let ((text (clutch--report-moved-outcome sql outcome)))
+                         (output (if (plist-get outcome :error)
+                                     (clutch-repl--format-error text)
+                                   (concat "\n" text "\n\n"
+                                           (clutch-repl--prompt)))))))))))))
         (error (report-error err))))))
 
 ;;;###autoload (autoload 'clutch-repl "clutch" nil t)
