@@ -10095,6 +10095,29 @@ statement."
                          ("UPDATE a SET n = 1" new-conn)
                          ("UPDATE b SET n = 2" new-conn))))))))
 
+(ert-deftest clutch-test-batch-stops-when-its-buffer-switches-connection ()
+  "A batch should stop rather than follow its buffer to another connection."
+  (with-temp-buffer
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (let (sent messages)
+        (cl-letf (((symbol-function 'clutch-db-query-async)
+                   (lambda (conn sql callback)
+                     (push (cons conn sql) sent)
+                     (push (cons sql callback) finishes)
+                     t))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (setq-local clutch-connection 'conn-b)
+          (ert-run-idle-timers)
+          (should (equal sent '((conn-a . "UPDATE t SET n = 1"))))
+          (should (member "1 statement executed, then stopped: the connection changed"
+                          messages))
+          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
   "A physical reconnect should not reuse the old connection's identity plan."
   (with-temp-buffer

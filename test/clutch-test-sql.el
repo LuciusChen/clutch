@@ -625,11 +625,12 @@ answer can change has to invalidate or extend it correctly."
     (let ((clutch-connection 'fake-conn)
           calls final-select final-mark)
       (cl-letf (((symbol-function 'clutch--execute-statement)
-                 (lambda (sql _conn present-result-p _region k
+                 (lambda (sql conn present-result-p _region k
                               &optional _context no-retry-p)
                    (push (list sql present-result-p no-retry-p) calls)
                    (funcall k (list :result-query-p
-                                    (string-prefix-p "SELECT" sql)))))
+                                    (string-prefix-p "SELECT" sql)
+                                    :connection conn))))
                 ((symbol-function 'clutch--present-statement-outcome)
                  (lambda (sql _conn _outcome &optional region)
                    (setq final-select sql
