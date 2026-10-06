@@ -10343,6 +10343,20 @@ result as it was."
           (ert-run-idle-timers)
           (should (equal (marker-line) "UPDATE t SET n = 1;")))))
     (with-temp-buffer
+      (insert "SELECT 1;  \nUPDATE t SET n = 1;\n")
+      (setq-local clutch-connection 'async-conn)
+      (goto-char (point-min))
+      (search-forward "UPDATE")
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore))
+          (clutch-execute-dwim (point) (point))
+          (goto-char (point-min))
+          (end-of-line)
+          (insert "-- typed while it runs")
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should (equal (marker-line) "UPDATE t SET n = 1;")))))
+    (with-temp-buffer
       (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
       (setq-local clutch-connection 'async-conn)
       (clutch-test--with-async-statements finishes

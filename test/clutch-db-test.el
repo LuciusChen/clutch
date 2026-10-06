@@ -57,7 +57,6 @@
 (defvar clutch-connection)
 (defvar clutch-jdbc--error-details-by-conn)
 (defvar clutch-jdbc--busy-request-ids)
-(defvar clutch-jdbc--ignored-response-ids)
 (defvar clutch-db--foreground-connections)
 (defvar mysql-type-long)
 (defvar mysql-type-float)
@@ -3365,7 +3364,6 @@ passes validation fails the test instead of failing on the fake client."
   "Async JDBC RPC should call ERRBACK and clear state on timeout."
   (let ((buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         (clutch-jdbc-rpc-timeout-seconds 1)
         timeout-message
         timer-fn)
@@ -3386,9 +3384,7 @@ passes validation fails the test instead of failing on the fake client."
           (funcall timer-fn)
           (should (string-match-p "timeout waiting for async response" timeout-message))
           (should-not (gethash 77 clutch-jdbc--async-callbacks))
-          (should (gethash 77 clutch-jdbc--ignored-response-ids))
-          (clutch-jdbc--agent-filter 'fake-proc "{\"id\":77,\"ok\":true}\n")
-          (should-not (gethash 77 clutch-jdbc--ignored-response-ids)))
+          (clutch-jdbc--agent-filter 'fake-proc "{\"id\":77,\"ok\":true}\n"))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
@@ -6831,7 +6827,6 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
               (sql . "SELECT COUNT(*) FROM ALL_OBJECTS a, ALL_OBJECTS b")
               (fetch-size . ,clutch-jdbc-fetch-size))))
           cancel-result)
-      (puthash request-id t clutch-jdbc--ignored-response-ids)
       (with-timeout
           (5 (ert-fail "Oracle live execute did not become cancellable"))
         (while (not (eq t (plist-get cancel-result :cancelled)))
@@ -6844,8 +6839,7 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
             (sleep-for 0.05))))
       (should (eq t (plist-get cancel-result :cancelled)))
       (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "42")))
-      (should-not (gethash request-id clutch-jdbc--ignored-response-ids)))))
+        (should (equal (caar (clutch-db-result-rows result)) "42"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-diagnostics ()
   :tags '(:db-live :jdbc-live :oracle-live)
@@ -7374,7 +7368,6 @@ That holds whether the old agent was stopped or exited on its own."
       (let ((clutch-jdbc--agent-process nil)
             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-            (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
             (before (buffer-list))
             (real-make-process (symbol-function 'make-process)))
@@ -7748,7 +7741,6 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
          (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
          (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
          (diag '(:category "query"
                  :op "execute"
                  :request-id 88
@@ -7790,7 +7782,6 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
       (should (= (gethash other clutch-jdbc--busy-request-ids) 89))
       (should-not (gethash 90 clutch-jdbc--async-callbacks))
       (should (gethash 91 clutch-jdbc--async-callbacks))
-      (should (gethash 90 clutch-jdbc--ignored-response-ids))
       (should (equal cancelled '(target-timer)))
       (let* ((details (clutch-db-error-details conn))
              (stored-diag (plist-get details :diag)))
@@ -7819,7 +7810,6 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
              (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
              (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
              (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
              (diag `(:category ,category
                      :op ,diag-op
                      :conn-id ,diag-conn-id
@@ -7869,7 +7859,6 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (clutch-jdbc--agent-process 'fake-proc)
         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         captured-op captured-params)
     (puthash 7 conn clutch-jdbc--connections-by-id)
     (puthash conn 41 clutch-jdbc--busy-request-ids)
@@ -7884,15 +7873,13 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (should (clutch-db-interrupt-query conn)))
       (should (equal captured-op "cancel"))
       (should (= (alist-get 'conn-id captured-params) 7))
-      (should-not (gethash conn clutch-jdbc--busy-request-ids))
-      (should (gethash 41 clutch-jdbc--ignored-response-ids))))
+      (should-not (gethash conn clutch-jdbc--busy-request-ids))))
   (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc-cancel-timeout-seconds 0.1)
         (clutch-jdbc--agent-process 'fake-proc)
         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         deleted-proc
         send-called)
     (puthash 7 conn clutch-jdbc--connections-by-id)
@@ -7910,13 +7897,11 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
       (should-not (clutch-db-interrupt-query conn))
       (should send-called)
       (should (eq clutch-jdbc--agent-process 'fake-proc))
-      (should-not deleted-proc)
-      (should (gethash 99 clutch-jdbc--ignored-response-ids))))
+      (should-not deleted-proc)))
   (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))
         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         send-called)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
               ((symbol-function 'clutch-jdbc--send)
@@ -7924,8 +7909,7 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
                  (setq send-called t)
                  (error "Cancel should not be sent"))))
       (should-not (clutch-db-interrupt-query conn))
-      (should-not send-called)
-      (should (= (hash-table-count clutch-jdbc--ignored-response-ids) 0)))))
+      (should-not send-called))))
 
 (ert-deftest clutch-db-test-jdbc-foreground-fetch-failure-still-finishes ()
   "A foreground request should finish even when fetching its rows fails.
@@ -7944,7 +7928,6 @@ and leaves the quit for Emacs to process afterwards."
             (clutch-jdbc--agent-process 'fake-proc)
             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-            (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
             outcomes requested-quit)
         (puthash 7 conn clutch-jdbc--connections-by-id)
@@ -7976,7 +7959,6 @@ and leaves the quit for Emacs to process afterwards."
         (clutch-jdbc--agent-process 'fake-proc)
         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (next-id 40)
         outcomes)
@@ -8008,7 +7990,6 @@ and leaves the quit for Emacs to process afterwards."
         (clutch-db-test--with-jdbc-agent-output
             '("{\"id\":43,\"ok\":true,\"result\":{\"cancelled\":true,\"request-id\":42}}")
           (should (clutch-db-interrupt-query conn)))
-        (should-not (gethash 42 clutch-jdbc--ignored-response-ids))
         (should (eql (gethash conn clutch-jdbc--busy-request-ids) 42))
         ;; An exiting agent finishes foreground requests, not metadata ones.
         (puthash 99 (list :callback #'ignore :conn conn :op "get-tables")
@@ -8043,8 +8024,7 @@ and leaves the quit for Emacs to process afterwards."
     (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7 :params '(:driver jdbc)))
           (clutch-jdbc--agent-process 'fake-proc)
           (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
-          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-          (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql)))
+          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq)))
       (puthash 7 conn clutch-jdbc--connections-by-id)
       (puthash conn 41 clutch-jdbc--busy-request-ids)
       (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
@@ -8073,7 +8053,6 @@ and leaves the quit for Emacs to process afterwards."
              (clutch-jdbc--agent-process (plist-get case :agent-process))
              (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
              (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
              (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
              (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
              deleted-proc
@@ -8111,7 +8090,6 @@ and leaves the quit for Emacs to process afterwards."
           (should-not (gethash 43 clutch-jdbc--async-callbacks))
           (should (gethash 44 clutch-jdbc--async-callbacks))
           (should (eq cancelled-timer 'metadata-timer))
-          (should (gethash 43 clutch-jdbc--ignored-response-ids))
           (should-not (gethash conn clutch-jdbc--error-details-by-conn))
           (should-not (gethash 7 clutch-jdbc--connections-by-id)))))))
 
@@ -8124,7 +8102,6 @@ should be ignored."
          (clutch-jdbc--agent-process 'fake-proc)
          (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
          (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
          (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
          (next-id 40)
@@ -8143,8 +8120,6 @@ should be ignored."
                                (setq outcome (list result error))))
       (clutch-db-disconnect conn)
       (should (equal sent '("force-disconnect" "execute")))
-      (should (gethash 41 clutch-jdbc--ignored-response-ids))
-      (should (gethash 42 clutch-jdbc--ignored-response-ids))
       (accept-process-output nil 0.01)
       (should-not (car outcome))
       (should (string-match-p "outcome is unknown"
@@ -8174,7 +8149,6 @@ told that no reply will arrive."
         (clutch-jdbc--protocol-error nil)
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
         (reply (list nil))
         notified)
@@ -8239,19 +8213,16 @@ told that no reply will arrive."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
-(ert-deftest clutch-db-test-jdbc-agent-filter-drops-ignored-response-ids ()
-  "An interrupted request's reply should be dropped and others delivered."
+(ert-deftest clutch-db-test-jdbc-agent-filter-drops-unregistered-replies ()
+  "A reply that no request waits for should be dropped and others delivered."
   (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-        (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
         (reply (list nil)))
-    (puthash 41 t clutch-jdbc--ignored-response-ids)
     (puthash 42 (list :reply reply) clutch-jdbc--async-callbacks)
     (unwind-protect
         (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf)))
           (clutch-jdbc--agent-filter 'fake-proc
                                      "{\"id\":41,\"ok\":false,\"error\":\"Query cancelled\"}\n{\"id\":42,\"ok\":true}\n")
-          (should-not (gethash 41 clutch-jdbc--ignored-response-ids))
           (should (equal (car reply) '(:id 42 :ok t))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
@@ -8714,7 +8685,6 @@ the statement's terminator and removed, changing the value returned."
       (let* ((clutch-jdbc--agent-process 'fake-proc)
              (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
              (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
-             (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
              (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
              (stuck (make-clutch-jdbc-conn :process 'fake-proc :conn-id 1))
              (bystander (make-clutch-jdbc-conn :process 'fake-proc :conn-id 2)))
@@ -8726,10 +8696,8 @@ the statement's terminator and removed, changing the value returned."
         (should (eq clutch-jdbc--agent-process 'fake-proc))
         (should-not (gethash 1 clutch-jdbc--connections-by-id))
         (should (eq (gethash 2 clutch-jdbc--connections-by-id) bystander))
-        (should (gethash 41 clutch-jdbc--ignored-response-ids))
         (should (equal (car sent) "force-disconnect"))
-        (should (eql (alist-get 'conn-id (cdr sent)) 1))
-        (should (gethash 99 clutch-jdbc--ignored-response-ids))))))
+        (should (eql (alist-get 'conn-id (cdr sent)) 1))))))
 
 (ert-deftest clutch-db-test-jdbc-escape-literal-follows-backend-dialect ()
   "JDBC literal escaping should follow each backend's backslash rules."
@@ -8888,7 +8856,6 @@ the statement's terminator and removed, changing the value returned."
          (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
          (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
          (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
          sent)
     (puthash 7 current clutch-jdbc--connections-by-id)
@@ -8914,7 +8881,6 @@ the statement's terminator and removed, changing the value returned."
         (should-error (funcall operation) :type 'clutch-db-error)
         (should-not sent))
       (should (= (gethash old clutch-jdbc--busy-request-ids) 17))
-      (should-not (gethash 17 clutch-jdbc--ignored-response-ids))
       (should (equal (clutch-db-result-rows
                       (clutch-db-query current "SELECT marker FROM probe"))
                      '(("NEW"))))
@@ -8950,7 +8916,6 @@ the statement's terminator and removed, changing the value returned."
          (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
          (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
          (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
-         (clutch-jdbc--ignored-response-ids (make-hash-table :test 'eql))
          (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq))
          sent)
     (puthash 7 current clutch-jdbc--connections-by-id)

@@ -7,6 +7,7 @@ Build a maintainable Emacs database client. Functional correctness and passing t
 - Prefer simpler state, data flow and control flow. A refactor should make a concrete improvement; moving code or reducing line count alone is not enough.
 - A helper should own a meaningful operation, express a useful domain concept, or centralize a shared rule. Inline pure forwarding and one-use accessor chains when direct code is clearer. Do not split functions by line count or introduce layers to flatten indentation. Named commands, callbacks and protocol adapters can have valid roles even when small.
 - Reuse an existing owner or rule before adding another. Share code only when semantics match; keep transaction completion, savepoint recovery, local filtering and server queries distinct.
+- Keep copies of one mechanism in step: a fix to one copy reaches the others, or its commit says why not. Extract the shared part when a third copy would appear, not before.
 - Fix failures at the responsible layer. Catch expected errors where input is interpreted, recovery is owned, or resources are cleaned up. Preserve the original failure and diagnostics; do not turn internal errors into empty results, guessed defaults or misleading user errors. Cleanup failures must not conceal the primary failure.
 - Add recovery, retries or compatibility handling only for a supported contract or demonstrated failure, with explicit success/failure semantics. Preserve required Emacs and backend compatibility; remove unused internal APIs and speculative shims.
 - Keep state with its workflow owner. Avoid wrapper ladders, generic helper modules and file splits that add declarations or cross-file navigation without simplifying ownership.
@@ -32,6 +33,7 @@ Build a maintainable Emacs database client. Functional correctness and passing t
 - Preserve NULL, empty, DEFAULT, row identity and transaction-state distinctions. Mutation preview must match execution; validation must retain the user's editing context. Copy/export scope, encoding, atomic file replacement and incomplete-value handling are data contracts.
 - Public names use `clutch-`; private names use `clutch--` or existing backend-local private prefixes. Keep existing public faces. Follow local Elisp conventions, Emacs indentation with spaces, lexical binding and hygienic macros; add required Edebug/indent declarations to changed macros.
 - Keep loading free of editing side effects; package registrations are allowed. Use stock Emacs facilities, buffer-local mode state and hooks, and cached data for rendering. Add cross-module declarations only where compilation genuinely needs them, not to conceal an architectural dependency.
+- Raise the cross-module declaration baseline in `test/check-architecture.el` only for a declaration that compilation needs on an existing boundary, giving the reason in the commit message; lower it when declarations go away.
 
 ## Read when relevant
 
@@ -65,5 +67,6 @@ Choose checks by the actual change. During iteration, start with affected tests;
 - Update README and the relevant guide for changed commands, defaults or user-visible behavior. Keep current documentation consistent with implementation; do not change product code to justify a documentation claim.
 - Add release-relevant changes to the existing version-based `Unreleased` section of CHANGELOG. Internal cleanup, tests and instructions with no product contract change do not need a release note. Commit or merge does not imply release or version bump.
 - Preserve the published agent version/checksum pair. Changed published jar bytes require a matching Clutch checksum; prefer a new agent version, and verify the published artifact rather than substituting a local build.
+- Before a release, review the range since the previous release tag for guards that no longer protect anything, copies that have drifted apart and code without callers, and converge them in commits of their own. Fix the bugs such a review finds first, each with a failing test.
 - Record a short design rationale for material workflow changes, non-obvious architecture or compatibility decisions, abandoned approaches and deliberately deferred limitations. Reuse a relevant record for one change; routine refactors, wording and instruction maintenance do not require a new postmortem. Historical records remain historical.
 - Keep Markdown/Org paragraphs on one source line. Reference detailed contracts from their canonical document rather than copying inventories into AGENTS.md.
