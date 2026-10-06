@@ -582,27 +582,24 @@ failure."
        (clutch--run-db-query-async
         conn query nil
         (lambda (result error &optional cancelled)
-          ;; A buffer that shows a result of another connection by now
-          ;; keeps it, whatever this query brought.
-          (let ((current (and (buffer-live-p buffer)
-                              (eq (buffer-local-value 'clutch-connection buffer)
-                                  conn))))
-            (clutch--finish-query-activity
-             activity
-             (lambda ()
-               (when current
-                 (cond
-                  (error
-                   (clutch--present-statement-outcome
-                    sql conn (list :error error
-                                   :source-buffer buffer
-                                   :result-context '(:keep-result-on-error t))))
-                  (cancelled (message "Query cancelled (result unchanged)"))))))
-            ;; After the activity ends, so a query that ON-RESULT starts
-            ;; counts its own time.
-            (when (and current (not error) (not cancelled))
-              (with-current-buffer buffer
-                (funcall on-result result (- (float-time) start)))))))))))
+          (clutch--query-activity-reply
+           activity conn
+           (lambda ()
+             (clutch--finish-query-activity
+              activity
+              (lambda ()
+                (cond
+                 (error
+                  (clutch--present-statement-outcome
+                   sql conn (list :error error
+                                  :source-buffer buffer
+                                  :result-context '(:keep-result-on-error t))))
+                 (cancelled (message "Query cancelled (result unchanged)")))))
+             ;; After the activity ends, so a query that ON-RESULT starts
+             ;; counts its own time.
+             (unless (or error cancelled)
+               (with-current-buffer buffer
+                 (funcall on-result result (- (float-time) start))))))))))))
 
 (cl-defun clutch-result--execute-page
     (page-num &optional page-offset &key (sort nil sort-p) success-message)
@@ -1117,7 +1114,7 @@ A server-side filter stays applied, with the row identity it had."
          (plan (clutch-result--current-query-plan))
          (sql (or (plist-get plan :sql)
                   (user-error "No query to re-execute"))))
-    (clutch--execute sql nil
+    (clutch--execute sql
                      (and filter
                           (clutch-result--filter-context
                            clutch--base-query filter plan)))))
@@ -1499,7 +1496,6 @@ result in place."
          (filter (unless (string-empty-p input) input))
          (plan (and filter (clutch-result--query-plan base filter))))
     (clutch--execute (or (plist-get plan :sql) base)
-                     clutch-connection
                      (append
                       (clutch-result--filter-context base filter plan)
                       (list :keep-result-on-error t
@@ -3306,7 +3302,8 @@ query activity, so \\[clutch-cancel-query-or-quit] cancels the export, also
 when the page it cancels arrives first.  A page that the backend runs
 synchronously continues the loop instead of nesting the next one, so many
 pages need no deeper stack.  An error or a quit is signaled while the
-command runs and only reported once it has returned."
+command runs and only reported once it has returned.  A result buffer that
+is killed, or loses its connection, stops the export."
   (let ((conn clutch-connection)
         (buffer (current-buffer))
         (order-by clutch--order-by)
@@ -3326,12 +3323,12 @@ command runs and only reported once it has returned."
                  (funcall done err))
              ((error quit) (report done-error)))
            nil)
+         (stop (text)
+           (message "%s" text)
+           (settle (list 'error text)))
          (handle (result error &optional cancelled)
            ;; Return non-nil when the next page should be fetched.
            (cond
-            ((not (buffer-live-p buffer))
-             (message "Export stopped: its result buffer was killed")
-             (settle '(error "Export stopped: its result buffer was killed")))
             (error
              (with-current-buffer buffer
                (clutch--present-statement-outcome
@@ -3340,8 +3337,7 @@ command runs and only reported once it has returned."
                                :result-context '(:keep-result-on-error t))))
              (settle error))
             (cancelled
-             (message "Export cancelled")
-             (settle '(error "Export cancelled")))
+             (stop "Export cancelled"))
             (t
              (let ((rows (clutch-db-result-rows result)))
                (condition-case emit-error
@@ -3355,12 +3351,25 @@ command runs and only reported once it has returned."
                   (settle emit-error)
                   (report emit-error)
                   nil))))))
+         (reply (handler)
+           ;; A page that came while it was dispatched counts only through
+           ;; the gate too: a backend that waits on the network
+           ;; synchronously runs timers, which can kill or move the buffer.
+           (clutch--query-activity-reply
+            activity conn handler
+            :moved
+            (lambda ()
+              (stop "Export stopped: the result's connection changed"))
+            :killed
+            (lambda ()
+              (stop "Export stopped: its result buffer was killed"))))
          (run ()
            ;; Fetch pages until one finishes asynchronously or the export ends.
            (catch 'wait
-             (while (buffer-live-p buffer)
+             (while t
                (let ((dispatching t)
-                     inline)
+                     inline
+                     next)
                  (with-current-buffer buffer
                    (clutch--run-db-query-async
                     conn
@@ -3373,16 +3382,19 @@ command runs and only reported once it has returned."
                       (if dispatching
                           (setq inline (list result error))
                         (setq waiting t)
-                        (condition-case run-error
-                            (when (handle result error cancelled)
-                              (run))
-                          ((error quit)
-                           (settle run-error)
-                           (report run-error)))))))
+                        (reply
+                         (lambda ()
+                           (condition-case run-error
+                               (when (handle result error cancelled)
+                                 (run))
+                             ((error quit)
+                              (settle run-error)
+                              (report run-error)))))))))
                  (setq dispatching nil)
-                 (unless (and inline (apply #'handle inline))
-                   (throw 'wait nil))))
-             (handle nil nil))))
+                 (when inline
+                   (reply (lambda () (setq next (apply #'handle inline)))))
+                 (unless next
+                   (throw 'wait nil)))))))
       (clutch--dispatch-query-activity activity #'run))))
 
 (defun clutch-result--collect-all-export-rows (on-rows)
@@ -3888,8 +3900,7 @@ The referenced table is qualified by FK's :ref-schema when it has one."
                (if schema (concat (clutch-db-escape-identifier c schema) ".") "")
                (clutch-db-escape-identifier c (plist-get fk :ref-table))
                (clutch-db-escape-identifier c (plist-get fk :ref-column))
-               (clutch-db-value-to-literal c val #'clutch--format-value))
-       clutch-connection))))
+               (clutch-db-value-to-literal c val #'clutch--format-value))))))
 
 (defun clutch-record--field-action-context ()
   "Return the action context for the Record field at point, or nil."
