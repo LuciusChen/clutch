@@ -190,6 +190,17 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
         (should (equal (plist-get chain :token) token))
         (should (= (length (plist-get chain :levels)) levels))))))
 
+(ert-deftest clutch-test-leading-comments-keep-the-first-keyword ()
+  "A statement after leading comments should keep its first keyword.
+A comment written as /*/ ... */ and a form feed hid it, so a DELETE
+after them asked for no confirmation."
+  (dolist (sql '("/* x */ DELETE FROM t" "/*/ x */ DELETE FROM t"
+                 "\f DELETE FROM t" "-- note\n DELETE FROM t"))
+    (ert-info (sql)
+      (should (equal (clutch-db-sql-strip-leading-comments sql)
+                     "DELETE FROM t"))
+      (should (clutch-db-sql-destructive-p sql)))))
+
 (ert-deftest clutch-test-embedded-statements ()
   "CTE bodies and data change tables should be the embedded statements."
   (dolist (case
@@ -197,6 +208,10 @@ SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
               ("SELECT 1" "DELETE FROM t RETURNING id"))
              ("SELECT id FROM OLD TABLE (DELETE FROM t WHERE id = 1)"
               ("DELETE FROM t WHERE id = 1"))
+             ("SELECT * FROM FINAL /* c */ TABLE (INSERT INTO t VALUES (1))"
+              ("INSERT INTO t VALUES (1)"))
+             ("SELECT * FROM NEW TABLE -- c\n (INSERT INTO t VALUES (1))"
+              ("INSERT INTO t VALUES (1)"))
              ("SELECT 'FINAL TABLE (DELETE FROM t)' FROM t" nil)
              ("CREATE TRIGGER audit AFTER DELETE ON t REFERENCING OLD TABLE AS gone FOR EACH STATEMENT EXECUTE FUNCTION log_gone()"
               nil)))
@@ -610,11 +625,12 @@ answer can change has to invalidate or extend it correctly."
     (let ((clutch-connection 'fake-conn)
           calls final-select final-mark)
       (cl-letf (((symbol-function 'clutch--execute-statement)
-                 (lambda (sql _conn present-result-p _region k
+                 (lambda (sql conn present-result-p _region k
                               &optional _context no-retry-p)
                    (push (list sql present-result-p no-retry-p) calls)
                    (funcall k (list :result-query-p
-                                    (string-prefix-p "SELECT" sql)))))
+                                    (string-prefix-p "SELECT" sql)
+                                    :connection conn))))
                 ((symbol-function 'clutch--present-statement-outcome)
                  (lambda (sql _conn _outcome &optional region)
                    (setq final-select sql

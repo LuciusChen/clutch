@@ -5273,6 +5273,31 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
                                   (buffer-string))))))))
 
+(ert-deftest clutch-test-insert-import-refuses-while-a-query-runs ()
+  "Importing rows should be refused while a statement runs, as staging is.
+The page that statement brings would replace the staged rows."
+  (clutch-test--with-pop-to-buffer-capture insert-buf
+    (clutch-test--with-insert-result-buffer result-buf
+        (:columns '("severity" "owner")
+         :column-defs '((:name "severity" :type-category text)
+                        (:name "owner" :type-category text))
+         :connection 'fake-conn
+         :source-table "shipping_incidents")
+      (let ((clutch--running-queries (make-hash-table :test 'eq)))
+        (cl-letf (((symbol-function 'clutch--ensure-column-details)
+                   (lambda (_conn _table)
+                     (list (list :name "severity" :type "text" :nullable t)
+                           (list :name "owner" :type "text" :nullable t))))
+                  ((symbol-function 'clutch--refresh-display) #'ignore))
+          (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+          (puthash 'fake-conn (list :buffer result-buf) clutch--running-queries)
+          (with-current-buffer insert-buf
+            (should-error (clutch-result-insert-import-delimited
+                           "owner\tseverity\nbob\thigh\nann\tlow\n")
+                          :type 'user-error))
+          (should-not (with-current-buffer result-buf
+                        clutch--pending-inserts)))))))
+
 ;;;; Edit — staged mutations (row identity)
 
 (ert-deftest clutch-test-insert-stage-replaces-existing-pending-insert ()
@@ -5543,6 +5568,31 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (should rolled-back)
         (should-not committed)
         (should-not reverted)
+        (should (equal clutch--pending-edits '(edit)))))))
+
+(ert-deftest clutch-test-submit-refuses-while-a-query-runs ()
+  "Submitting staged changes should be refused while a statement runs.
+JDBC opens the batch with a synchronous call that waits for the running
+statement, so the refusal has to come before the prompt and the batch."
+  (clutch-test--with-result-state
+      (:pending-edits '(edit))
+    (let ((clutch--running-queries (make-hash-table :test 'eq))
+          prompted batched)
+      (puthash clutch-connection (list :buffer (current-buffer)) clutch--running-queries)
+      (cl-letf (((symbol-function 'clutch-result--build-update-statements)
+                 (lambda ()
+                   '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
+                ((symbol-function 'clutch-db-escape-literal)
+                 (lambda (_conn value) (format "'%s'" value)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) (setq prompted t)))
+                ((symbol-function 'clutch-db-call-with-atomic-batch)
+                 (lambda (&rest _) (setq batched t))))
+        (should (string-match-p
+                 "A query is running"
+                 (error-message-string
+                  (should-error (clutch-result-submit) :type 'user-error))))
+        (should-not prompted)
+        (should-not batched)
         (should (equal clutch--pending-edits '(edit)))))))
 
 (ert-deftest clutch-test-submit-manual-batch-uses-atomic-backend-boundary ()
@@ -7793,6 +7843,21 @@ result's current rows."
       (should (equal clutch--order-by '("id" . "ASC")))
       (should (equal (nreverse pages) '(0 0 0 0))))))
 
+(ert-deftest clutch-test-local-sort-cycles-on-an-empty-page ()
+  "Sorting an empty page locally should cycle back to unsorted."
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows nil)
+    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (clutch-result--sort-by-column-index 1)
+      (should (equal clutch--sort-column "name"))
+      (clutch-result--sort-by-column-index 1)
+      (should clutch--sort-descending)
+      (clutch-result--sort-by-column-index 1)
+      (should-not clutch--sort-column)
+      (should-not clutch--sort-descending))))
+
 (ert-deftest clutch-test-sort-rejects-hidden-row-identity-column ()
   "Server-side sort should only accept visible user columns."
   (clutch-test--with-result-state
@@ -9990,6 +10055,69 @@ statement."
                 (should (eq (car-safe (plist-get outcome :error))
                             expected-error))))))))))
 
+(ert-deftest clutch-test-batch-continues-on-the-reconnected-connection ()
+  "Statements after an idle reconnect in a batch should use the new connection."
+  (with-temp-buffer
+    (let ((clutch-connection 'old-conn)
+          (clutch--tx-state-cache (make-hash-table :test 'eq))
+          (clutch-db--foreground-connections (make-hash-table :test 'eq))
+          (old-live t)
+          executions)
+      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-result-query-p) #'ignore)
+                ((symbol-function 'clutch-db-manual-commit-p) #'ignore)
+                ((symbol-function 'clutch--forget-row-identities) #'ignore)
+                ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
+                ((symbol-function 'clutch--execution-refresh-start) #'ignore)
+                ((symbol-function 'clutch--update-mode-line) #'ignore)
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (symbol-name conn)))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (if (eq conn 'old-conn) old-live t)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (conn sql &rest _args)
+                   (push (list sql conn) executions)
+                   (if (eq conn 'old-conn)
+                       (progn
+                         (setq old-live nil)
+                         (signal 'clutch-db-execution-not-started
+                                 '("idle validation failed")))
+                     (make-clutch-db-result :affected-rows 1))))
+                ((symbol-function 'clutch--try-reconnect)
+                 (lambda ()
+                   (setq clutch-connection 'new-conn)
+                   t)))
+        (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
+        (should (equal (nreverse executions)
+                       '(("UPDATE a SET n = 1" old-conn)
+                         ("UPDATE a SET n = 1" new-conn)
+                         ("UPDATE b SET n = 2" new-conn))))))))
+
+(ert-deftest clutch-test-batch-stops-when-its-buffer-switches-connection ()
+  "A batch should stop rather than follow its buffer to another connection."
+  (with-temp-buffer
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (let (sent messages)
+        (cl-letf (((symbol-function 'clutch-db-query-async)
+                   (lambda (conn sql callback)
+                     (push (cons conn sql) sent)
+                     (push (cons sql callback) finishes)
+                     t))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (setq-local clutch-connection 'conn-b)
+          (ert-run-idle-timers)
+          (should (equal sent '((conn-a . "UPDATE t SET n = 1"))))
+          (should (member "1 statement executed, then stopped: the connection changed"
+                          messages))
+          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
   "A physical reconnect should not reuse the old connection's identity plan."
   (with-temp-buffer
@@ -10283,6 +10411,46 @@ its outcome and the next one does not run."
                          '("UPDATE t SET n = 1 WHERE id = 1")))
           (should (member "1 statement executed, then cancelled" messages))
           (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
+(ert-deftest clutch-test-async-batch-releases-its-connection-on-a-quit ()
+  "A quit while a batch starts its next statement should end the batch.
+Otherwise the connection stays reserved and the mode line keeps counting."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let ((execute (symbol-function 'clutch--execute-statement))
+            (calls 0))
+        (cl-letf (((symbol-function 'message) #'ignore)
+                  ((symbol-function 'clutch--execute-statement)
+                   (lambda (&rest args)
+                     (if (= (cl-incf calls) 2)
+                         (signal 'quit nil)
+                       (apply execute args)))))
+          (clutch--execute-statements
+           '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2"))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          ;; ERT does not fail a test that quits, so take the quit here.
+          (condition-case nil (ert-run-idle-timers) (quit nil))
+          (should (= calls 2))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+
+(ert-deftest clutch-test-async-batch-failure-after-buffer-kill-says-nothing-odd ()
+  "A batch statement that fails after its buffer is killed should not say nil."
+  (let ((source (generate-new-buffer " *clutch-batch-killed*"))
+        messages)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (with-current-buffer source
+          (setq-local clutch-connection 'async-conn)
+          (clutch--execute-statements
+           '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2")))
+        (kill-buffer source)
+        (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
+        (ert-run-idle-timers)
+        (should-not (member "nil" messages))
+        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
 
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()
   "C-g should ask once to cancel the running query and otherwise quit."
