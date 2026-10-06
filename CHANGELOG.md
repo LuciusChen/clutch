@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Switching schema is refused while a statement runs on the connection, as the guide says. On JDBC the switch waited behind the statement, and where switching reconnects, as on ClickHouse, it closed the connection under the statement.
 - An export ends when showing a failed page's error fails as well. Its connection stayed reserved, and its temporary file stayed beside the destination.
 - A statement that `clutch-disconnect` ends while it runs on PostgreSQL or MySQL reports that its outcome is unknown, as on JDBC. It failed with "connection closed", although the server may finish such a statement and, in Auto mode, commit it.
 - `clutch-connect` is refused while a statement runs on the buffer's connection, as staging an edit is: `C-g` cancels the statement, and `clutch-disconnect` still ends it. Connecting elsewhere closed the connection under the statement, which PostgreSQL and MySQL then finished and, in Auto mode, committed.
