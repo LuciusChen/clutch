@@ -3302,7 +3302,8 @@ query activity, so \\[clutch-cancel-query-or-quit] cancels the export, also
 when the page it cancels arrives first.  A page that the backend runs
 synchronously continues the loop instead of nesting the next one, so many
 pages need no deeper stack.  An error or a quit is signaled while the
-command runs and only reported once it has returned."
+command runs and only reported once it has returned.  A result buffer that
+is killed, or loses its connection, stops the export."
   (let ((conn clutch-connection)
         (buffer (current-buffer))
         (order-by clutch--order-by)
@@ -3322,12 +3323,12 @@ command runs and only reported once it has returned."
                  (funcall done err))
              ((error quit) (report done-error)))
            nil)
+         (stop (text)
+           (message "%s" text)
+           (settle (list 'error text)))
          (handle (result error &optional cancelled)
            ;; Return non-nil when the next page should be fetched.
            (cond
-            ((not (buffer-live-p buffer))
-             (message "Export stopped: its result buffer was killed")
-             (settle '(error "Export stopped: its result buffer was killed")))
             (error
              (with-current-buffer buffer
                (clutch--present-statement-outcome
@@ -3336,8 +3337,7 @@ command runs and only reported once it has returned."
                                :result-context '(:keep-result-on-error t))))
              (settle error))
             (cancelled
-             (message "Export cancelled")
-             (settle '(error "Export cancelled")))
+             (stop "Export cancelled"))
             (t
              (let ((rows (clutch-db-result-rows result)))
                (condition-case emit-error
@@ -3354,7 +3354,7 @@ command runs and only reported once it has returned."
          (run ()
            ;; Fetch pages until one finishes asynchronously or the export ends.
            (catch 'wait
-             (while (buffer-live-p buffer)
+             (while t
                (let ((dispatching t)
                      inline)
                  (with-current-buffer buffer
@@ -3369,16 +3369,24 @@ command runs and only reported once it has returned."
                       (if dispatching
                           (setq inline (list result error))
                         (setq waiting t)
-                        (condition-case run-error
-                            (when (handle result error cancelled)
-                              (run))
-                          ((error quit)
-                           (settle run-error)
-                           (report run-error)))))))
+                        (clutch--query-activity-reply
+                         activity conn
+                         (lambda ()
+                           (condition-case run-error
+                               (when (handle result error cancelled)
+                                 (run))
+                             ((error quit)
+                              (settle run-error)
+                              (report run-error))))
+                         :moved
+                         (lambda ()
+                           (stop "Export stopped: the result's connection changed"))
+                         :killed
+                         (lambda ()
+                           (stop "Export stopped: its result buffer was killed")))))))
                  (setq dispatching nil)
                  (unless (and inline (apply #'handle inline))
-                   (throw 'wait nil))))
-             (handle nil nil))))
+                   (throw 'wait nil)))))))
       (clutch--dispatch-query-activity activity #'run))))
 
 (defun clutch-result--collect-all-export-rows (on-rows)
