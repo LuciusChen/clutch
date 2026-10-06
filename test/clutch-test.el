@@ -7060,6 +7060,12 @@ Only the family is remapped, so text scaling still applies once."
                    nil nil ((0 2) 1) (0 1 "1")
                    ("Aggregate \\[score\\]" "sum=4" "avg=2"
                     "\\[rows=2 cells=2 skipped=0\\]")
+                   nil)
+                  (scientific t
+                   ("id" "score")
+                   ((1 "1E+3") (2 "2.5"))
+                   nil nil ((0 1) 1) (0 1 "1E+3")
+                   ("sum=1002.5" "\\[rows=2 cells=2 skipped=0\\]")
                    nil)))
     (pcase-let ((`(,name ,region-active ,columns ,rows ,filter ,filtered
                          ,rect ,cell ,expected ,absent)
