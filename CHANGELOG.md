@@ -19,6 +19,7 @@
 - A quote or `--` inside a quoted identifier, as in `WITH "customer's rows" AS (DELETE FROM t RETURNING *) SELECT * FROM "customer's rows"`, no longer hides the rest of the statement from Clutch's checks. Such a statement that writes asks for confirmation, runs once instead of being paged, and leaves an uncommitted change in Manual mode, and completion finds the tables of a query that selects such a column.
 - A PostgreSQL generated column, as in `doubled int GENERATED ALWAYS AS (price * 2) STORED`, cannot be edited in a result, as an identity column cannot. Clutch staged the edit, and PostgreSQL refused the UPDATE with "column can only be updated to DEFAULT".
 - The column header of a result keeps the font of its rows when the theme draws header lines in a proportional font, as modus-themes and ef-themes do with their variable-pitch UI option. The header was drawn in that font while its padding was measured in the rows' font, so its column borders missed the rows'.
+- An XTDB column that has held both integers and fractions, as `[:union :i64 :f64]`, can be edited: each value goes as the member type it fits, so the column gains no type. XTDB keeps every type a column has held, even after its values change back or their rows are erased, so older tables often had such columns, and an edit of one failed with "Missing types for args". A column that mixes a number with a string is still changed with SQL.
 
 ## 0.5.4 - 2026-10-03
 
