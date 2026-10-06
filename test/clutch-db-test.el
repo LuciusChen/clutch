@@ -3337,6 +3337,42 @@ passes validation fails the test instead of failing on the fake client."
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
 
+(ert-deftest clutch-db-test-jdbc-table-metadata-asks-about-the-table-s-scope ()
+  "JDBC metadata for a qualified table should ask about that table's scope.
+Without the schema and catalog that qualify it, the columns and keys of the
+table of the same name in the connection's own scope answered for it."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver sqlserver :schema "dbo"
+                                               :catalog "app")))
+        scopes)
+    (cl-flet ((note (op params)
+                (push (list op (alist-get 'schema params)
+                            (alist-get 'catalog params))
+                      scopes)))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_conn op params &optional _timeout)
+                   (note op params)
+                   (pcase op
+                     ("get-primary-keys" '(:primary-keys ("id")))
+                     ("get-foreign-keys" '(:foreign-keys nil))
+                     ("get-columns" '(:columns ((:name "id" :type "INT")))))))
+                ((symbol-function 'clutch-jdbc--rpc-async)
+                 (lambda (op params callback &rest _)
+                   (note op params)
+                   (funcall callback (if (equal op "get-columns")
+                                         '(:columns ((:name "id" :type "INT")))
+                                       '(:foreign-keys nil)))
+                   t)))
+        (clutch-db-column-details conn "people" "alt" "other")
+        (clutch-db-column-details-async conn "people" #'ignore nil "alt" "other")
+        (clutch-db-foreign-keys-async conn "people" #'ignore nil "alt" "other")))
+    (should (equal (nreverse scopes)
+                   '(("get-primary-keys" "alt" "other")
+                     ("get-foreign-keys" "alt" "other")
+                     ("get-columns" "alt" "other")
+                     ("get-columns" "alt" "other")
+                     ("get-foreign-keys" "alt" "other"))))))
+
 ;;;; Unit tests — clutch-db-complete-tables (Oracle)
 
 (ert-deftest clutch-db-test-jdbc-complete-tables-searches-rpc-without-schema-cache-dependency ()
@@ -8593,9 +8629,9 @@ the statement's terminator and removed, changing the value returned."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle)))
         async-details)
     (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
-               (lambda (_conn _table) nil))
+               (lambda (_conn _table &optional _schema _catalog) nil))
               ((symbol-function 'clutch-db-foreign-keys)
-               (lambda (_conn _table) nil))
+               (lambda (_conn _table &optional _schema _catalog) nil))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (&rest _)
                  '(:columns ((:name "CONTENT" :type "BLOB"
