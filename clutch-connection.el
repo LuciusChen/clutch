@@ -2420,6 +2420,8 @@ If `clutch-connection-alist' is non-empty, offer saved connections via
 The password is resolved via `auth-source' when not in the connection
 params; see `clutch-connection-alist' for details."
   (interactive)
+  ;; Closing the connection would not stop its statement on the server.
+  (clutch--refuse-while-running clutch-connection)
   (let ((old-conn clutch-connection)
         (old-live-p (clutch--connection-alive-p clutch-connection)))
     (when old-live-p

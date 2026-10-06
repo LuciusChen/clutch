@@ -2608,6 +2608,24 @@ replacement connection would run the statement against an empty transaction."
       (should clutch-connection)
       (should (clutch--tx-dirty-p clutch-connection)))))
 
+(ert-deftest clutch-test-connect-refuses-while-a-query-runs ()
+  "Connecting elsewhere should wait for the statement running on the buffer.
+The server finished a statement whose connection was closed under it."
+  (let ((clutch-connection 'fake-conn)
+        (clutch--running-queries (make-hash-table :test 'eq))
+        prompted disconnected)
+    (puthash clutch-connection (list :buffer (current-buffer))
+             clutch--running-queries)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+              ((symbol-function 'clutch--connect-params-for-current-buffer)
+               (lambda () (setq prompted t) nil))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq disconnected t))))
+      (should-error (clutch-connect) :type 'user-error)
+      (should-not prompted)
+      (should-not disconnected)
+      (should (eq clutch-connection 'fake-conn)))))
+
 (ert-deftest clutch-test-disconnect-refreshes-derived-result-footer ()
   "Disconnect should refresh result chrome without replacing its table header."
   (require 'clutch-db-sqlite)
