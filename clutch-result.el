@@ -3351,12 +3351,25 @@ is killed, or loses its connection, stops the export."
                   (settle emit-error)
                   (report emit-error)
                   nil))))))
+         (reply (handler)
+           ;; A page that came while it was dispatched counts only through
+           ;; the gate too: a backend that waits on the network
+           ;; synchronously runs timers, which can kill or move the buffer.
+           (clutch--query-activity-reply
+            activity conn handler
+            :moved
+            (lambda ()
+              (stop "Export stopped: the result's connection changed"))
+            :killed
+            (lambda ()
+              (stop "Export stopped: its result buffer was killed"))))
          (run ()
            ;; Fetch pages until one finishes asynchronously or the export ends.
            (catch 'wait
              (while t
                (let ((dispatching t)
-                     inline)
+                     inline
+                     next)
                  (with-current-buffer buffer
                    (clutch--run-db-query-async
                     conn
@@ -3369,23 +3382,18 @@ is killed, or loses its connection, stops the export."
                       (if dispatching
                           (setq inline (list result error))
                         (setq waiting t)
-                        (clutch--query-activity-reply
-                         activity conn
+                        (reply
                          (lambda ()
                            (condition-case run-error
                                (when (handle result error cancelled)
                                  (run))
                              ((error quit)
                               (settle run-error)
-                              (report run-error))))
-                         :moved
-                         (lambda ()
-                           (stop "Export stopped: the result's connection changed"))
-                         :killed
-                         (lambda ()
-                           (stop "Export stopped: its result buffer was killed")))))))
+                              (report run-error)))))))))
                  (setq dispatching nil)
-                 (unless (and inline (apply #'handle inline))
+                 (when inline
+                   (reply (lambda () (setq next (apply #'handle inline)))))
+                 (unless next
                    (throw 'wait nil)))))))
       (clutch--dispatch-query-activity activity #'run))))
 
