@@ -14,7 +14,7 @@
 ### Fixed
 
 - A statement that ends after its buffer has left its connection, as after `clutch-disconnect`, draws no result or error page: in a console or a batch it marks its line and gives its outcome in the echo area, and in the REPL it prints its outcome. Its error page, or a SELECT's rows from the REPL, went to the result buffer that the buffer's new connection, or none, names, and bound that buffer to the old connection.
-- SQL run from an indirect edit (`clutch-edit-indirect`) runs in a buffer that holds its connection. It ran in the source buffer the edit returned to, whose mode line then read "clutch" for good, and its result went to a result buffer of no connection.
+- SQL run from an indirect edit (`clutch-edit-indirect`) runs in a buffer that holds its connection: another one when there is one, or else the edit itself, which is then buried instead of killed. It ran in the source buffer the edit returned to, whose mode line then read "clutch" for good, and its result went to a result buffer of no connection.
 - Aggregating selected cells counts a number in scientific notation, such as `1E+3`, which it skipped as text. Sorting and the insert form already read such numbers.
 - A form feed between `FETCH` and `FIRST`, or between `FINAL`, `NEW` or `OLD` and `TABLE`, counts as whitespace, as one before a statement does. The row limit was missed, and a data change table was not seen as writing, so its statement was paged and ran its `DELETE` again on each page.
 - Switching schema is refused while a statement runs on the connection, as the guide says. On JDBC the switch waited behind the statement, and where switching reconnects, as on ClickHouse, it closed the connection under the statement.
