@@ -10160,6 +10160,43 @@ statement."
                          ("UPDATE a SET n = 1" new-conn)
                          ("UPDATE b SET n = 2" new-conn))))))))
 
+(ert-deftest clutch-test-batch-stops-when-its-buffer-moves-during-a-synchronous-statement ()
+  "A batch should stop when its buffer moves while a statement runs synchronously.
+A backend that waits on the network synchronously runs timers, and one of
+them can move the buffer to another connection before the reply arrives."
+  (with-temp-buffer
+    (let ((clutch-connection 'conn-a)
+          (clutch--tx-state-cache (make-hash-table :test 'eq))
+          (clutch-db--foreground-connections (make-hash-table :test 'eq))
+          (source (current-buffer))
+          executions messages)
+      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
+                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
+                ((symbol-function 'clutch-db-result-query-p) #'ignore)
+                ((symbol-function 'clutch-db-manual-commit-p) #'ignore)
+                ((symbol-function 'clutch--forget-row-identities) #'ignore)
+                ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
+                ((symbol-function 'clutch--execution-refresh-start) #'ignore)
+                ((symbol-function 'clutch--update-mode-line) #'ignore)
+                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (symbol-name conn)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages)))
+                ((symbol-function 'clutch--run-db-query)
+                 (lambda (conn sql &rest _args)
+                   (push (list sql conn) executions)
+                   ;; A timer that runs while the statement waits moves the buffer.
+                   (with-current-buffer source
+                     (setq clutch-connection 'conn-b))
+                   (make-clutch-db-result :affected-rows 1))))
+        (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
+        (should (equal executions '(("UPDATE a SET n = 1" conn-a))))
+        (should (member "1 statement executed, then stopped: the connection changed"
+                        messages))
+        (should-not (clutch-db--foreground-busy-p 'conn-a))))))
+
 (ert-deftest clutch-test-batch-stops-when-its-buffer-switches-connection ()
   "A batch should stop rather than follow its buffer to another connection."
   (with-temp-buffer

@@ -1835,6 +1835,17 @@ Stops and reports on the first error."
                 activity
                 (lambda () (report-complete ", then cancelled")))
                nil))))
+         (reply (outcome stmt region final-p continue)
+           ;; A reply that came while its statement was dispatched counts
+           ;; only through the gate too: a backend that waits on the
+           ;; network synchronously runs timers, which can move the buffer.
+           (clutch--query-activity-reply
+            activity (plist-get outcome :connection)
+            (lambda ()
+              (when (handle outcome stmt region final-p)
+                (funcall continue)))
+            :moved (lambda ()
+                     (stop-moved outcome stmt region))))
          (run ()
            ;; Run statements until one finishes asynchronously or the batch ends.
            (catch 'wait
@@ -1843,7 +1854,8 @@ Stops and reports on the first error."
                             (region (and beg end (cons beg end)))
                             (final-p (null specs))
                             (dispatching t)
-                            (inline nil))
+                            (inline nil)
+                            (next nil))
                  (with-current-buffer source-buffer
                    (when region
                      (clutch--clear-executed-sql-overlay)
@@ -1854,16 +1866,13 @@ Stops and reports on the first error."
                       (if dispatching
                           (setq inline (list outcome))
                         (setq waiting t)
-                        (clutch--query-activity-reply
-                         activity (plist-get outcome :connection)
-                         (lambda ()
-                           (when (handle outcome stmt region final-p)
-                             (run)))
-                         :moved (lambda ()
-                                  (stop-moved outcome stmt region)))))
+                        (reply outcome stmt region final-p #'run)))
                     nil (> done 0)))
                  (setq dispatching nil)
-                 (unless (and inline (handle (car inline) stmt region final-p))
+                 (when inline
+                   (reply (car inline) stmt region final-p
+                          (lambda () (setq next t))))
+                 (unless next
                    (throw 'wait nil)))))))
       (clutch--dispatch-query-activity activity #'run))))
 
