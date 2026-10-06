@@ -103,14 +103,14 @@ project-shipped demo schema.")
   (condition-case err
       (let* ((connect-start (float-time))
              (conn (clutch-db-connect backend params))
-             (connect-elapsed (- (float-time) connect-start))
-             (select1 (clutch-bench--sample-query conn "SELECT 1" clutch-bench-iterations))
-             (medium (clutch-bench--sample-query conn medium-sql clutch-bench-iterations)))
+             (connect-elapsed (- (float-time) connect-start)))
         (unwind-protect
             (list :backend backend
                   :connect connect-elapsed
-                  :select1 select1
-                  :medium medium)
+                  :select1 (clutch-bench--sample-query
+                            conn "SELECT 1" clutch-bench-iterations)
+                  :medium (clutch-bench--sample-query
+                           conn medium-sql clutch-bench-iterations))
           (ignore-errors (clutch-db-disconnect conn))))
     (error
      (list :backend backend :error (error-message-string err)))))

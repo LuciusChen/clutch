@@ -1382,15 +1382,17 @@ Text inserted at either edge stays outside the region."
 MARKERS locate its statements in the buffer; ending the activity releases
 them.  Return the activity, which `clutch--finish-query-activity' ends."
   (clutch-db--reserve-connection connection)
-  (setq clutch--execution-start-time (float-time))
-  (clutch--execution-refresh-start)
-  (clutch--update-mode-line)
-  (redisplay t)
-  (list :connection connection :buffer (current-buffer) :markers markers
-        :ended nil))
+  (let ((start (float-time)))
+    (setq clutch--execution-start-time start)
+    (clutch--execution-refresh-start)
+    (clutch--update-mode-line)
+    (redisplay t)
+    (list :connection connection :buffer (current-buffer) :markers markers
+          :start start :ended nil)))
 
 (defun clutch--end-query-activity (activity)
-  "End ACTIVITY once, releasing its connection, markers and execution display."
+  "End ACTIVITY once, releasing its connection, markers and execution display.
+A later activity in ACTIVITY's buffer keeps its own display."
   (unless (plist-get activity :ended)
     (plist-put activity :ended t)
     (clutch-db--release-connection (plist-get activity :connection))
@@ -1399,8 +1401,9 @@ them.  Return the activity, which `clutch--finish-query-activity' ends."
     (let ((buffer (plist-get activity :buffer)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (setq clutch--execution-start-time nil)
-          (clutch--update-mode-line))))))
+          (when (eql clutch--execution-start-time (plist-get activity :start))
+            (setq clutch--execution-start-time nil)
+            (clutch--update-mode-line)))))))
 
 (defun clutch--dispatch-query-activity (activity dispatch)
   "Call DISPATCH to start ACTIVITY's work, ending ACTIVITY on a nonlocal exit."
