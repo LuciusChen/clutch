@@ -5065,41 +5065,51 @@ out, which broke the Oracle statement and left SQL Server unpaged."
           (should (equal (clutch-db-current-schema conn) "app")))))))
 
 (ert-deftest clutch-db-test-pg-follows-a-typed-search-path ()
-  "A search_path set through the adapter should replace its cached schema.
-The adapter went on reporting the schema it cached first, so a console
-showed and loaded that one after a typed SET search_path, and a reconnect
-set that one again.  XTDB has no search_path to switch."
+  "The adapter should ask the server again after SQL that may move its path.
+It went on reporting the schema it cached first, so a console showed and
+loaded that one after a typed SET search_path, and a reconnect set it again.
+A quoted name, a comment or a rollback that undid the SET kept even a plain
+SET from being followed.  XTDB has no search_path to switch."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
           (path "public"))
-      (cl-flet ((set-path (sql)
-                  (when (string-match "\\`SET search_path TO \\(.*\\)" sql)
-                    (setq path (match-string 1 sql)))
-                  (clutch-db-test--make-pg-result)))
+      (cl-flet ((server (sql)
+                  (cond
+                   ((equal sql "SELECT current_schema()")
+                    (clutch-db-test--make-pg-result
+                     :rows `((,(car (split-string path ", "))))))
+                   ((equal sql "SHOW search_path")
+                    (clutch-db-test--make-pg-result :rows `((,path))))
+                   (t
+                    (cond
+                     ((string-match-p "TO alt, public" sql)
+                      (setq path "alt, public"))
+                     ((string-match-p "\\`\\(?:RESET\\|ROLLBACK\\)" sql)
+                      (setq path "public")))
+                    (clutch-db-test--make-pg-result)))))
         (cl-letf (((symbol-function 'pgsql-exec)
-                   (lambda (_client sql)
-                     (pcase sql
-                       ("SELECT current_schema()"
-                        (clutch-db-test--make-pg-result
-                         :rows `((,(car (split-string path ", "))))))
-                       ("SHOW search_path"
-                        (clutch-db-test--make-pg-result :rows `((,path))))
-                       (_ (set-path sql)))))
+                   (lambda (_client sql) (server sql)))
                   ((symbol-function 'pgsql-exec-async)
                    (lambda (_client sql callback)
-                     (funcall callback (set-path sql) nil))))
+                     (funcall callback (server sql) nil)))
+                  ((symbol-function 'pgsql-transaction-status)
+                   (lambda (_client) 'in-transaction)))
           (should (equal (clutch-db-current-schema conn) "public"))
-          (clutch-db-query conn "SET search_path TO alt, public")
+          (clutch-db-query conn "SET \"search_path\" TO alt, public -- note")
           (should (equal (clutch-db-current-schema conn) "alt"))
-          (clutch-db-query-async conn "SET search_path TO beta" #'ignore)
-          (should (equal (clutch-db-current-schema conn) "beta"))
-          (clutch-db-query conn "SET search_path TO alt, public")
-          (should (clutch-db-namespace-switch-p conn "set search_path = alt"))
-          (should-not (clutch-db-namespace-switch-p
-                       conn "SET LOCAL search_path TO alt"))
+          (clutch-db-query conn "RESET /* back */ search_path")
+          (should (equal (clutch-db-current-schema conn) "public"))
+          (clutch-db-query-async conn "SET search_path TO alt, public" #'ignore)
+          (should (equal (clutch-db-current-schema conn) "alt"))
           (should (equal (clutch-db-update-namespace-params conn '(:schema "public"))
                          '(:schema "public" :search-path "alt, public")))
+          (clutch-db-rollback conn)
+          (should (equal (clutch-db-current-schema conn) "public"))
+          (dolist (sql '("-- go\nCOMMIT" "ROLLBACK TO SAVEPOINT s" "SET LOCAL x TO 1"))
+            (should (clutch-db-namespace-switch-p conn sql)))
+          (dolist (sql '("SELECT 1" "SHOW search_path" "RELEASE SAVEPOINT s"))
+            (should-not (clutch-db-namespace-switch-p conn sql)))
           (should-not (clutch-db-namespace-switch-p
                        (clutch-db-pg--make-xtdb-connection)
                        "SET search_path TO alt")))))))

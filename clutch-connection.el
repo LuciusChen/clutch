@@ -2382,6 +2382,37 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
                     (funcall update-fn clutch--connection-params))
         (clutch--update-mode-line)))))
 
+(defun clutch--note-namespace-switch (connection)
+  "Follow CONNECTION into the namespace it reports after a possible switch.
+As after `clutch-switch-schema', the automatic reconnect selects it.  When
+the connection parameters change, its schema replaces the cached metadata
+of the old one; a statement that left the namespace alone keeps them.
+Failing to read the namespace back is only reported: the statement or
+command that ran has finished, and its outcome must still arrive."
+  (condition-case err
+      (let (moved)
+        (clutch--update-connection-params-for-buffers
+         connection
+         (lambda (params)
+           (let ((updated (clutch-db-update-namespace-params
+                           connection params)))
+             (unless (equal updated params)
+               (setq moved t))
+             updated)))
+        (when moved
+          (clutch--clear-connection-metadata-caches connection)
+          (clutch--prime-schema-cache connection)))
+    (clutch-db-error
+     (message "Could not read the current schema or database back: %s"
+              (error-message-string err)))))
+
+(defun clutch--follow-transaction-end (conn sql)
+  "Follow CONN's namespace after it ended a transaction as SQL does.
+PostgreSQL undoes a search_path set inside a transaction it rolls back,
+and one set with SET LOCAL when the transaction ends either way."
+  (when (clutch-db-namespace-switch-p conn sql)
+    (clutch--note-namespace-switch conn)))
+
 ;;;###autoload (autoload 'clutch-switch-schema "clutch" nil t)
 (defun clutch-switch-schema ()
   "Switch the current schema or database on the active connection."
@@ -2676,6 +2707,8 @@ signal that nothing was committed."
             (user-error
              "%s; commit outcome is uncertain, roll back or reconnect"
              (clutch--humanize-db-error (error-message-string err)))))))
+    (clutch--follow-transaction-end
+     clutch-connection (if (eq outcome 'rolled-back) "ROLLBACK" "COMMIT"))
     (if (eq outcome 'rolled-back)
         (progn
           (clutch--mark-dml-results-rolled-back clutch-connection)
@@ -2698,6 +2731,7 @@ signal that nothing was committed."
                 uncertain)
       (user-error "Connection is in autocommit mode"))
     (clutch-db-rollback clutch-connection)
+    (clutch--follow-transaction-end clutch-connection "ROLLBACK")
     (unless uncertain
       (clutch--mark-dml-results-rolled-back clutch-connection))
     (clutch--clear-tx-state clutch-connection)
@@ -2719,6 +2753,9 @@ any open transaction according to its own semantics."
     (when (clutch--tx-unresolved-p clutch-connection)
       (user-error "Cannot toggle: commit or roll back uncommitted changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
+    ;; Leaving manual mode finishes the open transaction.
+    (when manual-now
+      (clutch--follow-transaction-end clutch-connection "COMMIT"))
     (clutch--clear-tx-state clutch-connection)
     (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
 
