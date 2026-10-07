@@ -48,6 +48,7 @@
 (declare-function pgsql-port "pgsql" (connection))
 (declare-function pgsql-result-affected-rows "pgsql" (result))
 (declare-function pgsql-result-columns "pgsql" (result))
+(declare-function pgsql-result-command-tag "pgsql" (result))
 (declare-function pgsql-result-rows "pgsql" (result))
 (declare-function pgsql-transaction-status "pgsql" (connection))
 (declare-function pgsql-type-name "pgsql" (oid))
@@ -289,8 +290,9 @@ transaction, which a lost connection rolls back."
 
 (defun clutch-db-pg--exec (conn sql)
   "Execute SQL through the pgsql.el client owned by CONN."
-  (prog1 (pgsql-exec (clutch-db-pg--connection-client conn) sql)
-    (clutch-db-pg--follow-search-path conn sql)))
+  (let ((result (pgsql-exec (clutch-db-pg--connection-client conn) sql)))
+    (clutch-db-pg--follow-search-path conn sql result)
+    result))
 
 (defun clutch-db-pg--cache-current-schema (conn schema)
   "Cache SCHEMA as the current schema for CONN."
@@ -316,31 +318,24 @@ it too, but are not followed."
           '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END"
             "PREPARE")))
 
-(defun clutch-db-pg--chained-commit-p (sql)
-  "Return non-nil when SQL is one COMMIT or END that chains a new transaction.
-Comments around or between its words, and its semicolons, do not count."
-  (let ((case-fold-search t)
-        (space "[ \t\n\r\f]+"))
-    (string-match-p
-     (concat "\\`[ \t\n\r\f]*\\(?:COMMIT\\|END\\)"
-             "\\(?:" space "\\(?:WORK\\|TRANSACTION\\)\\)?"
-             space "AND" space "CHAIN[ \t\n\r\f;]*\\'")
-     (clutch-db-sql-mask-literal-or-comment sql))))
-
-(defun clutch-db-pg--forget-search-path (conn &optional chained)
+(defun clutch-db-pg--forget-search-path (conn &optional committed)
   "Make CONN ask the server for its search_path again.
 Also note whether the path is settled.  A lost connection rolls back an
 open transaction, and a SET made in it, so the path is settled when none
-is open, or when CHAINED, just after a COMMIT that chained the next one."
+is open, or when COMMITTED, just after a COMMIT that chained the next one."
   (setf (clutch-db-pg--connection-current-schema conn) nil
         (clutch-db-pg--connection-search-path conn) nil
         (clutch-db-pg--connection-path-settled conn)
-        (or chained (not (clutch-db-pg--tx-open-p conn)))))
+        (or committed (not (clutch-db-pg--tx-open-p conn)))))
 
-(defun clutch-db-pg--follow-search-path (conn sql)
-  "Forget what CONN knows of its search_path when SQL may have changed it."
+(defun clutch-db-pg--follow-search-path (conn sql result)
+  "Forget what CONN knows of its search_path when SQL may have changed it.
+RESULT is SQL's result.  The server tags it COMMIT after a COMMIT or END,
+chained or not, and ROLLBACK after any rollback, a COMMIT of a failed
+transaction included, so a COMMIT tag committed the path."
   (when (clutch-db-pg--namespace-statement-p sql)
-    (clutch-db-pg--forget-search-path conn (clutch-db-pg--chained-commit-p sql))))
+    (clutch-db-pg--forget-search-path
+     conn (equal (pgsql-result-command-tag result) "COMMIT"))))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
@@ -784,7 +779,7 @@ Decline when the installed pgsql.el cannot execute asynchronously."
         (clutch-db-pg--connection-client conn) sql
         (lambda (result error)
           (when result
-            (clutch-db-pg--follow-search-path conn sql))
+            (clutch-db-pg--follow-search-path conn sql result))
           (funcall callback
                    (and result (clutch-db-pg--wrap-result conn result))
                    (and error

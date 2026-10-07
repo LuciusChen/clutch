@@ -381,7 +381,7 @@ though the server had rolled it back with the transaction."
                 (run "BEGIN" (format "SET search_path TO %s" moved))
                 (should (equal (path-after-a-lost-connection) default-path))
                 (run "BEGIN" (format "SET search_path TO %s" moved)
-                     "COMMIT AND CHAIN -- the last statement in its buffer")
+                     "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last in its buffer")
                 (should (equal (path-after-a-lost-connection) moved))))
           (when (buffer-live-p console-buffer)
             (kill-buffer console-buffer))
