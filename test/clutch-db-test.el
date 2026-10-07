@@ -5064,6 +5064,69 @@ out, which broke the Oracle statement and left SQL Server unpaged."
           (should (equal executed-sql "SET search_path TO \"app\""))
           (should (equal (clutch-db-current-schema conn) "app")))))))
 
+(ert-deftest clutch-db-test-pg-follows-a-typed-search-path ()
+  "A search_path set through the adapter should replace its cached schema.
+The adapter went on reporting the schema it cached first, so a console
+showed and loaded that one after a typed SET search_path, and a reconnect
+set that one again.  XTDB has no search_path to switch."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          (path "public"))
+      (cl-flet ((set-path (sql)
+                  (when (string-match "\\`SET search_path TO \\(.*\\)" sql)
+                    (setq path (match-string 1 sql)))
+                  (clutch-db-test--make-pg-result)))
+        (cl-letf (((symbol-function 'pgsql-exec)
+                   (lambda (_client sql)
+                     (pcase sql
+                       ("SELECT current_schema()"
+                        (clutch-db-test--make-pg-result
+                         :rows `((,(car (split-string path ", "))))))
+                       ("SHOW search_path"
+                        (clutch-db-test--make-pg-result :rows `((,path))))
+                       (_ (set-path sql)))))
+                  ((symbol-function 'pgsql-exec-async)
+                   (lambda (_client sql callback)
+                     (funcall callback (set-path sql) nil))))
+          (should (equal (clutch-db-current-schema conn) "public"))
+          (clutch-db-query conn "SET search_path TO alt, public")
+          (should (equal (clutch-db-current-schema conn) "alt"))
+          (clutch-db-query-async conn "SET search_path TO beta" #'ignore)
+          (should (equal (clutch-db-current-schema conn) "beta"))
+          (clutch-db-query conn "SET search_path TO alt, public")
+          (should (clutch-db-namespace-switch-p conn "set search_path = alt"))
+          (should-not (clutch-db-namespace-switch-p
+                       conn "SET LOCAL search_path TO alt"))
+          (should (equal (clutch-db-update-namespace-params conn '(:schema "public"))
+                         '(:schema "public" :search-path "alt, public")))
+          (should-not (clutch-db-namespace-switch-p
+                       (clutch-db-pg--make-xtdb-connection)
+                       "SET search_path TO alt")))))))
+
+(ert-deftest clutch-db-test-pg-connect-restores-a-whole-search-path ()
+  "PostgreSQL connect should restore a whole search_path in place of a schema.
+Setting only the current schema of a path such as alt, public left public
+out, so its tables no longer resolved unqualified after a reconnect."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let (executed)
+      (cl-letf (((symbol-function 'pgsql-connect)
+                 (lambda (&rest _args)
+                   (clutch-db-test--make-pg-client
+                    :host "127.0.0.1" :port 54321
+                    :user "system" :database "test")))
+                ((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (push sql executed)
+                   (clutch-db-test--make-pg-result))))
+        (clutch-db-pg-connect
+         '(:host "127.0.0.1" :port 54321 :database "test" :user "system"
+           :password "123456" :schema "app"
+           :search-path "alt, \"My Schema\""))
+        (should (equal executed
+                       '("SELECT set_config('search_path', 'alt, \"My Schema\"', false)")))))))
+
 (ert-deftest clutch-db-test-pg-connect-normalizes-tls-to-sslmode ()
   "PostgreSQL backend connect should pass canonical SSLMODE to pgsql.el."
   (require 'clutch-db-pg)
