@@ -298,6 +298,26 @@
                      (pgsql-escape-identifier schema)))
     (clutch-db-pg--cache-current-schema conn schema)))
 
+(defun clutch-db-pg--search-path-statement-p (sql)
+  "Return non-nil for SQL such as SET search_path.
+That is SET search_path or SET SCHEMA, but not SET LOCAL, which lasts
+only until its transaction ends, and RESET search_path, RESET ALL and
+DISCARD ALL, which restore it."
+  (pcase (mapcar #'upcase
+                 (split-string (clutch-db-sql-trim-end
+                                (clutch-db-sql-strip-leading-comments sql))
+                               "[ \t\n\r\f=]+" t))
+    ((or `("SET" "SESSION" ,(or "SEARCH_PATH" "SCHEMA") . ,_)
+         `("SET" ,(or "SEARCH_PATH" "SCHEMA") . ,_)
+         `("RESET" ,(or "SEARCH_PATH" "ALL"))
+         '("DISCARD" "ALL"))
+     t)))
+
+(defun clutch-db-pg--follow-search-path (conn sql)
+  "Forget CONN's cached current schema when SQL set its search_path."
+  (when (clutch-db-pg--search-path-statement-p sql)
+    (clutch-db-pg--cache-current-schema conn nil)))
+
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
   (memq (pgsql-transaction-status
@@ -340,7 +360,9 @@
 (defun clutch-db-pg-connect (params &optional make-connection)
   "Connect to PostgreSQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
-:sslmode, :schema, :connect-timeout, :read-idle-timeout, :query-timeout.
+:sslmode, :schema, :search-path, :connect-timeout, :read-idle-timeout,
+:query-timeout.  :search-path, a whole search_path that a reconnect
+restores, takes precedence over :schema.
 `:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name.
 MAKE-CONNECTION, when non-nil, builds the connection from its :client, for a
 backend such as XTDB that speaks the PostgreSQL protocol."
@@ -349,6 +371,7 @@ backend such as XTDB that speaks the PostgreSQL protocol."
                 (clutch-db-pg--normalize-connect-params
                  (clutch-db--reject-removed-connect-params params))))
   (let ((schema (plist-get params :schema))
+        (search-path (plist-get params :search-path))
         (sslmode (plist-get params :sslmode))
         (connect-timeout (plist-get params :connect-timeout))
         (read-idle-timeout (plist-get params :read-idle-timeout))
@@ -373,8 +396,13 @@ backend such as XTDB that speaks the PostgreSQL protocol."
           (when query-timeout
             (clutch-db-pg--exec
              conn (format "SET statement_timeout = %d" (* query-timeout 1000))))
-          (when schema
-            (clutch-db-pg--set-search-path conn schema))
+          (cond
+           (search-path
+            (clutch-db-pg--exec
+             conn (format "SELECT set_config('search_path', %s, false)"
+                          (pgsql-escape-literal search-path))))
+           (schema
+            (clutch-db-pg--set-search-path conn schema)))
           conn)
       (pgsql-error
        (when client
@@ -709,7 +737,8 @@ manual-commit mode via lazy BEGIN."
   (clutch-db-pg--run-query-with-transaction-state
    conn sql
    (lambda ()
-     (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql)))))
+     (prog1 (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql))
+       (clutch-db-pg--follow-search-path conn sql)))))
 
 (cl-defmethod clutch-db-query-async
     ((conn clutch-db-pg--connection) sql callback)
@@ -722,6 +751,8 @@ Decline when the installed pgsql.el cannot execute asynchronously."
        (pgsql-exec-async
         (clutch-db-pg--connection-client conn) sql
         (lambda (result error)
+          (when result
+            (clutch-db-pg--follow-search-path conn sql))
           (funcall callback
                    (and result (clutch-db-pg--wrap-result conn result))
                    (and error
@@ -841,6 +872,20 @@ ORDER BY schema_name")))
   "Switch PostgreSQL CONN to SCHEMA via search_path."
   (clutch-db--translate-library-error pgsql-error
     (clutch-db-pg--set-search-path conn schema)))
+
+(cl-defmethod clutch-db-namespace-switch-p ((_conn clutch-db-pg--connection) sql)
+  "Return non-nil when SQL set the search_path of the session."
+  (clutch-db-pg--search-path-statement-p sql))
+
+(cl-defmethod clutch-db-update-namespace-params
+    ((conn clutch-db-pg--connection) params)
+  "Store PostgreSQL CONN's search_path in a copy of connection PARAMS.
+A reconnect sets the whole path again: the current schema alone would
+leave out the other schemas of a path such as alt, public."
+  (plist-put (copy-sequence params) :search-path
+             (clutch-db--translate-library-error pgsql-error
+               (caar (clutch-db-pg--metadata-rows
+                      (clutch-db-pg--exec conn "SHOW search_path"))))))
 
 (clutch-db--define-idle-metadata-methods clutch-db-pg--connection "PostgreSQL")
 
@@ -1268,6 +1313,11 @@ XTDB cannot switch its current schema, so PARAMS may not set :schema."
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-pg--xtdb-connection))
   "Return the registered backend key for XTDB connections."
   'xtdb)
+
+(cl-defmethod clutch-db-namespace-switch-p
+    ((_conn clutch-db-pg--xtdb-connection) _sql)
+  "Return nil, since XTDB has no search_path to switch."
+  nil)
 
 (defconst clutch-db-pg--xtdb-types
   '((:utf8 "text" "text")

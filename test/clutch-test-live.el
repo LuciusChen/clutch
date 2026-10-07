@@ -222,6 +222,54 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
           (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))
         (delete-directory clutch-console-directory t)))))
 
+(ert-deftest clutch-test-live-console-follows-a-typed-namespace-switch ()
+  :tags '(:clutch-live)
+  "A console should follow a namespace switch typed into it.
+It went on showing and loading the namespace it opened with, and its
+parameters reconnected to that one.  PostgreSQL keeps the whole path."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL USE and PostgreSQL SET search_path"))
+  (clutch-test--with-conn admin
+    (let* ((schema (format "clutch_ns_%d" (emacs-pid)))
+           (params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (name (clutch--ad-hoc-console-name params))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console-buffer)
+      (pcase-let ((`(,switch ,namespace ,key ,value ,check-sql)
+                   (if (eq clutch-test-backend 'mysql)
+                       '("USE information_schema" "information_schema"
+                         :database "information_schema" "SELECT DATABASE()")
+                     (list (format "SET search_path TO %s, public" schema) schema
+                           :search-path (format "%s, public" schema)
+                           "SHOW search_path"))))
+        (unwind-protect
+            (progn
+              (when (eq clutch-test-backend 'pg)
+                (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
+              (clutch-query-console (list :name name :params params))
+              (setq console-buffer (current-buffer))
+              (cl-letf (((symbol-function 'message) #'ignore))
+                (clutch--execute switch)
+                (clutch-test--await-queries))
+              (should (equal (clutch-db-current-schema clutch-connection)
+                             namespace))
+              (should (equal (plist-get clutch--connection-params key) value))
+              (let* ((mysql-tls-verify-server nil)
+                     (reopened (clutch-db-connect clutch-test-backend
+                                                  clutch--connection-params)))
+                (unwind-protect
+                    (should (equal (caar (clutch-db-result-rows
+                                          (clutch-db-query reopened check-sql)))
+                                   value))
+                  (clutch-db-disconnect reopened))))
+          (when (buffer-live-p console-buffer)
+            (kill-buffer console-buffer))
+          (when (eq clutch-test-backend 'pg)
+            (ignore-errors
+              (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))
+          (delete-directory clutch-console-directory t))))))
+
 (ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
   :tags '(:clutch-live :duckdb-live)
   "The public command should switch DuckDB schemas in the current catalog."
