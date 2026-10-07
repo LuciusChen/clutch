@@ -3958,31 +3958,93 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
       (delete-directory clutch-console-directory t))))
 
 (ert-deftest clutch-test-query-console-reconnects-dead-existing-buffer ()
-  "Query console should reconnect an existing dead console before switching."
+  "Reopening a dead console should reconnect it as the automatic reconnect does.
+It built a connection from the saved entry and bound only the console, so
+its results stayed on the dead connection and reconnected to sessions of
+their own, its uncommitted work was not reported lost, and the database it
+had moved to gave way to the saved one."
   (let* ((name "alpha")
          (existing (get-buffer-create " *clutch-query-console-dead*"))
+         (attached (get-buffer-create " *clutch-query-console-dead-result*"))
+         (session '(:backend mysql :database "used_since" :pass-entry "alpha"))
          (clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
-         built
-         activated)
+         (clutch--tx-state-cache (make-hash-table :test 'eq))
+         messages
+         built)
+    (unwind-protect
+        (progn
+          (with-current-buffer attached
+            (setq-local clutch-connection 'dead-conn))
+          (with-current-buffer existing
+            (clutch-mode)
+            (setq-local clutch--console-name name)
+            (setq-local clutch-connection 'dead-conn)
+            (setq-local clutch--connection-params session)
+            (setq-local clutch--conn-sql-product 'postgres)
+            (puthash 'dead-conn 'dirty clutch--tx-state-cache)
+            (cl-letf (((symbol-function 'clutch--find-console-buffer)
+                       (lambda (&rest _args) existing)))
+              (clutch-test--with-connect-build-stubs
+                  (built 'mysql 'new-conn)
+                (cl-letf (((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                          ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                          ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                          ((symbol-function 'clutch--refresh-connection-render-state)
+                           #'ignore)
+                          ((symbol-function 'clutch--update-mode-line) #'ignore)
+                          ((symbol-function 'message)
+                           (lambda (format-string &rest args)
+                             (push (apply #'format format-string args) messages))))
+                  (clutch-query-console name))
+                (should (equal built session))
+                (should (eq (current-buffer) existing))
+                (dolist (buffer (list existing attached))
+                  (should (eq (buffer-local-value 'clutch-connection buffer)
+                              'new-conn))
+                  (should (equal (buffer-local-value 'clutch--connection-params
+                                                     buffer)
+                                 session)))
+                (should (eq (buffer-local-value 'clutch--conn-sql-product existing)
+                            'postgres))
+                (should-not (clutch--tx-state 'dead-conn))
+                (should (member "Reconnected to test-conn; uncommitted changes were lost"
+                                messages))))))
+      (dolist (buffer (list existing attached))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest clutch-test-query-console-reconnect-keeps-the-console-mode ()
+  "Reopening a dead console should leave it in the mode of its own session.
+Once reconnected, it was put in the mode of the saved entry, which a
+changed :surface makes another, and the mode change dropped the new
+connection from the console."
+  (let* ((name "docs")
+         (existing (get-buffer-create " *clutch-query-console-dead-mongo*"))
+         (session '(:backend mongodb :database "app"))
+         (clutch-connection-alist
+          '(("docs" . (:backend mongodb :database "app" :surface sql-interface))))
+         built)
     (unwind-protect
         (with-current-buffer existing
-          (clutch-mode)
+          (clutch-mongodb-mode)
           (setq-local clutch--console-name name)
           (setq-local clutch-connection 'dead-conn)
+          (setq-local clutch--connection-params session)
           (cl-letf (((symbol-function 'clutch--find-console-buffer)
                      (lambda (&rest _args) existing)))
             (clutch-test--with-connect-build-stubs
-                (built 'mysql 'new-conn activated)
-              (clutch-query-console name)
-              (should (equal built
-                             '(:backend mysql :database "app_a"
-                               :pass-entry "alpha")))
-              (should (equal activated
-                             '(new-conn
-                               (:backend mysql :database "app_a"
-                                :pass-entry "alpha")
-                               mysql)))
-              (should (eq (current-buffer) existing)))))
+                (built 'mongodb 'new-conn)
+              (cl-letf (((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                        ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                        ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                        ((symbol-function 'clutch--update-mode-line) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (clutch-query-console name))
+              (should (equal built session))
+              (should (eq (current-buffer) existing))
+              (should (eq major-mode 'clutch-mongodb-mode))
+              (should (eq clutch-connection 'new-conn))
+              (should (equal clutch--connection-params session)))))
       (when (buffer-live-p existing)
         (kill-buffer existing)))))
 
