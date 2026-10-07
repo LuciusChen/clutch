@@ -222,6 +222,53 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
           (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))
         (delete-directory clutch-console-directory t)))))
 
+(defun clutch-test--open-live-console (params)
+  "Open the ad hoc query console for PARAMS, or reopen it, and return it."
+  (clutch-query-console (list :name (clutch--ad-hoc-console-name params)
+                              :params params))
+  (current-buffer))
+
+(defmacro clutch-test--with-live-console (params &rest body)
+  "Run BODY in a query console opened on PARAMS, then close the console.
+The console keeps its text in a temporary directory, its messages are
+dropped, and closing it confirms nothing, as a test that failed can leave
+uncommitted work behind."
+  (declare (indent 1) (debug (form body)))
+  (let ((buffer (make-symbol "buffer")))
+    `(let ((clutch-console-directory (make-temp-file "clutch-console-" t))
+           ,buffer)
+       (unwind-protect
+           (cl-letf (((symbol-function 'message) #'ignore))
+             (setq ,buffer (clutch-test--open-live-console ,params))
+             (with-current-buffer ,buffer ,@body))
+         (when (buffer-live-p ,buffer)
+           (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+             (kill-buffer ,buffer)))
+         (delete-directory clutch-console-directory t)))))
+
+(defun clutch-test--run-in-console (&rest statements)
+  "Run each of STATEMENTS in the current console as typed, in turn."
+  (dolist (sql statements)
+    (clutch--execute sql)
+    (clutch-test--await-queries)))
+
+(defun clutch-test--end-console-session (admin)
+  "End the console's server session from ADMIN and return its connection.
+The console sees its connection closed before this returns.  The console
+is on MySQL or PostgreSQL."
+  (let* ((conn clutch-connection)
+         (mysql (eq (clutch-db-backend-key conn) 'mysql))
+         (id (caar (clutch-db-result-rows
+                    (clutch-db-query conn (if mysql
+                                              "SELECT CONNECTION_ID()"
+                                            "SELECT pg_backend_pid()"))))))
+    (clutch-db-query admin (format (if mysql
+                                       "KILL %s"
+                                     "SELECT pg_terminate_backend(%s)")
+                                   id))
+    (clutch-test--await (lambda () (not (clutch--connection-alive-p conn))))
+    conn))
+
 (ert-deftest clutch-test-live-console-follows-a-typed-namespace-switch ()
   :tags '(:clutch-live)
   "A console should follow a namespace switch typed into it.
@@ -230,12 +277,9 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
   (unless (memq clutch-test-backend '(mysql pg))
     (ert-skip "This regression covers MySQL USE and PostgreSQL SET search_path"))
   (clutch-test--with-conn admin
-    (let* ((schema (format "clutch_ns_%d" (emacs-pid)))
-           (params (append (list :backend clutch-test-backend)
-                           (clutch-test--live-connect-params)))
-           (name (clutch--ad-hoc-console-name params))
-           (clutch-console-directory (make-temp-file "clutch-console-" t))
-           console-buffer)
+    (let ((schema (format "clutch_ns_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params))))
       (pcase-let ((`(,switch ,namespace ,key ,value ,check-sql)
                    (if (eq clutch-test-backend 'mysql)
                        '("USE information_schema" "information_schema"
@@ -247,28 +291,21 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
             (progn
               (when (eq clutch-test-backend 'pg)
                 (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
-              (clutch-query-console (list :name name :params params))
-              (setq console-buffer (current-buffer))
-              (cl-letf (((symbol-function 'message) #'ignore))
-                (clutch--execute switch)
-                (clutch-test--await-queries))
-              (should (equal (clutch-db-current-schema clutch-connection)
-                             namespace))
-              (should (equal (plist-get clutch--connection-params key) value))
-              (let* ((mysql-tls-verify-server nil)
-                     (reopened (clutch-db-connect clutch-test-backend
-                                                  clutch--connection-params)))
-                (unwind-protect
-                    (should (equal (caar (clutch-db-result-rows
-                                          (clutch-db-query reopened check-sql)))
-                                   value))
-                  (clutch-db-disconnect reopened))))
-          (when (buffer-live-p console-buffer)
-            (kill-buffer console-buffer))
+              (clutch-test--with-live-console params
+                (clutch-test--run-in-console switch)
+                (should (equal (clutch-db-current-schema clutch-connection)
+                               namespace))
+                (should (equal (plist-get clutch--connection-params key) value))
+                (let ((reopened (clutch-db-connect clutch-test-backend
+                                                   clutch--connection-params)))
+                  (unwind-protect
+                      (should (equal (caar (clutch-db-result-rows
+                                            (clutch-db-query reopened check-sql)))
+                                     value))
+                    (clutch-db-disconnect reopened)))))
           (when (eq clutch-test-backend 'pg)
             (ignore-errors
-              (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))
-          (delete-directory clutch-console-directory t))))))
+              (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))))))))
 
 (ert-deftest clutch-test-live-mysql-console-follows-a-dropped-current-database ()
   :tags '(:clutch-live)
@@ -279,56 +316,32 @@ must not fail either."
   (unless (eq clutch-test-backend 'mysql)
     (ert-skip "This regression covers MySQL's current database"))
   (clutch-test--with-conn admin
-    (let* ((database (format "clutch_drop_%d" (emacs-pid)))
-           (params (append (list :backend 'mysql) (clutch-test--live-connect-params)))
-           (name (clutch--ad-hoc-console-name params))
-           (clutch-console-directory (make-temp-file "clutch-console-" t))
-           (mysql-tls-verify-server nil)
-           console-buffer)
-      (cl-labels ((run (sql)
-                    (clutch--execute sql)
-                    (clutch-test--await-queries))
-                  (server-database ()
-                    (caar (clutch-db-result-rows
-                           (clutch-db-query clutch-connection "SELECT DATABASE()")))))
+    (let ((database (format "clutch_drop_%d" (emacs-pid)))
+          (params (append (list :backend 'mysql) (clutch-test--live-connect-params))))
+      (cl-flet ((server-database ()
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query clutch-connection "SELECT DATABASE()"))))
+                (schema-state ()
+                  (plist-get (clutch--schema-status-entry clutch-connection) :state)))
         (unwind-protect
             (progn
               (clutch-db-query admin (format "CREATE DATABASE %s" database))
-              (clutch-query-console (list :name name :params params))
-              (setq console-buffer (current-buffer))
-              (cl-letf (((symbol-function 'message) #'ignore)
-                        ((symbol-function 'yes-or-no-p) #'always))
-                (run (format "USE %s" database))
+              (clutch-test--with-live-console params
+                (clutch-test--run-in-console (format "USE %s" database))
                 (should (equal (clutch-db-current-schema clutch-connection) database))
-                (run (format "DROP DATABASE %s" database))
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-test--run-in-console (format "DROP DATABASE %s" database)))
                 (should-not (server-database))
                 (should-not (clutch-db-current-schema clutch-connection))
                 (should-not (plist-get clutch--connection-params :database))
-                (clutch-test--await
-                 (lambda ()
-                   (not (eq (plist-get (clutch--schema-status-entry
-                                        clutch-connection)
-                                       :state)
-                            'refreshing))))
-                (should (eq (plist-get (clutch--schema-status-entry
-                                        clutch-connection)
-                                       :state)
-                            'ready))
-                (let ((conn clutch-connection)
-                      (id (caar (clutch-db-result-rows
-                                 (clutch-db-query clutch-connection
-                                                  "SELECT CONNECTION_ID()")))))
-                  (clutch-db-query admin (format "KILL %s" id))
-                  (clutch-test--await
-                   (lambda () (not (clutch--connection-alive-p conn))))
-                  (run "SELECT 1")
-                  (should-not (eq clutch-connection conn))
+                (clutch-test--await (lambda () (not (eq (schema-state) 'refreshing))))
+                (should (eq (schema-state) 'ready))
+                (let ((lost (clutch-test--end-console-session admin)))
+                  (clutch-test--run-in-console "SELECT 1")
+                  (should-not (eq clutch-connection lost))
                   (should-not (server-database)))))
-          (when (buffer-live-p console-buffer)
-            (kill-buffer console-buffer))
           (ignore-errors
-            (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))
-          (delete-directory clutch-console-directory t))))))
+            (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database))))))))
 
 (ert-deftest clutch-test-live-pg-console-follows-the-server-search-path ()
   :tags '(:clutch-live)
@@ -343,13 +356,9 @@ reconnect parameters."
     (let* ((schema (format "clutch_ns_back_%d" (emacs-pid)))
            (moved (format "%s, public" schema))
            (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
-           (name (clutch--ad-hoc-console-name params))
-           (clutch-console-directory (make-temp-file "clutch-console-" t))
-           console-buffer default-path)
+           default-path)
       (cl-labels ((run (&rest statements)
-                    (dolist (sql statements)
-                      (clutch--execute sql)
-                      (clutch-test--await-queries)))
+                    (apply #'clutch-test--run-in-console statements))
                   (server-path ()
                     (caar (clutch-db-result-rows
                            (clutch-db-query clutch-connection "SHOW search_path"))))
@@ -362,10 +371,8 @@ reconnect parameters."
         (unwind-protect
             (progn
               (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
-              (clutch-query-console (list :name name :params params))
-              (setq console-buffer (current-buffer))
-              (setq default-path (server-path))
-              (cl-letf (((symbol-function 'message) #'ignore))
+              (clutch-test--with-live-console params
+                (setq default-path (server-path))
                 (run (format "SET \"search_path\" TO %s -- note" moved))
                 (check moved schema)
                 (run "RESET /* back */ search_path")
@@ -388,11 +395,8 @@ reconnect parameters."
                 (clutch-commit)
                 (check default-path "public")
                 (clutch-toggle-auto-commit)))
-          (when (buffer-live-p console-buffer)
-            (kill-buffer console-buffer))
           (ignore-errors
-            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))
-          (delete-directory clutch-console-directory t))))))
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
 (ert-deftest clutch-test-live-pg-reconnect-restores-only-a-kept-search-path ()
   :tags '(:clutch-live)
@@ -406,48 +410,33 @@ though the server had rolled it back with the transaction."
     (let* ((schema (format "clutch_ns_lost_%d" (emacs-pid)))
            (moved (format "%s, public" schema))
            (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
-           (name (clutch--ad-hoc-console-name params))
-           (clutch-console-directory (make-temp-file "clutch-console-" t))
-           console-buffer default-path)
-      (cl-labels ((run (&rest statements)
-                    (dolist (sql statements)
-                      (clutch--execute sql)
-                      (clutch-test--await-queries)))
-                  (server-path ()
+           default-path)
+      (cl-labels ((server-path ()
                     (caar (clutch-db-result-rows
                            (clutch-db-query clutch-connection "SHOW search_path"))))
                   (path-after-a-lost-connection ()
-                    (let ((conn clutch-connection)
-                          (pid (caar (clutch-db-result-rows
-                                      (clutch-db-query clutch-connection
-                                                       "SELECT pg_backend_pid()")))))
-                      (clutch-db-query
-                       admin (format "SELECT pg_terminate_backend(%s)" pid))
-                      (clutch-test--await
-                       (lambda () (not (clutch--connection-alive-p conn))))
-                      (run "SELECT 1")
-                      (should-not (eq clutch-connection conn))
+                    (let ((lost (clutch-test--end-console-session admin)))
+                      (clutch-test--run-in-console "SELECT 1")
+                      (should-not (eq clutch-connection lost))
                       (server-path))))
         (unwind-protect
             (progn
               (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
-              (clutch-query-console (list :name name :params params))
-              (setq console-buffer (current-buffer))
-              (setq default-path (server-path))
-              (cl-letf (((symbol-function 'message) #'ignore))
-                (run "BEGIN" (format "SET LOCAL search_path TO %s" moved))
+              (clutch-test--with-live-console params
+                (setq default-path (server-path))
+                (clutch-test--run-in-console
+                 "BEGIN" (format "SET LOCAL search_path TO %s" moved))
                 (should (equal (clutch-db-current-schema clutch-connection) schema))
                 (should (equal (path-after-a-lost-connection) default-path))
-                (run "BEGIN" (format "SET search_path TO %s" moved))
+                (clutch-test--run-in-console
+                 "BEGIN" (format "SET search_path TO %s" moved))
                 (should (equal (path-after-a-lost-connection) default-path))
-                (run "BEGIN" (format "SET search_path TO %s" moved)
-                     "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last in its buffer")
+                (clutch-test--run-in-console
+                 "BEGIN" (format "SET search_path TO %s" moved)
+                 "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last in its buffer")
                 (should (equal (path-after-a-lost-connection) moved))))
-          (when (buffer-live-p console-buffer)
-            (kill-buffer console-buffer))
           (ignore-errors
-            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))
-          (delete-directory clutch-console-directory t))))))
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
 (ert-deftest clutch-test-live-pg-rollback-after-a-failed-commit-follows-the-path ()
   :tags '(:clutch-live)
@@ -458,48 +447,38 @@ showing the schema that SET had chosen."
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
   (clutch-test--with-conn admin
-    (let* ((schema (format "clutch_ns_failed_%d" (emacs-pid)))
-           (parent (format "clutch_parent_%d" (emacs-pid)))
-           (child (format "clutch_child_%d" (emacs-pid)))
-           (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
-           (name (clutch--ad-hoc-console-name params))
-           (clutch-console-directory (make-temp-file "clutch-console-" t))
-           console-buffer default-path)
-      (cl-labels ((run (sql)
-                    (clutch--execute sql)
-                    (clutch-test--await-queries)))
-        (unwind-protect
-            (progn
-              (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
-              (clutch-db-query admin (format "CREATE TABLE public.%s (id int PRIMARY KEY)"
-                                             parent))
-              (clutch-db-query
-               admin (format "CREATE TABLE public.%s (pid int REFERENCES public.%s %s)"
-                             child parent "DEFERRABLE INITIALLY DEFERRED"))
-              (clutch-query-console (list :name name :params params))
-              (setq console-buffer (current-buffer))
-              (setq default-path (caar (clutch-db-result-rows
-                                        (clutch-db-query clutch-connection
-                                                         "SHOW search_path"))))
-              (cl-letf (((symbol-function 'message) #'ignore))
+    (let ((schema (format "clutch_ns_failed_%d" (emacs-pid)))
+          (parent (format "clutch_parent_%d" (emacs-pid)))
+          (child (format "clutch_child_%d" (emacs-pid)))
+          (params (append (list :backend 'pg) (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+            (clutch-db-query admin (format "CREATE TABLE public.%s (id int PRIMARY KEY)"
+                                           parent))
+            (clutch-db-query
+             admin (format "CREATE TABLE public.%s (pid int REFERENCES public.%s %s)"
+                           child parent "DEFERRABLE INITIALLY DEFERRED"))
+            (clutch-test--with-live-console params
+              (let ((default-path (caar (clutch-db-result-rows
+                                         (clutch-db-query clutch-connection
+                                                          "SHOW search_path")))))
                 (clutch-toggle-auto-commit)
-                (run (format "SET search_path TO %s, public" schema))
-                (run (format "INSERT INTO public.%s VALUES (1)" child))
+                (clutch-test--run-in-console
+                 (format "SET search_path TO %s, public" schema)
+                 (format "INSERT INTO public.%s VALUES (1)" child))
                 (should (equal (clutch--shown-namespace) schema))
                 (should-error (clutch-commit) :type 'user-error)
                 (clutch-rollback)
                 (should (equal (clutch--shown-namespace) "public"))
                 (should (equal (plist-get clutch--connection-params :search-path)
                                default-path))
-                (clutch-toggle-auto-commit)))
-          (when (buffer-live-p console-buffer)
-            (kill-buffer console-buffer))
-          (ignore-errors
-            (clutch-db-query admin (format "DROP TABLE IF EXISTS public.%s, public.%s"
-                                           child parent)))
-          (ignore-errors
-            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))
-          (delete-directory clutch-console-directory t))))))
+                (clutch-toggle-auto-commit))))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS public.%s, public.%s"
+                                         child parent)))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))))))
 
 (ert-deftest clutch-test-live-reconnect-keeps-manual-commit-mode ()
   :tags '(:clutch-live)
@@ -510,60 +489,32 @@ Reopening a console whose session was lost reconnects it too."
   (unless (memq clutch-test-backend '(mysql pg))
     (ert-skip "This regression covers MySQL and PostgreSQL manual commit"))
   (clutch-test--with-conn admin
-    (let* ((table (format "clutch_manual_%d" (emacs-pid)))
-           (params (append (list :backend clutch-test-backend)
-                           (clutch-test--live-connect-params)))
-           (name (clutch--ad-hoc-console-name params))
-           (clutch-console-directory (make-temp-file "clutch-console-" t))
-           (mysql-tls-verify-server nil)
-           console-buffer)
-      (pcase-let ((`(,id-sql ,kill-format)
-                   (if (eq clutch-test-backend 'mysql)
-                       '("SELECT CONNECTION_ID()" "KILL %s")
-                     '("SELECT pg_backend_pid()" "SELECT pg_terminate_backend(%s)"))))
-        (cl-labels ((run (sql)
-                      (clutch--execute sql)
-                      (clutch-test--await-queries))
-                    (lose-session ()
-                      ;; End the console's session from another one.
-                      (let ((conn clutch-connection)
-                            (id (caar (clutch-db-result-rows
-                                       (clutch-db-query clutch-connection id-sql)))))
-                        (clutch-db-query admin (format kill-format id))
-                        (clutch-test--await
-                         (lambda () (not (clutch--connection-alive-p conn))))
-                        conn)))
-          (unwind-protect
-              (progn
-                (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
-                (clutch-query-console (list :name name :params params))
-                (setq console-buffer (current-buffer))
-                (cl-letf (((symbol-function 'message) #'ignore))
-                  (clutch-toggle-auto-commit)
-                  (let ((lost (lose-session)))
-                    (run "SELECT 1")
-                    (should-not (eq clutch-connection lost)))
-                  (should (clutch-db-manual-commit-p clutch-connection))
-                  (run (format "INSERT INTO %s VALUES (1)" table))
-                  (clutch-rollback)
-                  (should (equal (caar (clutch-db-result-rows
-                                        (clutch-db-query
-                                         admin (format "SELECT COUNT(*) FROM %s"
-                                                       table))))
-                                 0))
-                  (let ((lost (lose-session)))
-                    (clutch-query-console (list :name name :params params))
-                    (with-current-buffer console-buffer
-                      (should-not (eq clutch-connection lost))
-                      (should (clutch-db-manual-commit-p clutch-connection))
-                      (clutch-toggle-auto-commit)))))
-            (when (buffer-live-p console-buffer)
-              ;; A failure above can leave uncommitted work to confirm away.
-              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
-                (kill-buffer console-buffer)))
-            (ignore-errors
-              (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))
-            (delete-directory clutch-console-directory t)))))))
+    (let ((table (format "clutch_manual_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+            (clutch-test--with-live-console params
+              (clutch-toggle-auto-commit)
+              (let ((lost (clutch-test--end-console-session admin)))
+                (clutch-test--run-in-console "SELECT 1")
+                (should-not (eq clutch-connection lost)))
+              (should (clutch-db-manual-commit-p clutch-connection))
+              (clutch-test--run-in-console (format "INSERT INTO %s VALUES (1)" table))
+              (clutch-rollback)
+              (should (equal (caar (clutch-db-result-rows
+                                    (clutch-db-query
+                                     admin (format "SELECT COUNT(*) FROM %s" table))))
+                             0))
+              (let ((console (current-buffer))
+                    (lost (clutch-test--end-console-session admin)))
+                (should (eq (clutch-test--open-live-console params) console))
+                (should-not (eq clutch-connection lost))
+                (should (clutch-db-manual-commit-p clutch-connection)))
+              (clutch-toggle-auto-commit)))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
   :tags '(:clutch-live :duckdb-live)
