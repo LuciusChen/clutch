@@ -1191,7 +1191,8 @@ REGION is the statement's source region, or nil.  Database failures reach
 K under :error.  A statement that finishes synchronously calls K after
 this function's quit handling.  Query-phase quits recover the connection
 and signal `clutch-query-interrupted'."
-  (let ((dispatching t) released dispatched inline-outcome)
+  (let ((dispatching t) released dispatched inline-outcome
+        (shown (clutch--shown-namespace)))
     (clutch-db--reserve-connection connection)
     (cl-labels
         ((release ()
@@ -1257,7 +1258,7 @@ and signal `clutch-query-interrupted'."
                                         (when (clutch-db-namespace-switch-p
                                                connection sql)
                                           (clutch--note-namespace-switch
-                                           connection))
+                                           connection shown))
                                         (list :result result
                                               :connection connection
                                               :elapsed elapsed

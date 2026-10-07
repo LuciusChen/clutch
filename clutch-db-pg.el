@@ -59,9 +59,12 @@
 (cl-defstruct (clutch-db-pg--connection
                (:constructor clutch-db-pg--make-connection)
                (:copier nil))
-  "Clutch-owned state for one pgsql.el connection."
+  "Clutch-owned state for one pgsql.el connection.
+CURRENT-SCHEMA and SEARCH-PATH cache what the server last said, nil when
+it was not asked since; CURRENT-SCHEMA is `none' when it said NULL."
   client
   current-schema
+  search-path
   manual-commit)
 
 (defun clutch-db-pg--ensure-client-api ()
@@ -309,9 +312,10 @@ set_config, DO and CALL can change it too, but are not followed."
           '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END")))
 
 (defun clutch-db-pg--follow-search-path (conn sql)
-  "Forget CONN's cached current schema when SQL may have changed it."
+  "Forget what CONN knows of its search_path when SQL may have changed it."
   (when (clutch-db-pg--namespace-statement-p sql)
-    (clutch-db-pg--cache-current-schema conn nil)))
+    (setf (clutch-db-pg--connection-current-schema conn) nil
+          (clutch-db-pg--connection-search-path conn) nil)))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
@@ -854,13 +858,18 @@ ORDER BY schema_name")))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-db-pg--connection))
-  "Return the current effective schema for PostgreSQL CONN."
-  (or (clutch-db-pg--connection-current-schema conn)
+  "Return the current effective schema for PostgreSQL CONN.
+A path that names no existing schema gives nil, which is remembered too,
+so the mode line does not ask again until the path may change."
+  (let ((cached (clutch-db-pg--connection-current-schema conn)))
+    (if cached
+        (unless (eq cached 'none) cached)
       (clutch-db--translate-library-error pgsql-error
         (let* ((result (clutch-db-pg--exec conn "SELECT current_schema()"))
                (schema (caar (clutch-db-pg--metadata-rows result))))
-          (when schema
-            (clutch-db-pg--cache-current-schema conn schema))))))
+          (setf (clutch-db-pg--connection-current-schema conn)
+                (or schema 'none))
+          schema)))))
 
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-db-pg--connection) schema)
   "Switch PostgreSQL CONN to SCHEMA via search_path."
@@ -875,11 +884,15 @@ ORDER BY schema_name")))
     ((conn clutch-db-pg--connection) params)
   "Store PostgreSQL CONN's search_path in a copy of connection PARAMS.
 A reconnect sets the whole path again: the current schema alone would
-leave out the other schemas of a path such as alt, public."
+leave out the other schemas of a path such as alt, public.  The path is
+asked for once, then remembered, as every buffer on CONN needs it."
   (plist-put (copy-sequence params) :search-path
-             (clutch-db--translate-library-error pgsql-error
-               (caar (clutch-db-pg--metadata-rows
-                      (clutch-db-pg--exec conn "SHOW search_path"))))))
+             (or (clutch-db-pg--connection-search-path conn)
+                 (setf (clutch-db-pg--connection-search-path conn)
+                       (clutch-db--translate-library-error pgsql-error
+                         (caar (clutch-db-pg--metadata-rows
+                                (clutch-db-pg--exec
+                                 conn "SHOW search_path"))))))))
 
 (clutch-db--define-idle-metadata-methods clutch-db-pg--connection "PostgreSQL")
 
@@ -1299,9 +1312,11 @@ ORDER BY c.ordinal_position"
 
 (defun clutch-db-pg-xtdb-connect (params)
   "Connect to XTDB using PARAMS, which take the PostgreSQL keys.
-XTDB cannot switch its current schema, so PARAMS may not set :schema."
-  (when (plist-get params :schema)
-    (user-error "XTDB cannot switch its current schema; remove :schema"))
+XTDB cannot switch its current schema, so PARAMS may set neither :schema
+nor :search-path."
+  (when (or (plist-get params :schema) (plist-get params :search-path))
+    (user-error
+     "XTDB cannot switch its current schema; remove :schema and :search-path"))
   (clutch-db-pg-connect params #'clutch-db-pg--make-xtdb-connection))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-pg--xtdb-connection))

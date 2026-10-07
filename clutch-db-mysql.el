@@ -266,9 +266,18 @@ Return nil when TEXT has no Syntax section."
 (defun clutch-db-mysql--follow-use (conn sql)
   "Record the database that SQL, when a successful USE, moved CONN to.
 mysql.el keeps the database that `mysql-select-database' chose, so a USE
-typed into a console would leave it on the previous one."
+typed into a console would leave it on the previous one.  Failing to ask
+the server is only reported, after a timeout has resynchronized or closed
+CONN: the USE itself succeeded."
   (when (clutch-db-mysql--use-statement-p sql)
-    (mysql-refresh-current-database conn)))
+    (condition-case err
+        (condition-case timeout
+            (mysql-refresh-current-database conn)
+          (mysql-timeout
+           (clutch-db-mysql--handle-query-timeout conn timeout)))
+      ((clutch-db-error mysql-error)
+       (message "Could not read the current database back: %s"
+                (error-message-string err))))))
 
 ;;;; Lifecycle methods
 
@@ -397,16 +406,13 @@ Decline when the installed mysql.el cannot execute asynchronously."
       (mysql-query-async
        conn sql
        (lambda (result error)
-         ;; CONN is idle when this runs.  The statement's outcome is
-         ;; delivered even when recording its database fails.
-         (unwind-protect
-             (when result
-               (clutch-db-mysql--follow-use conn sql))
-           (funcall callback
-                    (and result (clutch-db-mysql--wrap-result result))
-                    (and error
-                         (list 'clutch-db-error
-                               (error-message-string error))))))))
+         ;; CONN is idle when this runs.
+         (when result
+           (clutch-db-mysql--follow-use conn sql))
+         (funcall callback
+                  (and result (clutch-db-mysql--wrap-result result))
+                  (and error
+                       (list 'clutch-db-error (error-message-string error)))))))
     t))
 
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
