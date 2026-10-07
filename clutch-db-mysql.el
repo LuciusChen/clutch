@@ -481,10 +481,17 @@ Decline when the installed mysql.el cannot execute asynchronously."
 (clutch-db--define-idle-metadata-methods mysql-conn "MySQL")
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-conn))
-  "Return table names for the current MySQL database on CONN."
+  "Return table names for the current MySQL database on CONN.
+A session with no current database has none, where SHOW TABLES fails
+with error 1046.  The server decides that, not mysql.el, which may have
+missed a USE or a DROP that changed the database."
   (clutch-db--translate-library-error mysql-error
-    (let ((result (mysql-query conn "SHOW TABLES")))
-      (mapcar #'car (mysql-result-rows result)))))
+    (condition-case err
+        (mapcar #'car (mysql-result-rows (mysql-query conn "SHOW TABLES")))
+      (mysql-query-error
+       ;; mysql.el reports a server error as "[CODE] (STATE) MESSAGE".
+       (unless (string-prefix-p "[1046]" (cadr err))
+         (signal (car err) (cdr err)))))))
 
 (cl-defmethod clutch-db-list-schemas ((conn mysql-conn))
   "Return visible MySQL schema/database names for CONN."
