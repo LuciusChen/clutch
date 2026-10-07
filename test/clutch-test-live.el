@@ -274,16 +274,17 @@ is on MySQL or PostgreSQL."
   "A console should follow a namespace switch typed into it.
 It went on showing and loading the namespace it opened with, and its
 parameters reconnected to that one.  PostgreSQL keeps the whole path.
-Oracle lists the tables of the schema it moved to, and connecting with
-its parameters starts there."
-  (unless (memq clutch-test-backend '(mysql pg oracle))
-    (ert-skip "This regression covers MySQL USE, PostgreSQL SET search_path and Oracle ALTER SESSION"))
+Oracle and DuckDB list the tables of the schema they moved to, and
+connecting with the console's parameters starts there."
+  (unless (memq (clutch-test-live-backend-id) '(mysql pg oracle duckdb))
+    (ert-skip "This regression covers MySQL USE, PostgreSQL SET search_path, Oracle ALTER SESSION and DuckDB USE"))
   (clutch-test--with-conn admin
-    (let ((schema (format "clutch_ns_%d" (emacs-pid)))
+    (let ((backend (clutch-test-live-backend-id))
+          (schema (format "clutch_ns_%d" (emacs-pid)))
           (params (append (list :backend clutch-test-backend)
                           (clutch-test--live-connect-params))))
       (pcase-let ((`(,switch ,namespace ,key ,value ,check-sql)
-                   (pcase clutch-test-backend
+                   (pcase backend
                      ('mysql
                       '("USE information_schema" "information_schema"
                         :database "information_schema" "SELECT DATABASE()"))
@@ -294,19 +295,26 @@ its parameters starts there."
                      ('oracle
                       (list (format "ALTER SESSION SET CURRENT_SCHEMA = %s" schema)
                             (upcase schema) :schema (upcase schema)
-                            "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))))
+                            "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"))
+                     ('duckdb
+                      (list (format "USE %s" schema) schema :schema schema
+                            "SELECT current_schema()")))))
         (unwind-protect
             (progn
-              (pcase clutch-test-backend
+              (pcase backend
                 ('pg (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
                 ('oracle
                  (clutch-db-query
                   admin (format "CREATE USER %s IDENTIFIED BY \"Clutch_ns1\" QUOTA UNLIMITED ON users"
                                 schema))
                  (clutch-db-query
-                  admin (format "CREATE TABLE %s.only_here (id NUMBER)" schema))))
+                  admin (format "CREATE TABLE %s.only_here (id NUMBER)" schema)))
+                ('duckdb
+                 (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+                 (clutch-db-query
+                  admin (format "CREATE TABLE %s.only_here (id INTEGER)" schema))))
               (clutch-test--with-live-console params
-                (when (eq clutch-test-backend 'oracle)
+                (when (eq backend 'oracle)
                   (clutch-test--run-in-console
                    (format "INSERT INTO %s.only_here VALUES (1)" schema))
                   (should (clutch--tx-dirty-p clutch-connection)))
@@ -316,7 +324,10 @@ its parameters starts there."
                 (should (equal (clutch-db-current-schema clutch-connection)
                                namespace))
                 (should (equal (plist-get clutch--connection-params key) value))
-                (when (eq clutch-test-backend 'oracle)
+                (when (memq backend '(oracle duckdb))
+                  (should (clutch-test--live-name-member-p
+                           "only_here" (clutch-db-list-tables clutch-connection))))
+                (when (eq backend 'oracle)
                   ;; ALTER SESSION commits nothing, so the insert is still
                   ;; uncommitted work.
                   (should (clutch--tx-dirty-p clutch-connection))
@@ -326,9 +337,7 @@ its parameters starts there."
                                                 (clutch-db-query
                                                  admin (format "SELECT COUNT(*) FROM %s.only_here"
                                                                schema)))))
-                                 "0"))
-                  (should (clutch-test--live-name-member-p
-                           "ONLY_HERE" (clutch-db-list-tables clutch-connection))))
+                                 "0")))
                 (let ((reopened (clutch-db-connect clutch-test-backend
                                                    clutch--connection-params)))
                   (unwind-protect
@@ -336,13 +345,57 @@ its parameters starts there."
                                             (clutch-db-query reopened check-sql)))
                                      value))
                     (clutch-db-disconnect reopened)))))
-          (pcase clutch-test-backend
+          (pcase backend
             ('pg
              (ignore-errors
                (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))
             ('oracle
              (ignore-errors
-               (clutch-db-query admin (format "DROP USER %s CASCADE" schema))))))))))
+               (clutch-db-query admin (format "DROP USER %s CASCADE" schema))))
+            ('duckdb
+             (ignore-errors
+               (clutch-db-query
+                admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))))
+
+(ert-deftest clutch-test-live-duckdb-reconnect-stays-out-of-attached-databases ()
+  :tags '(:clutch-live :duckdb-live)
+  "A DuckDB console moved into an attached database should keep its parameters.
+A reconnect cannot return to an attached database, so the parameters
+keep naming the database the URL opens, and connecting with them starts
+there."
+  (unless (eq (clutch-test-live-backend-id) 'duckdb)
+    (ert-skip "Live backend is not DuckDB"))
+  (let ((attached (concat (make-temp-name
+                           (expand-file-name "clutch-att-" temporary-file-directory))
+                          ".duckdb"))
+        (alias (format "clutch_att_%d" (emacs-pid)))
+        (params (append (list :backend clutch-test-backend)
+                        (clutch-test--live-connect-params))))
+    (unwind-protect
+        (clutch-test--with-live-console params
+          (let ((before clutch--connection-params))
+            (clutch-test--run-in-console
+             (format "ATTACH '%s' AS %s" attached alias)
+             (format "CREATE SCHEMA %s.side" alias)
+             (format "USE %s.side" alias))
+            (should (equal (caar (clutch-db-result-rows
+                                  (clutch-db-query clutch-connection
+                                                   "SELECT current_catalog()")))
+                           alias))
+            (should (equal clutch--connection-params before))
+            (let* ((reopened (clutch-db-connect clutch-test-backend
+                                                clutch--connection-params))
+                   (home (unwind-protect
+                             (caar (clutch-db-result-rows
+                                    (clutch-db-query reopened
+                                                     "SELECT current_catalog()")))
+                           (clutch-db-disconnect reopened))))
+              (should-not (equal home alias))
+              (clutch-test--run-in-console (format "USE %s" home)
+                                           (format "DETACH %s" alias)))))
+      (dolist (file (list attached (concat attached ".wal")))
+        (when (file-exists-p file)
+          (delete-file file))))))
 
 (ert-deftest clutch-test-live-oracle-reconnect-keeps-a-quoted-schema-name ()
   :tags '(:clutch-live)

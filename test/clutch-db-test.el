@@ -997,6 +997,123 @@ and a `?' inside a dollar-quoted function body is part of the body."
                (make-clutch-jdbc-conn :params '(:driver sqlserver))
                "CREATE TABLE t (id int)")))
 
+(ert-deftest clutch-db-test-jdbc-duckdb-follows-a-typed-namespace-switch ()
+  "A USE, SET or RESET run on DuckDB should move Clutch into the namespace it set.
+Clutch reconnected to the namespace the connection was opened with, and
+its metadata stayed there.  A reconnect cannot return to an attached
+database or to an in-memory one, so those leave the parameters alone."
+  (let ((server '("analytics" "main" "/tmp/analytics.duckdb"))
+        executed)
+    (cl-flet ((conn (&optional (url "jdbc:duckdb:/tmp/analytics.duckdb"))
+                (make-clutch-jdbc-conn :conn-id 8 :params (list :driver 'jdbc :url url)))
+              (run (conn sql moved-to)
+                (setq server (or moved-to server))
+                (clutch-db-query conn sql)
+                (clutch-db-update-namespace-params
+                 conn (list :url (plist-get (clutch-jdbc-conn-params conn) :url)))))
+      (cl-letf (((symbol-function 'clutch-jdbc--execute-rpc)
+                 (lambda (_conn _op payload)
+                   (let ((sql (alist-get 'sql payload)))
+                     (push sql executed)
+                     (make-clutch-db-result
+                      :rows (and (string-match-p "current_catalog" sql)
+                                 (list server)))))))
+        (ert-info ("USE in the database the URL opens is followed")
+          (let ((conn (conn)))
+            (should (clutch-db-namespace-switch-p conn "USE sales"))
+            (should (equal (run conn "USE sales"
+                                '("analytics" "sales" "/tmp/analytics.duckdb"))
+                           '(:url "jdbc:duckdb:/tmp/analytics.duckdb"
+                             :catalog "analytics" :schema "sales")))
+            (should (equal (clutch-db-current-schema conn) "sales"))))
+        (ert-info ("SET and RESET are asked about; one that moves nothing changes nothing")
+          (let ((conn (conn)))
+            (should (clutch-db-namespace-switch-p conn "SET threads = 4"))
+            (should (clutch-db-namespace-switch-p conn "RESET search_path"))
+            (should (equal (run conn "SET threads = 4"
+                                '("analytics" "main" "/tmp/analytics.duckdb"))
+                           '(:url "jdbc:duckdb:/tmp/analytics.duckdb")))))
+        (ert-info ("an attached database is not one a reconnect can return to")
+          (let ((conn (conn)))
+            (should (equal (run conn "USE att.side" '("att" "side" "/tmp/att.duckdb"))
+                           '(:url "jdbc:duckdb:/tmp/analytics.duckdb")))
+            (should (equal (plist-get (clutch-jdbc-conn-params conn) :catalog) "att"))))
+        (ert-info ("properties after a semicolon are not part of the file")
+          (let ((conn (conn "jdbc:duckdb:/tmp/analytics.duckdb;threads=2")))
+            (should (equal (run conn "USE sales"
+                                '("analytics" "sales" "/tmp/analytics.duckdb"))
+                           '(:url "jdbc:duckdb:/tmp/analytics.duckdb;threads=2"
+                             :catalog "analytics" :schema "sales")))))
+        (ert-info ("a link to the database file names the same file")
+          (let* ((dir (make-temp-file "clutch-duckdb-" t))
+                 (link (concat dir "-link"))
+                 (url (concat "jdbc:duckdb:" link "/a.duckdb")))
+            (unwind-protect
+                (progn
+                  (make-symbolic-link dir link)
+                  (should (equal (run (conn url) "USE sales"
+                                      (list "a" "sales" (concat dir "/a.duckdb")))
+                                 (list :url url :catalog "a" :schema "sales"))))
+              (delete-file link)
+              (delete-directory dir t))))
+        (ert-info ("a namespace DuckDB cannot name is a database error")
+          (let ((conn (conn)))
+            (setq server '("analytics" nil nil))
+            (should-error (clutch-db-current-schema conn) :type 'clutch-db-error)))
+        (ert-info ("nor is an in-memory database")
+          (let ((conn (conn "jdbc:duckdb:")))
+            (should (equal (run conn "USE s1" '("memory" "s1" nil))
+                           '(:url "jdbc:duckdb:")))))
+        (ert-info ("other statements are not followed")
+          (setq executed nil)
+          (let ((conn (conn)))
+            (clutch-db-query conn "SELECT 1")
+            (should (equal executed '("SELECT 1")))
+            (should-not (clutch-db-namespace-switch-p conn "SELECT 1"))))))))
+
+(ert-deftest clutch-db-test-jdbc-duckdb-connect-starts-in-its-namespace ()
+  "A DuckDB connection that names a schema should start its session in it.
+It started in the database's main schema, so after `clutch-switch-schema'
+or a USE the automatic reconnect lost the schema."
+  (let (executed disconnected)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op _params &optional _timeout-seconds)
+                 (should (equal op "connect"))
+                 '(:conn-id 9)))
+              ((symbol-function 'clutch-jdbc--execute-rpc)
+               (lambda (_conn _op payload)
+                 (let ((sql (alist-get 'sql payload)))
+                   (push sql executed)
+                   (when (string-match-p "gone\\|nope" sql)
+                     (signal 'clutch-db-error
+                             '("Catalog Error: SET schema: No catalog + schema found")))
+                   (make-clutch-db-result
+                    :rows (and (string-match-p "current_catalog" sql)
+                               '(("analytics" "sales" "/tmp/analytics.duckdb")))))))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (conn) (setq disconnected conn))))
+      (cl-flet ((connect (&rest extra)
+                  (setq executed nil disconnected nil)
+                  (clutch-db-jdbc-connect
+                   'jdbc (append extra '(:url "jdbc:duckdb:/tmp/analytics.duckdb"
+                                         :driver-class "org.duckdb.DuckDBDriver")))))
+        (let ((conn (connect :catalog "analytics" :schema "sales")))
+          (should (equal (car (last executed)) "USE \"analytics\".\"sales\""))
+          (should (equal (clutch-db-current-schema conn) "sales")))
+        (connect :schema "sales")
+        (should (equal (car (last executed)) "USE \"sales\""))
+        (connect)
+        (should-not executed)
+        (should (equal (cadr (should-error (connect :schema "gone")
+                                           :type 'clutch-db-error))
+                       "Could not start in schema gone: Catalog Error: SET schema: No catalog + schema found"))
+        (should (= (clutch-jdbc-conn-conn-id disconnected) 9))
+        (should (equal (cadr (should-error (connect :catalog "nope" :schema "main")
+                                           :type 'clutch-db-error))
+                       "Could not start in schema nope.main: Catalog Error: SET schema: No catalog + schema found"))))))
+
 (ert-deftest clutch-db-test-jdbc-oracle-session-control-keeps-the-transaction ()
   "An Oracle ALTER SESSION or ALTER SYSTEM should keep the transaction's state.
 They commit nothing, but were taken for DDL, which commits on Oracle, so
@@ -9267,7 +9384,8 @@ the statement's terminator and removed, changing the value returned."
                    (make-clutch-db-result
                     :rows '(("main") ("sales") ("odd.schema"))))
                   ((string-match-p "current_catalog" sql)
-                   (make-clutch-db-result :rows '(("analytics" "main"))))
+                   (make-clutch-db-result
+                    :rows '(("analytics" "main" "/tmp/analytics.duckdb"))))
                   ((string-prefix-p "USE " sql)
                    (make-clutch-db-result :rows nil))
                   (t (ert-fail (format "Unexpected SQL: %s" sql)))))))
@@ -9284,6 +9402,10 @@ the statement's terminator and removed, changing the value returned."
                      "analytics"))
       (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
                      "odd.schema"))
+      (should (equal (clutch-db-update-namespace-params
+                      conn '(:url "jdbc:duckdb:/tmp/analytics.duckdb"))
+                     '(:url "jdbc:duckdb:/tmp/analytics.duckdb"
+                       :catalog "analytics" :schema "odd.schema")))
       (should-not
        (clutch-db-list-schemas
         (make-clutch-jdbc-conn
