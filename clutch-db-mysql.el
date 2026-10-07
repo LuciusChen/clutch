@@ -316,8 +316,11 @@ itself succeeded."
                    (progn
                      (setq killer
                            (apply #'mysql-connect
+                                  ;; KILL QUERY needs no database, and the one
+                                  ;; CONN was opened on may have been dropped.
                                   (plist-put
-                                   (copy-sequence params)
+                                   (plist-put (copy-sequence params)
+                                              :database nil)
                                    :read-idle-timeout
                                    clutch-db-mysql-cancel-timeout-seconds)))
                      (mysql-query killer (format "KILL QUERY %d" thread-id))

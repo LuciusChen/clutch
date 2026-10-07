@@ -5427,9 +5427,10 @@ out, so its tables no longer resolved unqualified after a reconnect."
       (should (string-match-p "Conflicting" (error-message-string err))))))
 
 (ert-deftest clutch-db-test-mysql-interrupt-kills-query-and-drains-original-conn ()
-  "MySQL interrupt should kill through a helper connection.
-Only a synchronous query is drained; an asynchronous one reads its own
-verdict."
+  "MySQL interrupt should kill through a helper connection that names no database.
+KILL QUERY needs none, and the one the connection was opened on may have
+been dropped since.  Only a synchronous query is drained; an asynchronous
+one reads its own verdict."
   (require 'clutch-db-mysql)
   (require 'mysql)
   (let* ((conn (make-mysql-conn :host "127.0.0.1"
@@ -5473,6 +5474,7 @@ verdict."
       (should (clutch-db-interrupt-query conn))
       (should (equal captured-sql "KILL QUERY 123"))
       (should (equal (plist-get captured-connect-args :password) "secret"))
+      (should-not (plist-get captured-connect-args :database))
       (should (equal (plist-get captured-connect-args :read-idle-timeout)
                      clutch-db-mysql-cancel-timeout-seconds))
       (should drained)
