@@ -274,7 +274,8 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
   :tags '(:clutch-live)
   "A MySQL console should have no database once its current one is dropped.
 It went on showing the dropped database, and its automatic reconnect
-asked for that database and failed."
+asked for that database and failed.  Loading the tables of no database
+must not fail either."
   (unless (eq clutch-test-backend 'mysql)
     (ert-skip "This regression covers MySQL's current database"))
   (clutch-test--with-conn admin
@@ -303,6 +304,16 @@ asked for that database and failed."
                 (should-not (server-database))
                 (should-not (clutch-db-current-schema clutch-connection))
                 (should-not (plist-get clutch--connection-params :database))
+                (clutch-test--await
+                 (lambda ()
+                   (not (eq (plist-get (clutch--schema-status-entry
+                                        clutch-connection)
+                                       :state)
+                            'refreshing))))
+                (should (eq (plist-get (clutch--schema-status-entry
+                                        clutch-connection)
+                                       :state)
+                            'ready))
                 (let ((conn clutch-connection)
                       (id (caar (clutch-db-result-rows
                                  (clutch-db-query clutch-connection
