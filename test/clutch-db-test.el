@@ -5170,20 +5170,24 @@ transaction keeps the path, and PREPARE TRANSACTION keeps a plain SET."
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
           (path "public")
-          (status 'idle))
+          (status 'idle)
+          next)
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
-                   (clutch-db-test--make-pg-result
-                    :rows (and (equal sql "SHOW search_path") `((,path))))))
+                   (if (equal sql "SHOW search_path")
+                       (clutch-db-test--make-pg-result :rows `((,path)))
+                     ;; Running SQL leaves the server where the step says.
+                     (setq status (car next)
+                           path (cadr next))
+                     (clutch-db-test--make-pg-result))))
                 ((symbol-function 'pgsql-exec-async)
                  (lambda (client sql callback)
                    (funcall callback (pgsql-exec client sql) nil)))
                 ((symbol-function 'pgsql-transaction-status)
                  (lambda (_client) status)))
         (cl-flet ((reconnect-path (sql status-after path-after &optional async)
-                    ;; The server has PATH-AFTER and STATUS-AFTER once SQL ran.
-                    (setq status status-after
-                          path path-after)
+                    ;; Once SQL ran, the server has PATH-AFTER and STATUS-AFTER.
+                    (setq next (list status-after path-after))
                     (if async
                         (clutch-db-query-async conn sql #'ignore)
                       (clutch-db-query conn sql))
@@ -5213,11 +5217,39 @@ transaction keeps the path, and PREPARE TRANSACTION keeps a plain SET."
           (should (equal (reconnect-path "COMMIT AND CHAIN"
                                          'in-transaction "beta")
                          "beta"))
+          (should (equal (reconnect-path "COMMIT AND CHAIN -- the console's last"
+                                         'in-transaction "delta")
+                         "delta"))
+          ;; The REPL sends a line of statements together.
+          (should (equal (reconnect-path "COMMIT; BEGIN; SET search_path TO gamma"
+                                         'in-transaction "gamma")
+                         "before"))
           (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
                                          'in-transaction "gamma")
                          "before"))
           (should (equal (reconnect-path "PREPARE TRANSACTION 'p'" 'idle "beta")
                          "beta")))))))
+
+(ert-deftest clutch-db-test-pg-transaction-commands-ask-for-the-path-again ()
+  "PostgreSQL commit and rollback should ask for the path with none open too.
+A COMMIT that fails rolls its transaction back, the SET made in it too,
+but the console went on showing that SET's schema after clutch-rollback,
+as the adapter found no transaction to end and kept its cached path."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (clutch-db-test--make-pg-result
+                    :rows (and (equal sql "SELECT current_schema()")
+                               '(("public"))))))
+                ((symbol-function 'pgsql-transaction-status)
+                 (lambda (_client) 'idle)))
+        (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit
+                              (lambda (conn) (clutch-db-set-auto-commit conn t))))
+          (clutch-db-pg--cache-current-schema conn "alt")
+          (should-not (funcall finish conn))
+          (should (equal (clutch-db-current-schema conn) "public")))))))
 
 (ert-deftest clutch-db-test-pg-connect-restores-a-whole-search-path ()
   "PostgreSQL connect should restore a whole search_path in place of a schema.
