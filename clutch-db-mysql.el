@@ -367,7 +367,8 @@ itself succeeded."
 (cl-defmethod clutch-db-set-auto-commit ((conn mysql-conn) auto-commit)
   "Set autocommit mode on MySQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
-  (mysql-set-autocommit conn auto-commit))
+  (clutch-db--translate-library-error mysql-error
+    (mysql-set-autocommit conn auto-commit)))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
   ((conn mysql-conn) function)
