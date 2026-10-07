@@ -50,6 +50,7 @@
 (declare-function mysql-prepare "mysql" (conn sql))
 (declare-function mysql-query "mysql" (conn sql))
 (declare-function mysql-query-async "mysql" (conn sql callback))
+(declare-function mysql-refresh-current-database "mysql" (conn))
 (declare-function mysql-result-affected-rows "mysql" (object))
 (declare-function mysql-result-columns "mysql" (object))
 (declare-function mysql-result-connection "mysql" (object))
@@ -257,6 +258,27 @@ Return nil when TEXT has no Syntax section."
                                         (lambda (a b)
                                           (< (car a) (car b))))))))))
 
+(defun clutch-db-mysql--use-statement-p (sql)
+  "Return non-nil when SQL is a USE whose database mysql.el can record."
+  (and (fboundp 'mysql-refresh-current-database)
+       (equal (clutch-db-sql-leading-keyword sql) "USE")))
+
+(defun clutch-db-mysql--follow-use (conn sql)
+  "Record the database that SQL, when a successful USE, moved CONN to.
+mysql.el keeps the database that `mysql-select-database' chose, so a USE
+typed into a console would leave it on the previous one.  Failing to ask
+the server is only reported, after a timeout has resynchronized or closed
+CONN: the USE itself succeeded."
+  (when (clutch-db-mysql--use-statement-p sql)
+    (condition-case err
+        (condition-case timeout
+            (mysql-refresh-current-database conn)
+          (mysql-timeout
+           (clutch-db-mysql--handle-query-timeout conn timeout)))
+      ((clutch-db-error mysql-error)
+       (message "Could not read the current database back: %s"
+                (error-message-string err))))))
+
 ;;;; Lifecycle methods
 
 (when (require 'mysql nil t)
@@ -368,7 +390,8 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
 (cl-defmethod clutch-db-query ((conn mysql-conn) sql)
   "Execute SQL on MySQL CONN, returning a `clutch-db-result'."
   (condition-case err
-      (clutch-db-mysql--wrap-result (mysql-query conn sql))
+      (prog1 (clutch-db-mysql--wrap-result (mysql-query conn sql))
+        (clutch-db-mysql--follow-use conn sql))
     (mysql-timeout
      (clutch-db-mysql--handle-query-timeout conn err))
     (mysql-error
@@ -383,6 +406,9 @@ Decline when the installed mysql.el cannot execute asynchronously."
       (mysql-query-async
        conn sql
        (lambda (result error)
+         ;; CONN is idle when this runs.
+         (when result
+           (clutch-db-mysql--follow-use conn sql))
          (funcall callback
                   (and result (clutch-db-mysql--wrap-result result))
                   (and error
@@ -470,6 +496,10 @@ Decline when the installed mysql.el cannot execute asynchronously."
   "Switch MySQL CONN to SCHEMA."
   (clutch-db--translate-library-error mysql-error
     (mysql-select-database conn schema)))
+
+(cl-defmethod clutch-db-namespace-switch-p ((_conn mysql-conn) sql)
+  "Return non-nil when SQL is a USE whose database mysql.el records."
+  (clutch-db-mysql--use-statement-p sql))
 
 (cl-defmethod clutch-db-update-namespace-params ((conn mysql-conn) params)
   "Store MySQL CONN's current database in a copy of connection PARAMS."

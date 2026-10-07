@@ -48,6 +48,7 @@
 (declare-function pgsql-port "pgsql" (connection))
 (declare-function pgsql-result-affected-rows "pgsql" (result))
 (declare-function pgsql-result-columns "pgsql" (result))
+(declare-function pgsql-result-command-tag "pgsql" (result))
 (declare-function pgsql-result-rows "pgsql" (result))
 (declare-function pgsql-transaction-status "pgsql" (connection))
 (declare-function pgsql-type-name "pgsql" (oid))
@@ -59,9 +60,15 @@
 (cl-defstruct (clutch-db-pg--connection
                (:constructor clutch-db-pg--make-connection)
                (:copier nil))
-  "Clutch-owned state for one pgsql.el connection."
+  "Clutch-owned state for one pgsql.el connection.
+CURRENT-SCHEMA and SEARCH-PATH cache what the server last said, nil when
+it was not asked since; CURRENT-SCHEMA is `none' when it said NULL.
+PATH-SETTLED is non-nil once the path no longer depends on an open
+transaction, which a lost connection rolls back."
   client
   current-schema
+  search-path
+  path-settled
   manual-commit)
 
 (defun clutch-db-pg--ensure-client-api ()
@@ -283,7 +290,9 @@
 
 (defun clutch-db-pg--exec (conn sql)
   "Execute SQL through the pgsql.el client owned by CONN."
-  (pgsql-exec (clutch-db-pg--connection-client conn) sql))
+  (let ((result (pgsql-exec (clutch-db-pg--connection-client conn) sql)))
+    (clutch-db-pg--follow-search-path conn sql result)
+    result))
 
 (defun clutch-db-pg--cache-current-schema (conn schema)
   "Cache SCHEMA as the current schema for CONN."
@@ -297,6 +306,36 @@
              (format "SET search_path TO %s"
                      (pgsql-escape-identifier schema)))
     (clutch-db-pg--cache-current-schema conn schema)))
+
+(defun clutch-db-pg--namespace-statement-p (sql)
+  "Return non-nil for SQL after which the search_path may differ.
+SET, RESET and DISCARD can change it.  So can the end of a transaction:
+a rollback undoes a SET made inside it, and any end, PREPARE TRANSACTION
+too, undoes SET LOCAL.  Only the leading keyword counts, and the server
+then says what the path is.  SELECT set_config, DO and CALL can change
+it too, but are not followed."
+  (member (clutch-db-sql-leading-keyword sql)
+          '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END"
+            "PREPARE")))
+
+(defun clutch-db-pg--forget-search-path (conn &optional committed)
+  "Make CONN ask the server for its search_path again.
+Also note whether the path is settled.  A lost connection rolls back an
+open transaction, and a SET made in it, so the path is settled when none
+is open, or when COMMITTED, just after a COMMIT that chained the next one."
+  (setf (clutch-db-pg--connection-current-schema conn) nil
+        (clutch-db-pg--connection-search-path conn) nil
+        (clutch-db-pg--connection-path-settled conn)
+        (or committed (not (clutch-db-pg--tx-open-p conn)))))
+
+(defun clutch-db-pg--follow-search-path (conn sql result)
+  "Forget what CONN knows of its search_path when SQL may have changed it.
+RESULT is SQL's result.  The server tags it COMMIT after a COMMIT or END,
+chained or not, and ROLLBACK after any rollback, a COMMIT of a failed
+transaction included, so a COMMIT tag committed the path."
+  (when (clutch-db-pg--namespace-statement-p sql)
+    (clutch-db-pg--forget-search-path
+     conn (equal (pgsql-result-command-tag result) "COMMIT"))))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
@@ -340,7 +379,9 @@
 (defun clutch-db-pg-connect (params &optional make-connection)
   "Connect to PostgreSQL using PARAMS plist.
 PARAMS keys: :host, :port, :user, :password, :database, :tls,
-:sslmode, :schema, :connect-timeout, :read-idle-timeout, :query-timeout.
+:sslmode, :schema, :search-path, :connect-timeout, :read-idle-timeout,
+:query-timeout.  :search-path, a whole search_path that a reconnect
+restores, takes precedence over :schema.
 `:tls' is a convenience shortcut; `:sslmode' is the canonical PostgreSQL name.
 MAKE-CONNECTION, when non-nil, builds the connection from its :client, for a
 backend such as XTDB that speaks the PostgreSQL protocol."
@@ -349,6 +390,7 @@ backend such as XTDB that speaks the PostgreSQL protocol."
                 (clutch-db-pg--normalize-connect-params
                  (clutch-db--reject-removed-connect-params params))))
   (let ((schema (plist-get params :schema))
+        (search-path (plist-get params :search-path))
         (sslmode (plist-get params :sslmode))
         (connect-timeout (plist-get params :connect-timeout))
         (read-idle-timeout (plist-get params :read-idle-timeout))
@@ -373,8 +415,13 @@ backend such as XTDB that speaks the PostgreSQL protocol."
           (when query-timeout
             (clutch-db-pg--exec
              conn (format "SET statement_timeout = %d" (* query-timeout 1000))))
-          (when schema
-            (clutch-db-pg--set-search-path conn schema))
+          (cond
+           (search-path
+            (clutch-db-pg--exec
+             conn (format "SELECT set_config('search_path', %s, false)"
+                          (pgsql-escape-literal search-path))))
+           (schema
+            (clutch-db-pg--set-search-path conn schema)))
           conn)
       (pgsql-error
        (when client
@@ -649,33 +696,42 @@ FKS is an alist of (column-name . fk-plist)."
 
 (cl-defmethod clutch-db-commit ((conn clutch-db-pg--connection))
   "Finish the current foreground transaction on PostgreSQL CONN.
-Return `rolled-back' after rolling back an already failed transaction."
+Return `rolled-back' after rolling back an already failed transaction.
+With none open, as after a COMMIT that failed and so rolled back, forget
+the cached search_path, so that it is asked for again."
   (clutch-db--translate-library-error pgsql-error
-    (when (clutch-db-pg--tx-open-p conn)
-      (if (clutch-db-pg--tx-failed-p conn)
-          (progn
-            (clutch-db-pg--exec conn "ROLLBACK")
-            'rolled-back)
-        (clutch-db-pg--exec conn "COMMIT")))))
+    (if (clutch-db-pg--tx-open-p conn)
+        (if (clutch-db-pg--tx-failed-p conn)
+            (progn
+              (clutch-db-pg--exec conn "ROLLBACK")
+              'rolled-back)
+          (clutch-db-pg--exec conn "COMMIT"))
+      (ignore (clutch-db-pg--forget-search-path conn)))))
 
 (cl-defmethod clutch-db-rollback ((conn clutch-db-pg--connection))
-  "Roll back the current foreground transaction on PostgreSQL CONN."
+  "Roll back the current foreground transaction on PostgreSQL CONN.
+With none open, as after a COMMIT that failed and so rolled back, forget
+the cached search_path, so that it is asked for again."
   (clutch-db--translate-library-error pgsql-error
-    (when (clutch-db-pg--tx-open-p conn)
-      (clutch-db-pg--exec conn "ROLLBACK"))))
+    (if (clutch-db-pg--tx-open-p conn)
+        (clutch-db-pg--exec conn "ROLLBACK")
+      (ignore (clutch-db-pg--forget-search-path conn)))))
 
 (cl-defmethod clutch-db-set-auto-commit
     ((conn clutch-db-pg--connection) auto-commit)
   "Set foreground autocommit mode on PostgreSQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables clutch-managed
-manual-commit mode via lazy BEGIN."
+manual-commit mode via lazy BEGIN.  Enabling autocommit with no
+transaction open forgets the cached search_path, as `clutch-db-commit'
+does."
   (clutch-db--translate-library-error pgsql-error
     (if auto-commit
         (progn
-          (when (clutch-db-pg--tx-open-p conn)
-            (clutch-db-pg--exec conn (if (clutch-db-pg--tx-failed-p conn)
-                              "ROLLBACK"
-                            "COMMIT")))
+          (if (clutch-db-pg--tx-open-p conn)
+              (clutch-db-pg--exec conn (if (clutch-db-pg--tx-failed-p conn)
+                                "ROLLBACK"
+                              "COMMIT"))
+            (clutch-db-pg--forget-search-path conn))
           (setf (clutch-db-pg--connection-manual-commit conn) nil))
       (setf (clutch-db-pg--connection-manual-commit conn) t))))
 
@@ -722,6 +778,8 @@ Decline when the installed pgsql.el cannot execute asynchronously."
        (pgsql-exec-async
         (clutch-db-pg--connection-client conn) sql
         (lambda (result error)
+          (when result
+            (clutch-db-pg--follow-search-path conn sql result))
           (funcall callback
                    (and result (clutch-db-pg--wrap-result conn result))
                    (and error
@@ -829,18 +887,45 @@ ORDER BY schema_name")))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-db-pg--connection))
-  "Return the current effective schema for PostgreSQL CONN."
-  (or (clutch-db-pg--connection-current-schema conn)
+  "Return the current effective schema for PostgreSQL CONN.
+A path that names no existing schema gives nil, which is remembered too,
+so the mode line does not ask again until the path may change."
+  (let ((cached (clutch-db-pg--connection-current-schema conn)))
+    (if cached
+        (unless (eq cached 'none) cached)
       (clutch-db--translate-library-error pgsql-error
         (let* ((result (clutch-db-pg--exec conn "SELECT current_schema()"))
                (schema (caar (clutch-db-pg--metadata-rows result))))
-          (when schema
-            (clutch-db-pg--cache-current-schema conn schema))))))
+          (setf (clutch-db-pg--connection-current-schema conn)
+                (or schema 'none))
+          schema)))))
 
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-db-pg--connection) schema)
   "Switch PostgreSQL CONN to SCHEMA via search_path."
   (clutch-db--translate-library-error pgsql-error
     (clutch-db-pg--set-search-path conn schema)))
+
+(cl-defmethod clutch-db-namespace-switch-p ((_conn clutch-db-pg--connection) sql)
+  "Return non-nil when the search_path may differ after SQL."
+  (clutch-db-pg--namespace-statement-p sql))
+
+(cl-defmethod clutch-db-update-namespace-params
+    ((conn clutch-db-pg--connection) params)
+  "Store PostgreSQL CONN's search_path in a copy of connection PARAMS.
+A reconnect sets the whole path again: the current schema alone would
+leave out the other schemas of a path such as alt, public.  The path is
+asked for once, then remembered, as every buffer on CONN needs it.  An
+open transaction can still undo it, and a lost connection would, so
+PARAMS are returned as they are until the path is settled."
+  (if (clutch-db-pg--connection-path-settled conn)
+      (plist-put (copy-sequence params) :search-path
+                 (or (clutch-db-pg--connection-search-path conn)
+                     (setf (clutch-db-pg--connection-search-path conn)
+                           (clutch-db--translate-library-error pgsql-error
+                             (caar (clutch-db-pg--metadata-rows
+                                    (clutch-db-pg--exec
+                                     conn "SHOW search_path")))))))
+    params))
 
 (clutch-db--define-idle-metadata-methods clutch-db-pg--connection "PostgreSQL")
 
@@ -1260,14 +1345,21 @@ ORDER BY c.ordinal_position"
 
 (defun clutch-db-pg-xtdb-connect (params)
   "Connect to XTDB using PARAMS, which take the PostgreSQL keys.
-XTDB cannot switch its current schema, so PARAMS may not set :schema."
-  (when (plist-get params :schema)
-    (user-error "XTDB cannot switch its current schema; remove :schema"))
+XTDB cannot switch its current schema, so PARAMS may set neither :schema
+nor :search-path."
+  (when (or (plist-get params :schema) (plist-get params :search-path))
+    (user-error
+     "XTDB cannot switch its current schema; remove :schema and :search-path"))
   (clutch-db-pg-connect params #'clutch-db-pg--make-xtdb-connection))
 
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-pg--xtdb-connection))
   "Return the registered backend key for XTDB connections."
   'xtdb)
+
+(cl-defmethod clutch-db-namespace-switch-p
+    ((_conn clutch-db-pg--xtdb-connection) _sql)
+  "Return nil, since XTDB has no search_path to switch."
+  nil)
 
 (defconst clutch-db-pg--xtdb-types
   '((:utf8 "text" "text")
