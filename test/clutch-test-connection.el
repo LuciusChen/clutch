@@ -4096,7 +4096,14 @@ them in place."
                   (mysql
                    (:backend mysql :database "sales")
                    ("sales" "analytics") "sales" "analytics"
-                   (:backend mysql :database "analytics"))))
+                   (:backend mysql :database "analytics"))
+                  ;; Two schemas whose names differ only in case are two
+                  ;; schemas; switching between them was refused as a
+                  ;; switch to the current one.
+                  (oracle-case-twin
+                   (:driver oracle :schema "\"alt_lower\"")
+                   ("alt_lower" "ALT_LOWER") "alt_lower" "ALT_LOWER"
+                   (:driver oracle :schema "ALT_LOWER"))))
     (pcase-let ((`(,label ,params ,schemas ,current ,selected ,expected) case))
       (ert-info ((format "backend: %s" label))
         (let ((conn (list 'fake-conn label))

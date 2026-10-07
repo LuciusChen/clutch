@@ -3899,15 +3899,16 @@ orai18n warning."
                  (setq captured-op op
                        captured-params params)
                  '(:conn-id 7 :schema "ANALYTICS"))))
-      (should (equal (clutch-db-set-current-schema conn "analytics") "ANALYTICS"))
+      (should (equal (clutch-db-set-current-schema conn "ANALYTICS") "ANALYTICS"))
       (should (equal captured-op "set-current-schema"))
       (should (= (alist-get 'conn-id captured-params) 7))
       (should (equal (alist-get 'schema captured-params) "ANALYTICS"))
       (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
                      "ANALYTICS"))
-      (ert-info ("a name with upper-case letters is taken as written")
-        (should (equal (clutch-db-set-current-schema conn "Alt_Mixed") "Alt_Mixed"))
-        (should (equal (alist-get 'schema captured-params) "Alt_Mixed")))))
+      (ert-info ("a listed name is taken as it is, in any case")
+        (dolist (schema '("Alt_Mixed" "alt_lower"))
+          (should (equal (clutch-db-set-current-schema conn schema) schema))
+          (should (equal (alist-get 'schema captured-params) schema))))))
   (let ((conn (make-clutch-jdbc-conn
                :conn-id 7
                :params '(:driver jdbc :display-name "KingbaseES" :rpc-timeout 9))))
@@ -3945,6 +3946,11 @@ reconnect ran unqualified SQL in another schema than the one shown."
           (should (equal (reverse ops) '("connect" "set-current-schema")))
           (should (equal schemas '("REPORTING")))
           (should (equal (clutch-db-current-schema conn) "REPORTING")))
+        (ert-info (":schema is read as Oracle reads an identifier")
+          (connect :schema "Hr")
+          (should (equal schemas '("HR")))
+          (connect :schema "\"alt_lower\"")
+          (should (equal schemas '("alt_lower"))))
         (connect)
         (should (equal ops '("connect")))
         (should (equal (cadr (should-error (connect :schema "gone")
@@ -3991,7 +3997,13 @@ and its metadata sessions stayed there."
             (should (equal (clutch-db-current-schema conn) "Alt_Mixed"))
             (should (equal (clutch-db-update-namespace-params
                             conn '(:driver oracle :user "system"))
-                           '(:driver oracle :user "system" :schema "Alt_Mixed")))))
+                           '(:driver oracle :user "system" :schema "\"Alt_Mixed\"")))
+            (ert-info ("the recorded name leads back to the schema")
+              (should (equal (clutch-db-update-namespace-params
+                              conn '(:driver oracle :user "system"
+                                     :schema "\"Alt_Mixed\""))
+                             '(:driver oracle :user "system"
+                               :schema "\"Alt_Mixed\""))))))
         (ert-info ("an ALTER that leaves the schema keeps the parameters")
           (setq server-schema "SYSTEM" rpc-schemas nil)
           (let ((conn (conn))
