@@ -203,7 +203,9 @@
              ((symbol-function 'pgsql-result-rows)
               #'clutch-db-test--pg-result-rows)
              ((symbol-function 'pgsql-result-affected-rows)
-              #'clutch-db-test--pg-result-affected-rows))
+              #'clutch-db-test--pg-result-affected-rows)
+             ((symbol-function 'pgsql-result-command-tag)
+              #'clutch-db-test--pg-result-command-tag))
      ,@body))
 
 (defmacro clutch-db-test--with-pgsql-client (&rest body)
@@ -5165,7 +5167,8 @@ SET from being followed.  XTDB has no search_path to switch."
 A path set inside a transaction went into them at once, so a connection
 lost before the transaction ended came back on it, though the server had
 rolled it back with the transaction.  A commit that chains the next
-transaction keeps the path, and PREPARE TRANSACTION keeps a plain SET."
+transaction keeps the path however it is written, as the server tags it
+COMMIT, and PREPARE TRANSACTION keeps a plain SET."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
@@ -5177,57 +5180,66 @@ transaction keeps the path, and PREPARE TRANSACTION keeps a plain SET."
                    (if (equal sql "SHOW search_path")
                        (clutch-db-test--make-pg-result :rows `((,path)))
                      ;; Running SQL leaves the server where the step says.
-                     (setq status (car next)
-                           path (cadr next))
-                     (clutch-db-test--make-pg-result))))
+                     (pcase-let ((`(,tag ,status-after ,path-after) next))
+                       (setq status status-after
+                             path path-after)
+                       (clutch-db-test--make-pg-result :command-tag tag)))))
                 ((symbol-function 'pgsql-exec-async)
                  (lambda (client sql callback)
                    (funcall callback (pgsql-exec client sql) nil)))
                 ((symbol-function 'pgsql-transaction-status)
                  (lambda (_client) status)))
-        (cl-flet ((reconnect-path (sql status-after path-after &optional async)
-                    ;; Once SQL ran, the server has PATH-AFTER and STATUS-AFTER.
-                    (setq next (list status-after path-after))
+        (cl-flet ((reconnect-path (sql tag status-after path-after &optional async)
+                    ;; The server tags SQL with TAG and has STATUS-AFTER and
+                    ;; PATH-AFTER once it ran.
+                    (setq next (list tag status-after path-after))
                     (if async
                         (clutch-db-query-async conn sql #'ignore)
                       (clutch-db-query conn sql))
                     (plist-get (clutch-db-update-namespace-params
                                 conn '(:search-path "before"))
                                :search-path)))
-          (should (equal (reconnect-path "SET search_path TO alt" 'idle "alt")
+          (should (equal (reconnect-path "SET search_path TO alt"
+                                         "SET" 'idle "alt")
                          "alt"))
           (should (equal (reconnect-path "SET search_path TO beta"
-                                         'in-transaction "beta")
+                                         "SET" 'in-transaction "beta")
                          "before"))
           (should (equal (reconnect-path "SET search_path TO beta"
-                                         'in-transaction "beta" t)
+                                         "SET" 'in-transaction "beta" t)
                          "before"))
           (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
-                                         'in-transaction "gamma")
+                                         "SET" 'in-transaction "gamma")
                          "before"))
           (should (equal (reconnect-path "ROLLBACK TO SAVEPOINT s"
-                                         'in-transaction "beta")
+                                         "ROLLBACK" 'in-transaction "beta")
                          "before"))
           (should (equal (reconnect-path "ROLLBACK AND CHAIN"
-                                         'in-transaction "alt")
+                                         "ROLLBACK" 'in-transaction "alt")
                          "before"))
           (should (equal (reconnect-path "SET search_path TO beta"
-                                         'in-transaction "beta")
+                                         "SET" 'in-transaction "beta")
                          "before"))
           (should (equal (reconnect-path "COMMIT AND CHAIN"
-                                         'in-transaction "beta")
+                                         "COMMIT" 'in-transaction "beta")
                          "beta"))
-          (should (equal (reconnect-path "COMMIT AND CHAIN -- the console's last"
-                                         'in-transaction "delta")
+          (should (equal (reconnect-path
+                          "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last"
+                          "COMMIT" 'in-transaction "delta")
                          "delta"))
+          ;; A COMMIT of a failed transaction rolls it back.
+          (should (equal (reconnect-path "COMMIT AND CHAIN"
+                                         "ROLLBACK" 'in-transaction "delta")
+                         "before"))
           ;; The REPL sends a line of statements together.
           (should (equal (reconnect-path "COMMIT; BEGIN; SET search_path TO gamma"
-                                         'in-transaction "gamma")
+                                         "SET" 'in-transaction "gamma")
                          "before"))
           (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
-                                         'in-transaction "gamma")
+                                         "SET" 'in-transaction "gamma")
                          "before"))
-          (should (equal (reconnect-path "PREPARE TRANSACTION 'p'" 'idle "beta")
+          (should (equal (reconnect-path "PREPARE TRANSACTION 'p'"
+                                         "PREPARE TRANSACTION" 'idle "beta")
                          "beta")))))))
 
 (ert-deftest clutch-db-test-pg-transaction-commands-ask-for-the-path-again ()
