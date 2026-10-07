@@ -203,7 +203,9 @@
              ((symbol-function 'pgsql-result-rows)
               #'clutch-db-test--pg-result-rows)
              ((symbol-function 'pgsql-result-affected-rows)
-              #'clutch-db-test--pg-result-affected-rows))
+              #'clutch-db-test--pg-result-affected-rows)
+             ((symbol-function 'pgsql-result-command-tag)
+              #'clutch-db-test--pg-result-command-tag))
      ,@body))
 
 (defmacro clutch-db-test--with-pgsql-client (&rest body)
@@ -1420,7 +1422,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (let ((conn (clutch-db-test--make-pg-connection :database "test"))
         calls)
     (clutch-db-set-auto-commit conn nil)
-    (clutch-db-test--with-pgsql-results
+    (clutch-db-test--with-pgsql-client
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (push sql calls)
@@ -3904,6 +3906,93 @@ orai18n warning."
       (should (equal executed-sql "USE `analytics`"))
       (should (equal (mysql-current-database conn) "analytics")))))
 
+(ert-deftest clutch-db-test-mysql-records-the-database-a-use-chose ()
+  "A USE through the MySQL adapter should leave mysql.el on its database.
+mysql.el kept the database it connected to, so a console went on showing
+and loading that one after a typed USE.  A USE whose database cannot be
+recorded still delivers its own outcome, and a timeout while asking goes
+through the adapter's timeout recovery."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        refreshed outcomes)
+    (cl-flet ((note (result error) (push (list result error) outcomes)))
+      (cl-letf (((symbol-function 'mysql-query)
+                 (lambda (_conn _sql) (make-mysql-result)))
+                ((symbol-function 'mysql-query-async)
+                 (lambda (_conn _sql callback)
+                   (funcall callback (make-mysql-result) nil)))
+                ((symbol-function 'mysql-refresh-current-database)
+                 (lambda (mysql-conn) (push mysql-conn refreshed) "other")))
+        (clutch-db-query conn "USE other")
+        (clutch-db-query conn "SELECT 1")
+        (clutch-db-query-async conn "/* go */ use other" #'note)
+        (should (equal refreshed (list conn conn)))
+        (should (clutch-db-namespace-switch-p conn "-- go\nUSE other"))
+        (should-not (clutch-db-namespace-switch-p conn "SELECT 1"))
+        (let (messages recovered)
+          (cl-letf (((symbol-function 'mysql-refresh-current-database)
+                     (lambda (_conn) (signal 'mysql-error '("Lost connection"))))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch-db-query-async conn "USE other" #'note)
+            (should (clutch-db-query conn "USE other"))
+            (cl-letf (((symbol-function 'mysql-refresh-current-database)
+                       (lambda (_conn) (signal 'mysql-timeout '("Read timeout"))))
+                      ((symbol-function 'clutch-db-mysql--handle-query-timeout)
+                       (lambda (_conn _err)
+                         (setq recovered t)
+                         (signal 'clutch-db-error '("Query timed out")))))
+              (clutch-db-query-async conn "USE other" #'note)))
+          (should recovered)
+          (should (= (length messages) 3))
+          (should (cl-every (lambda (text)
+                              (string-prefix-p "Could not read the current database back"
+                                               text))
+                            messages)))))
+    (should (= (length outcomes) 3))
+    (should (cl-every #'car outcomes))))
+
+(ert-deftest clutch-db-test-mysql-asks-for-the-database-after-a-drop ()
+  "A DROP through the MySQL adapter should have mysql.el ask for its database.
+Dropping the current database leaves the session with none, but mysql.el
+kept its name, so a console went on showing that database, and its
+reconnect asked for one that no longer existed.  Loading its tables then
+failed too, as SHOW TABLES needs a database; the server says whether one
+is current, since an older mysql.el records none after a USE."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        refreshed)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql) (make-mysql-result)))
+              ((symbol-function 'mysql-query-async)
+               (lambda (_conn _sql callback)
+                 (funcall callback (make-mysql-result) nil)))
+              ((symbol-function 'mysql-refresh-current-database)
+               (lambda (mysql-conn)
+                 (push mysql-conn refreshed)
+                 (setf (mysql-conn-database mysql-conn) nil))))
+      (clutch-db-query conn "DROP DATABASE app")
+      (should-not (clutch-db-current-schema conn))
+      (should (equal (clutch-db-update-namespace-params conn '(:database "app"))
+                     '(:database nil)))
+      (cl-flet ((tables-for (reply)
+                  ;; SHOW TABLES answers with REPLY: rows, or an error.
+                  (cl-letf (((symbol-function 'mysql-query)
+                             (lambda (_conn _sql)
+                               (if (stringp reply)
+                                   (signal 'mysql-query-error (list reply))
+                                 (make-mysql-result :rows reply)))))
+                    (clutch-db-list-tables conn))))
+        (should-not (tables-for "[1046] (3D000) No database selected"))
+        (should (equal (tables-for '(("t1") ("t2"))) '("t1" "t2")))
+        (should-error (tables-for "[1142] (42000) SHOW command denied")
+                      :type 'clutch-db-error))
+      (clutch-db-query-async conn "/* go */ drop schema if exists app" #'ignore)
+      (should (equal refreshed (list conn conn)))
+      (should (clutch-db-namespace-switch-p conn "DROP DATABASE app"))
+      (should-not (clutch-db-namespace-switch-p conn "CREATE DATABASE app")))))
+
 (ert-deftest clutch-db-test-mysql-set-auto-commit-signals-a-clutch-error ()
   "A failure to set MySQL's commit mode should signal `clutch-db-error'.
 It escaped as a raw `mysql-error', which a reconnect that restores the
@@ -4427,7 +4516,8 @@ value is sent as, and the :null a union gains with a NULL adds none."
 
 (ert-deftest clutch-db-test-xtdb-connects-through-the-postgresql-adapter ()
   "The xtdb backend should open a pgsql.el connection keyed as XTDB.
-A :schema, which XTDB cannot switch to, should be refused before connecting."
+A :schema or :search-path, which XTDB cannot switch to, should be refused
+before connecting."
   (require 'clutch-db-pg)
   (should (eq (plist-get (clutch-backend-feature 'xtdb) :sql-product)
               'postgres))
@@ -4439,6 +4529,9 @@ A :schema, which XTDB cannot switch to, should be refused before connecting."
                   :host (plist-get args :host)
                   :database (plist-get args :database)))))
       (should-error (clutch-db-pg-xtdb-connect '(:host "xt" :schema "public"))
+                    :type 'user-error)
+      (should-error (clutch-db-pg-xtdb-connect
+                     '(:host "xt" :search-path "public"))
                     :type 'user-error)
       (should (= connects 0))
       (let ((conn (clutch-db-pg-xtdb-connect '(:host "xt" :database "xtdb"))))
@@ -5019,7 +5112,7 @@ out, which broke the Oracle statement and left SQL Server unpaged."
 (ert-deftest clutch-db-test-pg-set-current-schema-updates-search-path-cache ()
   "PostgreSQL schema switching should issue SET search_path and update cache."
   (require 'clutch-db-pg)
-  (clutch-db-test--with-pgsql-results
+  (clutch-db-test--with-pgsql-client
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
           executed-sql)
       (cl-letf (((symbol-function 'pgsql-exec)
@@ -5033,7 +5126,7 @@ out, which broke the Oracle statement and left SQL Server unpaged."
 (ert-deftest clutch-db-test-pg-connect-applies-schema-via-search-path ()
   "PostgreSQL connect should restore a requested schema via search_path."
   (require 'clutch-db-pg)
-  (clutch-db-test--with-pgsql-results
+  (clutch-db-test--with-pgsql-client
     (let (captured-args executed-sql)
       (cl-letf (((symbol-function 'pgsql-connect)
                  (lambda (&rest args)
@@ -5057,6 +5150,203 @@ out, which broke the Oracle statement and left SQL Server unpaged."
           (should-not (plist-member captured-args :schema))
           (should (equal executed-sql "SET search_path TO \"app\""))
           (should (equal (clutch-db-current-schema conn) "app")))))))
+
+(ert-deftest clutch-db-test-pg-follows-a-typed-search-path ()
+  "The adapter should ask the server again after SQL that may move its path.
+It went on reporting the schema it cached first, so a console showed and
+loaded that one after a typed SET search_path, and a reconnect set it again.
+A quoted name, a comment or a rollback that undid the SET kept even a plain
+SET from being followed.  XTDB has no search_path to switch."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          (path "public")
+          (status 'idle)
+          (asked 0)
+          (shown 0))
+      (cl-flet ((server (sql)
+                  (cond
+                   ((equal sql "SELECT current_schema()")
+                    (cl-incf asked)
+                    (clutch-db-test--make-pg-result
+                     :rows `((,(if (equal path "nowhere")
+                                   pgsql-null
+                                 (car (split-string path ", ")))))))
+                   ((equal sql "SHOW search_path")
+                    (cl-incf shown)
+                    (clutch-db-test--make-pg-result :rows `((,path))))
+                   (t
+                    (cond
+                     ((string-match-p "TO alt, public" sql)
+                      (setq path "alt, public"))
+                     ((string-match-p "TO nowhere" sql)
+                      (setq path "nowhere"))
+                     ((equal sql "BEGIN")
+                      (setq status 'in-transaction))
+                     ((string-match-p "\\`\\(?:RESET\\|ROLLBACK\\)" sql)
+                      (setq path "public"
+                            status 'idle)))
+                    (clutch-db-test--make-pg-result)))))
+        (cl-letf (((symbol-function 'pgsql-exec)
+                   (lambda (_client sql) (server sql)))
+                  ((symbol-function 'pgsql-exec-async)
+                   (lambda (_client sql callback)
+                     (funcall callback (server sql) nil)))
+                  ((symbol-function 'pgsql-transaction-status)
+                   (lambda (_client) status)))
+          (should (equal (clutch-db-current-schema conn) "public"))
+          (clutch-db-query conn "SET \"search_path\" TO alt, public -- note")
+          (should (equal (clutch-db-current-schema conn) "alt"))
+          (clutch-db-query conn "RESET /* back */ search_path")
+          (should (equal (clutch-db-current-schema conn) "public"))
+          (clutch-db-query-async conn "SET search_path TO alt, public" #'ignore)
+          (should (equal (clutch-db-current-schema conn) "alt"))
+          (should (equal (clutch-db-update-namespace-params conn '(:schema "public"))
+                         '(:schema "public" :search-path "alt, public")))
+          ;; Every buffer on the connection asks; the server is asked once.
+          (clutch-db-update-namespace-params conn nil)
+          (should (= shown 1))
+          (clutch-db-query conn "SET search_path TO nowhere")
+          (setq asked 0)
+          (should-not (clutch-db-current-schema conn))
+          (should-not (clutch-db-current-schema conn))
+          (should (= asked 1))
+          (clutch-db-query conn "BEGIN")
+          (clutch-db-query conn "SET search_path TO alt, public")
+          (clutch-db-rollback conn)
+          (should (equal (clutch-db-current-schema conn) "public"))
+          (dolist (sql '("-- go\nCOMMIT" "ROLLBACK TO SAVEPOINT s" "SET LOCAL x TO 1"
+                         "PREPARE TRANSACTION 'p'"))
+            (should (clutch-db-namespace-switch-p conn sql)))
+          (dolist (sql '("SELECT 1" "SHOW search_path" "RELEASE SAVEPOINT s"))
+            (should-not (clutch-db-namespace-switch-p conn sql)))
+          (should-not (clutch-db-namespace-switch-p
+                       (clutch-db-pg--make-xtdb-connection)
+                       "SET search_path TO alt")))))))
+
+(ert-deftest clutch-db-test-pg-reconnect-params-keep-out-an-uncommitted-path ()
+  "PostgreSQL reconnect params should leave out a path its transaction can undo.
+A path set inside a transaction went into them at once, so a connection
+lost before the transaction ended came back on it, though the server had
+rolled it back with the transaction.  A commit that chains the next
+transaction keeps the path however it is written, as the server tags it
+COMMIT, and PREPARE TRANSACTION keeps a plain SET."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          (path "public")
+          (status 'idle)
+          next)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (if (equal sql "SHOW search_path")
+                       (clutch-db-test--make-pg-result :rows `((,path)))
+                     ;; Running SQL leaves the server where the step says.
+                     (pcase-let ((`(,tag ,status-after ,path-after) next))
+                       (setq status status-after
+                             path path-after)
+                       (clutch-db-test--make-pg-result :command-tag tag)))))
+                ((symbol-function 'pgsql-exec-async)
+                 (lambda (client sql callback)
+                   (funcall callback (pgsql-exec client sql) nil)))
+                ((symbol-function 'pgsql-transaction-status)
+                 (lambda (_client) status)))
+        (cl-flet ((reconnect-path (sql tag status-after path-after &optional async)
+                    ;; The server tags SQL with TAG and has STATUS-AFTER and
+                    ;; PATH-AFTER once it ran.
+                    (setq next (list tag status-after path-after))
+                    (if async
+                        (clutch-db-query-async conn sql #'ignore)
+                      (clutch-db-query conn sql))
+                    (plist-get (clutch-db-update-namespace-params
+                                conn '(:search-path "before"))
+                               :search-path)))
+          (should (equal (reconnect-path "SET search_path TO alt"
+                                         "SET" 'idle "alt")
+                         "alt"))
+          (should (equal (reconnect-path "SET search_path TO beta"
+                                         "SET" 'in-transaction "beta")
+                         "before"))
+          (should (equal (reconnect-path "SET search_path TO beta"
+                                         "SET" 'in-transaction "beta" t)
+                         "before"))
+          (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
+                                         "SET" 'in-transaction "gamma")
+                         "before"))
+          (should (equal (reconnect-path "ROLLBACK TO SAVEPOINT s"
+                                         "ROLLBACK" 'in-transaction "beta")
+                         "before"))
+          (should (equal (reconnect-path "ROLLBACK AND CHAIN"
+                                         "ROLLBACK" 'in-transaction "alt")
+                         "before"))
+          (should (equal (reconnect-path "SET search_path TO beta"
+                                         "SET" 'in-transaction "beta")
+                         "before"))
+          (should (equal (reconnect-path "COMMIT AND CHAIN"
+                                         "COMMIT" 'in-transaction "beta")
+                         "beta"))
+          (should (equal (reconnect-path
+                          "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last"
+                          "COMMIT" 'in-transaction "delta")
+                         "delta"))
+          ;; A COMMIT of a failed transaction rolls it back.
+          (should (equal (reconnect-path "COMMIT AND CHAIN"
+                                         "ROLLBACK" 'in-transaction "delta")
+                         "before"))
+          ;; The REPL sends a line of statements together.
+          (should (equal (reconnect-path "COMMIT; BEGIN; SET search_path TO gamma"
+                                         "SET" 'in-transaction "gamma")
+                         "before"))
+          (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
+                                         "SET" 'in-transaction "gamma")
+                         "before"))
+          (should (equal (reconnect-path "PREPARE TRANSACTION 'p'"
+                                         "PREPARE TRANSACTION" 'idle "beta")
+                         "beta")))))))
+
+(ert-deftest clutch-db-test-pg-transaction-commands-ask-for-the-path-again ()
+  "PostgreSQL commit and rollback should ask for the path with none open too.
+A COMMIT that fails rolls its transaction back, the SET made in it too,
+but the console went on showing that SET's schema after clutch-rollback,
+as the adapter found no transaction to end and kept its cached path."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (clutch-db-test--make-pg-result
+                    :rows (and (equal sql "SELECT current_schema()")
+                               '(("public"))))))
+                ((symbol-function 'pgsql-transaction-status)
+                 (lambda (_client) 'idle)))
+        (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit
+                              (lambda (conn) (clutch-db-set-auto-commit conn t))))
+          (clutch-db-pg--cache-current-schema conn "alt")
+          (should-not (funcall finish conn))
+          (should (equal (clutch-db-current-schema conn) "public")))))))
+
+(ert-deftest clutch-db-test-pg-connect-restores-a-whole-search-path ()
+  "PostgreSQL connect should restore a whole search_path in place of a schema.
+Setting only the current schema of a path such as alt, public left public
+out, so its tables no longer resolved unqualified after a reconnect."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let (executed)
+      (cl-letf (((symbol-function 'pgsql-connect)
+                 (lambda (&rest _args)
+                   (clutch-db-test--make-pg-client
+                    :host "127.0.0.1" :port 54321
+                    :user "system" :database "test")))
+                ((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (push sql executed)
+                   (clutch-db-test--make-pg-result))))
+        (clutch-db-pg-connect
+         '(:host "127.0.0.1" :port 54321 :database "test" :user "system"
+           :password "123456" :schema "app"
+           :search-path "alt, \"My Schema\""))
+        (should (equal executed
+                       '("SELECT set_config('search_path', 'alt, \"My Schema\"', false)")))))))
 
 (ert-deftest clutch-db-test-pg-connect-normalizes-tls-to-sslmode ()
   "PostgreSQL backend connect should pass canonical SSLMODE to pgsql.el."
@@ -5086,7 +5376,7 @@ out, which broke the Oracle statement and left SQL Server unpaged."
 (ert-deftest clutch-db-test-pg-connect-applies-timeout-defaults ()
   "PostgreSQL connect applies timeout defaults and preserves explicit values."
   (require 'clutch-db-pg)
-  (clutch-db-test--with-pgsql-results
+  (clutch-db-test--with-pgsql-client
     (let ((clutch-connect-timeout-seconds 12)
           (clutch-read-idle-timeout-seconds 34)
           (clutch-query-timeout-seconds 56)
@@ -5171,9 +5461,10 @@ out, which broke the Oracle statement and left SQL Server unpaged."
       (should (string-match-p "Conflicting" (error-message-string err))))))
 
 (ert-deftest clutch-db-test-mysql-interrupt-kills-query-and-drains-original-conn ()
-  "MySQL interrupt should kill through a helper connection.
-Only a synchronous query is drained; an asynchronous one reads its own
-verdict."
+  "MySQL interrupt should kill through a helper connection that names no database.
+KILL QUERY needs none, and the one the connection was opened on may have
+been dropped since.  Only a synchronous query is drained; an asynchronous
+one reads its own verdict."
   (require 'clutch-db-mysql)
   (require 'mysql)
   (let* ((conn (make-mysql-conn :host "127.0.0.1"
@@ -5217,6 +5508,7 @@ verdict."
       (should (clutch-db-interrupt-query conn))
       (should (equal captured-sql "KILL QUERY 123"))
       (should (equal (plist-get captured-connect-args :password) "secret"))
+      (should-not (plist-get captured-connect-args :database))
       (should (equal (plist-get captured-connect-args :read-idle-timeout)
                      clutch-db-mysql-cancel-timeout-seconds))
       (should drained)

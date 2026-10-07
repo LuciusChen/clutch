@@ -10571,6 +10571,83 @@ cached keys and their metadata stayed that database's."
             (should-not (gethash conn clutch--schema-cache))
             (should (eq primed conn))))))))
 
+(ert-deftest clutch-test-namespace-follow-up-keeps-metadata-when-nothing-moved ()
+  "Following a possible switch should replace metadata only when it moved.
+A PostgreSQL COMMIT or ROLLBACK is followed in case it undid a search_path,
+and replacing the metadata after every one reloaded the schema for nothing,
+also after the first one on a console whose parameters had no path yet.
+The parameters take the namespace either way."
+  (with-temp-buffer
+    (let ((namespace "public") (cleared 0) (primed 0))
+      (setq-local clutch-connection 'ns-conn)
+      (setq-local clutch--connection-params '(:backend pg))
+      (cl-letf (((symbol-function 'clutch-db-update-namespace-params)
+                 (lambda (_conn params)
+                   (plist-put (copy-sequence params) :search-path namespace)))
+                ((symbol-function 'clutch-db-current-schema)
+                 (lambda (_conn) namespace))
+                ((symbol-function 'clutch--update-mode-line) #'ignore)
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 (lambda (_conn) (cl-incf cleared)))
+                ((symbol-function 'clutch--prime-schema-cache)
+                 (lambda (_conn) (cl-incf primed))))
+        (clutch--note-namespace-switch 'ns-conn "public")
+        (should (equal (plist-get clutch--connection-params :search-path)
+                       "public"))
+        (should (= cleared 0))
+        (should (= primed 0))
+        (setq namespace "alt")
+        (clutch--note-namespace-switch 'ns-conn "public")
+        (should (equal (plist-get clutch--connection-params :search-path) "alt"))
+        (should (= cleared 1))
+        (should (= primed 1))
+        ;; A connection lost right after its statement cannot answer.
+        (cl-letf (((symbol-function 'clutch-db-update-namespace-params)
+                   (lambda (_conn _params)
+                     (signal 'clutch-db-error '("connection lost"))))
+                  ((symbol-function 'message) #'ignore))
+          (clutch--note-namespace-switch 'ns-conn "alt"))
+        (should (equal (plist-get clutch--connection-params :search-path)
+                       "alt"))))))
+
+(ert-deftest clutch-test-transaction-commands-follow-the-namespace-back ()
+  "Ending a transaction from a command should follow the namespace back.
+PostgreSQL undoes a search_path set inside a transaction that rolls back,
+but the console stayed on it after `clutch-rollback', and after a commit or
+a switch to auto-commit that ended a SET LOCAL.  The follow-up runs once
+the transaction has ended, against the namespace shown before."
+  (with-temp-buffer
+    (setq-local clutch-connection 'tx-conn)
+    (setq-local clutch--connection-render-state '(:namespace "alt"))
+    (let (events)
+      (cl-letf (((symbol-function 'clutch--ensure-transaction-connection) #'ignore)
+                ((symbol-function 'clutch-db-manual-commit-supported-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
+                ((symbol-function 'clutch--tx-uncertain-p) #'ignore)
+                ((symbol-function 'clutch--tx-unresolved-p) #'ignore)
+                ((symbol-function 'clutch-db-rollback)
+                 (lambda (_conn) (push 'rollback events)))
+                ((symbol-function 'clutch-db-commit)
+                 (lambda (_conn) (push 'commit events) nil))
+                ((symbol-function 'clutch-db-set-auto-commit)
+                 (lambda (_conn _auto) (push 'auto-commit events)))
+                ((symbol-function 'clutch--mark-dml-results-rolled-back) #'ignore)
+                ((symbol-function 'clutch--mark-dml-results-committed) #'ignore)
+                ((symbol-function 'clutch--clear-tx-state) #'ignore)
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'clutch-db-namespace-switch-p)
+                 (lambda (_conn sql) (push sql events) t))
+                ((symbol-function 'clutch--note-namespace-switch)
+                 (lambda (_conn before) (push (list 'follow before) events))))
+        (clutch-rollback)
+        (clutch-commit)
+        (clutch-toggle-auto-commit)
+        (should (equal (nreverse events)
+                       '(rollback "ROLLBACK" (follow "alt")
+                         commit "COMMIT" (follow "alt")
+                         auto-commit "COMMIT" (follow "alt"))))))))
+
 (ert-deftest clutch-test-repl-reply-after-the-repl-moved-draws-no-result ()
   "A REPL statement's reply after the REPL left its connection draws no result.
 Showing the SELECT put the old connection's rows in the result buffer that
