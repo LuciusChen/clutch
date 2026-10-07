@@ -291,15 +291,17 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
     (abbreviate-file-name database))))
 
 (defun clutch--connection-key (conn)
-  "Return a descriptive string for CONN like \"user@host:port/db\"."
+  "Return a descriptive string for CONN like \"user@host:port/db\".
+A connection to no database leaves out \"/db\"."
   (if (eq (clutch-db-backend-key conn) 'sqlite)
       (format "sqlite:%s" (or (clutch-db-database conn) ""))
-    (format "%s:%s/%s"
-            (clutch--connection-user-host
-             (clutch-db-user conn)
-             (clutch--connection-remote-host conn))
-            (or (clutch--connection-remote-port conn) "?")
-            (or (clutch-db-database conn) ""))))
+    (let ((database (clutch-db-database conn)))
+      (format "%s:%s%s"
+              (clutch--connection-user-host
+               (clutch-db-user conn)
+               (clutch--connection-remote-host conn))
+              (or (clutch--connection-remote-port conn) "?")
+              (if (member database '(nil "")) "" (concat "/" database))))))
 
 (defun clutch--connection-user-host (user host)
   "Return HOST or USER@HOST when USER is non-empty."
