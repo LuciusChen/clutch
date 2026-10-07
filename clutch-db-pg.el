@@ -283,7 +283,8 @@
 
 (defun clutch-db-pg--exec (conn sql)
   "Execute SQL through the pgsql.el client owned by CONN."
-  (pgsql-exec (clutch-db-pg--connection-client conn) sql))
+  (prog1 (pgsql-exec (clutch-db-pg--connection-client conn) sql)
+    (clutch-db-pg--follow-search-path conn sql)))
 
 (defun clutch-db-pg--cache-current-schema (conn schema)
   "Cache SCHEMA as the current schema for CONN."
@@ -298,24 +299,18 @@
                      (pgsql-escape-identifier schema)))
     (clutch-db-pg--cache-current-schema conn schema)))
 
-(defun clutch-db-pg--search-path-statement-p (sql)
-  "Return non-nil for SQL such as SET search_path.
-That is SET search_path or SET SCHEMA, but not SET LOCAL, which lasts
-only until its transaction ends, and RESET search_path, RESET ALL and
-DISCARD ALL, which restore it."
-  (pcase (mapcar #'upcase
-                 (split-string (clutch-db-sql-trim-end
-                                (clutch-db-sql-strip-leading-comments sql))
-                               "[ \t\n\r\f=]+" t))
-    ((or `("SET" "SESSION" ,(or "SEARCH_PATH" "SCHEMA") . ,_)
-         `("SET" ,(or "SEARCH_PATH" "SCHEMA") . ,_)
-         `("RESET" ,(or "SEARCH_PATH" "ALL"))
-         '("DISCARD" "ALL"))
-     t)))
+(defun clutch-db-pg--namespace-statement-p (sql)
+  "Return non-nil for SQL after which the search_path may differ.
+SET, RESET and DISCARD can change it, and the end of a transaction can
+undo a SET made inside it, or one made with SET LOCAL.  Only the leading
+keyword counts, and the server then says what the path is.  SELECT
+set_config, DO and CALL can change it too, but are not followed."
+  (member (clutch-db-sql-leading-keyword sql)
+          '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END")))
 
 (defun clutch-db-pg--follow-search-path (conn sql)
-  "Forget CONN's cached current schema when SQL set its search_path."
-  (when (clutch-db-pg--search-path-statement-p sql)
+  "Forget CONN's cached current schema when SQL may have changed it."
+  (when (clutch-db-pg--namespace-statement-p sql)
     (clutch-db-pg--cache-current-schema conn nil)))
 
 (defun clutch-db-pg--tx-open-p (conn)
@@ -737,8 +732,7 @@ manual-commit mode via lazy BEGIN."
   (clutch-db-pg--run-query-with-transaction-state
    conn sql
    (lambda ()
-     (prog1 (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql))
-       (clutch-db-pg--follow-search-path conn sql)))))
+     (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql)))))
 
 (cl-defmethod clutch-db-query-async
     ((conn clutch-db-pg--connection) sql callback)
@@ -874,8 +868,8 @@ ORDER BY schema_name")))
     (clutch-db-pg--set-search-path conn schema)))
 
 (cl-defmethod clutch-db-namespace-switch-p ((_conn clutch-db-pg--connection) sql)
-  "Return non-nil when SQL set the search_path of the session."
-  (clutch-db-pg--search-path-statement-p sql))
+  "Return non-nil when the search_path may differ after SQL."
+  (clutch-db-pg--namespace-statement-p sql))
 
 (cl-defmethod clutch-db-update-namespace-params
     ((conn clutch-db-pg--connection) params)
