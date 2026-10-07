@@ -1420,7 +1420,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (let ((conn (clutch-db-test--make-pg-connection :database "test"))
         calls)
     (clutch-db-set-auto-commit conn nil)
-    (clutch-db-test--with-pgsql-results
+    (clutch-db-test--with-pgsql-client
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (push sql calls)
@@ -5048,7 +5048,7 @@ out, which broke the Oracle statement and left SQL Server unpaged."
 (ert-deftest clutch-db-test-pg-set-current-schema-updates-search-path-cache ()
   "PostgreSQL schema switching should issue SET search_path and update cache."
   (require 'clutch-db-pg)
-  (clutch-db-test--with-pgsql-results
+  (clutch-db-test--with-pgsql-client
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
           executed-sql)
       (cl-letf (((symbol-function 'pgsql-exec)
@@ -5062,7 +5062,7 @@ out, which broke the Oracle statement and left SQL Server unpaged."
 (ert-deftest clutch-db-test-pg-connect-applies-schema-via-search-path ()
   "PostgreSQL connect should restore a requested schema via search_path."
   (require 'clutch-db-pg)
-  (clutch-db-test--with-pgsql-results
+  (clutch-db-test--with-pgsql-client
     (let (captured-args executed-sql)
       (cl-letf (((symbol-function 'pgsql-connect)
                  (lambda (&rest args)
@@ -5097,6 +5097,7 @@ SET from being followed.  XTDB has no search_path to switch."
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
           (path "public")
+          (status 'idle)
           (asked 0)
           (shown 0))
       (cl-flet ((server (sql)
@@ -5116,8 +5117,11 @@ SET from being followed.  XTDB has no search_path to switch."
                       (setq path "alt, public"))
                      ((string-match-p "TO nowhere" sql)
                       (setq path "nowhere"))
+                     ((equal sql "BEGIN")
+                      (setq status 'in-transaction))
                      ((string-match-p "\\`\\(?:RESET\\|ROLLBACK\\)" sql)
-                      (setq path "public")))
+                      (setq path "public"
+                            status 'idle)))
                     (clutch-db-test--make-pg-result)))))
         (cl-letf (((symbol-function 'pgsql-exec)
                    (lambda (_client sql) (server sql)))
@@ -5125,7 +5129,7 @@ SET from being followed.  XTDB has no search_path to switch."
                    (lambda (_client sql callback)
                      (funcall callback (server sql) nil)))
                   ((symbol-function 'pgsql-transaction-status)
-                   (lambda (_client) 'in-transaction)))
+                   (lambda (_client) status)))
           (should (equal (clutch-db-current-schema conn) "public"))
           (clutch-db-query conn "SET \"search_path\" TO alt, public -- note")
           (should (equal (clutch-db-current-schema conn) "alt"))
@@ -5143,16 +5147,77 @@ SET from being followed.  XTDB has no search_path to switch."
           (should-not (clutch-db-current-schema conn))
           (should-not (clutch-db-current-schema conn))
           (should (= asked 1))
+          (clutch-db-query conn "BEGIN")
           (clutch-db-query conn "SET search_path TO alt, public")
           (clutch-db-rollback conn)
           (should (equal (clutch-db-current-schema conn) "public"))
-          (dolist (sql '("-- go\nCOMMIT" "ROLLBACK TO SAVEPOINT s" "SET LOCAL x TO 1"))
+          (dolist (sql '("-- go\nCOMMIT" "ROLLBACK TO SAVEPOINT s" "SET LOCAL x TO 1"
+                         "PREPARE TRANSACTION 'p'"))
             (should (clutch-db-namespace-switch-p conn sql)))
           (dolist (sql '("SELECT 1" "SHOW search_path" "RELEASE SAVEPOINT s"))
             (should-not (clutch-db-namespace-switch-p conn sql)))
           (should-not (clutch-db-namespace-switch-p
                        (clutch-db-pg--make-xtdb-connection)
                        "SET search_path TO alt")))))))
+
+(ert-deftest clutch-db-test-pg-reconnect-params-keep-out-an-uncommitted-path ()
+  "PostgreSQL reconnect params should leave out a path its transaction can undo.
+A path set inside a transaction went into them at once, so a connection
+lost before the transaction ended came back on it, though the server had
+rolled it back with the transaction.  A commit that chains the next
+transaction keeps the path, and PREPARE TRANSACTION keeps a plain SET."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-results
+    (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+          (path "public")
+          (status 'idle))
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (clutch-db-test--make-pg-result
+                    :rows (and (equal sql "SHOW search_path") `((,path))))))
+                ((symbol-function 'pgsql-exec-async)
+                 (lambda (client sql callback)
+                   (funcall callback (pgsql-exec client sql) nil)))
+                ((symbol-function 'pgsql-transaction-status)
+                 (lambda (_client) status)))
+        (cl-flet ((reconnect-path (sql status-after path-after &optional async)
+                    ;; The server has PATH-AFTER and STATUS-AFTER once SQL ran.
+                    (setq status status-after
+                          path path-after)
+                    (if async
+                        (clutch-db-query-async conn sql #'ignore)
+                      (clutch-db-query conn sql))
+                    (plist-get (clutch-db-update-namespace-params
+                                conn '(:search-path "before"))
+                               :search-path)))
+          (should (equal (reconnect-path "SET search_path TO alt" 'idle "alt")
+                         "alt"))
+          (should (equal (reconnect-path "SET search_path TO beta"
+                                         'in-transaction "beta")
+                         "before"))
+          (should (equal (reconnect-path "SET search_path TO beta"
+                                         'in-transaction "beta" t)
+                         "before"))
+          (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
+                                         'in-transaction "gamma")
+                         "before"))
+          (should (equal (reconnect-path "ROLLBACK TO SAVEPOINT s"
+                                         'in-transaction "beta")
+                         "before"))
+          (should (equal (reconnect-path "ROLLBACK AND CHAIN"
+                                         'in-transaction "alt")
+                         "before"))
+          (should (equal (reconnect-path "SET search_path TO beta"
+                                         'in-transaction "beta")
+                         "before"))
+          (should (equal (reconnect-path "COMMIT AND CHAIN"
+                                         'in-transaction "beta")
+                         "beta"))
+          (should (equal (reconnect-path "SET LOCAL search_path TO gamma"
+                                         'in-transaction "gamma")
+                         "before"))
+          (should (equal (reconnect-path "PREPARE TRANSACTION 'p'" 'idle "beta")
+                         "beta")))))))
 
 (ert-deftest clutch-db-test-pg-connect-restores-a-whole-search-path ()
   "PostgreSQL connect should restore a whole search_path in place of a schema.
@@ -5205,7 +5270,7 @@ out, so its tables no longer resolved unqualified after a reconnect."
 (ert-deftest clutch-db-test-pg-connect-applies-timeout-defaults ()
   "PostgreSQL connect applies timeout defaults and preserves explicit values."
   (require 'clutch-db-pg)
-  (clutch-db-test--with-pgsql-results
+  (clutch-db-test--with-pgsql-client
     (let ((clutch-connect-timeout-seconds 12)
           (clutch-read-idle-timeout-seconds 34)
           (clutch-query-timeout-seconds 56)
