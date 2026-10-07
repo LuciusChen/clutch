@@ -792,6 +792,24 @@ Also remember PARAMS and PRODUCT."
   (clutch--refresh-transaction-ui conn)
   conn)
 
+(defun clutch--build-replacement-conn (old-conn params)
+  "Connect with PARAMS to replace OLD-CONN, in the commit mode OLD-CONN had.
+OLD-CONN may be dead already; it still says whether it was in manual
+mode.  When the new connection cannot be put in that mode, discard it
+and signal, as going on in the other mode would commit statements, or
+hold them back, unlike the session it replaces."
+  (let ((manual (and (clutch-db-manual-commit-supported-p old-conn)
+                     (clutch-db-manual-commit-p old-conn)))
+        (conn (clutch--build-conn params)))
+    (when (and (clutch-db-manual-commit-supported-p conn)
+               (xor manual (clutch-db-manual-commit-p conn)))
+      (condition-case err
+          (clutch-db-set-auto-commit conn (not manual))
+        ((error quit)
+         (clutch--discard-unbound-connection conn)
+         (signal (car err) (cdr err)))))
+    conn))
+
 (defun clutch--try-reconnect ()
   "Attempt to re-establish the connection for the current logical session.
 Find reconnect params from the current buffer or any attached buffer that
@@ -805,7 +823,7 @@ Connection failures propagate to the calling command."
               (context (clutch--connection-context old-conn))
               (params (car context)))
     (let ((product (cadr context))
-          (conn (clutch--build-conn params))
+          (conn (clutch--build-replacement-conn old-conn params))
           (prior-tx-state (clutch--tx-state old-conn)))
       (if (eq prior-tx-state 'dirty)
           (clutch--discard-lost-transaction old-conn)
@@ -832,7 +850,7 @@ Connection failures propagate to the calling command."
   "Replace OLD-CONN with a new connection built from PARAMS.
 PRODUCT is the effective SQL product for the new logical session."
   (let* ((product (or product (clutch--effective-sql-product params)))
-         (new-conn (clutch--build-conn params))
+         (new-conn (clutch--build-replacement-conn old-conn params))
          (bound nil))
     ;; Tearing down the old connection can signal; until NEW-CONN is bound
     ;; to attached buffers, this function still owns its transport.
