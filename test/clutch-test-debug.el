@@ -48,6 +48,26 @@
                             (plist-get parts :summary)))
     (should-not (plist-get parts :hint))))
 
+;; MySQL refusals name their own cause.
+(ert-deftest clutch-test-mysql-refusal-hints-name-the-cause ()
+  "A MySQL refusal should get the hint of its own cause.
+A database the user lacks privileges on, error 1044, and a locked
+account, error 3118, were hinted as a wrong username or password, as
+error 1045 is, and an unknown database, error 1049, had no hint."
+  (pcase-dolist (`(,message ,hint)
+                 '(("Authentication failed: [1045] (28000) Access denied for user 'u'@'h' (using password: YES)"
+                    "wrong username or password")
+                   ("[1044] (42000) Access denied for user 'u'@'%' to database 'mysql'"
+                    "insufficient privileges on that database")
+                   ("[3118] (HY000) Access denied for user 'u'@'h'. Account is locked."
+                    "account is locked; an administrator must unlock it")
+                   ("[4151] (HY000) Access denied, this account is locked"
+                    "account is locked; an administrator must unlock it")
+                   ("[1049] (42000) Unknown database 'nope'"
+                    "database does not exist; check its name")))
+    (should (equal (plist-get (clutch--humanize-db-error-parts message) :hint)
+                   hint))))
+
 ;;;; Debug — problem records and buffer
 
 (ert-deftest clutch-test-debug-mode-creates-dedicated-buffer ()

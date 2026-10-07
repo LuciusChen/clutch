@@ -97,7 +97,11 @@ enforce a server-side statement timeout."
     ("ORA-01031" . "insufficient privileges")
     ("ORA-00904" . "invalid column name")
     ;; MySQL
+    ("Access denied for user .* to database"
+     . "insufficient privileges on that database")
+    ("account is locked" . "account is locked; an administrator must unlock it")
     ("Access denied for user" . "wrong username or password")
+    ("Unknown database" . "database does not exist; check its name")
     ("Unknown column" . "column does not exist; check spelling")
     ;; PostgreSQL
     ("relation .* does not exist" . "table does not exist; check schema and name")
