@@ -258,18 +258,22 @@ Return nil when TEXT has no Syntax section."
                                         (lambda (a b)
                                           (< (car a) (car b))))))))))
 
-(defun clutch-db-mysql--use-statement-p (sql)
-  "Return non-nil when SQL is a USE whose database mysql.el can record."
+(defun clutch-db-mysql--namespace-statement-p (sql)
+  "Return non-nil for SQL after which the current database may differ.
+USE chooses another one, and a DROP of the current database leaves the
+session with none.  Only the leading keyword counts, and the server then
+says which database is current, provided mysql.el can record it."
   (and (fboundp 'mysql-refresh-current-database)
-       (equal (clutch-db-sql-leading-keyword sql) "USE")))
+       (member (clutch-db-sql-leading-keyword sql) '("USE" "DROP"))))
 
-(defun clutch-db-mysql--follow-use (conn sql)
-  "Record the database that SQL, when a successful USE, moved CONN to.
+(defun clutch-db-mysql--follow-database (conn sql)
+  "Record the database CONN is on after SQL, when SQL may have moved it.
 mysql.el keeps the database that `mysql-select-database' chose, so a USE
-typed into a console would leave it on the previous one.  Failing to ask
-the server is only reported, after a timeout has resynchronized or closed
-CONN: the USE itself succeeded."
-  (when (clutch-db-mysql--use-statement-p sql)
+typed into a console would leave it on the previous one, and a DROP of
+that one on a database that no longer exists.  Failing to ask the server
+is only reported, after a timeout has resynchronized or closed CONN: SQL
+itself succeeded."
+  (when (clutch-db-mysql--namespace-statement-p sql)
     (condition-case err
         (condition-case timeout
             (mysql-refresh-current-database conn)
@@ -312,8 +316,11 @@ CONN: the USE itself succeeded."
                    (progn
                      (setq killer
                            (apply #'mysql-connect
+                                  ;; KILL QUERY needs no database, and the one
+                                  ;; CONN was opened on may have been dropped.
                                   (plist-put
-                                   (copy-sequence params)
+                                   (plist-put (copy-sequence params)
+                                              :database nil)
                                    :read-idle-timeout
                                    clutch-db-mysql-cancel-timeout-seconds)))
                      (mysql-query killer (format "KILL QUERY %d" thread-id))
@@ -391,7 +398,7 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
   "Execute SQL on MySQL CONN, returning a `clutch-db-result'."
   (condition-case err
       (prog1 (clutch-db-mysql--wrap-result (mysql-query conn sql))
-        (clutch-db-mysql--follow-use conn sql))
+        (clutch-db-mysql--follow-database conn sql))
     (mysql-timeout
      (clutch-db-mysql--handle-query-timeout conn err))
     (mysql-error
@@ -408,7 +415,7 @@ Decline when the installed mysql.el cannot execute asynchronously."
        (lambda (result error)
          ;; CONN is idle when this runs.
          (when result
-           (clutch-db-mysql--follow-use conn sql))
+           (clutch-db-mysql--follow-database conn sql))
          (funcall callback
                   (and result (clutch-db-mysql--wrap-result result))
                   (and error
@@ -477,10 +484,17 @@ Decline when the installed mysql.el cannot execute asynchronously."
 (clutch-db--define-idle-metadata-methods mysql-conn "MySQL")
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-conn))
-  "Return table names for the current MySQL database on CONN."
+  "Return table names for the current MySQL database on CONN.
+A session with no current database has none, where SHOW TABLES fails
+with error 1046.  The server decides that, not mysql.el, which may have
+missed a USE or a DROP that changed the database."
   (clutch-db--translate-library-error mysql-error
-    (let ((result (mysql-query conn "SHOW TABLES")))
-      (mapcar #'car (mysql-result-rows result)))))
+    (condition-case err
+        (mapcar #'car (mysql-result-rows (mysql-query conn "SHOW TABLES")))
+      (mysql-query-error
+       ;; mysql.el reports a server error as "[CODE] (STATE) MESSAGE".
+       (unless (string-prefix-p "[1046]" (cadr err))
+         (signal (car err) (cdr err)))))))
 
 (cl-defmethod clutch-db-list-schemas ((conn mysql-conn))
   "Return visible MySQL schema/database names for CONN."
@@ -498,8 +512,8 @@ Decline when the installed mysql.el cannot execute asynchronously."
     (mysql-select-database conn schema)))
 
 (cl-defmethod clutch-db-namespace-switch-p ((_conn mysql-conn) sql)
-  "Return non-nil when SQL is a USE whose database mysql.el records."
-  (clutch-db-mysql--use-statement-p sql))
+  "Return non-nil when the current database may differ after SQL."
+  (clutch-db-mysql--namespace-statement-p sql))
 
 (cl-defmethod clutch-db-update-namespace-params ((conn mysql-conn) params)
   "Store MySQL CONN's current database in a copy of connection PARAMS."

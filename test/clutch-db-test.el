@@ -3953,6 +3953,46 @@ through the adapter's timeout recovery."
     (should (= (length outcomes) 3))
     (should (cl-every #'car outcomes))))
 
+(ert-deftest clutch-db-test-mysql-asks-for-the-database-after-a-drop ()
+  "A DROP through the MySQL adapter should have mysql.el ask for its database.
+Dropping the current database leaves the session with none, but mysql.el
+kept its name, so a console went on showing that database, and its
+reconnect asked for one that no longer existed.  Loading its tables then
+failed too, as SHOW TABLES needs a database; the server says whether one
+is current, since an older mysql.el records none after a USE."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        refreshed)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql) (make-mysql-result)))
+              ((symbol-function 'mysql-query-async)
+               (lambda (_conn _sql callback)
+                 (funcall callback (make-mysql-result) nil)))
+              ((symbol-function 'mysql-refresh-current-database)
+               (lambda (mysql-conn)
+                 (push mysql-conn refreshed)
+                 (setf (mysql-conn-database mysql-conn) nil))))
+      (clutch-db-query conn "DROP DATABASE app")
+      (should-not (clutch-db-current-schema conn))
+      (should (equal (clutch-db-update-namespace-params conn '(:database "app"))
+                     '(:database nil)))
+      (cl-flet ((tables-for (reply)
+                  ;; SHOW TABLES answers with REPLY: rows, or an error.
+                  (cl-letf (((symbol-function 'mysql-query)
+                             (lambda (_conn _sql)
+                               (if (stringp reply)
+                                   (signal 'mysql-query-error (list reply))
+                                 (make-mysql-result :rows reply)))))
+                    (clutch-db-list-tables conn))))
+        (should-not (tables-for "[1046] (3D000) No database selected"))
+        (should (equal (tables-for '(("t1") ("t2"))) '("t1" "t2")))
+        (should-error (tables-for "[1142] (42000) SHOW command denied")
+                      :type 'clutch-db-error))
+      (clutch-db-query-async conn "/* go */ drop schema if exists app" #'ignore)
+      (should (equal refreshed (list conn conn)))
+      (should (clutch-db-namespace-switch-p conn "DROP DATABASE app"))
+      (should-not (clutch-db-namespace-switch-p conn "CREATE DATABASE app")))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
@@ -5399,9 +5439,10 @@ out, so its tables no longer resolved unqualified after a reconnect."
       (should (string-match-p "Conflicting" (error-message-string err))))))
 
 (ert-deftest clutch-db-test-mysql-interrupt-kills-query-and-drains-original-conn ()
-  "MySQL interrupt should kill through a helper connection.
-Only a synchronous query is drained; an asynchronous one reads its own
-verdict."
+  "MySQL interrupt should kill through a helper connection that names no database.
+KILL QUERY needs none, and the one the connection was opened on may have
+been dropped since.  Only a synchronous query is drained; an asynchronous
+one reads its own verdict."
   (require 'clutch-db-mysql)
   (require 'mysql)
   (let* ((conn (make-mysql-conn :host "127.0.0.1"
@@ -5445,6 +5486,7 @@ verdict."
       (should (clutch-db-interrupt-query conn))
       (should (equal captured-sql "KILL QUERY 123"))
       (should (equal (plist-get captured-connect-args :password) "secret"))
+      (should-not (plist-get captured-connect-args :database))
       (should (equal (plist-get captured-connect-args :read-idle-timeout)
                      clutch-db-mysql-cancel-timeout-seconds))
       (should drained)
