@@ -1050,7 +1050,8 @@ Returns a `clutch-jdbc-conn'."
           (unwind-protect
               (condition-case err
                   (progn
-                    (clutch-db-set-current-schema conn schema)
+                    (clutch-db-set-current-schema
+                     conn (clutch-jdbc--oracle-read-schema schema))
                     (setq switched t))
                 (clutch-db-error
                  (signal 'clutch-db-error
@@ -2047,15 +2048,25 @@ current database."
          (clutch-jdbc--remember-duckdb-namespace conn catalog schema))
       (user-error "DuckDB schema is no longer available: %s" schema)))
    ((clutch-jdbc--oracle-conn-p conn)
-    (clutch-jdbc--use-oracle-schema conn (clutch-jdbc--oracle-schema-name schema)))
+    (clutch-jdbc--use-oracle-schema conn schema))
    (t
     (user-error "Schema switching is currently supported only for Oracle JDBC"))))
 
-(defun clutch-jdbc--oracle-schema-name (name)
-  "Return the stored form of Oracle schema NAME.
-A NAME without upper-case letters is upper-cased, as Oracle folds an
-unquoted name; any other NAME is taken as written."
-  (if (string= name (downcase name)) (upcase name) name))
+(defun clutch-jdbc--oracle-read-schema (text)
+  "Return the Oracle schema named by TEXT, read as an Oracle identifier.
+A name in double quotes is taken as written, and any other is
+upper-cased."
+  (if (and (> (length text) 1)
+           (string-prefix-p "\"" text)
+           (string-suffix-p "\"" text))
+      (substring text 1 -1)
+    (upcase text)))
+
+(defun clutch-jdbc--oracle-write-schema (schema)
+  "Return Oracle SCHEMA written for `clutch-jdbc--oracle-read-schema' to read back."
+  (if (equal schema (upcase schema))
+      schema
+    (concat "\"" schema "\"")))
 
 (defun clutch-jdbc--use-oracle-schema (conn schema)
   "Move every session of Oracle CONN into SCHEMA, named exactly, and return it."
@@ -2086,12 +2097,13 @@ Oracle PARAMS that already lead to the current schema stay as they are."
    ((clutch-jdbc--oracle-conn-p conn)
     (let ((schema (clutch-jdbc--conn-schema conn))
           (named (if-let* ((entry (plist-get params :schema)))
-                     (clutch-jdbc--oracle-schema-name entry)
+                     (clutch-jdbc--oracle-read-schema entry)
                    (and (plist-get params :user)
                         (upcase (plist-get params :user))))))
       (if (equal schema named)
           params
-        (plist-put (copy-sequence params) :schema schema))))
+        (plist-put (copy-sequence params) :schema
+                   (clutch-jdbc--oracle-write-schema schema)))))
    (t
     (cl-call-next-method))))
 

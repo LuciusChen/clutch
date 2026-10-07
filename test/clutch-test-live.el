@@ -344,36 +344,44 @@ its parameters starts there."
              (ignore-errors
                (clutch-db-query admin (format "DROP USER %s CASCADE" schema))))))))))
 
-(ert-deftest clutch-test-live-oracle-reconnect-keeps-a-mixed-case-schema ()
+(ert-deftest clutch-test-live-oracle-reconnect-keeps-a-quoted-schema-name ()
   :tags '(:clutch-live)
-  "A console moved to a mixed-case Oracle schema should reconnect into it.
+  "A console moved to a quoted Oracle schema should reconnect into that schema.
 The console recorded the schema as Oracle names it, but connecting with
-its parameters upper-cased the name and failed with ORA-01435."
+its parameters upper-cased the name: a mixed-case one failed with
+ORA-01435, and a lower-case one moved the session into the upper-case
+schema of the same name when there was one."
   (unless (eq clutch-test-backend 'oracle)
     (ert-skip "This regression covers Oracle's quoted schema names"))
   (clutch-test--with-conn admin
-    (let ((schema (format "Clutch_Mx_%d" (emacs-pid)))
-          (params (append (list :backend 'oracle) (clutch-test--live-connect-params))))
+    (let* ((mixed (format "Clutch_Mx_%d" (emacs-pid)))
+           (lower (format "clutch_lc_%d" (emacs-pid)))
+           (users (list mixed lower (upcase lower)))
+           (params (append (list :backend 'oracle) (clutch-test--live-connect-params))))
       (unwind-protect
           (progn
-            (clutch-db-query
-             admin (format "CREATE USER \"%s\" IDENTIFIED BY \"Clutch_ns1\"" schema))
-            (clutch-test--with-live-console params
-              ;; Clutch asks before it runs an ALTER.
-              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
-                (clutch-test--run-in-console
-                 (format "ALTER SESSION SET CURRENT_SCHEMA = \"%s\"" schema)))
-              (should (equal (plist-get clutch--connection-params :schema) schema))
-              (let ((reopened (clutch-db-connect 'oracle clutch--connection-params)))
-                (unwind-protect
-                    (should (equal (caar (clutch-db-result-rows
-                                          (clutch-db-query
-                                           reopened
-                                           "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))
-                                   schema))
-                  (clutch-db-disconnect reopened)))))
-        (ignore-errors
-          (clutch-db-query admin (format "DROP USER \"%s\" CASCADE" schema)))))))
+            (dolist (user users)
+              (clutch-db-query
+               admin (format "CREATE USER \"%s\" IDENTIFIED BY \"Clutch_ns1\"" user)))
+            (dolist (schema (list mixed lower))
+              (ert-info (schema)
+                (clutch-test--with-live-console params
+                  ;; Clutch asks before it runs an ALTER.
+                  (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                    (clutch-test--run-in-console
+                     (format "ALTER SESSION SET CURRENT_SCHEMA = \"%s\"" schema)))
+                  (should (equal (clutch-db-current-schema clutch-connection) schema))
+                  (let ((reopened (clutch-db-connect 'oracle clutch--connection-params)))
+                    (unwind-protect
+                        (should (equal (caar (clutch-db-result-rows
+                                              (clutch-db-query
+                                               reopened
+                                               "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))
+                                       schema))
+                      (clutch-db-disconnect reopened)))))))
+        (dolist (user users)
+          (ignore-errors
+            (clutch-db-query admin (format "DROP USER \"%s\" CASCADE" user))))))))
 
 (ert-deftest clutch-test-live-mysql-console-follows-a-dropped-current-database ()
   :tags '(:clutch-live)
