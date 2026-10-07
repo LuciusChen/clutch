@@ -3904,6 +3904,34 @@ orai18n warning."
       (should (equal executed-sql "USE `analytics`"))
       (should (equal (mysql-current-database conn) "analytics")))))
 
+(ert-deftest clutch-db-test-mysql-records-the-database-a-use-chose ()
+  "A USE through the MySQL adapter should leave mysql.el on its database.
+mysql.el kept the database it connected to, so a console went on showing
+and loading that one after a typed USE.  A USE whose database cannot be
+recorded still delivers its own outcome."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        refreshed outcomes)
+    (cl-flet ((note (result error) (push (list result error) outcomes)))
+      (cl-letf (((symbol-function 'mysql-query)
+                 (lambda (_conn _sql) (make-mysql-result)))
+                ((symbol-function 'mysql-query-async)
+                 (lambda (_conn _sql callback)
+                   (funcall callback (make-mysql-result) nil)))
+                ((symbol-function 'mysql-refresh-current-database)
+                 (lambda (mysql-conn) (push mysql-conn refreshed) "other")))
+        (clutch-db-query conn "USE other")
+        (clutch-db-query conn "SELECT 1")
+        (clutch-db-query-async conn "/* go */ use other" #'note)
+        (should (equal refreshed (list conn conn)))
+        (should (clutch-db-namespace-switch-p conn "-- go\nUSE other"))
+        (should-not (clutch-db-namespace-switch-p conn "SELECT 1"))
+        (cl-letf (((symbol-function 'mysql-refresh-current-database)
+                   (lambda (_conn) (signal 'mysql-error '("Lost connection")))))
+          (should-error (clutch-db-query-async conn "USE other" #'note)))))
+    (should (= (length outcomes) 2))
+    (should (cl-every #'car outcomes))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
