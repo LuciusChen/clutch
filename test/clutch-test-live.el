@@ -270,6 +270,66 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
               (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))
           (delete-directory clutch-console-directory t))))))
 
+(ert-deftest clutch-test-live-mysql-console-follows-a-dropped-current-database ()
+  :tags '(:clutch-live)
+  "A MySQL console should have no database once its current one is dropped.
+It went on showing the dropped database, and its automatic reconnect
+asked for that database and failed.  Loading the tables of no database
+must not fail either."
+  (unless (eq clutch-test-backend 'mysql)
+    (ert-skip "This regression covers MySQL's current database"))
+  (clutch-test--with-conn admin
+    (let* ((database (format "clutch_drop_%d" (emacs-pid)))
+           (params (append (list :backend 'mysql) (clutch-test--live-connect-params)))
+           (name (clutch--ad-hoc-console-name params))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           (mysql-tls-verify-server nil)
+           console-buffer)
+      (cl-labels ((run (sql)
+                    (clutch--execute sql)
+                    (clutch-test--await-queries))
+                  (server-database ()
+                    (caar (clutch-db-result-rows
+                           (clutch-db-query clutch-connection "SELECT DATABASE()")))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE DATABASE %s" database))
+              (clutch-query-console (list :name name :params params))
+              (setq console-buffer (current-buffer))
+              (cl-letf (((symbol-function 'message) #'ignore)
+                        ((symbol-function 'yes-or-no-p) #'always))
+                (run (format "USE %s" database))
+                (should (equal (clutch-db-current-schema clutch-connection) database))
+                (run (format "DROP DATABASE %s" database))
+                (should-not (server-database))
+                (should-not (clutch-db-current-schema clutch-connection))
+                (should-not (plist-get clutch--connection-params :database))
+                (clutch-test--await
+                 (lambda ()
+                   (not (eq (plist-get (clutch--schema-status-entry
+                                        clutch-connection)
+                                       :state)
+                            'refreshing))))
+                (should (eq (plist-get (clutch--schema-status-entry
+                                        clutch-connection)
+                                       :state)
+                            'ready))
+                (let ((conn clutch-connection)
+                      (id (caar (clutch-db-result-rows
+                                 (clutch-db-query clutch-connection
+                                                  "SELECT CONNECTION_ID()")))))
+                  (clutch-db-query admin (format "KILL %s" id))
+                  (clutch-test--await
+                   (lambda () (not (clutch--connection-alive-p conn))))
+                  (run "SELECT 1")
+                  (should-not (eq clutch-connection conn))
+                  (should-not (server-database)))))
+          (when (buffer-live-p console-buffer)
+            (kill-buffer console-buffer))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))
+          (delete-directory clutch-console-directory t))))))
+
 (ert-deftest clutch-test-live-pg-console-follows-the-server-search-path ()
   :tags '(:clutch-live)
   "A PostgreSQL console should follow the search_path that the server has.
