@@ -347,10 +347,28 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
 
 ;;;; SQL helpers for transaction state
 
-(defun clutch--transaction-control-query-p (sql)
-  "Return non-nil when SQL is explicit transaction control."
-  (member (clutch-db-sql-leading-keyword sql)
-          '("COMMIT" "ROLLBACK" "END" "ABORT")))
+(defun clutch--transaction-end-query-p (sql)
+  "Return non-nil when SQL ends the current transaction.
+That is a COMMIT, or a ROLLBACK of the whole transaction: ROLLBACK [WORK]
+[AND [NO] CHAIN] [[NO] RELEASE], or ROLLBACK TRANSACTION or TRAN [AND [NO]
+CHAIN].  A rollback to a savepoint keeps the work done before it, and so
+may SQL Server's ROLLBACK TRANSACTION with a name, which can name a
+savepoint, even one called CHAIN."
+  (pcase (clutch-db-sql-leading-keyword sql)
+    ((or "COMMIT" "END" "ABORT") t)
+    ("ROLLBACK"
+     (let* ((case-fold-search t)
+            (space "[ \t\n\r\f]+")
+            (chain (concat "\\(?:" space "AND\\(?:" space "NO\\)?"
+                           space "CHAIN\\)?")))
+       (string-match-p
+        (concat "\\`ROLLBACK\\(?:"
+                "\\(?:" space "WORK\\)?" chain
+                "\\(?:\\(?:" space "NO\\)?" space "RELEASE\\)?"
+                "\\|" space "TRAN\\(?:SACTION\\)?" chain
+                "\\)\\'")
+        (clutch-db-sql-trim-end
+         (clutch-db-sql-strip-leading-comments sql)))))))
 
 ;;;; Transaction state
 
@@ -526,7 +544,7 @@ pre-rendered text."
   "Update transaction dirty state for successful SQL on CONN."
   (when (clutch-db-manual-commit-p conn)
     (cond
-     ((clutch--transaction-control-query-p sql)
+     ((clutch--transaction-end-query-p sql)
       (clutch--clear-tx-state conn))
      ((clutch-db-sql-schema-affecting-p sql)
       (pcase (clutch-db-schema-transaction-effect conn sql)

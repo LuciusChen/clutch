@@ -365,6 +365,15 @@ lists.  Stop before those lists can grow without bound."
   "Return the Redis logical database label for CONN."
   (or (clutch-db-database conn) "0"))
 
+(cl-defmethod clutch-db-namespace-switch-p ((_conn clutch-redis-conn) command-text)
+  "Return non-nil when COMMAND-TEXT is a SELECT of a logical database."
+  (string-equal-ignore-case
+   (car (clutch-redis--command-parts command-text)) "SELECT"))
+
+(cl-defmethod clutch-db-update-namespace-params ((conn clutch-redis-conn) params)
+  "Store Redis CONN's current database in a copy of connection PARAMS."
+  (plist-put (copy-sequence params) :database (clutch-db-database conn)))
+
 (defun clutch-redis--scan-keys (conn &optional pattern)
   "Return keys from Redis CONN matching PATTERN within discovery budgets.
 Duplicate keys permitted by Redis `SCAN' are removed while preserving their

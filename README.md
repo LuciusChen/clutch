@@ -412,7 +412,7 @@ The shared `clutch-switch-schema` command lists databases visible to the current
 
 Redis is basic key/value support through `redis.el`. It connects to ordinary Redis TCP endpoints, uses line-oriented `clutch-redis-mode` command buffers, and maps key browsing/type-aware reads into the shared Clutch grid. Redis support is intentionally basic: no SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows. Generated discovery and collection-browse operations are bounded; use explicit scan/range commands for larger traversals. See [docs/backend-support.org](docs/backend-support.org) and [docs/native-backends.md](docs/native-backends.md) for support boundaries.
 
-Redis profiles may select an initial logical database with `:database`. Clutch does not offer it in `clutch-switch-schema` because Redis has no generally available, ACL-safe command that enumerates every configured logical database.
+Redis profiles may select an initial logical database with `:database`, and a `SELECT` run in the console moves the session to another one, which the automatic reconnect after an idle drop selects again; `C-c C-e` connects to the profile's database, as after `clutch-switch-schema`. Clutch does not offer it in `clutch-switch-schema` because Redis has no generally available, ACL-safe command that enumerates every configured logical database.
 
 ### JDBC Backend
 

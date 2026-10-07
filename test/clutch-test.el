@@ -5691,6 +5691,42 @@ statement, so the refusal has to come before the prompt and the batch."
           (should (equal clutch--pending-inserts '(first second)))
           (should-not reverted))))))
 
+(ert-deftest clutch-test-rollback-to-a-savepoint-keeps-the-transaction-dirty ()
+  "Only a rollback of the whole transaction should clear its uncommitted work.
+A rollback to a savepoint keeps the work done before the savepoint, which a
+disconnect then lost without asking.  SQL Server's ROLLBACK TRANSACTION with
+a name may name a savepoint, so it keeps the work too, also when the name is
+a word that ends a whole rollback, such as CHAIN."
+  (pcase-dolist (`(,sql ,state)
+                 '(("ROLLBACK TO SAVEPOINT s" dirty)
+                   ("rollback to s;" dirty)
+                   ("ROLLBACK WORK TO SAVEPOINT s" dirty)
+                   ("ROLLBACK TRANSACTION TO SAVEPOINT s" dirty)
+                   ("ROLLBACK TRAN s" dirty)
+                   ("ROLLBACK TRANSACTION chain" dirty)
+                   ("ROLLBACK TRAN release" dirty)
+                   ("ROLLBACK TRAN no" dirty)
+                   ("ROLLBACK" nil)
+                   ("rollback work;" nil)
+                   ("ROLLBACK TRANSACTION" nil)
+                   ("ROLLBACK TRANSACTION AND CHAIN" nil)
+                   ("ROLLBACK AND NO CHAIN" nil)
+                   ("ROLLBACK WORK AND CHAIN NO RELEASE" nil)
+                   ("-- done\nROLLBACK" nil)
+                   ("COMMIT" nil)))
+    (ert-info (sql)
+      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+            (clutch--running-queries (make-hash-table :test 'eq)))
+        (cl-letf (((symbol-function 'clutch-db-manual-commit-p) (lambda (_) t))
+                  ((symbol-function 'clutch-db-query)
+                   (lambda (&rest _) (make-clutch-db-result :affected-rows 1)))
+                  ((symbol-function 'clutch--clear-connection-problem-capture)
+                   #'ignore))
+          (dolist (statement (list "UPDATE t SET n = 1" "SAVEPOINT s"
+                                   "UPDATE t SET n = 2" sql))
+            (clutch--run-db-query 'tx-conn statement))
+          (should (eq (clutch--tx-state 'tx-conn) state)))))))
+
 ;;;; Edit — validation
 
 (ert-deftest clutch-test-insert-local-validation-updates-inline-error ()
@@ -10445,6 +10481,35 @@ buffer's new connection names, and bound that buffer to the old connection."
           (should (cl-some (lambda (text) (string-match-p "outcome is unknown" text))
                            messages))
           (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+
+(ert-deftest clutch-test-redis-select-moves-the-session-to-its-database ()
+  "A Redis SELECT should move the session to the database it selects.
+A reconnect selected the database the connection was opened with, and the
+cached keys and their metadata stayed that database's."
+  (require 'redis)
+  (require 'clutch-redis)
+  (with-temp-buffer
+    ;; The client reports the database that the SELECT moves it to, as
+    ;; redis.el does once the server accepts it.
+    (let ((conn (make-clutch-redis-conn :client (make-redis-conn :database "1")))
+          primed)
+      (setq-local clutch-connection conn)
+      (setq-local clutch--connection-params '(:backend redis :database 0))
+      (clutch-test--with-async-statements finishes
+        (let ((clutch--schema-cache (make-hash-table :test 'eq)))
+          (puthash conn 'keys-of-database-0 clutch--schema-cache)
+          (cl-letf (((symbol-function 'clutch-result--display-select) #'ignore)
+                    ((symbol-function 'clutch--prime-schema-cache)
+                     (lambda (connection) (setq primed connection))))
+            (clutch--execute "SELECT 1")
+            (funcall (cdar finishes)
+                     (make-clutch-db-result :columns '((:name "value"))
+                                            :rows '(("OK")))
+                     nil)
+            (ert-run-idle-timers)
+            (should (equal (plist-get clutch--connection-params :database) "1"))
+            (should-not (gethash conn clutch--schema-cache))
+            (should (eq primed conn))))))))
 
 (ert-deftest clutch-test-repl-reply-after-the-repl-moved-draws-no-result ()
   "A REPL statement's reply after the REPL left its connection draws no result.

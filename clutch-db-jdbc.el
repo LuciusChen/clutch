@@ -1859,11 +1859,13 @@ when a catalog is supplied."
     (append (when catalog `((catalog . ,catalog)))
             (when schema `((schema . ,schema))))))
 
-(defun clutch-jdbc--table-metadata-params (conn table)
-  "Return JDBC metadata params for TABLE on CONN."
+(defun clutch-jdbc--table-metadata-params (conn table &optional schema catalog)
+  "Return JDBC metadata params for TABLE on CONN.
+SCHEMA and CATALOG, when non-nil, qualify TABLE in place of CONN's scope."
   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
     (table . ,table)
-    ,@(clutch-jdbc--metadata-scope-params conn)))
+    ,@(clutch-jdbc--metadata-scope-params
+       (clutch-jdbc--metadata-conn-for-scope conn schema catalog))))
 
 (defun clutch-jdbc--visible-schemas (conn schemas)
   "Normalize visible SCHEMAS for CONN."
@@ -2061,11 +2063,11 @@ the metadata request."
     t))
 
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
-                                              &optional errback _schema _catalog)
+                                              &optional errback schema catalog)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-columns"
-   (clutch-jdbc--table-metadata-params conn table)
+   (clutch-jdbc--table-metadata-params conn table schema catalog)
    (lambda (result)
      (when callback
        (funcall callback
@@ -2093,19 +2095,24 @@ the metadata request."
   t)
 
 (defun clutch-jdbc--foreign-keys-from-result (result)
-  "Return normalized foreign keys from JDBC metadata RESULT."
+  "Return normalized foreign keys from JDBC metadata RESULT.
+A referenced table names its schema as :ref-schema; a driver without
+schemas reports an empty one, which is left out."
   (mapcar (lambda (fk)
-            (cons (plist-get fk :fk-column)
-                  (list :ref-table (plist-get fk :pk-table)
-                        :ref-column (plist-get fk :pk-column))))
+            (let ((schema (plist-get fk :pk-schema)))
+              (cons (plist-get fk :fk-column)
+                    `(:ref-table ,(plist-get fk :pk-table)
+                      :ref-column ,(plist-get fk :pk-column)
+                      ,@(and (stringp schema) (not (string-empty-p schema))
+                             (list :ref-schema schema))))))
           (plist-get result :foreign-keys)))
 
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback
-                                            &optional errback _schema _catalog)
+                                            &optional errback schema catalog)
   "Fetch foreign-key info for TABLE on JDBC CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-foreign-keys"
-   (clutch-jdbc--table-metadata-params conn table)
+   (clutch-jdbc--table-metadata-params conn table schema catalog)
    (lambda (result)
      (when callback
        (funcall callback (clutch-jdbc--foreign-keys-from-result result))))
@@ -2305,11 +2312,12 @@ the metadata request."
        (clutch-jdbc--conn-schema metadata-conn)))))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn clutch-jdbc-conn) table
-                                             &optional _schema _catalog)
+                                             &optional schema catalog)
   "Return primary key columns for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   conn "get-primary-keys"
-                  (clutch-jdbc--table-metadata-params conn table))))
+                  (clutch-jdbc--table-metadata-params
+                   conn table schema catalog))))
     (plist-get result :primary-keys)))
 
 (defun clutch-jdbc--index-column-name (column)
@@ -2400,21 +2408,23 @@ without a unique index never asks for them."
             (list rowid))))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table
-                                      &optional _schema _catalog)
+                                      &optional schema catalog)
   "Return foreign key info for TABLE on JDBC CONN."
   (let* ((result (clutch-jdbc--rpc
                   conn "get-foreign-keys"
-                  (clutch-jdbc--table-metadata-params conn table))))
+                  (clutch-jdbc--table-metadata-params
+                   conn table schema catalog))))
     (clutch-jdbc--foreign-keys-from-result result)))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table
-                                        &optional _schema _catalog)
+                                        &optional schema catalog)
   "Return detailed column info for TABLE on JDBC CONN."
-  (let* ((pk-cols (clutch-db-primary-key-columns conn table))
-         (fks     (clutch-db-foreign-keys conn table))
+  (let* ((pk-cols (clutch-db-primary-key-columns conn table schema catalog))
+         (fks     (clutch-db-foreign-keys conn table schema catalog))
          (result  (clutch-jdbc--rpc
                    conn "get-columns"
-                   (clutch-jdbc--table-metadata-params conn table)))
+                   (clutch-jdbc--table-metadata-params
+                    conn table schema catalog)))
          (cols    (clutch-jdbc--normalize-column-details
                    (plist-get result :columns))))
     (mapcar (lambda (col)

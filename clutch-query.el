@@ -1158,6 +1158,17 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
         (clutch--set-schema-status connection 'stale)
       (clutch--refresh-schema-cache-async connection))))
 
+(defun clutch--note-namespace-switch (connection)
+  "Follow a statement that switched CONNECTION to another namespace.
+As after `clutch-switch-schema', the automatic reconnect selects that
+namespace, and its schema replaces the cached metadata of the old one."
+  (clutch--update-connection-params-for-buffers
+   connection
+   (lambda (params)
+     (clutch-db-update-namespace-params connection params)))
+  (clutch--clear-connection-metadata-caches connection)
+  (clutch--prime-schema-cache connection))
+
 (defun clutch--query-debug-summary (result)
   "Return a compact summary string for RESULT."
   (if-let* ((rows (clutch-db-result-rows result)))
@@ -1254,6 +1265,10 @@ and signal `clutch-query-interrupted'."
                                           (clutch--forget-row-identities connection)
                                           (clutch--note-schema-affecting-query
                                            sql connection))
+                                        (when (clutch-db-namespace-switch-p
+                                               connection sql)
+                                          (clutch--note-namespace-switch
+                                           connection))
                                         (list :result result
                                               :connection connection
                                               :elapsed elapsed
