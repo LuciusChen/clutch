@@ -381,10 +381,62 @@ though the server had rolled it back with the transaction."
                 (run "BEGIN" (format "SET search_path TO %s" moved))
                 (should (equal (path-after-a-lost-connection) default-path))
                 (run "BEGIN" (format "SET search_path TO %s" moved)
-                     "COMMIT AND CHAIN")
+                     "COMMIT AND CHAIN -- the last statement in its buffer")
                 (should (equal (path-after-a-lost-connection) moved))))
           (when (buffer-live-p console-buffer)
             (kill-buffer console-buffer))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))
+          (delete-directory clutch-console-directory t))))))
+
+(ert-deftest clutch-test-live-pg-rollback-after-a-failed-commit-follows-the-path ()
+  :tags '(:clutch-live)
+  "A rollback after a failed PostgreSQL commit should show the server's path.
+A COMMIT that fails rolls back the transaction, and a SET made in it, but
+clutch-rollback then found nothing to end, and the console went on
+showing the schema that SET had chosen."
+  (unless (eq clutch-test-backend 'pg)
+    (ert-skip "This regression covers the PostgreSQL search_path"))
+  (clutch-test--with-conn admin
+    (let* ((schema (format "clutch_ns_failed_%d" (emacs-pid)))
+           (parent (format "clutch_parent_%d" (emacs-pid)))
+           (child (format "clutch_child_%d" (emacs-pid)))
+           (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
+           (name (clutch--ad-hoc-console-name params))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console-buffer default-path)
+      (cl-labels ((run (sql)
+                    (clutch--execute sql)
+                    (clutch-test--await-queries)))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+              (clutch-db-query admin (format "CREATE TABLE public.%s (id int PRIMARY KEY)"
+                                             parent))
+              (clutch-db-query
+               admin (format "CREATE TABLE public.%s (pid int REFERENCES public.%s %s)"
+                             child parent "DEFERRABLE INITIALLY DEFERRED"))
+              (clutch-query-console (list :name name :params params))
+              (setq console-buffer (current-buffer))
+              (setq default-path (caar (clutch-db-result-rows
+                                        (clutch-db-query clutch-connection
+                                                         "SHOW search_path"))))
+              (cl-letf (((symbol-function 'message) #'ignore))
+                (clutch-toggle-auto-commit)
+                (run (format "SET search_path TO %s, public" schema))
+                (run (format "INSERT INTO public.%s VALUES (1)" child))
+                (should (equal (clutch--shown-namespace) schema))
+                (should-error (clutch-commit) :type 'user-error)
+                (clutch-rollback)
+                (should (equal (clutch--shown-namespace) "public"))
+                (should (equal (plist-get clutch--connection-params :search-path)
+                               default-path))
+                (clutch-toggle-auto-commit)))
+          (when (buffer-live-p console-buffer)
+            (kill-buffer console-buffer))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS public.%s, public.%s"
+                                           child parent)))
           (ignore-errors
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))
           (delete-directory clutch-console-directory t))))))

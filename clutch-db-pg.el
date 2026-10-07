@@ -316,17 +316,31 @@ it too, but are not followed."
           '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END"
             "PREPARE")))
 
+(defun clutch-db-pg--chained-commit-p (sql)
+  "Return non-nil when SQL is one COMMIT or END that chains a new transaction.
+Comments around or between its words, and its semicolons, do not count."
+  (let ((case-fold-search t)
+        (space "[ \t\n\r\f]+"))
+    (string-match-p
+     (concat "\\`[ \t\n\r\f]*\\(?:COMMIT\\|END\\)"
+             "\\(?:" space "\\(?:WORK\\|TRANSACTION\\)\\)?"
+             space "AND" space "CHAIN[ \t\n\r\f;]*\\'")
+     (clutch-db-sql-mask-literal-or-comment sql))))
+
+(defun clutch-db-pg--forget-search-path (conn &optional chained)
+  "Make CONN ask the server for its search_path again.
+Also note whether the path is settled.  A lost connection rolls back an
+open transaction, and a SET made in it, so the path is settled when none
+is open, or when CHAINED, just after a COMMIT that chained the next one."
+  (setf (clutch-db-pg--connection-current-schema conn) nil
+        (clutch-db-pg--connection-search-path conn) nil
+        (clutch-db-pg--connection-path-settled conn)
+        (or chained (not (clutch-db-pg--tx-open-p conn)))))
+
 (defun clutch-db-pg--follow-search-path (conn sql)
-  "Forget what CONN knows of its search_path when SQL may have changed it.
-Also note whether that path is settled.  A lost connection rolls back an
-open transaction, and a SET made in it, so the path is settled outside
-one, or after a COMMIT or END that chained the next one."
+  "Forget what CONN knows of its search_path when SQL may have changed it."
   (when (clutch-db-pg--namespace-statement-p sql)
-    (setf (clutch-db-pg--connection-current-schema conn) nil
-          (clutch-db-pg--connection-search-path conn) nil
-          (clutch-db-pg--connection-path-settled conn)
-          (or (not (clutch-db-pg--tx-open-p conn))
-              (member (clutch-db-sql-leading-keyword sql) '("COMMIT" "END"))))))
+    (clutch-db-pg--forget-search-path conn (clutch-db-pg--chained-commit-p sql))))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
@@ -687,33 +701,42 @@ FKS is an alist of (column-name . fk-plist)."
 
 (cl-defmethod clutch-db-commit ((conn clutch-db-pg--connection))
   "Finish the current foreground transaction on PostgreSQL CONN.
-Return `rolled-back' after rolling back an already failed transaction."
+Return `rolled-back' after rolling back an already failed transaction.
+With none open, as after a COMMIT that failed and so rolled back, forget
+the cached search_path, so that it is asked for again."
   (clutch-db--translate-library-error pgsql-error
-    (when (clutch-db-pg--tx-open-p conn)
-      (if (clutch-db-pg--tx-failed-p conn)
-          (progn
-            (clutch-db-pg--exec conn "ROLLBACK")
-            'rolled-back)
-        (clutch-db-pg--exec conn "COMMIT")))))
+    (if (clutch-db-pg--tx-open-p conn)
+        (if (clutch-db-pg--tx-failed-p conn)
+            (progn
+              (clutch-db-pg--exec conn "ROLLBACK")
+              'rolled-back)
+          (clutch-db-pg--exec conn "COMMIT"))
+      (ignore (clutch-db-pg--forget-search-path conn)))))
 
 (cl-defmethod clutch-db-rollback ((conn clutch-db-pg--connection))
-  "Roll back the current foreground transaction on PostgreSQL CONN."
+  "Roll back the current foreground transaction on PostgreSQL CONN.
+With none open, as after a COMMIT that failed and so rolled back, forget
+the cached search_path, so that it is asked for again."
   (clutch-db--translate-library-error pgsql-error
-    (when (clutch-db-pg--tx-open-p conn)
-      (clutch-db-pg--exec conn "ROLLBACK"))))
+    (if (clutch-db-pg--tx-open-p conn)
+        (clutch-db-pg--exec conn "ROLLBACK")
+      (ignore (clutch-db-pg--forget-search-path conn)))))
 
 (cl-defmethod clutch-db-set-auto-commit
     ((conn clutch-db-pg--connection) auto-commit)
   "Set foreground autocommit mode on PostgreSQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables clutch-managed
-manual-commit mode via lazy BEGIN."
+manual-commit mode via lazy BEGIN.  Enabling autocommit with no
+transaction open forgets the cached search_path, as `clutch-db-commit'
+does."
   (clutch-db--translate-library-error pgsql-error
     (if auto-commit
         (progn
-          (when (clutch-db-pg--tx-open-p conn)
-            (clutch-db-pg--exec conn (if (clutch-db-pg--tx-failed-p conn)
-                              "ROLLBACK"
-                            "COMMIT")))
+          (if (clutch-db-pg--tx-open-p conn)
+              (clutch-db-pg--exec conn (if (clutch-db-pg--tx-failed-p conn)
+                                "ROLLBACK"
+                              "COMMIT"))
+            (clutch-db-pg--forget-search-path conn))
           (setf (clutch-db-pg--connection-manual-commit conn) nil))
       (setf (clutch-db-pg--connection-manual-commit conn) t))))
 
