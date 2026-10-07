@@ -273,29 +273,62 @@ is on MySQL or PostgreSQL."
   :tags '(:clutch-live)
   "A console should follow a namespace switch typed into it.
 It went on showing and loading the namespace it opened with, and its
-parameters reconnected to that one.  PostgreSQL keeps the whole path."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "This regression covers MySQL USE and PostgreSQL SET search_path"))
+parameters reconnected to that one.  PostgreSQL keeps the whole path.
+Oracle lists the tables of the schema it moved to, and connecting with
+its parameters starts there."
+  (unless (memq clutch-test-backend '(mysql pg oracle))
+    (ert-skip "This regression covers MySQL USE, PostgreSQL SET search_path and Oracle ALTER SESSION"))
   (clutch-test--with-conn admin
     (let ((schema (format "clutch_ns_%d" (emacs-pid)))
           (params (append (list :backend clutch-test-backend)
                           (clutch-test--live-connect-params))))
       (pcase-let ((`(,switch ,namespace ,key ,value ,check-sql)
-                   (if (eq clutch-test-backend 'mysql)
-                       '("USE information_schema" "information_schema"
-                         :database "information_schema" "SELECT DATABASE()")
-                     (list (format "SET search_path TO %s, public" schema) schema
-                           :search-path (format "%s, public" schema)
-                           "SHOW search_path"))))
+                   (pcase clutch-test-backend
+                     ('mysql
+                      '("USE information_schema" "information_schema"
+                        :database "information_schema" "SELECT DATABASE()"))
+                     ('pg
+                      (list (format "SET search_path TO %s, public" schema) schema
+                            :search-path (format "%s, public" schema)
+                            "SHOW search_path"))
+                     ('oracle
+                      (list (format "ALTER SESSION SET CURRENT_SCHEMA = %s" schema)
+                            (upcase schema) :schema (upcase schema)
+                            "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))))
         (unwind-protect
             (progn
-              (when (eq clutch-test-backend 'pg)
-                (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
+              (pcase clutch-test-backend
+                ('pg (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
+                ('oracle
+                 (clutch-db-query
+                  admin (format "CREATE USER %s IDENTIFIED BY \"Clutch_ns1\" QUOTA UNLIMITED ON users"
+                                schema))
+                 (clutch-db-query
+                  admin (format "CREATE TABLE %s.only_here (id NUMBER)" schema))))
               (clutch-test--with-live-console params
-                (clutch-test--run-in-console switch)
+                (when (eq clutch-test-backend 'oracle)
+                  (clutch-test--run-in-console
+                   (format "INSERT INTO %s.only_here VALUES (1)" schema))
+                  (should (clutch--tx-dirty-p clutch-connection)))
+                ;; Clutch asks before it runs an ALTER.
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-test--run-in-console switch))
                 (should (equal (clutch-db-current-schema clutch-connection)
                                namespace))
                 (should (equal (plist-get clutch--connection-params key) value))
+                (when (eq clutch-test-backend 'oracle)
+                  ;; ALTER SESSION commits nothing, so the insert is still
+                  ;; uncommitted work.
+                  (should (clutch--tx-dirty-p clutch-connection))
+                  (clutch-rollback)
+                  (should (equal (format "%s"
+                                         (caar (clutch-db-result-rows
+                                                (clutch-db-query
+                                                 admin (format "SELECT COUNT(*) FROM %s.only_here"
+                                                               schema)))))
+                                 "0"))
+                  (should (clutch-test--live-name-member-p
+                           "ONLY_HERE" (clutch-db-list-tables clutch-connection))))
                 (let ((reopened (clutch-db-connect clutch-test-backend
                                                    clutch--connection-params)))
                   (unwind-protect
@@ -303,9 +336,44 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
                                             (clutch-db-query reopened check-sql)))
                                      value))
                     (clutch-db-disconnect reopened)))))
-          (when (eq clutch-test-backend 'pg)
-            (ignore-errors
-              (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))))))))
+          (pcase clutch-test-backend
+            ('pg
+             (ignore-errors
+               (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))
+            ('oracle
+             (ignore-errors
+               (clutch-db-query admin (format "DROP USER %s CASCADE" schema))))))))))
+
+(ert-deftest clutch-test-live-oracle-reconnect-keeps-a-mixed-case-schema ()
+  :tags '(:clutch-live)
+  "A console moved to a mixed-case Oracle schema should reconnect into it.
+The console recorded the schema as Oracle names it, but connecting with
+its parameters upper-cased the name and failed with ORA-01435."
+  (unless (eq clutch-test-backend 'oracle)
+    (ert-skip "This regression covers Oracle's quoted schema names"))
+  (clutch-test--with-conn admin
+    (let ((schema (format "Clutch_Mx_%d" (emacs-pid)))
+          (params (append (list :backend 'oracle) (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             admin (format "CREATE USER \"%s\" IDENTIFIED BY \"Clutch_ns1\"" schema))
+            (clutch-test--with-live-console params
+              ;; Clutch asks before it runs an ALTER.
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (clutch-test--run-in-console
+                 (format "ALTER SESSION SET CURRENT_SCHEMA = \"%s\"" schema)))
+              (should (equal (plist-get clutch--connection-params :schema) schema))
+              (let ((reopened (clutch-db-connect 'oracle clutch--connection-params)))
+                (unwind-protect
+                    (should (equal (caar (clutch-db-result-rows
+                                          (clutch-db-query
+                                           reopened
+                                           "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))
+                                   schema))
+                  (clutch-db-disconnect reopened)))))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP USER \"%s\" CASCADE" schema)))))))
 
 (ert-deftest clutch-test-live-mysql-console-follows-a-dropped-current-database ()
   :tags '(:clutch-live)

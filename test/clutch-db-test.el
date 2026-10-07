@@ -997,6 +997,24 @@ and a `?' inside a dollar-quoted function body is part of the body."
                (make-clutch-jdbc-conn :params '(:driver sqlserver))
                "CREATE TABLE t (id int)")))
 
+(ert-deftest clutch-db-test-jdbc-oracle-session-control-keeps-the-transaction ()
+  "An Oracle ALTER SESSION or ALTER SYSTEM should keep the transaction's state.
+They commit nothing, but were taken for DDL, which commits on Oracle, so
+a typed ALTER SESSION cleared the uncommitted work that Manual mode
+tracks, and a disconnect no longer asked first."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle))))
+    (dolist (sql '("ALTER SESSION SET CURRENT_SCHEMA = hr"
+                   "alter system flush shared_pool"
+                   "/* move */ ALTER\n  SESSION SET NLS_DATE_FORMAT = 'YYYY'"))
+      (should-not (clutch-db-schema-transaction-effect conn sql)))
+    (dolist (sql '("ALTER TABLE sessions ADD c NUMBER"
+                   "ALTER SYNONYM s COMPILE"))
+      (should (eq (clutch-db-schema-transaction-effect conn sql) 'clear)))
+    (ert-info ("whatever buffer is current when the statement ends")
+      (with-syntax-table emacs-lisp-mode-syntax-table
+        (should-not (clutch-db-schema-transaction-effect
+                     conn "ALTER SESSION/* move */SET CURRENT_SCHEMA = hr"))))))
+
 (ert-deftest clutch-db-test-jdbc-transaction-rpcs ()
   "JDBC commit and rollback should send the expected transaction RPC."
   (dolist (case '((commit clutch-db-commit 17)
@@ -3886,13 +3904,194 @@ orai18n warning."
       (should (= (alist-get 'conn-id captured-params) 7))
       (should (equal (alist-get 'schema captured-params) "ANALYTICS"))
       (should (equal (plist-get (clutch-jdbc-conn-params conn) :schema)
-                     "ANALYTICS"))))
+                     "ANALYTICS"))
+      (ert-info ("a name with upper-case letters is taken as written")
+        (should (equal (clutch-db-set-current-schema conn "Alt_Mixed") "Alt_Mixed"))
+        (should (equal (alist-get 'schema captured-params) "Alt_Mixed")))))
   (let ((conn (make-clutch-jdbc-conn
                :conn-id 7
                :params '(:driver jdbc :display-name "KingbaseES" :rpc-timeout 9))))
     (should-error
      (clutch-db-set-current-schema conn "public")
      :type 'user-error)))
+
+(ert-deftest clutch-db-test-jdbc-oracle-connect-starts-in-its-schema ()
+  "An Oracle connection that names a schema should start its session in it.
+Connecting left the session in the user's own schema while Clutch showed
+and browsed the named one, so after `clutch-switch-schema' the automatic
+reconnect ran unqualified SQL in another schema than the one shown."
+  (let (ops schemas disconnected)
+    (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+              ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params &optional _timeout-seconds)
+                 (push op ops)
+                 (pcase op
+                   ("connect" '(:conn-id 7))
+                   ("set-current-schema"
+                    (push (alist-get 'schema params) schemas)
+                    (when (equal (alist-get 'schema params) "GONE")
+                      (signal 'clutch-db-error '("ORA-01435: user does not exist")))
+                    '(:conn-id 7)))))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (conn) (setq disconnected conn))))
+      (cl-flet ((connect (&rest extra)
+                  (setq ops nil schemas nil disconnected nil)
+                  (clutch-db-jdbc-connect
+                   'oracle
+                   (append extra '(:host "db" :port 1521 :database "svc"
+                                   :user "scott" :password "tiger")))))
+        (let ((conn (connect :schema "reporting")))
+          (should (equal (reverse ops) '("connect" "set-current-schema")))
+          (should (equal schemas '("REPORTING")))
+          (should (equal (clutch-db-current-schema conn) "REPORTING")))
+        (connect)
+        (should (equal ops '("connect")))
+        (should (equal (cadr (should-error (connect :schema "gone")
+                                           :type 'clutch-db-error))
+                       "Could not start in schema gone: ORA-01435: user does not exist"))
+        (should (= (clutch-jdbc-conn-conn-id disconnected) 7))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-follows-a-typed-schema-switch ()
+  "An ALTER SESSION run on Oracle should move Clutch into the schema it set.
+Clutch went on showing, browsing and reconnecting to the schema it had,
+and its metadata sessions stayed there."
+  (let ((server-schema "SYSTEM")
+        read-fails executed rpc-schemas messages)
+    (cl-flet ((conn ()
+                (make-clutch-jdbc-conn
+                 :conn-id 7 :params (list :driver 'oracle :user "system"))))
+      (cl-letf (((symbol-function 'clutch-jdbc--execute-rpc)
+                 (lambda (_conn _op payload)
+                   (let ((sql (alist-get 'sql payload)))
+                     (push sql executed)
+                     (cond
+                      ((string-match-p "SYS_CONTEXT" sql)
+                       (when read-fails
+                         (signal 'clutch-db-error '("connection lost")))
+                       (make-clutch-db-result :rows (list (list server-schema))))
+                      ((string-match-p "\\`ALTER SESSION" sql)
+                       (setq server-schema "Alt_Mixed")
+                       (make-clutch-db-result :affected-rows 0))
+                      (t (make-clutch-db-result :affected-rows 0))))))
+                ((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_conn op params &optional _timeout-seconds)
+                   (should (equal op "set-current-schema"))
+                   (push (alist-get 'schema params) rpc-schemas)
+                   '(:conn-id 7)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (ert-info ("ALTER SESSION moves every session, in the exact case")
+          (let ((conn (conn))
+                (sql "ALTER SESSION SET CURRENT_SCHEMA = \"Alt_Mixed\""))
+            (should (clutch-db-result-p (clutch-db-query conn sql)))
+            (should (clutch-db-namespace-switch-p conn sql))
+            (should (equal rpc-schemas '("Alt_Mixed")))
+            (should (equal (clutch-db-current-schema conn) "Alt_Mixed"))
+            (should (equal (clutch-db-update-namespace-params
+                            conn '(:driver oracle :user "system"))
+                           '(:driver oracle :user "system" :schema "Alt_Mixed")))))
+        (ert-info ("an ALTER that leaves the schema keeps the parameters")
+          (setq server-schema "SYSTEM" rpc-schemas nil)
+          (let ((conn (conn))
+                (sql "ALTER TABLE t ADD c NUMBER"))
+            (clutch-db-query conn sql)
+            (should (clutch-db-namespace-switch-p conn sql))
+            (should-not rpc-schemas)
+            (should (equal (clutch-db-update-namespace-params
+                            conn '(:driver oracle :user "system"))
+                           '(:driver oracle :user "system")))))
+        (ert-info ("parameters that already lead to the schema stay as they are")
+          (let ((conn (make-clutch-jdbc-conn
+                       :conn-id 7 :params (list :driver 'oracle :user "system"
+                                                :schema "SYSTEM"))))
+            (should (equal (clutch-db-update-namespace-params
+                            conn '(:driver oracle :user "system"))
+                           '(:driver oracle :user "system"))))
+          (let ((conn (make-clutch-jdbc-conn
+                       :conn-id 7 :params (list :driver 'oracle :user "system"
+                                                :schema "HR"))))
+            (should (equal (clutch-db-update-namespace-params
+                            conn '(:driver oracle :user "system" :schema "hr"))
+                           '(:driver oracle :user "system" :schema "hr")))))
+        (ert-info ("other statements are not followed")
+          (setq executed nil)
+          (let ((conn (conn)))
+            (clutch-db-query conn "SELECT 1 FROM dual")
+            (should (equal executed '("SELECT 1 FROM dual")))
+            (should-not (clutch-db-namespace-switch-p conn "SELECT 1 FROM dual"))))
+        (ert-info ("only Oracle is followed")
+          (setq executed nil)
+          (let ((conn (make-clutch-jdbc-conn
+                       :conn-id 8 :params '(:driver sqlserver :user "sa"))))
+            (clutch-db-query conn "ALTER TABLE t ADD c INT")
+            (should (equal executed '("ALTER TABLE t ADD c INT")))
+            (should-not (clutch-db-namespace-switch-p
+                         conn "ALTER TABLE t ADD c INT"))))
+        (ert-info ("failing to read the schema back only reports it")
+          (setq read-fails t rpc-schemas nil messages nil)
+          (let ((conn (conn)))
+            (should (clutch-db-result-p
+                     (clutch-db-query conn "ALTER SESSION SET CURRENT_SCHEMA = hr")))
+            (should-not rpc-schemas)
+            (should (equal (clutch-db-current-schema conn) "SYSTEM"))
+            (should (equal messages
+                           '("Could not follow the current schema: connection lost")))))))))
+
+(ert-deftest clutch-db-test-jdbc-oracle-follows-before-the-async-callback ()
+  "An asynchronous ALTER SESSION should be followed before its outcome arrives.
+The console reads the schema back from the connection when the outcome
+arrives, so it must already be the new one."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 7 :params (list :driver 'oracle :user "system")))
+        seen)
+    (cl-letf (((symbol-function 'clutch-jdbc--execute-rpc-async)
+               (lambda (_conn _op _payload callback)
+                 (funcall callback (make-clutch-db-result :affected-rows 0) nil)))
+              ((symbol-function 'clutch-jdbc--execute-rpc)
+               (lambda (_conn _op _payload)
+                 (make-clutch-db-result :rows '(("HR")))))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _args) '(:conn-id 7))))
+      (clutch-db-query-async conn "ALTER SESSION SET CURRENT_SCHEMA = hr"
+                             (lambda (result error)
+                               (setq seen (list (clutch-db-result-p result) error
+                                                (clutch-db-current-schema conn)))))
+      (should (equal seen '(t nil "HR"))))
+    (ert-info ("a statement that failed is not followed")
+      (let ((conn (make-clutch-jdbc-conn
+                   :conn-id 8 :params (list :driver 'oracle :user "system")))
+            (err '(clutch-db-error "ORA-01435: user does not exist"))
+            followed)
+        (cl-letf (((symbol-function 'clutch-jdbc--execute-rpc-async)
+                   (lambda (_conn _op _payload callback)
+                     (funcall callback nil err)))
+                  ((symbol-function 'clutch-jdbc--execute-rpc)
+                   (lambda (&rest _args) (setq followed t)))
+                  ((symbol-function 'clutch-jdbc--rpc)
+                   (lambda (&rest _args) (setq followed t))))
+          (clutch-db-query-async conn "ALTER SESSION SET CURRENT_SCHEMA = nobody"
+                                 (lambda (result error)
+                                   (setq seen (list result error)))))
+        (should-not followed)
+        (should (equal seen (list nil err)))))
+    (ert-info ("a quit while following still delivers the outcome once")
+      (let ((conn (make-clutch-jdbc-conn
+                   :conn-id 9 :params (list :driver 'oracle :user "system")))
+            calls)
+        (cl-letf (((symbol-function 'clutch-jdbc--execute-rpc-async)
+                   (lambda (_conn _op _payload callback)
+                     (funcall callback (make-clutch-db-result :affected-rows 0) nil)))
+                  ((symbol-function 'clutch-jdbc--execute-rpc)
+                   (lambda (&rest _args) (signal 'quit nil))))
+          (condition-case nil
+              (clutch-db-query-async conn "ALTER SESSION SET CURRENT_SCHEMA = hr"
+                                     (lambda (result error)
+                                       (push (list (clutch-db-result-p result) error)
+                                             calls)))
+            (quit nil)))
+        (should (equal calls '((t nil))))))))
 
 (ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
   "MySQL schema switching should execute USE and update the connection database."
