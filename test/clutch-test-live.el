@@ -273,9 +273,10 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
 (ert-deftest clutch-test-live-pg-console-follows-the-server-search-path ()
   :tags '(:clutch-live)
   "A PostgreSQL console should follow the search_path that the server has.
-A SET written with a quoted name or a comment was not followed, and a
+A SET written with a quoted name or a comment was not followed, a
 rollback that undid a SET left the console, and its reconnect, on the
-schema the server had left."
+schema the server had left, and a SET not yet committed went into the
+reconnect parameters."
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
   (clutch-test--with-conn admin
@@ -292,12 +293,12 @@ schema the server had left."
                   (server-path ()
                     (caar (clutch-db-result-rows
                            (clutch-db-query clutch-connection "SHOW search_path"))))
-                  (check (path namespace)
+                  (check (path namespace &optional reconnect-path)
                     (should (equal (server-path) path))
                     (should (equal (clutch-db-current-schema clutch-connection)
                                    namespace))
                     (should (equal (plist-get clutch--connection-params :search-path)
-                                   path))))
+                                   (or reconnect-path path)))))
         (unwind-protect
             (progn
               (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
@@ -316,10 +317,72 @@ schema the server had left."
                 (check default-path "public")
                 (clutch-toggle-auto-commit)
                 (run (format "SET search_path TO %s" moved))
-                (check moved schema)
+                (check moved schema default-path)
                 (clutch-rollback)
                 (check default-path "public")
+                (run (format "SET search_path TO %s" moved))
+                (clutch-commit)
+                (check moved schema)
+                (run "RESET search_path")
+                (check default-path "public" moved)
+                (clutch-commit)
+                (check default-path "public")
                 (clutch-toggle-auto-commit)))
+          (when (buffer-live-p console-buffer)
+            (kill-buffer console-buffer))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))
+          (delete-directory clutch-console-directory t))))))
+
+(ert-deftest clutch-test-live-pg-reconnect-restores-only-a-kept-search-path ()
+  :tags '(:clutch-live)
+  "A PostgreSQL reconnect should restore the search_path the server kept.
+A path set inside a transaction went into the reconnect parameters at
+once, so a connection lost before the transaction ended came back on it,
+though the server had rolled it back with the transaction."
+  (unless (eq clutch-test-backend 'pg)
+    (ert-skip "This regression covers the PostgreSQL search_path"))
+  (clutch-test--with-conn admin
+    (let* ((schema (format "clutch_ns_lost_%d" (emacs-pid)))
+           (moved (format "%s, public" schema))
+           (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
+           (name (clutch--ad-hoc-console-name params))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console-buffer default-path)
+      (cl-labels ((run (&rest statements)
+                    (dolist (sql statements)
+                      (clutch--execute sql)
+                      (clutch-test--await-queries)))
+                  (server-path ()
+                    (caar (clutch-db-result-rows
+                           (clutch-db-query clutch-connection "SHOW search_path"))))
+                  (path-after-a-lost-connection ()
+                    (let ((conn clutch-connection)
+                          (pid (caar (clutch-db-result-rows
+                                      (clutch-db-query clutch-connection
+                                                       "SELECT pg_backend_pid()")))))
+                      (clutch-db-query
+                       admin (format "SELECT pg_terminate_backend(%s)" pid))
+                      (clutch-test--await
+                       (lambda () (not (clutch--connection-alive-p conn))))
+                      (run "SELECT 1")
+                      (should-not (eq clutch-connection conn))
+                      (server-path))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+              (clutch-query-console (list :name name :params params))
+              (setq console-buffer (current-buffer))
+              (setq default-path (server-path))
+              (cl-letf (((symbol-function 'message) #'ignore))
+                (run "BEGIN" (format "SET LOCAL search_path TO %s" moved))
+                (should (equal (clutch-db-current-schema clutch-connection) schema))
+                (should (equal (path-after-a-lost-connection) default-path))
+                (run "BEGIN" (format "SET search_path TO %s" moved))
+                (should (equal (path-after-a-lost-connection) default-path))
+                (run "BEGIN" (format "SET search_path TO %s" moved)
+                     "COMMIT AND CHAIN")
+                (should (equal (path-after-a-lost-connection) moved))))
           (when (buffer-live-p console-buffer)
             (kill-buffer console-buffer))
           (ignore-errors

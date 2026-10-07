@@ -61,10 +61,13 @@
                (:copier nil))
   "Clutch-owned state for one pgsql.el connection.
 CURRENT-SCHEMA and SEARCH-PATH cache what the server last said, nil when
-it was not asked since; CURRENT-SCHEMA is `none' when it said NULL."
+it was not asked since; CURRENT-SCHEMA is `none' when it said NULL.
+PATH-SETTLED is non-nil once the path no longer depends on an open
+transaction, which a lost connection rolls back."
   client
   current-schema
   search-path
+  path-settled
   manual-commit)
 
 (defun clutch-db-pg--ensure-client-api ()
@@ -304,18 +307,26 @@ it was not asked since; CURRENT-SCHEMA is `none' when it said NULL."
 
 (defun clutch-db-pg--namespace-statement-p (sql)
   "Return non-nil for SQL after which the search_path may differ.
-SET, RESET and DISCARD can change it, and the end of a transaction can
-undo a SET made inside it, or one made with SET LOCAL.  Only the leading
-keyword counts, and the server then says what the path is.  SELECT
-set_config, DO and CALL can change it too, but are not followed."
+SET, RESET and DISCARD can change it.  So can the end of a transaction:
+a rollback undoes a SET made inside it, and any end, PREPARE TRANSACTION
+too, undoes SET LOCAL.  Only the leading keyword counts, and the server
+then says what the path is.  SELECT set_config, DO and CALL can change
+it too, but are not followed."
   (member (clutch-db-sql-leading-keyword sql)
-          '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END")))
+          '("SET" "RESET" "DISCARD" "ROLLBACK" "ABORT" "COMMIT" "END"
+            "PREPARE")))
 
 (defun clutch-db-pg--follow-search-path (conn sql)
-  "Forget what CONN knows of its search_path when SQL may have changed it."
+  "Forget what CONN knows of its search_path when SQL may have changed it.
+Also note whether that path is settled.  A lost connection rolls back an
+open transaction, and a SET made in it, so the path is settled outside
+one, or after a COMMIT or END that chained the next one."
   (when (clutch-db-pg--namespace-statement-p sql)
     (setf (clutch-db-pg--connection-current-schema conn) nil
-          (clutch-db-pg--connection-search-path conn) nil)))
+          (clutch-db-pg--connection-search-path conn) nil
+          (clutch-db-pg--connection-path-settled conn)
+          (or (not (clutch-db-pg--tx-open-p conn))
+              (member (clutch-db-sql-leading-keyword sql) '("COMMIT" "END"))))))
 
 (defun clutch-db-pg--tx-open-p (conn)
   "Return non-nil when CONN has an open foreground transaction."
@@ -885,14 +896,18 @@ so the mode line does not ask again until the path may change."
   "Store PostgreSQL CONN's search_path in a copy of connection PARAMS.
 A reconnect sets the whole path again: the current schema alone would
 leave out the other schemas of a path such as alt, public.  The path is
-asked for once, then remembered, as every buffer on CONN needs it."
-  (plist-put (copy-sequence params) :search-path
-             (or (clutch-db-pg--connection-search-path conn)
-                 (setf (clutch-db-pg--connection-search-path conn)
-                       (clutch-db--translate-library-error pgsql-error
-                         (caar (clutch-db-pg--metadata-rows
-                                (clutch-db-pg--exec
-                                 conn "SHOW search_path"))))))))
+asked for once, then remembered, as every buffer on CONN needs it.  An
+open transaction can still undo it, and a lost connection would, so
+PARAMS are returned as they are until the path is settled."
+  (if (clutch-db-pg--connection-path-settled conn)
+      (plist-put (copy-sequence params) :search-path
+                 (or (clutch-db-pg--connection-search-path conn)
+                     (setf (clutch-db-pg--connection-search-path conn)
+                           (clutch-db--translate-library-error pgsql-error
+                             (caar (clutch-db-pg--metadata-rows
+                                    (clutch-db-pg--exec
+                                     conn "SHOW search_path")))))))
+    params))
 
 (clutch-db--define-idle-metadata-methods clutch-db-pg--connection "PostgreSQL")
 
