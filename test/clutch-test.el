@@ -10034,6 +10034,66 @@ statement."
         (should-not clutch--execution-start-time)
         (should (> mode-line-updates 0))))))
 
+(ert-deftest clutch-test-replacement-connection-keeps-the-commit-mode ()
+  "A connection that replaces another should keep its commit mode.
+A console in Manual mode came back in Auto mode after the automatic
+reconnect, so each statement after it was committed on its own.  A new
+connection that cannot take the mode is discarded, and one that has no
+Manual mode is left as it is."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((old-conn (list 'old-connection))
+          (new-conn (list 'new-connection))
+          (clutch--tx-state-cache (make-hash-table :test 'eq))
+          modes set discarded)
+      (cl-letf (((symbol-function 'clutch--build-conn) (lambda (_params) new-conn))
+                ((symbol-function 'clutch-db-manual-commit-supported-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-manual-commit-p)
+                 (lambda (conn) (alist-get conn modes)))
+                ((symbol-function 'clutch-db-set-auto-commit)
+                 (lambda (conn auto-commit)
+                   (push (list conn auto-commit) set)
+                   (setf (alist-get conn modes) (not auto-commit))))
+                ((symbol-function 'clutch--discard-unbound-connection)
+                 (lambda (conn) (push conn discarded))))
+        (cl-flet ((replace (old-manual new-manual)
+                    (setq modes (list (cons old-conn old-manual)
+                                      (cons new-conn new-manual))
+                          set nil)
+                    (should (eq (clutch--build-replacement-conn old-conn nil)
+                                new-conn))
+                    set))
+          (should (equal (replace t nil) (list (list new-conn nil))))
+          ;; Oracle starts in manual mode, which a session may have left.
+          (should (equal (replace nil t) (list (list new-conn t))))
+          (should-not (replace t t))
+          (should-not (replace nil nil))
+          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+                     (lambda (conn) (eq conn old-conn))))
+            (should-not (replace t nil)))
+          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
+                     (lambda (conn) (eq conn new-conn))))
+            (should (equal (replace t t) (list (list new-conn t))))))
+        (dolist (failure '((clutch-db-error "Lost connection") (quit)))
+          (setq modes (list (cons old-conn t) (cons new-conn nil))
+                discarded nil)
+          (cl-letf (((symbol-function 'clutch-db-set-auto-commit)
+                     (lambda (_conn _auto-commit)
+                       (signal (car failure) (cdr failure)))))
+            (should (eq (car (condition-case err
+                                 (clutch--build-replacement-conn old-conn nil)
+                               ((error quit) err)))
+                        (car failure))))
+          (should (equal discarded (list new-conn))))
+        ;; A schema switch that reconnects goes through it too.
+        (setq modes (list (cons old-conn t) (cons new-conn nil))
+              set nil)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'ignore)
+                  ((symbol-function 'clutch--require-live-connection) #'ignore)
+                  ((symbol-function 'clutch--finalize-rebound-connection) #'ignore))
+          (clutch--replace-connection old-conn nil 'postgres))
+        (should (equal set (list (list new-conn nil))))))))
+
 (ert-deftest clutch-test-dead-query-reconnects-on-next-command-without-replay ()
   "A dead query should preserve its session anchor until the next command."
   (clutch-test--with-isolated-metadata-caches

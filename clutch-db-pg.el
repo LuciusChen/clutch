@@ -614,8 +614,8 @@ FKS is an alist of (column-name . fk-plist)."
 ;;;; Lifecycle methods
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-db-pg--connection))
-  "Disconnect PostgreSQL CONN."
-  (setf (clutch-db-pg--connection-manual-commit conn) nil)
+  "Disconnect PostgreSQL CONN.
+CONN keeps its commit mode, which a connection that replaces it takes on."
   (pgsql-disconnect (clutch-db-pg--connection-client conn)))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-db-pg--connection))
