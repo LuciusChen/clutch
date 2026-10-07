@@ -78,6 +78,10 @@
               "scott@dbhost:1522")
              (empty-user mongodb nil "127.0.0.1" 27017 "app" nil
               "127.0.0.1:27017/app" "127.0.0.1")
+             (no-database mysql "root" "127.0.0.1" 3306 nil nil
+              "root@127.0.0.1:3306" "root@127.0.0.1")
+             (empty-database mysql "root" "127.0.0.1" 3306 "" nil
+              "root@127.0.0.1:3306" "root@127.0.0.1")
              (sqlite-file sqlite nil nil nil "/tmp/bookmarks.db" nil
               "sqlite:/tmp/bookmarks.db" "bookmarks.db")
              (sqlite-memory sqlite nil nil nil ":memory:" nil nil
