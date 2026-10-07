@@ -3337,6 +3337,59 @@ passes validation fails the test instead of failing on the fake client."
         (should-not (alist-get 'catalog (cdr call)))
         (should-not (alist-get 'schema (cdr call)))))))
 
+(ert-deftest clutch-db-test-jdbc-table-metadata-asks-about-the-table-s-scope ()
+  "JDBC metadata for a qualified table should ask about that table's scope.
+Without the schema and catalog that qualify it, the columns and keys of the
+table of the same name in the connection's own scope answered for it."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver sqlserver :schema "dbo"
+                                               :catalog "app")))
+        scopes)
+    (cl-flet ((note (op params)
+                (push (list op (alist-get 'schema params)
+                            (alist-get 'catalog params))
+                      scopes)))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_conn op params &optional _timeout)
+                   (note op params)
+                   (pcase op
+                     ("get-primary-keys" '(:primary-keys ("id")))
+                     ("get-foreign-keys" '(:foreign-keys nil))
+                     ("get-columns" '(:columns ((:name "id" :type "INT")))))))
+                ((symbol-function 'clutch-jdbc--rpc-async)
+                 (lambda (op params callback &rest _)
+                   (note op params)
+                   (funcall callback (if (equal op "get-columns")
+                                         '(:columns ((:name "id" :type "INT")))
+                                       '(:foreign-keys nil)))
+                   t)))
+        (clutch-db-column-details conn "people" "alt" "other")
+        (clutch-db-column-details-async conn "people" #'ignore nil "alt" "other")
+        (clutch-db-foreign-keys-async conn "people" #'ignore nil "alt" "other")))
+    (should (equal (nreverse scopes)
+                   '(("get-primary-keys" "alt" "other")
+                     ("get-foreign-keys" "alt" "other")
+                     ("get-columns" "alt" "other")
+                     ("get-columns" "alt" "other")
+                     ("get-foreign-keys" "alt" "other"))))))
+
+(ert-deftest clutch-db-test-jdbc-foreign-keys-name-the-referenced-schema ()
+  "A JDBC foreign key should name the schema of the table it references.
+Following one into another schema opened the table of the same name in the
+connection's own schema.  A driver without schemas reports an empty one."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5
+                                     :params '(:driver sqlserver :schema "dbo"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (&rest _)
+                 '(:foreign-keys ((:fk-column "parent_id" :pk-table "parents"
+                                   :pk-column "id" :pk-schema "alt")
+                                  (:fk-column "kind_id" :pk-table "kinds"
+                                   :pk-column "id" :pk-schema ""))))))
+      (should (equal (clutch-db-foreign-keys conn "children")
+                     '(("parent_id" :ref-table "parents" :ref-column "id"
+                        :ref-schema "alt")
+                       ("kind_id" :ref-table "kinds" :ref-column "id")))))))
+
 ;;;; Unit tests — clutch-db-complete-tables (Oracle)
 
 (ert-deftest clutch-db-test-jdbc-complete-tables-searches-rpc-without-schema-cache-dependency ()
@@ -6467,6 +6520,29 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
           (clutch-db-query conn (format "DEL %S %S %S"
                                         string-key hash-key list-key)))))))
 
+(ert-deftest clutch-db-test-redis-live-select-switches-the-database ()
+  :tags '(:db-live :redis-live)
+  "A Redis SELECT should move the connection and its parameters to its database.
+The connection went on reporting the database it was opened with, and its
+parameters reopened that database."
+  (clutch-db-test--with-redis conn
+    (let ((key (clutch-db-test--redis-live-key "select")))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn "SELECT 1")
+            (clutch-db-query conn (format "SET %S one" key))
+            (should (equal (clutch-db-current-schema conn) "1"))
+            (let ((reopened (clutch-db-connect
+                             'redis
+                             (clutch-db-update-namespace-params
+                              conn (clutch-db-test--redis-live-params)))))
+              (unwind-protect
+                  (should (equal (clutch-db-result-rows
+                                  (clutch-db-query reopened (format "GET %S" key)))
+                                 '(("one"))))
+                (clutch-db-disconnect reopened))))
+        (ignore-errors (clutch-db-query conn (format "DEL %S" key)))))))
+
 (ert-deftest clutch-db-test-redis-live-schema ()
   :tags '(:db-live :redis-live)
   "Redis metadata should expose keys as KEY objects."
@@ -7188,6 +7264,39 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
     (let ((entries (clutch-db-list-table-entries conn)))
       (should (listp entries))
       (should (> (length entries) 0)))))
+
+(ert-deftest clutch-db-test-jdbc-mssql-live-metadata-of-a-table-in-another-schema ()
+  :tags '(:db-live :jdbc-live :mssql-live)
+  "SQL Server JDBC metadata should describe the table that its schema names.
+The columns of every table of the same name answered for it, and a foreign
+key into another schema lost that schema."
+  (clutch-db-test--with-mssql conn
+    (let* ((schema (clutch-db-test--live-name "cc_alt"))
+           (table (clutch-db-test--live-name "cc_people"))
+           (parents (clutch-db-test--live-name "cc_parents"))
+           (drops (list (format "DROP TABLE IF EXISTS %s.%s" schema table)
+                        (format "DROP TABLE IF EXISTS %s.%s" schema parents)
+                        (format "DROP TABLE IF EXISTS dbo.%s" table)
+                        (format "DROP SCHEMA IF EXISTS %s" schema))))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE SCHEMA %s" schema))
+            (clutch-db-query
+             conn (format "CREATE TABLE dbo.%s (id INT PRIMARY KEY, name NVARCHAR(32))"
+                          table))
+            (clutch-db-query
+             conn (format "CREATE TABLE %s.%s (id INT PRIMARY KEY)" schema parents))
+            (clutch-db-query
+             conn (format "CREATE TABLE %s.%s (id INT PRIMARY KEY, parent_id INT REFERENCES %s.%s (id))"
+                          schema table schema parents))
+            (should (equal (mapcar (lambda (column) (plist-get column :name))
+                                   (clutch-db-column-details conn table schema))
+                           '("id" "parent_id")))
+            (should (equal (clutch-db-foreign-keys conn table schema)
+                           `(("parent_id" :ref-table ,parents :ref-column "id"
+                              :ref-schema ,schema)))))
+        (dolist (sql drops)
+          (ignore-errors (clutch-db-query conn sql)))))))
 
 (defun clutch-db-test--query-async-outcome (conn sql)
   "Run SQL on CONN without blocking and return its (RESULT ERROR) outcome."
@@ -8593,9 +8702,9 @@ the statement's terminator and removed, changing the value returned."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle)))
         async-details)
     (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
-               (lambda (_conn _table) nil))
+               (lambda (_conn _table &optional _schema _catalog) nil))
               ((symbol-function 'clutch-db-foreign-keys)
-               (lambda (_conn _table) nil))
+               (lambda (_conn _table &optional _schema _catalog) nil))
               ((symbol-function 'clutch-jdbc--rpc)
                (lambda (&rest _)
                  '(:columns ((:name "CONTENT" :type "BLOB"

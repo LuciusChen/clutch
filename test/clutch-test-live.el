@@ -1278,6 +1278,49 @@ A quote inside the CTE's quoted name must not hide the modification."
             (clutch-db-set-auto-commit conn t)))
           (clutch-db-query conn drop-sql)))))
 
+(ert-deftest clutch-test-live-rollback-to-a-savepoint-keeps-the-transaction-dirty ()
+  :tags '(:clutch-live)
+  "A rollback to a savepoint should leave the work before it known as uncommitted.
+Clutch took it for a rollback of the whole transaction, so a disconnect then
+lost that work without asking.  The savepoint is named chain, a word that a
+whole rollback can also end with."
+  (pcase-let ((`(,save ,rollback)
+               (pcase clutch-test-backend
+                 ((or 'pg 'mysql 'oracle)
+                  '("SAVEPOINT chain" "ROLLBACK TO SAVEPOINT chain"))
+                 ('sqlserver
+                  '("SAVE TRANSACTION chain" "ROLLBACK TRANSACTION chain")))))
+    (unless save
+      (ert-skip "This regression needs a backend whose savepoint syntax it knows"))
+    (clutch-test--with-conn conn
+      (unless (clutch-db-manual-commit-supported-p conn)
+        (ert-skip "This regression requires manual-commit support"))
+      (let* ((table (format "clutch_savepoint_%d" (emacs-pid)))
+             (drop-sql (format "DROP TABLE IF EXISTS %s" table))
+             (insert-sql (format "INSERT INTO %s (id, name) VALUES (?, ?)" table)))
+        (unwind-protect
+            (progn
+              (clutch-db-query conn drop-sql)
+              (clutch-db-query conn (clutch-test--live-create-table-sql
+                                     table '((id int primary) (name string))))
+              (clutch-db-set-auto-commit conn nil)
+              (clutch--run-db-query conn insert-sql '(1 "before"))
+              (clutch--run-db-query conn save)
+              (clutch--run-db-query conn insert-sql '(2 "after"))
+              (clutch--run-db-query conn rollback)
+              (should (clutch--tx-dirty-p conn))
+              (should (equal (clutch-test--live-row-ids
+                              (clutch-db-result-rows
+                               (clutch-db-query
+                                conn (format "SELECT id FROM %s" table))))
+                             '(1))))
+          (ignore-errors
+            (when (clutch-db-manual-commit-p conn)
+              (clutch-db-rollback conn)
+              (clutch--clear-tx-state conn)
+              (clutch-db-set-auto-commit conn t)))
+          (clutch-db-query conn drop-sql))))))
+
 (ert-deftest clutch-test-live-insert-and-delete-submit-persists ()
   :tags '(:clutch-live)
   "Submitted insert and delete staging should persist on a real backend."

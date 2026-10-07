@@ -30,7 +30,7 @@ Redis is not a MongoDB-like document backend for clutch purposes.  It is a key/v
 
 Redis support uses the separate =redis= backend and the external =redis.el= native RESP client.  Clutch owns the command query buffer, key browsing, type-aware value display, TTL metadata, and result-grid mapping.  The protocol package owns RESP encoding/decoding, TCP connection lifecycle, AUTH, SELECT, and Redis error responses.
 
-Saved Redis profiles may choose an initial =:database=.  Runtime logical-database switching is not advertised through the shared namespace picker because the server's configured database count is not reliably enumerable under ordinary ACLs; hard-coding the common 0–15 range would overstate the backend capability.
+Saved Redis profiles may choose an initial =:database=, and a =SELECT= run in the console moves the session to another logical database: Clutch shows it, loads its keys and selects it again when it reconnects after an idle drop, while =C-c C-e= connects to the profile's database, as after =clutch-switch-schema=.  Runtime logical-database switching is not advertised through the shared namespace picker because the server's configured database count is not reliably enumerable under ordinary ACLs; hard-coding the common 0–15 range would overstate the backend capability.
 
 Redis support is intentionally basic.  It does not expose SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows.
 

@@ -1876,6 +1876,14 @@ deciding where literals end."
   "Default: runtime schema switching is unsupported."
   (user-error "This backend does not support switching schemas"))
 
+(cl-defgeneric clutch-db-namespace-switch-p (conn sql)
+  "Return non-nil when SQL, having succeeded on CONN, switched its namespace.
+CONN's current schema then names the namespace SQL switched to.")
+
+(cl-defmethod clutch-db-namespace-switch-p ((_conn t) _sql)
+  "Backends whose statements never switch the namespace return nil."
+  nil)
+
 (cl-defgeneric clutch-db-update-namespace-params (conn params)
   "Return connection PARAMS updated with CONN's current namespace.")
 
