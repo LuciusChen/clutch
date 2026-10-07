@@ -3908,7 +3908,8 @@ orai18n warning."
   "A USE through the MySQL adapter should leave mysql.el on its database.
 mysql.el kept the database it connected to, so a console went on showing
 and loading that one after a typed USE.  A USE whose database cannot be
-recorded still delivers its own outcome."
+recorded still delivers its own outcome, and a timeout while asking goes
+through the adapter's timeout recovery."
   (require 'clutch-db-mysql)
   (let ((conn (make-mysql-conn :database "app"))
         refreshed outcomes)
@@ -3926,10 +3927,28 @@ recorded still delivers its own outcome."
         (should (equal refreshed (list conn conn)))
         (should (clutch-db-namespace-switch-p conn "-- go\nUSE other"))
         (should-not (clutch-db-namespace-switch-p conn "SELECT 1"))
-        (cl-letf (((symbol-function 'mysql-refresh-current-database)
-                   (lambda (_conn) (signal 'mysql-error '("Lost connection")))))
-          (should-error (clutch-db-query-async conn "USE other" #'note)))))
-    (should (= (length outcomes) 2))
+        (let (messages recovered)
+          (cl-letf (((symbol-function 'mysql-refresh-current-database)
+                     (lambda (_conn) (signal 'mysql-error '("Lost connection"))))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch-db-query-async conn "USE other" #'note)
+            (should (clutch-db-query conn "USE other"))
+            (cl-letf (((symbol-function 'mysql-refresh-current-database)
+                       (lambda (_conn) (signal 'mysql-timeout '("Read timeout"))))
+                      ((symbol-function 'clutch-db-mysql--handle-query-timeout)
+                       (lambda (_conn _err)
+                         (setq recovered t)
+                         (signal 'clutch-db-error '("Query timed out")))))
+              (clutch-db-query-async conn "USE other" #'note)))
+          (should recovered)
+          (should (= (length messages) 3))
+          (should (cl-every (lambda (text)
+                              (string-prefix-p "Could not read the current database back"
+                                               text))
+                            messages)))))
+    (should (= (length outcomes) 3))
     (should (cl-every #'car outcomes))))
 
 ;;;; Unit tests — backend registry
@@ -4433,7 +4452,8 @@ value is sent as, and the :null a union gains with a NULL adds none."
 
 (ert-deftest clutch-db-test-xtdb-connects-through-the-postgresql-adapter ()
   "The xtdb backend should open a pgsql.el connection keyed as XTDB.
-A :schema, which XTDB cannot switch to, should be refused before connecting."
+A :schema or :search-path, which XTDB cannot switch to, should be refused
+before connecting."
   (require 'clutch-db-pg)
   (should (eq (plist-get (clutch-backend-feature 'xtdb) :sql-product)
               'postgres))
@@ -4445,6 +4465,9 @@ A :schema, which XTDB cannot switch to, should be refused before connecting."
                   :host (plist-get args :host)
                   :database (plist-get args :database)))))
       (should-error (clutch-db-pg-xtdb-connect '(:host "xt" :schema "public"))
+                    :type 'user-error)
+      (should-error (clutch-db-pg-xtdb-connect
+                     '(:host "xt" :search-path "public"))
                     :type 'user-error)
       (should (= connects 0))
       (let ((conn (clutch-db-pg-xtdb-connect '(:host "xt" :database "xtdb"))))
@@ -5073,18 +5096,26 @@ SET from being followed.  XTDB has no search_path to switch."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "test"))
-          (path "public"))
+          (path "public")
+          (asked 0)
+          (shown 0))
       (cl-flet ((server (sql)
                   (cond
                    ((equal sql "SELECT current_schema()")
+                    (cl-incf asked)
                     (clutch-db-test--make-pg-result
-                     :rows `((,(car (split-string path ", "))))))
+                     :rows `((,(if (equal path "nowhere")
+                                   pgsql-null
+                                 (car (split-string path ", ")))))))
                    ((equal sql "SHOW search_path")
+                    (cl-incf shown)
                     (clutch-db-test--make-pg-result :rows `((,path))))
                    (t
                     (cond
                      ((string-match-p "TO alt, public" sql)
                       (setq path "alt, public"))
+                     ((string-match-p "TO nowhere" sql)
+                      (setq path "nowhere"))
                      ((string-match-p "\\`\\(?:RESET\\|ROLLBACK\\)" sql)
                       (setq path "public")))
                     (clutch-db-test--make-pg-result)))))
@@ -5104,6 +5135,15 @@ SET from being followed.  XTDB has no search_path to switch."
           (should (equal (clutch-db-current-schema conn) "alt"))
           (should (equal (clutch-db-update-namespace-params conn '(:schema "public"))
                          '(:schema "public" :search-path "alt, public")))
+          ;; Every buffer on the connection asks; the server is asked once.
+          (clutch-db-update-namespace-params conn nil)
+          (should (= shown 1))
+          (clutch-db-query conn "SET search_path TO nowhere")
+          (setq asked 0)
+          (should-not (clutch-db-current-schema conn))
+          (should-not (clutch-db-current-schema conn))
+          (should (= asked 1))
+          (clutch-db-query conn "SET search_path TO alt, public")
           (clutch-db-rollback conn)
           (should (equal (clutch-db-current-schema conn) "public"))
           (dolist (sql '("-- go\nCOMMIT" "ROLLBACK TO SAVEPOINT s" "SET LOCAL x TO 1"))
