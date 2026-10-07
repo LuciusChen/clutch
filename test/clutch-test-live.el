@@ -516,6 +516,54 @@ Reopening a console whose session was lost reconnects it too."
         (ignore-errors
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
+(ert-deftest clutch-test-live-reopened-console-ends-the-lost-session ()
+  :tags '(:clutch-live)
+  "Reopening a console whose session was lost should end that session in full.
+The console came back on a new connection, but its results stayed on the
+dead one, its uncommitted work was not reported lost, and the old
+transaction state stayed behind."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL consoles"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_reopen_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params)))
+          (result-name "*clutch-test-reopen-result*"))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+            (clutch-test--with-live-console params
+              (let ((console (current-buffer)))
+                (clutch-test--with-live-result-buffer result-name
+                  (clutch-toggle-auto-commit)
+                  (clutch-test--run-in-console
+                   (format "INSERT INTO %s VALUES (1)" table)
+                   (format "SELECT id FROM %s" table))
+                  (with-current-buffer console
+                    (should (clutch--tx-dirty-p clutch-connection))
+                    (let ((lost (clutch-test--end-console-session admin))
+                          messages)
+                      (cl-letf (((symbol-function 'message)
+                                 (lambda (format-string &rest args)
+                                   (when format-string
+                                     (push (apply #'format format-string args)
+                                           messages)))))
+                        (should (eq (clutch-test--open-live-console params) console)))
+                      (should-not (eq clutch-connection lost))
+                      (should (eq (buffer-local-value 'clutch-connection
+                                                      (get-buffer result-name))
+                                  clutch-connection))
+                      (should-not (clutch--tx-state lost))
+                      (should-not (clutch--tx-state clutch-connection))
+                      (should (cl-some (lambda (text)
+                                         (string-match-p
+                                          "uncommitted changes were lost" text))
+                                       messages))
+                      (should (clutch-db-manual-commit-p clutch-connection))
+                      (clutch-toggle-auto-commit)))))))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+
 (ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
   :tags '(:clutch-live :duckdb-live)
   "The public command should switch DuckDB schemas in the current catalog."
