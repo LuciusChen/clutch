@@ -372,7 +372,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
                             (not (clutch--connection-alive-p
                                   (buffer-local-value 'clutch-connection existing))))
                        (with-current-buffer existing
-                         (clutch--build-conn params))
+                         (clutch--build-replacement-conn clutch-connection params))
                      (clutch--build-conn params)))
              (buf (or existing
                       (generate-new-buffer "*clutch-console*")))

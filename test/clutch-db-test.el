@@ -3904,6 +3904,28 @@ orai18n warning."
       (should (equal executed-sql "USE `analytics`"))
       (should (equal (mysql-current-database conn) "analytics")))))
 
+(ert-deftest clutch-db-test-mysql-set-auto-commit-signals-a-clutch-error ()
+  "A failure to set MySQL's commit mode should signal `clutch-db-error'.
+It escaped as a raw `mysql-error', which a reconnect that restores the
+commit mode passed on unexplained."
+  (require 'clutch-db-mysql)
+  (cl-letf (((symbol-function 'mysql-set-autocommit)
+             (lambda (_conn _auto-commit)
+               (signal 'mysql-query-error '("[2013] Lost connection")))))
+    (should-error (clutch-db-set-auto-commit (make-mysql-conn) nil)
+                  :type 'clutch-db-error)))
+
+(ert-deftest clutch-db-test-pg-disconnect-keeps-the-commit-mode ()
+  "A disconnected PostgreSQL connection should still say it was in manual mode.
+Disconnecting cleared the mode, so the connection that replaced a session
+retired after a quit came back in Auto mode."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+    (cl-letf (((symbol-function 'pgsql-disconnect) #'ignore))
+      (clutch-db-set-auto-commit conn nil)
+      (clutch-db-disconnect conn)
+      (should (clutch-db-manual-commit-p conn)))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()

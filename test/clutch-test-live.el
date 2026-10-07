@@ -222,6 +222,70 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
           (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))
         (delete-directory clutch-console-directory t)))))
 
+(ert-deftest clutch-test-live-reconnect-keeps-manual-commit-mode ()
+  :tags '(:clutch-live)
+  "An automatic reconnect should keep a console in Manual mode.
+The console came back in Auto mode, so each statement after the
+reconnect was committed on its own, past the reach of a rollback.
+Reopening a console whose session was lost reconnects it too."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL manual commit"))
+  (clutch-test--with-conn admin
+    (let* ((table (format "clutch_manual_%d" (emacs-pid)))
+           (params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (name (clutch--ad-hoc-console-name params))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           (mysql-tls-verify-server nil)
+           console-buffer)
+      (pcase-let ((`(,id-sql ,kill-format)
+                   (if (eq clutch-test-backend 'mysql)
+                       '("SELECT CONNECTION_ID()" "KILL %s")
+                     '("SELECT pg_backend_pid()" "SELECT pg_terminate_backend(%s)"))))
+        (cl-labels ((run (sql)
+                      (clutch--execute sql)
+                      (clutch-test--await-queries))
+                    (lose-session ()
+                      ;; End the console's session from another one.
+                      (let ((conn clutch-connection)
+                            (id (caar (clutch-db-result-rows
+                                       (clutch-db-query clutch-connection id-sql)))))
+                        (clutch-db-query admin (format kill-format id))
+                        (clutch-test--await
+                         (lambda () (not (clutch--connection-alive-p conn))))
+                        conn)))
+          (unwind-protect
+              (progn
+                (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+                (clutch-query-console (list :name name :params params))
+                (setq console-buffer (current-buffer))
+                (cl-letf (((symbol-function 'message) #'ignore))
+                  (clutch-toggle-auto-commit)
+                  (let ((lost (lose-session)))
+                    (run "SELECT 1")
+                    (should-not (eq clutch-connection lost)))
+                  (should (clutch-db-manual-commit-p clutch-connection))
+                  (run (format "INSERT INTO %s VALUES (1)" table))
+                  (clutch-rollback)
+                  (should (equal (caar (clutch-db-result-rows
+                                        (clutch-db-query
+                                         admin (format "SELECT COUNT(*) FROM %s"
+                                                       table))))
+                                 0))
+                  (let ((lost (lose-session)))
+                    (clutch-query-console (list :name name :params params))
+                    (with-current-buffer console-buffer
+                      (should-not (eq clutch-connection lost))
+                      (should (clutch-db-manual-commit-p clutch-connection))
+                      (clutch-toggle-auto-commit)))))
+            (when (buffer-live-p console-buffer)
+              ;; A failure above can leave uncommitted work to confirm away.
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (kill-buffer console-buffer)))
+            (ignore-errors
+              (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))
+            (delete-directory clutch-console-directory t)))))))
+
 (ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
   :tags '(:clutch-live :duckdb-live)
   "The public command should switch DuckDB schemas in the current catalog."
