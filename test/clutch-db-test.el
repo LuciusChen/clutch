@@ -3951,6 +3951,32 @@ through the adapter's timeout recovery."
     (should (= (length outcomes) 3))
     (should (cl-every #'car outcomes))))
 
+(ert-deftest clutch-db-test-mysql-asks-for-the-database-after-a-drop ()
+  "A DROP through the MySQL adapter should have mysql.el ask for its database.
+Dropping the current database leaves the session with none, but mysql.el
+kept its name, so a console went on showing that database, and its
+reconnect asked for one that no longer existed."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        refreshed)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn _sql) (make-mysql-result)))
+              ((symbol-function 'mysql-query-async)
+               (lambda (_conn _sql callback)
+                 (funcall callback (make-mysql-result) nil)))
+              ((symbol-function 'mysql-refresh-current-database)
+               (lambda (mysql-conn)
+                 (push mysql-conn refreshed)
+                 (setf (mysql-conn-database mysql-conn) nil))))
+      (clutch-db-query conn "DROP DATABASE app")
+      (should-not (clutch-db-current-schema conn))
+      (should (equal (clutch-db-update-namespace-params conn '(:database "app"))
+                     '(:database nil)))
+      (clutch-db-query-async conn "/* go */ drop schema if exists app" #'ignore)
+      (should (equal refreshed (list conn conn)))
+      (should (clutch-db-namespace-switch-p conn "DROP DATABASE app"))
+      (should-not (clutch-db-namespace-switch-p conn "CREATE DATABASE app")))))
+
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
