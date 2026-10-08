@@ -829,7 +829,9 @@ wide-table rendering from repeatedly walking column definition lists."
 
 (defvar clutch--nerd-icons-availability 'unchecked
   "Cached nerd-icons availability, or `unchecked' before its first check.
-Set to `unchecked' to repeat the check after installing nerd-icons.")
+The check runs once per Emacs session, and some icons, such as the sort
+indicators of result headers, stay cached as drawn, so nerd-icons
+installed during a session takes effect after restarting Emacs.")
 
 (defvar clutch--nerd-icons-warning-families nil
   "Nerd-icons glyph-set families already reported as unavailable.")
