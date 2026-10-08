@@ -1981,6 +1981,17 @@ current database."
    (t
     (clutch-jdbc--conn-schema conn))))
 
+(cl-defmethod clutch-db-resolution-context ((conn clutch-jdbc-conn))
+  "Return what an unqualified table name on JDBC CONN resolves in.
+DuckDB resolves one through its catalog, current schema and search path."
+  (if (clutch-jdbc--duckdb-conn-p conn)
+      (car (clutch-db-result-rows
+            (clutch-db-query
+             conn
+             (concat "SELECT current_catalog(), current_schema(), "
+                     "current_setting('search_path')"))))
+    (cl-call-next-method)))
+
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-jdbc-conn) schema)
   "Switch JDBC CONN to SCHEMA."
   (cond

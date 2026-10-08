@@ -5091,6 +5091,52 @@ out, which broke the Oracle statement and left SQL Server unpaged."
         (should (equal (clutch-db-current-schema conn) "public"))
         (should (= calls 1))))))
 
+(ert-deftest clutch-db-test-pg-resolution-context-follows-the-whole-path ()
+  "PostgreSQL's resolution context should be the database and its effective path.
+The current schema alone is s1 for both s1, s2 and s1, s3, which resolve
+an unqualified name to different tables.  The path is asked once and
+again after SQL that may change it, a rollback included."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-client
+    (let ((conn (clutch-db-test--make-pg-connection
+                 :database "app" :transaction-status 'idle))
+          (path "{pg_catalog,s1,s2}")
+          (asked 0))
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (cond
+                    ((equal sql "SELECT current_schemas(true)")
+                     (cl-incf asked)
+                     (clutch-db-test--make-pg-result :rows `((,path))))
+                    ((string-match-p "TO s1, s3" sql)
+                     (setq path "{pg_catalog,s1,s3}")
+                     (clutch-db-test--make-pg-result :command-tag "SET"))
+                    ((equal sql "ROLLBACK")
+                     (setq path "{pg_catalog,s1,s2}")
+                     (clutch-db-test--make-pg-result :command-tag "ROLLBACK"))
+                    (t (clutch-db-test--make-pg-result))))))
+        (should (equal (clutch-db-resolution-context conn)
+                       '("app" "{pg_catalog,s1,s2}")))
+        (should (equal (clutch-db-resolution-context conn)
+                       '("app" "{pg_catalog,s1,s2}")))
+        (should (= asked 1))
+        (clutch-db-query conn "SET search_path TO s1, s3")
+        (should (equal (clutch-db-resolution-context conn)
+                       '("app" "{pg_catalog,s1,s3}")))
+        (should (= asked 2))
+        (ert-info ("a rollback that undoes the SET is asked about too")
+          (clutch-db-query conn "ROLLBACK")
+          (should (equal (clutch-db-resolution-context conn)
+                         '("app" "{pg_catalog,s1,s2}")))
+          (should (= asked 3)))))))
+
+(ert-deftest clutch-db-test-resolution-context-defaults-to-database-and-schema ()
+  "A backend's resolution context should default to its database and schema."
+  (cl-letf (((symbol-function 'clutch-db-database) (lambda (_conn) "app"))
+            ((symbol-function 'clutch-db-current-schema) (lambda (_conn) "sales")))
+    (should (equal (clutch-db-resolution-context (list 'opaque-conn))
+                   '("app" "sales")))))
+
 (ert-deftest clutch-db-test-pg-null-schema-and-comment-stay-nil ()
   "PostgreSQL nullable metadata cells should cross the adapter as nil."
   (require 'clutch-db-pg)
@@ -9039,6 +9085,20 @@ the statement's terminator and removed, changing the value returned."
                (lambda (details) (setq async-details details))))
       (should (equal (plist-get (car async-details) :backend-type)
                      "BLOB")))))
+
+(ert-deftest clutch-db-test-jdbc-duckdb-resolution-context-includes-its-search-path ()
+  "DuckDB's resolution context should name its catalog, schema and search path.
+A `SET search_path' changes what an unqualified name resolves to while
+the current schema can stay the same."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 8 :params '(:driver jdbc :url "jdbc:duckdb:/tmp/a.duckdb")))
+        asked)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn sql)
+                 (setq asked sql)
+                 (make-clutch-db-result :rows '(("a" "main" "s1,main"))))))
+      (should (equal (clutch-db-resolution-context conn) '("a" "main" "s1,main")))
+      (should (string-match-p "current_setting('search_path')" asked)))))
 
 (ert-deftest clutch-db-test-jdbc-duckdb-switches-current-catalog-schema ()
   "DuckDB JDBC should switch a schema within the current catalog."
