@@ -61,13 +61,15 @@
                (:constructor clutch-db-pg--make-connection)
                (:copier nil))
   "Clutch-owned state for one pgsql.el connection.
-CURRENT-SCHEMA and SEARCH-PATH cache what the server last said, nil when
-it was not asked since; CURRENT-SCHEMA is `none' when it said NULL.
+CURRENT-SCHEMA, SEARCH-PATH and SCHEMAS cache what the server last said,
+nil when it was not asked since; CURRENT-SCHEMA is `none' when it said
+NULL.  SCHEMAS is the effective path, `current_schemas(true)'.
 PATH-SETTLED is non-nil once the path no longer depends on an open
 transaction, which a lost connection rolls back."
   client
   current-schema
   search-path
+  schemas
   path-settled
   manual-commit)
 
@@ -325,6 +327,7 @@ open transaction, and a SET made in it, so the path is settled when none
 is open, or when COMMITTED, just after a COMMIT that chained the next one."
   (setf (clutch-db-pg--connection-current-schema conn) nil
         (clutch-db-pg--connection-search-path conn) nil
+        (clutch-db-pg--connection-schemas conn) nil
         (clutch-db-pg--connection-path-settled conn)
         (or committed (not (clutch-db-pg--tx-open-p conn)))))
 
@@ -908,6 +911,20 @@ so the mode line does not ask again until the path may change."
                 (or schema 'none))
           schema)))))
 
+(cl-defmethod clutch-db-resolution-context ((conn clutch-db-pg--connection))
+  "Return CONN's database and the effective path that resolves its names.
+The path is `current_schemas(true)', with the schemas PostgreSQL searches
+implicitly.  It is asked once and again after SQL that may change it, as
+`clutch-db-pg--namespace-statement-p' picks, so a schema on the path
+that is created or dropped meanwhile shows only after such SQL."
+  (list (clutch-db-database conn)
+        (or (clutch-db-pg--connection-schemas conn)
+            (setf (clutch-db-pg--connection-schemas conn)
+                  (clutch-db--translate-library-error pgsql-error
+                    (caar (clutch-db-pg--metadata-rows
+                           (clutch-db-pg--exec
+                            conn "SELECT current_schemas(true)"))))))))
+
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-db-pg--connection) schema)
   "Switch PostgreSQL CONN to SCHEMA via search_path."
   (clutch-db--translate-library-error pgsql-error
@@ -1389,6 +1406,10 @@ the first catalog query would otherwise make it read-only."
     ((_conn clutch-db-pg--xtdb-connection) _sql)
   "Return nil, since XTDB has no search_path to switch."
   nil)
+
+(cl-defmethod clutch-db-resolution-context ((conn clutch-db-pg--xtdb-connection))
+  "Return XTDB CONN's database and current schema, as it has no search_path."
+  (list (clutch-db-database conn) (clutch-db-current-schema conn)))
 
 (defconst clutch-db-pg--xtdb-types
   '((:utf8 "text" "text")
