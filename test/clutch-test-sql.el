@@ -463,8 +463,8 @@ answer can change has to invalidate or extend it correctly."
                                 (clutch-completion-at-point))))))))
 
 (ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
-  :tags '(:smoke)
   "DWIM execution should prefer semicolon-delimited statement bounds."
+  :tags '(:smoke)
   (with-temp-buffer
     (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")
     (goto-char (point-min))
