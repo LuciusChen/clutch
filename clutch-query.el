@@ -310,9 +310,12 @@ console window; (3) nil, meaning use the selected window."
                   (when (and (clutch--query-buffer-p)
                              clutch--console-name
                              clutch--connection-params)
+                    ;; Its own parameters follow the session; the ones it
+                    ;; was opened with name it.
                     (cons (buffer-name buffer)
                           (list :name clutch--console-name
-                                :params clutch--connection-params
+                                :params (or clutch--console-ad-hoc-params
+                                            clutch--connection-params)
                                 :ad-hoc t)))))
               when target collect target))))
 
@@ -360,8 +363,7 @@ as the automatic reconnect does, rather than with PARAMS."
         (let ((existing-params (or clutch--connection-params params)))
           (setq-local clutch--console-name name)
           (setq-local clutch--console-storage-name storage-name)
-          (setq-local clutch--console-ad-hoc-params
-                      (and ad-hoc-params existing-params))
+          (setq-local clutch--console-ad-hoc-params ad-hoc-params)
           (clutch--bind-connection-context
            clutch-connection existing-params product))
         (clutch--update-console-buffer-name))
@@ -378,8 +380,7 @@ as the automatic reconnect does, rather than with PARAMS."
       (clutch--try-reconnect)
       (setq-local clutch--console-name name)
       (setq-local clutch--console-storage-name storage-name)
-      (setq-local clutch--console-ad-hoc-params
-                  (and ad-hoc-params clutch--connection-params))
+      (setq-local clutch--console-ad-hoc-params ad-hoc-params)
       (clutch--update-console-buffer-name))
      (t
       (let* ((conn (clutch--build-conn params))
@@ -2054,13 +2055,12 @@ to execute or \\[clutch-indirect-abort] to abort."
   (let* ((text (clutch--extract-indirect-sql-text))
          (conn (or clutch-connection
                    (clutch--find-connection)))
-         (params clutch--connection-params)
-         (product clutch--conn-sql-product)
+         (context (clutch--connection-context conn))
          (buf  (generate-new-buffer "*clutch: indirect*")))
     (pop-to-buffer buf)
     (clutch-mode)
     (when conn
-      (clutch--bind-connection-context conn params product)
+      (clutch--bind-connection-context conn (car context) (cadr context))
       (clutch--update-mode-line))
     (clutch--indirect-mode 1)
     (insert text)
