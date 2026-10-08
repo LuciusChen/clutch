@@ -221,7 +221,6 @@ the SELECT projection cannot be proven writable."
 
 (defun clutch-result--source-column-details (table op)
   "Return the column details of source TABLE for OP, loading them if needed."
-  (clutch-result--require-connection)
   (clutch--ensure-connection)
   (clutch-result--refuse-if-moved)
   (or (clutch--ensure-column-details clutch-connection table t)
