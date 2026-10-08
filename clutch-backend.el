@@ -1882,6 +1882,16 @@ deciding where literals end."
   "Default: no current schema abstraction."
   nil)
 
+(cl-defgeneric clutch-db-resolution-context (conn)
+  "Return what an unqualified table name on CONN resolves in.
+The value comes from the server where it can, and is only compared with
+`equal', to tell whether a name resolves as it did when a result was
+produced.")
+
+(cl-defmethod clutch-db-resolution-context ((conn t))
+  "Return CONN's database and current schema."
+  (list (clutch-db-database conn) (clutch-db-current-schema conn)))
+
 (cl-defgeneric clutch-db-set-current-schema (conn schema)
   "Switch CONN to SCHEMA for subsequent metadata and query context.")
 

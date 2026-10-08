@@ -5595,6 +5595,130 @@ statement, so the refusal has to come before the prompt and the batch."
         (should-not batched)
         (should (equal clutch--pending-edits '(edit)))))))
 
+(ert-deftest clutch-test-result-refuses-writes-after-its-source-moved ()
+  "A result should refuse staging and submitting once its connection moved.
+A staged edit names the table as the query did and ran wherever the
+connection was when it was submitted, so after `clutch-switch-schema' it
+updated the table of the same name in the other database.  A table the
+query qualified is no exception: in DuckDB a schema still resolves in
+the current catalog."
+  (let ((here '("a" "a"))
+        now batched)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch-db-resolution-context)
+               (lambda (_conn) now))
+              ((symbol-function 'clutch-db-sql-surface-p) #'always)
+              ((symbol-function 'clutch-result--build-update-statements)
+               (lambda ()
+                 '(("UPDATE t SET v = ? WHERE id = ?" . ("x" 1)))))
+              ((symbol-function 'clutch-db-escape-literal)
+               (lambda (_conn value) (format "'%s'" value)))
+              ((symbol-function 'yes-or-no-p) #'always)
+              ((symbol-function 'clutch-db-call-with-atomic-batch)
+               (lambda (&rest _) (setq batched t)))
+              ((symbol-function 'clutch-result-rerun) #'ignore))
+      (clutch-test--with-result-state
+          (:pending-edits '(edit) :source-table "t")
+        (setq-local clutch--result-resolution-context here)
+        (ert-info ("the connection moved: staging and submitting are refused")
+          (setq now '("b" "b"))
+          (should (string-match-p
+                   "run the query again"
+                   (error-message-string
+                    (should-error (clutch-result-submit) :type 'user-error))))
+          (should-not batched)
+          (should-error (clutch-edit--require-sql-staged-mutation "Stage delete")
+                        :type 'user-error)
+          (setq-local clutch--result-source-schema "a")
+          (should-error (clutch-edit--require-sql-staged-mutation "Stage delete")
+                        :type 'user-error)
+          (setq-local clutch--result-source-schema nil))
+        (ert-info ("a context Clutch could not read is refused")
+          (setq now here)
+          (setq-local clutch--result-resolution-context 'unknown)
+          (should-error (clutch-edit--require-sql-staged-mutation "Stage delete")
+                        :type 'user-error))
+        (ert-info ("a failure to read the context is reported as the server gave it")
+          (setq-local clutch--result-resolution-context here)
+          (cl-letf (((symbol-function 'clutch-db-resolution-context)
+                     (lambda (_conn)
+                       (signal 'clutch-db-error
+                               '("current transaction is aborted")))))
+            (should (string-match-p
+                     "current transaction is aborted"
+                     (error-message-string
+                      (should-error
+                       (clutch-edit--require-sql-staged-mutation "Stage delete")
+                       :type 'user-error))))))
+        (ert-info ("a connection that is not live is left to fail on its own")
+          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'ignore))
+            (clutch-edit--require-sql-staged-mutation "Stage delete")))
+        (ert-info ("the same context allows both")
+          (setq-local clutch--result-resolution-context here)
+          (clutch-edit--require-sql-staged-mutation "Stage delete")
+          (clutch-result-submit)
+          (should batched))))))
+
+(ert-deftest clutch-test-result-refuses-to-load-more-after-its-source-moved ()
+  "A result should not load pages, a count or an export once its source moved.
+They run the result's query again, wherever the connection is, and would
+mix another table's rows into the result."
+  (let ((here '("app" "{pg_catalog,s1,s2}"))
+        now ran)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch-db-resolution-context)
+               (lambda (_conn) now))
+              ((symbol-function 'clutch--ensure-connection) #'ignore)
+              ((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql &rest _) sql))
+              ((symbol-function 'clutch-db-build-count-sql)
+               (lambda (_conn sql) (concat "SELECT COUNT(*) FROM (" sql ") c")))
+              ((symbol-function 'clutch-result--run-query)
+               (lambda (&rest _) (setq ran t))))
+      (clutch-test--with-result-state
+          (:source-table "t" :base-query "SELECT id, v FROM t"
+           :last-query "SELECT id, v FROM t"
+           :server-pageable t :server-rewritable t)
+        (setq-local clutch--result-resolution-context here)
+        (setq now '("app" "{pg_catalog,s1,s3}"))
+        (should-error (clutch-result--execute-page 1) :type 'user-error)
+        (should-error (clutch-result-count-total) :type 'user-error)
+        (should-error (clutch-result--map-export-batches #'ignore #'ignore)
+                      :type 'user-error)
+        (should-not ran)
+        (setq now here)
+        (clutch-result--execute-page 1)
+        (should ran)))))
+
+(ert-deftest clutch-test-result-records-the-context-its-query-ran-in ()
+  "A result should record the context its query ran in, once it has run.
+A context that cannot be read is recorded as `unknown'."
+  (let ((clutch--source-window (selected-window))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
+        (result-name "*clutch-test-result*")
+        ran context-error)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql &rest _) sql))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql)
+                 (setq ran t)
+                 (make-clutch-db-result :columns '((:name "id")) :rows '((1)))))
+              ((symbol-function 'clutch-db-resolution-context)
+               (lambda (_conn)
+                 (when context-error
+                   (signal 'clutch-db-error '("connection lost")))
+                 (if ran 'after 'before))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch-test--execute-and-present "SELECT id FROM users" 'fake-conn)
+        (with-current-buffer result-name
+          (should (eq clutch--result-resolution-context 'after)))
+        (setq context-error t)
+        (clutch-test--execute-and-present "SELECT id FROM users" 'fake-conn)
+        (with-current-buffer result-name
+          (should (eq clutch--result-resolution-context 'unknown)))))))
+
 (ert-deftest clutch-test-submit-manual-batch-uses-atomic-backend-boundary ()
   "Manual staged submit should be atomic without committing the user transaction."
   (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
@@ -10457,6 +10581,33 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
                   (push (cons sql callback) ,finishes-var)
                   t)))
        ,@body)))
+
+(ert-deftest clutch-test-result-context-interruption-keeps-the-successful-reply ()
+  "A failed context lookup must not lose a successful asynchronous query.
+An interrupted lookup ran before the activity guard, leaving its timer
+and foreground reservation behind instead of presenting the result."
+  (dolist (failure '(clutch-db-error quit))
+    (with-temp-buffer
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (let (presented)
+          (cl-letf (((symbol-function 'clutch-db-resolution-context)
+                     (lambda (_conn) (signal failure '("Context unavailable"))))
+                    ((symbol-function 'clutch--present-statement-outcome)
+                     (lambda (_sql _conn outcome &rest _)
+                       (setq presented outcome))))
+            (clutch--execute "SELECT 1")
+            (funcall (cdar finishes)
+                     (make-clutch-db-result :columns '((:name "value"))
+                                            :rows '((1))) nil)
+            (condition-case nil (ert-run-idle-timers) (quit nil))
+            (should presented)
+            (should (equal (clutch-db-result-rows (plist-get presented :result))
+                           '((1))))
+            (should (eq (plist-get presented :resolution-context) 'unknown))
+            (should-not clutch--execution-start-time)
+            (should (zerop (hash-table-count clutch-db--foreground-connections)))
+            (should (zerop (hash-table-count clutch--running-queries)))))))))
 
 (ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
   "SQL from an indirect edit should run in a buffer that holds its connection.
