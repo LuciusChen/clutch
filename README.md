@@ -408,7 +408,7 @@ MongoDB is basic native document support through `mongodb.el`: ordinary MongoDB 
 
 Native MongoDB `updateOne` requires update operators such as `$set`; use `replaceOne` for a replacement document. Clutch rejects a plain document passed to `updateOne` before it can replace existing fields.
 
-The shared `clutch-switch-schema` command lists databases visible to the current MongoDB user and changes Clutch's logical database without reconnecting.
+The shared `clutch-switch-schema` command lists databases visible to the current MongoDB user and changes Clutch's logical database without reconnecting; the automatic reconnect returns to it and authenticates where the connection first did.
 
 ### Redis Backend
 

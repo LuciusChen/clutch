@@ -2107,6 +2107,49 @@ replacement connection would run the statement against an empty transaction."
         (should (clutch--try-reconnect))
         (should (equal rebound '(dead-conn new-conn nil)))))))
 
+(ert-deftest clutch-test-try-reconnect-refuses-a-namespace-it-cannot-reach ()
+  "The automatic reconnect should refuse when it cannot return to the namespace.
+It connected to where the parameters lead and ran the next statement
+there, as for a DuckDB console moved into an attached database."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+        built)
+    (with-temp-buffer
+      (setq-local clutch-connection 'dead-conn
+                  clutch--connection-params '(:backend jdbc :url "jdbc:duckdb:/tmp/h.duckdb"))
+      (cl-letf (((symbol-function 'clutch-db-unreachable-namespace)
+                 (lambda (_conn) "att.main"))
+                ((symbol-function 'clutch--build-conn)
+                 (lambda (_params) (setq built t) 'new-conn)))
+        (should (string-match-p
+                 "att\\.main"
+                 (error-message-string
+                  (should-error (clutch--try-reconnect) :type 'user-error))))
+        (should-not built)
+        (should (eq clutch-connection 'dead-conn))))))
+
+(ert-deftest clutch-test-query-console-refused-reconnect-stays-in-the-console ()
+  "Reopening a dead console whose reconnect is refused should show the console.
+The refusal says to press C-c C-e, which only the console binds to
+connecting again, but it came before the console was shown."
+  (let* ((existing (get-buffer-create " *clutch-query-console-refused*"))
+         (clutch-connection-alist '(("alpha" . (:backend jdbc :url "jdbc:duckdb:/tmp/a.duckdb")))))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer existing
+            (clutch-mode)
+            (setq-local clutch--console-name "alpha")
+            (setq-local clutch-connection 'dead-conn))
+          (with-temp-buffer
+            (switch-to-buffer (current-buffer))
+            (cl-letf (((symbol-function 'clutch--find-console-buffer)
+                       (lambda (&rest _args) existing))
+                      ((symbol-function 'clutch--connection-alive-p) #'ignore)
+                      ((symbol-function 'clutch--try-reconnect)
+                       (lambda () (user-error "The session was in att.main"))))
+              (should-error (clutch-query-console "alpha") :type 'user-error)
+              (should (eq (window-buffer (selected-window)) existing)))))
+      (kill-buffer existing))))
+
 (defun clutch-test--make-dml-result-buf (conn)
   "Create a temporary DML result buffer associated with CONN for testing."
   (let ((buf (generate-new-buffer " *clutch-dml-test*")))

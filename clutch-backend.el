@@ -1918,6 +1918,14 @@ CONN's current schema then names the namespace that CONN is in, and
       (error "Backend switched namespace without reporting a current schema"))
     (plist-put (copy-sequence params) :schema schema)))
 
+(cl-defgeneric clutch-db-unreachable-namespace (conn)
+  "Return the namespace CONN is in when a new connection cannot return to it.
+Return nil when the parameters recorded for the session lead back there.")
+
+(cl-defmethod clutch-db-unreachable-namespace ((_conn t))
+  "Return nil, as the recorded parameters lead back to the namespace."
+  nil)
+
 (cl-defgeneric clutch-db-namespace-reconnect-params (conn params namespace)
   "Return replacement PARAMS when switching CONN to NAMESPACE needs reconnecting.")
 

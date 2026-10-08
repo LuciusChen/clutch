@@ -370,17 +370,17 @@ as the automatic reconnect does, rather than with PARAMS."
       (switch-to-buffer existing))
      (existing-conn
       ;; Its session was lost: reconnect it, results and all, as the
-      ;; automatic reconnect does.
-      (with-current-buffer existing
-        (clutch--try-reconnect)
-        (setq-local clutch--console-name name)
-        (setq-local clutch--console-storage-name storage-name)
-        (setq-local clutch--console-ad-hoc-params
-                    (and ad-hoc-params clutch--connection-params))
-        (clutch--update-console-buffer-name))
+      ;; automatic reconnect does, from the console, which keeps it if
+      ;; that fails or is refused.
       (select-window
        (or (clutch--console-window-for existing) (selected-window)))
-      (switch-to-buffer existing))
+      (switch-to-buffer existing)
+      (clutch--try-reconnect)
+      (setq-local clutch--console-name name)
+      (setq-local clutch--console-storage-name storage-name)
+      (setq-local clutch--console-ad-hoc-params
+                  (and ad-hoc-params clutch--connection-params))
+      (clutch--update-console-buffer-name))
      (t
       (let* ((conn (clutch--build-conn params))
              (buf (or existing
@@ -1333,6 +1333,7 @@ already confirmed SQL."
                 (with-current-buffer source-buffer
                   (and (eq connection clutch-connection)
                        (not (clutch--connection-alive-p connection))
+                       (not (clutch-db-unreachable-namespace connection))
                        (clutch--try-reconnect))))
            (with-current-buffer source-buffer
              (let ((retry-context (copy-sequence result-context)))
