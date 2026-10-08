@@ -1815,6 +1815,7 @@ header from tabular formats."
     ((or 'document-insert-one 'document-insert-many
          'document-replace-one 'document-delete-one
          'document-update-one-set)
+     (clutch-result--require-connection)
      (clutch-result--copy-rows format rect))
     (_
      (user-error "Unsupported copy format: %s" format))))

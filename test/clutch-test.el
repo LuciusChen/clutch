@@ -1428,7 +1428,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "REPORTS" :source-token "APP.reports"
                     :columns ("ID") :indices (0) :source-indices (0))))
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  '((:name "ID" :backend-type "NUMBER")
                    (:name "STATUS" :backend-type "VARCHAR2" :default "'new'")
@@ -1461,7 +1462,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
         (identity '(:kind row-locator :name "ROWID"
                     :table "DOCUMENTS" :where-sql "ROWID = ?"
                     :indices (2))))
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  (clutch-jdbc--normalize-column-details
                   '((:name "CONTENT" :type "BLOB")
@@ -1513,7 +1515,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
          '((:name "name" :source-column "name")))
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "USERS" :columns ("ID") :indices (1))))
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  '((:name "NAME" :backend-type "VARCHAR2")))))
       (pcase-let ((`(,sql . ,_)
@@ -1531,7 +1534,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
          '((:name "display_name" :source-column "NAME")))
         (identity '(:kind primary-key :name "PRIMARY"
                     :table "users" :columns ("id") :indices (1))))
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  '((:name "name" :backend-type "text")))))
       (pcase-let ((`(,sql . ,_)
@@ -2458,7 +2462,8 @@ Point left behind made the next cell command scroll back to it."
             (search-forward "name")
             (goto-char (match-beginning 0))
             (should (equal (clutch--cell-at-point) '(0 1 "alice"))))
-          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                    ((symbol-function 'clutch--ensure-column-details)
                      (lambda (_conn _table &optional _strict)
                        (list (list :name "name" :type "text")))))
             (with-current-buffer record-buf
@@ -2501,7 +2506,8 @@ Point left behind made the next cell command scroll back to it."
             (goto-char (point-min))
             (search-forward "qty")
             (goto-char (match-beginning 0)))
-          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                    ((symbol-function 'clutch--ensure-column-details)
                      (lambda (_conn _table &optional _strict)
                        (list (list :name "qty" :type "int")))))
             (with-current-buffer record-buf
@@ -4436,7 +4442,8 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   (with-current-buffer result-buf
     (setq-local clutch--result-source-table table))
-  (cl-letf (((symbol-function 'clutch--cell-at-point)
+  (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+            ((symbol-function 'clutch--cell-at-point)
              (lambda () cell))
             ((symbol-function 'clutch--ensure-column-details)
              (lambda (_conn _table &optional _strict)
@@ -5508,7 +5515,8 @@ The page that statement brings would replace the staged rows."
                                 clutch--pending-edits clutch--pending-deletes
                                 clutch--pending-inserts)
                           reverts)))
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                ((symbol-function 'clutch-result--build-pending-insert-statements)
                  (lambda () '(("INSERT INTO users (id, name) VALUES (?, ?)" . ("3" "c")))))
                 ((symbol-function 'clutch-result--build-update-statements)
                  (lambda () '(("UPDATE users SET name = ? WHERE id = ?" . ("a2" 1)))))
@@ -5544,7 +5552,8 @@ The page that statement brings would replace the staged rows."
     (let (committed rolled-back reverted)
       (setq-local revert-buffer-function
                   (lambda (&rest _args) (setq reverted t)))
-      (cl-letf (((symbol-function 'clutch-result--build-update-statements)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                ((symbol-function 'clutch-result--build-update-statements)
                  (lambda ()
                    '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
                 ((symbol-function 'clutch-db-escape-literal)
@@ -5727,7 +5736,8 @@ A context that cannot be read is recorded as `unknown'."
       (let (atomic executed notice)
       (setq-local revert-buffer-function
                   (lambda (&rest _args) nil))
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                ((symbol-function 'clutch-result--build-pending-insert-statements)
                  (lambda () '(("INSERT first") ("INSERT second"))))
                 ((symbol-function 'clutch-db-escape-literal)
                  (lambda (_conn value) (format "'%s'" value)))
@@ -5759,7 +5769,8 @@ A context that cannot be read is recorded as `unknown'."
       (let (refreshed reverted)
         (setq-local revert-buffer-function
                     (lambda (&rest _args) (setq reverted t)))
-        (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                  ((symbol-function 'clutch-result--build-pending-insert-statements)
                    (lambda () '(("INSERT first") ("INSERT second"))))
                   ((symbol-function 'clutch-db-escape-literal)
                    (lambda (_conn value) (format "'%s'" value)))
@@ -5788,7 +5799,8 @@ A context that cannot be read is recorded as `unknown'."
       (let (reverted)
         (setq-local revert-buffer-function
                     (lambda (&rest _args) (setq reverted t)))
-        (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                  ((symbol-function 'clutch-result--build-pending-insert-statements)
                    (lambda () '(("INSERT first") ("INSERT second"))))
                   ((symbol-function 'clutch-db-escape-literal)
                    (lambda (_conn value) (format "'%s'" value)))
@@ -5812,6 +5824,11 @@ A context that cannot be read is recorded as `unknown'."
                      "roll back or reconnect"
                      (error-message-string err))))
           (should (clutch--tx-uncertain-p clutch-connection))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'ignore))
+            (should (string-match-p
+                     "Transaction state is uncertain"
+                     (error-message-string
+                      (should-error (clutch-result-submit) :type 'user-error)))))
           (should (equal clutch--pending-inserts '(first second)))
           (should-not reverted))))))
 
@@ -6115,7 +6132,8 @@ a word that ends a whole rollback, such as CHAIN."
                         clutch--result-source-table "users")
             (clutch--goto-cell 1 4)
             (set-window-hscroll (selected-window) 40)
-            (cl-letf (((symbol-function 'clutch--ensure-column-details)
+            (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                      ((symbol-function 'clutch--ensure-column-details)
                        (lambda (&rest _)
                          '((:name "id") (:name "name") (:name "city")
                            (:name "note") (:name "flag"))))
@@ -6165,7 +6183,8 @@ a word that ends a whole rollback, such as CHAIN."
                                  '(clutch-row-idx 0 clutch-col-idx 0
                                    clutch-full-value "before")))
           (goto-char (point-min))
-          (cl-letf (((symbol-function 'clutch--ensure-column-details)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                    ((symbol-function 'clutch--ensure-column-details)
                      (lambda (&rest _) '((:name "name"))))
                     ((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args)
@@ -6456,7 +6475,8 @@ a word that ends a whole rollback, such as CHAIN."
                        (clutch-test--transient-suffix-for-key
                         'clutch-result-export key)))
                   (should suffix)
-                  (cl-letf (((symbol-function 'transient-args)
+                  (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                            ((symbol-function 'transient-args)
                              (lambda (_prefix) args))
                             ((symbol-function 'completing-read)
                              (lambda (prompt choices &rest _args)
@@ -6584,7 +6604,8 @@ a word that ends a whole rollback, such as CHAIN."
                 clutch--result-rows '((999 "current-page-only"))
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0)))
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch--ensure-column-details)
                (lambda (_conn _table &optional _strict)
                  (list (list :name "id")
                        (list :name "name"))))
@@ -6702,6 +6723,27 @@ a word that ends a whole rollback, such as CHAIN."
                              '("name"))))
         (should (equal (current-kill 0) "doc.update.snippet();"))))))
 
+(ert-deftest clutch-test-document-copy-reports-an-ended-session ()
+  "Document copy should explain an ended session and work on a lost one."
+  (require 'mongodb)
+  (let ((lost (make-clutch-mongodb-conn
+               :client (make-mongodb-conn :closed t) :database "test"))
+        kill-ring kill-ring-yank-pointer)
+    (clutch-test--with-result-state
+        (:connection nil :connection-params '(:backend mongodb)
+         :source-table "users" :columns '("_id" "clutch__document")
+         :column-defs '((:name "_id")
+                        (:name "clutch__document" :document-source t :hidden t))
+         :rows (list (list 1 (mongodb-document '(("_id" . 1))))))
+      (let ((err (should-error
+                  (clutch-result-copy 'document-insert-one '((0) 0))
+                  :type 'user-error)))
+        (should (string-match-p "Connection closed" (error-message-string err))))
+      (setq-local clutch-connection lost)
+      (clutch-result-copy 'document-insert-one '((0) 0))
+      (should (equal (current-kill 0)
+                     "db.getCollection(\"users\").insertOne({\"_id\":1});")))))
+
 (ert-deftest clutch-test-non-sql-results-reject-sql-mutation-commands ()
   "Document and key/value results should reject SQL-only mutation commands."
   (dolist (surface '(document key-value))
@@ -6772,7 +6814,8 @@ a word that ends a whole rollback, such as CHAIN."
                         "models" '("id") '(0))
          :pending-edits
          (list (cons (cons (vector 1) 1) "[0,1,2]")))
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                ((symbol-function 'clutch--ensure-column-details)
                  (lambda (_conn _table &optional _strict)
                    '((:name "id" :type "integer" :backend-type "int4")
                      (:name "precision" :type "ARRAY"
@@ -6818,7 +6861,8 @@ a word that ends a whole rollback, such as CHAIN."
                                               "users" '("id") '(0))
                         clutch--result-rows '((1 "a" "new")
                                               (2 "b" "done")))
-            (cl-letf (((symbol-function 'use-region-p) (lambda () region-p))
+            (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                      ((symbol-function 'use-region-p) (lambda () region-p))
                       ((symbol-function 'clutch-result--region-rectangle-indices)
                        (lambda () rectangle))
                       ((symbol-function 'clutch--cell-at-point)
@@ -6907,7 +6951,8 @@ a word that ends a whole rollback, such as CHAIN."
                     clutch--result-source-table "users"
                     clutch--row-identity (clutch-test--primary-row-identity
                                           "users" '("id") '(0)))
-        (cl-letf (((symbol-function 'clutch--ensure-column-details)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                  ((symbol-function 'clutch--ensure-column-details)
                    (lambda (_conn _table &optional _strict)
                      (plist-get case :details))))
           (let ((err (should-error
@@ -6937,7 +6982,8 @@ after the edit is staged."
                     clutch--row-identity (clutch-test--primary-row-identity
                                           "users" '("id") '(0))
                     clutch--pending-edits '((([1] . 1) . "alice")))
-        (cl-letf (((symbol-function 'clutch--ensure-column-details)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                  ((symbol-function 'clutch--ensure-column-details)
                    (lambda (_conn _table &optional _strict) (cadr case)))
                   ((symbol-function 'clutch-db-escape-identifier)
                    (lambda (_conn name) name)))
@@ -9417,7 +9463,8 @@ loop turns into a stack as deep as the pages are many."
                   (list (cons (cons (vector 1) 1) "lynx"))
                   clutch--pending-deletes
                   (list (vector 2)))
-      (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
+      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                ((symbol-function 'derived-mode-p) (lambda (&rest _modes) t))
                 ((symbol-function 'clutch--ensure-column-details)
                  (lambda (&rest _)
                    '((:name "id") (:name "name") (:name "note"))))
