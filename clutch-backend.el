@@ -2205,8 +2205,10 @@ Optional keys:
 ;; Re-entrancy guard
 
 (cl-defgeneric clutch-db-busy-p (conn)
-  "Return non-nil if CONN is currently executing a query.
-Used to prevent re-entrant queries from completion timers.")
+  "Return non-nil when CONN must defer automatic metadata queries.
+A running query is busy; a backend may also protect an open transaction
+that cannot accept metadata queries.  Foreground SQL can still run in
+such a transaction once its preceding statement has finished.")
 
 ;; Metadata
 
