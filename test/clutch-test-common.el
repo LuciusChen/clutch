@@ -17,6 +17,12 @@
 
 (require 'clutch)
 
+;; Tests stand in for connections with symbols such as `fake-conn', which
+;; implement no backend; a result they produce records no context.
+(cl-defmethod clutch-db-resolution-context ((_conn symbol))
+  "Return nil for a symbol standing in for a connection."
+  nil)
+
 ;;;; Test helpers
 
 (defun clutch-test--await (predicate)

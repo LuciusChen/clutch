@@ -117,6 +117,10 @@ Nil means derive the offset from `clutch--page-current'.")
   "Schema that qualifies the source table in the query, or nil.")
 (defvar-local clutch--result-source-catalog nil
   "Catalog that qualifies the source table in the query, or nil.")
+(defvar-local clutch--result-resolution-context nil
+  "The `clutch-db-resolution-context' the result's query ran in.
+It is `unknown' when it could not be read, and nil for a result that
+recorded none.")
 (defvar-local clutch--result-server-pageable nil
   "Non-nil when server-side page navigation is safe for this result.")
 (defvar-local clutch--result-server-rewritable nil
@@ -468,7 +472,7 @@ offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
     (sql columns rows elapsed
          &key row-identity-prep page-offset page-has-more
          server-pageable server-rewritable source-table source-schema
-         source-catalog)
+         source-catalog resolution-context)
   "Initialize buffer-local state for a fresh query result.
 SQL is the original query, COLUMNS and ROWS the result data, ELAPSED the
 query time.  ROW-IDENTITY-PREP describes any hidden row identity columns in
@@ -477,12 +481,14 @@ PAGE-HAS-MORE records one-row lookahead.
 SERVER-PAGEABLE, SERVER-REWRITABLE, and SOURCE-TABLE describe whether clutch
 may treat the result as a re-executable relation source, and SOURCE-SCHEMA
 and SOURCE-CATALOG qualify SOURCE-TABLE as the query does.
+RESOLUTION-CONTEXT is the `clutch-db-resolution-context' SQL ran in.
 Returns column names."
   (setq-local clutch--last-query sql
               clutch--base-query sql
               clutch--result-source-table source-table
               clutch--result-source-schema source-schema
               clutch--result-source-catalog source-catalog
+              clutch--result-resolution-context resolution-context
               clutch--result-server-pageable server-pageable
               clutch--result-server-rewritable server-rewritable
               clutch--page-total-rows (and (not server-pageable)
@@ -496,10 +502,10 @@ Returns column names."
 (cl-defun clutch-result--display-select
     (connection sql result elapsed
                 &key row-identity-prep server-pageable
-                result-context source-buffer)
+                result-context resolution-context source-buffer)
   "Display SELECT RESULT for SQL on CONNECTION in a result buffer.
-ROW-IDENTITY-PREP, SERVER-PAGEABLE, RESULT-CONTEXT, SOURCE-BUFFER, and ELAPSED
-are produced by the query execution layer."
+ROW-IDENTITY-PREP, SERVER-PAGEABLE, RESULT-CONTEXT, RESOLUTION-CONTEXT,
+SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
   (let* ((page-size clutch-result-max-rows)
          (buf (get-buffer-create (clutch-result--buffer-name)))
          (params clutch--connection-params)
@@ -542,7 +548,8 @@ are produced by the query execution layer."
              :server-rewritable server-rewritable
              :source-table source-table
              :source-schema (plist-get row-identity-prep :source-schema)
-             :source-catalog (plist-get row-identity-prep :source-catalog)))
+             :source-catalog (plist-get row-identity-prep :source-catalog)
+             :resolution-context resolution-context))
       ;; A server-side filter result restores the query it filters.
       (when (plist-member result-context :where-filter)
         (setq-local clutch--base-query (plist-get result-context :base-query)
@@ -622,6 +629,7 @@ loaded."
     (unless effective-sql
       (user-error "Pagination not available for this query"))
     (clutch--ensure-connection)
+    (clutch-result--refuse-if-moved)
     (clutch-result--confirm-discard-pending
      "Discard staged changes and change page? " "Page change cancelled")
     (clutch-result--run-query
@@ -1090,6 +1098,7 @@ THEN, when non-nil, is called in this buffer once the count arrives."
     (user-error "Server-side count is not available for this query result"))
   (let ((base (clutch-result--effective-query)))
     (clutch--ensure-connection)
+    (clutch-result--refuse-if-moved)
     (let ((count-sql (clutch-db-build-count-sql clutch-connection base)))
       (clutch-result--run-query
        count-sql count-sql
@@ -3285,6 +3294,7 @@ may run after this function returns."
           (progn
             (emit clutch--result-rows)
             (funcall done nil))
+        (clutch-result--refuse-if-moved)
         (clutch-result--export-pages
          effective-sql
          (plist-get (plist-get plan :row-identity-prep) :sql)

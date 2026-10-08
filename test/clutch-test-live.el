@@ -516,6 +516,165 @@ Reopening a console whose session was lost reconnects it too."
         (ignore-errors
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
+(ert-deftest clutch-test-live-mysql-result-refuses-writes-after-a-schema-switch ()
+  :tags '(:clutch-live)
+  "A MySQL result should refuse to submit once the console switched database.
+An edit staged in a result of database A, submitted after
+`clutch-switch-schema' to B, updated the table of the same name in B.
+Running the query again shows B's rows, which may then be edited."
+  (unless (eq clutch-test-backend 'mysql)
+    (ert-skip "This regression covers MySQL's current database"))
+  (clutch-test--with-conn admin
+    (let* ((a (format "clutch_result_a_%d" (emacs-pid)))
+           (b (format "clutch_result_b_%d" (emacs-pid)))
+           (params (append (list :backend 'mysql :database a)
+                           (clutch-test--live-connect-params)))
+           (result-name (format " *clutch-result-moved-%d*" (emacs-pid))))
+      (cl-flet ((value (database)
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query
+                          admin (format "SELECT v FROM %s.t WHERE id = 1" database))))))
+        (unwind-protect
+            (progn
+              (dolist (database (list a b))
+                (clutch-db-query admin (format "CREATE DATABASE %s" database))
+                (clutch-db-query
+                 admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(20))"
+                               database))
+                (clutch-db-query
+                 admin (format "INSERT INTO %s.t VALUES (1, 'orig')" database)))
+              (clutch-test--with-live-console params
+                (clutch-test--with-live-result-buffer result-name
+                  (clutch-test--run-in-console "SELECT id, v FROM t")
+                  (with-current-buffer result-name
+                    (clutch-test--xtdb-edit 0 "v" "edited"))
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (&rest _) b)))
+                    (clutch-switch-schema))
+                  (with-current-buffer result-name
+                    (should (string-match-p
+                             "run the query again"
+                             (error-message-string
+                              (should-error (clutch-test--xtdb-submit)
+                                            :type 'user-error))))
+                    (should clutch--pending-edits)
+                    (should-error (clutch-result-count-total) :type 'user-error)
+                    (should (equal (list (value a) (value b)) '("orig" "orig")))
+                    (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                      (clutch-result-rerun)
+                      (clutch-test--await-queries))
+                    (clutch-test--xtdb-edit 0 "v" "edited")
+                    (clutch-test--xtdb-submit)
+                    (should (equal (list (value a) (value b)) '("orig" "edited")))))))
+          (dolist (database (list a b))
+            (ignore-errors
+              (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
+
+(ert-deftest clutch-test-live-mysql-old-result-refuses-writes-after-a-typed-use ()
+  :tags '(:clutch-live)
+  "A MySQL result left behind by a typed USE should refuse to submit.
+Result buffers are named by database, so after `USE b' the result of
+database A stays in its own buffer, and an edit staged there and
+submitted updated B's table of the same name."
+  (unless (eq clutch-test-backend 'mysql)
+    (ert-skip "This regression covers MySQL's current database"))
+  (clutch-test--with-conn admin
+    (let* ((a (format "clutch_typed_a_%d" (emacs-pid)))
+           (b (format "clutch_typed_b_%d" (emacs-pid)))
+           (params (append (list :backend 'mysql :database a)
+                           (clutch-test--live-connect-params)))
+           results)
+      (cl-flet ((value (database)
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query
+                          admin (format "SELECT v FROM %s.t WHERE id = 1" database))))))
+        (unwind-protect
+            (progn
+              (dolist (database (list a b))
+                (clutch-db-query admin (format "CREATE DATABASE %s" database))
+                (clutch-db-query
+                 admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(20))"
+                               database))
+                (clutch-db-query
+                 admin (format "INSERT INTO %s.t VALUES (1, 'orig')" database)))
+              (clutch-test--with-live-console params
+                (clutch-test--run-in-console "SELECT id, v FROM t")
+                (push (get-buffer (clutch-result--buffer-name)) results)
+                (clutch-test--run-in-console (format "USE %s" b))
+                (push (get-buffer (clutch-result--buffer-name)) results)
+                (should-not (eq (car results) (cadr results)))
+                (with-current-buffer (cadr results)
+                  (should-error (clutch-test--xtdb-edit 0 "v" "edited")
+                                :type 'user-error))
+                (should (equal (list (value a) (value b)) '("orig" "orig")))))
+          (dolist (buffer results)
+            (when (buffer-live-p buffer)
+              (kill-buffer buffer)))
+          (dolist (database (list a b))
+            (ignore-errors
+              (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
+
+(ert-deftest clutch-test-live-pg-result-refuses-writes-after-a-reconnect-moved-it ()
+  :tags '(:clutch-live)
+  "A PostgreSQL result should refuse to submit once a reconnect moved its path.
+In Manual mode, with s1, s3 committed and s1, s2 set in the open
+transaction, a result of t shows s2's row.  After the session was lost,
+the next statement in the console reconnected on s1, s3, and the edit
+staged in the result updated s3.t, though `current_schema()' was s1
+throughout."
+  (unless (eq clutch-test-backend 'pg)
+    (ert-skip "This regression covers the PostgreSQL search_path"))
+  (clutch-test--with-conn admin
+    (let* ((s1 (format "clutch_path1_%d" (emacs-pid)))
+           (s2 (format "clutch_path2_%d" (emacs-pid)))
+           (s3 (format "clutch_path3_%d" (emacs-pid)))
+           (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
+           (result-name (format " *clutch-result-path-%d*" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE SCHEMA %s" s1))
+            (dolist (schema (list s2 s3))
+              (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+              (clutch-db-query
+               admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text)" schema))
+              (clutch-db-query
+               admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
+            (clutch-test--with-live-console params
+              (clutch-toggle-auto-commit)
+              (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 s3))
+              (clutch-commit)
+              (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 s2))
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-test--run-in-console "SELECT id, v FROM t")
+                (with-current-buffer result-name
+                  (clutch-test--xtdb-edit 0 "v" "edited"))
+                (let ((lost (clutch-test--end-console-session admin)))
+                  ;; The statement reconnects before it asks to discard the
+                  ;; staged edit, which is kept.
+                  (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+                    (should-error (clutch-test--run-in-console "SELECT 1")
+                                  :type 'user-error))
+                  (should-not (eq clutch-connection lost)))
+                (with-current-buffer result-name
+                  (should (string-match-p
+                           "run the query again"
+                           (error-message-string
+                            (should-error (clutch-test--xtdb-submit)
+                                          :type 'user-error))))
+                  (should clutch--pending-edits))
+                (dolist (schema (list s2 s3))
+                  (should (equal (caar (clutch-db-result-rows
+                                        (clutch-db-query
+                                         clutch-connection
+                                         (format "SELECT v FROM %s.t WHERE id = 1"
+                                                 schema))))
+                                 "orig"))))
+              (clutch-rollback)
+              (clutch-toggle-auto-commit)))
+        (dolist (schema (list s1 s2 s3))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))
+
 (ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
   :tags '(:clutch-live :duckdb-live)
   "The public command should switch DuckDB schemas in the current catalog."

@@ -26,6 +26,7 @@
 (defvar clutch--result-column-defs)
 (defvar clutch--result-column-details)
 (defvar clutch--result-columns)
+(defvar clutch--result-resolution-context)
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
 (defvar clutch-record--result-buffer)
@@ -40,14 +41,39 @@
 (defvar-local clutch--pending-inserts nil
   "List of field alists staged for insertion.")
 
+(defun clutch-result--refuse-if-moved ()
+  "Signal unless the connection resolves names as this result's query did.
+A staged change, a page, a count and an export name the result's tables
+as its query did, and the connection resolves them wherever it is when
+they run: after a switch of schema, database or search path, or a
+reconnect that restored another one, they would reach other tables.
+Nothing is checked while the connection is not live, and a failure to
+ask where it is now is reported as the server gave it."
+  (when (and clutch--result-resolution-context
+             (clutch--connection-alive-p clutch-connection))
+    (cond
+     ((eq clutch--result-resolution-context 'unknown)
+      (user-error
+       "Cannot tell where this result's query ran; run the query again"))
+     ((not (equal clutch--result-resolution-context
+                  (condition-case err
+                      (clutch-db-resolution-context clutch-connection)
+                    (clutch-db-error
+                     (user-error "%s" (clutch--humanize-db-error
+                                       (error-message-string err)))))))
+      (user-error
+       "The connection moved to another database or schema since this result's query ran; switch back, or run the query again")))))
+
 (defun clutch-edit--require-sql-staged-mutation (op)
   "Signal unless SQL staged mutation OP is available for this result.
 It is not while a query runs on the connection, since a page arriving
-then would drop what was staged."
+then would drop what was staged, nor once the connection moved from
+where the result's query ran."
   (unless (clutch-db-sql-surface-p clutch-connection clutch--connection-params)
     (user-error
      "%s is SQL-only and is not available for non-SQL results" op))
-  (clutch--refuse-while-running clutch-connection))
+  (clutch--refuse-while-running clutch-connection)
+  (clutch-result--refuse-if-moved))
 
 ;;;; Cell editing (C-c ')
 
@@ -822,6 +848,7 @@ relying on the selected window."
 TARGET-ROW is a plist captured when the edit buffer opened.
 Refresh the affected row and footer in place when possible."
   (clutch--refuse-while-running clutch-connection)
+  (clutch-result--refuse-if-moved)
   (let* ((table (clutch--result-source-table-or-user-error "Stage UPDATE"))
          (row-identity (clutch-result--row-identity-or-user-error table "Stage UPDATE"))
          (display-rows (clutch--result-display-rows))
@@ -1158,6 +1185,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
   (when (clutch--tx-uncertain-p clutch-connection)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before submitting"))
+  (clutch-result--refuse-if-moved)
   (let* ((insert-stmts (when clutch--pending-inserts
                          (clutch-result--build-pending-insert-statements)))
          (update-stmts (when clutch--pending-edits
@@ -1975,7 +2003,8 @@ buffer.  PENDING-INDEX re-edits an existing staged insert."
 
 (defun clutch-result-insert--ensure-live-result-context ()
   "Signal when the parent result buffer no longer matches this insert form.
-Staging is also refused while a statement runs on its connection."
+Staging is also refused while a statement runs on its connection, and
+once the connection moved from where the result's query ran."
   (let ((result-buf clutch-result-insert--result-buffer)
         (source-table clutch-result-insert--table))
     (unless (buffer-live-p result-buf)
@@ -1983,7 +2012,8 @@ Staging is also refused while a statement runs on its connection."
     (with-current-buffer result-buf
       (unless (equal (clutch--result-source-key) source-table)
         (user-error "Result table changed; reopen the insert buffer"))
-      (clutch--refuse-while-running clutch-connection))))
+      (clutch--refuse-while-running clutch-connection)
+      (clutch-result--refuse-if-moved))))
 
 ;;;###autoload
 (defun clutch-result-insert-row ()

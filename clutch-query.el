@@ -1182,6 +1182,14 @@ CONNECTION, PHASE, SQL, BUFFER, SUMMARY, ELAPSED, and CONTEXT describe it."
      :elapsed elapsed
      :context context)))
 
+(defun clutch--read-resolution-context (connection)
+  "Return CONNECTION's `clutch-db-resolution-context', or `unknown'.
+A result whose context could not be read refuses whatever would run its
+query or write its table again."
+  (condition-case nil
+      (clutch-db-resolution-context connection)
+    (clutch-db-error 'unknown)))
+
 (defun clutch--execute-statement-attempt
     (sql connection present-result-p result-context region k)
   "Attempt one SQL statement on CONNECTION and call K with an outcome plist.
@@ -1263,6 +1271,11 @@ and signal `clutch-query-interrupted'."
                                               :connection connection
                                               :elapsed elapsed
                                               :result-query-p result-query-p
+                                              :resolution-context
+                                              (and result-query-p
+                                                   present-result-p
+                                                   (clutch--read-resolution-context
+                                                    connection))
                                               :row-identity-prep row-identity-prep
                                               :server-pageable server-pageable
                                               :result-context result-context
@@ -1491,6 +1504,7 @@ executed or failed."
            :row-identity-prep (plist-get outcome :row-identity-prep)
            :server-pageable (plist-get outcome :server-pageable)
            :result-context (plist-get outcome :result-context)
+           :resolution-context (plist-get outcome :resolution-context)
            :source-buffer source-buffer)
         (clutch-result--display result sql elapsed))
       (when region
