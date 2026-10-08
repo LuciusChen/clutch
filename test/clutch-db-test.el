@@ -4961,6 +4961,39 @@ value that is no number takes none."
                   :type 'user-error)
     (should-not called)))
 
+(ert-deftest clutch-db-test-xtdb-manual-mode-begins-only-to-write ()
+  "XTDB in Manual mode should open a transaction only before SQL that writes.
+XTDB cannot mix queries and DML in a transaction and took one opened
+before a SELECT as read-only, so the next INSERT failed.  An ASSERT opens
+one too, since it guards the writes after it.  Background metadata waits
+while any transaction is open, as a catalog query would fail it."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-client
+    (let* ((client (clutch-db-test--make-pg-client))
+           (conn (clutch-db-pg--make-xtdb-connection :client client :manual-commit t))
+           sent)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (push sql sent)
+                   (clutch-db-test--make-pg-result)))
+                ((symbol-function 'pgsql-busy-p) #'ignore))
+        (pcase-dolist (`(,sql ,begins)
+                       '(("SELECT * FROM t" nil)
+                         ("BEGIN READ ONLY" nil)
+                         ("ASSERT 1 = 1" t)
+                         ("INSERT INTO t (_id) VALUES (1)" t)
+                         ("ERASE FROM t WHERE _id = 1" t)))
+          (ert-info (sql)
+            (setq sent nil)
+            (clutch-db-pg--ensure-foreground-transaction conn sql)
+            (should (equal sent (and begins '("BEGIN READ WRITE"))))))
+        (should-not (clutch-db-busy-p conn))
+        (setf (plist-get client :transaction-status) 'in-transaction)
+        (setq sent nil)
+        (clutch-db-pg--ensure-foreground-transaction conn "INSERT INTO t (_id) VALUES (2)")
+        (should-not sent)
+        (should (clutch-db-busy-p conn))))))
+
 (ert-deftest clutch-db-test-xtdb-lists-no-objects-or-schemas ()
   "XTDB has no objects but tables and no schema to switch to.
 Listing them should send no catalog query."
@@ -5418,6 +5451,28 @@ out, which broke the Oracle statement and left SQL Server unpaged."
         (should (equal (clutch-db-current-schema conn) "public"))
         (should (equal (clutch-db-current-schema conn) "public"))
         (should (= calls 1))))))
+
+(ert-deftest clutch-db-test-transaction-open-p-reports-the-server ()
+  "PostgreSQL and MySQL should report an open transaction as their server does.
+PostgreSQL says so in every ReadyForQuery and MySQL in the status flags of
+its OK and EOF packets; other backends cannot tell, and say so."
+  (require 'clutch-db-pg)
+  (require 'clutch-db-mysql)
+  (clutch-db-test--with-pgsql-client
+    (let ((conn (clutch-db-test--make-pg-connection)))
+      (pcase-dolist (`(,status ,open)
+                     '((idle nil) (in-transaction t) (failed-transaction t)))
+        (setf (plist-get (clutch-db-pg--connection-client conn) :transaction-status)
+              status)
+        (should (eq (clutch-db-transaction-open-p conn) open)))))
+  (should (eq (clutch-db-transaction-open-p (make-mysql-conn :status-flags #x0003))
+              t))
+  (should (eq (clutch-db-transaction-open-p (make-mysql-conn :status-flags #x0002))
+              nil))
+  (should (eq (clutch-db-transaction-open-p
+               (make-clutch-jdbc-conn :conn-id 1 :params '(:driver oracle)))
+              'unknown))
+  (should (eq (clutch-db-transaction-open-p 'opaque-conn) 'unknown)))
 
 (ert-deftest clutch-db-test-pg-null-schema-and-comment-stay-nil ()
   "PostgreSQL nullable metadata cells should cross the adapter as nil."

@@ -356,6 +356,12 @@ itself succeeded."
   "Return non-nil for MySQL runtime autocommit toggling."
   t)
 
+(cl-defmethod clutch-db-transaction-open-p ((conn mysql-conn))
+  "Return t when the last OK or EOF packet on CONN had a transaction open.
+An error packet carries no status flags, so after an error this still
+gives the status from before it."
+  (and (mysql-in-transaction-p conn) t))
+
 (cl-defmethod clutch-db-commit ((conn mysql-conn))
   "Commit the current transaction on MySQL CONN."
   (mysql-commit conn))

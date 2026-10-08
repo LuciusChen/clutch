@@ -10187,10 +10187,12 @@ Manual mode is left as it is."
             (kill-buffer buffer)))))))
 
 (ert-deftest clutch-test-execute-retries-only-safe-clean-preflight-failures ()
-  "Retry once only when JDBC proves execution did not start and tx is clean."
+  "Retry once only when JDBC proves execution did not start and tx is clean.
+A transaction begun with BEGIN in Auto mode holds uncommitted work too."
   (dolist (case '((auto nil nil 2 1 new-conn nil)
                   (manual-clean t nil 2 1 new-conn nil)
                   (manual-dirty t t 1 0 old-conn clutch-db-execution-not-started)
+                  (auto-dirty nil t 1 0 old-conn clutch-db-execution-not-started)
                   (ambiguous-first-failure nil nil 1 0 old-conn clutch-db-error)
                   (second-failure nil nil 2 1 new-conn clutch-db-error)))
     (pcase-let ((`(,label ,manual ,dirty ,expected-runs ,expected-reconnects
