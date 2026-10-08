@@ -694,6 +694,10 @@ CONN keeps its commit mode, which a connection that replaces it takes on."
   "Return non-nil because PostgreSQL supports Clutch-managed manual commit."
   t)
 
+(cl-defmethod clutch-db-transaction-open-p ((conn clutch-db-pg--connection))
+  "Return t when the last ReadyForQuery on CONN had a transaction open."
+  (and (clutch-db-pg--tx-open-p conn) t))
+
 (cl-defmethod clutch-db-commit ((conn clutch-db-pg--connection))
   "Finish the current foreground transaction on PostgreSQL CONN.
 Return `rolled-back' after rolling back an already failed transaction.

@@ -962,16 +962,19 @@ to the display name (e.g. \"MySQL\")."
 
 (defun clutch--transaction-header-line-segment (transaction-state)
   "Return a header-line segment for semantic TRANSACTION-STATE, or nil.
-TRANSACTION-STATE is one of `auto', `manual', `dirty', or `uncertain'."
+TRANSACTION-STATE is one of `auto', `auto-dirty', `manual', `dirty', or
+`uncertain'.  `auto-dirty' is a transaction begun with BEGIN in Auto mode
+that holds uncommitted work."
   (when transaction-state
     (let* ((state-face (pcase transaction-state
                          ('auto 'success)
                          ('manual 'warning)
-                         ((or 'dirty 'uncertain) 'error)))
+                         ((or 'auto-dirty 'dirty 'uncertain) 'error)))
            (icon (clutch--icon-with-face '(mdicon . "nf-md-database_lock")
                                          "⛁" state-face))
            (label (pcase transaction-state
                     ('auto "Tx: Auto")
+                    ('auto-dirty "Tx: Auto*")
                     ('manual "Tx: Manual")
                     ('dirty "Tx: Manual*")
                     ('uncertain "Tx: Uncertain"))))

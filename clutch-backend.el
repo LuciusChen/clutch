@@ -1375,6 +1375,15 @@ For example, SET NAMES utf8mb4 on MySQL.")
   "Fallback implementation for backends without manual-commit support."
   nil)
 
+(cl-defgeneric clutch-db-transaction-open-p (conn)
+  "Return t when CONN's server reported an open transaction, nil when not.
+The report came with the reply to the last statement that succeeded.
+Return `unknown' when the backend cannot tell.")
+
+(cl-defmethod clutch-db-transaction-open-p ((_conn t))
+  "Return `unknown', as the backend reports no transaction status."
+  'unknown)
+
 (cl-defgeneric clutch-db-commit (conn)
   "Finish the current transaction on CONN.
 Return `rolled-back' when the backend had to roll back an already failed

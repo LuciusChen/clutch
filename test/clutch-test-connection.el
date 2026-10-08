@@ -1552,6 +1552,17 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
             (should (string-match-p
                      "Tx: Auto"
                      (substring-no-properties clutch--footer-base-string))))
+          ;; A transaction begun with BEGIN in Auto mode holds uncommitted work.
+          (clutch--set-tx-dirty conn)
+          (with-current-buffer result
+            (should (string-match-p
+                     "Tx: Auto\\*"
+                     (substring-no-properties clutch--footer-base-string))))
+          (clutch--clear-tx-state conn)
+          (with-current-buffer result
+            (should-not (string-match-p
+                         "Tx: Auto\\*"
+                         (substring-no-properties clutch--footer-base-string))))
           (with-current-buffer owner
             (clutch-toggle-auto-commit))
           (with-current-buffer result
@@ -1635,6 +1646,67 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
             (should (eq (not (null (clutch--tx-dirty-p conn)))
                         expected-dirty))))))))
 
+(ert-deftest clutch-test-transaction-state-follows-the-server-report ()
+  "Uncommitted work should be known until the server reports no transaction.
+On MySQL a CREATE TEMPORARY TABLE, which commits nothing, cleared the work
+of an INSERT before it, and in Auto mode a typed BEGIN and INSERT were not
+recorded at all, so a disconnect lost the work without asking.  SQL that
+writes inside a transaction the server reports open marks it; only a
+report of none open clears it."
+  (pcase-dolist (`(,label ,manual ,ddl-effect ,steps ,state)
+                 '(("Manual, DDL that commits nothing" t clear
+                    (("INSERT INTO t VALUES (1)" t)
+                     ("CREATE TEMPORARY TABLE x (id int)" t))
+                    dirty)
+                   ("Manual, DDL that commits" t clear
+                    (("INSERT INTO t VALUES (1)" t)
+                     ("CREATE TABLE x (id int)" nil))
+                    nil)
+                   ("Manual, DDL inside the transaction" t dirty
+                    (("CREATE TABLE x (id int)" t))
+                    dirty)
+                   ("Manual, a read in the open transaction" t clear
+                    (("SELECT 1" t))
+                    nil)
+                   ("Manual, a commit that chains the next transaction" t clear
+                    (("INSERT INTO t VALUES (1)" t) ("COMMIT AND CHAIN" t))
+                    nil)
+                   ("Auto, a typed BEGIN and a write" nil clear
+                    (("BEGIN" t) ("INSERT INTO t VALUES (1)" t))
+                    dirty)
+                   ("Auto, a typed BEGIN alone" nil clear
+                    (("BEGIN" t))
+                    nil)
+                   ("Auto, a rollback to a savepoint" nil clear
+                    (("START TRANSACTION" t) ("INSERT INTO t VALUES (1)" t)
+                     ("SAVEPOINT s" t) ("ROLLBACK TO SAVEPOINT s" t))
+                    dirty)
+                   ("Auto, a typed COMMIT" nil clear
+                    (("BEGIN" t) ("INSERT INTO t VALUES (1)" t) ("COMMIT" nil))
+                    nil)
+                   ("Auto, a write that commits itself" nil clear
+                    (("INSERT INTO t VALUES (1)" nil))
+                    nil)))
+    (ert-info (label)
+      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+            (clutch--running-queries (make-hash-table :test 'eq))
+            open)
+        (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
+                   (lambda (_conn) manual))
+                  ((symbol-function 'clutch-db-transaction-open-p)
+                   (lambda (_conn) open))
+                  ((symbol-function 'clutch-db-schema-transaction-effect)
+                   (lambda (_conn _sql) ddl-effect))
+                  ((symbol-function 'clutch-db-query)
+                   (lambda (&rest _) (make-clutch-db-result :affected-rows 1)))
+                  ((symbol-function 'clutch--clear-connection-problem-capture)
+                   #'ignore)
+                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+          (pcase-dolist (`(,sql ,reported) steps)
+            (setq open reported)
+            (clutch--run-db-query 'tx-conn sql))
+          (should (eq (clutch--tx-state 'tx-conn) state)))))))
+
 (ert-deftest clutch-test-run-db-query-can-defer-transaction-state-to-batch ()
   "Staged statements should not publish dirty state before their batch succeeds."
   (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
@@ -1693,10 +1765,12 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
         (should-not (clutch--tx-state clutch-connection))))))
 
 (ert-deftest clutch-test-disconnect-confirmation-describes-transaction-state ()
-  "Closing prompts should not present an uncertain commit as known-lost work."
+  "Closing prompts should not present an uncertain commit as known-lost work.
+Work of a transaction begun with BEGIN in Auto mode is asked about too."
   (dolist (case '((dirty t "Uncommitted changes")
                   (uncertain nil "outcome is unknown")
-                  (dirty nil nil)))
+                  (dirty nil "Uncommitted changes")
+                  (nil t nil)))
     (pcase-let ((`(,state ,manual ,expected-pattern) case))
       (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
             prompt)
@@ -2607,6 +2681,62 @@ replacement connection would run the statement against an empty transaction."
       (should-not disconnected)
       (should clutch-connection)
       (should (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-disconnect-asks-for-auto-mode-uncommitted-work ()
+  "Disconnect should ask before dropping work of a transaction begun in Auto mode.
+Only Manual mode asked, so the work of a typed BEGIN and INSERT was lost
+without a question.  `clutch-commit' and `clutch-rollback' stay Manual
+mode commands and say how to end such a transaction."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        prompts disconnected)
+    (puthash clutch-connection 'dirty clutch--tx-state-cache)
+    (cl-letf (((symbol-function 'clutch-db-manual-commit-p) #'ignore)
+              ((symbol-function 'clutch-db-manual-commit-supported-p) #'always)
+              ((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (push prompt prompts) nil))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (setq disconnected t))))
+      (should-error (clutch-disconnect) :type 'user-error)
+      (should (string-match-p "Uncommitted changes will be lost" (car prompts)))
+      (should-not disconnected)
+      (should (clutch--tx-dirty-p clutch-connection))
+      (dolist (command '(clutch-commit clutch-rollback))
+        (should (string-match-p
+                 "COMMIT or ROLLBACK"
+                 (error-message-string
+                  (should-error (funcall command) :type 'user-error)))))
+      (should (clutch--tx-dirty-p clutch-connection)))))
+
+(ert-deftest clutch-test-toggle-to-manual-adopts-a-transaction-begun-with-sql ()
+  "Switching to Manual mode should keep the work of a transaction begun in Auto.
+Refusing it left a staged batch, which Auto mode refuses inside such a
+transaction, nowhere to go.  Leaving Manual mode with work, or either
+way with an uncertain outcome, is still refused."
+  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+        (clutch-connection 'fake-conn)
+        (manual nil)
+        modes)
+    (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p) #'always)
+              ((symbol-function 'clutch-db-manual-commit-p)
+               (lambda (_conn) manual))
+              ((symbol-function 'clutch-db-set-auto-commit)
+               (lambda (_conn auto-commit)
+                 (push auto-commit modes)
+                 (setq manual (not auto-commit))))
+              ((symbol-function 'clutch--connection-alive-p) #'always)
+              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+      (puthash clutch-connection 'dirty clutch--tx-state-cache)
+      (clutch-toggle-auto-commit)
+      (should manual)
+      (should (clutch--tx-dirty-p clutch-connection))
+      (should-error (clutch-toggle-auto-commit) :type 'user-error)
+      (should manual)
+      (setq manual nil)
+      (puthash clutch-connection 'uncertain clutch--tx-state-cache)
+      (should-error (clutch-toggle-auto-commit) :type 'user-error)
+      (should (equal modes '(nil))))))
 
 (ert-deftest clutch-test-connect-refuses-while-a-query-runs ()
   "Connecting elsewhere should wait for the statement running on the buffer.

@@ -5091,6 +5091,28 @@ out, which broke the Oracle statement and left SQL Server unpaged."
         (should (equal (clutch-db-current-schema conn) "public"))
         (should (= calls 1))))))
 
+(ert-deftest clutch-db-test-transaction-open-p-reports-the-server ()
+  "PostgreSQL and MySQL should report an open transaction as their server does.
+PostgreSQL says so in every ReadyForQuery and MySQL in the status flags of
+its OK and EOF packets; other backends cannot tell, and say so."
+  (require 'clutch-db-pg)
+  (require 'clutch-db-mysql)
+  (clutch-db-test--with-pgsql-client
+    (let ((conn (clutch-db-test--make-pg-connection)))
+      (pcase-dolist (`(,status ,open)
+                     '((idle nil) (in-transaction t) (failed-transaction t)))
+        (setf (plist-get (clutch-db-pg--connection-client conn) :transaction-status)
+              status)
+        (should (eq (clutch-db-transaction-open-p conn) open)))))
+  (should (eq (clutch-db-transaction-open-p (make-mysql-conn :status-flags #x0003))
+              t))
+  (should (eq (clutch-db-transaction-open-p (make-mysql-conn :status-flags #x0002))
+              nil))
+  (should (eq (clutch-db-transaction-open-p
+               (make-clutch-jdbc-conn :conn-id 1 :params '(:driver oracle)))
+              'unknown))
+  (should (eq (clutch-db-transaction-open-p 'opaque-conn) 'unknown)))
+
 (ert-deftest clutch-db-test-pg-null-schema-and-comment-stay-nil ()
   "PostgreSQL nullable metadata cells should cross the adapter as nil."
   (require 'clutch-db-pg)
