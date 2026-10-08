@@ -4028,7 +4028,7 @@ and uncommitted work lost with the old one went unreported."
             (with-temp-buffer
               (clutch-mode)
               (setq-local clutch--console-name "alpha"
-                          clutch--console-target
+                          clutch--session-target
                           (clutch--connection-target
                            (clutch-prepare-connection-params
                             (clutch--saved-connection-params "alpha")))
@@ -4101,7 +4101,7 @@ server was written to another.  Once connected there, the console's next
             (with-temp-buffer
               (clutch-mode)
               (setq-local clutch--console-name "alpha"
-                          clutch--console-target
+                          clutch--session-target
                           (clutch--connection-target
                            (clutch-prepare-connection-params
                             (clutch--saved-connection-params "alpha")))
@@ -4140,7 +4140,7 @@ server, so the session and its results move as they do otherwise."
     (with-temp-buffer
       (clutch-mode)
       (setq-local clutch--console-name "alpha"
-                  clutch--console-target
+                  clutch--session-target
                   (clutch--connection-target
                    (clutch-prepare-connection-params
                     (clutch--saved-connection-params "alpha")))
@@ -4487,7 +4487,91 @@ connection from the console."
                  (lambda () '(:backend mysql :database "manual_db"))))
         (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
           (clutch-connect)
-          (should (equal built '(:backend mysql :database "manual_db"))))))))
+          (should (equal built '(:backend mysql :database "manual_db")))
+          (should (equal clutch--session-target
+                         (clutch--connection-target
+                          (clutch-prepare-connection-params
+                           '(:backend mysql :database "manual_db"))))))))))
+
+(ert-deftest clutch-test-connect-outside-a-console-follows-the-picked-target ()
+  "`C-c C-e' outside a console should move a session picked again.
+Picking the connection the session was on started a new session in the
+mode that connection starts in and left the buffer's results without a
+connection.  Picking another connects the buffer alone."
+  (let ((clutch-connection-alist
+         '(("alpha" . (:backend mysql :host "db1" :database "app"))
+           ("beta" . (:backend mysql :host "db2" :database "app"))))
+        picked built replaced)
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch-connection 'old-conn
+                  clutch--session-target
+                  (clutch--connection-target
+                   (clutch-prepare-connection-params
+                    (clutch--saved-connection-params "alpha"))))
+      (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (memq conn '(old-conn new-conn))))
+                  ((symbol-function 'clutch--confirm-session-close) #'ignore)
+                  ((symbol-function 'clutch--read-connection-params)
+                   (lambda () (clutch--saved-connection-params picked)))
+                  ((symbol-function 'clutch--replace-connection)
+                   (lambda (&rest _) (setq replaced t)))
+                  ((symbol-function 'clutch--do-disconnect) #'ignore))
+          (setq picked "alpha")
+          (clutch-connect)
+          (should replaced)
+          (setq replaced nil
+                picked "beta")
+          (clutch-connect)
+          (should-not replaced)
+          (should (equal (plist-get built :host) "db2"))
+          (should (equal clutch--session-target
+                         (clutch--connection-target
+                          (clutch-prepare-connection-params
+                           (clutch--saved-connection-params "beta"))))))))))
+
+(ert-deftest clutch-test-connect-in-an-indirect-edit-leaves-its-console-session ()
+  "`C-c C-e' in an indirect edit should leave the session of its console.
+Connecting the edit elsewhere asked to close and then disconnected the
+console's session, which the edit only borrows."
+  (let ((console (generate-new-buffer " *clutch-test-console*"))
+        (clutch-connection-alist
+         '(("alpha" . (:backend mysql :host "db1"))
+           ("beta" . (:backend mysql :host "db2"))))
+        built ended asked)
+    (unwind-protect
+        (let ((target (clutch--connection-target
+                       (clutch-prepare-connection-params
+                        (clutch--saved-connection-params "alpha")))))
+          (with-current-buffer console
+            (setq-local clutch-connection 'old-conn
+                        clutch--session-target target))
+          (with-temp-buffer
+            (clutch-mode)
+            (clutch--indirect-mode 1)
+            (setq-local clutch-connection 'old-conn
+                        clutch--session-target target)
+            (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+              (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                         (lambda (conn) (memq conn '(old-conn new-conn))))
+                        ((symbol-function 'clutch--confirm-session-close)
+                         (lambda (&rest _) (setq asked t)))
+                        ((symbol-function 'clutch--read-connection-params)
+                         (lambda () (clutch--saved-connection-params "beta")))
+                        ((symbol-function 'clutch--do-disconnect)
+                         (lambda (conn) (push conn ended)))
+                        ((symbol-function 'clutch--release-connection-transport)
+                         (lambda (conn) (push conn ended)))
+                        ((symbol-function 'clutch--clear-connection-metadata-caches)
+                         (lambda (conn) (push conn ended))))
+                (clutch-connect)
+                (should (eq clutch-connection 'new-conn))
+                (should-not ended)
+                (should-not asked)
+                (should (eq (buffer-local-value 'clutch-connection console)
+                            'old-conn))))))
+      (kill-buffer console))))
 
 (ert-deftest clutch-test-connect-over-dead-connection-releases-only-its-transport ()
   "Connecting over a dead connection should release its transport only.

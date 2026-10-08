@@ -10729,7 +10729,8 @@ reconnecting from it failed with \"Connection params require :backend\"."
           (with-current-buffer console
             (setq-local clutch-connection 'live-conn
                         clutch--connection-params params
-                        clutch--conn-sql-product 'mysql))
+                        clutch--conn-sql-product 'mysql
+                        clutch--session-target 'console-target))
           (cl-letf (((symbol-function 'clutch--connection-alive-p)
                      (lambda (conn) (eq conn 'live-conn)))
                     ((symbol-function 'clutch--update-mode-line) #'ignore)
@@ -10741,7 +10742,8 @@ reconnecting from it failed with \"Connection params require :backend\"."
           (with-current-buffer indirect
             (should (eq clutch-connection 'live-conn))
             (should (equal clutch--connection-params params))
-            (should (eq clutch--conn-sql-product 'mysql))))
+            (should (eq clutch--conn-sql-product 'mysql))
+            (should (eq clutch--session-target 'console-target))))
       (dolist (buffer (list console indirect))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
