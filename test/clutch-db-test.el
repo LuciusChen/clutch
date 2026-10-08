@@ -3453,13 +3453,16 @@ passes validation fails the test instead of failing on the fake client."
   "ClickHouse given only a :url should list the tables of the URL's database.
 It listed the tables of `default', while it showed and queried the URL's.
 The driver also takes a protocol, credentials, an IPv6 address, a list of
-hosts and tags, and a `database' property, the last one if there are
-several, which it prefers to the path."
+hosts and tags, an HTTP path before the database, and a `database'
+property, the last one if there are several, which it prefers to the
+path."
   (dolist (url '("jdbc:clickhouse://db:8123/analytics"
                  "jdbc:clickhouse://db:8123/analytics#dc1,r1"
                  "jdbc:clickhouse://db:8123?database=analytics"
                  "jdbc:clickhouse://db:8123/default?ssl=true&database=analytics"
                  "jdbc:clickhouse://db:8123/default?database=other&database=analytics"
+                 "jdbc:clickhouse://db:8123/proxy/analytics"
+                 "jdbc:clickhouse://h1:8123,h2:8123/a/b/analytics?ssl=true"
                  "jdbc:clickhouse:http://db:8123/analytics"
                  "jdbc:clickhouse://h1:8123,h2:8123/analytics"
                  "jdbc:clickhouse://user:pass@db:8123/analytics"
@@ -3476,7 +3479,9 @@ several, which it prefers to the path."
           (clutch-db-list-table-entries conn)
           (should (string-match-p "database = 'analytics'" captured-sql))
           (should (equal (clutch-jdbc--conn-catalog conn) "analytics"))
-          (should (equal (clutch-db-database conn) "analytics")))))))
+          (should (equal (clutch-db-database conn) "analytics"))))))
+  (should-not (clutch-jdbc--clickhouse-url-database
+               "jdbc:clickhouse://db:8123/proxy/")))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-switch-names-the-database-in-the-url ()
   "A ClickHouse switch should name the new database in the :url it reconnects with.
@@ -3497,7 +3502,13 @@ old database, while Clutch showed and listed the new one."
                      ("jdbc:clickhouse://db:8123/dbx?ssl=true&database=dba#t"
                       "jdbc:clickhouse://db:8123/dbx?ssl=true&database=dbb#t")
                      ("jdbc:clickhouse://db:8123?database=a&ssl=true&database=dba"
-                      "jdbc:clickhouse://db:8123?database=dbb&ssl=true&database=dbb")))
+                      "jdbc:clickhouse://db:8123?database=dbb&ssl=true&database=dbb")
+                     ("jdbc:clickhouse://db:8123/proxy/dba"
+                      "jdbc:clickhouse://db:8123/proxy/dbb")
+                     ("jdbc:clickhouse://db:8123/a/b/dba?ssl=true"
+                      "jdbc:clickhouse://db:8123/a/b/dbb?ssl=true")
+                     ("jdbc:clickhouse://db:8123/proxy/"
+                      "jdbc:clickhouse://db:8123/proxy/dbb")))
       (ert-info (url)
         (let ((params (clutch-db-namespace-reconnect-params
                        conn (list :url url :user "u") "dbb")))
