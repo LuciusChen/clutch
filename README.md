@@ -100,6 +100,8 @@ The SQLite Quick Start has no optional dependency. For other backends, install o
 
 If a configured native backend package is missing, Clutch reports it when connecting. Install that package with your package manager, ensure it is on `load-path`, and reconnect.
 
+`nerd-icons` is optional: without it, Clutch uses text symbols and backend names instead of icons. Its availability is checked once per Emacs session, including when it is missing; restart Emacs after installing it during a running session.
+
 JDBC support ships with Clutch, but its runtime requires Java 17+, `clutch-jdbc-agent.jar`, and a database driver jar where applicable. Clutch pins agent 0.2.26, which preserves structured BLOB whitespace, keeps CLOB previews at complete Unicode character boundaries, bounds per-connection lock retention, runs Oracle schema-wide listings on their own session so they cannot delay a query's metadata lookups, and lets a statement run without a time limit when none is configured. On first connection, Clutch can prompt to download the agent and supported drivers; it verifies the configured agent jar against its SHA-256 before startup. See the [JDBC backend guide](docs/jdbc-backend.org) for setup, supported drivers, connection examples, and transaction behavior.
 
 For source checkouts, add Clutch and each native protocol checkout you use to `load-path`:
