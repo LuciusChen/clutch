@@ -409,8 +409,8 @@ and a `?' inside a dollar-quoted function body is part of the body."
    :type 'user-error))
 
 (ert-deftest clutch-db-test-redis-query-mapping-contract ()
-  :tags '(:smoke)
   "Redis query results should map command responses to result grids."
+  :tags '(:smoke)
   (let ((conn (make-clutch-redis-conn :client 'redis-client)))
     (cl-letf (((symbol-function 'redis-command)
                (lambda (client command &rest args)
@@ -1902,8 +1902,8 @@ Filtering the category listing ran a schema-wide query per describe."
       (delete-directory dir t))))
 
 (ert-deftest clutch-db-test-sqlite-returning-yields-result-rows ()
-  :tags '(:smoke)
   "SQLite DML with RETURNING should produce columns and rows."
+  :tags '(:smoke)
   (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-returning-"
     (clutch-db-query conn "CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
@@ -2620,8 +2620,8 @@ Filtering the category listing ran a schema-wide query per describe."
     (should (<= visited (* 8 width (length docs))))))
 
 (ert-deftest clutch-db-test-mongodb-query-documents-to-grid ()
-  :tags '(:smoke)
   "Native MongoDB query results should flatten top-level document keys."
+  :tags '(:smoke)
   (let ((docs `((("_id" . ,(mongodb-object-id "64f"))
                  ("name" . "Ann")
                  ("score" . 10)
@@ -4346,8 +4346,8 @@ retired after a quit came back in Auto mode."
 ;;;; Unit tests — backend registry
 
 (ert-deftest clutch-db-test-backend-features ()
-  :tags '(:smoke)
   "Test that backend features are correctly registered."
+  :tags '(:smoke)
   (let ((mysql-features (alist-get 'mysql clutch-backend--registry))
         (pg-features (alist-get 'pg clutch-backend--registry))
         (sqlite-features (clutch-backend-feature 'sqlite))
@@ -4506,8 +4506,8 @@ retired after a quit came back in Auto mode."
     (should (equal (clutch-db-display-name conn) "KingbaseES"))))
 
 (ert-deftest clutch-db-test-build-conn-routes-generic-jdbc-through-jdbc-backend ()
-  :tags '(:smoke)
   "The generic JDBC backend should pass :url through to `clutch-db-connect'."
+  :tags '(:smoke)
   (require 'clutch)
   (let (captured-backend captured-params)
     (cl-letf (((symbol-function 'clutch--resolve-password)
@@ -5086,8 +5086,8 @@ Listing them should send no catalog query."
 ;;;; Unit tests — SQL building (paged queries)
 
 (ert-deftest clutch-db-test-build-paged-sql-limit-offset ()
-  :tags '(:smoke)
   "MySQL and PostgreSQL share LIMIT/OFFSET paging, quoted per dialect."
+  :tags '(:smoke)
   (require 'clutch-db-mysql)
   (require 'mysql)
   (require 'clutch-db-pg)
@@ -6212,8 +6212,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
  "MySQL")
 
 (ert-deftest clutch-db-test-mysql-live-authinfo-profile-connect ()
-  :tags '(:db-live :mysql-live)
   "MySQL should connect through an authinfo `:profile-entry'."
+  :tags '(:db-live :mysql-live)
   (if (not (clutch-db-test--mysql-live-configured-p))
       (ert-skip "Set clutch-db-test-mysql-password to enable MySQL live tests")
     (clutch-db-test--with-local-mysql-tls
@@ -6233,8 +6233,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
         (clutch-db-test--assert-live-basic-query conn)))))
 
 (ert-deftest clutch-db-test-mysql-live-interrupt-keeps-connection-usable ()
-  :tags '(:db-live :mysql-live)
   "MySQL query interruption should keep the original session usable."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (clutch-db-test--with-mysql watcher
       (let (worker)
@@ -6278,8 +6278,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           (ignore-errors (clutch-db-interrupt-query conn)))))))
 
 (ert-deftest clutch-db-test-mysql-live-manual-batch-preserves-select-lock ()
-  :tags '(:db-live :mysql-live)
   "An empty Manual batch preserves locks acquired by a result-set query."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (clutch-db-test--with-mysql watcher
       (let ((table (clutch-db-test--live-name "clutch_eof_lock")))
@@ -6310,8 +6310,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-db-test-mysql-live-timeout-recovers-connection ()
-  :tags '(:db-live :mysql-live)
   "MySQL read timeout should resynchronize the session before reuse."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (let ((clutch-db-mysql-cancel-timeout-seconds 2)
           (old-timeout (mysql-conn-read-idle-timeout conn))
@@ -6329,8 +6329,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
         (setf (mysql-conn-read-idle-timeout conn) old-timeout)))))
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
-  :tags '(:db-live :mysql-live)
   "Test MySQL schema introspection."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     ;; list-tables
     (let ((tables (clutch-db-list-tables conn)))
@@ -6347,8 +6347,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
       (should (string-match-p "CREATE\\( TABLE\\| .* VIEW\\)" ddl)))))
 
 (ert-deftest clutch-db-test-mysql-live-row-identity-uses-unique-not-null ()
-  :tags '(:db-live :mysql-live)
   "MySQL should use a non-null unique key when no primary key exists."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (let* ((table (format "clutch_rowid_unique_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -6367,8 +6367,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-mysql-live-row-identity-sees-generated-invisible-pk ()
-  :tags '(:db-live :mysql-live)
   "MySQL generated invisible primary keys should behave as primary keys."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (let* ((table (format "clutch_rowid_gipk_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
@@ -6407,8 +6407,8 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
            conn "SET SESSION sql_generate_invisible_primary_key=OFF"))))))
 
 (ert-deftest clutch-db-test-mysql-live-index-details-filter-by-target-table ()
-  :tags '(:db-live :mysql-live)
   "MySQL index details should stay scoped to the target table."
+  :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (let* ((suffix (emacs-pid))
            (table-a (format "clutch_idx_a_%d" suffix))
@@ -6477,8 +6477,8 @@ Skips if `clutch-db-test-pg-password' is nil."
  "PostgreSQL")
 
 (ert-deftest clutch-db-test-pg-live-public-value-and-transaction-contract ()
-  :tags '(:db-live :pg-live)
   "PostgreSQL should preserve typed values and recover failed transactions."
+  :tags '(:db-live :pg-live)
   (clutch-db-test--with-pg conn
     (let* ((result
             (clutch-db-execute-params
@@ -6522,9 +6522,9 @@ Skips if `clutch-db-test-pg-password' is nil."
     (should-not (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-pg-live-timestamptz-params-keep-emacs-local-time ()
-  :tags '(:db-live :pg-live)
   "A timestamptz written back should be the time Clutch showed for it.
 The session time zone differs from Emacs's here, as it often does."
+  :tags '(:db-live :pg-live)
   (clutch-db-test--with-pg conn
     (clutch-db-test--with-time-zone "Asia/Shanghai"
       (clutch-db-query conn "SET TIME ZONE 'UTC'")
@@ -6544,8 +6544,8 @@ The session time zone differs from Emacs's here, as it often does."
         (should (equal row '(t "2026-01-02 03:04:06")))))))
 
 (ert-deftest clutch-db-test-pg-live-keyboard-quit-keeps-connection-usable ()
-  :tags '(:db-live :pg-live)
   "PostgreSQL keyboard quit should not be cancelled twice by the adapter."
+  :tags '(:db-live :pg-live)
   (clutch-db-test--with-pg conn
     (let ((client (clutch-db-pg--connection-client conn))
           (cancel-function (symbol-function 'pgsql-cancel))
@@ -6576,8 +6576,8 @@ The session time zone differs from Emacs's here, as it often does."
           (cancel-timer timer))))))
 
 (ert-deftest clutch-db-test-pg-live-query-timeout-keeps-connection-usable ()
-  :tags '(:db-live :pg-live)
   "PostgreSQL statement timeout should preserve the synchronized client."
+  :tags '(:db-live :pg-live)
   (if (not (clutch-db-test--pg-live-configured-p))
       (ert-skip "Set clutch-db-test-pg-password to enable PostgreSQL live tests")
     (let ((conn (clutch-db-connect
@@ -6595,8 +6595,8 @@ The session time zone differs from Emacs's here, as it often does."
         (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-db-test-pg-live-authinfo-profile-provides-backend ()
-  :tags '(:db-live :pg-live)
   "PostgreSQL should connect when authinfo profile provides the backend."
+  :tags '(:db-live :pg-live)
   (if (not (clutch-db-test--pg-live-configured-p))
       (ert-skip "Set clutch-db-test-pg-password to enable PostgreSQL live tests")
     (clutch-db-test--with-authinfo-profile-conn
@@ -6616,8 +6616,8 @@ The session time zone differs from Emacs's here, as it often does."
       (clutch-db-test--assert-live-basic-query conn))))
 
 (ert-deftest clutch-db-test-pg-live-schema ()
-  :tags '(:db-live :pg-live)
   "Test PostgreSQL schema introspection."
+  :tags '(:db-live :pg-live)
   (clutch-db-test--with-pg conn
     (let* ((table (clutch-db-test--live-name "clutch_schema"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
@@ -6651,9 +6651,9 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-stored-generated-columns-are-generated ()
-  :tags '(:db-live :pg-live)
   "A stored generated column should be generated, as an identity column is.
 PostgreSQL refuses a value for either."
+  :tags '(:db-live :pg-live)
   (clutch-db-test--with-pg conn
     (let* ((table (clutch-db-test--live-name "clutch_generated"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
@@ -6677,8 +6677,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()
-  :tags '(:db-live :pg-live)
   "PostgreSQL should use CTID when no logical key exists."
+  :tags '(:db-live :pg-live)
   (clutch-db-test--with-pg conn
     (let* ((table (format "clutch_rowid_ctid_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
@@ -6755,8 +6755,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
             (clutch-db-result-rows result))))
 
 (ert-deftest clutch-db-test-mongodb-live-connect ()
-  :tags '(:db-live :mongodb-live)
   "Native MongoDB connection should return a live conn."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "MongoDB"))
@@ -6764,8 +6764,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
     (should-not (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-mongodb-live-authinfo-profile-connect ()
-  :tags '(:db-live :mongodb-live)
   "Native MongoDB should connect through an authinfo `:profile-entry'."
+  :tags '(:db-live :mongodb-live)
   (if (not (and clutch-db-test-mongodb-live-enabled
                 clutch-db-test-mongodb-host
                 clutch-db-test-mongodb-port
@@ -6798,8 +6798,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
                    1.0))))))
 
 (ert-deftest clutch-db-test-mongodb-live-query ()
-  :tags '(:db-live :mongodb-live)
   "Native MongoDB should evaluate MQL helper commands and return document grids."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let ((collection (clutch-db-test--mongodb-live-collection "query")))
       (unwind-protect
@@ -6943,8 +6943,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-update-versus-replacement ()
-  :tags '(:db-live :mongodb-live)
   "Reject replacement-shaped updates without losing existing fields."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let* ((collection (clutch-db-test--mongodb-live-collection "update_shape"))
            (helper (format "db.getCollection(%S)" collection)))
@@ -6979,8 +6979,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-schema ()
-  :tags '(:db-live :mongodb-live)
   "Native MongoDB metadata should expose databases, collections, and sampled keys."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let* ((collection (clutch-db-test--mongodb-live-collection "schema"))
            (validation-collection (concat collection "_validation")))
@@ -7070,8 +7070,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
          conn validation-collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-idle-metadata-serializes-one-client ()
-  :tags '(:db-live :mongodb-live)
   "Idle metadata calls should serialize while one MongoDB find is blocked."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let ((first (clutch-db-test--mongodb-live-collection "metadata_first"))
           (second (clutch-db-test--mongodb-live-collection "metadata_second"))
@@ -7112,8 +7112,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-collection conn second)))))
 
 (ert-deftest clutch-db-test-mongodb-live-failed-column-load-waits-for-refresh ()
-  :tags '(:db-live :mongodb-live)
   "Failed deferred column metadata should not retry before schema refresh."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let ((collection (clutch-db-test--mongodb-live-collection "metadata_retry")))
       (unwind-protect
@@ -7152,8 +7152,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-mongodb-live-set-current-schema ()
-  :tags '(:db-live :mongodb-live)
   "Native MongoDB schema switching should change the target database."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let ((original (clutch-db-current-schema conn))
           (schema (format "%s_switch_%d"
@@ -7172,8 +7172,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-set-current-schema conn original)))))
 
 (ert-deftest clutch-db-test-mongodb-live-error ()
-  :tags '(:db-live :mongodb-live)
   "Native MongoDB query errors should signal `clutch-db-error'."
+  :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (should-error (clutch-db-query conn "db.getCollection(")
                   :type 'clutch-db-error)
@@ -7199,8 +7199,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-collection conn collection)))))
 
 (ert-deftest clutch-db-test-redis-live-connect ()
-  :tags '(:db-live :redis-live)
   "Redis connection should return a live key/value conn."
+  :tags '(:db-live :redis-live)
   (clutch-db-test--with-redis conn
     (should (clutch-db-live-p conn))
     (should (eq (clutch-db-backend-key conn) 'redis))
@@ -7209,8 +7209,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
                    (format "%s" clutch-db-test-redis-database)))))
 
 (ert-deftest clutch-db-test-redis-live-authinfo-profile-connect ()
-  :tags '(:db-live :redis-live)
   "Redis should connect through an authinfo `:profile-entry'."
+  :tags '(:db-live :redis-live)
   (if (not (clutch-db-test--redis-live-configured-p))
       (ert-skip "Set Redis host and port to enable profile live tests")
     (clutch-db-test--with-authinfo-profile-conn
@@ -7231,8 +7231,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
                      (format "%s" clutch-db-test-redis-database))))))
 
 (ert-deftest clutch-db-test-redis-live-query ()
-  :tags '(:db-live :redis-live)
   "Redis commands should render through Clutch result grids."
+  :tags '(:db-live :redis-live)
   (clutch-db-test--with-redis conn
     (let ((string-key (clutch-db-test--redis-live-key "string"))
           (hash-key (clutch-db-test--redis-live-key "hash"))
@@ -7264,10 +7264,10 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
                                         string-key hash-key list-key)))))))
 
 (ert-deftest clutch-db-test-redis-live-select-switches-the-database ()
-  :tags '(:db-live :redis-live)
   "A Redis SELECT should move the connection and its parameters to its database.
 The connection went on reporting the database it was opened with, and its
 parameters reopened that database."
+  :tags '(:db-live :redis-live)
   (clutch-db-test--with-redis conn
     (let ((key (clutch-db-test--redis-live-key "select")))
       (unwind-protect
@@ -7287,8 +7287,8 @@ parameters reopened that database."
         (ignore-errors (clutch-db-query conn (format "DEL %S" key)))))))
 
 (ert-deftest clutch-db-test-redis-live-schema ()
-  :tags '(:db-live :redis-live)
   "Redis metadata should expose keys as KEY objects."
+  :tags '(:db-live :redis-live)
   (clutch-db-test--with-redis conn
     (let ((hash-key (clutch-db-test--redis-live-key "schema")))
       (unwind-protect
@@ -7322,8 +7322,8 @@ parameters reopened that database."
           (clutch-db-query conn (format "DEL %S" hash-key)))))))
 
 (ert-deftest clutch-db-test-redis-live-error ()
-  :tags '(:db-live :redis-live)
   "Redis command errors should signal `clutch-db-error'."
+  :tags '(:db-live :redis-live)
   (clutch-db-test--with-redis conn
     (let ((string-key (clutch-db-test--redis-live-key "error")))
       (unwind-protect
@@ -7504,23 +7504,23 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
          (clutch-db-disconnect ,var)))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-connect ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC connection should start the agent and return a live conn."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (should (clutch-db-live-p conn))
     (should (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-query ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC query should return correct columns and rows."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let ((result (clutch-db-query conn "SELECT 1 AS n FROM DUAL")))
       (should (clutch-db-result-p result))
       (should (= (length (clutch-db-result-rows result)) 1)))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-manual-commit ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC commit RPC should persist DML."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_TEST"))
            (drop-sql (format "DROP TABLE %s" tbl)))
@@ -7538,8 +7538,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-rollback ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC rollback RPC should discard uncommitted DML."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_RB"))
            (drop-sql (format "DROP TABLE %s" tbl)))
@@ -7555,8 +7555,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-rollback-invalidates-later-savepoints ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Rolling back an Oracle savepoint should invalidate later local handles."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((conn-id (clutch-jdbc-conn-conn-id conn))
            (timeout (clutch-jdbc--conn-rpc-timeout conn))
@@ -7582,8 +7582,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (string-match-p "Unknown savepoint id" (cadr err)))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-toggle-auto-commit ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC set-auto-commit RPC should toggle between manual and auto modes."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     ;; Oracle starts in manual-commit mode
     (should (clutch-db-manual-commit-p conn))
@@ -7595,8 +7595,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
     (should (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-schema ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC schema introspection should list tables and columns."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_SCHEMA"))
            (drop-sql (format "DROP TABLE %s" tbl)))
@@ -7614,8 +7614,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
           (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-uses-unique-not-null ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC should use a non-null unique key when no primary key exists."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_UID"))
            (idx (clutch-db-test--live-name "CC_UID_UQ"))
@@ -7636,8 +7636,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
           (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-row-identity-falls-back-to-rowid ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC should use ROWID to update a table without a logical key."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((tbl (clutch-db-test--live-name "CC_ROWID"))
            (drop-sql (format "DROP TABLE %s" tbl)))
@@ -7680,8 +7680,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
           (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-cancel-keeps-connection-usable ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC cancel should interrupt the query and keep the session usable."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let ((request-id
            (clutch-jdbc--send
@@ -7705,8 +7705,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (equal (caar (clutch-db-result-rows result)) "42"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-diagnostics ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Wire-level Oracle JDBC errors should return structured diagnostics."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((token (clutch-db-test--live-name "definitely_missing"))
            (request-id
@@ -7732,8 +7732,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (equal (caar (clutch-db-result-rows result)) "42"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-debug-payload ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Wire-level Oracle JDBC errors should carry opt-in backend debug payloads."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (let ((clutch-debug-mode t))
     (clutch-db-test--with-oracle conn
       (let* ((token (clutch-db-test--live-name "definitely_missing"))
@@ -7758,8 +7758,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
           (should (equal (caar (clutch-db-result-rows result)) "44")))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-diagnostics ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "High-level Oracle JDBC query errors should stay on the current connection."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
     (clutch-db-test--with-oracle conn
       (let ((token (clutch-db-test--live-name "definitely_missing")))
@@ -7781,8 +7781,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (equal (caar (clutch-db-result-rows result)) "43"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-debug-payload ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "High-level Oracle JDBC query errors should cache opt-in debug payloads."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (let ((clutch-debug-mode t)
         (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
     (clutch-db-test--with-oracle conn
@@ -7801,8 +7801,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (equal (caar (clutch-db-result-rows result)) "45"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-wire-schema-switch-error-carries-generated-sql ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Wire-level Oracle schema-switch failures should expose generated SQL."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
     (let* ((token (clutch-db-test--live-name "MISSING_SCHEMA"))
            (request-id
@@ -7829,8 +7829,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (equal (caar (clutch-db-result-rows result)) "42"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-schema-switch-error-caches-generated-sql ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "High-level Oracle schema-switch failures should stay on the current connection."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
     (clutch-db-test--with-oracle conn
       (let ((token (clutch-db-test--live-name "MISSING_SCHEMA")))
@@ -7855,8 +7855,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (equal (caar (clutch-db-result-rows result)) "43"))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-low-priv-completion ()
-  :tags '(:db-live :jdbc-live :oracle-live)
   "Oracle JDBC low-privilege users should still get table completion and discovery."
+  :tags '(:db-live :jdbc-live :oracle-live)
   (if (null clutch-db-test-jdbc-oracle-password)
       (ert-skip "Set clutch-db-test-jdbc-oracle-password to enable Oracle live tests")
     (require 'clutch-db-jdbc)
@@ -7906,15 +7906,15 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (clutch-db-disconnect admin)))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-connect ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "SQL Server JDBC connection should return a live conn."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "SQL Server"))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-query ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "SQL Server JDBC query should return one row for SELECT 1."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let ((result (clutch-db-query conn "SELECT 1 AS n")))
       (should (clutch-db-result-p result))
@@ -7922,8 +7922,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
       (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-release-invalidates-later-savepoints ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "Releasing a SQL Server savepoint should invalidate later local handles."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (clutch-db-set-auto-commit conn nil)
     (let* ((conn-id (clutch-jdbc-conn-conn-id conn))
@@ -7950,8 +7950,8 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (should (string-match-p "Unknown savepoint id" (cadr err)))))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-result-workflow ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "SQL Server JDBC should handle real result workflows."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let* ((tbl (clutch-db-test--live-name "cc_mssql_flow"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
@@ -8001,18 +8001,18 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-schema ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "SQL Server JDBC schema introspection should return table entries."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let ((entries (clutch-db-list-table-entries conn)))
       (should (listp entries))
       (should (> (length entries) 0)))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-metadata-of-a-table-in-another-schema ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "SQL Server JDBC metadata should describe the table that its schema names.
 The columns of every table of the same name answered for it, and a foreign
 key into another schema lost that schema."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let* ((schema (clutch-db-test--live-name "cc_alt"))
            (table (clutch-db-test--live-name "cc_people"))
@@ -8053,10 +8053,10 @@ key into another schema lost that schema."
     outcome))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-statement-limits ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "Only the RPC budget or a configured limit should stop a long statement.
 A request Emacs waits for times out inside the RPC budget, while a
 statement nothing waits for keeps its own limit."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (let ((clutch-jdbc-rpc-timeout-seconds 6)
         (clutch-query-timeout-seconds 30))
     (clutch-db-test--with-mssql conn
@@ -8071,8 +8071,8 @@ statement nothing waits for keeps its own limit."
                      conn "WAITFOR DELAY '00:00:03'"))))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-disconnect-while-running ()
-  :tags '(:db-live :jdbc-live :mssql-live)
   "Disconnecting during a statement should return at once and report it."
+  :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let ((start (float-time))
           outcome)
@@ -8089,8 +8089,8 @@ statement nothing waits for keeps its own limit."
                               (error-message-string (cadr outcome)))))))
 
 (ert-deftest clutch-db-test-sql-interface-mongodb-live-connect ()
-  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface JDBC connection should return a live conn."
+  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   (clutch-db-test--with-sql-interface-mongodb conn
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "MongoDB"))
@@ -8099,8 +8099,8 @@ statement nothing waits for keeps its own limit."
     (should-not (clutch-db-manual-commit-p conn))))
 
 (ert-deftest clutch-db-test-sql-interface-mongodb-live-query ()
-  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface should execute a read-only SQL Interface query."
+  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   (clutch-db-test--with-sql-interface-mongodb conn
     (let* ((sql "SELECT * FROM [{'n': 1}]")
            (result (clutch-db-query conn sql))
@@ -8112,22 +8112,22 @@ statement nothing waits for keeps its own limit."
                      "SELECT * FROM [{'n': 1}] LIMIT 1 OFFSET 1")))))
 
 (ert-deftest clutch-db-test-sql-interface-mongodb-live-schema ()
-  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   "MongoDB SQL Interface metadata calls should return list-shaped results."
+  :tags '(:db-live :jdbc-live :sql-interface-mongodb-live)
   (clutch-db-test--with-sql-interface-mongodb conn
     (should (listp (clutch-db-list-table-entries conn)))
     (should (listp (clutch-db-list-schemas conn)))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-live-connect ()
-  :tags '(:db-live :jdbc-live :clickhouse-live)
   "ClickHouse JDBC connection should return a live conn."
+  :tags '(:db-live :jdbc-live :clickhouse-live)
   (clutch-db-test--with-clickhouse conn
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "ClickHouse"))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-live-result-workflow ()
-  :tags '(:db-live :jdbc-live :clickhouse-live)
   "ClickHouse JDBC should handle real result workflows."
+  :tags '(:db-live :jdbc-live :clickhouse-live)
   (clutch-db-test--with-clickhouse conn
     (let* ((tbl (clutch-db-test--live-name "cc_ch_flow"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
@@ -8169,8 +8169,8 @@ statement nothing waits for keeps its own limit."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-live-schema ()
-  :tags '(:db-live :jdbc-live :clickhouse-live)
   "ClickHouse JDBC schema introspection should return user table entries."
+  :tags '(:db-live :jdbc-live :clickhouse-live)
   (clutch-db-test--with-clickhouse conn
     (let* ((tbl (clutch-db-test--live-name "cc_ch_schema"))
            (drop-sql (format "DROP TABLE IF EXISTS %s" tbl)))
@@ -8191,8 +8191,8 @@ statement nothing waits for keeps its own limit."
 ;;;; Cross-backend consistency tests
 
 (ert-deftest clutch-db-test-cross-type-categories ()
-  :tags '(:db-live :mysql-live :pg-live)
   "Test that both backends use consistent type categories."
+  :tags '(:db-live :mysql-live :pg-live)
   (clutch-db-test--require-cross-sql-live-backends)
   ;; Test numeric
   (clutch-db-test--with-local-mysql-tls
@@ -8215,8 +8215,8 @@ statement nothing waits for keeps its own limit."
         (when pg-conn (clutch-db-disconnect pg-conn))))))
 
 (ert-deftest clutch-db-test-cross-null-handling ()
-  :tags '(:db-live :mysql-live :pg-live)
   "Test that both backends handle NULL values consistently."
+  :tags '(:db-live :mysql-live :pg-live)
   (clutch-db-test--require-cross-sql-live-backends)
   (clutch-db-test--with-local-mysql-tls
     (dolist (backend-spec (list (cons 'mysql

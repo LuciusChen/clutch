@@ -98,8 +98,8 @@
 ;;;; Test backend matrix
 
 (ert-deftest clutch-test-backend-matrix-selects-live-workflow-capabilities ()
-  :tags '(:smoke)
   "Live backend matrix should replace hard-coded workflow backend lists."
+  :tags '(:smoke)
   (let ((clutch-test-backend 'jdbc)
         (clutch-test-url "jdbc:duckdb:/tmp/clutch-test.duckdb"))
     (should (eq (clutch-test-live-backend-id) 'duckdb))
@@ -129,8 +129,8 @@
 ;;;; Rendering — value formatting
 
 (ert-deftest clutch-test-format-value-values ()
-  :tags '(:smoke)
   "Result values should render as compact display strings."
+  :tags '(:smoke)
   (dolist (case '((nil "NULL")
                   (:false "false")
                   (:null "null")
@@ -2168,8 +2168,8 @@ Point left behind made the next cell command scroll back to it."
                                  'face 'clutch-modified-face cell)))))
 
 (ert-deftest clutch-test-display-select-contract ()
-  :tags '(:smoke)
   "SELECT display should install source metadata, errors, and window metrics."
+  :tags '(:smoke)
   (let ((result-name "*clutch-test-result*")
         (result (make-clutch-db-result
                  :columns '((:name "id" :type-category numeric))
@@ -5059,8 +5059,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (equal fields '(("severity" . "low")))))))))
 
 (ert-deftest clutch-test-insert-buffer-shows-all-fields-by-default ()
-  :tags '(:smoke)
   "Insert buffers should render every field without a sparse toggle."
+  :tags '(:smoke)
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-insert-result-buffer result-buf
         (:columns '("id" "severity" "owner" "created_at")
@@ -6553,8 +6553,8 @@ a word that ends a whole rollback, such as CHAIN."
                    "1\ta,b\n"))))
 
 (ert-deftest clutch-test-insert-content-builds-full-row-sql ()
-  :tags '(:smoke)
   "INSERT export content should build SQL from the ROWS argument."
+  :tags '(:smoke)
   (with-temp-buffer
     (setq-local clutch-connection 'fake-conn
                 clutch--result-columns '("id" "name")
@@ -9435,8 +9435,8 @@ loop turns into a stack as deep as the pages are many."
                                   "\n")))))))
 
 (ert-deftest clutch-test-result-effective-query-applies-where-filter ()
-  :tags '(:smoke)
   "Result workflows should reuse the filtered SQL, not just display the filter."
+  :tags '(:smoke)
   (with-temp-buffer
     (setq-local clutch--base-query "SELECT * FROM t"
                 clutch--last-query "SELECT * FROM t WHERE id > 0"
