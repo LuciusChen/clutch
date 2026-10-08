@@ -11,7 +11,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        emacs-version: ["29.4", "30.2", "31.1"]
+        include:
+          - {emacs-version: "29.4", mode: plain, pg: "17"}
+          - {emacs-version: "31.1", mode: plain, pg: "17"}
+          - {emacs-version: "31.1", mode: plain, pg: "18"}
+          - {emacs-version: "31.1", mode: console, pg: "18"}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,10 +37,19 @@ jobs:
           git clone --depth 1 https://github.com/LuciusChen/pgsql.el.git "$env:RUNNER_TEMP\pgsql.el"
           & C:\emacs\bin\emacs.exe -Q --batch -l .github/issue-116/install.el
 
+      - name: Install PostgreSQL 18
+        if: matrix.pg == '18'
+        shell: pwsh
+        run: |
+          choco install postgresql18 -y --no-progress --params '/Password:postgres'
+          Get-Service postgresql* | Stop-Service -ErrorAction SilentlyContinue
+          Get-ChildItem 'C:\Program Files\PostgreSQL' | Select-Object -ExpandProperty Name
+
       - name: Start PostgreSQL
         shell: pwsh
         run: |
           $bin = $env:PGBIN
+          if ('${{ matrix.pg }}' -eq '18') { $bin = 'C:\Program Files\PostgreSQL\18\bin' }
           if (-not $bin) { $bin = (Get-ChildItem 'C:\Program Files\PostgreSQL' | Sort-Object Name | Select-Object -Last 1).FullName + '\bin' }
           $data = "$env:RUNNER_TEMP\pgdata"
           & "$bin\initdb.exe" -D $data -U demo -A trust -E UTF8 | Out-Null
@@ -65,12 +78,14 @@ jobs:
           $env:EMACS_SERVER_FILE = "$env:USERPROFILE\.emacs.d\server\server"
           Get-ChildItem "$env:USERPROFILE\.emacs.d\server" -ErrorAction SilentlyContinue | Out-String | Write-Host
           New-Item -ItemType Directory -Force out | Out-Null
-          .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt"
-          '### Emacs ${{ matrix.emacs-version }}' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $plain = '${{ matrix.mode }}' -eq 'plain'
+          if ($plain) { .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt" -Plain }
+          else { .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt" }
+          '### Emacs ${{ matrix.emacs-version }} ${{ matrix.mode }} pg${{ matrix.pg }}' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           Get-Content out\results.txt | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: issue-116-${{ matrix.emacs-version }}
+          name: issue-116-${{ matrix.emacs-version }}-${{ matrix.mode }}-pg${{ matrix.pg }}
           path: out/

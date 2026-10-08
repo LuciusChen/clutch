@@ -1,5 +1,5 @@
 # Reproduction driver for issue 116: PostgreSQL statement vs display-line-numbers-mode on Windows.
-param([string]$EmacsDir, [string]$ResultFile)
+param([string]$EmacsDir, [string]$ResultFile, [switch]$Plain)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type @'
@@ -37,8 +37,19 @@ function Wait-State([double]$seconds, [int]$cancelVk, [double]$cancelAt) {
   return "NO RESULT after $seconds s"
 }
 
-Log "== $(Ev '(t116-info)')"
-Ev '(t116-console)' | Out-Null
+Log "== $(Ev '(t116-info)') plain=$Plain"
+if ($Plain) {
+  Ev '(t116-use-plain)' | Out-Null
+  Focus
+  CtrlKey 0x43; CtrlKey 0x45                      # C-c C-e
+  Start-Sleep -Seconds 1
+  foreach ($vk in 0x53, 0x48, 0x4F, 0x50) {       # s h o p
+    [Win]::keybd_event($vk, 0, 0, [UIntPtr]::Zero); [Win]::keybd_event($vk, 0, 2, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80
+  }
+  [Win]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero); [Win]::keybd_event(0x0D, 0, 2, [UIntPtr]::Zero)
+} else {
+  Ev '(t116-console)' | Out-Null
+}
 $sw = [Diagnostics.Stopwatch]::StartNew()
 while ((Ev '(t116-ready)') -ne 't' -and $sw.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Seconds 1 }
 Log "connected: $(Ev '(t116-ready)')"
@@ -47,6 +58,7 @@ foreach ($ln in 0, 1) {
   foreach ($case in @(@{i=0; name='SELECT 1'; cancel=0; at=0; wait=8}, @{i=1; name='pg_sleep(20) then C-g at 1s'; cancel=0x47; at=1; wait=10})) {
     Ev "(t116-prep $($case.i) $ln)" | Out-Null
     Focus
+    Log ("  redisplay check: {0}" -f (Ev '(t116-ln-width)'))
     CtrlKey 0x43; CtrlKey 0x43
     $res = Wait-State $case.wait $case.cancel $case.at
     if ($res -like 'NO RESULT*') {

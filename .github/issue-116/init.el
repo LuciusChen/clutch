@@ -18,9 +18,31 @@
   (clutch-query-console "shop")
   nil)
 
+(defvar t116-plain nil
+  "Non-nil when the statements run in a plain `clutch-mode' buffer.")
+
 (defun t116-buffer ()
-  (cl-find-if (lambda (b) (string-prefix-p "*clutch: shop*" (buffer-name b)))
-              (buffer-list)))
+  (if t116-plain
+      (get-buffer "plain")
+    (cl-find-if (lambda (b) (string-prefix-p "*clutch: shop*" (buffer-name b)))
+                (buffer-list))))
+
+(defun t116-use-plain ()
+  "Switch to a plain `clutch-mode' buffer, as in the issue's steps."
+  (setq t116-plain t)
+  (with-current-buffer (get-buffer-create "plain") (clutch-mode))
+  (switch-to-buffer "plain")
+  (delete-other-windows)
+  (select-frame-set-input-focus (selected-frame))
+  nil)
+
+(defun t116-ln-width ()
+  "Return (FRAME-VISIBLE LINE-NUMBER-WIDTH) after a forced redisplay."
+  (redisplay t)
+  (with-selected-window (selected-window)
+    (list (frame-visible-p (selected-frame))
+          (buffer-name)
+          (line-number-display-width))))
 
 (defun t116-ready ()
   "Return t when the console connection is live."
