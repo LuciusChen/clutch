@@ -402,6 +402,9 @@ as the automatic reconnect does, rather than with PARAMS."
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
+        (setq-local clutch--console-target
+                    (clutch--connection-target
+                     (clutch--resolve-sqlite-file params source-default-directory)))
         (clutch--update-console-buffer-name))))))
 
 ;;;###autoload (autoload 'clutch-query-sqlite-file "clutch" nil t)
