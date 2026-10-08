@@ -12,12 +12,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {emacs-version: "29.4", mode: plain, pg: "17"}
-          - {emacs-version: "31.1", mode: plain, pg: "17"}
-          - {emacs-version: "31.1", mode: plain, pg: "18"}
-          - {emacs-version: "31.1", mode: console, pg: "18"}
+          - {emacs-version: "31.1", mode: plain, pg: "18", ref: v0.5.4}
+          - {emacs-version: "31.1", mode: plain, pg: "18", ref: dce2186}
+          - {emacs-version: "31.1", mode: console, pg: "17", ref: v0.5.4}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: clutch-src
 
       - name: Install Emacs ${{ matrix.emacs-version }}
         shell: pwsh
@@ -60,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           $env:HOME = $env:USERPROFILE
-          $env:CLUTCH_DIR = $env:GITHUB_WORKSPACE
+          $env:CLUTCH_DIR = "$env:GITHUB_WORKSPACE\clutch-src"
           $env:PGSQL_DIR = "$env:RUNNER_TEMP\pgsql.el"
           $env:PGPORT_T116 = '55432'
           Start-Process C:\emacs\bin\runemacs.exe -ArgumentList '-Q','-l',"$env:GITHUB_WORKSPACE\.github\issue-116\init.el"
@@ -81,11 +85,11 @@ jobs:
           $plain = '${{ matrix.mode }}' -eq 'plain'
           if ($plain) { .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt" -Plain }
           else { .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt" }
-          '### Emacs ${{ matrix.emacs-version }} ${{ matrix.mode }} pg${{ matrix.pg }}' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          '### Emacs ${{ matrix.emacs-version }} ${{ matrix.mode }} pg${{ matrix.pg }} clutch ${{ matrix.ref }}' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           Get-Content out\results.txt | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: issue-116-${{ matrix.emacs-version }}-${{ matrix.mode }}-pg${{ matrix.pg }}
+          name: issue-116-${{ matrix.emacs-version }}-${{ matrix.mode }}-pg${{ matrix.pg }}-${{ matrix.ref }}
           path: out/
