@@ -357,6 +357,140 @@ connecting with the console's parameters starts there."
                (clutch-db-query
                 admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))))
 
+(defconst clutch-test--live-namespace-fixtures
+  '((mysql "CREATE DATABASE %s" "DROP DATABASE IF EXISTS %s" "SELECT DATABASE()")
+    (pg "CREATE SCHEMA %s" "DROP SCHEMA IF EXISTS %s CASCADE"
+        "SELECT current_schemas(true)")
+    (oracle "CREATE USER %s IDENTIFIED BY \"Clutch_ns1\"" "DROP USER %s CASCADE"
+            "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")
+    (duckdb "CREATE SCHEMA %s" "DROP SCHEMA IF EXISTS %s CASCADE"
+            "SELECT current_catalog(), current_schema(), current_setting('search_path')")
+    (clickhouse "CREATE DATABASE %s" "DROP DATABASE IF EXISTS %s"
+                "SELECT currentDatabase()"))
+  "For each backend with a namespace switch: SQL that creates a namespace,
+SQL that drops it, and a query that asks the server where a session is.")
+
+(ert-deftest clutch-test-live-console-params-lead-back-to-a-switched-namespace ()
+  "A connection with a console's parameters should start where the console is.
+The automatic reconnect connects with them, so after `clutch-switch-schema'
+a new connection must be where the server says the console is."
+  :tags '(:clutch-live)
+  (pcase-let ((`(,create ,drop ,where)
+               (alist-get (clutch-test-live-backend-id)
+                          clutch-test--live-namespace-fixtures)))
+    (unless create
+      (ert-skip "This backend has no namespace switch"))
+    (clutch-test--with-conn admin
+      (let ((name (funcall (if (eq clutch-test-backend 'oracle) #'upcase #'identity)
+                           (format "clutch_ns_%d" (emacs-pid))))
+            (params (append (list :backend clutch-test-backend)
+                            (clutch-test--live-connect-params))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format create name))
+              (clutch-test--with-live-console params
+                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) name))
+                          ((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-switch-schema))
+                (let ((here (clutch-db-result-rows (clutch-db-query clutch-connection where))))
+                  (should (string-match-p (regexp-quote name) (format "%S" here)))
+                  (let ((reopened (clutch-db-connect clutch-test-backend
+                                                     clutch--connection-params)))
+                    (unwind-protect
+                        (should (equal (clutch-db-result-rows
+                                        (clutch-db-query reopened where))
+                                       here))
+                      (clutch-db-disconnect reopened))))))
+          (ignore-errors (clutch-db-query admin (format drop name))))))))
+
+(ert-deftest clutch-test-live-clickhouse-url-console-lists-switches-and-reconnects ()
+  "A ClickHouse console opened with a :url should stay in the database it shows.
+Given only a :url, it listed the tables of `default'.  A switch
+reconnected with the unchanged :url, so the server stayed in the old
+database, and unqualified SQL ran there, while Clutch showed and listed
+the new one."
+  :tags '(:clutch-live)
+  (unless (clutch-test--clickhouse-live-p)
+    (ert-skip (clutch-test-capability-skip-message :clickhouse-engine)))
+  (clutch-test--with-conn admin
+    (let* ((a (format "clutch_url_a_%d" (emacs-pid)))
+           (b (format "clutch_url_b_%d" (emacs-pid)))
+           (live (clutch-test--live-connect-params))
+           (params (list :backend 'clickhouse
+                         :url (format "jdbc:clickhouse://%s:%d/%s"
+                                      (plist-get live :host) (plist-get live :port) a)
+                         :user (plist-get live :user)
+                         :password (plist-get live :password))))
+      (cl-flet ((current (conn)
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query conn "SELECT currentDatabase()")))))
+        (unwind-protect
+            (progn
+              (dolist (database (list a b))
+                (clutch-db-query admin (format "CREATE DATABASE %s" database)))
+              (clutch-db-query
+               admin (format "CREATE TABLE %s.only_in_a (id UInt8) ENGINE = Memory" a))
+              (clutch-test--with-live-console params
+                (should (member "only_in_a" (clutch-db-list-tables clutch-connection)))
+                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) b))
+                          ((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-switch-schema))
+                (should (equal (current clutch-connection) b))
+                (let ((reopened (clutch-db-connect 'clickhouse clutch--connection-params)))
+                  (unwind-protect
+                      (should (equal (current reopened) b))
+                    (clutch-db-disconnect reopened)))))
+          (dolist (database (list a b))
+            (ignore-errors
+              (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
+
+(ert-deftest clutch-test-live-duckdb-reconnect-refuses-an-unreachable-database ()
+  "A DuckDB console that lost its session in a database a reconnect cannot reach
+should say so instead of reconnecting.  A new connection opens the URL's
+database file, so the automatic reconnect ran the next statement there,
+or in a new, empty in-memory database, without a word."
+  :tags '(:clutch-live :duckdb-live)
+  (unless (eq (clutch-test-live-backend-id) 'duckdb)
+    (ert-skip "Live backend is not DuckDB"))
+  (let* ((attached (concat (make-temp-name
+                            (expand-file-name "clutch-unreach-" temporary-file-directory))
+                           ".duckdb"))
+         (beside-memory (concat (make-temp-name
+                                 (expand-file-name "clutch-unreach-" temporary-file-directory))
+                                ".duckdb"))
+         (alias (format "clutch_unreach_%d" (emacs-pid)))
+         (params (append (list :backend clutch-test-backend)
+                         (clutch-test--live-connect-params))))
+    (unwind-protect
+        (pcase-dolist (`(,label ,console-params ,setup ,namespace)
+                       `(("attached" ,params
+                          (,(format "ATTACH '%s' AS %s" attached alias)
+                           ,(format "USE %s" alias))
+                          ,(format "%s.main" alias))
+                         ("in memory" ,(plist-put (copy-sequence params) :url "jdbc:duckdb:")
+                          ("CREATE TABLE kept (v INTEGER)")
+                          "memory.main")
+                         ("attached to memory"
+                          ,(plist-put (copy-sequence params) :url "jdbc:duckdb:")
+                          (,(format "ATTACH '%s' AS %s" beside-memory alias)
+                           ,(format "USE %s" alias))
+                          ,(format "%s.main" alias))))
+          (ert-info (label)
+            (clutch-test--with-live-console console-params
+              (apply #'clutch-test--run-in-console setup)
+              (let ((lost clutch-connection))
+                (clutch-db-disconnect lost)
+                (should (string-match-p
+                         (regexp-quote namespace)
+                         (error-message-string
+                          (should-error (clutch-test--run-in-console "SELECT 1")
+                                        :type 'user-error))))
+                (should (eq clutch-connection lost))))))
+      (dolist (file (list attached (concat attached ".wal")
+                          beside-memory (concat beside-memory ".wal")))
+        (when (file-exists-p file)
+          (delete-file file))))))
+
 (ert-deftest clutch-test-live-duckdb-reconnect-stays-out-of-attached-databases ()
   "A DuckDB console moved into an attached database should keep its parameters.
 A reconnect cannot return to an attached database, so the parameters

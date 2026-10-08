@@ -846,10 +846,16 @@ to the new connection on success.
 Staged result-buffer changes are preserved across reconnects because
 they are client-side DML.  Only query re-execution should discard them.
 Returns non-nil on success and nil when no reconnect context exists.
-Connection failures propagate to the calling command."
+Connection failures propagate to the calling command, and so does a
+refusal when the session was in a namespace that a new connection cannot
+return to, as an attached DuckDB database."
   (when-let* ((old-conn clutch-connection)
               (context (clutch--connection-context old-conn))
               (params (car context)))
+    (when-let* ((namespace (clutch-db-unreachable-namespace old-conn)))
+      (user-error
+       "The session was in %s, which a new connection cannot return to; C-c C-e in the SQL buffer or REPL connects anew"
+       namespace))
     (let ((product (cadr context))
           (conn (clutch--build-replacement-conn old-conn params))
           (prior-tx-state (clutch--tx-state old-conn)))

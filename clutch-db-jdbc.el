@@ -1914,8 +1914,7 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
 ClickHouse maps its current database to JDBC catalog, not schema."
   (or (plist-get (clutch-jdbc-conn-params conn) :catalog)
       (when (clutch-jdbc--clickhouse-conn-p conn)
-        (or (plist-get (clutch-jdbc-conn-params conn) :database)
-            "default"))))
+        (or (clutch-db-database conn) "default"))))
 
 (defun clutch-jdbc--metadata-scope-params (conn)
   "Return optional JDBC metadata scope params for CONN.
@@ -1964,18 +1963,38 @@ Return SCHEMA.  PATH is nil for an in-memory catalog."
     (setf (clutch-jdbc-conn-params conn) params))
   schema)
 
+(defun clutch-jdbc--duckdb-url-file (url)
+  "Return the database file DuckDB JDBC URL names, or \"\" for none."
+  ;; The driver reads properties after the first semicolon.
+  (car (split-string (substring url (length "jdbc:duckdb:")) ";")))
+
 (defun clutch-jdbc--duckdb-restorable-p (conn)
   "Return non-nil when DuckDB CONN is in the database file its URL opens.
 A reconnect cannot return to an attached database or an in-memory one."
   (let* ((params (clutch-jdbc-conn-params conn))
          (path (plist-get params :catalog-path))
-         ;; The driver reads properties after the first semicolon.
-         (file (car (split-string
-                     (substring (plist-get params :url) (length "jdbc:duckdb:"))
-                     ";"))))
+         (file (clutch-jdbc--duckdb-url-file (plist-get params :url))))
     (and path
          (not (string-empty-p file))
          (equal (file-truename path) (file-truename file)))))
+
+(cl-defmethod clutch-db-unreachable-namespace ((conn clutch-jdbc-conn))
+  "Return DuckDB CONN's namespace when a new connection cannot return to it.
+That is an attached or in-memory database, once CONN has said where it
+is; a new connection opens the database the URL names.  A relative
+URL file is resolved against the JDBC agent's directory, which Emacs does
+not know, so with one only an in-memory database is named.  An
+in-memory URL opens no file, so a database with one is attached."
+  (let ((params (clutch-jdbc-conn-params conn)))
+    (when (and (clutch-jdbc--duckdb-conn-p conn)
+               (plist-member params :catalog-path)
+               (not (clutch-jdbc--duckdb-restorable-p conn))
+               (let ((file (clutch-jdbc--duckdb-url-file (plist-get params :url))))
+                 (or (null (plist-get params :catalog-path))
+                     (string-empty-p file)
+                     (string-prefix-p ":memory:" file)
+                     (file-name-absolute-p file))))
+      (format "%s.%s" (plist-get params :catalog) (plist-get params :schema)))))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
   "Return table names for JDBC CONN.
@@ -1987,8 +2006,7 @@ current database."
 
 (defun clutch-jdbc--clickhouse-table-entries (conn)
   "Return ClickHouse table entries for CONN from system.tables."
-  (let* ((database (or (plist-get (clutch-jdbc-conn-params conn) :database)
-                       "default"))
+  (let* ((database (or (clutch-db-database conn) "default"))
          (sql (format "SELECT name, engine FROM system.tables WHERE database = %s ORDER BY name"
                       (clutch-db-escape-literal conn database))))
     (mapcar
@@ -2163,12 +2181,36 @@ when a reconnect could not return to it."
    (t
     (cl-call-next-method))))
 
+(defconst clutch-jdbc--clickhouse-url-hosts-regexp "\\`\\([^?#]*?://[^/?#]*\\)"
+  "Regexp matching a ClickHouse JDBC URL up to the end of its hosts.
+Any protocol, credentials, IPv6 address or list of hosts comes before,
+and the database, any `?' properties and any `#' tags come after.")
+
+(defun clutch-jdbc--clickhouse-url-database (url)
+  "Return the database ClickHouse JDBC URL names, or nil."
+  (and url
+       (string-match (concat clutch-jdbc--clickhouse-url-hosts-regexp "/\\([^/?#]+\\)")
+                     url)
+       (match-string 2 url)))
+
+(defun clutch-jdbc--clickhouse-url-with-database (url database)
+  "Return ClickHouse JDBC URL with DATABASE in place of the one it names."
+  (replace-regexp-in-string
+   (concat clutch-jdbc--clickhouse-url-hosts-regexp "[^?#]*")
+   (lambda (match) (concat (match-string 1 match) "/" database))
+   url t t))
+
 (cl-defmethod clutch-db-namespace-reconnect-params
     ((conn clutch-jdbc-conn) params namespace)
-  "Return ClickHouse replacement PARAMS for NAMESPACE, or nil for JDBC CONN."
+  "Return ClickHouse replacement PARAMS for NAMESPACE, or nil for JDBC CONN.
+A :url is used as it is, so the database it names becomes NAMESPACE."
   (when (clutch-jdbc--clickhouse-conn-p conn)
-    (plist-put (copy-sequence (or params (clutch-jdbc-conn-params conn)))
-               :database namespace)))
+    (let* ((params (copy-sequence (or params (clutch-jdbc-conn-params conn))))
+           (url (plist-get params :url)))
+      (when url
+        (setq params (plist-put params :url (clutch-jdbc--clickhouse-url-with-database
+                                             url namespace))))
+      (plist-put params :database namespace))))
 
 (cl-defmethod clutch-db-browseable-object-entries ((conn clutch-jdbc-conn))
   "Return the fast browseable object snapshot for JDBC CONN.
@@ -2610,10 +2652,12 @@ without a unique index never asks for them."
 
 (cl-defmethod clutch-db-database ((conn clutch-jdbc-conn))
   "Return the database for JDBC CONN."
-  (or (plist-get (clutch-jdbc-conn-params conn) :database)
-      (plist-get (clutch-jdbc--url-metadata
-                  (plist-get (clutch-jdbc-conn-params conn) :url))
-                 :database)))
+  (let ((params (clutch-jdbc-conn-params conn)))
+    (or (plist-get params :database)
+        (if (clutch-jdbc--clickhouse-conn-p conn)
+            (clutch-jdbc--clickhouse-url-database (plist-get params :url))
+          (plist-get (clutch-jdbc--url-metadata (plist-get params :url))
+                     :database)))))
 
 (cl-defmethod clutch-db-display-name ((conn clutch-jdbc-conn))
   "Return a display name for CONN based on the JDBC driver type."

@@ -10312,11 +10312,13 @@ Manual mode is left as it is."
 
 (ert-deftest clutch-test-execute-retries-only-safe-clean-preflight-failures ()
   "Retry once only when JDBC proves execution did not start and tx is clean.
-A transaction begun with BEGIN in Auto mode holds uncommitted work too."
+A transaction begun with BEGIN in Auto mode holds uncommitted work too,
+and a namespace a new connection cannot return to is not retried."
   (dolist (case '((auto nil nil 2 1 new-conn nil)
                   (manual-clean t nil 2 1 new-conn nil)
                   (manual-dirty t t 1 0 old-conn clutch-db-execution-not-started)
                   (auto-dirty nil t 1 0 old-conn clutch-db-execution-not-started)
+                  (unreachable nil nil 1 0 old-conn clutch-db-execution-not-started)
                   (ambiguous-first-failure nil nil 1 0 old-conn clutch-db-error)
                   (second-failure nil nil 2 1 new-conn clutch-db-error)))
     (pcase-let ((`(,label ,manual ,dirty ,expected-runs ,expected-reconnects
@@ -10337,6 +10339,8 @@ A transaction begun with BEGIN in Auto mode holds uncommitted work too."
                      (lambda (_sql) (cl-incf confirmations)))
                     ((symbol-function 'clutch-db-result-query-p)
                      (lambda (&rest _args) nil))
+                    ((symbol-function 'clutch-db-unreachable-namespace)
+                     (lambda (_conn) (and (eq label 'unreachable) "att.main")))
                     ((symbol-function 'clutch-db-manual-commit-p)
                      (lambda (_conn) manual))
                     ((symbol-function 'clutch--connection-alive-p)
