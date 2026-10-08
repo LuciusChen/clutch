@@ -10674,6 +10674,7 @@ holds no connection for the statement to belong to."
           (with-current-buffer console
             (setq-local clutch-connection 'indirect-conn))
           (with-current-buffer indirect
+            (clutch--indirect-mode 1)
             (setq-local clutch-connection 'indirect-conn)
             (insert "SELECT 1"))
           (switch-to-buffer code)
@@ -10713,6 +10714,51 @@ buried instead of killed, since its statement's reply needs it."
           (should (buffer-live-p indirect))
           (should (equal ran-in (list indirect "SELECT 41"))))
       (dolist (buffer (list code indirect))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest clutch-test-indirect-execute-runs-in-a-session-of-its-own ()
+  "SQL from an indirect edit should run in a session the edit connected.
+The edit ran it in any other buffer that held the connection, such as the
+edit's own result buffer, and killed the edit.  Once that session is
+gone, the edit runs SQL where a connection is, as it did before."
+  (let ((console (generate-new-buffer " *clutch-test-console*"))
+        (result (generate-new-buffer " *clutch-test-result*"))
+        (code (generate-new-buffer " *clutch-test-code*"))
+        (indirect (generate-new-buffer " *clutch-test-indirect*"))
+        ran-in)
+    (unwind-protect
+        (progn
+          (with-current-buffer console
+            (setq-local clutch-connection 'console-conn))
+          (with-current-buffer result
+            (setq-local clutch-connection 'own-conn))
+          (with-current-buffer indirect
+            (clutch--indirect-mode 1)
+            (setq-local clutch-connection 'own-conn
+                        clutch--connected-here t)
+            (insert "SELECT 1"))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (_conn) t))
+                    ((symbol-function 'clutch--find-connection)
+                     (lambda () 'console-conn))
+                    ((symbol-function 'clutch--execute)
+                     (lambda (sql &rest _)
+                       (setq ran-in (list (current-buffer) sql)))))
+            (switch-to-buffer code)
+            (switch-to-buffer indirect)
+            (clutch-indirect-execute)
+            (should (buffer-live-p indirect))
+            (should (equal ran-in (list indirect "SELECT 1")))
+            (with-current-buffer indirect
+              (setq-local clutch-connection nil))
+            (with-current-buffer result
+              (setq-local clutch-connection nil))
+            (switch-to-buffer indirect)
+            (clutch-indirect-execute)
+            (should-not (buffer-live-p indirect))
+            (should (equal ran-in (list console "SELECT 1")))))
+      (dolist (buffer (list console result code indirect))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
