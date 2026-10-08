@@ -2436,7 +2436,7 @@ Point left behind made the next cell command scroll back to it."
   "Record fields should edit through their parent result buffer."
   (clutch-test--with-pop-to-buffer-capture edit-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection nil
+        (:connection 'fake-conn
          :connection-params '(:backend mysql)
          :source-table "users"
          :columns '("id" "name")
@@ -2481,7 +2481,7 @@ Point left behind made the next cell command scroll back to it."
   "Submitting an unchanged numeric Record field should not stage an edit."
   (clutch-test--with-pop-to-buffer-capture edit-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection nil
+        (:connection 'fake-conn
          :connection-params '(:backend mysql)
          :source-table "orders"
          :columns '("id" "qty")
@@ -6110,7 +6110,7 @@ a word that ends a whole rollback, such as CHAIN."
                    :render t
                    :row-identity
                    (clutch-test--primary-row-identity "users" '("id") '(0))))
-            (setq-local clutch-connection nil
+            (setq-local clutch-connection 'fake-conn
                         clutch--connection-params '(:backend mysql)
                         clutch--result-source-table "users")
             (clutch--goto-cell 1 4)
@@ -6148,7 +6148,8 @@ a word that ends a whole rollback, such as CHAIN."
     (unwind-protect
         (with-current-buffer result-buf
           (clutch-result-mode)
-          (setq-local clutch--result-columns '("name")
+          (setq-local clutch-connection 'fake-conn
+                      clutch--result-columns '("name")
                       clutch--connection-params '(:backend mysql)
                       clutch--result-column-defs
                       '((:name "name" :type-category text

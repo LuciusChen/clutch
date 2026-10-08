@@ -349,6 +349,8 @@ Inside a query console, =C-c C-e= connects the console's session anew with the c
 
 In ordinary =clutch-mode= or REPL buffers, =C-c C-e= keeps the generic connect picker: select a saved connection, or press RET with no matching connection to enter temporary params.  It connects that buffer alone, in the mode the chosen connection starts in.  For SQLite files, use the query-console path instead of opening the database file itself as an editor buffer.
 
+A result whose session ended, as after =clutch-disconnect= or killing its console, keeps its rows to read, copy as text and export as loaded.  The commands that need its connection say it is closed: refreshing, paging, counting, sorting on the server and filtering it, editing a cell, loading a column's details, previewing its SQL and copying rows as =INSERT= or =UPDATE= statements.  A result whose session was lost keeps its connection, which still previews its SQL and copies rows as =INSERT= statements without the server.
+
 ** Paste whitespace cleanup
 
 Text pasted into a query console is automatically cleaned: trailing whitespace, mixed tabs/spaces, and CRLF line endings are fixed in the pasted region only — existing SQL in the buffer is not touched. Disable with =(setq clutch-console-yank-cleanup nil)=.

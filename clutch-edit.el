@@ -64,6 +64,14 @@ ask where it is now is reported as the server gave it."
       (user-error
        "The connection moved to another database or schema since this result's query ran; switch back, or run the query again")))))
 
+(defun clutch-result--require-connection ()
+  "Signal unless this result has a connection, live or lost.
+A result whose session ended has none, and `clutch--ensure-connection'
+says so.  A lost one still builds SQL as its backend does, and the
+command that runs the SQL reconnects it."
+  (unless clutch-connection
+    (clutch--ensure-connection)))
+
 (defun clutch-edit--require-sql-staged-mutation (op)
   "Signal unless SQL staged mutation OP is available for this result.
 It is not while a query runs on the connection, since a page arriving
@@ -211,6 +219,12 @@ the SELECT projection cannot be proven writable."
      (user-error "Cannot %s: writable source for result column %s is unknown"
                   op display-name)))))
 
+(defun clutch-result--source-column-details (table op)
+  "Return the column details of source TABLE for OP, loading them if needed."
+  (clutch-result--require-connection)
+  (or (clutch--ensure-column-details clutch-connection table t)
+      (user-error "Cannot %s: source column metadata is unavailable" op)))
+
 (defun clutch-result--writable-source-detail (table cidx op &optional details)
   "Return canonical source-column metadata for CIDX in TABLE during OP.
 TABLE is a metadata key from `clutch--table-key'.  An exact metadata name
@@ -218,11 +232,7 @@ wins.  Otherwise, accept a single case-insensitive match so unquoted
 identifiers can be reconciled with backend canonical case.
 Return nil when no metadata column matches, and reject ambiguous matches."
   (let* ((source-column (clutch-result--writable-source-column cidx op))
-         (details
-          (or details
-              (clutch--ensure-column-details clutch-connection table t)
-              (user-error "Cannot %s: source column metadata is unavailable"
-                          op)))
+         (details (or details (clutch-result--source-column-details table op)))
          (exact
           (cl-find-if
            (lambda (detail)
@@ -1011,9 +1021,7 @@ the parameter list."
 TABLE is a metadata key from `clutch--table-key'.  Each element is
 \(CIDX NAME . BACKEND-TYPE), with NAME as the table spells it.
 Signal a `user-error' for OP when a column is not a writable source column."
-  (let ((details (or (clutch--ensure-column-details clutch-connection table t)
-                     (user-error "Cannot %s: source column metadata is unavailable"
-                                 op)))
+  (let ((details (clutch-result--source-column-details table op))
         columns invalid)
     (dolist (cidx col-indices)
       (let ((detail (clutch-result--writable-source-detail table cidx op details)))
