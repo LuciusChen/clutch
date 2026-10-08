@@ -1918,6 +1918,15 @@ CONN's current schema then names the namespace that CONN is in, and
       (error "Backend switched namespace without reporting a current schema"))
     (plist-put (copy-sequence params) :schema schema)))
 
+(cl-defgeneric clutch-db-metadata-scope (conn)
+  "Return the scope of CONN's metadata when its current schema is not all of it.
+Return it as CONN last reported it, without asking the server: it is read
+before each statement, to tell whether the statement moved CONN.")
+
+(cl-defmethod clutch-db-metadata-scope ((_conn t))
+  "Return nil, as CONN's current schema is the scope of its metadata."
+  nil)
+
 (cl-defgeneric clutch-db-unreachable-namespace (conn)
   "Return the namespace CONN is in when a new connection cannot return to it.
 Return nil when the parameters recorded for the session lead back there.")
