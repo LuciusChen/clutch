@@ -10580,6 +10580,33 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
                   t)))
        ,@body)))
 
+(ert-deftest clutch-test-result-context-interruption-keeps-the-successful-reply ()
+  "A failed context lookup must not lose a successful asynchronous query.
+An interrupted lookup ran before the activity guard, leaving its timer
+and foreground reservation behind instead of presenting the result."
+  (dolist (failure '(clutch-db-error quit))
+    (with-temp-buffer
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (let (presented)
+          (cl-letf (((symbol-function 'clutch-db-resolution-context)
+                     (lambda (_conn) (signal failure '("Context unavailable"))))
+                    ((symbol-function 'clutch--present-statement-outcome)
+                     (lambda (_sql _conn outcome &rest _)
+                       (setq presented outcome))))
+            (clutch--execute "SELECT 1")
+            (funcall (cdar finishes)
+                     (make-clutch-db-result :columns '((:name "value"))
+                                            :rows '((1))) nil)
+            (condition-case nil (ert-run-idle-timers) (quit nil))
+            (should presented)
+            (should (equal (clutch-db-result-rows (plist-get presented :result))
+                           '((1))))
+            (should (eq (plist-get presented :resolution-context) 'unknown))
+            (should-not clutch--execution-start-time)
+            (should (zerop (hash-table-count clutch-db--foreground-connections)))
+            (should (zerop (hash-table-count clutch--running-queries)))))))))
+
 (ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
   "SQL from an indirect edit should run in a buffer that holds its connection.
 Closing the edit shows a buffer of another kind, such as source code, which
