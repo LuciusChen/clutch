@@ -2193,7 +2193,10 @@ The driver takes the database from the last one, and prefers it to the
 path.")
 
 (defun clutch-jdbc--clickhouse-url-database (url)
-  "Return the database ClickHouse JDBC URL names, or nil."
+  "Return the database ClickHouse JDBC URL names, or nil.
+Without a `database' property, the driver takes the last segment of the
+path, whose earlier segments are an HTTP path, and a path that ends in a
+slash names none."
   (when url
     (let ((case-fold-search nil)
           (start 0)
@@ -2204,19 +2207,25 @@ path.")
               start (match-end 0)))
       (or database
           (and (string-match (concat clutch-jdbc--clickhouse-url-hosts-regexp
-                                     "/\\([^/?#]+\\)")
+                                     "[^?#]*/\\([^/?#]+\\)\\(?:[?#]\\|\\'\\)")
                              url)
                (match-string 2 url))))))
 
 (defun clutch-jdbc--clickhouse-url-with-database (url database)
-  "Return ClickHouse JDBC URL with DATABASE in place of the one it names."
+  "Return ClickHouse JDBC URL with DATABASE in place of the one it names.
+An HTTP path before the database stays."
   (let ((case-fold-search nil))
     (if (string-match-p clutch-jdbc--clickhouse-url-database-property-regexp url)
         (replace-regexp-in-string
          clutch-jdbc--clickhouse-url-database-property-regexp database url t t 1)
       (replace-regexp-in-string
-       (concat clutch-jdbc--clickhouse-url-hosts-regexp "[^?#]*")
-       (lambda (match) (concat (match-string 1 match) "/" database))
+       (concat clutch-jdbc--clickhouse-url-hosts-regexp
+               "\\(\\(?:[^?#]*/\\)?\\)[^/?#]*")
+       (lambda (match)
+         (let ((before (match-string 2 match)))
+           (concat (match-string 1 match)
+                   (if (string-empty-p before) "/" before)
+                   database)))
        url t t))))
 
 (cl-defmethod clutch-db-namespace-reconnect-params
