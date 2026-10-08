@@ -2436,7 +2436,7 @@ Point left behind made the next cell command scroll back to it."
   "Record fields should edit through their parent result buffer."
   (clutch-test--with-pop-to-buffer-capture edit-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection nil
+        (:connection 'fake-conn
          :connection-params '(:backend mysql)
          :source-table "users"
          :columns '("id" "name")
@@ -2481,7 +2481,7 @@ Point left behind made the next cell command scroll back to it."
   "Submitting an unchanged numeric Record field should not stage an edit."
   (clutch-test--with-pop-to-buffer-capture edit-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection nil
+        (:connection 'fake-conn
          :connection-params '(:backend mysql)
          :source-table "orders"
          :columns '("id" "qty")
@@ -6110,7 +6110,7 @@ a word that ends a whole rollback, such as CHAIN."
                    :render t
                    :row-identity
                    (clutch-test--primary-row-identity "users" '("id") '(0))))
-            (setq-local clutch-connection nil
+            (setq-local clutch-connection 'fake-conn
                         clutch--connection-params '(:backend mysql)
                         clutch--result-source-table "users")
             (clutch--goto-cell 1 4)
@@ -6148,7 +6148,8 @@ a word that ends a whole rollback, such as CHAIN."
     (unwind-protect
         (with-current-buffer result-buf
           (clutch-result-mode)
-          (setq-local clutch--result-columns '("name")
+          (setq-local clutch-connection 'fake-conn
+                      clutch--result-columns '("name")
                       clutch--connection-params '(:backend mysql)
                       clutch--result-column-defs
                       '((:name "name" :type-category text
@@ -10665,6 +10666,36 @@ buried instead of killed, since its statement's reply needs it."
           (should (buffer-live-p indirect))
           (should (equal ran-in (list indirect "SELECT 41"))))
       (dolist (buffer (list code indirect))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest clutch-test-edit-indirect-holds-the-params-of-its-connection ()
+  "An indirect edit opened outside Clutch should hold its connection's params.
+It held a console's connection but none of its parameters, so once the
+console followed a namespace switch it held only that namespace, and
+reconnecting from it failed with \"Connection params require :backend\"."
+  (let ((console (generate-new-buffer " *clutch-test-console*"))
+        (params '(:backend mysql :host "db" :database "app"))
+        indirect)
+    (unwind-protect
+        (progn
+          (with-current-buffer console
+            (setq-local clutch-connection 'live-conn
+                        clutch--connection-params params
+                        clutch--conn-sql-product 'mysql))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (eq conn 'live-conn)))
+                    ((symbol-function 'clutch--update-mode-line) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (with-temp-buffer
+              (insert "SELECT 1")
+              (clutch-edit-indirect)
+              (setq indirect (current-buffer))))
+          (with-current-buffer indirect
+            (should (eq clutch-connection 'live-conn))
+            (should (equal clutch--connection-params params))
+            (should (eq clutch--conn-sql-product 'mysql))))
+      (dolist (buffer (list console indirect))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
