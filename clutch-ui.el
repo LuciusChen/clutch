@@ -827,6 +827,12 @@ wide-table rendering from repeatedly walking column definition lists."
     (wicon     . nerd-icons-wicon))
   "Alist mapping nerd-icons glyph-set symbols to public render functions.")
 
+(defvar clutch--nerd-icons-availability 'unchecked
+  "Cached nerd-icons availability, or `unchecked' before its first check.
+The check runs once per Emacs session, and some icons, such as the sort
+indicators of result headers, stay cached as drawn, so nerd-icons
+installed during a session takes effect after restarting Emacs.")
+
 (defvar clutch--nerd-icons-warning-families nil
   "Nerd-icons glyph-set families already reported as unavailable.")
 
@@ -834,10 +840,13 @@ wide-table rendering from repeatedly walking column definition lists."
   "Cache header sort indicators by icon identity and display metrics.")
 
 (defun clutch--nerd-icons-available-p ()
-  "Return non-nil when nerd-icons is loadable and exposes public icon functions."
-  (and (require 'nerd-icons nil t)
-       (cl-some (lambda (entry) (fboundp (cdr entry)))
-                clutch--nerd-icons-function-alist)))
+  "Return cached availability of nerd-icons and its public icon functions."
+  (when (eq clutch--nerd-icons-availability 'unchecked)
+    (setq clutch--nerd-icons-availability
+          (and (require 'nerd-icons nil t)
+               (cl-some (lambda (entry) (fboundp (cdr entry)))
+                        clutch--nerd-icons-function-alist))))
+  clutch--nerd-icons-availability)
 
 (defun clutch--nerd-icons-warn-unavailable-family (family)
   "Warn once that nerd-icons FAMILY cannot be rendered."
