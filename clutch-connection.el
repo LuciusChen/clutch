@@ -353,22 +353,31 @@ That is a COMMIT, or a ROLLBACK of the whole transaction: ROLLBACK [WORK]
 [AND [NO] CHAIN] [[NO] RELEASE], or ROLLBACK TRANSACTION or TRAN [AND [NO]
 CHAIN].  A rollback to a savepoint keeps the work done before it, and so
 may SQL Server's ROLLBACK TRANSACTION with a name, which can name a
-savepoint, even one called CHAIN."
-  (pcase (clutch-db-sql-leading-keyword sql)
-    ((or "COMMIT" "END" "ABORT") t)
-    ("ROLLBACK"
-     (let* ((case-fold-search t)
-            (space "[ \t\n\r\f]+")
-            (chain (concat "\\(?:" space "AND\\(?:" space "NO\\)?"
-                           space "CHAIN\\)?")))
-       (string-match-p
-        (concat "\\`ROLLBACK\\(?:"
-                "\\(?:" space "WORK\\)?" chain
-                "\\(?:\\(?:" space "NO\\)?" space "RELEASE\\)?"
-                "\\|" space "TRAN\\(?:SACTION\\)?" chain
-                "\\)\\'")
-        (clutch-db-sql-trim-end
-         (clutch-db-sql-strip-leading-comments sql)))))))
+savepoint, even one called CHAIN.  SQL holds that statement alone: the
+REPL sends several typed at once, and in COMMIT; BEGIN; INSERT the last
+transaction is still open."
+  (let ((keyword (clutch-db-sql-leading-keyword sql)))
+    (and (member keyword '("COMMIT" "END" "ABORT" "ROLLBACK"))
+         (cl-every (lambda (pos)
+                     (string-empty-p
+                      (clutch-db-sql-strip-leading-comments
+                       (substring sql (1+ pos)))))
+                   (clutch-db-sql-statement-breaks sql))
+         (pcase keyword
+           ((or "COMMIT" "END" "ABORT") t)
+           ("ROLLBACK"
+            (let* ((case-fold-search t)
+                   (space "[ \t\n\r\f]+")
+                   (chain (concat "\\(?:" space "AND\\(?:" space "NO\\)?"
+                                  space "CHAIN\\)?")))
+              (string-match-p
+               (concat "\\`ROLLBACK\\(?:"
+                       "\\(?:" space "WORK\\)?" chain
+                       "\\(?:\\(?:" space "NO\\)?" space "RELEASE\\)?"
+                       "\\|" space "TRAN\\(?:SACTION\\)?" chain
+                       "\\)\\'")
+               (clutch-db-sql-trim-end
+                (clutch-db-sql-strip-leading-comments sql)))))))))
 
 ;;;; Transaction state
 
@@ -458,7 +467,7 @@ pre-rendered text."
                 ((clutch-db-manual-commit-supported-p conn)
                  (if (clutch-db-manual-commit-p conn)
                      (if (clutch--tx-dirty-p conn) 'dirty 'manual)
-                   'auto)))))))
+                   (if (clutch--tx-dirty-p conn) 'auto-dirty 'auto))))))))
 
 (defun clutch--refresh-connection-render-state ()
   "Project current buffer connection state into semantic UI input."
@@ -541,17 +550,36 @@ pre-rendered text."
                'face '(:inherit shadow))))
 
 (defun clutch--record-tx-state-after-query (conn sql)
-  "Update transaction dirty state for successful SQL on CONN."
-  (when (clutch-db-manual-commit-p conn)
-    (cond
-     ((clutch--transaction-end-query-p sql)
-      (clutch--clear-tx-state conn))
-     ((clutch-db-sql-schema-affecting-p sql)
-      (pcase (clutch-db-schema-transaction-effect conn sql)
-        ('dirty (clutch--set-tx-dirty conn))
-        ('clear (clutch--clear-tx-state conn))))
-     ((clutch-db-sql-modifies-data-p sql)
-      (clutch--set-tx-dirty conn)))))
+  "Update transaction dirty state for successful SQL on CONN.
+Where the server reports whether a transaction is open, SQL that writes
+inside one marks it dirty, in either commit mode, as a typed BEGIN can
+open one in Auto mode.  Only a report of none open, or SQL that ended the
+transaction and chained a new one, clears it.  Elsewhere SQL marks and
+clears it in Manual mode only."
+  (pcase (clutch-db-transaction-open-p conn)
+    ('unknown
+     (when (clutch-db-manual-commit-p conn)
+       (cond
+        ((clutch--transaction-end-query-p sql)
+         (clutch--clear-tx-state conn))
+        ((clutch-db-sql-schema-affecting-p sql)
+         (pcase (clutch-db-schema-transaction-effect conn sql)
+           ('dirty (clutch--set-tx-dirty conn))
+           ('clear (clutch--clear-tx-state conn))))
+        ((clutch-db-sql-modifies-data-p sql)
+         (clutch--set-tx-dirty conn)))))
+    ('nil
+     (when (clutch--tx-dirty-p conn)
+       (clutch--clear-tx-state conn)))
+    (_
+     (cond
+      ((clutch--transaction-end-query-p sql)
+       (when (clutch--tx-dirty-p conn)
+         (clutch--clear-tx-state conn)))
+      ((if (clutch-db-sql-schema-affecting-p sql)
+           (eq (clutch-db-schema-transaction-effect conn sql) 'dirty)
+         (clutch-db-sql-modifies-data-p sql))
+       (clutch--set-tx-dirty conn))))))
 
 (defvar clutch--running-queries (make-hash-table :test 'eq)
   "Statements in flight, keyed by connection.
@@ -683,9 +711,7 @@ With no query to cancel, or one already being cancelled, run
   "Require confirmation before ACTION closes unresolved CONN.
 ACTION is a short question such as \"Disconnect? \"."
   (let ((state (clutch--tx-state conn)))
-    (when (and (or (eq state 'uncertain)
-                   (and (eq state 'dirty)
-                        (clutch-db-manual-commit-p conn)))
+    (when (and state
                (not
                 (yes-or-no-p
                  (concat
@@ -2456,7 +2482,7 @@ the transaction ends either way."
                 "Switch schema/database: ")
               namespaces nil t nil nil current)))
         (unless (string-empty-p namespace)
-          (if (and current (string-equal-ignore-case namespace current))
+          (if (equal namespace current)
               (message "Already on schema/database %s" current)
             (if-let* ((replacement-params
                        (clutch-db-namespace-reconnect-params
@@ -2705,6 +2731,16 @@ rollback on a replacement session as evidence about the dead session."
      "Connection dropped with an uncertain transaction outcome; reconnect and verify it")))
   (clutch--ensure-connection))
 
+(defun clutch--refuse-in-auto-mode (conn)
+  "Signal that a transaction command needs Manual mode on CONN.
+A transaction begun with SQL in Auto mode is ended with SQL, or adopted
+by switching to Manual mode."
+  (user-error
+   "%s"
+   (if (clutch--tx-dirty-p conn)
+       "Connection is in autocommit mode; end its open transaction with COMMIT or ROLLBACK, or switch to Manual mode"
+     "Connection is in autocommit mode")))
+
 ;;;###autoload
 (defun clutch-commit ()
   "Commit the current transaction.
@@ -2718,7 +2754,7 @@ signal that nothing was committed."
     (user-error
      "Transaction state is uncertain; roll back or reconnect instead of committing"))
   (unless (clutch-db-manual-commit-p clutch-connection)
-    (user-error "Connection is in autocommit mode"))
+    (clutch--refuse-in-auto-mode clutch-connection))
   (let* ((shown (clutch--shown-namespace))
          (outcome
           (condition-case err
@@ -2752,7 +2788,7 @@ signal that nothing was committed."
         (shown (clutch--shown-namespace)))
     (unless (or (clutch-db-manual-commit-p clutch-connection)
                 uncertain)
-      (user-error "Connection is in autocommit mode"))
+      (clutch--refuse-in-auto-mode clutch-connection))
     (clutch-db-rollback clutch-connection)
     (clutch--follow-transaction-end clutch-connection "ROLLBACK" shown)
     (unless uncertain
@@ -2767,20 +2803,26 @@ signal that nothing was committed."
 (defun clutch-toggle-auto-commit ()
   "Toggle auto-commit mode for the current connection.
 When switching from manual-commit to auto-commit, the backend finishes
-any open transaction according to its own semantics."
+any open transaction according to its own semantics.  Switching to
+manual-commit keeps a transaction begun with SQL open, with its
+uncommitted work, for \\[clutch-commit] or \\[clutch-rollback] to end."
   (interactive)
   (clutch--ensure-transaction-connection)
   (unless (clutch-db-manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection))
         (shown (clutch--shown-namespace)))
-    (when (clutch--tx-unresolved-p clutch-connection)
+    (when (if manual-now
+              (clutch--tx-unresolved-p clutch-connection)
+            (clutch--tx-uncertain-p clutch-connection))
       (user-error "Cannot toggle: commit or roll back uncommitted changes first"))
     (clutch-db-set-auto-commit clutch-connection manual-now)
-    ;; Leaving manual mode finishes the open transaction.
-    (when manual-now
-      (clutch--follow-transaction-end clutch-connection "COMMIT" shown))
-    (clutch--clear-tx-state clutch-connection)
+    (if manual-now
+        ;; Leaving manual mode finishes the open transaction.
+        (progn
+          (clutch--follow-transaction-end clutch-connection "COMMIT" shown)
+          (clutch--clear-tx-state clutch-connection))
+      (clutch--refresh-transaction-ui clutch-connection))
     (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
 
 (provide 'clutch-connection)

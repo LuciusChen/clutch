@@ -1042,6 +1042,35 @@ Returns a `clutch-jdbc-conn'."
                   :params   conn-params
                   :busy     nil)))
       (puthash (clutch-jdbc-conn-conn-id conn) conn clutch-jdbc--connections-by-id)
+      (when-let* ((schema (plist-get conn-params :schema))
+                  ((or (clutch-jdbc--oracle-conn-p conn)
+                       (clutch-jdbc--duckdb-conn-p conn))))
+        ;; The session starts in the schema PARAMS name, as after
+        ;; `clutch-switch-schema'.
+        (let (switched)
+          (unwind-protect
+              (condition-case err
+                  (progn
+                    (if (clutch-jdbc--oracle-conn-p conn)
+                        (clutch-db-set-current-schema
+                         conn (clutch-jdbc--oracle-read-schema schema))
+                      (clutch-db-query
+                       conn
+                       (concat "USE "
+                               (when-let* ((catalog (plist-get conn-params :catalog)))
+                                 (concat (clutch-db-escape-identifier conn catalog) "."))
+                               (clutch-db-escape-identifier conn schema))))
+                    (setq switched t))
+                (clutch-db-error
+                 (signal 'clutch-db-error
+                         (cons (format "Could not start in schema %s: %s"
+                                       (if-let* ((catalog (plist-get conn-params :catalog)))
+                                           (concat catalog "." schema)
+                                         schema)
+                                       (cadr err))
+                               (cddr err)))))
+            (unless switched
+              (clutch-db-disconnect conn)))))
       conn)))
 
 ;;;; Register backend
@@ -1324,11 +1353,15 @@ commits any pending transaction per the JDBC specification."
                 (plist-put (clutch-jdbc-conn-params conn)
                            :manual-commit t)))))))
 
-(cl-defmethod clutch-db-schema-transaction-effect ((conn clutch-jdbc-conn) _sql)
+(cl-defmethod clutch-db-schema-transaction-effect ((conn clutch-jdbc-conn) sql)
   "Return schema SQL transaction effect for JDBC CONN.
-Oracle DDL commits the transaction; other JDBC drivers keep the default
-unknown effect."
-  (when (clutch-jdbc--oracle-conn-p conn)
+Oracle DDL commits the transaction, though ALTER SESSION and ALTER
+SYSTEM do not; other JDBC drivers keep the default unknown effect."
+  (when (and (clutch-jdbc--oracle-conn-p conn)
+             (not (let ((case-fold-search t))
+                    (string-match-p
+                     "\\`ALTER[ \t\n\r\f]+\\(?:SESSION\\|SYSTEM\\)\\(?:[^[:alnum:]_$#]\\|\\'\\)"
+                     (clutch-db-sql-strip-leading-comments sql)))))
     'clear))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((conn clutch-jdbc-conn))
@@ -1604,13 +1637,48 @@ fetch and cursor are then in an unknown state."
     (setf (clutch-jdbc-conn-busy conn) nil)
     (funcall callback result error)))
 
+(defun clutch-jdbc--namespace-statement-p (conn sql)
+  "Return non-nil when SQL may move JDBC CONN into another schema.
+Oracle's ALTER SESSION and DuckDB's USE, SET and RESET do; the server
+says which schema they set."
+  (pcase (clutch-db-sql-leading-keyword sql)
+    ("ALTER" (clutch-jdbc--oracle-conn-p conn))
+    ((or "USE" "SET" "RESET") (clutch-jdbc--duckdb-conn-p conn))))
+
+(defun clutch-jdbc--follow-schema (conn sql)
+  "Follow JDBC CONN into the schema SQL may have set.
+DuckDB is asked for its namespace, which records it.  Oracle's ALTER
+SESSION moves only the session it runs on, so the others are moved too.
+Failing to follow is only reported: SQL has run, and its outcome must
+still arrive."
+  (when (clutch-jdbc--namespace-statement-p conn sql)
+    (condition-case err
+        (if (clutch-jdbc--duckdb-conn-p conn)
+            (clutch-db-current-schema conn)
+          (let ((schema (caar (clutch-db-result-rows
+                               (clutch-db-query
+                                conn
+                                "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))))
+            (unless (equal schema (clutch-jdbc--conn-schema conn))
+              (clutch-jdbc--use-oracle-schema conn schema))))
+      (clutch-db-error
+       (message "Could not follow the current schema: %s" (cadr err))))))
+
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
-  (clutch-jdbc--execute-rpc conn "execute" `((sql . ,sql))))
+  (prog1 (clutch-jdbc--execute-rpc conn "execute" `((sql . ,sql)))
+    (clutch-jdbc--follow-schema conn sql)))
 
 (cl-defmethod clutch-db-query-async ((conn clutch-jdbc-conn) sql callback)
   "Start SQL on JDBC CONN and pass the outcome to CALLBACK."
-  (clutch-jdbc--execute-rpc-async conn "execute" `((sql . ,sql)) callback)
+  (clutch-jdbc--execute-rpc-async
+   conn "execute" `((sql . ,sql))
+   (lambda (result error)
+     ;; SQL has run: its outcome reaches CALLBACK however following ends.
+     (unwind-protect
+         (unless error
+           (clutch-jdbc--follow-schema conn sql))
+       (funcall callback result error))))
   t)
 
 (defconst clutch-jdbc--binary-param-type-names
@@ -1886,13 +1954,28 @@ SCHEMA and CATALOG, when non-nil, qualify TABLE in place of CONN's scope."
              ((and current (string= (downcase b) (downcase current))) nil)
              (t (string-collate-lessp a b)))))))
 
-(defun clutch-jdbc--remember-duckdb-namespace (conn catalog schema)
-  "Store DuckDB CATALOG and SCHEMA on CONN, then return SCHEMA."
+(defun clutch-jdbc--remember-duckdb-namespace (conn catalog schema path)
+  "Store DuckDB CATALOG, SCHEMA and CATALOG's file PATH on CONN.
+Return SCHEMA.  PATH is nil for an in-memory catalog."
   (let ((params (copy-sequence (clutch-jdbc-conn-params conn))))
     (setq params (plist-put params :catalog catalog))
     (setq params (plist-put params :schema schema))
+    (setq params (plist-put params :catalog-path path))
     (setf (clutch-jdbc-conn-params conn) params))
   schema)
+
+(defun clutch-jdbc--duckdb-restorable-p (conn)
+  "Return non-nil when DuckDB CONN is in the database file its URL opens.
+A reconnect cannot return to an attached database or an in-memory one."
+  (let* ((params (clutch-jdbc-conn-params conn))
+         (path (plist-get params :catalog-path))
+         ;; The driver reads properties after the first semicolon.
+         (file (car (split-string
+                     (substring (plist-get params :url) (length "jdbc:duckdb:"))
+                     ";"))))
+    (and path
+         (not (string-empty-p file))
+         (equal (file-truename path) (file-truename file)))))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-jdbc-conn))
   "Return table names for JDBC CONN.
@@ -1971,13 +2054,19 @@ current database."
     (clutch-db-database conn))
    ((clutch-jdbc--duckdb-conn-p conn)
     (pcase (clutch-db-result-rows
-            (clutch-db-query conn "SELECT current_catalog(), current_schema()"))
-      (`((,catalog ,schema . ,_) . ,_)
+            (clutch-db-query
+             conn
+             (concat "SELECT current_catalog(), current_schema(), "
+                     "(SELECT path FROM duckdb_databases() "
+                     "WHERE database_name = current_catalog())")))
+      (`((,catalog ,schema . ,rest) . ,_)
        (unless (and (stringp catalog) (not (string-empty-p catalog))
                     (stringp schema) (not (string-empty-p schema)))
-         (error "DuckDB returned an invalid current namespace"))
-       (clutch-jdbc--remember-duckdb-namespace conn catalog schema))
-      (_ (error "DuckDB did not return a current namespace"))))
+         (signal 'clutch-db-error
+                 '("DuckDB returned an invalid current namespace")))
+       (clutch-jdbc--remember-duckdb-namespace conn catalog schema (car rest)))
+      (_ (signal 'clutch-db-error
+                 '("DuckDB did not return a current namespace")))))
    (t
     (clutch-jdbc--conn-schema conn))))
 
@@ -2005,31 +2094,74 @@ DuckDB resolves one through its catalog, current schema and search path."
           (format "USE %s.%s"
                   (clutch-db-escape-identifier conn catalog)
                   (clutch-db-escape-identifier conn schema)))
-         (clutch-jdbc--remember-duckdb-namespace conn catalog schema))
+         (clutch-jdbc--remember-duckdb-namespace
+          conn catalog schema
+          (plist-get (clutch-jdbc-conn-params conn) :catalog-path)))
       (user-error "DuckDB schema is no longer available: %s" schema)))
    ((clutch-jdbc--oracle-conn-p conn)
-    (let ((schema (upcase schema)))
-      (clutch-jdbc--rpc
-       conn "set-current-schema"
-       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-         (schema . ,schema)))
-       (setf (clutch-jdbc-conn-params conn)
-             (plist-put (clutch-jdbc-conn-params conn) :schema schema))
-       schema))
+    (clutch-jdbc--use-oracle-schema conn schema))
    (t
     (user-error "Schema switching is currently supported only for Oracle JDBC"))))
 
+(defun clutch-jdbc--oracle-read-schema (text)
+  "Return the Oracle schema named by TEXT, read as an Oracle identifier.
+A name in double quotes is taken as written, and any other is
+upper-cased."
+  (if (and (> (length text) 1)
+           (string-prefix-p "\"" text)
+           (string-suffix-p "\"" text))
+      (substring text 1 -1)
+    (upcase text)))
+
+(defun clutch-jdbc--oracle-write-schema (schema)
+  "Return Oracle SCHEMA written for `clutch-jdbc--oracle-read-schema' to read back."
+  (if (equal schema (upcase schema))
+      schema
+    (concat "\"" schema "\"")))
+
+(defun clutch-jdbc--use-oracle-schema (conn schema)
+  "Move every session of Oracle CONN into SCHEMA, named exactly, and return it."
+  (clutch-jdbc--rpc
+   conn "set-current-schema"
+   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+     (schema . ,schema)))
+  (setf (clutch-jdbc-conn-params conn)
+        (plist-put (clutch-jdbc-conn-params conn) :schema schema))
+  schema)
+
+(cl-defmethod clutch-db-namespace-switch-p ((conn clutch-jdbc-conn) sql)
+  "Return non-nil when SQL may have moved JDBC CONN into another schema."
+  (clutch-jdbc--namespace-statement-p conn sql))
+
 (cl-defmethod clutch-db-update-namespace-params ((conn clutch-jdbc-conn) params)
-  "Store JDBC CONN's current namespace in a copy of connection PARAMS."
-  (if (clutch-jdbc--duckdb-conn-p conn)
-      (let ((catalog (clutch-jdbc--conn-catalog conn))
-            (schema (clutch-jdbc--conn-schema conn))
-            (params (copy-sequence params)))
-        (unless (and catalog schema)
-          (error "DuckDB switched namespace without catalog/schema state"))
-        (setq params (plist-put params :catalog catalog))
-        (plist-put params :schema schema))
-    (cl-call-next-method)))
+  "Store JDBC CONN's current namespace in a copy of connection PARAMS.
+PARAMS that already lead to it stay as they are, and so do DuckDB PARAMS
+when a reconnect could not return to it."
+  (cond
+   ((clutch-jdbc--duckdb-conn-p conn)
+    (let ((catalog (clutch-jdbc--conn-catalog conn))
+          (schema (clutch-jdbc--conn-schema conn)))
+      (unless (and catalog schema)
+        (error "DuckDB switched namespace without catalog/schema state"))
+      (if (or (not (clutch-jdbc--duckdb-restorable-p conn))
+              (and (equal schema (or (plist-get params :schema) "main"))
+                   (member (plist-get params :catalog) (list nil catalog))))
+          params
+        (let ((params (copy-sequence params)))
+          (setq params (plist-put params :catalog catalog))
+          (plist-put params :schema schema)))))
+   ((clutch-jdbc--oracle-conn-p conn)
+    (let ((schema (clutch-jdbc--conn-schema conn))
+          (named (if-let* ((entry (plist-get params :schema)))
+                     (clutch-jdbc--oracle-read-schema entry)
+                   (and (plist-get params :user)
+                        (upcase (plist-get params :user))))))
+      (if (equal schema named)
+          params
+        (plist-put (copy-sequence params) :schema
+                   (clutch-jdbc--oracle-write-schema schema)))))
+   (t
+    (cl-call-next-method))))
 
 (cl-defmethod clutch-db-namespace-reconnect-params
     ((conn clutch-jdbc-conn) params namespace)

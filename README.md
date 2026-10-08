@@ -237,6 +237,8 @@ SQLite does not expose these transaction controls; its console header omits the 
 
 Native MySQL maps `C-c C-a` to the server session's autocommit flag directly. Native PostgreSQL uses a clutch-managed manual mode: enabling manual mode does not send `BEGIN` immediately, the first foreground statement opens the transaction lazily, and transactional DDL also counts as uncommitted work, so toggle/disconnect stays blocked until you commit or roll back.
 
+On native MySQL and PostgreSQL, and on XTDB, the server reports with each reply whether a transaction is open, and Clutch follows it. A write inside an open transaction is uncommitted work in Auto mode too: after a `BEGIN` or `START TRANSACTION` typed in Auto mode and an `INSERT`, the indicator shows `Tx: Auto*`, and disconnecting, killing the console or connecting elsewhere asks first. End such a transaction with a typed `COMMIT` or `ROLLBACK`, or switch to Manual mode with `C-c C-a`, which keeps it open, uncommitted work and all, for `C-c C-m` or `C-c C-u`. The work stays known until the server reports no open transaction, so a MySQL `CREATE TEMPORARY TABLE`, which commits nothing, keeps it, while DDL that commits clears it.
+
 If recovery of an atomic submission fails, or any `COMMIT` returns without a known outcome, the transaction indicator changes to `Tx: Uncertain`. Clutch then blocks further queries, commit, and transaction-mode changes; explicitly roll back with `C-c C-u`, or reconnect if rollback cannot recover the session. Either action restores a usable session, but it cannot prove that an earlier uncertain commit did not happen, so verify the database before retrying retained work.
 
 ### Password Management

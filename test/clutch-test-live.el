@@ -273,29 +273,71 @@ is on MySQL or PostgreSQL."
   :tags '(:clutch-live)
   "A console should follow a namespace switch typed into it.
 It went on showing and loading the namespace it opened with, and its
-parameters reconnected to that one.  PostgreSQL keeps the whole path."
-  (unless (memq clutch-test-backend '(mysql pg))
-    (ert-skip "This regression covers MySQL USE and PostgreSQL SET search_path"))
+parameters reconnected to that one.  PostgreSQL keeps the whole path.
+Oracle and DuckDB list the tables of the schema they moved to, and
+connecting with the console's parameters starts there."
+  (unless (memq (clutch-test-live-backend-id) '(mysql pg oracle duckdb))
+    (ert-skip "This regression covers MySQL USE, PostgreSQL SET search_path, Oracle ALTER SESSION and DuckDB USE"))
   (clutch-test--with-conn admin
-    (let ((schema (format "clutch_ns_%d" (emacs-pid)))
+    (let ((backend (clutch-test-live-backend-id))
+          (schema (format "clutch_ns_%d" (emacs-pid)))
           (params (append (list :backend clutch-test-backend)
                           (clutch-test--live-connect-params))))
       (pcase-let ((`(,switch ,namespace ,key ,value ,check-sql)
-                   (if (eq clutch-test-backend 'mysql)
-                       '("USE information_schema" "information_schema"
-                         :database "information_schema" "SELECT DATABASE()")
-                     (list (format "SET search_path TO %s, public" schema) schema
-                           :search-path (format "%s, public" schema)
-                           "SHOW search_path"))))
+                   (pcase backend
+                     ('mysql
+                      '("USE information_schema" "information_schema"
+                        :database "information_schema" "SELECT DATABASE()"))
+                     ('pg
+                      (list (format "SET search_path TO %s, public" schema) schema
+                            :search-path (format "%s, public" schema)
+                            "SHOW search_path"))
+                     ('oracle
+                      (list (format "ALTER SESSION SET CURRENT_SCHEMA = %s" schema)
+                            (upcase schema) :schema (upcase schema)
+                            "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"))
+                     ('duckdb
+                      (list (format "USE %s" schema) schema :schema schema
+                            "SELECT current_schema()")))))
         (unwind-protect
             (progn
-              (when (eq clutch-test-backend 'pg)
-                (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
+              (pcase backend
+                ('pg (clutch-db-query admin (format "CREATE SCHEMA %s" schema)))
+                ('oracle
+                 (clutch-db-query
+                  admin (format "CREATE USER %s IDENTIFIED BY \"Clutch_ns1\" QUOTA UNLIMITED ON users"
+                                schema))
+                 (clutch-db-query
+                  admin (format "CREATE TABLE %s.only_here (id NUMBER)" schema)))
+                ('duckdb
+                 (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+                 (clutch-db-query
+                  admin (format "CREATE TABLE %s.only_here (id INTEGER)" schema))))
               (clutch-test--with-live-console params
-                (clutch-test--run-in-console switch)
+                (when (eq backend 'oracle)
+                  (clutch-test--run-in-console
+                   (format "INSERT INTO %s.only_here VALUES (1)" schema))
+                  (should (clutch--tx-dirty-p clutch-connection)))
+                ;; Clutch asks before it runs an ALTER.
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-test--run-in-console switch))
                 (should (equal (clutch-db-current-schema clutch-connection)
                                namespace))
                 (should (equal (plist-get clutch--connection-params key) value))
+                (when (memq backend '(oracle duckdb))
+                  (should (clutch-test--live-name-member-p
+                           "only_here" (clutch-db-list-tables clutch-connection))))
+                (when (eq backend 'oracle)
+                  ;; ALTER SESSION commits nothing, so the insert is still
+                  ;; uncommitted work.
+                  (should (clutch--tx-dirty-p clutch-connection))
+                  (clutch-rollback)
+                  (should (equal (format "%s"
+                                         (caar (clutch-db-result-rows
+                                                (clutch-db-query
+                                                 admin (format "SELECT COUNT(*) FROM %s.only_here"
+                                                               schema)))))
+                                 "0")))
                 (let ((reopened (clutch-db-connect clutch-test-backend
                                                    clutch--connection-params)))
                   (unwind-protect
@@ -303,9 +345,96 @@ parameters reconnected to that one.  PostgreSQL keeps the whole path."
                                             (clutch-db-query reopened check-sql)))
                                      value))
                     (clutch-db-disconnect reopened)))))
-          (when (eq clutch-test-backend 'pg)
-            (ignore-errors
-              (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))))))))
+          (pcase backend
+            ('pg
+             (ignore-errors
+               (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))
+            ('oracle
+             (ignore-errors
+               (clutch-db-query admin (format "DROP USER %s CASCADE" schema))))
+            ('duckdb
+             (ignore-errors
+               (clutch-db-query
+                admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))))
+
+(ert-deftest clutch-test-live-duckdb-reconnect-stays-out-of-attached-databases ()
+  :tags '(:clutch-live :duckdb-live)
+  "A DuckDB console moved into an attached database should keep its parameters.
+A reconnect cannot return to an attached database, so the parameters
+keep naming the database the URL opens, and connecting with them starts
+there."
+  (unless (eq (clutch-test-live-backend-id) 'duckdb)
+    (ert-skip "Live backend is not DuckDB"))
+  (let ((attached (concat (make-temp-name
+                           (expand-file-name "clutch-att-" temporary-file-directory))
+                          ".duckdb"))
+        (alias (format "clutch_att_%d" (emacs-pid)))
+        (params (append (list :backend clutch-test-backend)
+                        (clutch-test--live-connect-params))))
+    (unwind-protect
+        (clutch-test--with-live-console params
+          (let ((before clutch--connection-params))
+            (clutch-test--run-in-console
+             (format "ATTACH '%s' AS %s" attached alias)
+             (format "CREATE SCHEMA %s.side" alias)
+             (format "USE %s.side" alias))
+            (should (equal (caar (clutch-db-result-rows
+                                  (clutch-db-query clutch-connection
+                                                   "SELECT current_catalog()")))
+                           alias))
+            (should (equal clutch--connection-params before))
+            (let* ((reopened (clutch-db-connect clutch-test-backend
+                                                clutch--connection-params))
+                   (home (unwind-protect
+                             (caar (clutch-db-result-rows
+                                    (clutch-db-query reopened
+                                                     "SELECT current_catalog()")))
+                           (clutch-db-disconnect reopened))))
+              (should-not (equal home alias))
+              (clutch-test--run-in-console (format "USE %s" home)
+                                           (format "DETACH %s" alias)))))
+      (dolist (file (list attached (concat attached ".wal")))
+        (when (file-exists-p file)
+          (delete-file file))))))
+
+(ert-deftest clutch-test-live-oracle-reconnect-keeps-a-quoted-schema-name ()
+  :tags '(:clutch-live)
+  "A console moved to a quoted Oracle schema should reconnect into that schema.
+The console recorded the schema as Oracle names it, but connecting with
+its parameters upper-cased the name: a mixed-case one failed with
+ORA-01435, and a lower-case one moved the session into the upper-case
+schema of the same name when there was one."
+  (unless (eq clutch-test-backend 'oracle)
+    (ert-skip "This regression covers Oracle's quoted schema names"))
+  (clutch-test--with-conn admin
+    (let* ((mixed (format "Clutch_Mx_%d" (emacs-pid)))
+           (lower (format "clutch_lc_%d" (emacs-pid)))
+           (users (list mixed lower (upcase lower)))
+           (params (append (list :backend 'oracle) (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (dolist (user users)
+              (clutch-db-query
+               admin (format "CREATE USER \"%s\" IDENTIFIED BY \"Clutch_ns1\"" user)))
+            (dolist (schema (list mixed lower))
+              (ert-info (schema)
+                (clutch-test--with-live-console params
+                  ;; Clutch asks before it runs an ALTER.
+                  (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                    (clutch-test--run-in-console
+                     (format "ALTER SESSION SET CURRENT_SCHEMA = \"%s\"" schema)))
+                  (should (equal (clutch-db-current-schema clutch-connection) schema))
+                  (let ((reopened (clutch-db-connect 'oracle clutch--connection-params)))
+                    (unwind-protect
+                        (should (equal (caar (clutch-db-result-rows
+                                              (clutch-db-query
+                                               reopened
+                                               "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))
+                                       schema))
+                      (clutch-db-disconnect reopened)))))))
+        (dolist (user users)
+          (ignore-errors
+            (clutch-db-query admin (format "DROP USER \"%s\" CASCADE" user))))))))
 
 (ert-deftest clutch-test-live-mysql-console-follows-a-dropped-current-database ()
   :tags '(:clutch-live)
@@ -513,6 +642,54 @@ Reopening a console whose session was lost reconnects it too."
                 (should-not (eq clutch-connection lost))
                 (should (clutch-db-manual-commit-p clutch-connection)))
               (clutch-toggle-auto-commit)))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+
+(ert-deftest clutch-test-live-reopened-console-ends-the-lost-session ()
+  :tags '(:clutch-live)
+  "Reopening a console whose session was lost should end that session in full.
+The console came back on a new connection, but its results stayed on the
+dead one, its uncommitted work was not reported lost, and the old
+transaction state stayed behind."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL consoles"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_reopen_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params)))
+          (result-name "*clutch-test-reopen-result*"))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+            (clutch-test--with-live-console params
+              (let ((console (current-buffer)))
+                (clutch-test--with-live-result-buffer result-name
+                  (clutch-toggle-auto-commit)
+                  (clutch-test--run-in-console
+                   (format "INSERT INTO %s VALUES (1)" table)
+                   (format "SELECT id FROM %s" table))
+                  (with-current-buffer console
+                    (should (clutch--tx-dirty-p clutch-connection))
+                    (let ((lost (clutch-test--end-console-session admin))
+                          messages)
+                      (cl-letf (((symbol-function 'message)
+                                 (lambda (format-string &rest args)
+                                   (when format-string
+                                     (push (apply #'format format-string args)
+                                           messages)))))
+                        (should (eq (clutch-test--open-live-console params) console)))
+                      (should-not (eq clutch-connection lost))
+                      (should (eq (buffer-local-value 'clutch-connection
+                                                      (get-buffer result-name))
+                                  clutch-connection))
+                      (should-not (clutch--tx-state lost))
+                      (should-not (clutch--tx-state clutch-connection))
+                      (should (cl-some (lambda (text)
+                                         (string-match-p
+                                          "uncommitted changes were lost" text))
+                                       messages))
+                      (should (clutch-db-manual-commit-p clutch-connection))
+                      (clutch-toggle-auto-commit)))))))
         (ignore-errors
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
@@ -1774,6 +1951,111 @@ whole rollback can also end with."
               (clutch-db-set-auto-commit conn t)))
           (clutch-db-query conn drop-sql))))))
 
+(defun clutch-test--live-close-prompts (close)
+  "Call CLOSE, declining every confirmation, and return the prompts it asked."
+  (let (prompts)
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (push prompt prompts) nil)))
+      (condition-case nil
+          (funcall close)
+        (user-error nil)))
+    prompts))
+
+(ert-deftest clutch-test-live-auto-mode-transaction-begun-with-sql-is-tracked ()
+  :tags '(:clutch-live)
+  "Work in a transaction begun with SQL in Auto mode should be known.
+Clutch recorded nothing in Auto mode, so after a typed BEGIN and INSERT,
+disconnecting or killing the console dropped the insert without asking.
+The server's report of an open transaction now marks it, a rollback to
+a savepoint keeps it, and a typed COMMIT clears it.  Switching to Manual
+mode keeps such a transaction open for `clutch-commit' to end."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL transaction status"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_auto_tx_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params))))
+      (cl-flet ((rows ()
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query
+                          admin (format "SELECT COUNT(*) FROM %s" table))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+              (clutch-test--with-live-console params
+                (should-not (clutch-db-manual-commit-p clutch-connection))
+                (clutch-test--run-in-console
+                 (if (eq clutch-test-backend 'mysql) "START TRANSACTION" "BEGIN")
+                 (format "INSERT INTO %s VALUES (1)" table))
+                (should (eq (plist-get clutch--connection-render-state
+                                       :transaction-state)
+                            'auto-dirty))
+                (should (clutch-test--live-close-prompts #'clutch-disconnect))
+                (should (clutch--connection-alive-p clutch-connection))
+                (let ((console (current-buffer)))
+                  (should (clutch-test--live-close-prompts
+                           (lambda () (kill-buffer console))))
+                  (should (buffer-live-p console)))
+                (clutch-test--run-in-console
+                 "SAVEPOINT s" (format "INSERT INTO %s VALUES (2)" table)
+                 "ROLLBACK TO SAVEPOINT s")
+                (should (clutch-test--live-close-prompts #'clutch-disconnect))
+                (should (= (rows) 0))
+                (clutch-test--run-in-console "COMMIT")
+                (should-not (clutch--tx-state clutch-connection))
+                (should (eq (plist-get clutch--connection-render-state
+                                       :transaction-state)
+                            'auto))
+                (should (= (rows) 1))
+                (clutch-test--run-in-console
+                 (if (eq clutch-test-backend 'mysql) "START TRANSACTION" "BEGIN")
+                 (format "INSERT INTO %s VALUES (3)" table))
+                (clutch-toggle-auto-commit)
+                (should (eq (plist-get clutch--connection-render-state
+                                       :transaction-state)
+                            'dirty))
+                (should (= (rows) 1))
+                (clutch-commit)
+                (should (= (rows) 2))
+                (clutch-toggle-auto-commit)))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table))))))))
+
+(ert-deftest clutch-test-live-mysql-ddl-that-commits-nothing-keeps-work-known ()
+  :tags '(:clutch-live)
+  "A MySQL CREATE TEMPORARY TABLE should keep the work before it known.
+Clutch took every DDL for one that commits, as most MySQL DDL does, so in
+Manual mode a temporary table after an INSERT cleared the insert, and a
+disconnect then dropped it without asking.  A CREATE TABLE commits it."
+  (unless (eq clutch-test-backend 'mysql)
+    (ert-skip "This regression covers MySQL's implicit commits"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_tmp_tx_%d" (emacs-pid)))
+          (params (append (list :backend 'mysql) (clutch-test--live-connect-params))))
+      (cl-flet ((rows ()
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query
+                          admin (format "SELECT COUNT(*) FROM %s" table))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+              (clutch-test--with-live-console params
+                (clutch-toggle-auto-commit)
+                (clutch-test--run-in-console
+                 (format "INSERT INTO %s VALUES (1)" table)
+                 (format "CREATE TEMPORARY TABLE %s_tmp (id int)" table))
+                (should (clutch--tx-dirty-p clutch-connection))
+                (should (clutch-test--live-close-prompts #'clutch-disconnect))
+                (should (= (rows) 0))
+                (clutch-test--run-in-console
+                 (format "CREATE TABLE %s_made (id int)" table))
+                (should-not (clutch--tx-state clutch-connection))
+                (should (= (rows) 1))
+                (clutch-toggle-auto-commit)))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s, %s_made"
+                                           table table))))))))
+
 (ert-deftest clutch-test-live-insert-and-delete-submit-persists ()
   :tags '(:clutch-live)
   "Submitted insert and delete staging should persist on a real backend."
@@ -1850,6 +2132,43 @@ whole rollback can also end with."
           (kill-buffer insert-buf))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-pg-repl-batch-keeps-its-last-transaction-dirty ()
+  :tags '(:clutch-live)
+  "A REPL batch ending with an uncommitted write must ask before closing.
+COMMIT at the start of the input cleared the work of its later BEGIN
+and INSERT, despite the server reporting that transaction still open."
+  (unless (eq clutch-test-backend 'pg)
+    (ert-skip "This regression covers PostgreSQL's multi-statement REPL"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_repl_tx_%d" (emacs-pid)))
+          (params (append '(:backend pg) (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+            (clutch-test--with-live-console params
+              (let ((conn clutch-connection))
+                (clutch-repl-mode)
+                (setq-local clutch-connection conn
+                            clutch--connection-params params))
+              (clutch-repl--input-sender
+               nil (format "COMMIT; BEGIN; INSERT INTO %s VALUES (1);" table))
+              (clutch-test--await-queries)
+              (should (clutch--tx-dirty-p clutch-connection))
+              (should (clutch-test--live-close-prompts #'clutch-disconnect))
+              (should (clutch--connection-alive-p clutch-connection))
+              (should (= (caar (clutch-db-result-rows
+                               (clutch-db-query admin
+                                                (format "SELECT COUNT(*) FROM %s" table))))
+                         0))
+              (clutch-repl--input-sender nil "COMMIT;")
+              (clutch-test--await-queries)
+              (should-not (clutch--tx-state clutch-connection))
+              (should (= (caar (clutch-db-result-rows
+                               (clutch-db-query admin
+                                                (format "SELECT COUNT(*) FROM %s" table))))
+                         1))))
+        (ignore-errors (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+
 ;;;; XTDB
 
 (defvar clutch-test--xtdb-table-counter 0
@@ -1913,6 +2232,66 @@ The current buffer is the result."
           (clutch--execute sql)
           (clutch-test--await-queries))))
     prompts))
+
+(ert-deftest clutch-test-live-xtdb-first-write-transaction-defers-metadata ()
+  :tags '(:xtdb-live)
+  "A cold console's catalog refresh must leave its write transaction usable."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn admin
+    (let ((table (clutch-test--xtdb-table "cold_tx"))
+          (params (append '(:backend xtdb) (clutch-test--live-connect-params))))
+      (clutch-test--with-live-console params
+        (clutch-test--run-in-console "BEGIN READ WRITE")
+        (ert-run-idle-timers)
+        (should (eq (pgsql-transaction-status
+                     (clutch-db-pg--connection-client clutch-connection))
+                    'in-transaction))
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a', 'kept')" table)
+         "COMMIT")
+        (should (equal (clutch-test--xtdb-rows admin
+                                             (format "SELECT name FROM %s" table))
+                       '(("kept"))))
+        (ert-run-idle-timers)
+        (clutch-test--await
+         (lambda () (eq (plist-get (clutch--schema-status-entry clutch-connection) :state)
+                        'ready)))))))
+
+(ert-deftest clutch-test-live-xtdb-manual-read-does-not-open-a-read-only-transaction ()
+  :tags '(:xtdb-live)
+  "Manual reads must not prevent the following DML from opening its transaction.
+An ASSERT opens one as a write does, so it still guards the writes after it."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn admin
+    (let ((table (clutch-test--xtdb-table "read_then_write"))
+          (params (append '(:backend xtdb) (clutch-test--live-connect-params))))
+      (clutch-test--with-live-console params
+        (clutch-toggle-auto-commit)
+        (clutch-test--run-in-console "SELECT 1")
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a', 'kept')" table))
+        (should (clutch--tx-dirty-p clutch-connection))
+        (should-not (clutch-test--xtdb-rows admin (format "SELECT name FROM %s" table)))
+        (clutch-commit)
+        (should (equal (clutch-test--xtdb-rows admin (format "SELECT name FROM %s" table))
+                       '(("kept"))))
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('b', 'discarded')" table))
+        (clutch-rollback)
+        (should (equal (clutch-test--xtdb-rows admin
+                                             (format "SELECT name FROM %s ORDER BY _id" table))
+                       '(("kept"))))
+        ;; An ASSERT opens the transaction too, so it guards the write after it.
+        (clutch-test--run-in-console
+         "ASSERT 1 = 2"
+         (format "INSERT INTO %s (_id, name) VALUES ('c', 'guarded')" table))
+        (should-error (clutch-commit) :type 'user-error)
+        (clutch-rollback)
+        (should (equal (clutch-test--xtdb-rows admin
+                                             (format "SELECT name FROM %s ORDER BY _id" table))
+                       '(("kept"))))))))
 
 (ert-deftest clutch-test-live-xtdb-reads-its-own-catalog ()
   :tags '(:xtdb-live)
@@ -1997,6 +2376,44 @@ XTDB stores a value with the type it is sent as."
       (clutch-db-set-auto-commit conn t)
       (should (equal (clutch-test--xtdb-rows conn (format "SELECT name FROM %s" table))
                      '(("Ann")))))))
+
+(ert-deftest clutch-test-live-xtdb-transaction-state-follows-the-server ()
+  :tags '(:xtdb-live)
+  "XTDB's report of an open transaction should mark uncommitted work.
+An INSERT in Manual mode, or after BEGIN READ WRITE in Auto mode, leaves
+work that a disconnect asks about; a commit clears it, and a SELECT in
+Manual mode, which runs outside a transaction, marks nothing."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (let ((table (clutch-test--xtdb-table "tx"))
+        (params (append (list :backend 'xtdb) (clutch-test--live-connect-params))))
+    (cl-flet ((state () (plist-get clutch--connection-render-state
+                                   :transaction-state)))
+      (clutch-test--with-live-console params
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a0', 'Al')" table))
+        (should (eq (state) 'auto))
+        (clutch-test--run-in-console
+         "BEGIN READ WRITE"
+         (format "INSERT INTO %s (_id, name) VALUES ('a1', 'Ann')" table))
+        (should (eq (state) 'auto-dirty))
+        (clutch-test--run-in-console "COMMIT")
+        (should (eq (state) 'auto))
+        (clutch-test--with-conn other
+          (should (equal (clutch-test--xtdb-rows
+                          other (format "SELECT _id FROM %s ORDER BY _id" table))
+                         '(("a0") ("a1")))))
+        (clutch-toggle-auto-commit)
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a2', 'Bo')" table))
+        (should (eq (state) 'dirty))
+        (should (clutch-test--live-close-prompts #'clutch-disconnect))
+        (clutch-commit)
+        (should (eq (state) 'manual))
+        (clutch-test--run-in-console (format "SELECT * FROM %s" table))
+        (should (eq (state) 'manual))
+        (clutch-rollback)
+        (clutch-toggle-auto-commit)))))
 
 (ert-deftest clutch-test-live-xtdb-time-and-union-columns ()
   :tags '(:xtdb-live)
