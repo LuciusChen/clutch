@@ -1057,6 +1057,130 @@ reconnects it."
   :tags '(:clutch-live)
   (clutch-test--result-action-after-session-loss 'delete))
 
+(ert-deftest clutch-test-live-connect-outside-a-console-keeps-its-session ()
+  "`C-c C-e' outside a console should connect a session picked again anew.
+In a buffer with `clutch-mode' or the REPL, picking the connection the
+session was on started a new session in Auto mode, though the buffer was
+in Manual; over a live session the buffer's result lost its connection,
+and over a lost one it reconnected to a session of its own.  Picking
+another connection connects the buffer alone, in that connection's mode."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (clutch-test--with-conn admin
+    (let* ((mysql (eq clutch-test-backend 'mysql))
+           (table (format "clutch_outside_%d" (emacs-pid)))
+           (params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (clutch-connection-alist
+            (list (cons "same" params)
+                  (cons "other" (append params '(:connect-timeout 7)))))
+           (result-name (format " *clutch-outside-result-%d*" (emacs-pid)))
+           (buffer (generate-new-buffer " *clutch-outside*"))
+           repl)
+      (cl-flet ((connect (name)
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (&rest _) name)))
+                    (clutch-connect)))
+                (manual ()
+                  (unless (clutch-db-manual-commit-p clutch-connection)
+                    (clutch-toggle-auto-commit))))
+        (unwind-protect
+            (progn
+              (clutch-db-query
+               admin (format "CREATE TABLE %s (id int PRIMARY KEY, v %s)"
+                             table (if mysql "varchar(20)" "text")))
+              (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'a')" table))
+              (cl-letf (((symbol-function 'message) #'ignore))
+                (with-current-buffer buffer
+                  (clutch-mode)
+                  (connect "same")
+                  (clutch-test--with-live-result-buffer result-name
+                    (pcase-dolist (`(,label ,lose-session) '(("live" nil) ("lost" t)))
+                      (ert-info (label)
+                        (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
+                        (manual)
+                        (let ((old (if lose-session
+                                       (clutch-test--end-console-session admin)
+                                     clutch-connection)))
+                          (connect "same")
+                          (should-not (eq clutch-connection old))
+                          (should (clutch-db-manual-commit-p clutch-connection))
+                          (let ((conn clutch-connection))
+                            (with-current-buffer result-name
+                              (should (eq clutch-connection conn))
+                              (clutch-result-rerun)
+                              (clutch-test--await-queries)
+                              (should (eq clutch-connection conn)))))))
+                    (clutch-rollback)
+                    (connect "other")
+                    (should-not (clutch-db-manual-commit-p clutch-connection))
+                    (should-not (buffer-local-value 'clutch-connection
+                                                    (get-buffer result-name)))))
+                (setq repl (generate-new-buffer " *clutch-outside-repl*"))
+                (with-current-buffer repl
+                  (clutch-repl-mode)
+                  (connect "same")
+                  (manual)
+                  (connect "same")
+                  (should (clutch-db-manual-commit-p clutch-connection))
+                  (clutch-toggle-auto-commit))))
+          (dolist (b (list buffer repl))
+            (when (buffer-live-p b)
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (kill-buffer b))))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table))))))))
+
+(ert-deftest clutch-test-live-connect-in-an-indirect-edit-keeps-its-console ()
+  "`C-c C-e' in an indirect edit should move or leave its console's session.
+Picking the connection the edit shares with its console disconnected the
+console and connected the edit alone, in Auto mode, and so did picking
+another.  The session now moves, console and all, in its mode, and
+connecting the edit elsewhere leaves the console where it was."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (let* ((params (append (list :backend clutch-test-backend)
+                         (clutch-test--live-connect-params)))
+         (clutch-connection-alist
+          (list (cons "same" params)
+                (cons "other" (append params '(:connect-timeout 7)))))
+         (clutch-console-directory (make-temp-file "clutch-console-" t))
+         console indirect)
+    (cl-flet ((connect (name)
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (&rest _) name)))
+                  (clutch-connect))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'message) #'ignore))
+            (clutch-query-console "same")
+            (setq console (current-buffer))
+            (clutch-toggle-auto-commit)
+            (insert "SELECT 1")
+            (clutch-edit-indirect)
+            (setq indirect (current-buffer))
+            (let ((old clutch-connection))
+              (connect "same")
+              (should-not (eq clutch-connection old))
+              (should (eq (buffer-local-value 'clutch-connection console)
+                          clutch-connection))
+              (should (clutch-db-manual-commit-p clutch-connection)))
+            (let ((shared clutch-connection))
+              (connect "other")
+              (should-not (eq clutch-connection shared))
+              (should (eq (buffer-local-value 'clutch-connection console) shared))
+              (should (clutch--connection-alive-p shared))))
+        (when (buffer-live-p indirect)
+          (with-current-buffer indirect
+            (when (clutch--connection-alive-p clutch-connection)
+              (clutch-db-disconnect clutch-connection)))
+          (kill-buffer indirect))
+        (when (buffer-live-p console)
+          (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+            (kill-buffer console)))
+        (delete-directory clutch-console-directory t)))))
+
 (ert-deftest clutch-test-live-picking-a-moved-console-returns-to-it ()
   "Picking a console that followed a namespace switch should return to it.
 An ad hoc console that followed a typed USE or SET search_path was named

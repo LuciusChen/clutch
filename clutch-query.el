@@ -402,7 +402,7 @@ as the automatic reconnect does, rather than with PARAMS."
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
-        (setq-local clutch--console-target
+        (setq-local clutch--session-target
                     (clutch--connection-target
                      (clutch--resolve-sqlite-file params source-default-directory)))
         (clutch--update-console-buffer-name))))))
@@ -2059,11 +2059,13 @@ to execute or \\[clutch-indirect-abort] to abort."
          (conn (or clutch-connection
                    (clutch--find-connection)))
          (context (clutch--connection-context conn))
+         (target (clutch--session-target-of conn))
          (buf  (generate-new-buffer "*clutch: indirect*")))
     (pop-to-buffer buf)
     (clutch-mode)
     (when conn
       (clutch--bind-connection-context conn (car context) (cadr context))
+      (setq-local clutch--session-target target)
       (clutch--update-mode-line))
     (clutch--indirect-mode 1)
     (insert text)
