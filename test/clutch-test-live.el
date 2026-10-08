@@ -827,6 +827,148 @@ transaction state stayed behind."
         (ignore-errors
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
+(ert-deftest clutch-test-live-connect-in-a-console-moves-its-session ()
+  "`C-c C-e' in a console should move its whole session to a new connection.
+After the session was lost, it bound only the console, and the console's
+result reconnected to a session of its own; over a live session it left
+the result with no connection, so refreshing it failed.  The new
+connection started in Auto mode."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL consoles"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_connect_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params)))
+          (result-name (format " *clutch-connect-result-%d*" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id int PRIMARY KEY)" table))
+            (clutch-db-query admin (format "INSERT INTO %s VALUES (1)" table))
+            (clutch-test--with-live-console params
+              (clutch-test--with-live-result-buffer result-name
+                (clutch-toggle-auto-commit)
+                (clutch-test--run-in-console (format "SELECT id FROM %s" table))
+                (pcase-dolist (`(,label ,lose-session) '(("lost" t) ("live" nil)))
+                  (ert-info (label)
+                    (let ((old clutch-connection))
+                      (when lose-session
+                        (clutch-test--end-console-session admin))
+                      (clutch-connect)
+                      (should-not (eq clutch-connection old))
+                      (should (clutch--connection-alive-p clutch-connection))
+                      (should (clutch-db-manual-commit-p clutch-connection))
+                      (let ((conn clutch-connection))
+                        (with-current-buffer result-name
+                          (should (eq clutch-connection conn))
+                          (clutch-result-rerun)
+                          (clutch-test--await-queries)
+                          (should (eq clutch-connection conn)))))))
+                (clutch-toggle-auto-commit))))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+
+(ert-deftest clutch-test-live-picking-a-moved-console-returns-to-it ()
+  "Picking a console that followed a namespace switch should return to it.
+An ad hoc console that followed a typed USE or SET search_path was named
+by the parameters that followed it, so picking it in `clutch-query-console'
+opened a second console on a second connection.  Returning to it, live or
+after its session was lost, replaced the parameters `C-c C-e' connects
+with by those."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL USE and PostgreSQL SET search_path"))
+  (clutch-test--with-conn admin
+    (let* ((mysql (eq clutch-test-backend 'mysql))
+           (namespace (format "clutch_pick_%d" (emacs-pid)))
+           (params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           console picked)
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format (if mysql
+                                               "CREATE DATABASE %s"
+                                             "CREATE SCHEMA %s")
+                                           namespace))
+            (clutch-test--with-live-console params
+              (setq console (current-buffer))
+              (let ((opened-with clutch--console-ad-hoc-params))
+                (clutch-test--run-in-console
+                 (format (if mysql "USE %s" "SET search_path TO %s") namespace))
+                (should-not (equal clutch--connection-params opened-with))
+                (pcase-dolist (`(,label ,lose-session) '(("live" nil) ("lost" t)))
+                  (ert-info (label)
+                    (let ((conn clutch-connection))
+                      (when lose-session
+                        (clutch-test--end-console-session admin))
+                      (cl-letf (((symbol-function 'completing-read)
+                                 (lambda (_prompt collection &rest _args)
+                                   (should (member (buffer-name console) collection))
+                                   (buffer-name console))))
+                        (call-interactively #'clutch-query-console))
+                      (setq picked (current-buffer))
+                      (should (eq picked console))
+                      (should (eq (not (eq clutch-connection conn)) lose-session))
+                      (should (clutch--connection-alive-p clutch-connection))
+                      (should (equal clutch--console-ad-hoc-params opened-with))))))))
+        (when (and (buffer-live-p picked) (not (eq picked console)))
+          (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+            (kill-buffer picked)))
+        (ignore-errors
+          (clutch-db-query admin (format (if mysql
+                                             "DROP DATABASE IF EXISTS %s"
+                                           "DROP SCHEMA IF EXISTS %s CASCADE")
+                                         namespace)))))))
+
+(ert-deftest clutch-test-live-indirect-edit-reconnects-its-session ()
+  "An indirect edit opened outside Clutch should reconnect as its console does.
+It held its console's connection but none of its parameters, so after a
+typed USE or SET search_path it held only the namespace, and once the
+session was lost, running SQL in it failed with \"Connection params
+require :backend\"."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL USE and PostgreSQL SET search_path"))
+  (clutch-test--with-conn admin
+    (let* ((mysql (eq clutch-test-backend 'mysql))
+           (namespace (format "clutch_indirect_%d" (emacs-pid)))
+           (params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (result-name (format " *clutch-indirect-result-%d*" (emacs-pid)))
+           indirect)
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format (if mysql
+                                               "CREATE DATABASE %s"
+                                             "CREATE SCHEMA %s")
+                                           namespace))
+            (clutch-test--with-live-console params
+              (clutch-test--with-live-result-buffer result-name
+               (let ((console (current-buffer)))
+                (with-temp-buffer
+                  (insert "SELECT 1")
+                  (clutch-edit-indirect)
+                  (setq indirect (current-buffer)))
+                (with-current-buffer console
+                  (clutch-test--run-in-console
+                   (format (if mysql "USE %s" "SET search_path TO %s") namespace))
+                  (let ((lost (clutch-test--end-console-session admin)))
+                    (with-current-buffer indirect
+                      (clutch-test--run-in-console "SELECT 1")
+                      (should-not (eq clutch-connection lost))
+                      (should (clutch--connection-alive-p clutch-connection))
+                      (should (equal (clutch-db-current-schema clutch-connection)
+                                     namespace)))
+                    (should (eq clutch-connection
+                                (buffer-local-value 'clutch-connection indirect)))))))))
+        (when (buffer-live-p indirect)
+          (kill-buffer indirect))
+        (ignore-errors
+          (clutch-db-query admin (format (if mysql
+                                             "DROP DATABASE IF EXISTS %s"
+                                           "DROP SCHEMA IF EXISTS %s CASCADE")
+                                         namespace)))))))
+
 (ert-deftest clutch-test-live-mysql-result-refuses-writes-after-a-schema-switch ()
   "A MySQL result should refuse to submit once the console switched database.
 An edit staged in a result of database A, submitted after

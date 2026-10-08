@@ -856,52 +856,55 @@ return to, as an attached DuckDB database."
       (user-error
        "The session was in %s, which a new connection cannot return to; C-c C-e in the SQL buffer or REPL connects anew"
        namespace))
-    (let ((product (cadr context))
-          (conn (clutch--build-replacement-conn old-conn params))
-          (prior-tx-state (clutch--tx-state old-conn)))
-      (if (eq prior-tx-state 'dirty)
-          (clutch--discard-lost-transaction old-conn)
-        (clutch--clear-tx-state old-conn))
-      (clutch--release-connection-transport old-conn)
-      (clutch--require-live-connection conn)
-      (clutch--clear-connection-problem-capture old-conn)
-      (clutch--clear-connection-metadata-caches old-conn)
-      (clutch--rebind-connection-buffers old-conn conn params product)
-      (clutch--finalize-rebound-connection conn)
-      (pcase prior-tx-state
-        ('dirty
-         (message "Reconnected to %s; uncommitted changes were lost"
-                  (clutch--connection-key conn)))
-        ('uncertain
-         (message
-          "Reconnected to %s; prior transaction outcome is unknown, verify before retrying"
-          (clutch--connection-key conn)))
-        (_
-         (message "Reconnected to %s" (clutch--connection-key conn))))
-      t)))
+    (clutch--report-replaced-session
+     "Reconnected to" (clutch--replace-connection old-conn params (cadr context)))
+    t))
 
 (defun clutch--replace-connection (old-conn params &optional product)
   "Replace OLD-CONN with a new connection built from PARAMS.
-PRODUCT is the effective SQL product for the new logical session."
+PRODUCT is the effective SQL product for the new logical session.  The
+new connection is in the commit mode OLD-CONN had, and every buffer
+attached to OLD-CONN moves to it.  Return OLD-CONN's transaction state:
+`dirty' when its uncommitted work is lost, which marks its DML results
+rolled back, `uncertain' when a prior outcome is unknown, or nil."
   (let* ((product (or product (clutch--effective-sql-product params)))
          (new-conn (clutch--build-replacement-conn old-conn params))
+         (prior-tx-state (clutch--tx-state old-conn))
          (bound nil))
     ;; Tearing down the old connection can signal; until NEW-CONN is bound
     ;; to attached buffers, this function still owns its transport.
     (unwind-protect
         (progn
-          (clutch--clear-tx-state old-conn)
+          (if (eq prior-tx-state 'dirty)
+              (clutch--discard-lost-transaction old-conn)
+            (clutch--clear-tx-state old-conn))
           (unwind-protect
               (when (clutch--connection-alive-p old-conn)
                 (clutch-db-disconnect old-conn))
             (clutch--release-connection-transport old-conn))
           (clutch--require-live-connection new-conn)
+          (clutch--clear-connection-problem-capture old-conn)
           (clutch--rebind-connection-buffers old-conn new-conn params product)
           (setq bound t)
           (clutch--clear-connection-metadata-caches old-conn)
           (clutch--finalize-rebound-connection new-conn))
       (unless bound
-        (clutch--discard-unbound-connection new-conn)))))
+        (clutch--discard-unbound-connection new-conn)))
+    prior-tx-state))
+
+(defun clutch--report-replaced-session (verb prior-tx-state)
+  "Report the current buffer's new connection with VERB.
+PRIOR-TX-STATE is what `clutch--replace-connection' returned for the
+connection it replaced."
+  (let ((key (clutch--connection-key clutch-connection)))
+    (pcase prior-tx-state
+      ('dirty
+       (message "%s %s; uncommitted changes were lost" verb key))
+      ('uncertain
+       (message "%s %s; prior transaction outcome is unknown, verify before retrying"
+                verb key))
+      (_
+       (message "%s %s" verb key)))))
 
 (defun clutch--ensure-connection ()
   "Ensure current buffer has a live connection.
@@ -2533,7 +2536,10 @@ the transaction ends either way."
 If `clutch-connection-alist' is non-empty, offer saved connections via
   `completing-read'.  Empty or unmatched input prompts for each parameter.
 The password is resolved via `auth-source' when not in the connection
-params; see `clutch-connection-alist' for details."
+params; see `clutch-connection-alist' for details.
+A query console that has a connection connects anew with its own saved
+or temporary parameters, in the commit mode it was in, and its results
+and the other buffers of its session move to the new connection."
   (interactive)
   ;; Closing the connection would not stop its statement on the server.
   (clutch--refuse-while-running clutch-connection)
@@ -2547,24 +2553,28 @@ params; see `clutch-connection-alist' for details."
                      (clutch--connect-params-for-current-buffer)
                      source-default-directory))
            (effective-params (clutch--materialize-connection-params params))
-           (product (clutch--effective-sql-product effective-params))
-           (conn    (clutch--build-conn effective-params)))
-      ;; Tearing down the old connection can signal or be quit; until this
-      ;; buffer holds CONN, this function still owns it.
-      (unwind-protect
-          (progn
-            (if old-live-p
-                (clutch--do-disconnect old-conn)
-              ;; Other buffers keep a dead OLD-CONN to reconnect in place;
-              ;; only its transport is released here.
-              (clutch--release-connection-transport old-conn))
-            (clutch--require-live-connection conn)
-            (when old-conn
-              (clutch--clear-connection-metadata-caches old-conn))
-            (clutch--activate-current-buffer-connection conn effective-params product)
-            (message "Connected to %s" (clutch--connection-key conn)))
-        (unless (eq clutch-connection conn)
-          (clutch--discard-unbound-connection conn))))))
+           (product (clutch--effective-sql-product effective-params)))
+      (if (and old-conn clutch--console-name)
+          (clutch--report-replaced-session
+           "Connected to"
+           (clutch--replace-connection old-conn effective-params product))
+        (let ((conn (clutch--build-conn effective-params)))
+          ;; Tearing down the old connection can signal or be quit; until this
+          ;; buffer holds CONN, this function still owns it.
+          (unwind-protect
+              (progn
+                (if old-live-p
+                    (clutch--do-disconnect old-conn)
+                  ;; Other buffers keep a dead OLD-CONN to reconnect in place;
+                  ;; only its transport is released here.
+                  (clutch--release-connection-transport old-conn))
+                (clutch--require-live-connection conn)
+                (when old-conn
+                  (clutch--clear-connection-metadata-caches old-conn))
+                (clutch--activate-current-buffer-connection conn effective-params product)
+                (message "Connected to %s" (clutch--connection-key conn)))
+            (unless (eq clutch-connection conn)
+              (clutch--discard-unbound-connection conn))))))))
 
 ;;;###autoload
 (defun clutch-prepare-ssh-host (&optional ssh-host)

@@ -10668,6 +10668,36 @@ buried instead of killed, since its statement's reply needs it."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest clutch-test-edit-indirect-holds-the-params-of-its-connection ()
+  "An indirect edit opened outside Clutch should hold its connection's params.
+It held a console's connection but none of its parameters, so once the
+console followed a namespace switch it held only that namespace, and
+reconnecting from it failed with \"Connection params require :backend\"."
+  (let ((console (generate-new-buffer " *clutch-test-console*"))
+        (params '(:backend mysql :host "db" :database "app"))
+        indirect)
+    (unwind-protect
+        (progn
+          (with-current-buffer console
+            (setq-local clutch-connection 'live-conn
+                        clutch--connection-params params
+                        clutch--conn-sql-product 'mysql))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (eq conn 'live-conn)))
+                    ((symbol-function 'clutch--update-mode-line) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (with-temp-buffer
+              (insert "SELECT 1")
+              (clutch-edit-indirect)
+              (setq indirect (current-buffer))))
+          (with-current-buffer indirect
+            (should (eq clutch-connection 'live-conn))
+            (should (equal clutch--connection-params params))
+            (should (eq clutch--conn-sql-product 'mysql))))
+      (dolist (buffer (list console indirect))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest clutch-test-statement-reply-after-its-buffer-moved-is-only-reported ()
   "A statement's reply after its buffer left its connection should only be reported.
 Drawing it put the old connection's error page in the result buffer that the
