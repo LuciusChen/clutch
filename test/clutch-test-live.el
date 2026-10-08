@@ -1897,6 +1897,66 @@ The current buffer is the result."
           (clutch-test--await-queries))))
     prompts))
 
+(ert-deftest clutch-test-live-xtdb-first-write-transaction-defers-metadata ()
+  :tags '(:xtdb-live)
+  "A cold console's catalog refresh must leave its write transaction usable."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn admin
+    (let ((table (clutch-test--xtdb-table "cold_tx"))
+          (params (append '(:backend xtdb) (clutch-test--live-connect-params))))
+      (clutch-test--with-live-console params
+        (clutch-test--run-in-console "BEGIN READ WRITE")
+        (ert-run-idle-timers)
+        (should (eq (pgsql-transaction-status
+                     (clutch-db-pg--connection-client clutch-connection))
+                    'in-transaction))
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a', 'kept')" table)
+         "COMMIT")
+        (should (equal (clutch-test--xtdb-rows admin
+                                             (format "SELECT name FROM %s" table))
+                       '(("kept"))))
+        (ert-run-idle-timers)
+        (clutch-test--await
+         (lambda () (eq (plist-get (clutch--schema-status-entry clutch-connection) :state)
+                        'ready)))))))
+
+(ert-deftest clutch-test-live-xtdb-manual-read-does-not-open-a-read-only-transaction ()
+  :tags '(:xtdb-live)
+  "Manual reads must not prevent the following DML from opening its transaction.
+An ASSERT opens one as a write does, so it still guards the writes after it."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (clutch-test--with-conn admin
+    (let ((table (clutch-test--xtdb-table "read_then_write"))
+          (params (append '(:backend xtdb) (clutch-test--live-connect-params))))
+      (clutch-test--with-live-console params
+        (clutch-toggle-auto-commit)
+        (clutch-test--run-in-console "SELECT 1")
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a', 'kept')" table))
+        (should (clutch--tx-dirty-p clutch-connection))
+        (should-not (clutch-test--xtdb-rows admin (format "SELECT name FROM %s" table)))
+        (clutch-commit)
+        (should (equal (clutch-test--xtdb-rows admin (format "SELECT name FROM %s" table))
+                       '(("kept"))))
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('b', 'discarded')" table))
+        (clutch-rollback)
+        (should (equal (clutch-test--xtdb-rows admin
+                                             (format "SELECT name FROM %s ORDER BY _id" table))
+                       '(("kept"))))
+        ;; An ASSERT opens the transaction too, so it guards the write after it.
+        (clutch-test--run-in-console
+         "ASSERT 1 = 2"
+         (format "INSERT INTO %s (_id, name) VALUES ('c', 'guarded')" table))
+        (should-error (clutch-commit) :type 'user-error)
+        (clutch-rollback)
+        (should (equal (clutch-test--xtdb-rows admin
+                                             (format "SELECT name FROM %s ORDER BY _id" table))
+                       '(("kept"))))))))
+
 (ert-deftest clutch-test-live-xtdb-reads-its-own-catalog ()
   :tags '(:xtdb-live)
   "XTDB should connect as its own backend and read its catalog as XTDB has it."

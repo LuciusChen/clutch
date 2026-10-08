@@ -4633,6 +4633,39 @@ value that is no number takes none."
                   :type 'user-error)
     (should-not called)))
 
+(ert-deftest clutch-db-test-xtdb-manual-mode-begins-only-to-write ()
+  "XTDB in Manual mode should open a transaction only before SQL that writes.
+XTDB cannot mix queries and DML in a transaction and took one opened
+before a SELECT as read-only, so the next INSERT failed.  An ASSERT opens
+one too, since it guards the writes after it.  Background metadata waits
+while any transaction is open, as a catalog query would fail it."
+  (require 'clutch-db-pg)
+  (clutch-db-test--with-pgsql-client
+    (let* ((client (clutch-db-test--make-pg-client))
+           (conn (clutch-db-pg--make-xtdb-connection :client client :manual-commit t))
+           sent)
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (_client sql)
+                   (push sql sent)
+                   (clutch-db-test--make-pg-result)))
+                ((symbol-function 'pgsql-busy-p) #'ignore))
+        (pcase-dolist (`(,sql ,begins)
+                       '(("SELECT * FROM t" nil)
+                         ("BEGIN READ ONLY" nil)
+                         ("ASSERT 1 = 1" t)
+                         ("INSERT INTO t (_id) VALUES (1)" t)
+                         ("ERASE FROM t WHERE _id = 1" t)))
+          (ert-info (sql)
+            (setq sent nil)
+            (clutch-db-pg--ensure-foreground-transaction conn sql)
+            (should (equal sent (and begins '("BEGIN READ WRITE"))))))
+        (should-not (clutch-db-busy-p conn))
+        (setf (plist-get client :transaction-status) 'in-transaction)
+        (setq sent nil)
+        (clutch-db-pg--ensure-foreground-transaction conn "INSERT INTO t (_id) VALUES (2)")
+        (should-not sent)
+        (should (clutch-db-busy-p conn))))))
+
 (ert-deftest clutch-db-test-xtdb-lists-no-objects-or-schemas ()
   "XTDB has no objects but tables and no schema to switch to.
 Listing them should send no catalog query."
