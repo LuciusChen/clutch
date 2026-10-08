@@ -241,6 +241,8 @@ On native MySQL and PostgreSQL, and on XTDB, the server reports with each reply 
 
 If recovery of an atomic submission fails, or any `COMMIT` returns without a known outcome, the transaction indicator changes to `Tx: Uncertain`. Clutch then blocks further queries, commit, and transaction-mode changes; explicitly roll back with `C-c C-u`, or reconnect if rollback cannot recover the session. Either action restores a usable session, but it cannot prove that an earlier uncertain commit did not happen, so verify the database before retrying retained work.
 
+After a session is lost, editing a result cell, copying rows as UPDATE statements and submitting staged changes reconnect before contacting the server, keeping the session's Auto or Manual mode. If reconnecting restores another database, schema or search path, these actions refuse until you switch back or rerun the query. An uncertain submission still requires explicit recovery before retrying. After an explicit disconnect, results retain their rows, but commands that need the connection, including copying MongoDB document mutation snippets, report that it is closed.
+
 ### Password Management
 
 Connection entries may include `:password`, but auth-source is preferred. When `:password` is omitted, clutch resolves credentials through:
@@ -360,7 +362,7 @@ You can also open any `.sql` file, enable `clutch-mode`, and connect manually â€
 4. C-c C-c                 â€” execute region, or the current statement/query at point
 ```
 
-In ordinary `clutch-mode` or REPL buffers, `C-c C-e` keeps that generic connect flow: select a saved connection, or press RET with no matching connection to enter temporary params. For SQLite files, prefer `M-x clutch-query-sqlite-file`, or `M-x clutch-query-console` followed by RET with no matching connection and backend `sqlite`; both open a connected SQL console rather than using the database file buffer as the editor. In query-console buffers, `C-c C-e` reconnects the connection already associated with that console, without reopening the global connection picker. To switch to another saved or temporary connection, use `M-x clutch-query-console`.
+In ordinary `clutch-mode` or REPL buffers, `C-c C-e` keeps that generic connect flow: select a saved connection, or press RET with no matching connection to enter temporary params. For SQLite files, prefer `M-x clutch-query-sqlite-file`, or `M-x clutch-query-console` followed by RET with no matching connection and backend `sqlite`; both open a connected SQL console rather than using the database file buffer as the editor. In query-console buffers, `C-c C-e` connects the console's session anew with the connection already associated with that console, without reopening the global connection picker: its results move to the new connection, which keeps the console's commit mode, unless the saved entry changed in anything but `:password` or `:pass-entry`, when the console connects alone. To switch to another saved or temporary connection, use `M-x clutch-query-console`.
 
 For deeper troubleshooting, enable `M-x clutch-debug-mode`, reproduce the failure, then inspect `*clutch-debug*`. Enabling the mode starts a fresh capture window and creates that dedicated buffer automatically. It is the only supported debug UI, and it shows problem records, generated/internal SQL when relevant, recent redacted debug events, and JDBC stderr/debug payload when available.
 
