@@ -222,6 +222,8 @@ the SELECT projection cannot be proven writable."
 (defun clutch-result--source-column-details (table op)
   "Return the column details of source TABLE for OP, loading them if needed."
   (clutch-result--require-connection)
+  (clutch--ensure-connection)
+  (clutch-result--refuse-if-moved)
   (or (clutch--ensure-column-details clutch-connection table t)
       (user-error "Cannot %s: source column metadata is unavailable" op)))
 
@@ -1193,6 +1195,7 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
   (when (clutch--tx-uncertain-p clutch-connection)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before submitting"))
+  (clutch--ensure-connection)
   (clutch-result--refuse-if-moved)
   (let* ((insert-stmts (when clutch--pending-inserts
                          (clutch-result--build-pending-insert-statements)))
