@@ -62,6 +62,8 @@ jobs:
       - name: Reproduce
         shell: pwsh
         run: |
+          $env:EMACS_SERVER_FILE = "$env:USERPROFILE\.emacs.d\server\server"
+          Get-ChildItem "$env:USERPROFILE\.emacs.d\server" -ErrorAction SilentlyContinue | Out-String | Write-Host
           New-Item -ItemType Directory -Force out | Out-Null
           .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt"
           '### Emacs ${{ matrix.emacs-version }}' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
