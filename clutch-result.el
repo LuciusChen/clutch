@@ -389,6 +389,7 @@ Signal `user-error' if the user declines."
 
 (defun clutch-result--preview-execution-sql ()
   "Return the SQL that would execute from a result buffer."
+  (clutch-result--require-connection)
   (if (clutch-result--pending-changes-p)
       (string-trim-right (clutch-result--pending-sql-content))
     (clutch-result--effective-query)))
@@ -618,6 +619,7 @@ with the page.  SUCCESS-MESSAGE replaces the message about the rows
 loaded."
   (unless (clutch-result--server-pageable-p)
     (user-error "Server-side pagination is not available for this query result"))
+  (clutch-result--require-connection)
   (let* ((plan (clutch-result--current-query-plan))
          (effective-sql (plist-get plan :sql))
          (row-identity-prep (plist-get plan :row-identity-prep))
@@ -1096,6 +1098,7 @@ THEN, when non-nil, is called in this buffer once the count arrives."
   (interactive)
   (unless (clutch-result--server-rewritable-p)
     (user-error "Server-side count is not available for this query result"))
+  (clutch-result--require-connection)
   (let ((base (clutch-result--effective-query)))
     (clutch--ensure-connection)
     (clutch-result--refuse-if-moved)
@@ -1119,6 +1122,7 @@ THEN, when non-nil, is called in this buffer once the count arrives."
   "Re-execute the last query that produced this result buffer.
 A server-side filter stays applied, with the row identity it had."
   (interactive)
+  (clutch-result--require-connection)
   (let* ((filter (and clutch--base-query clutch--where-filter))
          (plan (clutch-result--current-query-plan))
          (sql (or (plist-get plan :sql)
@@ -1492,6 +1496,7 @@ result in place."
     (user-error "No query to filter"))
   (unless (clutch-result--server-rewritable-p)
     (user-error "Server-side filter is not available for this query result"))
+  (clutch-result--require-connection)
   (let* ((base (or clutch--base-query
                    clutch--last-query))
          (current clutch--where-filter)
@@ -1802,6 +1807,7 @@ header from tabular formats."
      (clutch-result--copy-rows format rect omit-header))
     ('insert
      (clutch-result--require-action 'copy-insert "Copy INSERT SQL")
+     (clutch-result--require-connection)
      (clutch-result--copy-rows 'insert rect))
     ('update
      (clutch-result--require-action 'copy-update "Copy UPDATE SQL")
@@ -1809,6 +1815,7 @@ header from tabular formats."
     ((or 'document-insert-one 'document-insert-many
          'document-replace-one 'document-delete-one
          'document-update-one-set)
+     (clutch-result--require-connection)
      (clutch-result--copy-rows format rect))
     (_
      (user-error "Unsupported copy format: %s" format))))
@@ -3612,6 +3619,7 @@ When details are not yet cached, attempts to load them from the database."
     (unless clutch--result-column-details
       (when-let* ((table (clutch--result-source-key))
                   (cols clutch--result-columns))
+        (clutch-result--require-connection)
         (setq-local clutch--result-column-details
                     (clutch--result-column-details
                      clutch-connection table cols t))))

@@ -3885,6 +3885,47 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest clutch-test-query-console-picker-returns-to-a-moved-ad-hoc-console ()
+  "Picking an ad hoc console that followed a namespace switch should return there.
+The picker named it by the parameters that followed the switch, so it
+opened a second console on a second connection, and returning to it
+replaced the parameters `C-c C-e' connects with by those."
+  (let* ((name "MySQL: app@db:3306/app")
+         (opened-with '(:backend mysql :host "db" :port 3306 :user "app"
+                        :database "app"))
+         (moved '(:backend mysql :host "db" :port 3306 :user "app"
+                  :database "other"))
+         (console (generate-new-buffer " *clutch-moved-ad-hoc*"))
+         (clutch-connection-alist nil)
+         built)
+    (unwind-protect
+        (progn
+          (with-current-buffer console
+            (clutch-mode)
+            (setq-local clutch--console-name name
+                        clutch--console-storage-name
+                        (clutch--console-persistence-name name opened-with)
+                        clutch--console-ad-hoc-params opened-with
+                        clutch--connection-params moved
+                        clutch-connection 'live-conn))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt _collection &rest _args)
+                       (buffer-name console)))
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (eq conn 'live-conn)))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (_params)
+                       (setq built t)
+                       'unexpected-conn))
+                    ((symbol-function 'clutch--update-console-buffer-name)
+                     #'ignore))
+            (call-interactively #'clutch-query-console)
+            (should-not built)
+            (should (eq (current-buffer) console))
+            (should (equal clutch--console-ad-hoc-params opened-with))
+            (should (equal clutch--connection-params moved))))
+      (kill-buffer console))))
+
 (ert-deftest clutch-test-query-console-tramp-origin-contract ()
   "Query console connection origin should come from the command source buffer."
   (dolist (case
@@ -3967,6 +4008,175 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
           (clutch-connect)
           (should-not read-called)
           (should (equal built params)))))))
+
+(ert-deftest clutch-test-connect-in-a-console-moves-its-session ()
+  "`C-c C-e' in a console should move its whole session to a new connection.
+It bound only the console: over a lost session its results reconnected
+to sessions of their own, and over a live one they were left with no
+connection.  The new connection started in the mode the entry starts in,
+and uncommitted work lost with the old one went unreported."
+  (pcase-dolist (`(,label ,old-live ,tx-state ,expected-message)
+                 '(("live" t nil "Connected to test-conn")
+                   ("lost with uncommitted work" nil dirty
+                    "Connected to test-conn; uncommitted changes were lost")))
+    (ert-info (label)
+      (let ((result (generate-new-buffer " *clutch-connect-result*"))
+            (clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
+            (clutch--tx-state-cache (make-hash-table :test 'eq))
+            built disconnected auto-commit marked messages)
+        (unwind-protect
+            (with-temp-buffer
+              (clutch-mode)
+              (setq-local clutch--console-name "alpha"
+                          clutch--console-target
+                          (clutch--connection-target
+                           (clutch-prepare-connection-params
+                            (clutch--saved-connection-params "alpha")))
+                          clutch-connection 'old-conn)
+              (with-current-buffer result
+                (setq-local clutch-connection 'old-conn))
+              (when tx-state
+                (puthash 'old-conn tx-state clutch--tx-state-cache))
+              (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+                (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                           (lambda (conn)
+                             (or (eq conn 'new-conn)
+                                 (and old-live (eq conn 'old-conn)))))
+                          ((symbol-function 'clutch--confirm-session-close) #'ignore)
+                          ((symbol-function 'clutch-db-disconnect)
+                           (lambda (conn) (push conn disconnected)))
+                          ((symbol-function 'clutch--release-connection-transport)
+                           #'ignore)
+                          ((symbol-function 'clutch-db-manual-commit-supported-p)
+                           #'always)
+                          ((symbol-function 'clutch-db-manual-commit-p)
+                           (lambda (conn) (eq conn 'old-conn)))
+                          ((symbol-function 'clutch-db-set-auto-commit)
+                           (lambda (conn enabled)
+                             (push (list conn enabled) auto-commit)))
+                          ((symbol-function 'clutch--mark-dml-results-rolled-back)
+                           (lambda (conn) (push conn marked)))
+                          ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                          ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
+                          ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
+                          ((symbol-function 'clutch--refresh-connection-render-state)
+                           #'ignore)
+                          ((symbol-function 'clutch--update-mode-line) #'ignore)
+                          ((symbol-function 'message)
+                           (lambda (format-string &rest args)
+                             (push (apply #'format format-string args) messages))))
+                  (clutch-connect)
+                  (should (equal built '(:backend mysql :database "app_a"
+                                         :pass-entry "alpha")))
+                  (should (eq clutch-connection 'new-conn))
+                  (should (eq (buffer-local-value 'clutch-connection result)
+                              'new-conn))
+                  (should (equal auto-commit '((new-conn nil))))
+                  (should (equal disconnected (and old-live '(old-conn))))
+                  (should (equal marked (and tx-state '(old-conn))))
+                  (should-not (clutch--tx-state 'old-conn))
+                  (should (member expected-message messages)))))
+          (kill-buffer result))))))
+
+(ert-deftest clutch-test-connect-in-a-console-whose-entry-moved-connects-it-alone ()
+  "`C-c C-e' should not move a console's session to another target.
+The console's saved entry led elsewhere since its session connected, and
+moving the session took its results there, so an edit staged on one
+server was written to another.  Once connected there, the console's next
+`C-c C-e' moves its session again."
+  (pcase-dolist (`(,label ,before ,after)
+                 '(("host"
+                    (:backend mysql :host "db1" :database "app")
+                    (:backend mysql :host "db2" :database "app"))
+                   ("database property"
+                    (:backend mongodb :surface sql-interface :host "db1"
+                     :user "u" :password "pw" :props (("database" . "app")))
+                    (:backend mongodb :surface sql-interface :host "db1"
+                     :user "u" :password "pw" :props (("database" . "other"))))))
+    (ert-info (label)
+      (let ((result (generate-new-buffer " *clutch-connect-result*"))
+            (clutch-connection-alist (list (cons "alpha" before)))
+            built replaced)
+        (unwind-protect
+            (with-temp-buffer
+              (clutch-mode)
+              (setq-local clutch--console-name "alpha"
+                          clutch--console-target
+                          (clutch--connection-target
+                           (clutch-prepare-connection-params
+                            (clutch--saved-connection-params "alpha")))
+                          clutch-connection 'old-conn)
+              (with-current-buffer result
+                (setq-local clutch-connection 'old-conn))
+              (setq clutch-connection-alist (list (cons "alpha" after)))
+              (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+                (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                           (lambda (conn) (memq conn '(old-conn new-conn))))
+                          ((symbol-function 'clutch--confirm-session-close) #'ignore)
+                          ((symbol-function 'clutch-db-disconnect) #'ignore)
+                          ((symbol-function 'clutch--release-connection-transport)
+                           #'ignore)
+                          ((symbol-function 'clutch--refresh-connection-render-state)
+                           #'ignore)
+                          ((symbol-function 'clutch--replace-connection)
+                           (lambda (&rest _) (setq replaced t))))
+                  (clutch-connect)
+                  (should-not replaced)
+                  (should (equal (plist-get built :host) (plist-get after :host)))
+                  (should (equal (plist-get built :props) (plist-get after :props)))
+                  (should (eq clutch-connection 'new-conn))
+                  (should-not (buffer-local-value 'clutch-connection result))
+                  (clutch-connect)
+                  (should replaced))))
+          (kill-buffer result))))))
+
+(ert-deftest clutch-test-connect-in-a-console-moves-its-session-after-new-credentials ()
+  "`C-c C-e' should move a console's session when only its credentials changed.
+A new password or password entry in the saved entry leads to the same
+server, so the session and its results move as they do otherwise."
+  (let ((clutch-connection-alist
+         '(("alpha" . (:backend mysql :host "db1" :database "app"))))
+        built replaced)
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch--console-name "alpha"
+                  clutch--console-target
+                  (clutch--connection-target
+                   (clutch-prepare-connection-params
+                    (clutch--saved-connection-params "alpha")))
+                  clutch-connection 'old-conn)
+      (setq clutch-connection-alist
+            '(("alpha" . (:backend mysql :host "db1" :database "app"
+                          :password "rotated" :pass-entry "vault/alpha"))))
+      (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (memq conn '(old-conn new-conn))))
+                  ((symbol-function 'clutch--confirm-session-close) #'ignore)
+                  ((symbol-function 'clutch--replace-connection)
+                   (lambda (&rest _) (setq replaced t))))
+          (clutch-connect)
+          (should replaced))))))
+
+(ert-deftest clutch-test-connect-in-a-saved-sqlite-console-moves-its-session ()
+  "`C-c C-e' should move the session of a saved SQLite console.
+Its file named with `~' was compared as written when the console
+connected and resolved by `C-c C-e', so the session never moved."
+  (let ((clutch-connection-alist
+         '(("lite" . (:backend sqlite :database "~/clutch-test-lite.db"))))
+        (clutch-console-directory (make-temp-file "clutch-console-" t))
+        built replaced opened)
+    (unwind-protect
+        (clutch-test--with-connect-build-stubs (built 'sqlite 'lite-conn)
+          (clutch-query-console "lite")
+          (setq opened (current-buffer))
+          (cl-letf (((symbol-function 'clutch--confirm-session-close) #'ignore)
+                    ((symbol-function 'clutch--replace-connection)
+                     (lambda (&rest _) (setq replaced t))))
+            (clutch-connect))
+          (should replaced))
+      (when (buffer-live-p opened)
+        (kill-buffer opened))
+      (delete-directory clutch-console-directory t))))
 
 (ert-deftest clutch-test-query-console-switches-to-existing-connected-buffer ()
   "Query console should reuse an existing connected console buffer."
