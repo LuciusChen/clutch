@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6 - Unreleased
+
+### Fixed
+
+- A ClickHouse connection given by a `:url` lists the tables of the database the URL names, and `clutch-switch-schema` moves it there, as the new connection's `:url` names the database switched to. It listed the tables of `default`, and after a switch it stayed in the URL's database, where unqualified SQL ran, while Clutch showed and listed the new one.
+- After `clutch-switch-schema` on MongoDB, the automatic reconnect returns to the database switched to and authenticates as the connection first did. It authenticated against that database, so a user defined in another, such as `admin`, could not reconnect, and with a `:url` that names a database it returned there.
+- The automatic reconnect of a DuckDB console that was in an attached or an in-memory database, which a new connection cannot reach, refuses with a message naming it, and `C-c C-e` connects anew. It connected to the URL's database file, or to a new, empty in-memory database, and ran the next statement there. With a URL that names its file by a relative path, which the JDBC agent resolves in its own directory, only an in-memory database is refused.
+
 ## 0.5.5 - 2026-10-08
 
 ### Changed
