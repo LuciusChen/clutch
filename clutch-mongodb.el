@@ -194,7 +194,8 @@ Emacs result contract from materializing an unbounded collection."
 
 (defun clutch-mongodb-connect (params)
   "Connect to MongoDB using PARAMS.
-PARAMS may contain :url, or structured :host/:port/:database fields.
+PARAMS may contain :url, or structured :host/:port/:database fields, and
+:schema, the database to work in when it is not the one they name.
 The default connection delegates to public mongodb.el APIs.  When PARAMS select
 `:surface sql-interface', delegate to the JDBC SQL Interface surface."
   (clutch-mongodb--validate-surface params)
@@ -207,7 +208,7 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (clutch-mongodb--with-mongodb-errors
       (let ((client (mongodb-connect params)))
         (make-clutch-mongodb-conn
-         :database (mongodb-conn-database client)
+         :database (or (plist-get params :schema) (mongodb-conn-database client))
          :client client)))))
 
 ;;;; MQL helper parsing
@@ -1551,9 +1552,12 @@ display them in their Extended JSON spelling."
 
 (cl-defmethod clutch-db-update-namespace-params
     ((conn clutch-mongodb-conn) params)
-  "Store MongoDB CONN's current database in a copy of connection PARAMS."
+  "Store MongoDB CONN's current database in a copy of connection PARAMS.
+It goes in :schema, which `clutch-mongodb-connect' works in: mongodb.el
+takes :database, or the database a :url names, for the authentication
+database too when authSource names none."
   (plist-put (copy-sequence params)
-             :database (clutch-mongodb-conn-database conn)))
+             :schema (clutch-mongodb-conn-database conn)))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-mongodb-conn))
   "Return collection names for CONN's current MongoDB database."

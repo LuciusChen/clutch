@@ -2519,6 +2519,30 @@ Filtering the category listing ran a schema-wide query per describe."
               (when check-captured
                 (should (equal captured-params params))))))))))
 
+(ert-deftest clutch-db-test-mongodb-switch-keeps-the-authentication-database ()
+  "A MongoDB switch should come back on reconnect and keep where it authenticates.
+It wrote :database, which mongodb.el also takes for the authentication
+database when authSource names none, so the reconnect of a user defined
+in admin failed; and a :url naming a database won over it, so the
+reconnect returned there."
+  (let ((params (clutch-db-update-namespace-params
+                 (clutch-db-test--make-mongodb-conn "dbb")
+                 '(:backend mongodb :host "h" :user "root"))))
+    (should (equal (plist-get params :schema) "dbb"))
+    (should-not (plist-get params :database)))
+  (pcase-dolist (`(,params ,client-database)
+                 '(((:backend mongodb :url "mongodb://h/dba" :schema "dbb") "dba")
+                   ((:backend mongodb :host "h" :user "root" :schema "dbb") "test")))
+    (ert-info ((format "%S" params))
+      (let (captured)
+        (cl-letf (((symbol-function 'mongodb-connect)
+                   (lambda (params)
+                     (setq captured params)
+                     (make-mongodb-conn :database client-database :closed nil))))
+          (let ((conn (clutch-mongodb-connect params)))
+            (should (equal (clutch-db-current-schema conn) "dbb"))
+            (should-not (plist-get captured :database))))))))
+
 (ert-deftest clutch-db-test-mongodb-connect-sql-interface-delegates-to-jdbc ()
   "MongoDB SQL Interface should stay under the mongodb backend but use JDBC."
   (let (captured-driver captured-params)
@@ -3424,6 +3448,77 @@ passes validation fails the test instead of failing on the fake client."
                  :source-schema "default"))))
       (should (string-match-p "FROM system\\.tables" captured-sql))
       (should (string-match-p "database = 'default'" captured-sql)))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-url-names-the-database-it-lists ()
+  "ClickHouse given only a :url should list the tables of the URL's database.
+It listed the tables of `default', while it showed and queried the URL's.
+The driver also takes a protocol, credentials, an IPv6 address, a list of
+hosts and tags, an HTTP path before the database, and a `database'
+property, the last one if there are several, which it prefers to the
+path."
+  (dolist (url '("jdbc:clickhouse://db:8123/analytics"
+                 "jdbc:clickhouse://db:8123/analytics#dc1,r1"
+                 "jdbc:clickhouse://db:8123?database=analytics"
+                 "jdbc:clickhouse://db:8123/default?ssl=true&database=analytics"
+                 "jdbc:clickhouse://db:8123/default?database=other&database=analytics"
+                 "jdbc:clickhouse://db:8123/proxy/analytics"
+                 "jdbc:clickhouse://h1:8123,h2:8123/a/b/analytics?ssl=true"
+                 "jdbc:clickhouse:http://db:8123/analytics"
+                 "jdbc:clickhouse://h1:8123,h2:8123/analytics"
+                 "jdbc:clickhouse://user:pass@db:8123/analytics"
+                 "jdbc:clickhouse://[::1]:8123/analytics"
+                 "jdbc:ch://db:8123/analytics?ssl=true"))
+    (ert-info (url)
+      (let ((conn (make-clutch-jdbc-conn
+                   :conn-id 5 :params (list :driver 'clickhouse :url url)))
+            captured-sql)
+        (cl-letf (((symbol-function 'clutch-db-query)
+                   (lambda (_conn sql)
+                     (setq captured-sql sql)
+                     (make-clutch-db-result :rows nil))))
+          (clutch-db-list-table-entries conn)
+          (should (string-match-p "database = 'analytics'" captured-sql))
+          (should (equal (clutch-jdbc--conn-catalog conn) "analytics"))
+          (should (equal (clutch-db-database conn) "analytics"))))))
+  (should-not (clutch-jdbc--clickhouse-url-database
+               "jdbc:clickhouse://db:8123/proxy/")))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-switch-names-the-database-in-the-url ()
+  "A ClickHouse switch should name the new database in the :url it reconnects with.
+The new connection was opened from the unchanged :url and stayed in the
+old database, while Clutch showed and listed the new one."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5 :params '(:driver clickhouse))))
+    (pcase-dolist (`(,url ,expected)
+                   '(("jdbc:clickhouse://db:8123/dba" "jdbc:clickhouse://db:8123/dbb")
+                     ("jdbc:clickhouse://db:8123/dba?ssl=true"
+                      "jdbc:clickhouse://db:8123/dbb?ssl=true")
+                     ("jdbc:clickhouse://db:8123" "jdbc:clickhouse://db:8123/dbb")
+                     ("jdbc:ch:http://db:8123/dba" "jdbc:ch:http://db:8123/dbb")
+                     ("jdbc:clickhouse://db:8123/dba?x=1#dc1,r1"
+                      "jdbc:clickhouse://db:8123/dbb?x=1#dc1,r1")
+                     ("jdbc:ch://db#t" "jdbc:ch://db/dbb#t")
+                     ("jdbc:clickhouse://db:8123?database=dba"
+                      "jdbc:clickhouse://db:8123?database=dbb")
+                     ("jdbc:clickhouse://db:8123/dbx?ssl=true&database=dba#t"
+                      "jdbc:clickhouse://db:8123/dbx?ssl=true&database=dbb#t")
+                     ("jdbc:clickhouse://db:8123?database=a&ssl=true&database=dba"
+                      "jdbc:clickhouse://db:8123?database=dbb&ssl=true&database=dbb")
+                     ("jdbc:clickhouse://db:8123/proxy/dba"
+                      "jdbc:clickhouse://db:8123/proxy/dbb")
+                     ("jdbc:clickhouse://db:8123/a/b/dba?ssl=true"
+                      "jdbc:clickhouse://db:8123/a/b/dbb?ssl=true")
+                     ("jdbc:clickhouse://db:8123/proxy/"
+                      "jdbc:clickhouse://db:8123/proxy/dbb")))
+      (ert-info (url)
+        (let ((params (clutch-db-namespace-reconnect-params
+                       conn (list :url url :user "u") "dbb")))
+          (should (equal (plist-get params :url) expected))
+          (should (equal (plist-get params :database) "dbb"))
+          (should (equal (plist-get params :user) "u")))))
+    (let ((params (clutch-db-namespace-reconnect-params
+                   conn '(:host "db" :port 8123 :database "dba") "dbb")))
+      (should (equal (plist-get params :database) "dbb"))
+      (should-not (plist-get params :url)))))
 
 (ert-deftest clutch-db-test-jdbc-clickhouse-search-table-entries-filters-system-tables ()
   "ClickHouse table search should filter discovered table entries by prefix."
@@ -7171,6 +7266,29 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-database conn schema)
         (clutch-db-set-current-schema conn original)))))
 
+(ert-deftest clutch-db-test-mongodb-live-switched-params-lead-back-there ()
+  "A MongoDB connection with the switched parameters should work in that database.
+A :url naming a database won over the :database the switch wrote, so the
+automatic reconnect worked in the URL's database again."
+  :tags '(:db-live :mongodb-live)
+  (clutch-db-test--with-mongodb conn
+    (let ((other (format "%s_restore_%d" clutch-db-test-mongodb-database (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-set-current-schema conn other)
+            (let ((reopened (clutch-db-connect
+                             'mongodb
+                             (clutch-db-update-namespace-params
+                              conn (clutch-db-test--mongodb-live-params)))))
+              (unwind-protect
+                  (progn
+                    (should (equal (clutch-db-current-schema reopened) other))
+                    (clutch-db-query
+                     reopened "db.getCollection(\"restored\").insertOne({_id: 1})")
+                    (should (member "restored" (clutch-db-list-tables conn))))
+                (clutch-db-disconnect reopened))))
+        (clutch-db-test--mongodb-live-drop-database conn other)))))
+
 (ert-deftest clutch-db-test-mongodb-live-error ()
   "Native MongoDB query errors should signal `clutch-db-error'."
   :tags '(:db-live :mongodb-live)
@@ -9482,6 +9600,48 @@ the current schema can stay the same."
                  (make-clutch-db-result :rows '(("a" "main" "s1,main"))))))
       (should (equal (clutch-db-resolution-context conn) '("a" "main" "s1,main")))
       (should (string-match-p "current_setting('search_path')" asked)))))
+
+(ert-deftest clutch-db-test-jdbc-duckdb-names-a-namespace-a-reconnect-cannot-reach ()
+  "DuckDB should name an attached or in-memory database a reconnect cannot reach.
+A new connection opens the URL's database file, so the automatic
+reconnect after the session was lost there ran the next statement in
+that file, or in a new, empty in-memory database, without a word."
+  (let ((home (make-temp-file "clutch-home-" nil ".duckdb"))
+        (att (make-temp-file "clutch-att-" nil ".duckdb")))
+    (unwind-protect
+        (pcase-dolist (`(,params ,expected)
+                       `(((:driver jdbc :url ,(concat "jdbc:duckdb:" home)) nil)
+                         ((:driver jdbc :url ,(concat "jdbc:duckdb:" home)
+                           :catalog "home" :schema "s1" :catalog-path ,home)
+                          nil)
+                         ((:driver jdbc :url ,(concat "jdbc:duckdb:" home)
+                           :catalog "att" :schema "main" :catalog-path ,att)
+                          "att.main")
+                         ((:driver jdbc :url "jdbc:duckdb:"
+                           :catalog "memory" :schema "main" :catalog-path nil)
+                          "memory.main")
+                         ((:driver jdbc :url "jdbc:duckdb::memory:"
+                           :catalog "memory" :schema "main" :catalog-path nil)
+                          "memory.main")
+                         ;; An in-memory URL opens no file.
+                         ((:driver jdbc :url "jdbc:duckdb:"
+                           :catalog "att" :schema "main" :catalog-path ,att)
+                          "att.main")
+                         ((:driver jdbc :url "jdbc:duckdb::memory:"
+                           :catalog "att" :schema "main" :catalog-path ,att)
+                          "att.main")
+                         ;; A relative file is the agent's to resolve.
+                         ((:driver jdbc :url "jdbc:duckdb:data/home.duckdb"
+                           :catalog "home" :schema "main"
+                           :catalog-path "/elsewhere/data/home.duckdb")
+                          nil)
+                         ((:driver oracle :schema "APP") nil)))
+          (ert-info ((format "%S" params))
+            (should (equal (clutch-db-unreachable-namespace
+                            (make-clutch-jdbc-conn :conn-id 8 :params params))
+                           expected))))
+      (delete-file home)
+      (delete-file att))))
 
 (ert-deftest clutch-db-test-jdbc-duckdb-switches-current-catalog-schema ()
   "DuckDB JDBC should switch a schema within the current catalog."
