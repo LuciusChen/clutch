@@ -3453,9 +3453,13 @@ passes validation fails the test instead of failing on the fake client."
   "ClickHouse given only a :url should list the tables of the URL's database.
 It listed the tables of `default', while it showed and queried the URL's.
 The driver also takes a protocol, credentials, an IPv6 address, a list of
-hosts and tags."
+hosts and tags, and a `database' property, the last one if there are
+several, which it prefers to the path."
   (dolist (url '("jdbc:clickhouse://db:8123/analytics"
                  "jdbc:clickhouse://db:8123/analytics#dc1,r1"
+                 "jdbc:clickhouse://db:8123?database=analytics"
+                 "jdbc:clickhouse://db:8123/default?ssl=true&database=analytics"
+                 "jdbc:clickhouse://db:8123/default?database=other&database=analytics"
                  "jdbc:clickhouse:http://db:8123/analytics"
                  "jdbc:clickhouse://h1:8123,h2:8123/analytics"
                  "jdbc:clickhouse://user:pass@db:8123/analytics"
@@ -3487,7 +3491,13 @@ old database, while Clutch showed and listed the new one."
                      ("jdbc:ch:http://db:8123/dba" "jdbc:ch:http://db:8123/dbb")
                      ("jdbc:clickhouse://db:8123/dba?x=1#dc1,r1"
                       "jdbc:clickhouse://db:8123/dbb?x=1#dc1,r1")
-                     ("jdbc:ch://db#t" "jdbc:ch://db/dbb#t")))
+                     ("jdbc:ch://db#t" "jdbc:ch://db/dbb#t")
+                     ("jdbc:clickhouse://db:8123?database=dba"
+                      "jdbc:clickhouse://db:8123?database=dbb")
+                     ("jdbc:clickhouse://db:8123/dbx?ssl=true&database=dba#t"
+                      "jdbc:clickhouse://db:8123/dbx?ssl=true&database=dbb#t")
+                     ("jdbc:clickhouse://db:8123?database=a&ssl=true&database=dba"
+                      "jdbc:clickhouse://db:8123?database=dbb&ssl=true&database=dbb")))
       (ert-info (url)
         (let ((params (clutch-db-namespace-reconnect-params
                        conn (list :url url :user "u") "dbb")))

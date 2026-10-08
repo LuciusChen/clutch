@@ -2186,19 +2186,38 @@ when a reconnect could not return to it."
 Any protocol, credentials, IPv6 address or list of hosts comes before,
 and the database, any `?' properties and any `#' tags come after.")
 
+(defconst clutch-jdbc--clickhouse-url-database-property-regexp
+  "[?&]database=\\([^&#]+\\)"
+  "Regexp matching a `database' property of a ClickHouse JDBC URL.
+The driver takes the database from the last one, and prefers it to the
+path.")
+
 (defun clutch-jdbc--clickhouse-url-database (url)
   "Return the database ClickHouse JDBC URL names, or nil."
-  (and url
-       (string-match (concat clutch-jdbc--clickhouse-url-hosts-regexp "/\\([^/?#]+\\)")
-                     url)
-       (match-string 2 url)))
+  (when url
+    (let ((case-fold-search nil)
+          (start 0)
+          database)
+      (while (string-match clutch-jdbc--clickhouse-url-database-property-regexp
+                           url start)
+        (setq database (match-string 1 url)
+              start (match-end 0)))
+      (or database
+          (and (string-match (concat clutch-jdbc--clickhouse-url-hosts-regexp
+                                     "/\\([^/?#]+\\)")
+                             url)
+               (match-string 2 url))))))
 
 (defun clutch-jdbc--clickhouse-url-with-database (url database)
   "Return ClickHouse JDBC URL with DATABASE in place of the one it names."
-  (replace-regexp-in-string
-   (concat clutch-jdbc--clickhouse-url-hosts-regexp "[^?#]*")
-   (lambda (match) (concat (match-string 1 match) "/" database))
-   url t t))
+  (let ((case-fold-search nil))
+    (if (string-match-p clutch-jdbc--clickhouse-url-database-property-regexp url)
+        (replace-regexp-in-string
+         clutch-jdbc--clickhouse-url-database-property-regexp database url t t 1)
+      (replace-regexp-in-string
+       (concat clutch-jdbc--clickhouse-url-hosts-regexp "[^?#]*")
+       (lambda (match) (concat (match-string 1 match) "/" database))
+       url t t))))
 
 (cl-defmethod clutch-db-namespace-reconnect-params
     ((conn clutch-jdbc-conn) params namespace)
