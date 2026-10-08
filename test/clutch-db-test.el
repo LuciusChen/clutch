@@ -3483,6 +3483,42 @@ path."
   (should-not (clutch-jdbc--clickhouse-url-database
                "jdbc:clickhouse://db:8123/proxy/")))
 
+(ert-deftest clutch-db-test-jdbc-clickhouse-url-decoding-aligns-metadata ()
+  "ClickHouse metadata should use the UTF-8 database name the URL encodes."
+  (pcase-dolist (`(,url ,database)
+                 '(("jdbc:clickhouse://db:8123/default?database=a%5Fb" "a_b")
+                   ("jdbc:clickhouse://db:8123/proxy/a%5Fb" "a_b")
+                   ("jdbc:clickhouse://db:8123/default?database=a%252Fb" "a%2Fb")
+                   ("jdbc:clickhouse://db:8123/a+b" "a b")
+                   ("jdbc:clickhouse://db:8123/default?database=%E5%BA%93_%2B%26"
+                    "库_+&")))
+    (ert-info (url)
+      (let ((conn (make-clutch-jdbc-conn
+                   :params (list :driver 'clickhouse :url url)))
+            sql)
+        (cl-letf (((symbol-function 'clutch-db-query)
+                   (lambda (_conn query)
+                     (setq sql query)
+                     (make-clutch-db-result :rows nil))))
+          (should (equal (clutch-db-database conn) database))
+          (should (equal (clutch-jdbc--conn-catalog conn) database))
+          (clutch-db-list-table-entries conn)
+          (should (string-match-p
+                   (regexp-quote (format "database = '%s'" database)) sql)))))))
+
+(ert-deftest clutch-db-test-jdbc-clickhouse-switch-encodes-the-url-database ()
+  "ClickHouse switches should encode database names without losing URL routing."
+  (let ((conn (make-clutch-jdbc-conn :params '(:driver clickhouse)))
+        (database "库_+&"))
+    (dolist (url '("jdbc:clickhouse://db:8123/proxy/old"
+                   "jdbc:clickhouse://db:8123/proxy/old?database=old&ssl=true#tag"))
+      (let* ((params (clutch-db-namespace-reconnect-params conn (list :url url) database))
+             (rewritten (plist-get params :url)))
+        (should (equal (plist-get params :database) database))
+        (should (string-prefix-p "jdbc:clickhouse://db:8123/proxy/" rewritten))
+        (should (string-match-p "%E5%BA%93_%2B%26" rewritten))
+        (should (equal (clutch-jdbc--clickhouse-url-database rewritten) database))))))
+
 (ert-deftest clutch-db-test-jdbc-clickhouse-switch-names-the-database-in-the-url ()
   "A ClickHouse switch should name the new database in the :url it reconnects with.
 The new connection was opened from the unchanged :url and stayed in the

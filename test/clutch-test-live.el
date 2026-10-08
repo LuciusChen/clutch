@@ -414,7 +414,7 @@ the new one.  The driver prefers a `database' property to the path."
     (ert-skip (clutch-test-capability-skip-message :clickhouse-engine)))
   (clutch-test--with-conn admin
     (let* ((a (format "clutch_url_a_%d" (emacs-pid)))
-           (b (format "clutch_url_b_%d" (emacs-pid)))
+           (b (format "clutch_url_b_%d_+&" (emacs-pid)))
            (live (clutch-test--live-connect-params))
            (server (format "jdbc:clickhouse://%s:%d"
                            (plist-get live :host) (plist-get live :port))))
@@ -424,11 +424,17 @@ the new one.  The driver prefers a `database' property to the path."
         (unwind-protect
             (progn
               (dolist (database (list a b))
-                (clutch-db-query admin (format "CREATE DATABASE %s" database)))
+                (clutch-db-query
+                 admin (format "CREATE DATABASE %s"
+                               (clutch-db-escape-identifier admin database))))
               (clutch-db-query
                admin (format "CREATE TABLE %s.only_in_a (id UInt8) ENGINE = Memory" a))
               (dolist (url (list (format "%s/%s" server a)
-                                 (format "%s/default?database=%s" server a)))
+                                 (format "%s/default?database=%s" server a)
+                                 (format "%s/%s" server
+                                         (replace-regexp-in-string "_" "%5F" a))
+                                 (format "%s/default?database=%s" server
+                                         (replace-regexp-in-string "_" "%5F" a))))
                 (ert-info (url)
                   (clutch-test--with-live-console
                       (list :backend 'clickhouse :url url
@@ -449,7 +455,9 @@ the new one.  The driver prefers a `database' property to the path."
                         (clutch-db-disconnect reopened)))))))
           (dolist (database (list a b))
             (ignore-errors
-              (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
+              (clutch-db-query
+               admin (format "DROP DATABASE IF EXISTS %s"
+                             (clutch-db-escape-identifier admin database))))))))))
 
 (ert-deftest clutch-test-live-duckdb-reconnect-refuses-an-unreachable-database ()
   "A DuckDB console that lost its session in a database a reconnect cannot reach
