@@ -546,6 +546,51 @@ there."
         (when (file-exists-p file)
           (delete-file file))))))
 
+(ert-deftest clutch-test-live-duckdb-use-replaces-the-metadata-of-the-database-left ()
+  "A DuckDB console moved into another database should offer that one's tables.
+A USE of an attached database keeps the schema name main, and Clutch
+compared only that name, so it kept the cached tables of the database
+left.  A SET that moves nothing keeps the cached metadata."
+  :tags '(:clutch-live :duckdb-live)
+  (unless (eq (clutch-test-live-backend-id) 'duckdb)
+    (ert-skip "Live backend is not DuckDB"))
+  (let ((attached (concat (make-temp-name
+                           (expand-file-name "clutch-meta-" temporary-file-directory))
+                          ".duckdb"))
+        (alias (format "clutch_meta_%d" (emacs-pid)))
+        (left (format "clutch_left_%d" (emacs-pid)))
+        (params (append (list :backend clutch-test-backend)
+                        (clutch-test--live-connect-params))))
+    (cl-flet ((cached-tables ()
+                (sort (hash-table-keys (clutch--schema-for-connection))
+                      #'string<)))
+      (unwind-protect
+          (clutch-test--with-live-console params
+            (let ((home (caar (clutch-db-result-rows
+                               (clutch-db-query clutch-connection
+                                                "SELECT current_catalog()")))))
+              (unwind-protect
+                  (progn
+                    (clutch-test--run-in-console
+                     (format "CREATE TABLE %s (id INTEGER)" left)
+                     (format "ATTACH '%s' AS %s" attached alias)
+                     (format "CREATE TABLE %s.main.only_here (id INTEGER)" alias))
+                    (clutch--refresh-schema-cache clutch-connection)
+                    (should (member left (cached-tables)))
+                    (clutch-test--run-in-console (format "USE %s" alias))
+                    (should (equal (cached-tables) '("only_here")))
+                    (let ((schema (clutch--schema-for-connection)))
+                      (clutch-test--run-in-console "SET enable_progress_bar = false")
+                      (should (eq (clutch--schema-for-connection) schema))))
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-test--run-in-console
+                   (format "USE %s" (clutch-db-escape-identifier clutch-connection home))
+                   (format "DETACH %s" alias)
+                   (format "DROP TABLE IF EXISTS %s" left))))))
+        (dolist (file (list attached (concat attached ".wal")))
+          (when (file-exists-p file)
+            (delete-file file)))))))
+
 (ert-deftest clutch-test-live-oracle-reconnect-keeps-a-quoted-schema-name ()
   "A console moved to a quoted Oracle schema should reconnect into that schema.
 The console recorded the schema as Oracle names it, but connecting with

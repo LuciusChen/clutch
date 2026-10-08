@@ -2462,21 +2462,30 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
   "Return the namespace in the current buffer's mode line."
   (plist-get clutch--connection-render-state :namespace))
 
+(defun clutch--namespace-before (conn)
+  "Return what a possible namespace switch on CONN is compared with.
+That is the namespace in the current buffer's mode line, and the scope
+of CONN's metadata, as `clutch-db-metadata-scope' gives it."
+  (list (clutch--shown-namespace) (clutch-db-metadata-scope conn)))
+
 (defun clutch--note-namespace-switch (connection before)
   "Follow CONNECTION into the namespace it reports after a possible switch.
-BEFORE is the namespace shown before the statement or command that may
-have switched it.  As after `clutch-switch-schema', the automatic
-reconnect selects the namespace now reported, and when it differs from
-BEFORE, its schema replaces the cached metadata of the old one.  Failing
-to read it back is only reported: the statement or command that ran has
-finished, and its outcome must still arrive."
+BEFORE is what `clutch--namespace-before' returned before the statement
+or command that may have switched it.  As after `clutch-switch-schema',
+the automatic reconnect selects the namespace now reported, and when it,
+or the scope of CONNECTION's metadata, differs from BEFORE, its schema
+replaces the cached metadata of the old one.  Failing to read it back is
+only reported: the statement or command that ran has finished, and its
+outcome must still arrive."
   (condition-case err
       (progn
         (clutch--update-connection-params-for-buffers
          connection
          (lambda (params)
            (clutch-db-update-namespace-params connection params)))
-        (unless (equal (clutch-db-current-schema connection) before)
+        (unless (equal (list (clutch-db-current-schema connection)
+                             (clutch-db-metadata-scope connection))
+                       before)
           (clutch--clear-connection-metadata-caches connection)
           (clutch--prime-schema-cache connection)))
     (clutch-db-error
@@ -2485,9 +2494,9 @@ finished, and its outcome must still arrive."
 
 (defun clutch--follow-transaction-end (conn sql before)
   "Follow CONN's namespace after it ended a transaction as SQL does.
-BEFORE is the namespace shown before.  PostgreSQL undoes a search_path
-set inside a transaction it rolls back, and one set with SET LOCAL when
-the transaction ends either way."
+BEFORE is what `clutch--namespace-before' returned before.  PostgreSQL
+undoes a search_path set inside a transaction it rolls back, and one set
+with SET LOCAL when the transaction ends either way."
   (when (clutch-db-namespace-switch-p conn sql)
     (clutch--note-namespace-switch conn before)))
 
@@ -2803,7 +2812,7 @@ signal that nothing was committed."
      "Transaction state is uncertain; roll back or reconnect instead of committing"))
   (unless (clutch-db-manual-commit-p clutch-connection)
     (clutch--refuse-in-auto-mode clutch-connection))
-  (let* ((shown (clutch--shown-namespace))
+  (let* ((before (clutch--namespace-before clutch-connection))
          (outcome
           (condition-case err
               (clutch-db-commit clutch-connection)
@@ -2814,7 +2823,7 @@ signal that nothing was committed."
               (clutch--humanize-db-error (error-message-string err)))))))
     (clutch--follow-transaction-end
      clutch-connection (if (eq outcome 'rolled-back) "ROLLBACK" "COMMIT")
-     shown)
+     before)
     (if (eq outcome 'rolled-back)
         (progn
           (clutch--mark-dml-results-rolled-back clutch-connection)
@@ -2833,12 +2842,12 @@ signal that nothing was committed."
   (unless (clutch-db-manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (let ((uncertain (clutch--tx-uncertain-p clutch-connection))
-        (shown (clutch--shown-namespace)))
+        (before (clutch--namespace-before clutch-connection)))
     (unless (or (clutch-db-manual-commit-p clutch-connection)
                 uncertain)
       (clutch--refuse-in-auto-mode clutch-connection))
     (clutch-db-rollback clutch-connection)
-    (clutch--follow-transaction-end clutch-connection "ROLLBACK" shown)
+    (clutch--follow-transaction-end clutch-connection "ROLLBACK" before)
     (unless uncertain
       (clutch--mark-dml-results-rolled-back clutch-connection))
     (clutch--clear-tx-state clutch-connection)
@@ -2859,7 +2868,7 @@ uncommitted work, for \\[clutch-commit] or \\[clutch-rollback] to end."
   (unless (clutch-db-manual-commit-supported-p clutch-connection)
     (user-error "Manual commit is not supported by this connection"))
   (let ((manual-now (clutch-db-manual-commit-p clutch-connection))
-        (shown (clutch--shown-namespace)))
+        (before (clutch--namespace-before clutch-connection)))
     (when (if manual-now
               (clutch--tx-unresolved-p clutch-connection)
             (clutch--tx-uncertain-p clutch-connection))
@@ -2868,7 +2877,7 @@ uncommitted work, for \\[clutch-commit] or \\[clutch-rollback] to end."
     (if manual-now
         ;; Leaving manual mode finishes the open transaction.
         (progn
-          (clutch--follow-transaction-end clutch-connection "COMMIT" shown)
+          (clutch--follow-transaction-end clutch-connection "COMMIT" before)
           (clutch--clear-tx-state clutch-connection))
       (clutch--refresh-transaction-ui clutch-connection))
     (message "Auto-commit %s" (if manual-now "enabled" "disabled"))))
