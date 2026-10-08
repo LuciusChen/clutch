@@ -1615,6 +1615,111 @@ whole rollback can also end with."
               (clutch-db-set-auto-commit conn t)))
           (clutch-db-query conn drop-sql))))))
 
+(defun clutch-test--live-close-prompts (close)
+  "Call CLOSE, declining every confirmation, and return the prompts it asked."
+  (let (prompts)
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (push prompt prompts) nil)))
+      (condition-case nil
+          (funcall close)
+        (user-error nil)))
+    prompts))
+
+(ert-deftest clutch-test-live-auto-mode-transaction-begun-with-sql-is-tracked ()
+  :tags '(:clutch-live)
+  "Work in a transaction begun with SQL in Auto mode should be known.
+Clutch recorded nothing in Auto mode, so after a typed BEGIN and INSERT,
+disconnecting or killing the console dropped the insert without asking.
+The server's report of an open transaction now marks it, a rollback to
+a savepoint keeps it, and a typed COMMIT clears it.  Switching to Manual
+mode keeps such a transaction open for `clutch-commit' to end."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL transaction status"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_auto_tx_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params))))
+      (cl-flet ((rows ()
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query
+                          admin (format "SELECT COUNT(*) FROM %s" table))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+              (clutch-test--with-live-console params
+                (should-not (clutch-db-manual-commit-p clutch-connection))
+                (clutch-test--run-in-console
+                 (if (eq clutch-test-backend 'mysql) "START TRANSACTION" "BEGIN")
+                 (format "INSERT INTO %s VALUES (1)" table))
+                (should (eq (plist-get clutch--connection-render-state
+                                       :transaction-state)
+                            'auto-dirty))
+                (should (clutch-test--live-close-prompts #'clutch-disconnect))
+                (should (clutch--connection-alive-p clutch-connection))
+                (let ((console (current-buffer)))
+                  (should (clutch-test--live-close-prompts
+                           (lambda () (kill-buffer console))))
+                  (should (buffer-live-p console)))
+                (clutch-test--run-in-console
+                 "SAVEPOINT s" (format "INSERT INTO %s VALUES (2)" table)
+                 "ROLLBACK TO SAVEPOINT s")
+                (should (clutch-test--live-close-prompts #'clutch-disconnect))
+                (should (= (rows) 0))
+                (clutch-test--run-in-console "COMMIT")
+                (should-not (clutch--tx-state clutch-connection))
+                (should (eq (plist-get clutch--connection-render-state
+                                       :transaction-state)
+                            'auto))
+                (should (= (rows) 1))
+                (clutch-test--run-in-console
+                 (if (eq clutch-test-backend 'mysql) "START TRANSACTION" "BEGIN")
+                 (format "INSERT INTO %s VALUES (3)" table))
+                (clutch-toggle-auto-commit)
+                (should (eq (plist-get clutch--connection-render-state
+                                       :transaction-state)
+                            'dirty))
+                (should (= (rows) 1))
+                (clutch-commit)
+                (should (= (rows) 2))
+                (clutch-toggle-auto-commit)))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table))))))))
+
+(ert-deftest clutch-test-live-mysql-ddl-that-commits-nothing-keeps-work-known ()
+  :tags '(:clutch-live)
+  "A MySQL CREATE TEMPORARY TABLE should keep the work before it known.
+Clutch took every DDL for one that commits, as most MySQL DDL does, so in
+Manual mode a temporary table after an INSERT cleared the insert, and a
+disconnect then dropped it without asking.  A CREATE TABLE commits it."
+  (unless (eq clutch-test-backend 'mysql)
+    (ert-skip "This regression covers MySQL's implicit commits"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_tmp_tx_%d" (emacs-pid)))
+          (params (append (list :backend 'mysql) (clutch-test--live-connect-params))))
+      (cl-flet ((rows ()
+                  (caar (clutch-db-result-rows
+                         (clutch-db-query
+                          admin (format "SELECT COUNT(*) FROM %s" table))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+              (clutch-test--with-live-console params
+                (clutch-toggle-auto-commit)
+                (clutch-test--run-in-console
+                 (format "INSERT INTO %s VALUES (1)" table)
+                 (format "CREATE TEMPORARY TABLE %s_tmp (id int)" table))
+                (should (clutch--tx-dirty-p clutch-connection))
+                (should (clutch-test--live-close-prompts #'clutch-disconnect))
+                (should (= (rows) 0))
+                (clutch-test--run-in-console
+                 (format "CREATE TABLE %s_made (id int)" table))
+                (should-not (clutch--tx-state clutch-connection))
+                (should (= (rows) 1))
+                (clutch-toggle-auto-commit)))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s, %s_made"
+                                           table table))))))))
+
 (ert-deftest clutch-test-live-insert-and-delete-submit-persists ()
   :tags '(:clutch-live)
   "Submitted insert and delete staging should persist on a real backend."
@@ -1838,6 +1943,44 @@ XTDB stores a value with the type it is sent as."
       (clutch-db-set-auto-commit conn t)
       (should (equal (clutch-test--xtdb-rows conn (format "SELECT name FROM %s" table))
                      '(("Ann")))))))
+
+(ert-deftest clutch-test-live-xtdb-transaction-state-follows-the-server ()
+  :tags '(:xtdb-live)
+  "XTDB's report of an open transaction should mark uncommitted work.
+An INSERT in Manual mode, or after BEGIN READ WRITE in Auto mode, leaves
+work that a disconnect asks about; a commit clears it, and a SELECT in
+Manual mode, which also opens a transaction, marks nothing."
+  (unless (eq clutch-test-backend 'xtdb)
+    (ert-skip "Live backend is not XTDB"))
+  (let ((table (clutch-test--xtdb-table "tx"))
+        (params (append (list :backend 'xtdb) (clutch-test--live-connect-params))))
+    (cl-flet ((state () (plist-get clutch--connection-render-state
+                                   :transaction-state)))
+      (clutch-test--with-live-console params
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a0', 'Al')" table))
+        (should (eq (state) 'auto))
+        (clutch-test--run-in-console
+         "BEGIN READ WRITE"
+         (format "INSERT INTO %s (_id, name) VALUES ('a1', 'Ann')" table))
+        (should (eq (state) 'auto-dirty))
+        (clutch-test--run-in-console "COMMIT")
+        (should (eq (state) 'auto))
+        (clutch-test--with-conn other
+          (should (equal (clutch-test--xtdb-rows
+                          other (format "SELECT _id FROM %s ORDER BY _id" table))
+                         '(("a0") ("a1")))))
+        (clutch-toggle-auto-commit)
+        (clutch-test--run-in-console
+         (format "INSERT INTO %s (_id, name) VALUES ('a2', 'Bo')" table))
+        (should (eq (state) 'dirty))
+        (should (clutch-test--live-close-prompts #'clutch-disconnect))
+        (clutch-commit)
+        (should (eq (state) 'manual))
+        (clutch-test--run-in-console (format "SELECT * FROM %s" table))
+        (should (eq (state) 'manual))
+        (clutch-rollback)
+        (clutch-toggle-auto-commit)))))
 
 (ert-deftest clutch-test-live-xtdb-time-and-union-columns ()
   :tags '(:xtdb-live)
