@@ -983,9 +983,13 @@ starts in, and its results keep the old connection, or none."
                     (clutch-test--with-live-result-buffer result-name
                       (when manual (clutch-toggle-auto-commit))
                       (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
-                      (when (eq action 'submit)
-                        (with-current-buffer result-name
-                          (clutch-test--xtdb-edit 0 "v" "edited")))
+                      (with-current-buffer result-name
+                        (pcase action
+                          ('submit (clutch-test--xtdb-edit 0 "v" "edited"))
+                          ('delete
+                           (set-window-buffer (selected-window) (current-buffer))
+                           (clutch--goto-cell 0 1)
+                           (call-interactively #'clutch-result-delete-rows))))
                       (let ((lost (clutch-test--end-console-session admin)))
                         (with-current-buffer result-name
                           (set-window-buffer (selected-window) (current-buffer))
@@ -1001,7 +1005,7 @@ starts in, and its results keep the old connection, or none."
                                (clutch-result-copy 'update '((0) 1))
                                (should (string-match-p "UPDATE.*SET.*v.*orig"
                                                        (current-kill 0)))))
-                            ('submit (clutch-test--xtdb-submit)))
+                            ((or 'submit 'delete) (clutch-test--xtdb-submit)))
                           (should-not (eq clutch-connection lost))
                           (should (eq clutch-connection
                                       (buffer-local-value 'clutch-connection console)))
@@ -1014,10 +1018,12 @@ starts in, and its results keep the old connection, or none."
                        (equal (caar (clutch-db-result-rows
                                      (clutch-db-query
                                       admin (format "SELECT v FROM %s WHERE id=1" table))))
-                              (if (and (eq action 'submit) (not manual))
-                                  "edited"
-                                "orig"))))))
-                (clutch-db-query admin (format "UPDATE %s SET v='orig' WHERE id=1" table)))))
+                              (cond (manual "orig")
+                                    ((eq action 'submit) "edited")
+                                    ((eq action 'delete) nil)
+                                    (t "orig")))))))
+                (clutch-db-query admin (format "DELETE FROM %s" table))
+                (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'orig')" table)))))
         (ignore-errors
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
@@ -1035,6 +1041,13 @@ starts in, and its results keep the old connection, or none."
   "Submitting staged edits after session loss should recover before its batch."
   :tags '(:clutch-live)
   (clutch-test--result-action-after-session-loss 'submit))
+
+(ert-deftest clutch-test-live-result-delete-submit-recovers-a-lost-session ()
+  "Submitting a staged delete after session loss should recover before its batch.
+A delete loads no column metadata, so only the recovery before the batch
+reconnects it."
+  :tags '(:clutch-live)
+  (clutch-test--result-action-after-session-loss 'delete))
 
 (ert-deftest clutch-test-live-picking-a-moved-console-returns-to-it ()
   "Picking a console that followed a namespace switch should return to it.
