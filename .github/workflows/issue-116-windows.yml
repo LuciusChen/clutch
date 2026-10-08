@@ -12,9 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {emacs-version: "31.1", mode: plain, pg: "18", ref: v0.5.4}
-          - {emacs-version: "31.1", mode: plain, pg: "18", ref: dce2186}
-          - {emacs-version: "31.1", mode: console, pg: "17", ref: v0.5.4}
+          - {emacs-version: "31.1", mode: plain, pg: "17", ref: dce218673fc517068b8793ccd5d40ee13674b2b9}
     steps:
       - uses: actions/checkout@v4
 
