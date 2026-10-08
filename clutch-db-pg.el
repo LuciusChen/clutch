@@ -360,7 +360,11 @@ transaction included, so a COMMIT tag committed the path."
      "\\`\\(?:BEGIN\\|START\\s-+TRANSACTION\\|COMMIT\\|END\\|ABORT\\|ROLLBACK\\|SAVEPOINT\\|RELEASE\\)\\b"
      trimmed)))
 
-(defun clutch-db-pg--ensure-foreground-transaction (conn sql)
+(cl-defgeneric clutch-db-pg--ensure-foreground-transaction (conn sql)
+  "Apply CONN's lazy foreground transaction rule before SQL.")
+
+(cl-defmethod clutch-db-pg--ensure-foreground-transaction
+    ((conn clutch-db-pg--connection) sql)
   "Lazily open a foreground transaction on CONN before running SQL."
   (when (and (clutch-db-pg--connection-manual-commit conn)
              (not (clutch-db-pg--transaction-control-query-p sql))
@@ -696,6 +700,10 @@ CONN keeps its commit mode, which a connection that replaces it takes on."
     ((_conn clutch-db-pg--connection))
   "Return non-nil because PostgreSQL supports Clutch-managed manual commit."
   t)
+
+(cl-defmethod clutch-db-transaction-open-p ((conn clutch-db-pg--connection))
+  "Return t when the last ReadyForQuery on CONN had a transaction open."
+  (and (clutch-db-pg--tx-open-p conn) t))
 
 (cl-defmethod clutch-db-commit ((conn clutch-db-pg--connection))
   "Finish the current foreground transaction on PostgreSQL CONN.
@@ -1372,6 +1380,27 @@ nor :search-path."
 (cl-defmethod clutch-db-backend-key ((_conn clutch-db-pg--xtdb-connection))
   "Return the registered backend key for XTDB connections."
   'xtdb)
+
+(cl-defmethod clutch-db-pg--ensure-foreground-transaction
+    ((conn clutch-db-pg--xtdb-connection) sql)
+  "Open a Manual transaction on XTDB CONN only for SQL that writes.
+XTDB cannot mix queries and DML in a transaction.  A normal read stays
+outside one, so it cannot make the next write's transaction read-only.
+An ASSERT opens one too, since it guards the writes after it in the
+same transaction.  Explicit transaction control is left to SQL."
+  (when (and (clutch-db-pg--connection-manual-commit conn)
+             (or (clutch-db-sql-modifies-data-p sql)
+                 (clutch-db-sql-starts-with-keyword-p sql '("ASSERT")))
+             (not (clutch-db-pg--transaction-control-query-p sql))
+             (not (clutch-db-pg--tx-open-p conn)))
+    (clutch-db-pg--exec conn "BEGIN READ WRITE")))
+
+(cl-defmethod clutch-db-busy-p ((conn clutch-db-pg--xtdb-connection))
+  "Return non-nil when metadata must wait for XTDB CONN.
+A running query or open transaction prevents metadata queries.
+Even a transaction that has not chosen its type must be left alone:
+the first catalog query would otherwise make it read-only."
+  (or (cl-call-next-method) (clutch-db-pg--tx-open-p conn)))
 
 (cl-defmethod clutch-db-namespace-switch-p
     ((_conn clutch-db-pg--xtdb-connection) _sql)

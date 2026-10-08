@@ -342,38 +342,47 @@ buffer is a query console, and the last command was a yank variant."
     (name params &optional ad-hoc-params source-default-directory)
   "Open or switch to query console NAME using PARAMS.
 AD-HOC-PARAMS, when non-nil, are stored for console-local reconnects.
-SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
+SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command.
+A console whose connection was lost reconnects with its own parameters,
+as the automatic reconnect does, rather than with PARAMS."
   (let* ((params (clutch--prepare-connection-origin-params
                   params source-default-directory))
          (ad-hoc-params (and ad-hoc-params params))
          (product (clutch--effective-sql-product params))
          (storage-name (clutch--console-persistence-name name params))
-         (existing (clutch--find-console-buffer name storage-name)))
-    (if (and existing
-             (buffer-local-value 'clutch-connection existing)
-             (clutch--connection-alive-p
-              (buffer-local-value 'clutch-connection existing)))
-        (progn
-          (with-current-buffer existing
-            (clutch--ensure-query-console-major-mode params)
-            (let ((existing-params (or clutch--connection-params params)))
-              (setq-local clutch--console-name name)
-              (setq-local clutch--console-storage-name storage-name)
-              (setq-local clutch--console-ad-hoc-params
-                          (and ad-hoc-params existing-params))
-              (clutch--bind-connection-context
-               clutch-connection existing-params product))
-            (clutch--update-console-buffer-name))
-          (select-window
-           (or (clutch--console-window-for existing) (selected-window)))
-          (switch-to-buffer existing))
-      (let* ((conn (if (and existing
-                            (buffer-local-value 'clutch-connection existing)
-                            (not (clutch--connection-alive-p
-                                  (buffer-local-value 'clutch-connection existing))))
-                       (with-current-buffer existing
-                         (clutch--build-replacement-conn clutch-connection params))
-                     (clutch--build-conn params)))
+         (existing (clutch--find-console-buffer name storage-name))
+         (existing-conn (and existing
+                             (buffer-local-value 'clutch-connection existing))))
+    (cond
+     ((and existing-conn (clutch--connection-alive-p existing-conn))
+      (with-current-buffer existing
+        (clutch--ensure-query-console-major-mode params)
+        (let ((existing-params (or clutch--connection-params params)))
+          (setq-local clutch--console-name name)
+          (setq-local clutch--console-storage-name storage-name)
+          (setq-local clutch--console-ad-hoc-params
+                      (and ad-hoc-params existing-params))
+          (clutch--bind-connection-context
+           clutch-connection existing-params product))
+        (clutch--update-console-buffer-name))
+      (select-window
+       (or (clutch--console-window-for existing) (selected-window)))
+      (switch-to-buffer existing))
+     (existing-conn
+      ;; Its session was lost: reconnect it, results and all, as the
+      ;; automatic reconnect does.
+      (with-current-buffer existing
+        (clutch--try-reconnect)
+        (setq-local clutch--console-name name)
+        (setq-local clutch--console-storage-name storage-name)
+        (setq-local clutch--console-ad-hoc-params
+                    (and ad-hoc-params clutch--connection-params))
+        (clutch--update-console-buffer-name))
+      (select-window
+       (or (clutch--console-window-for existing) (selected-window)))
+      (switch-to-buffer existing))
+     (t
+      (let* ((conn (clutch--build-conn params))
              (buf (or existing
                       (generate-new-buffer "*clutch-console*")))
              (is-new (zerop (buffer-size buf))))
@@ -392,7 +401,7 @@ SOURCE-DEFAULT-DIRECTORY is the buffer directory that initiated the command."
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
-        (clutch--update-console-buffer-name)))))
+        (clutch--update-console-buffer-name))))))
 
 ;;;###autoload (autoload 'clutch-query-sqlite-file "clutch" nil t)
 (defun clutch-query-sqlite-file (file)
@@ -1311,15 +1320,13 @@ already confirmed SQL."
   ;; A result kept on failure keeps its query; a new result records its own.
   (unless (plist-get result-context :keep-result-on-error)
     (setq clutch--last-query sql))
-  (let ((manual-dirty-p
-         (and (clutch--tx-unresolved-p connection)
-              (clutch-db-manual-commit-p connection)))
+  (let ((unresolved (clutch--tx-unresolved-p connection))
         (source-buffer (current-buffer)))
     (clutch--execute-statement-attempt
      sql connection present-result-p result-context region
      (lambda (outcome)
        (if (and (not no-idle-retry-p)
-                (not manual-dirty-p)
+                (not unresolved)
                 (eq (car-safe (plist-get outcome :error))
                     'clutch-db-execution-not-started)
                 (buffer-live-p source-buffer)
@@ -1337,7 +1344,7 @@ already confirmed SQL."
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
-  "Warning shown when a dirty manual transaction loses its session.")
+  "Warning shown when a dirty transaction loses its session.")
 
 (defun clutch--connection-loss-context (connection &optional context)
   "Add transaction-loss state for CONNECTION to a copy of CONTEXT."
