@@ -54,6 +54,10 @@
   "Params plist used to establish the current connection.
 Stored at connect time so the connection can be re-established
 automatically when it drops.")
+(defvar-local clutch--console-target nil
+  "Target of the parameters a console's session connected with.
+As `clutch--connection-target' returns it.  `clutch-connect' moves the
+session only to a connection with the same target.")
 (defvar clutch--console-name)
 (defvar clutch--console-ad-hoc-params)
 (defvar clutch--describe-object-entry)
@@ -1591,17 +1595,34 @@ TRAMP methods are ignored for inference."
 When PARAMS has no explicit transport, SOURCE-DEFAULT-DIRECTORY may provide a
 TRAMP origin according to `clutch-tramp-context-policy'.  Local SQLite files
 are resolved against SOURCE-DEFAULT-DIRECTORY, or `default-directory'."
-  (let ((prepared (clutch--prepare-connection-origin-params
-                   params source-default-directory)))
-    (when-let* (((eq (plist-get prepared :backend) 'sqlite))
-                ((not (file-remote-p (or source-default-directory
-                                         default-directory))))
-                (database (plist-get prepared :database)))
-      (setq prepared
-            (plist-put (copy-sequence prepared) :database
-                       (clutch--normalize-sqlite-database-file
-                        database source-default-directory))))
-    prepared))
+  (clutch--resolve-sqlite-file
+   (clutch--prepare-connection-origin-params params source-default-directory)
+   source-default-directory))
+
+(defun clutch--resolve-sqlite-file (params &optional source-default-directory)
+  "Return PARAMS with a local SQLite database file resolved.
+The file is resolved against SOURCE-DEFAULT-DIRECTORY, or
+`default-directory'."
+  (if-let* (((eq (plist-get params :backend) 'sqlite))
+            ((not (file-remote-p (or source-default-directory
+                                     default-directory))))
+            (database (plist-get params :database)))
+      (plist-put (copy-sequence params) :database
+                 (clutch--normalize-sqlite-database-file
+                  database source-default-directory))
+    params))
+
+(defun clutch--connection-target (params)
+  "Return what connection PARAMS lead to, as an alist sorted by key.
+That is all of PARAMS but `:password' and `:pass-entry', which a saved
+entry may change without leading elsewhere; a password inside a `:url'
+is part of it.  Callers pass PARAMS as
+`clutch-prepare-connection-params' leaves them, so a SQLite file is
+compared resolved."
+  (sort (cl-loop for (key value) on params by #'cddr
+                 unless (memq key '(:password :pass-entry))
+                 collect (cons key value))
+        (lambda (a b) (string< (car a) (car b)))))
 
 (defun clutch--carry-current-connection-origin (params)
   "Return PARAMS with the current buffer's inferred origin preserved.
@@ -2539,7 +2560,9 @@ The password is resolved via `auth-source' when not in the connection
 params; see `clutch-connection-alist' for details.
 A query console that has a connection connects anew with its own saved
 or temporary parameters, in the commit mode it was in, and its results
-and the other buffers of its session move to the new connection."
+and the other buffers of its session move to the new connection.  One
+whose saved entry changed since in anything but `:password' or
+`:pass-entry' connects alone, in the mode that entry starts in."
   (interactive)
   ;; Closing the connection would not stop its statement on the server.
   (clutch--refuse-while-running clutch-connection)
@@ -2552,9 +2575,14 @@ and the other buffers of its session move to the new connection."
            (params  (clutch-prepare-connection-params
                      (clutch--connect-params-for-current-buffer)
                      source-default-directory))
+           (target (clutch--connection-target params))
            (effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product effective-params)))
-      (if (and old-conn clutch--console-name)
+      (if (and old-conn
+               clutch--console-name
+               ;; A saved entry changed since may lead to another server,
+               ;; where the session's results must not go.
+               (equal target clutch--console-target))
           (clutch--report-replaced-session
            "Connected to"
            (clutch--replace-connection old-conn effective-params product))
@@ -2572,6 +2600,8 @@ and the other buffers of its session move to the new connection."
                 (when old-conn
                   (clutch--clear-connection-metadata-caches old-conn))
                 (clutch--activate-current-buffer-connection conn effective-params product)
+                (when clutch--console-name
+                  (setq-local clutch--console-target target))
                 (message "Connected to %s" (clutch--connection-key conn)))
             (unless (eq clutch-connection conn)
               (clutch--discard-unbound-connection conn))))))))
