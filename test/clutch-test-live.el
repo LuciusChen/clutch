@@ -46,8 +46,8 @@
     params))
 
 (ert-deftest clutch-test-live-connect-params-pass-driver-options ()
-  :tags '(:clutch-live)
   "Generic JDBC live params should pass an optional driver class."
+  :tags '(:clutch-live)
   (let ((clutch-test-url "jdbc:duckdb:/tmp/clutch-test.duckdb")
         (clutch-test-host nil)
         (clutch-test-port nil)
@@ -71,8 +71,8 @@
     name))
 
 (ert-deftest clutch-test-live-column-name-follows-backend-metadata-case ()
-  :tags '(:clutch-live)
   "Synthetic live rows should use the backend's metadata identifier case."
+  :tags '(:clutch-live)
   (let ((clutch-test-backend 'oracle)
         (clutch-test-url nil))
     (should (equal (clutch-test--live-column-name "name") "NAME")))
@@ -173,8 +173,8 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
       (clutch-test--execute-and-present sql conn))))
 
 (ert-deftest clutch-test-live-clickhouse-converged-console-and-namespace-entrypoints ()
-  :tags '(:clutch-live)
   "Unified console and namespace commands should work against ClickHouse."
+  :tags '(:clutch-live)
   (unless (clutch-test--clickhouse-live-p)
     (ert-skip (clutch-test-capability-skip-message :clickhouse-engine)))
   (clutch-test--with-conn admin
@@ -270,12 +270,12 @@ is on MySQL or PostgreSQL."
     conn))
 
 (ert-deftest clutch-test-live-console-follows-a-typed-namespace-switch ()
-  :tags '(:clutch-live)
   "A console should follow a namespace switch typed into it.
 It went on showing and loading the namespace it opened with, and its
 parameters reconnected to that one.  PostgreSQL keeps the whole path.
 Oracle and DuckDB list the tables of the schema they moved to, and
 connecting with the console's parameters starts there."
+  :tags '(:clutch-live)
   (unless (memq (clutch-test-live-backend-id) '(mysql pg oracle duckdb))
     (ert-skip "This regression covers MySQL USE, PostgreSQL SET search_path, Oracle ALTER SESSION and DuckDB USE"))
   (clutch-test--with-conn admin
@@ -358,11 +358,11 @@ connecting with the console's parameters starts there."
                 admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))))
 
 (ert-deftest clutch-test-live-duckdb-reconnect-stays-out-of-attached-databases ()
-  :tags '(:clutch-live :duckdb-live)
   "A DuckDB console moved into an attached database should keep its parameters.
 A reconnect cannot return to an attached database, so the parameters
 keep naming the database the URL opens, and connecting with them starts
 there."
+  :tags '(:clutch-live :duckdb-live)
   (unless (eq (clutch-test-live-backend-id) 'duckdb)
     (ert-skip "Live backend is not DuckDB"))
   (let ((attached (concat (make-temp-name
@@ -398,12 +398,12 @@ there."
           (delete-file file))))))
 
 (ert-deftest clutch-test-live-oracle-reconnect-keeps-a-quoted-schema-name ()
-  :tags '(:clutch-live)
   "A console moved to a quoted Oracle schema should reconnect into that schema.
 The console recorded the schema as Oracle names it, but connecting with
 its parameters upper-cased the name: a mixed-case one failed with
 ORA-01435, and a lower-case one moved the session into the upper-case
 schema of the same name when there was one."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'oracle)
     (ert-skip "This regression covers Oracle's quoted schema names"))
   (clutch-test--with-conn admin
@@ -437,11 +437,11 @@ schema of the same name when there was one."
             (clutch-db-query admin (format "DROP USER \"%s\" CASCADE" user))))))))
 
 (ert-deftest clutch-test-live-mysql-console-follows-a-dropped-current-database ()
-  :tags '(:clutch-live)
   "A MySQL console should have no database once its current one is dropped.
 It went on showing the dropped database, and its automatic reconnect
 asked for that database and failed.  Loading the tables of no database
 must not fail either."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'mysql)
     (ert-skip "This regression covers MySQL's current database"))
   (clutch-test--with-conn admin
@@ -473,12 +473,12 @@ must not fail either."
             (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database))))))))
 
 (ert-deftest clutch-test-live-pg-console-follows-the-server-search-path ()
-  :tags '(:clutch-live)
   "A PostgreSQL console should follow the search_path that the server has.
 A SET written with a quoted name or a comment was not followed, a
 rollback that undid a SET left the console, and its reconnect, on the
 schema the server had left, and a SET not yet committed went into the
 reconnect parameters."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
   (clutch-test--with-conn admin
@@ -528,11 +528,11 @@ reconnect parameters."
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
 (ert-deftest clutch-test-live-pg-reconnect-restores-only-a-kept-search-path ()
-  :tags '(:clutch-live)
   "A PostgreSQL reconnect should restore the search_path the server kept.
 A path set inside a transaction went into the reconnect parameters at
 once, so a connection lost before the transaction ended came back on it,
 though the server had rolled it back with the transaction."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
   (clutch-test--with-conn admin
@@ -568,11 +568,11 @@ though the server had rolled it back with the transaction."
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
 (ert-deftest clutch-test-live-pg-rollback-after-a-failed-commit-follows-the-path ()
-  :tags '(:clutch-live)
   "A rollback after a failed PostgreSQL commit should show the server's path.
 A COMMIT that fails rolls back the transaction, and a SET made in it, but
 clutch-rollback then found nothing to end, and the console went on
 showing the schema that SET had chosen."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
   (clutch-test--with-conn admin
@@ -610,11 +610,11 @@ showing the schema that SET had chosen."
           (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema)))))))
 
 (ert-deftest clutch-test-live-reconnect-keeps-manual-commit-mode ()
-  :tags '(:clutch-live)
   "An automatic reconnect should keep a console in Manual mode.
 The console came back in Auto mode, so each statement after the
 reconnect was committed on its own, past the reach of a rollback.
 Reopening a console whose session was lost reconnects it too."
+  :tags '(:clutch-live)
   (unless (memq clutch-test-backend '(mysql pg))
     (ert-skip "This regression covers MySQL and PostgreSQL manual commit"))
   (clutch-test--with-conn admin
@@ -646,11 +646,11 @@ Reopening a console whose session was lost reconnects it too."
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-test-live-reopened-console-ends-the-lost-session ()
-  :tags '(:clutch-live)
   "Reopening a console whose session was lost should end that session in full.
 The console came back on a new connection, but its results stayed on the
 dead one, its uncommitted work was not reported lost, and the old
 transaction state stayed behind."
+  :tags '(:clutch-live)
   (unless (memq clutch-test-backend '(mysql pg))
     (ert-skip "This regression covers MySQL and PostgreSQL consoles"))
   (clutch-test--with-conn admin
@@ -694,11 +694,11 @@ transaction state stayed behind."
           (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-test-live-mysql-result-refuses-writes-after-a-schema-switch ()
-  :tags '(:clutch-live)
   "A MySQL result should refuse to submit once the console switched database.
 An edit staged in a result of database A, submitted after
 `clutch-switch-schema' to B, updated the table of the same name in B.
 Running the query again shows B's rows, which may then be edited."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'mysql)
     (ert-skip "This regression covers MySQL's current database"))
   (clutch-test--with-conn admin
@@ -748,11 +748,11 @@ Running the query again shows B's rows, which may then be edited."
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
 
 (ert-deftest clutch-test-live-mysql-old-result-refuses-writes-after-a-typed-use ()
-  :tags '(:clutch-live)
   "A MySQL result left behind by a typed USE should refuse to submit.
 Result buffers are named by database, so after `USE b' the result of
 database A stays in its own buffer, and an edit staged there and
 submitted updated B's table of the same name."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'mysql)
     (ert-skip "This regression covers MySQL's current database"))
   (clutch-test--with-conn admin
@@ -792,13 +792,13 @@ submitted updated B's table of the same name."
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
 
 (ert-deftest clutch-test-live-pg-result-refuses-writes-after-a-reconnect-moved-it ()
-  :tags '(:clutch-live)
   "A PostgreSQL result should refuse to submit once a reconnect moved its path.
 In Manual mode, with s1, s3 committed and s1, s2 set in the open
 transaction, a result of t shows s2's row.  After the session was lost,
 the next statement in the console reconnected on s1, s3, and the edit
 staged in the result updated s3.t, though `current_schema()' was s1
 throughout."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
   (clutch-test--with-conn admin
@@ -853,8 +853,8 @@ throughout."
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))
 
 (ert-deftest clutch-test-live-duckdb-namespace-entrypoint ()
-  :tags '(:clutch-live :duckdb-live)
   "The public command should switch DuckDB schemas in the current catalog."
+  :tags '(:clutch-live :duckdb-live)
   (unless (eq (clutch-test-live-backend-id) 'duckdb)
     (ert-skip "Live backend is not DuckDB"))
   (let* ((params (append
@@ -904,8 +904,8 @@ throughout."
       (ignore-errors (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-test-live-schema-introspection ()
-  :tags '(:clutch-live)
   "Test schema introspection functions."
+  :tags '(:clutch-live)
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_schema_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -929,8 +929,8 @@ throughout."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-completion-does-not-cache-unknown-table ()
-  :tags '(:clutch-live :native-columns-live)
   "Deferred native completion should not cache a parsed nonexistent table."
+  :tags '(:clutch-live :native-columns-live)
   (clutch-test--with-conn conn
     (unless (memq clutch-test-backend '(pg mysql))
       (ert-skip "Live backend is not a deferred native SQL adapter"))
@@ -961,8 +961,8 @@ throughout."
         (should (eq (gethash table schema missing) missing))))))
 
 (ert-deftest clutch-test-live-object-describe-uses-real-table-and-index-metadata ()
-  :tags '(:clutch-live)
   "Object describe should render real table/index metadata from the backend."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :object-describe)
     (ert-skip (clutch-test-capability-skip-message :object-describe)))
   (clutch-test--with-conn conn
@@ -1010,8 +1010,8 @@ throughout."
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 
 (ert-deftest clutch-test-live-paged-sql-building ()
-  :tags '(:clutch-live)
   "Test paged SQL query building."
+  :tags '(:clutch-live)
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_paged_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
@@ -1053,8 +1053,8 @@ throughout."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-result-filter-sort-page-count-export-workflow ()
-  :tags '(:clutch-live)
   "Result buffer workflows should run real backend queries end-to-end."
+  :tags '(:clutch-live)
   (unless (clutch-test--result-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :result-workflow)))
   (clutch-test--with-conn conn
@@ -1194,8 +1194,8 @@ throughout."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-mysql-limited-join-duplicate-columns-executes-flat ()
-  :tags '(:clutch-live)
   "MySQL limited JOIN results with duplicate column names should not be wrapped."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :duplicate-column-join)
     (ert-skip (clutch-test-capability-skip-message :duplicate-column-join)))
   (clutch-test--with-conn conn
@@ -1242,8 +1242,8 @@ throughout."
         (ignore-errors (clutch-db-query conn drop-a))))))
 
 (ert-deftest clutch-test-live-long-statement-runs-in-background-and-cancels ()
-  :tags '(:clutch-live)
   "A long statement should leave Emacs free and stop when C-g cancels it."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :async-cancel)
     (ert-skip (clutch-test-capability-skip-message :async-cancel)))
   (clutch-test--with-conn conn
@@ -1272,11 +1272,11 @@ throughout."
       (should (clutch-db-live-p conn)))))
 
 (ert-deftest clutch-test-live-disconnect-ends-running-statement ()
-  :tags '(:clutch-live)
   "Disconnecting during a statement should return at once and end it once.
 The server may still finish the statement, so its outcome is unknown, which
 the echo area says; the buffer has left the connection, so no error page is
 drawn."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :async-cancel)
     (ert-skip (clutch-test-capability-skip-message :async-cancel)))
   (clutch-test--with-conn conn
@@ -1306,8 +1306,8 @@ drawn."
           (should-not (gethash conn clutch--running-queries)))))))
 
 (ert-deftest clutch-test-live-pg-ctid-edit-via-execute-select-persists ()
-  :tags '(:clutch-live)
   "PostgreSQL no-key edit should work through SELECT row identity injection."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :ctid-row-identity)
     (ert-skip (clutch-test-capability-skip-message :ctid-row-identity)))
   (clutch-test--with-conn conn
@@ -1350,11 +1350,11 @@ drawn."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-pg-qualified-table-changes-itself ()
-  :tags '(:clutch-live)
   "A result of a table in another schema should be edited by its own key.
 public has a table of the same name keyed by another column, and the
 schema is not on the search path.  Unquoted names fold to lower case and
 quoted ones keep their case, as PostgreSQL reads them."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "Live backend is not PostgreSQL"))
   (clutch-test--with-conn conn
@@ -1414,10 +1414,10 @@ quoted ones keep their case, as PostgreSQL reads them."
             (ignore-errors (clutch-db-query conn sql))))))))
 
 (ert-deftest clutch-test-live-pg-result-follows-keys-in-its-schema ()
-  :tags '(:clutch-live)
   "Following a foreign key should open the parent in the child's schema.
 The query either qualifies the child or finds it through the search path,
 whose first schema, public, has a parent table of the same name."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "Live backend is not PostgreSQL"))
   (clutch-test--with-conn conn
@@ -1457,8 +1457,8 @@ whose first schema, public, has a parent table of the same name."
             (ignore-errors (clutch-db-query conn sql))))))))
 
 (ert-deftest clutch-test-live-pg-ctid-aggregate-select-skips-row-identity-injection ()
-  :tags '(:clutch-live)
   "PostgreSQL no-key aggregate SELECT should not receive CTID injection."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :ctid-row-identity)
     (ert-skip (clutch-test-capability-skip-message :ctid-row-identity)))
   (clutch-test--with-conn conn
@@ -1483,8 +1483,8 @@ whose first schema, public, has a parent table of the same name."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-aggregate-select-skips-row-identity-injection ()
-  :tags '(:clutch-live)
   "Aggregate SELECT execution should not inject row identity into live SQL."
+  :tags '(:clutch-live)
   (unless (clutch-test--result-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :result-workflow)))
   (clutch-test--with-conn conn
@@ -1512,9 +1512,9 @@ whose first schema, public, has a parent table of the same name."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-data-modifying-cte-runs-once ()
-  :tags '(:clutch-live)
   "A SELECT over a data-modifying CTE should run once and dirty Manual mode.
 A quote inside the CTE's quoted name must not hide the modification."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :data-modifying-cte)
     (ert-skip (clutch-test-capability-skip-message :data-modifying-cte)))
   (clutch-test--with-conn conn
@@ -1557,8 +1557,8 @@ A quote inside the CTE's quoted name must not hide the modification."
               (ignore-errors (clutch-db-query conn drop-sql)))))))))
 
 (ert-deftest clutch-test-live-select-into-copies-every-row ()
-  :tags '(:clutch-live)
   "SELECT INTO should copy every row as written and dirty Manual mode."
+  :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :select-into)
     (ert-skip (clutch-test-capability-skip-message :select-into)))
   (clutch-test--with-conn conn
@@ -1610,8 +1610,8 @@ A quote inside the CTE's quoted name must not hide the modification."
           (drop-all))))))
 
 (ert-deftest clutch-test-live-edit-field-and-submit-persists ()
-  :tags '(:clutch-live)
   "Edit through a real SELECT result and submit the persisted row change."
+  :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
@@ -1667,8 +1667,8 @@ A quote inside the CTE's quoted name must not hide the modification."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-cte-result-edit-changes-one-base-row ()
-  :tags '(:clutch-live)
   "Editing a CTE result should change only the base table row it shows."
+  :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
@@ -1729,8 +1729,8 @@ A quote inside the CTE's quoted name must not hide the modification."
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 
 (ert-deftest clutch-test-live-cte-result-delete-and-insert-reach-base-table ()
-  :tags '(:clutch-live)
   "Deleting and inserting through a CTE result should change its base table."
+  :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
@@ -1780,8 +1780,8 @@ A quote inside the CTE's quoted name must not hide the modification."
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 
 (ert-deftest clutch-test-live-autocommit-staged-batch-is-atomic ()
-  :tags '(:clutch-live)
   "Auto mode should commit or roll back a real staged batch as one submission."
+  :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
@@ -1833,8 +1833,8 @@ A quote inside the CTE's quoted name must not hide the modification."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-manual-staged-batch-rolls-back-to-savepoint ()
-  :tags '(:clutch-live)
   "A failed Manual submission should preserve earlier work and undo its own prefix."
+  :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (unless (clutch-test-live-backend-capability-p :manual-savepoint)
@@ -1909,11 +1909,11 @@ A quote inside the CTE's quoted name must not hide the modification."
           (clutch-db-query conn drop-sql)))))
 
 (ert-deftest clutch-test-live-rollback-to-a-savepoint-keeps-the-transaction-dirty ()
-  :tags '(:clutch-live)
   "A rollback to a savepoint should leave the work before it known as uncommitted.
 Clutch took it for a rollback of the whole transaction, so a disconnect then
 lost that work without asking.  The savepoint is named chain, a word that a
 whole rollback can also end with."
+  :tags '(:clutch-live)
   (pcase-let ((`(,save ,rollback)
                (pcase clutch-test-backend
                  ((or 'pg 'mysql 'oracle)
@@ -1962,13 +1962,13 @@ whole rollback can also end with."
     prompts))
 
 (ert-deftest clutch-test-live-auto-mode-transaction-begun-with-sql-is-tracked ()
-  :tags '(:clutch-live)
   "Work in a transaction begun with SQL in Auto mode should be known.
 Clutch recorded nothing in Auto mode, so after a typed BEGIN and INSERT,
 disconnecting or killing the console dropped the insert without asking.
 The server's report of an open transaction now marks it, a rollback to
 a savepoint keeps it, and a typed COMMIT clears it.  Switching to Manual
 mode keeps such a transaction open for `clutch-commit' to end."
+  :tags '(:clutch-live)
   (unless (memq clutch-test-backend '(mysql pg))
     (ert-skip "This regression covers MySQL and PostgreSQL transaction status"))
   (clutch-test--with-conn admin
@@ -2022,11 +2022,11 @@ mode keeps such a transaction open for `clutch-commit' to end."
             (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table))))))))
 
 (ert-deftest clutch-test-live-mysql-ddl-that-commits-nothing-keeps-work-known ()
-  :tags '(:clutch-live)
   "A MySQL CREATE TEMPORARY TABLE should keep the work before it known.
 Clutch took every DDL for one that commits, as most MySQL DDL does, so in
 Manual mode a temporary table after an INSERT cleared the insert, and a
 disconnect then dropped it without asking.  A CREATE TABLE commits it."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'mysql)
     (ert-skip "This regression covers MySQL's implicit commits"))
   (clutch-test--with-conn admin
@@ -2057,8 +2057,8 @@ disconnect then dropped it without asking.  A CREATE TABLE commits it."
                                            table table))))))))
 
 (ert-deftest clutch-test-live-insert-and-delete-submit-persists ()
-  :tags '(:clutch-live)
   "Submitted insert and delete staging should persist on a real backend."
+  :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
   (clutch-test--with-conn conn
@@ -2133,10 +2133,10 @@ disconnect then dropped it without asking.  A CREATE TABLE commits it."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-pg-repl-batch-keeps-its-last-transaction-dirty ()
-  :tags '(:clutch-live)
   "A REPL batch ending with an uncommitted write must ask before closing.
 COMMIT at the start of the input cleared the work of its later BEGIN
 and INSERT, despite the server reporting that transaction still open."
+  :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers PostgreSQL's multi-statement REPL"))
   (clutch-test--with-conn admin
@@ -2234,8 +2234,8 @@ The current buffer is the result."
     prompts))
 
 (ert-deftest clutch-test-live-xtdb-first-write-transaction-defers-metadata ()
-  :tags '(:xtdb-live)
   "A cold console's catalog refresh must leave its write transaction usable."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn admin
@@ -2259,9 +2259,9 @@ The current buffer is the result."
                         'ready)))))))
 
 (ert-deftest clutch-test-live-xtdb-manual-read-does-not-open-a-read-only-transaction ()
-  :tags '(:xtdb-live)
   "Manual reads must not prevent the following DML from opening its transaction.
 An ASSERT opens one as a write does, so it still guards the writes after it."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn admin
@@ -2294,8 +2294,8 @@ An ASSERT opens one as a write does, so it still guards the writes after it."
                        '(("kept"))))))))
 
 (ert-deftest clutch-test-live-xtdb-reads-its-own-catalog ()
-  :tags '(:xtdb-live)
   "XTDB should connect as its own backend and read its catalog as XTDB has it."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2325,9 +2325,9 @@ An ASSERT opens one as a write does, so it still guards the writes after it."
                             (error-message-string err)))))
 
 (ert-deftest clutch-test-live-xtdb-staged-changes-keep-column-types ()
-  :tags '(:xtdb-live)
   "An insert, an edit and a deletion should keep their columns' types.
 XTDB stores a value with the type it is sent as."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2354,8 +2354,8 @@ XTDB stores a value with the type it is sent as."
       (should (equal (clutch-test--xtdb-column-type conn table "name") ":utf8")))))
 
 (ert-deftest clutch-test-live-xtdb-manual-mode-refuses-staged-changes ()
-  :tags '(:xtdb-live)
   "Staged changes should need Auto mode, since XTDB has no savepoints."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2378,11 +2378,11 @@ XTDB stores a value with the type it is sent as."
                      '(("Ann")))))))
 
 (ert-deftest clutch-test-live-xtdb-transaction-state-follows-the-server ()
-  :tags '(:xtdb-live)
   "XTDB's report of an open transaction should mark uncommitted work.
 An INSERT in Manual mode, or after BEGIN READ WRITE in Auto mode, leaves
 work that a disconnect asks about; a commit clears it, and a SELECT in
 Manual mode, which runs outside a transaction, marks nothing."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (let ((table (clutch-test--xtdb-table "tx"))
@@ -2416,9 +2416,9 @@ Manual mode, which runs outside a transaction, marks nothing."
         (clutch-toggle-auto-commit)))))
 
 (ert-deftest clutch-test-live-xtdb-time-and-union-columns ()
-  :tags '(:xtdb-live)
   "A time column should take times, and a union column should refuse a value.
 XTDB reports both as json, and stores a JSON string as a string."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2456,10 +2456,10 @@ XTDB reports both as json, and stores a JSON string as a string."
                      '(("m1" 1) ("m2" "one")))))))
 
 (ert-deftest clutch-test-live-xtdb-number-union-columns-take-each-value ()
-  :tags '(:xtdb-live)
   "A column of integers and fractions should take either through edits.
 Each value goes as a member type that holds it, so the column's union does not
 grow, also after it gains a NULL; a value that is no number is refused."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2493,10 +2493,10 @@ grow, also after it gains a NULL; a value that is no number is refused."
                      "[:union :i64 :f64 [:? :null]]")))))
 
 (ert-deftest clutch-test-live-xtdb-number-union-values-keep-every-digit ()
-  :tags '(:xtdb-live)
   "A number should go as a member of its column that holds it whole.
 A long fraction takes the decimal member before the float, and an integer
 out of the integer member's range takes the float."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2531,9 +2531,9 @@ out of the integer member's range takes the float."
                      '(("32768.0")))))))
 
 (ert-deftest clutch-test-live-xtdb-timestamptz-keeps-the-time-shown ()
-  :tags '(:xtdb-live)
   "A timestamptz should be written as the time shown, with Emacs's offset.
 The insert form should set a row's valid time through _valid_from."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (unwind-protect
@@ -2577,9 +2577,9 @@ The insert form should set a row's valid time through _valid_from."
     (set-time-zone-rule (getenv "TZ"))))
 
 (ert-deftest clutch-test-live-xtdb-history-results-are-read-only ()
-  :tags '(:xtdb-live)
   "A row of a query of past versions should refuse edits; a current one not.
 Its _id names the current version, which an edit would change."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
@@ -2634,8 +2634,8 @@ Its _id names the current version, which an edit would change."
                      '(("EDITED")))))))
 
 (ert-deftest clutch-test-live-xtdb-erase-asks-once-and-dirties-manual-mode ()
-  :tags '(:xtdb-live)
   "ERASE should ask once, as a DELETE does, and dirty Manual mode."
+  :tags '(:xtdb-live)
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (clutch-test--with-conn conn
