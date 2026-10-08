@@ -1,0 +1,9 @@
+# 217 — Result Actions Recover Before Server Work
+
+Editing a cell and copying UPDATE statements loaded source-column metadata directly from a lost connection; submitting staged changes could use cached metadata but started its atomic batch on that same closed connection. All three failures were reproduced through public result commands on a disposable MySQL 8.0 server before the fix.
+
+The existing connection owner recovers the session before source-column metadata is read and before a staged submission is built. Recovery remains outside the atomic batch: no failed statement or unknown outcome is replayed. Submission checks the old session's uncertain state before recovery. Once recovery has rebound the session's buffers, the result checks its recorded resolution context again before loading metadata or submitting, because PostgreSQL can restore a different committed search path after losing an open transaction.
+
+Pure SQL previews and INSERT copies keep their existing offline behavior. MongoDB document copies also work with a lost connection, but an explicitly ended session has no backend connection and now reports "Connection closed" through the existing result guard rather than an unsupported-action message.
+
+Public-command live tests cover the first edit, UPDATE copy, staged submit and staged delete after session loss in Auto and Manual mode on MySQL and PostgreSQL; a delete loads no column metadata, so only the recovery before the batch reconnects its session. The PostgreSQL path regression also covers each action as the first command to recover, checks that it refuses and confirms both tables remain unchanged. An uncertain-outcome regression refuses a second submit even after that session is lost. Unit fixtures that supply metadata now explicitly model a live connection in their own scopes; connection recovery is exercised by the real-server tests.

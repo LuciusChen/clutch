@@ -24,7 +24,6 @@ Each case below was reproduced on MySQL and PostgreSQL with #114 (5f0b2bb). On m
 - `C-c C-e` outside a console, in a buffer with `clutch-mode` or the REPL, keeps its picker and connects that buffer alone, in the mode the chosen connection starts in: over a live session the buffers that shared it lose their connection, and over a lost one they reconnect to sessions of their own. Keeping the mode when the same entry is picked again is not done there, since those buffers do not keep the parameters their session was opened with, which telling the same entry apart needs.
 - A password written into a `:url` is part of the target, so changing it makes `C-c C-e` connect the console alone.
 - A saved console whose entry was removed from `clutch-connection-alist` keeps no parameters it was opened with, so the picker still names it by those that follow its session, as before.
-- After a lost session, editing a cell or copying rows as UPDATE statements before any other command fails on the closed connection, from which they load the table's metadata, where the other commands reconnect. Reconnecting there changes how the tests provide metadata and is left for a change of its own.
 
 ## Verification
 

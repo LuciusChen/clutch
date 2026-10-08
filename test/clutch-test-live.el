@@ -961,6 +961,94 @@ starts in, and its results keep the old connection, or none."
                                              namespace))))
           (delete-directory clutch-console-directory t))))))
 
+(defun clutch-test--result-action-after-session-loss (action)
+  "Check that result ACTION recovers a lost session before contacting it."
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL session loss"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_result_recover_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params)))
+          (result-name (format " *clutch-result-recover-%d*" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin
+                             (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20))"
+                                     table))
+            (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'orig')" table))
+            (dolist (manual '(nil t))
+              (ert-info ((format "%s, %s" action (if manual "Manual" "Auto")))
+                (clutch-test--with-live-console params
+                  (let ((console (current-buffer)))
+                    (clutch-test--with-live-result-buffer result-name
+                      (when manual (clutch-toggle-auto-commit))
+                      (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
+                      (with-current-buffer result-name
+                        (pcase action
+                          ('submit (clutch-test--xtdb-edit 0 "v" "edited"))
+                          ('delete
+                           (set-window-buffer (selected-window) (current-buffer))
+                           (clutch--goto-cell 0 1)
+                           (call-interactively #'clutch-result-delete-rows))))
+                      (let ((lost (clutch-test--end-console-session admin)))
+                        (with-current-buffer result-name
+                          (set-window-buffer (selected-window) (current-buffer))
+                          (clutch--goto-cell 0 1)
+                          (pcase action
+                            ('edit
+                             (with-current-buffer (clutch-result-edit-cell)
+                               (erase-buffer)
+                               (insert "edited")
+                               (clutch-result-edit-finish)))
+                            ('copy
+                             (let (kill-ring kill-ring-yank-pointer)
+                               (clutch-result-copy 'update '((0) 1))
+                               (should (string-match-p "UPDATE.*SET.*v.*orig"
+                                                       (current-kill 0)))))
+                            ((or 'submit 'delete) (clutch-test--xtdb-submit)))
+                          (should-not (eq clutch-connection lost))
+                          (should (eq clutch-connection
+                                      (buffer-local-value 'clutch-connection console)))
+                          (should (eq (not (null (clutch-db-manual-commit-p
+                                                  clutch-connection)))
+                                      manual))))
+                      (with-current-buffer console
+                        (when manual (clutch-rollback)))
+                      (should
+                       (equal (caar (clutch-db-result-rows
+                                     (clutch-db-query
+                                      admin (format "SELECT v FROM %s WHERE id=1" table))))
+                              (cond (manual "orig")
+                                    ((eq action 'submit) "edited")
+                                    ((eq action 'delete) nil)
+                                    (t "orig")))))))
+                (clutch-db-query admin (format "DELETE FROM %s" table))
+                (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'orig')" table)))))
+        (ignore-errors
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+
+(ert-deftest clutch-test-live-result-edit-recovers-a-lost-session ()
+  "The first cell edit after session loss should recover its connection."
+  :tags '(:clutch-live)
+  (clutch-test--result-action-after-session-loss 'edit))
+
+(ert-deftest clutch-test-live-result-copy-update-recovers-a-lost-session ()
+  "The first UPDATE copy after session loss should recover its connection."
+  :tags '(:clutch-live)
+  (clutch-test--result-action-after-session-loss 'copy))
+
+(ert-deftest clutch-test-live-result-submit-recovers-a-lost-session ()
+  "Submitting staged edits after session loss should recover before its batch."
+  :tags '(:clutch-live)
+  (clutch-test--result-action-after-session-loss 'submit))
+
+(ert-deftest clutch-test-live-result-delete-submit-recovers-a-lost-session ()
+  "Submitting a staged delete after session loss should recover before its batch.
+A delete loads no column metadata, so only the recovery before the batch
+reconnects it."
+  :tags '(:clutch-live)
+  (clutch-test--result-action-after-session-loss 'delete))
+
 (ert-deftest clutch-test-live-picking-a-moved-console-returns-to-it ()
   "Picking a console that followed a namespace switch should return to it.
 An ad hoc console that followed a typed USE or SET search_path was named
@@ -1251,38 +1339,47 @@ throughout."
                admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text)" schema))
               (clutch-db-query
                admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
-            (clutch-test--with-live-console params
-              (clutch-toggle-auto-commit)
-              (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 s3))
-              (clutch-commit)
-              (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 s2))
-              (clutch-test--with-live-result-buffer result-name
-                (clutch-test--run-in-console "SELECT id, v FROM t")
-                (with-current-buffer result-name
-                  (clutch-test--xtdb-edit 0 "v" "edited"))
-                (let ((lost (clutch-test--end-console-session admin)))
-                  ;; The statement reconnects before it asks to discard the
-                  ;; staged edit, which is kept.
-                  (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
-                    (should-error (clutch-test--run-in-console "SELECT 1")
-                                  :type 'user-error))
-                  (should-not (eq clutch-connection lost)))
-                (with-current-buffer result-name
-                  (should (string-match-p
-                           "run the query again"
-                           (error-message-string
-                            (should-error (clutch-test--xtdb-submit)
-                                          :type 'user-error))))
-                  (should clutch--pending-edits))
-                (dolist (schema (list s2 s3))
-                  (should (equal (caar (clutch-db-result-rows
-                                        (clutch-db-query
-                                         clutch-connection
-                                         (format "SELECT v FROM %s.t WHERE id = 1"
-                                                 schema))))
-                                 "orig"))))
-              (clutch-rollback)
-              (clutch-toggle-auto-commit)))
+            (dolist (action '(console submit edit copy))
+              (clutch-test--with-live-console params
+                (clutch-toggle-auto-commit)
+                (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 s3))
+                (clutch-commit)
+                (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 s2))
+                (clutch-test--with-live-result-buffer result-name
+                  (clutch-test--run-in-console "SELECT id, v FROM t")
+                  (with-current-buffer result-name
+                    (clutch-test--xtdb-edit 0 "v" "edited"))
+                  (let ((lost (clutch-test--end-console-session admin)))
+                    (when (eq action 'console)
+                      ;; The statement reconnects before it asks to discard
+                      ;; the staged edit, which is kept.
+                      (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+                        (should-error (clutch-test--run-in-console "SELECT 1")
+                                      :type 'user-error)))
+                    (with-current-buffer result-name
+                      (ert-info ((format "first action: %s" action))
+                        (should (string-match-p
+                                 "run the query again"
+                                 (error-message-string
+                                  (should-error
+                                   (pcase action
+                                     ('edit
+                                      (clutch--goto-cell 0 1)
+                                      (clutch-result-edit-cell))
+                                     ('copy (clutch-result-copy 'update '((0) 1)))
+                                     (_ (clutch-test--xtdb-submit)))
+                                   :type 'user-error)))))
+                      (should clutch--pending-edits)
+                      (should-not (eq clutch-connection lost))))
+                  (dolist (schema (list s2 s3))
+                    (should (equal (caar (clutch-db-result-rows
+                                          (clutch-db-query
+                                           clutch-connection
+                                           (format "SELECT v FROM %s.t WHERE id = 1"
+                                                   schema))))
+                                   "orig"))))
+                (clutch-rollback)
+                (clutch-toggle-auto-commit))))
         (dolist (schema (list s1 s2 s3))
           (ignore-errors
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))
