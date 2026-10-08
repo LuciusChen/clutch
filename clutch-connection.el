@@ -2456,7 +2456,7 @@ the transaction ends either way."
                 "Switch schema/database: ")
               namespaces nil t nil nil current)))
         (unless (string-empty-p namespace)
-          (if (and current (string-equal-ignore-case namespace current))
+          (if (equal namespace current)
               (message "Already on schema/database %s" current)
             (if-let* ((replacement-params
                        (clutch-db-namespace-reconnect-params
