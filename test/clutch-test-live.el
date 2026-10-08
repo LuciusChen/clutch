@@ -969,6 +969,72 @@ require :backend\"."
                                            "DROP SCHEMA IF EXISTS %s CASCADE")
                                          namespace)))))))
 
+(ert-deftest clutch-test-live-result-commands-after-the-session-ends ()
+  "A result's commands should say so once its session has ended.
+After `clutch-disconnect', refreshing, paging, counting, sorting and
+filtering a result, editing a cell, showing a column's details,
+previewing its SQL and copying rows as INSERT or UPDATE statements
+failed with `cl-no-applicable-method'.  A result whose session was lost
+still previews its SQL and copies rows as INSERT statements without
+reconnecting."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL results"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_ended_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params)))
+          (result-name (format " *clutch-ended-result-%d*" (emacs-pid))))
+      (cl-flet ((call-in-result (command)
+                  (with-current-buffer result-name
+                    (set-window-buffer (selected-window) (current-buffer))
+                    (clutch--goto-cell 0 1)
+                    (cl-letf (((symbol-function 'completing-read)
+                               (lambda (&rest _) "id = 1"))
+                              ((symbol-function 'read-string)
+                               (lambda (&rest _) "id = 1")))
+                      (let ((value (call-interactively command)))
+                        (when (and (bufferp value)
+                                   (not (eq value (current-buffer))))
+                          (kill-buffer value)))))))
+        (unwind-protect
+            (progn
+              (clutch-db-query
+               admin (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20))" table))
+              (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'a'), (2, 'b')"
+                                             table))
+              (clutch-test--with-live-console params
+                (clutch-test--with-live-result-buffer result-name
+                  (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
+                  (let ((lost (clutch-test--end-console-session admin)))
+                    (dolist (command '(clutch-result-copy-insert
+                                       clutch-preview-execution-sql))
+                      (ert-info ((format "lost: %s" command))
+                        (call-in-result command)
+                        (should (eq (buffer-local-value 'clutch-connection
+                                                        (get-buffer result-name))
+                                    lost)))))
+                  (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
+                  (clutch-disconnect)
+                  (dolist (command '(clutch-result-rerun clutch-result-last-page
+                                     clutch-result-count-total
+                                     clutch-result-sort-by-column
+                                     clutch-result-apply-filter clutch-result-edit-cell
+                                     clutch-result-column-info
+                                     clutch-preview-execution-sql
+                                     clutch-result-copy-insert
+                                     clutch-result-copy-update))
+                    (ert-info ((format "ended: %s" command))
+                      (should (string-match-p
+                               "Connection closed"
+                               (error-message-string
+                                (should-error (call-in-result command)
+                                              :type 'user-error)))))))))
+          (when-let* ((preview (get-buffer "*clutch-preview*")))
+            (kill-buffer preview))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table))))))))
+
 (ert-deftest clutch-test-live-mysql-result-refuses-writes-after-a-schema-switch ()
   "A MySQL result should refuse to submit once the console switched database.
 An edit staged in a result of database A, submitted after
