@@ -2046,7 +2046,7 @@ XTDB stores a value with the type it is sent as."
   "XTDB's report of an open transaction should mark uncommitted work.
 An INSERT in Manual mode, or after BEGIN READ WRITE in Auto mode, leaves
 work that a disconnect asks about; a commit clears it, and a SELECT in
-Manual mode, which also opens a transaction, marks nothing."
+Manual mode, which runs outside a transaction, marks nothing."
   (unless (eq clutch-test-backend 'xtdb)
     (ert-skip "Live backend is not XTDB"))
   (let ((table (clutch-test--xtdb-table "tx"))
