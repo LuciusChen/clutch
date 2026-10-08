@@ -4573,6 +4573,54 @@ console's session, which the edit only borrows."
                             'old-conn))))))
       (kill-buffer console))))
 
+(ert-deftest clutch-test-connect-in-an-indirect-edit-ends-its-own-session ()
+  "`C-c C-e' in an indirect edit should end a session the edit connected.
+Connecting the edit elsewhere a second time left the session it had
+connected open and asked nothing about its uncommitted work, as if that
+session were still its console's."
+  (let ((clutch-connection-alist
+         '(("beta" . (:backend mysql :host "db2"))
+           ("gamma" . (:backend mysql :host "db3"))))
+        (conns '(beta-conn gamma-conn))
+        picked ended asked)
+    (with-temp-buffer
+      (clutch-mode)
+      (clutch--indirect-mode 1)
+      (setq-local clutch-connection 'console-conn)
+      (cl-letf (((symbol-function 'clutch--build-conn)
+                 (lambda (_params) (pop conns)))
+                ((symbol-function 'clutch--effective-sql-product)
+                 (lambda (_params) 'mysql))
+                ((symbol-function 'clutch--connection-alive-p)
+                 (lambda (conn) (and conn (not (memq conn ended)))))
+                ((symbol-function 'clutch--confirm-session-close)
+                 (lambda (conn _action) (push conn asked)))
+                ((symbol-function 'clutch--read-connection-params)
+                 (lambda () (clutch--saved-connection-params picked)))
+                ((symbol-function 'clutch--do-disconnect)
+                 (lambda (conn) (push conn ended)))
+                ((symbol-function 'clutch--release-connection-transport)
+                 #'ignore)
+                ((symbol-function 'clutch--clear-connection-metadata-caches)
+                 #'ignore)
+                ((symbol-function 'clutch--activate-current-buffer-connection)
+                 (lambda (conn params _product)
+                   (setq-local clutch-connection conn
+                               clutch--connection-params params)))
+                ((symbol-function 'clutch--connection-key)
+                 (lambda (_conn) "test-conn"))
+                ((symbol-function 'message) #'ignore))
+        (setq picked "beta")
+        (clutch-connect)
+        (should (eq clutch-connection 'beta-conn))
+        (should-not ended)
+        (should-not asked)
+        (setq picked "gamma")
+        (clutch-connect)
+        (should (eq clutch-connection 'gamma-conn))
+        (should (equal ended '(beta-conn)))
+        (should (equal asked '(beta-conn)))))))
+
 (ert-deftest clutch-test-connect-over-dead-connection-releases-only-its-transport ()
   "Connecting over a dead connection should release its transport only.
 Other buffers keep the dead connection so their next command can reconnect

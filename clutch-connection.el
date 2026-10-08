@@ -58,6 +58,9 @@ automatically when it drops.")
   "Target of the parameters this buffer's session connected with.
 As `clutch--connection-target' returns it.  `clutch-connect' moves the
 session only to a connection with the same target.")
+(defvar-local clutch--connected-here nil
+  "Non-nil when `clutch-connect' in this buffer connected its session.
+An indirect edit borrows the session of its console until then.")
 (defvar clutch--console-name)
 (defvar clutch--console-ad-hoc-params)
 (defvar clutch--describe-object-entry)
@@ -2561,6 +2564,13 @@ the transaction ends either way."
 
 ;;;; Interactive connect/disconnect
 
+(defun clutch--borrowed-session-p ()
+  "Return non-nil in an indirect edit that does not own its session.
+The edit borrows the session of its console until `clutch-connect'
+connects it on its own, and owns that session while it holds it."
+  (and (bound-and-true-p clutch--indirect-mode)
+       (not (and clutch--connected-here clutch-connection))))
+
 ;;;###autoload (autoload 'clutch-connect "clutch" nil t)
 (defun clutch-connect ()
   "Connect to a database server interactively.
@@ -2575,7 +2585,7 @@ buffer's session connected, in anything but `:password' and
 in, and its results and other buffers move to the new connection.
 Otherwise the buffer connects alone, in the mode that connection starts
 in; an indirect edit then leaves the session it shares with its console
-as it was."
+as it was, and the session it connects is its own."
   (interactive)
   ;; Closing the connection would not stop its statement on the server.
   (clutch--refuse-while-running clutch-connection)
@@ -2589,8 +2599,7 @@ as it was."
          ;; A saved entry changed since, or another one picked, may lead
          ;; to another server, where the session's results must not go.
          (same-target (and old-conn (equal target clutch--session-target)))
-         ;; An indirect edit borrows the session of its console.
-         (borrowed (bound-and-true-p clutch--indirect-mode)))
+         (borrowed (clutch--borrowed-session-p)))
     (when (and old-live-p (or same-target (not borrowed)))
       (clutch--confirm-session-close
        old-conn "Disconnect? "))
@@ -2615,7 +2624,8 @@ as it was."
                 (when (and old-conn (not borrowed))
                   (clutch--clear-connection-metadata-caches old-conn))
                 (clutch--activate-current-buffer-connection conn effective-params product)
-                (setq-local clutch--session-target target)
+                (setq-local clutch--session-target target
+                            clutch--connected-here t)
                 (message "Connected to %s" (clutch--connection-key conn)))
             (unless (eq clutch-connection conn)
               (clutch--discard-unbound-connection conn))))))))
@@ -2763,8 +2773,9 @@ state, and disconnects the underlying connection."
 (defun clutch--disconnect-on-kill ()
   "Disconnect the connection owned by this buffer.
 Invalidates all derived buffers that share the same connection.
-Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
-  (when (and (not (bound-and-true-p clutch--indirect-mode))
+Does nothing in an indirect edit on its console's session, as
+`clutch--borrowed-session-p' tells."
+  (when (and (not (clutch--borrowed-session-p))
              clutch-connection)
     (if (clutch--connection-alive-p clutch-connection)
         (progn

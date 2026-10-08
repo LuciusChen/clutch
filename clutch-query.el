@@ -2000,8 +2000,9 @@ Key bindings:
 (defun clutch-indirect-execute ()
   "Execute the SQL in the indirect buffer, then close it.
 The SQL runs in another buffer that holds the connection, as a statement
-run there would.  When only this buffer holds it, as after connecting
-here, the SQL runs here and the buffer is buried instead of killed."
+run there would.  When the session is this buffer's own, as after
+connecting here, or no other buffer holds it, the SQL runs here and the
+buffer is buried instead of killed."
   (interactive)
   (let ((sql (string-trim
               (buffer-substring-no-properties (point-min) (point-max))))
@@ -2012,12 +2013,14 @@ here, the SQL runs here and the buffer is buried instead of killed."
       (user-error "No SQL to execute"))
     (unless conn
       (user-error "No active connection"))
-    (let ((home (or (cl-find-if
-                     (lambda (buffer)
-                       (and (not (eq buffer indirect))
-                            (eq (buffer-local-value 'clutch-connection buffer)
-                                conn)))
-                     (buffer-list))
+    (let ((home (or (and (clutch--borrowed-session-p)
+                         (cl-find-if
+                          (lambda (buffer)
+                            (and (not (eq buffer indirect))
+                                 (eq (buffer-local-value 'clutch-connection
+                                                         buffer)
+                                     conn)))
+                          (buffer-list)))
                     indirect)))
       ;; Killing the buffer the statement runs in would drop its reply.
       (quit-window (not (eq home indirect)))
