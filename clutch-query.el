@@ -1305,15 +1305,13 @@ already confirmed SQL."
   ;; A result kept on failure keeps its query; a new result records its own.
   (unless (plist-get result-context :keep-result-on-error)
     (setq clutch--last-query sql))
-  (let ((manual-dirty-p
-         (and (clutch--tx-unresolved-p connection)
-              (clutch-db-manual-commit-p connection)))
+  (let ((unresolved (clutch--tx-unresolved-p connection))
         (source-buffer (current-buffer)))
     (clutch--execute-statement-attempt
      sql connection present-result-p result-context region
      (lambda (outcome)
        (if (and (not no-idle-retry-p)
-                (not manual-dirty-p)
+                (not unresolved)
                 (eq (car-safe (plist-get outcome :error))
                     'clutch-db-execution-not-started)
                 (buffer-live-p source-buffer)
@@ -1331,7 +1329,7 @@ already confirmed SQL."
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
-  "Warning shown when a dirty manual transaction loses its session.")
+  "Warning shown when a dirty transaction loses its session.")
 
 (defun clutch--connection-loss-context (connection &optional context)
   "Add transaction-loss state for CONNECTION to a copy of CONTEXT."
