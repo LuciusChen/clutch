@@ -2624,10 +2624,12 @@ as it was, and the session it connects is its own."
                 (when (and old-conn (not borrowed))
                   (clutch--clear-connection-metadata-caches old-conn))
                 (clutch--activate-current-buffer-connection conn effective-params product)
+                (message "Connected to %s" (clutch--connection-key conn)))
+            ;; Once bound, CONN is this buffer's session, also when what
+            ;; follows the binding, such as loading metadata, is quit.
+            (if (eq clutch-connection conn)
                 (setq-local clutch--session-target target
                             clutch--connected-here t)
-                (message "Connected to %s" (clutch--connection-key conn)))
-            (unless (eq clutch-connection conn)
               (clutch--discard-unbound-connection conn))))))))
 
 ;;;###autoload
