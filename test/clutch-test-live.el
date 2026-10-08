@@ -408,7 +408,7 @@ a new connection must be where the server says the console is."
 Given only a :url, it listed the tables of `default'.  A switch
 reconnected with the unchanged :url, so the server stayed in the old
 database, and unqualified SQL ran there, while Clutch showed and listed
-the new one."
+the new one.  The driver prefers a `database' property to the path."
   :tags '(:clutch-live)
   (unless (clutch-test--clickhouse-live-p)
     (ert-skip (clutch-test-capability-skip-message :clickhouse-engine)))
@@ -416,11 +416,8 @@ the new one."
     (let* ((a (format "clutch_url_a_%d" (emacs-pid)))
            (b (format "clutch_url_b_%d" (emacs-pid)))
            (live (clutch-test--live-connect-params))
-           (params (list :backend 'clickhouse
-                         :url (format "jdbc:clickhouse://%s:%d/%s"
-                                      (plist-get live :host) (plist-get live :port) a)
-                         :user (plist-get live :user)
-                         :password (plist-get live :password))))
+           (server (format "jdbc:clickhouse://%s:%d"
+                           (plist-get live :host) (plist-get live :port))))
       (cl-flet ((current (conn)
                   (caar (clutch-db-result-rows
                          (clutch-db-query conn "SELECT currentDatabase()")))))
@@ -430,16 +427,26 @@ the new one."
                 (clutch-db-query admin (format "CREATE DATABASE %s" database)))
               (clutch-db-query
                admin (format "CREATE TABLE %s.only_in_a (id UInt8) ENGINE = Memory" a))
-              (clutch-test--with-live-console params
-                (should (member "only_in_a" (clutch-db-list-tables clutch-connection)))
-                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) b))
-                          ((symbol-function 'yes-or-no-p) #'always))
-                  (clutch-switch-schema))
-                (should (equal (current clutch-connection) b))
-                (let ((reopened (clutch-db-connect 'clickhouse clutch--connection-params)))
-                  (unwind-protect
-                      (should (equal (current reopened) b))
-                    (clutch-db-disconnect reopened)))))
+              (dolist (url (list (format "%s/%s" server a)
+                                 (format "%s/default?database=%s" server a)))
+                (ert-info (url)
+                  (clutch-test--with-live-console
+                      (list :backend 'clickhouse :url url
+                            :user (plist-get live :user)
+                            :password (plist-get live :password))
+                    (should (member "only_in_a"
+                                    (clutch-db-list-tables clutch-connection)))
+                    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) b))
+                              ((symbol-function 'yes-or-no-p) #'always))
+                      (clutch-switch-schema))
+                    (should (equal (current clutch-connection) b))
+                    (should-not (member "only_in_a"
+                                        (clutch-db-list-tables clutch-connection)))
+                    (let ((reopened (clutch-db-connect 'clickhouse
+                                                       clutch--connection-params)))
+                      (unwind-protect
+                          (should (equal (current reopened) b))
+                        (clutch-db-disconnect reopened)))))))
           (dolist (database (list a b))
             (ignore-errors
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
