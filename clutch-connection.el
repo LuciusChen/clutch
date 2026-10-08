@@ -54,10 +54,13 @@
   "Params plist used to establish the current connection.
 Stored at connect time so the connection can be re-established
 automatically when it drops.")
-(defvar-local clutch--console-target nil
-  "Target of the parameters a console's session connected with.
+(defvar-local clutch--session-target nil
+  "Target of the parameters this buffer's session connected with.
 As `clutch--connection-target' returns it.  `clutch-connect' moves the
 session only to a connection with the same target.")
+(defvar-local clutch--connected-here nil
+  "Non-nil when `clutch-connect' in this buffer connected its session.
+An indirect edit borrows the session of its console until then.")
 (defvar clutch--console-name)
 (defvar clutch--console-ad-hoc-params)
 (defvar clutch--describe-object-entry)
@@ -759,6 +762,16 @@ The transport is released even when disconnecting signals or is quit."
                            (buffer-local-value 'clutch--connection-params buf))
                  return (list (buffer-local-value 'clutch--connection-params buf)
                               (buffer-local-value 'clutch--conn-sql-product buf))))))
+
+(defun clutch--session-target-of (conn)
+  "Return the target CONN's session connected to, from a buffer that has it."
+  (when conn
+    (or (and (eq clutch-connection conn) clutch--session-target)
+        (cl-loop for buf in (buffer-list)
+                 for target = (and (eq (buffer-local-value 'clutch-connection buf)
+                                       conn)
+                                   (buffer-local-value 'clutch--session-target buf))
+                 when target return target))))
 
 (defun clutch--buffer-sql-dialect ()
   "Return the `clutch-db-sql-dialect' rules for the current buffer.
@@ -2551,6 +2564,13 @@ the transaction ends either way."
 
 ;;;; Interactive connect/disconnect
 
+(defun clutch--borrowed-session-p ()
+  "Return non-nil in an indirect edit that does not own its session.
+The edit borrows the session of its console until `clutch-connect'
+connects it on its own, and owns that session while it holds it."
+  (and (bound-and-true-p clutch--indirect-mode)
+       (not (and clutch--connected-here clutch-connection))))
+
 ;;;###autoload (autoload 'clutch-connect "clutch" nil t)
 (defun clutch-connect ()
   "Connect to a database server interactively.
@@ -2558,31 +2578,34 @@ If `clutch-connection-alist' is non-empty, offer saved connections via
   `completing-read'.  Empty or unmatched input prompts for each parameter.
 The password is resolved via `auth-source' when not in the connection
 params; see `clutch-connection-alist' for details.
-A query console that has a connection connects anew with its own saved
-or temporary parameters, in the commit mode it was in, and its results
-and the other buffers of its session move to the new connection.  One
-whose saved entry changed since in anything but `:password' or
-`:pass-entry' connects alone, in the mode that entry starts in."
+A query console connects with its own saved or temporary parameters,
+another buffer with the connection picked.  When they lead where the
+buffer's session connected, in anything but `:password' and
+`:pass-entry', the session connects anew, in the commit mode it was
+in, and its results and other buffers move to the new connection.
+Otherwise the buffer connects alone, in the mode that connection starts
+in; an indirect edit then leaves the session it shares with its console
+as it was, and the session it connects is its own."
   (interactive)
   ;; Closing the connection would not stop its statement on the server.
   (clutch--refuse-while-running clutch-connection)
-  (let ((old-conn clutch-connection)
-        (old-live-p (clutch--connection-alive-p clutch-connection)))
-    (when old-live-p
+  (let* ((old-conn clutch-connection)
+         (old-live-p (clutch--connection-alive-p old-conn))
+         (source-default-directory default-directory)
+         (params (clutch-prepare-connection-params
+                  (clutch--connect-params-for-current-buffer)
+                  source-default-directory))
+         (target (clutch--connection-target params))
+         ;; A saved entry changed since, or another one picked, may lead
+         ;; to another server, where the session's results must not go.
+         (same-target (and old-conn (equal target clutch--session-target)))
+         (borrowed (clutch--borrowed-session-p)))
+    (when (and old-live-p (or same-target (not borrowed)))
       (clutch--confirm-session-close
        old-conn "Disconnect? "))
-    (let* ((source-default-directory default-directory)
-           (params  (clutch-prepare-connection-params
-                     (clutch--connect-params-for-current-buffer)
-                     source-default-directory))
-           (target (clutch--connection-target params))
-           (effective-params (clutch--materialize-connection-params params))
+    (let* ((effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product effective-params)))
-      (if (and old-conn
-               clutch--console-name
-               ;; A saved entry changed since may lead to another server,
-               ;; where the session's results must not go.
-               (equal target clutch--console-target))
+      (if same-target
           (clutch--report-replaced-session
            "Connected to"
            (clutch--replace-connection old-conn effective-params product))
@@ -2591,19 +2614,22 @@ whose saved entry changed since in anything but `:password' or
           ;; buffer holds CONN, this function still owns it.
           (unwind-protect
               (progn
-                (if old-live-p
-                    (clutch--do-disconnect old-conn)
-                  ;; Other buffers keep a dead OLD-CONN to reconnect in place;
-                  ;; only its transport is released here.
-                  (clutch--release-connection-transport old-conn))
+                (unless borrowed
+                  (if old-live-p
+                      (clutch--do-disconnect old-conn)
+                    ;; Other buffers keep a dead OLD-CONN to reconnect in
+                    ;; place; only its transport is released here.
+                    (clutch--release-connection-transport old-conn)))
                 (clutch--require-live-connection conn)
-                (when old-conn
+                (when (and old-conn (not borrowed))
                   (clutch--clear-connection-metadata-caches old-conn))
                 (clutch--activate-current-buffer-connection conn effective-params product)
-                (when clutch--console-name
-                  (setq-local clutch--console-target target))
                 (message "Connected to %s" (clutch--connection-key conn)))
-            (unless (eq clutch-connection conn)
+            ;; Once bound, CONN is this buffer's session, also when what
+            ;; follows the binding, such as loading metadata, is quit.
+            (if (eq clutch-connection conn)
+                (setq-local clutch--session-target target
+                            clutch--connected-here t)
               (clutch--discard-unbound-connection conn))))))))
 
 ;;;###autoload
@@ -2749,8 +2775,9 @@ state, and disconnects the underlying connection."
 (defun clutch--disconnect-on-kill ()
   "Disconnect the connection owned by this buffer.
 Invalidates all derived buffers that share the same connection.
-Does nothing in indirect SQL buffers (`clutch--indirect-mode')."
-  (when (and (not (bound-and-true-p clutch--indirect-mode))
+Does nothing in an indirect edit on its console's session, as
+`clutch--borrowed-session-p' tells."
+  (when (and (not (clutch--borrowed-session-p))
              clutch-connection)
     (if (clutch--connection-alive-p clutch-connection)
         (progn

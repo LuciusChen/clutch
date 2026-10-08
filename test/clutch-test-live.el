@@ -258,16 +258,35 @@ The console sees its connection closed before this returns.  The console
 is on MySQL or PostgreSQL."
   (let* ((conn clutch-connection)
          (mysql (eq (clutch-db-backend-key conn) 'mysql))
-         (id (caar (clutch-db-result-rows
-                    (clutch-db-query conn (if mysql
-                                              "SELECT CONNECTION_ID()"
-                                            "SELECT pg_backend_pid()"))))))
+         (id (clutch-test--server-session-id conn)))
     (clutch-db-query admin (format (if mysql
                                        "KILL %s"
                                      "SELECT pg_terminate_backend(%s)")
                                    id))
     (clutch-test--await (lambda () (not (clutch--connection-alive-p conn))))
     conn))
+
+(defun clutch-test--server-session-id (conn)
+  "Return the server's id of the session of MySQL or PostgreSQL CONN."
+  (caar (clutch-db-result-rows
+         (clutch-db-query conn (if (eq (clutch-db-backend-key conn) 'mysql)
+                                   "SELECT CONNECTION_ID()"
+                                 "SELECT pg_backend_pid()")))))
+
+(defun clutch-test--server-session-count (admin id)
+  "Return how many sessions with ID the server has, asked through ADMIN."
+  (caar (clutch-db-result-rows
+         (clutch-db-query
+          admin
+          (format (if (eq (clutch-db-backend-key admin) 'mysql)
+                      "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = %s"
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid = %s")
+                  id)))))
+
+(defun clutch-test--await-session-end (admin id)
+  "Wait until the server, asked through ADMIN, has no session with ID."
+  (clutch-test--await
+   (lambda () (equal (clutch-test--server-session-count admin id) 0))))
 
 (ert-deftest clutch-test-live-console-follows-a-typed-namespace-switch ()
   "A console should follow a namespace switch typed into it.
@@ -1056,6 +1075,356 @@ A delete loads no column metadata, so only the recovery before the batch
 reconnects it."
   :tags '(:clutch-live)
   (clutch-test--result-action-after-session-loss 'delete))
+
+(ert-deftest clutch-test-live-connect-outside-a-console-keeps-its-session ()
+  "`C-c C-e' outside a console should connect a session picked again anew.
+In a buffer with `clutch-mode' or the REPL, picking the connection the
+session was on started a new session in Auto mode, though the buffer was
+in Manual; over a live session the buffer's result lost its connection,
+and over a lost one it reconnected to a session of its own.  Picking
+another connection connects the buffer alone, in that connection's mode."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (clutch-test--with-conn admin
+    (let* ((mysql (eq clutch-test-backend 'mysql))
+           (table (format "clutch_outside_%d" (emacs-pid)))
+           (params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (clutch-connection-alist
+            (list (cons "same" params)
+                  (cons "other" (append params '(:connect-timeout 7)))))
+           (result-name (format " *clutch-outside-result-%d*" (emacs-pid)))
+           (buffer (generate-new-buffer " *clutch-outside*"))
+           repl)
+      (cl-flet ((connect (name)
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (&rest _) name)))
+                    (clutch-connect)))
+                (manual ()
+                  (unless (clutch-db-manual-commit-p clutch-connection)
+                    (clutch-toggle-auto-commit))))
+        (unwind-protect
+            (progn
+              (clutch-db-query
+               admin (format "CREATE TABLE %s (id int PRIMARY KEY, v %s)"
+                             table (if mysql "varchar(20)" "text")))
+              (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'a')" table))
+              (cl-letf (((symbol-function 'message) #'ignore))
+                (with-current-buffer buffer
+                  (clutch-mode)
+                  (connect "same")
+                  (clutch-test--with-live-result-buffer result-name
+                    (pcase-dolist (`(,label ,lose-session) '(("live" nil) ("lost" t)))
+                      (ert-info (label)
+                        (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
+                        (manual)
+                        (let ((old (if lose-session
+                                       (clutch-test--end-console-session admin)
+                                     clutch-connection)))
+                          (connect "same")
+                          (should-not (eq clutch-connection old))
+                          (should (clutch-db-manual-commit-p clutch-connection))
+                          (let ((conn clutch-connection))
+                            (with-current-buffer result-name
+                              (should (eq clutch-connection conn))
+                              (clutch-result-rerun)
+                              (clutch-test--await-queries)
+                              (should (eq clutch-connection conn)))))))
+                    (clutch-rollback)
+                    (connect "other")
+                    (should-not (clutch-db-manual-commit-p clutch-connection))
+                    (should-not (buffer-local-value 'clutch-connection
+                                                    (get-buffer result-name)))))
+                (setq repl (generate-new-buffer " *clutch-outside-repl*"))
+                (with-current-buffer repl
+                  (clutch-repl-mode)
+                  (connect "same")
+                  (manual)
+                  (connect "same")
+                  (should (clutch-db-manual-commit-p clutch-connection))
+                  (clutch-toggle-auto-commit))))
+          (dolist (b (list buffer repl))
+            (when (buffer-live-p b)
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (kill-buffer b))))
+          (ignore-errors
+            (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table))))))))
+
+(ert-deftest clutch-test-live-connect-in-an-indirect-edit-keeps-its-console ()
+  "`C-c C-e' in an indirect edit should move or leave its console's session.
+Picking the connection the edit shares with its console disconnected the
+console and connected the edit alone, in Auto mode, and so did picking
+another.  The session now moves, console and all, in its mode, and
+connecting the edit elsewhere leaves the console where it was.  Leaving
+the edit then ends the session it connected, which stayed open on the
+server, and an edit whose connection failed still leaves the console's."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (clutch-test--with-conn admin
+    (let* ((params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (clutch-connection-alist
+            (list (cons "same" params)
+                  (cons "other" (append params '(:connect-timeout 7)))
+                  (cons "broken" (plist-put (copy-sequence params) :port 1))))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console indirect)
+      (cl-flet ((connect (name)
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (&rest _) name)))
+                    (clutch-connect))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (clutch-query-console "same")
+              (setq console (current-buffer))
+              (clutch-toggle-auto-commit)
+              (insert "SELECT 1")
+              (clutch-edit-indirect)
+              (setq indirect (current-buffer))
+              (let ((old clutch-connection))
+                (connect "same")
+                (should-not (eq clutch-connection old))
+                (should (eq (buffer-local-value 'clutch-connection console)
+                            clutch-connection))
+                (should (clutch-db-manual-commit-p clutch-connection)))
+              (let ((shared clutch-connection))
+                (connect "other")
+                (should-not (eq clutch-connection shared))
+                (should (eq (buffer-local-value 'clutch-connection console) shared))
+                (should (clutch--connection-alive-p shared))
+                (let ((own (clutch-test--server-session-id clutch-connection)))
+                  (clutch-indirect-abort)
+                  (should-not (buffer-live-p indirect))
+                  (clutch-test--await-session-end admin own))
+                (should (clutch--connection-alive-p shared))
+                (pop-to-buffer console)
+                (clutch-edit-indirect)
+                (setq indirect (current-buffer))
+                (should-error (connect "broken"))
+                (clutch-indirect-abort)
+                (should (eq (buffer-local-value 'clutch-connection console) shared))
+                (should (clutch--connection-alive-p shared))))
+          (when (buffer-live-p indirect)
+            (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+              (kill-buffer indirect)))
+          (when (buffer-live-p console)
+            (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+              (kill-buffer console)))
+          (delete-directory clutch-console-directory t))))))
+
+(ert-deftest clutch-test-live-indirect-edit-ends-a-session-of-its-own ()
+  "`C-c C-e' in an indirect edit should end a session the edit connected.
+Connecting the edit elsewhere a second time asked nothing and left the
+session it had connected open on the server, its uncommitted work and
+all.  A connection that fails, or the question answered no, leaves that
+session to the edit."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (clutch-test--with-conn admin
+    (let* ((params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (clutch-connection-alist
+            (list (cons "same" params)
+                  (cons "other" (append params '(:connect-timeout 7)))
+                  (cons "third" (append params '(:connect-timeout 8)))
+                  (cons "broken" (plist-put (copy-sequence params) :port 1))))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console indirect)
+      (cl-flet ((connect (name answer)
+                  (let (asked)
+                    (cl-letf (((symbol-function 'completing-read)
+                               (lambda (&rest _) name))
+                              ((symbol-function 'yes-or-no-p)
+                               (lambda (prompt) (setq asked prompt) answer)))
+                      (clutch-connect))
+                    asked)))
+        (unwind-protect
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (clutch-query-console "same")
+              (setq console (current-buffer))
+              (insert "SELECT 1")
+              (clutch-edit-indirect)
+              (setq indirect (current-buffer))
+              (connect "other" t)
+              (clutch-toggle-auto-commit)
+              (clutch-test--run-in-console
+               "CREATE TEMPORARY TABLE clutch_own_session (v INT)"
+               "INSERT INTO clutch_own_session VALUES (1)")
+              (let* ((own clutch-connection)
+                     (id (clutch-test--server-session-id own)))
+                (should (clutch--tx-dirty-p own))
+                (should-error (connect "broken" t))
+                (should-error (connect "third" nil) :type 'user-error)
+                (should (eq clutch-connection own))
+                (should (clutch--tx-dirty-p own))
+                (should (equal (clutch-test--server-session-count admin id) 1))
+                (should (string-match-p "Uncommitted changes will be lost"
+                                        (or (connect "third" t) "")))
+                (should-not (eq clutch-connection own))
+                (clutch-test--await-session-end admin id))
+              (should (clutch--connection-alive-p
+                       (buffer-local-value 'clutch-connection console))))
+          (when (buffer-live-p indirect)
+            (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+              (kill-buffer indirect)))
+          (when (buffer-live-p console)
+            (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+              (kill-buffer console)))
+          (delete-directory clutch-console-directory t))))))
+
+(ert-deftest clutch-test-live-indirect-edit-owns-a-session-quit-while-connecting ()
+  "An indirect edit should own a connection bound before its setup was quit.
+A quit while the new connection loaded its metadata left the edit holding
+it as its console's session, with the console's target: picking that
+connection again connected the edit alone, in Auto mode, and leaving the
+edit left the connection open on the server."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (clutch-test--with-conn admin
+    (let* ((params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (clutch-connection-alist
+            (list (cons "same" params)
+                  (cons "other" (append params '(:connect-timeout 7)))))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console indirect)
+      (cl-flet ((connect (name)
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (&rest _) name)))
+                    (clutch-connect))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (clutch-query-console "same")
+              (setq console (current-buffer))
+              (insert "SELECT 1")
+              (clutch-edit-indirect)
+              (setq indirect (current-buffer))
+              (let ((shared clutch-connection))
+                ;; C-g while the new connection loads its metadata.
+                (should (eq (condition-case nil
+                                (cl-letf (((symbol-function 'clutch--prime-schema-cache)
+                                           (lambda (_conn) (signal 'quit nil))))
+                                  (connect "other"))
+                              (quit 'quit))
+                            'quit))
+                (should-not (eq clutch-connection shared))
+                (clutch-toggle-auto-commit)
+                (let ((own clutch-connection))
+                  (connect "other")
+                  (should-not (eq clutch-connection own))
+                  (should (clutch-db-manual-commit-p clutch-connection)))
+                (let ((id (clutch-test--server-session-id clutch-connection)))
+                  (clutch-indirect-abort)
+                  (should-not (buffer-live-p indirect))
+                  (clutch-test--await-session-end admin id))
+                (should (clutch--connection-alive-p shared))))
+          (dolist (buffer (list indirect console))
+            (when (buffer-live-p buffer)
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (kill-buffer buffer))))
+          (delete-directory clutch-console-directory t))))))
+
+(ert-deftest clutch-test-live-indirect-edit-runs-again-in-a-session-of-its-own ()
+  "`C-c \='' should run SQL again in a session the indirect edit connected.
+The edit ran its SQL in any other buffer that held its connection, which
+after a first run was the edit's own result buffer: running again killed
+the edit and sent the SQL there.  The edit is buried and runs it."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (let* ((params (append (list :backend clutch-test-backend)
+                         (clutch-test--live-connect-params)))
+         (clutch-connection-alist
+          (list (cons "same" params)
+                (cons "other" (append params '(:connect-timeout 7)))))
+         (clutch-console-directory (make-temp-file "clutch-console-" t))
+         (result-name "*clutch-test-own-session-result*")
+         console indirect)
+    (clutch-test--with-live-result-buffer result-name
+      (unwind-protect
+          (cl-letf (((symbol-function 'message) #'ignore))
+            (clutch-query-console "same")
+            (setq console (current-buffer))
+            (insert "SELECT 1")
+            (clutch-edit-indirect)
+            (setq indirect (current-buffer))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (&rest _) "other")))
+              (clutch-connect))
+            (let ((own clutch-connection))
+              (dolist (sql '("SELECT 1 AS one" "SELECT 2 AS two"))
+                (pop-to-buffer indirect)
+                (erase-buffer)
+                (insert sql)
+                (clutch-indirect-execute)
+                (clutch-test--await-queries)
+                (should (buffer-live-p indirect))
+                (should (eq (buffer-local-value 'clutch-connection indirect) own))
+                (should (clutch--connection-alive-p own)))
+              (should (equal (buffer-local-value 'clutch--result-columns
+                                                 (get-buffer result-name))
+                             '("two")))))
+        (dolist (buffer (list indirect console))
+          (when (buffer-live-p buffer)
+            (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+              (kill-buffer buffer))))
+        (delete-directory clutch-console-directory t)))))
+
+(ert-deftest clutch-test-live-nested-indirect-edit-leaves-its-parent-session ()
+  "An indirect edit opened from one with a session of its own borrows it.
+Leaving the inner edit keeps that session.  Once the outer edit moved it
+to a new connection, leaving the outer edit ends that connection, which
+an edit that had connected left open on the server."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This regression covers MySQL and PostgreSQL"))
+  (clutch-test--with-conn admin
+    (let* ((params (append (list :backend clutch-test-backend)
+                           (clutch-test--live-connect-params)))
+           (clutch-connection-alist
+            (list (cons "same" params)
+                  (cons "other" (append params '(:connect-timeout 7)))))
+           (clutch-console-directory (make-temp-file "clutch-console-" t))
+           console outer inner)
+      (cl-flet ((connect (name)
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (&rest _) name)))
+                    (clutch-connect))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (clutch-query-console "same")
+              (setq console (current-buffer))
+              (insert "SELECT 1")
+              (clutch-edit-indirect)
+              (setq outer (current-buffer))
+              (connect "other")
+              (let ((own clutch-connection))
+                (clutch-edit-indirect)
+                (setq inner (current-buffer))
+                (should (eq clutch-connection own))
+                (clutch-indirect-abort)
+                (should-not (buffer-live-p inner))
+                (should (clutch--connection-alive-p own))
+                (pop-to-buffer outer)
+                (let ((id (clutch-test--server-session-id own)))
+                  (connect "other")
+                  (should-not (eq clutch-connection own))
+                  (clutch-test--await-session-end admin id)))
+              (let ((id (clutch-test--server-session-id clutch-connection)))
+                (clutch-indirect-abort)
+                (should-not (buffer-live-p outer))
+                (clutch-test--await-session-end admin id))
+              (should (clutch--connection-alive-p
+                       (buffer-local-value 'clutch-connection console))))
+          (dolist (buffer (list inner outer console))
+            (when (buffer-live-p buffer)
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (kill-buffer buffer))))
+          (delete-directory clutch-console-directory t))))))
 
 (ert-deftest clutch-test-live-picking-a-moved-console-returns-to-it ()
   "Picking a console that followed a namespace switch should return to it.
