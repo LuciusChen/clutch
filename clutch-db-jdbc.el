@@ -41,6 +41,7 @@
 (require 'json)
 (require 'seq)
 (require 'sql)
+(require 'url-util)
 
 ;;;; Configuration
 
@@ -2196,7 +2197,8 @@ path.")
   "Return the database ClickHouse JDBC URL names, or nil.
 Without a `database' property, the driver takes the last segment of the
 path, whose earlier segments are an HTTP path, and a path that ends in a
-slash names none."
+slash names none.  Decode percent escapes once as UTF-8, and `+' as a
+space, as the driver's URL decoder does."
   (when url
     (let ((case-fold-search nil)
           (start 0)
@@ -2205,16 +2207,22 @@ slash names none."
                            url start)
         (setq database (match-string 1 url)
               start (match-end 0)))
-      (or database
-          (and (string-match (concat clutch-jdbc--clickhouse-url-hosts-regexp
+      (when-let* ((encoded
+                   (or database
+                       (and (string-match
+                             (concat clutch-jdbc--clickhouse-url-hosts-regexp
                                      "[^?#]*/\\([^/?#]+\\)\\(?:[?#]\\|\\'\\)")
                              url)
-               (match-string 2 url))))))
+                            (match-string 2 url)))))
+        (decode-coding-string
+         (url-unhex-string (replace-regexp-in-string "+" " " encoded t t))
+         'utf-8)))))
 
 (defun clutch-jdbc--clickhouse-url-with-database (url database)
   "Return ClickHouse JDBC URL with DATABASE in place of the one it names.
 An HTTP path before the database stays."
-  (let ((case-fold-search nil))
+  (let ((case-fold-search nil)
+        (database (url-hexify-string database)))
     (if (string-match-p clutch-jdbc--clickhouse-url-database-property-regexp url)
         (replace-regexp-in-string
          clutch-jdbc--clickhouse-url-database-property-regexp database url t t 1)
