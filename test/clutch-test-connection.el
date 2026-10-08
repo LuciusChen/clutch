@@ -1684,13 +1684,17 @@ report of none open clears it."
                    ("Auto, a typed COMMIT" nil clear
                     (("BEGIN" t) ("INSERT INTO t VALUES (1)" t) ("COMMIT" nil))
                     nil)
+                   ("Auto, a batch that commits then writes in a new transaction" nil clear
+                    (("COMMIT; BEGIN; INSERT INTO t VALUES (1);" t))
+                    dirty)
                    ("Auto, a write that commits itself" nil clear
                     (("INSERT INTO t VALUES (1)" nil))
                     nil)))
     (ert-info (label)
       (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
             (clutch--running-queries (make-hash-table :test 'eq))
-            open)
+            open
+            (remaining steps))
         (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
                    (lambda (_conn) manual))
                   ((symbol-function 'clutch-db-transaction-open-p)
@@ -1698,12 +1702,15 @@ report of none open clears it."
                   ((symbol-function 'clutch-db-schema-transaction-effect)
                    (lambda (_conn _sql) ddl-effect))
                   ((symbol-function 'clutch-db-query)
-                   (lambda (&rest _) (make-clutch-db-result :affected-rows 1)))
+                   (lambda (_conn sql)
+                     (let ((step (pop remaining)))
+                       (should (equal sql (car step)))
+                       (setq open (cadr step)))
+                     (make-clutch-db-result :affected-rows 1)))
                   ((symbol-function 'clutch--clear-connection-problem-capture)
                    #'ignore)
                   ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-          (pcase-dolist (`(,sql ,reported) steps)
-            (setq open reported)
+          (pcase-dolist (`(,sql ,_) steps)
             (clutch--run-db-query 'tx-conn sql))
           (should (eq (clutch--tx-state 'tx-conn) state)))))))
 

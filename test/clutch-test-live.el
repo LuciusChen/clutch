@@ -1796,6 +1796,43 @@ disconnect then dropped it without asking.  A CREATE TABLE commits it."
           (kill-buffer insert-buf))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-pg-repl-batch-keeps-its-last-transaction-dirty ()
+  :tags '(:clutch-live)
+  "A REPL batch ending with an uncommitted write must ask before closing.
+COMMIT at the start of the input cleared the work of its later BEGIN
+and INSERT, despite the server reporting that transaction still open."
+  (unless (eq clutch-test-backend 'pg)
+    (ert-skip "This regression covers PostgreSQL's multi-statement REPL"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_repl_tx_%d" (emacs-pid)))
+          (params (append '(:backend pg) (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id int)" table))
+            (clutch-test--with-live-console params
+              (let ((conn clutch-connection))
+                (clutch-repl-mode)
+                (setq-local clutch-connection conn
+                            clutch--connection-params params))
+              (clutch-repl--input-sender
+               nil (format "COMMIT; BEGIN; INSERT INTO %s VALUES (1);" table))
+              (clutch-test--await-queries)
+              (should (clutch--tx-dirty-p clutch-connection))
+              (should (clutch-test--live-close-prompts #'clutch-disconnect))
+              (should (clutch--connection-alive-p clutch-connection))
+              (should (= (caar (clutch-db-result-rows
+                               (clutch-db-query admin
+                                                (format "SELECT COUNT(*) FROM %s" table))))
+                         0))
+              (clutch-repl--input-sender nil "COMMIT;")
+              (clutch-test--await-queries)
+              (should-not (clutch--tx-state clutch-connection))
+              (should (= (caar (clutch-db-result-rows
+                               (clutch-db-query admin
+                                                (format "SELECT COUNT(*) FROM %s" table))))
+                         1))))
+        (ignore-errors (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+
 ;;;; XTDB
 
 (defvar clutch-test--xtdb-table-counter 0
