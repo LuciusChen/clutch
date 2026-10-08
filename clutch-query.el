@@ -1215,7 +1215,7 @@ K under :error.  A statement that finishes synchronously calls K after
 this function's quit handling.  Query-phase quits recover the connection
 and signal `clutch-query-interrupted'."
   (let ((dispatching t) released dispatched inline-outcome
-        (shown (clutch--shown-namespace)))
+        (before (clutch--namespace-before connection)))
     (clutch-db--reserve-connection connection)
     (cl-labels
         ((release ()
@@ -1281,7 +1281,7 @@ and signal `clutch-query-interrupted'."
                                         (when (clutch-db-namespace-switch-p
                                                connection sql)
                                           (clutch--note-namespace-switch
-                                           connection shown))
+                                           connection before))
                                         (list :result result
                                               :connection connection
                                               :elapsed elapsed

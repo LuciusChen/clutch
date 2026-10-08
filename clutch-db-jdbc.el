@@ -2152,6 +2152,12 @@ upper-cased."
   "Return non-nil when SQL may have moved JDBC CONN into another schema."
   (clutch-jdbc--namespace-statement-p conn sql))
 
+(cl-defmethod clutch-db-metadata-scope ((conn clutch-jdbc-conn))
+  "Return the catalog and schema of JDBC CONN's metadata requests.
+On DuckDB, a USE of another database can keep a schema of the same name,
+such as main, in another catalog."
+  (clutch-jdbc--metadata-scope-params conn))
+
 (cl-defmethod clutch-db-update-namespace-params ((conn clutch-jdbc-conn) params)
   "Store JDBC CONN's current namespace in a copy of connection PARAMS.
 PARAMS that already lead to it stay as they are, and so do DuckDB PARAMS
