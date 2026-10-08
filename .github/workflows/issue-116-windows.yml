@@ -1,0 +1,74 @@
+name: Issue 116 (Windows)
+
+on:
+  push:
+    branches:
+      - ci/windows-issue-116
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs-version: ["29.4", "30.2", "31.1"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Emacs ${{ matrix.emacs-version }}
+        shell: pwsh
+        run: |
+          $major = $env:EMACS_VERSION.Split('.')[0]
+          $zip = "$env:RUNNER_TEMP\emacs.zip"
+          Invoke-WebRequest "https://ftp.gnu.org/gnu/emacs/windows/emacs-$major/emacs-$($env:EMACS_VERSION).zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath C:\emacs
+          "C:\emacs\bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+          & C:\emacs\bin\emacs.exe --version | Select-Object -First 1
+        env:
+          EMACS_VERSION: ${{ matrix.emacs-version }}
+
+      - name: Fetch dependencies
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/LuciusChen/pgsql.el.git "$env:RUNNER_TEMP\pgsql.el"
+          & C:\emacs\bin\emacs.exe -Q --batch -l .github/issue-116/install.el
+
+      - name: Start PostgreSQL
+        shell: pwsh
+        run: |
+          $bin = $env:PGBIN
+          if (-not $bin) { $bin = (Get-ChildItem 'C:\Program Files\PostgreSQL' | Sort-Object Name | Select-Object -Last 1).FullName + '\bin' }
+          $data = "$env:RUNNER_TEMP\pgdata"
+          & "$bin\initdb.exe" -D $data -U demo -A trust -E UTF8 | Out-Null
+          & "$bin\pg_ctl.exe" -D $data -o "-p 55432" -l "$env:RUNNER_TEMP\pg.log" -w start
+          & "$bin\psql.exe" -h 127.0.0.1 -p 55432 -U demo postgres -tAc "select version()"
+
+      - name: Start Emacs
+        shell: pwsh
+        run: |
+          $env:HOME = $env:USERPROFILE
+          $env:CLUTCH_DIR = $env:GITHUB_WORKSPACE
+          $env:PGSQL_DIR = "$env:RUNNER_TEMP\pgsql.el"
+          $env:PGPORT_T116 = '55432'
+          Start-Process C:\emacs\bin\runemacs.exe -ArgumentList '-Q','-l',"$env:GITHUB_WORKSPACE\.github\issue-116\init.el"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          while ($sw.Elapsed.TotalSeconds -lt 180) {
+            $out = & C:\emacs\bin\emacsclient.exe -e '(emacs-version)' 2>&1 | Out-String
+            if ($out -match 'GNU Emacs') { break }
+            Start-Sleep -Seconds 2
+          }
+          Write-Host $out
+
+      - name: Reproduce
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          .github\issue-116\run.ps1 -EmacsDir C:\emacs -ResultFile "$env:GITHUB_WORKSPACE\out\results.txt"
+          '### Emacs ${{ matrix.emacs-version }}' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content out\results.txt | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-116-${{ matrix.emacs-version }}
+          path: out/
