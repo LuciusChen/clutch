@@ -353,22 +353,31 @@ That is a COMMIT, or a ROLLBACK of the whole transaction: ROLLBACK [WORK]
 [AND [NO] CHAIN] [[NO] RELEASE], or ROLLBACK TRANSACTION or TRAN [AND [NO]
 CHAIN].  A rollback to a savepoint keeps the work done before it, and so
 may SQL Server's ROLLBACK TRANSACTION with a name, which can name a
-savepoint, even one called CHAIN."
-  (pcase (clutch-db-sql-leading-keyword sql)
-    ((or "COMMIT" "END" "ABORT") t)
-    ("ROLLBACK"
-     (let* ((case-fold-search t)
-            (space "[ \t\n\r\f]+")
-            (chain (concat "\\(?:" space "AND\\(?:" space "NO\\)?"
-                           space "CHAIN\\)?")))
-       (string-match-p
-        (concat "\\`ROLLBACK\\(?:"
-                "\\(?:" space "WORK\\)?" chain
-                "\\(?:\\(?:" space "NO\\)?" space "RELEASE\\)?"
-                "\\|" space "TRAN\\(?:SACTION\\)?" chain
-                "\\)\\'")
-        (clutch-db-sql-trim-end
-         (clutch-db-sql-strip-leading-comments sql)))))))
+savepoint, even one called CHAIN.  SQL holds that statement alone: the
+REPL sends several typed at once, and in COMMIT; BEGIN; INSERT the last
+transaction is still open."
+  (let ((keyword (clutch-db-sql-leading-keyword sql)))
+    (and (member keyword '("COMMIT" "END" "ABORT" "ROLLBACK"))
+         (cl-every (lambda (pos)
+                     (string-empty-p
+                      (clutch-db-sql-strip-leading-comments
+                       (substring sql (1+ pos)))))
+                   (clutch-db-sql-statement-breaks sql))
+         (pcase keyword
+           ((or "COMMIT" "END" "ABORT") t)
+           ("ROLLBACK"
+            (let* ((case-fold-search t)
+                   (space "[ \t\n\r\f]+")
+                   (chain (concat "\\(?:" space "AND\\(?:" space "NO\\)?"
+                                  space "CHAIN\\)?")))
+              (string-match-p
+               (concat "\\`ROLLBACK\\(?:"
+                       "\\(?:" space "WORK\\)?" chain
+                       "\\(?:\\(?:" space "NO\\)?" space "RELEASE\\)?"
+                       "\\|" space "TRAN\\(?:SACTION\\)?" chain
+                       "\\)\\'")
+               (clutch-db-sql-trim-end
+                (clutch-db-sql-strip-leading-comments sql)))))))))
 
 ;;;; Transaction state
 
