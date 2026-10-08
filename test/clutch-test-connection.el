@@ -47,8 +47,8 @@
               'jdbc)))
 
 (ert-deftest clutch-test-connection-key ()
-  :tags '(:smoke)
   "Test connection key generation."
+  :tags '(:smoke)
   (require 'clutch-db-mysql)
   (require 'mysql)
   (let ((conn (make-mysql-conn :host "localhost" :port 3306
