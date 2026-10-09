@@ -5,6 +5,7 @@
 | Key         | Action                     |
 |-------------+----------------------------|
 | =C-c C-c=   | Execute region, or the current =;=-delimited statement / query at point |
+| =C-u C-c C-c= | Export one SELECT directly to a CSV/TSV file |
 | =C-c C-r=   | Execute selected region; multiple =;=-delimited statements run sequentially |
 | =C-c C-b=   | Execute entire buffer; multiple =;=-delimited statements run sequentially |
 | =C-c C-e=   | Connect; query consoles reconnect their current connection |
@@ -26,6 +27,10 @@
 Standard editing integrations still apply in =clutch-mode=: xref lookup uses =M-.= through the buffer-local xref backend for SQL alias navigation, so =M-.= on =u= or =u.name= jumps to the alias definition in the current statement. Schema-qualified table names such as =schema.table= are not treated as aliases; use =C-c C-d= or =C-c C-j= for object lookup and table description.  CAPF completion handles SQL identifiers, including empty column positions such as =select | from users=.  =TAB= completes columns after a table or alias dot, then falls back to indentation elsewhere; other completion stays on normal CAPF keys such as =M-TAB= inherited from Emacs.
 
 SQL execution status marks the statement's starting line with a colored dot: a fringe bitmap on graphical displays, or =●= in the left margin on text terminals. Both use the same success/failure faces. Terminal SQL buffers reserve enough margin width for the dot automatically and retain it between executions; existing wider margins and right margins are preserved. No additional mode or configuration is required.
+
+=C-u C-c C-c=, =M-x clutch-export-query= and Execute → Export query to file export the selected region, or the statement at point, directly to a file. The minibuffer asks for CSV/TSV, encoding and destination, and asks before overwriting an existing file. Export accepts one SELECT, including a SELECT-only WITH query, and refuses multiple statements, SELECT INTO and data-changing CTEs. It uses the query's columns without adding editing identity columns, leaves the existing result and its staged edits intact, and does not open a result grid. Files include a header even for an empty result. The encoding, incomplete-value checks and atomic file replacement follow the result exporter described below.
+
+Without an explicit SQL row limit, direct export retrieves pages of =clutch-result-max-rows= rows. With LIMIT/OFFSET, TOP or FETCH, it runs the bounded query once and formats its rows in batches, so the backend may hold that whole result in memory. Use ORDER BY when paging order matters; pages are separate executions and do not guarantee a consistent snapshot if the data changes. The source buffer's mode line counts elapsed time while the export runs, and =C-g= there stops it. MySQL, PostgreSQL and JDBC statement waits are asynchronous; formatting and file writes still run in Emacs, JDBC remaining-row fetches are synchronous, and other backends such as SQLite can block. Compression may also hold the whole output in memory, as below.
 
 * Result Browser (clutch-result-mode) Key Bindings
 
@@ -91,6 +96,8 @@ Tip: a result remembers where its query resolved table names, as the server repo
 An untouched blank insert field is omitted, allowing the database to supply its default. =C-c C-n= explicitly selects SQL NULL, =C-c C-e= selects an empty string, and =C-c C-d= returns the field to omission/default. Typing =NULL= inserts the literal text. Cloned rows and reopened staged inserts preserve the distinction between empty strings and SQL NULL. The state markers are visual overlays, not text sent to the database.
 
 INSERT submission and copy/export retain a simple query's source schema. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
+
+JDBC binary values that contain only BLOB length metadata are unavailable as complete data and are refused by copy/export and mutation paths too. Select an explicit hex or text conversion in SQL to export those bytes, for example =RAWTOHEX(col)= on Oracle or =CONVERT(VARCHAR(MAX), col, 2)= on SQL Server. Decoded complete JSON/XML text BLOBs remain usable.
 
 ** Edit Buffer Keys
 
