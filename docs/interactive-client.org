@@ -205,6 +205,8 @@ Typical flow:
 
 The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=, =Collapse=, or =Show value=.  It is inapt when point is not on a field.
 
+Staging a field edit with =C-c C-c= returns to the same field in the Record view.
+
 * Describe View (clutch-describe-mode) Key Bindings
 
 | Key         | Action                        |

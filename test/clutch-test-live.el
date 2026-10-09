@@ -2939,7 +2939,7 @@ A quote inside the CTE's quoted name must not hide the modification."
           (drop-all))))))
 
 (ert-deftest clutch-test-live-edit-field-and-submit-persists ()
-  "Edit through a real SELECT result and submit the persisted row change."
+  "Edit a Record field, keep point there, and submit the persisted change."
   :tags '(:clutch-live)
   (unless (clutch-test--updateable-live-backend-p)
     (ert-skip (clutch-test-capability-skip-message :updateable-workflow)))
@@ -2972,14 +2972,30 @@ A quote inside the CTE's quoted name must not hide the modification."
                                '("id")))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t)))
-                  (let ((row (car clutch--result-rows)))
-                    (clutch-result--apply-edit
-                     0 1 "after"
-                     (list
-                      :identity (clutch-db-row-identity-values
-                                 row clutch--row-identity)
-                      :original (nth 1 row)
-                      :original-state (cons nil (nth 1 row)))))
+                  (save-window-excursion
+                    (let (record-buf edit-buf)
+                      (unwind-protect
+                          (progn
+                            (switch-to-buffer result-name)
+                            (clutch--goto-cell 0 1)
+                            (call-interactively #'clutch-result-open-record)
+                            (setq record-buf (current-buffer))
+                            (goto-char (point-min))
+                            (goto-char
+                             (prop-match-beginning
+                              (text-property-search-forward
+                               'clutch-col-idx 1 #'eq)))
+                            (call-interactively #'clutch-result-edit-cell)
+                            (setq edit-buf (current-buffer))
+                            (erase-buffer)
+                            (insert "after")
+                            (call-interactively #'clutch-result-edit-finish)
+                            (should (eq (current-buffer) record-buf))
+                            (should (eq (get-text-property
+                                         (point) 'clutch-col-idx) 1)))
+                        (when (buffer-live-p edit-buf) (kill-buffer edit-buf))
+                        (when (buffer-live-p record-buf)
+                          (kill-buffer record-buf)))))
                   (should clutch--pending-edits)
                   (progn (clutch-result-submit) (clutch-test--await-queries))
                   (should-not clutch--pending-edits)
