@@ -2017,7 +2017,7 @@ throughout."
       (unwind-protect
           (progn
             (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, body VARCHAR(64))" table))
-            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, '中文,a'), (2, 'b'), (3, '')" table))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, '中文,a'), (2, 'b'), (3, ''), (4, NULL), (5, 'NULL')" table))
             (dolist (sql (append (list (format "SELECT id, body FROM %s ORDER BY id" table))
                                  (when (clutch-test--live-supports-with-p conn)
                                    (list (format "WITH c AS (SELECT * FROM %s) SELECT * FROM c ORDER BY id" table)))))
@@ -2046,7 +2046,7 @@ throughout."
                   (should-not (clutch-db--foreground-busy-p conn))
                   (should (equal (with-temp-buffer (insert-file-contents path)
                                                    (buffer-string))
-                                 "id,body\n1,\"中文,a\"\n2,b\n3,\n"))))))
+                                 "id,body\n1,\"中文,a\"\n2,b\n3,\"\"\n4,\n5,NULL\n"))))))
         (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))
         (delete-file path)))))
 
@@ -2104,8 +2104,8 @@ Expected cells are literal export text, independent of the formatter."
             "00000000-0000-0000-0000-000000000123")
       (unsigned "DECIMAL(20,0)" "18446744073709551615"
                 "18446744073709551615" "18446744073709551615")
-      (null ,varchar "NULL" "NULL" "NULL")
-      (empty ,varchar "''" ,(if oracle "NULL" "") ,(if oracle "NULL" "")))))
+      (null ,varchar "NULL" "" "")
+      (empty ,varchar "''" ,(if oracle "" "\"\"") ,(if oracle "" "\"\"")))))
 
 (ert-deftest clutch-test-live-query-export-wide-table-without-identity ()
   "Export 101 columns and 602 rows of varied types without a key or index."
@@ -2198,7 +2198,7 @@ Expected cells are literal export text, independent of the formatter."
                                            (mapconcat (lambda (id) (format "%d%s%s\n" id delimiter cells))
                                                       (number-sequence 1 601) "")
                                            "602" delimiter
-                                           (mapconcat (lambda (_) "NULL") fields delimiter) "\n")))
+                                           (mapconcat (lambda (_) "") fields delimiter) "\n")))
                     (let* ((actual (with-temp-buffer (insert-file-contents path) (buffer-string)))
                            (comparison (compare-strings expected nil nil actual nil nil)))
                       (unless (eq comparison t)

@@ -91,6 +91,24 @@ Explicit SQL row limits are preserved."
                  (coding-system :tag "Other coding system"))
   :group 'clutch)
 
+(defcustom clutch-export-default-format 'csv
+  "Default format offered by `clutch-export-query'."
+  :type '(choice (const :tag "CSV" csv) (const :tag "TSV" tsv))
+  :group 'clutch)
+
+(defcustom clutch-export-default-directory nil
+  "Default directory offered for file exports.
+When nil, use the current buffer's `default-directory'."
+  :type '(choice (const :tag "Current buffer directory" nil) directory)
+  :group 'clutch)
+
+(defcustom clutch-export-default-file-name nil
+  "Default file name offered for file exports.
+When nil, use the selected format's name, such as export.csv or export.tsv.
+The name is relative to `clutch-export-default-directory' unless absolute."
+  :type '(choice (const :tag "Format default" nil) string)
+  :group 'clutch)
+
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
 
@@ -3094,12 +3112,16 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
                 (if (= (length lines) 1) "" "s"))))))
 
 (defun clutch--delimited-escape (val delimiter)
-  "Return VAL escaped for text separated by DELIMITER."
+  "Return VAL escaped for text separated by DELIMITER.
+SQL NULL is an unquoted empty field; empty text is quoted."
   (let ((s (clutch--format-value (clutch-db-require-complete-value val))))
-    (if (or (string-match-p "[\"\r\n]" s)
-            (string-match-p (regexp-quote (char-to-string delimiter)) s))
-        (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
-      s)))
+    (cond
+     ((null val) "")
+     ((or (string-empty-p s)
+          (string-match-p "[\"\r\n]" s)
+          (string-match-p (regexp-quote (char-to-string delimiter)) s))
+      (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s)))
+     (t s))))
 
 (defun clutch--delimited-lines-for-rows (rows col-indices delimiter)
   "Return lines for ROWS using COL-INDICES and DELIMITER."
@@ -3585,12 +3607,17 @@ stops it.  Replace the destination only after the whole export succeeds."
     (unless (clutch-db-sql-surface-p clutch-connection clutch--connection-params)
       (user-error "Query export requires a SQL connection"))
     (clutch--refuse-while-running clutch-connection)
-    (let* ((kind (intern (completing-read "Export format: " '("csv" "tsv")
-                                          nil t nil nil "csv")))
+    (let* ((kind (intern (completing-read
+                         (format "Export format (default %s): "
+                                 clutch-export-default-format)
+                         '("csv" "tsv") nil t nil nil
+                         (symbol-name clutch-export-default-format))))
            (spec (cdr (assq kind clutch--result-export-kinds)))
            (coding (clutch--read-delimited-export-coding-system kind))
-           (path (read-file-name (plist-get spec :file-prompt)
-                                 nil nil nil (plist-get spec :default-file)))
+           (path (read-file-name
+                  (plist-get spec :file-prompt) clutch-export-default-directory
+                  nil nil (or clutch-export-default-file-name
+                              (plist-get spec :default-file))))
            (page-size (clutch-result--export-page-size)))
       (when (and (file-exists-p path)
                  (not (yes-or-no-p (format "Overwrite %s? " path))))
@@ -3637,9 +3664,10 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
       ('file
        (let* ((coding (when (eq (plist-get spec :file-coding) 'delimited)
                         (clutch--read-delimited-export-coding-system kind)))
-              (path (read-file-name (plist-get spec :file-prompt)
-                                    nil nil nil
-                                    (plist-get spec :default-file))))
+              (path (read-file-name
+                     (plist-get spec :file-prompt) clutch-export-default-directory
+                     nil nil (or clutch-export-default-file-name
+                                 (plist-get spec :default-file)))))
          (message "Exporting to %s..." path)
          (clutch-result--write-export-file
           kind spec path
