@@ -8881,7 +8881,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                 (setq-local clutch-connection conn)
                 (insert "SELECT 'outside';\n" sql "; -- trailing comment\n")
                 (goto-char (+ (point-min) (length "SELECT 'outside';\n") 1))
-                (let ((clutch-result-max-rows 2)
+                (let ((clutch-result-max-rows 4)
+                      (clutch-export-page-size 2)
                       (query (symbol-function 'clutch-db-query))
                       executed)
                   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
@@ -8955,7 +8956,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
               (with-current-buffer source
                 (insert "SELECT id FROM t")
                 (setq-local clutch-connection 'async-conn)
-                (let ((clutch-result-max-rows 2))
+                (let ((clutch-export-page-size 2))
                   (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                             ((symbol-function 'clutch-db-sql-surface-p) (lambda (_conn _params) t))
                             ((symbol-function 'read-file-name) (lambda (&rest _) path))
@@ -9024,7 +9025,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
             (setq-local clutch--result-source-table "items"
                         clutch--row-identity
                         (clutch-test--primary-row-identity "items" '("id") '(0)))
-            (let ((clutch-result-max-rows 2)
+            (let ((clutch-result-max-rows 4)
+                  (clutch-export-page-size 2)
                   (rows (clutch-db-result-rows
                          (clutch-db-query conn clutch--base-query))))
               (dolist (kind '(csv tsv insert update))
@@ -9035,10 +9037,16 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                        (funcall content rows omit-header)
                                      (funcall content rows)))
                          (calls 0)
+                         (query (symbol-function 'clutch-db-query))
+                         executed
                          (format-batch (symbol-function content)))
                     (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
                               ((symbol-function 'clutch--read-delimited-export-coding-system)
                                (lambda (_) 'utf-8))
+                              ((symbol-function 'clutch-db-query)
+                               (lambda (connection sql)
+                                 (push sql executed)
+                                 (funcall query connection sql)))
                               ((symbol-function content)
                                (lambda (batch &rest args)
                                  (should (<= (length batch) 2))
@@ -9046,11 +9054,41 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                  (apply format-batch batch args))))
                       (clutch--export-result kind 'file omit-header))
                     (should (= calls 3))
+                    (should (= (length executed) 3))
                     (should (equal expected (with-temp-buffer
                                               (insert-file-contents path)
                                               (buffer-string))))))))))
       (delete-file path)
       (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-export-page-size-must-be-positive ()
+  "Invalid page sizes fail both export paths before querying or writing data."
+  (let ((path (make-temp-file "clutch-export-invalid-size-")))
+    (unwind-protect
+        (dolist (size '(0 -1 1.5 nil))
+          (let ((clutch-export-page-size size))
+            (write-region "original" nil path nil 'silent)
+            (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                      ((symbol-function 'clutch-db-sql-surface-p)
+                       (lambda (_conn _params) t))
+                      ((symbol-function 'read-file-name) (lambda (&rest _) path))
+                      ((symbol-function 'clutch-db-query-async)
+                       (lambda (&rest _) (ert-fail "Invalid size started SQL"))))
+              (with-temp-buffer
+                (setq-local clutch-connection 'fake-conn)
+                (insert "SELECT id FROM t")
+                (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                  (should-error (clutch-export-query (point-min) (point-max))
+                                :type 'user-error)))
+              (clutch-test--with-result-state
+                  (:base-query "SELECT id FROM t" :server-pageable t)
+                (should-error
+                 (clutch-result--map-export-batches #'ignore #'ignore)
+                 :type 'user-error)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path) (buffer-string))
+                           "original"))))
+      (delete-file path))))
 
 (ert-deftest clutch-test-file-export-replaces-file-once-all-pages-arrive ()
   "A file export should fetch its pages without blocking.
@@ -9074,6 +9112,7 @@ or a killed result buffer, leaves it and no temporary file behind."
                        :base-query "SELECT id FROM t"
                        :server-pageable t
                        :result-max-rows 2))
+                (setq-local clutch-export-page-size 2)
                 (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
                           ((symbol-function 'clutch-db-build-paged-sql)
                            (lambda (_conn _sql page-num &rest _)
@@ -9244,7 +9283,7 @@ loop turns into a stack as deep as the pages are many."
                :server-pageable t :columns '("i"))
             ;; Far fewer frames than pages: a page that nested the next
             ;; would run out of depth long before the last.
-            (let ((clutch-result-max-rows 1)
+            (let ((clutch-export-page-size 1)
                   (max-lisp-eval-depth 1000))
               (cl-letf (((symbol-function 'message) #'ignore))
                 (clutch-result--write-export-file
