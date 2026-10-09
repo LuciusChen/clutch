@@ -2525,8 +2525,9 @@ has no active request to cancel.  No cancellation result is mocked."
                 (setq-local clutch-connection conn)
                 (insert (if (eq workflow 'batch)
                             (concat first "; " second)
-                          (concat first " UNION ALL " second " UNION ALL " third
-                                  " ORDER BY id")))
+                          ;; ClickHouse applies a trailing ORDER BY to the last SELECT only.
+                          (concat "SELECT id FROM (" first " UNION ALL " second
+                                  " UNION ALL " third ") t ORDER BY id")))
                 (write-region "original" nil path nil 'silent)
                 (let ((finish (symbol-function 'clutch--finish-db-query))
                       (query (symbol-function 'clutch--run-db-query-async))
