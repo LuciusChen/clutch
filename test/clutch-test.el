@@ -11525,10 +11525,12 @@ there, and the result keeps its rows and its unknown total."
           (should (equal (marker-line) "UPDATE b SET n = 2;")))))))
 
 (ert-deftest clutch-test-execute-at-point-flashes-the-statement ()
-  "The statement picked at point should flash before it runs.
+  "The statement picked at point should flash first.
 SQLite runs it synchronously, which blocks pulse's timers and redisplay,
-so the flash is drawn first.  Point stays and no region becomes active.
-SQL run without a source region, as from the REPL, does not flash, and
+so the flash is drawn before it runs.  Point stays and no region becomes
+active.  The flash marks the picked statement before any confirmation,
+so a declined statement has flashed too.  SQL run without a source
+region, as from the REPL, does not flash, and
 `clutch-pulse-statement-at-point' set to nil turns the flash off."
   (require 'clutch-db-sqlite)
   (skip-unless (sqlite-available-p))
@@ -11569,7 +11571,16 @@ SQL run without a source region, as from the REPL, does not flash, and
             (let ((clutch-pulse-statement-at-point nil))
               (call-interactively #'clutch-execute-dwim))
             (should (string-prefix-p "SELECT 2 AS b" (cdr (assq 'query events))))
-            (should-not (assq 'pulse events))))
+            (should-not (assq 'pulse events))
+            (setq events nil)
+            (goto-char (point-max))
+            (insert "DELETE FROM t WHERE id = 1;")
+            (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+              (should-error (call-interactively #'clutch-execute-dwim)
+                            :type 'user-error))
+            (should (equal (assq 'pulse events)
+                           '(pulse . "DELETE FROM t WHERE id = 1")))
+            (should-not (assq 'query events))))
       (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-test-execute-chosen-text-does-not-flash ()
