@@ -2,7 +2,7 @@
 
 ## Failure
 
-The SQL Server export probe recorded in 221 reproduced a cancellation refusal followed by a successful export that replaced its destination. A public batch execution probe reproduced the same continuation: after the backend declined cancellation, the first successful reply dispatched the next statement.
+The SQL Server export probe recorded in 221 reproduced a cancellation refusal followed by a successful export that replaced its destination. A public batch execution probe reproduced the same continuation: after the backend declined cancellation, the first successful reply dispatched the next statement. Paging a result, sorting it on the server and counting its rows read the same flag, so after a refused cancel they applied their reply, although the guide said C-g leaves the result as it was.
 
 `clutch-cancel-query-or-quit` cleared `:cancelling` when the interrupt returned nil or signalled `clutch-db-error`. The reply therefore lost the user's request to stop, even though batch and export continuations already knew how to stop when that flag was set.
 
@@ -10,11 +10,11 @@ The SQL Server export probe recorded in 221 reproduced a cancellation refusal fo
 
 Keep the existing flag until the current reply is handled. It records the user's request, not evidence that the server cancelled the statement. A refusal reports that Clutch must wait for the current result before stopping; a second C-g quits as it does after an accepted request. No new state, retry or disconnect path is needed.
 
-The current statement retains its real outcome and transaction accounting. A successful write may already be committed in Auto mode; stopping the workflow does not undo it. Subsequent batch statements and export pages do not run. A stopped file export removes its temporary output and preserves the existing destination.
+The current statement retains its real outcome and transaction accounting. A successful write may already be committed in Auto mode; stopping the workflow does not undo it. Subsequent batch statements and export pages do not run, and a result's page load, sort or count leaves the result as it was. A stopped file export removes its temporary output and preserves the existing destination.
 
 ## Verification
 
-Extend existing batch and both file-export lifecycle regressions with rejected and failed cancellation requests. They fail before the fix and pass after it, checking that no next statement or page is dispatched, successful work is recorded and export output stays atomic. Existing cancellation command coverage also checks that the request is retained and repeated C-g quits.
+Extend existing batch and both file-export lifecycle regressions with rejected and failed cancellation requests. They fail before the fix and pass after it, checking that no next statement or page is dispatched, successful work is recorded and export output stays atomic. Existing cancellation command coverage also checks that the request is retained and repeated C-g quits. The page-load regression also refuses, and fails to send, the cancel of a server-side sort: its successful reply leaves the rows and order as they were, where main applied the sort.
 
 A JDBC live regression requests cancellation immediately before Clutch handles a real query reply, when the backend has already released its active request. It checks the actual nil cancellation result, keeps the successful first result, starts no subsequent SQL, releases the foreground reservation and preserves the export destination. Only reply timing is controlled; SQL execution and cancellation are real.
 

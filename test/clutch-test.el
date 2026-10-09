@@ -11229,7 +11229,8 @@ the REPL's new connection names, bound to the old connection."
 (ert-deftest clutch-test-page-load-keeps-result-until-it-succeeds ()
   "A page load should leave the page, its sort and staging until it succeeds.
 It runs without blocking, staging waits for it, and a failure leaves the
-result as it was."
+result as it was.  So does \[clutch-cancel-query-or-quit], also when the
+backend refuses the cancel or fails to send it and the page then arrives."
   (clutch-test--with-result-state
       (:columns '("id" "name")
        :rows '((1 "a") (2 "b"))
@@ -11281,7 +11282,21 @@ result as it was."
           (should (equal clutch--sort-column "name"))
           (should (equal clutch--order-by '("name" . "DESC")))
           (should (equal clutch--result-rows '((2 "b") (1 "a"))))
-          (should (equal (car messages) "Sorted by name DESC")))))))
+          (should (equal (car messages) "Sorted by name DESC"))
+          (dolist (interrupt (list #'ignore
+                                   (lambda (_conn)
+                                     (signal 'clutch-db-error '("cancel failed")))))
+            (cl-letf (((symbol-function 'clutch-db-interrupt-query) interrupt))
+              (clutch-result--sort "name" nil)
+              (clutch-cancel-query-or-quit)
+              (funcall (cdar finishes)
+                       (make-clutch-db-result :columns clutch--result-column-defs
+                                              :rows '((1 "a") (2 "b")))
+                       nil)
+              (ert-run-idle-timers)
+              (should (equal clutch--order-by '("name" . "DESC")))
+              (should (equal clutch--result-rows '((2 "b") (1 "a"))))
+              (should (string-suffix-p "(result unchanged)" (car messages))))))))))
 
 (ert-deftest clutch-test-page-load-leaves-a-result-of-another-connection ()
   "A page that arrives once its buffer shows another connection's result is dropped.
