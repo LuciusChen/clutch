@@ -5,7 +5,7 @@
 ### Added
 
 - `M-x clutch-export-query` and Execute → Export query to file (`C-c ?`, then `e`) export one SELECT or SELECT-only CTE directly to CSV/TSV, prompting for encoding and destination without opening a result grid. Query row limits, existing results and staged edits are preserved; cancellation or failure leaves an existing file unchanged.
-- A statement sent from a SQL buffer briefly flashes with the built-in `pulse`, each statement of a batch in turn, without moving point or the region; its status dot still shows the outcome. Setting `pulse-flag` to `never` turns the flash off.
+- A statement sent from a SQL buffer is highlighted with the built-in `pulse`, each statement of a batch in turn, without moving point or the region; its status dot still shows the outcome. The highlight fades out, or stays until the next key press with `pulse-flag` nil, and `pulse-flag` set to `never` turns it off.
 
 ### Changed
 
