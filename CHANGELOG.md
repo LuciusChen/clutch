@@ -4,6 +4,7 @@
 
 ### Added
 
+- `clutch-export-page-size` controls query export and all-row result export independently of display pagination, defaulting to 2000 rows to reduce repeated pagination queries. Explicit SQL row limits remain unchanged.
 - `M-x clutch-export-query` and Execute → Export query to file (`C-c ?`, then `e`) export one SELECT or SELECT-only CTE directly to CSV/TSV, prompting for encoding and destination without opening a result grid. Query row limits, existing results and staged edits are preserved; cancellation or failure leaves an existing file unchanged.
 
 ### Fixed
