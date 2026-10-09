@@ -189,6 +189,8 @@ Binary-envelope fields have exact semantics:
 
 The envelope is deliberately limited to binary parameters. Clutch does not send type tags for ordinary values, and the agent does not claim a portable general-purpose JDBC type system. When a text-like BLOB result reports an encoding, Clutch retains that encoding across editing and converts the edited text back to those bytes; new text without source encoding uses UTF-8.
 
+Result values are separate from that parameter envelope. A result object containing `__type: "blob"` and `length` without decoded `text` carries metadata only, not the original bytes. Clutch's JDBC normalization converts it to a `clutch-db-value-preview` with type `blob`, the reported length and empty text. The existing completeness check refuses to copy, export or mutate it as complete data. Select a hex or text conversion explicitly in SQL when the bytes are needed as exportable text. Complete decoded JSON/XML text BLOBs remain usable, while CLOB previews shorter than their JDBC UTF-16 length remain incomplete too.
+
 `fetch` accepts:
 
 - `cursor-id`

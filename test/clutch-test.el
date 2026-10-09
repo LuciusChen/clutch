@@ -8843,6 +8843,168 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                '("real.csv")))))
           (delete-directory dir t))))))
 
+(ert-deftest clutch-test-view-metadata-only-binary-as-preview ()
+  "View a length-only JDBC BLOB as unavailable content with its actual size."
+  (let ((value (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3))))))
+    (should (equal (string-trim-right
+                    (plist-get (clutch--view-spec value '(:type-category blob)) :content))
+                   "<BLOB preview; 3 total>"))))
+
+(ert-deftest clutch-test-export-rejects-metadata-only-binary-values ()
+  "Binary length metadata is not complete data; decoded text remains usable."
+  (let ((metadata (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3))))))
+    (clutch-test--with-result-state (:columns '("body") :column-defs '((:name "body")))
+      (should-error (clutch--export-csv-content (list (list metadata))) :type 'user-error)
+      (let ((value (car (clutch-jdbc--normalize-row
+                         '((:__type "blob" :length 4 :text "<r/>" :encoding "utf-8"))))))
+        (should (equal (clutch--export-csv-content (list (list value))) "body\n<r/>\n"))))))
+
+(ert-deftest clutch-test-query-export-content-and-bounds ()
+  "Direct export writes CSV/TSV without a grid, respecting SQL bounds."
+  (require 'clutch-db-sqlite)
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (path (make-temp-file "clutch-query-export-")))
+    (unwind-protect
+        (progn
+          (clutch-db-query conn "CREATE TABLE items(id INTEGER PRIMARY KEY, body TEXT)")
+          (clutch-db-query conn "INSERT INTO items VALUES (1, '中文,a'), (2, 'a\"b'), (3, NULL), (4, ''), (5, 'last')")
+          (dolist (case '(("SELECT id, body FROM items ORDER BY id" "csv" "utf-8-bom"
+                           "id,body\n1,\"中文,a\"\n2,\"a\"\"b\"\n3,NULL\n4,\n5,last\n" 3)
+                          ("SELECT id, body FROM items ORDER BY id LIMIT 1 OFFSET 1" "tsv" "utf-8"
+                           "id\tbody\n2\t\"a\"\"b\"\n" 1)
+                          ("WITH c AS (SELECT * FROM items) SELECT id, body FROM c WHERE 0" "csv" "utf-8"
+                           "id,body\n" 1)))
+            (pcase-let ((`(,sql ,format ,encoding ,expected ,query-count) case))
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (insert "SELECT 'outside';\n" sql "; -- trailing comment\n")
+                (goto-char (+ (point-min) (length "SELECT 'outside';\n") 1))
+                (let ((clutch-result-max-rows 2)
+                      (query (symbol-function 'clutch-db-query))
+                      executed)
+                  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                            ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                            ((symbol-function 'clutch-db-query)
+                             (lambda (connection sql)
+                               (push sql executed)
+                               (funcall query connection sql)))
+                            ((symbol-function 'clutch-result--display-select)
+                             (lambda (&rest _) (ert-fail "Export displayed a grid")))
+                            ((symbol-function 'clutch-result--check-pending-changes)
+                             (lambda () (ert-fail "Export would discard staged edits"))))
+                    (clutch-test--with-minibuffer-answers (list format encoding)
+                      (call-interactively #'clutch-export-query)))
+                  (should (= (length executed) query-count))
+                  (should-not clutch--last-result-buffer)
+                  (should-not (clutch-db--foreground-busy-p conn))
+                  (should (equal (with-temp-buffer
+                                   (insert-file-contents path)
+                                   (buffer-string))
+                                 expected))
+                  (let ((bytes (with-temp-buffer
+                                 (set-buffer-multibyte nil)
+                                 (insert-file-contents-literally path)
+                                 (buffer-string))))
+                    (should (eq (string-prefix-p (unibyte-string #xef #xbb #xbf) bytes)
+                                (equal encoding "utf-8-bom")))
+                    (when (equal encoding "utf-8-bom")
+                      (should-not (string-match-p (unibyte-string #xef #xbb #xbf)
+                                                  (substring bytes 3))))))))))
+      (delete-file path)
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-query-export-rejects-unsupported-statements ()
+  "Invalid exports and declined overwrites start no query or file writes."
+  (dolist (sql '("SELECT 1; SELECT 2" "DELETE FROM t" "SELECT * INTO copy FROM t"
+                 "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d" "-- comment"))
+    (with-temp-buffer
+      (insert sql)
+      (cl-letf (((symbol-function 'clutch--ensure-connection)
+                 (lambda () (ert-fail "Invalid SQL reached the connection"))))
+        (should-error (clutch-export-query (point-min) (point-max)) :type 'user-error))))
+  (let ((path (make-temp-file "clutch-export-declined-")))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "SELECT 1")
+          (setq-local clutch-connection 'fake-conn)
+          (write-region "original" nil path nil 'silent)
+          (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                    ((symbol-function 'clutch-db-sql-surface-p) (lambda (_conn _params) t))
+                    ((symbol-function 'read-file-name) (lambda (&rest _) path))
+                    ((symbol-function 'yes-or-no-p) (lambda (&rest _) nil))
+                    ((symbol-function 'clutch-db-query-async)
+                     (lambda (&rest _) (ert-fail "Declined export started SQL"))))
+            (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+              (should-error (clutch-export-query (point-min) (point-max)) :type 'user-error)))
+          (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                         "original")))
+      (delete-file path))))
+
+(ert-deftest clutch-test-query-export-async-lifecycle ()
+  "Direct export stays atomic on failure, cancel, kill, move and handler quit."
+  (dolist (outcome '(success page-error cancelled killed moved quit incomplete))
+    (ert-info ((symbol-name outcome))
+      (let* ((dir (make-temp-file "clutch-query-export-async-" t))
+             (path (expand-file-name "out.tsv" dir))
+             (source (generate-new-buffer " *clutch-query-export*")))
+        (unwind-protect
+            (clutch-test--with-async-statements finishes
+              (write-region "original" nil path nil 'silent)
+              (with-current-buffer source
+                (insert "SELECT id FROM t")
+                (setq-local clutch-connection 'async-conn)
+                (let ((clutch-result-max-rows 2))
+                  (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                            ((symbol-function 'clutch-db-sql-surface-p) (lambda (_conn _params) t))
+                            ((symbol-function 'read-file-name) (lambda (&rest _) path))
+                            ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                            ((symbol-function 'clutch-db-build-paged-sql)
+                             (lambda (_conn _sql page-num &rest _)
+                               (format "SELECT id FROM t PAGE %d" page-num)))
+                            ((symbol-function 'message) #'ignore))
+                    (clutch-test--with-minibuffer-answers '("tsv" "utf-8")
+                      (clutch-export-query (point-min) (point-max)))
+                    (funcall (cdar finishes)
+                             (make-clutch-db-result :columns '((:name "id"))
+                                                    :rows '((1) (2))) nil)
+                    (ert-run-idle-timers)
+                    (should (equal (caar finishes) "SELECT id FROM t PAGE 1"))
+                    (should (equal (with-temp-buffer (insert-file-contents path)
+                                                     (buffer-string)) "original"))
+                    (pcase outcome
+                      ('cancelled
+                       (cl-letf (((symbol-function 'clutch-db-interrupt-query) (lambda (_) t)))
+                         (clutch-cancel-query-or-quit)))
+                      ('killed (kill-buffer source))
+                      ('moved (setq-local clutch-connection 'another-conn)))
+                    (let ((write (symbol-function 'write-region)))
+                      (cl-letf (((symbol-function 'write-region)
+                                 (lambda (&rest args)
+                                   (if (eq outcome 'quit)
+                                       (signal 'quit nil)
+                                     (apply write args)))))
+                        (if (eq outcome 'page-error)
+                            (funcall (cdar finishes) nil '(clutch-db-error "query failed"))
+                          (funcall (cdar finishes)
+                                   (make-clutch-db-result
+                                    ;; Oracle's later pages append an RN column.
+                                    :columns '((:name "id") (:name "RN"))
+                                    :rows (if (eq outcome 'incomplete)
+                                              (list (list (make-clutch-db-value-preview
+                                                           :type 'clob :length 100
+                                                           :text "preview")))
+                                            '((3 99)))) nil))
+                        (ert-run-idle-timers))))))
+              (should-not (clutch-db--foreground-busy-p 'async-conn))
+              (should-not (gethash 'async-conn clutch--running-queries))
+              (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                             (if (eq outcome 'success) "id\n1\n2\n3\n" "original")))
+              (should (equal (directory-files dir nil "\\`[^.]") '("out.tsv"))))
+          (when (buffer-live-p source) (kill-buffer source))
+          (delete-directory dir t))))))
+
 (ert-deftest clutch-test-file-export-pages-through-sqlite ()
   "Paged file output should equal complete formatting for every SQL format."
   (require 'clutch-db-sqlite)

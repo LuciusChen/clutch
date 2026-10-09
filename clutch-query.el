@@ -95,7 +95,6 @@ that window.")
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
-(declare-function clutch-copy-context-for-agent "clutch-result" ())
 
 ;;;; Query console
 
@@ -2429,6 +2428,7 @@ Key bindings:
     ("R" "REPL" clutch-repl)]
    ["Execute"
     ("x" "DWIM" clutch-execute-dwim)
+    ("e" "Export query to file" clutch-export-query)
     ("r" "Region" clutch-execute-region)
     ("b" "Buffer" clutch-execute-buffer)
     ("p" "Preview execution" clutch-preview-execution-sql)

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - Unreleased
+
+### Added
+
+- `M-x clutch-export-query` and Execute → Export query to file (`C-c ?`, then `e`) export one SELECT or SELECT-only CTE directly to CSV/TSV, prompting for encoding and destination without opening a result grid. Query row limits, existing results and staged edits are preserved; cancellation or failure leaves an existing file unchanged.
+
+### Fixed
+
+- JDBC BLOB results carrying only length metadata become incomplete previews, so copy/export and mutation refuse them and the viewer shows their actual length instead of treating the metadata as content. Complete decoded text BLOBs remain usable.
+
 ## 0.5.6 - 2026-10-09
 
 ### Fixed
