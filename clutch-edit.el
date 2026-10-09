@@ -826,9 +826,10 @@ the selected window."
                (not (equal new-state
                            clutch-result-edit--initial-value-state)))
       (funcall cb new-value))
+    (clutch-result-edit--close-buffer kill-buffer-directly)
+    ;; `quit-window' restores its saved point, so refresh the Record afterward.
     (clutch-result-edit--refresh-record-return-buffer return-buf
-                                                      (cdr target-cell))
-    (clutch-result-edit--close-buffer kill-buffer-directly)))
+                                                      (cdr target-cell))))
 
 ;;;###autoload
 (defun clutch-result-edit-cancel ()
