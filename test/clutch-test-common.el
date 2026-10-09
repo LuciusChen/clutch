@@ -25,6 +25,44 @@
 
 ;;;; Test helpers
 
+(cl-defstruct clutch-test-conn
+  "A single-table metadata backend for result workflows, with no SQL engine.
+TABLE and COLUMNS declare the available metadata.  Other tables and every
+query fail the test rather than silently supplying empty results."
+  (live t) table columns)
+
+(cl-defmethod clutch-db-live-p ((conn clutch-test-conn))
+  "Return whether CONN is open."
+  (clutch-test-conn-live conn))
+
+(cl-defmethod clutch-db-disconnect ((conn clutch-test-conn))
+  "Close CONN."
+  (setf (clutch-test-conn-live conn) nil))
+
+(cl-defmethod clutch-db-resolution-context ((_conn clutch-test-conn))
+  "Return nil because this backend has no namespace switches."
+  nil)
+
+(cl-defmethod clutch-db-column-details
+  ((conn clutch-test-conn) table &optional schema catalog)
+  "Return CONN's declared columns for TABLE, without SCHEMA or CATALOG."
+  (should (clutch-db-live-p conn))
+  (should-not (or schema catalog))
+  (should (equal table (clutch-test-conn-table conn)))
+  (clutch-test-conn-columns conn))
+
+(cl-defmethod clutch-db-query ((_conn clutch-test-conn) sql)
+  "Fail on unexpected SQL instead of pretending to execute SQL."
+  (ert-fail (format "Unexpected test-backend query: %S" sql)))
+
+(cl-defmethod clutch-db-escape-identifier ((_conn clutch-test-conn) name)
+  "Quote NAME using standard SQL identifier syntax."
+  (concat "\"" (string-replace "\"" "\"\"" name) "\""))
+
+(cl-defmethod clutch-db-escape-literal ((_conn clutch-test-conn) value)
+  "Quote VALUE using standard SQL string syntax."
+  (concat "'" (string-replace "'" "''" value) "'"))
+
 (defun clutch-test--await (predicate)
   "Run process output and idle timers until PREDICATE returns non-nil."
   (let ((deadline (+ (float-time) 30)))

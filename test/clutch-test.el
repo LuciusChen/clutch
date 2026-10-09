@@ -1508,15 +1508,15 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
 
 (ert-deftest clutch-test-update-canonicalizes-source-column-case ()
   "Mutation SQL should use canonical source names, including behind aliases."
-  (pcase-dolist (`(,driver ,table ,key ,column ,canonical ,absent)
-                 '((oracle "USERS" "ID"
+  (pcase-dolist (`(,label ,driver ,table ,key ,column ,canonical ,absent)
+                 '(("canonical source-column case" oracle "USERS" "ID"
                     (:name "name" :source-column "name")
                     (:name "NAME" :backend-type "VARCHAR2") nil)
-                   (jdbc "users" "id"
+                   ("source column behind an alias" jdbc "users" "id"
                     (:name "display_name" :source-column "NAME")
                     (:name "name" :backend-type "text")
                     ("display_name" "\"NAME\""))))
-    (ert-info ((symbol-name driver))
+    (ert-info (label)
       (let ((clutch-connection
              (make-clutch-jdbc-conn :params (list :driver driver)))
             (clutch--result-columns (list (plist-get column :name)))
@@ -2429,7 +2429,8 @@ Point left behind made the next cell command scroll back to it."
   "Staging a Record field keeps point there after the editor window closes."
   (save-window-excursion
     (clutch-test--with-result-state-buffer result-buf
-        (:connection 'fake-conn
+        (:connection (make-clutch-test-conn :table "users"
+                                            :columns '((:name "note" :type "text")))
          :connection-params '(:backend mysql)
          :source-table "users"
          :columns '("id" "name" "note")
@@ -2449,10 +2450,7 @@ Point left behind made the next cell command scroll back to it."
               (goto-char (point-min))
               (search-forward "note")
               (beginning-of-line)
-              (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                        ((symbol-function 'clutch--ensure-column-details)
-                         (lambda (&rest _) '((:name "note" :type "text")))))
-                (call-interactively #'clutch-result-edit-cell))
+              (call-interactively #'clutch-result-edit-cell)
               (setq edit-buf (current-buffer))
               (erase-buffer)
               (insert "after")
@@ -2469,7 +2467,8 @@ Point left behind made the next cell command scroll back to it."
   "Submitting an unchanged numeric Record field should not stage an edit."
   (clutch-test--with-pop-to-buffer-capture edit-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection 'fake-conn
+        (:connection (make-clutch-test-conn :table "orders"
+                                            :columns '((:name "qty" :type "int")))
          :connection-params '(:backend mysql)
          :source-table "orders"
          :columns '("id" "qty")
@@ -2489,12 +2488,8 @@ Point left behind made the next cell command scroll back to it."
             (goto-char (point-min))
             (search-forward "qty")
             (goto-char (match-beginning 0)))
-          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "qty" :type "int")))))
-            (with-current-buffer record-buf
-              (clutch-result-edit-cell)))
+          (with-current-buffer record-buf
+            (clutch-result-edit-cell))
           (with-current-buffer edit-buf
             (should (equal (buffer-string) "42"))
             (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
@@ -5004,15 +4999,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         (:name "postmortem" :type-category json)
                         (:name "is_ship_blocked" :type-category numeric)
                         (:name "opened_at" :type-category datetime))
-         :connection 'fake-conn)
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "id" :type "int" :generated t :nullable nil)
-                         (list :name "severity" :type "enum('low','medium')" :nullable nil)
-                         (list :name "postmortem" :type "json" :nullable t)
-                         (list :name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)
-                         (list :name "opened_at" :type "datetime" :nullable nil)))))
-        (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+         :connection (make-clutch-test-conn :table "shipping_incidents"
+                                            :columns '((:name "id" :type "int" :generated t :nullable nil)
+                                                       (:name "severity" :type "enum('low','medium')" :nullable nil)
+                                                       (:name "postmortem" :type "json" :nullable t)
+                                                       (:name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)
+                                                       (:name "opened_at" :type "datetime" :nullable nil))))
+      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
       (with-current-buffer insert-buf
         (let ((rendered (buffer-string)))
           (should (string-match-p "^id[ ]+\\[generated\\]: $" rendered))
@@ -5043,16 +5036,13 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         (:name "severity" :type-category text)
                         (:name "owner" :type-category text)
                         (:name "created_at" :type-category datetime))
-         :connection 'fake-conn
+         :connection (make-clutch-test-conn :table "shipping_incidents"
+                                            :columns '((:name "id" :type "int" :generated t :nullable nil)
+                                                       (:name "severity" :type "enum('low','medium','high')" :nullable nil)
+                                                       (:name "owner" :type "varchar(64)" :default "system" :nullable t)
+                                                       (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
          :source-table "shipping_incidents")
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "id" :type "int" :generated t :nullable nil)
-                         (list :name "severity" :type "enum('low','medium','high')" :nullable nil)
-                         (list :name "owner" :type "varchar(64)" :default "system" :nullable t)
-                         (list :name "created_at" :type "datetime"
-                               :default "CURRENT_TIMESTAMP" :nullable t)))))
-        (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
       (with-current-buffer insert-buf
         (should (string-match-p "C-c \\. Set current time"
                                 (substring-no-properties
@@ -5074,7 +5064,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Cloning a result row should reuse visible row values and staged edits."
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection-params '(:backend mysql)
+        (:connection (make-clutch-test-conn :table "shipping_incidents"
+                                            :columns '((:name "id" :type "int" :generated t :nullable nil)
+                                                       (:name "severity" :type "enum('low','medium','high')" :nullable nil)
+                                                       (:name "owner" :type "varchar(64)" :nullable t)
+                                                       (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
+         :connection-params '(:backend mysql)
          :last-query "SELECT * FROM shipping_incidents"
          :source-table "shipping_incidents"
          :columns '("id" "severity" "owner" "created_at")
@@ -5088,14 +5083,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
          :pending-edits `((([1] . 1) . "high")
                           (([1] . 3) . ,clutch--cell-default-placeholder)))
       (cl-letf (((symbol-function 'clutch--row-idx-at-line)
-                 (lambda () 0))
-                ((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "id" :type "int" :generated t :nullable nil)
-                         (list :name "severity" :type "enum('low','medium','high')" :nullable nil)
-                         (list :name "owner" :type "varchar(64)" :nullable t)
-                         (list :name "created_at" :type "datetime"
-                               :default "CURRENT_TIMESTAMP" :nullable t)))))
+                 (lambda () 0)))
         (with-current-buffer result-buf
           (clutch-clone-row-to-insert)))
       (with-current-buffer insert-buf
@@ -5114,7 +5102,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Cloning from a record buffer should prefill the current visible record row."
   (dolist (case '((unfiltered ((7 "carol")) nil nil "carol" nil)
                   (filtered ((1 "alice") (2 "bob")) "bob" ((2 "bob"))
-                   "bob" "alice")))
+                            "bob" "alice")))
     (pcase-let ((`(,label ,rows ,filter ,filtered-rows ,expected ,rejected)
                  case))
       (ert-info ((format "case: %s" label))
@@ -5122,7 +5110,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (unwind-protect
               (clutch-test--with-pop-to-buffer-capture insert-buf
                 (clutch-test--with-result-state-buffer result-buf
-                    (:connection-params '(:backend mysql)
+                    (:connection (make-clutch-test-conn :table "shipping_incidents"
+                                                        :columns '((:name "id" :type "int" :generated t :nullable nil)
+                                                                   (:name "owner" :type "varchar(64)" :nullable t)))
+                     :connection-params '(:backend mysql)
                      :last-query "SELECT * FROM shipping_incidents"
                      :source-table "shipping_incidents"
                      :columns '("id" "owner")
@@ -5135,14 +5126,8 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                     (clutch-record-mode)
                     (setq-local clutch-record--result-buffer result-buf
                                 clutch-record--row-idx 0))
-                  (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                             (lambda (_conn _table)
-                               (list (list :name "id" :type "int"
-                                           :generated t :nullable nil)
-                                     (list :name "owner" :type "varchar(64)"
-                                           :nullable t)))))
-                    (with-current-buffer record-buf
-                      (clutch-clone-row-to-insert)))
+                  (with-current-buffer record-buf
+                    (clutch-clone-row-to-insert))
                   (with-current-buffer insert-buf
                     (should (string-match-p "^id[ ]+\\[generated\\]: $"
                                             (buffer-string)))
@@ -5159,7 +5144,10 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
   "Clone-to-insert should render primary-key fields without prefilling them."
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-result-state-buffer result-buf
-        (:connection-params '(:backend mysql)
+        (:connection (make-clutch-test-conn :table "incident_codes"
+                                            :columns '((:name "id" :type "int" :primary-key t :nullable nil)
+                                                       (:name "label" :type "varchar(64)" :nullable nil)))
+         :connection-params '(:backend mysql)
          :last-query "SELECT * FROM incident_codes"
          :source-table "incident_codes"
          :columns '("id" "label")
@@ -5167,11 +5155,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
                         (:name "label" :type-category text))
          :rows '((42 "duplicate me")))
       (cl-letf (((symbol-function 'clutch--row-idx-at-line)
-                 (lambda () 0))
-                ((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "id" :type "int" :primary-key t :nullable nil)
-                         (list :name "label" :type "varchar(64)" :nullable nil)))))
+                 (lambda () 0)))
         (with-current-buffer result-buf
           (clutch-clone-row-to-insert)))
       (with-current-buffer insert-buf
@@ -5206,13 +5190,11 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
         (:columns '("owner" "severity")
          :column-defs '((:name "owner" :type-category text)
                         (:name "severity" :type-category text))
-         :connection 'fake-conn
+         :connection (make-clutch-test-conn :table "shipping_incidents"
+                                            :columns '((:name "owner" :type "varchar(64)" :nullable t)
+                                                       (:name "severity" :type "enum('low','high')" :nullable nil)))
          :source-table "shipping_incidents")
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "owner" :type "varchar(64)" :nullable t)
-                         (list :name "severity" :type "enum('low','high')" :nullable nil)))))
-        (clutch-result-insert--open-buffer "shipping_incidents" result-buf))
+      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
       (with-current-buffer insert-buf
         (clutch-result-insert-import-delimited
          "owner,severity\n\"Bob, Jr.\",high\n")
@@ -5228,15 +5210,12 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
          :column-defs '((:name "severity" :type-category text)
                         (:name "owner" :type-category text)
                         (:name "created_at" :type-category datetime))
-         :connection 'fake-conn
+         :connection (make-clutch-test-conn :table "shipping_incidents"
+                                            :columns '((:name "severity" :type "enum('low','high')" :nullable nil)
+                                                       (:name "owner" :type "varchar(64)" :nullable t)
+                                                       (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
          :source-table "shipping_incidents")
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "severity" :type "enum('low','high')" :nullable nil)
-                         (list :name "owner" :type "varchar(64)" :nullable t)
-                         (list :name "created_at" :type "datetime"
-                               :default "CURRENT_TIMESTAMP" :nullable t))))
-                ((symbol-function 'clutch--refresh-display) #'ignore))
+      (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
         (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
         (with-current-buffer insert-buf
           (clutch-result-insert-import-delimited
@@ -5244,7 +5223,7 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (equal (with-current-buffer result-buf
                            clutch--pending-inserts)
                          '((("owner" . "bob") ("severity" . "high"))
-                            (("owner" . "ann") ("severity" . "low")))))
+                           (("owner" . "ann") ("severity" . "low")))))
           (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
                                   (buffer-string))))))))
 
@@ -5256,16 +5235,15 @@ The page that statement brings would replace the staged rows."
         (:columns '("severity" "owner")
          :column-defs '((:name "severity" :type-category text)
                         (:name "owner" :type-category text))
-         :connection 'fake-conn
+         :connection (make-clutch-test-conn :table "shipping_incidents"
+                                            :columns '((:name "severity" :type "text" :nullable t)
+                                                       (:name "owner" :type "text" :nullable t)))
          :source-table "shipping_incidents")
       (let ((clutch--running-queries (make-hash-table :test 'eq)))
-        (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                   (lambda (_conn _table)
-                     (list (list :name "severity" :type "text" :nullable t)
-                           (list :name "owner" :type "text" :nullable t))))
-                  ((symbol-function 'clutch--refresh-display) #'ignore))
+        (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore))
           (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-          (puthash 'fake-conn (list :buffer result-buf) clutch--running-queries)
+          (puthash (buffer-local-value 'clutch-connection result-buf)
+                   (list :buffer result-buf) clutch--running-queries)
           (with-current-buffer insert-buf
             (should-error (clutch-result-insert-import-delimited
                            "owner\tseverity\nbob\thigh\nann\tlow\n")
@@ -5341,11 +5319,10 @@ The page that statement brings would replace the staged rows."
       (clutch-test--with-insert-result-buffer result-buf
           (:columns '("name")
            :column-defs '((:name "name" :type-category text))
-           :connection 'fake-conn
+           :connection (make-clutch-test-conn :table "users"
+                                              :columns '())
            :source-table "users")
-        (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                   (lambda (&rest _) nil)))
-          (clutch-result-insert--open-buffer "users" result-buf))
+        (clutch-result-insert--open-buffer "users" result-buf)
         (with-current-buffer insert-buf
           (clutch-test--set-insert-field-value "name" "alice"))
         (with-current-buffer result-buf
@@ -5843,13 +5820,11 @@ a word that ends a whole rollback, such as CHAIN."
   (clutch-test--with-insert-result-buffer result-buf
       (:columns '("impact_score")
        :column-defs '((:name "impact_score" :type-category numeric))
-       :connection 'fake-conn)
+       :connection (make-clutch-test-conn :table "shipping_incidents"
+                                          :columns '((:name "impact_score" :type "decimal(5,1)"))))
     (clutch-test--with-pop-to-buffer-capture insert-buf
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "impact_score" :type "decimal(5,1)")))))
-        (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-        (with-current-buffer insert-buf
+      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+      (with-current-buffer insert-buf
         (clutch-test--goto-insert-field-value "impact_score")
         (insert "x")
         (clutch-result-insert--run-idle-validation insert-buf)
@@ -5867,7 +5842,7 @@ a word that ends a whole rollback, such as CHAIN."
           (clutch-result-insert--run-idle-validation insert-buf)
           (setq field (clutch-result-insert--field-state "impact_score"))
           (should-not (plist-get field :error-message))
-          (should-not (plist-get field :error-overlay))))))))
+          (should-not (plist-get field :error-overlay)))))))
 
 (ert-deftest clutch-test-insert-idle-validation-covers-all-changed-fields ()
   "Idle validation should validate every field changed since the last run."
@@ -5875,37 +5850,35 @@ a word that ends a whole rollback, such as CHAIN."
       (:columns '("impact_score" "severity")
        :column-defs '((:name "impact_score" :type-category numeric)
                       (:name "severity" :type-category numeric))
-       :connection 'fake-conn)
+       :connection (make-clutch-test-conn :table "shipping_incidents"
+                                          :columns '((:name "impact_score" :type "decimal(5,1)")
+                                                     (:name "severity" :type "int"))))
     (clutch-test--with-pop-to-buffer-capture insert-buf
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (_conn _table)
-                   (list (list :name "impact_score" :type "decimal(5,1)")
-                         (list :name "severity" :type "int")))))
-        (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-        (with-current-buffer insert-buf
-          (clutch-test--goto-insert-field-value "impact_score")
-          (insert "x")
-          (clutch-test--goto-insert-field-value "severity")
-          (insert "1")
-          (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
-                                           insert-buf)))
-            (apply (timer--function timer) (timer--args timer)))
-          (should (equal (plist-get (clutch-result-insert--field-state "impact_score")
-                                    :error-message)
-                         "Field impact_score expects a numeric value"))
-          (should-not (plist-get (clutch-result-insert--field-state "severity")
-                                 :error-message))
-          (clutch-test--goto-insert-field-value "impact_score")
-          (delete-region (point) (line-end-position))
-          (insert "1.5")
-          (clutch-test--goto-insert-field-value "severity" t)
-          (insert "2")
-          (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
-                                           insert-buf)))
-            (apply (timer--function timer) (timer--args timer)))
-          (let ((field (clutch-result-insert--field-state "impact_score")))
-            (should-not (plist-get field :error-message))
-            (should-not (plist-get field :error-overlay))))))))
+      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+      (with-current-buffer insert-buf
+        (clutch-test--goto-insert-field-value "impact_score")
+        (insert "x")
+        (clutch-test--goto-insert-field-value "severity")
+        (insert "1")
+        (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
+                                         insert-buf)))
+          (apply (timer--function timer) (timer--args timer)))
+        (should (equal (plist-get (clutch-result-insert--field-state "impact_score")
+                                  :error-message)
+                       "Field impact_score expects a numeric value"))
+        (should-not (plist-get (clutch-result-insert--field-state "severity")
+                               :error-message))
+        (clutch-test--goto-insert-field-value "impact_score")
+        (delete-region (point) (line-end-position))
+        (insert "1.5")
+        (clutch-test--goto-insert-field-value "severity" t)
+        (insert "2")
+        (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
+                                         insert-buf)))
+          (apply (timer--function timer) (timer--args timer)))
+        (let ((field (clutch-result-insert--field-state "impact_score")))
+          (should-not (plist-get field :error-message))
+          (should-not (plist-get field :error-overlay)))))))
 
 (ert-deftest clutch-test-json-validation-is-scheduled-on-idle ()
   "JSON insert and edit buffers should defer local validation until idle."
@@ -6095,17 +6068,17 @@ a word that ends a whole rollback, such as CHAIN."
                    :render t
                    :row-identity
                    (clutch-test--primary-row-identity "users" '("id") '(0))))
-            (setq-local clutch-connection 'fake-conn
+            (setq-local clutch-connection (make-clutch-test-conn :table "users"
+                                                                 :columns '((:name "id")
+                                                                            (:name "name")
+                                                                            (:name "city")
+                                                                            (:name "note")
+                                                                            (:name "flag")))
                         clutch--connection-params '(:backend mysql)
                         clutch--result-source-table "users")
             (clutch--goto-cell 1 4)
             (set-window-hscroll (selected-window) 40)
-            (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                      ((symbol-function 'clutch--ensure-column-details)
-                       (lambda (&rest _)
-                         '((:name "id") (:name "name") (:name "city")
-                           (:name "note") (:name "flag"))))
-                      ((symbol-function 'window-body-width)
+            (cl-letf (((symbol-function 'window-body-width)
                        (lambda (&rest _) 40)))
               (clutch-result-edit-cell))
             (setq edit-buf (current-buffer))
@@ -6134,7 +6107,8 @@ a word that ends a whole rollback, such as CHAIN."
     (unwind-protect
         (with-current-buffer result-buf
           (clutch-result-mode)
-          (setq-local clutch-connection 'fake-conn
+          (setq-local clutch-connection (make-clutch-test-conn :table "users"
+                                                               :columns '((:name "name")))
                       clutch--result-columns '("name")
                       clutch--connection-params '(:backend mysql)
                       clutch--result-column-defs
@@ -6149,12 +6123,9 @@ a word that ends a whole rollback, such as CHAIN."
             (insert "before")
             (add-text-properties (point-min) (point-max)
                                  '(clutch-row-idx 0 clutch-col-idx 0
-                                   clutch-full-value "before")))
+                                                  clutch-full-value "before")))
           (goto-char (point-min))
-          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (&rest _) '((:name "name"))))
-                    ((symbol-function 'pop-to-buffer)
+          (cl-letf (((symbol-function 'pop-to-buffer)
                      (lambda (buf &rest _args)
                        (setq edit-buf buf)
                        buf)))
@@ -6204,20 +6175,19 @@ a word that ends a whole rollback, such as CHAIN."
       (clutch-test--with-insert-result-buffer result-buf
           (:columns columns
            :column-defs column-defs
-           :connection 'fake-conn
+           :connection (make-clutch-test-conn :table "shipping_incidents"
+                                              :columns details)
            :source-table "shipping_incidents"
            :pending-inserts nil)
         (clutch-test--with-pop-to-buffer-capture insert-buf
-          (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table) details)))
-            (clutch-result-insert--open-buffer
-             "shipping_incidents" result-buf fields)
-            (with-current-buffer insert-buf
-              (let ((err (should-error (clutch-result-insert-stage)
-                                       :type 'user-error)))
-                (when expected-message
-                  (should (string-match-p expected-message
-                                          (error-message-string err))))))))
+          (clutch-result-insert--open-buffer
+           "shipping_incidents" result-buf fields)
+          (with-current-buffer insert-buf
+            (let ((err (should-error (clutch-result-insert-stage)
+                                     :type 'user-error)))
+              (when expected-message
+                (should (string-match-p expected-message
+                                        (error-message-string err)))))))
         (should (buffer-live-p result-buf))
         (should-not (with-current-buffer result-buf clutch--pending-inserts))))))
 
@@ -6545,25 +6515,23 @@ a word that ends a whole rollback, such as CHAIN."
   "INSERT export content should build SQL from the ROWS argument."
   :tags '(:smoke)
   (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
+    (setq-local clutch-connection (make-clutch-test-conn)
                 clutch--result-columns '("id" "name")
                 clutch--result-rows '((999 "current-page-only"))
                 clutch--last-query "SELECT id, name FROM users")
-    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn s) (format "\"%s\"" s)))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn s) (format "'%s'" s))))
-      (should (equal (clutch--export-insert-content '((1 "a") (2 "b")))
-                     (concat
-                      "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a');\n"
-                      "INSERT INTO \"users\" (\"id\", \"name\") VALUES (2, 'b');\n")))
-      (should-not (string-match-p "current-page-only"
-                                  (clutch--export-insert-content '((1 "a"))))))))
+    (should (equal (clutch--export-insert-content '((1 "a") (2 "b")))
+                   (concat
+                    "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a');\n"
+                    "INSERT INTO \"users\" (\"id\", \"name\") VALUES (2, 'b');\n")))
+    (should-not (string-match-p "current-page-only"
+                                (clutch--export-insert-content '((1 "a")))))))
 
 (ert-deftest clutch-test-update-content-builds-full-row-sql ()
   "UPDATE export content should build SQL from the ROWS argument."
   (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
+    (setq-local clutch-connection (make-clutch-test-conn :table "users"
+                                                         :columns '((:name "id")
+                                                                    (:name "name")))
                 clutch--result-source-table "users"
                 clutch--result-columns '("id" "name")
                 clutch--result-column-defs
@@ -6572,21 +6540,12 @@ a word that ends a whole rollback, such as CHAIN."
                 clutch--result-rows '((999 "current-page-only"))
                 clutch--row-identity (clutch-test--primary-row-identity
                                       "users" '("id") '(0)))
-    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-              ((symbol-function 'clutch--ensure-column-details)
-               (lambda (_conn _table &optional _strict)
-                 (list (list :name "id")
-                       (list :name "name"))))
-              ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn s) (format "\"%s\"" s)))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn s) (format "'%s'" s))))
-      (should (equal (clutch--export-update-content '((1 "a") (2 "b")))
-                     (concat
-                      "UPDATE \"users\" SET \"name\" = 'a' WHERE \"id\" = 1\n"
-                      "UPDATE \"users\" SET \"name\" = 'b' WHERE \"id\" = 2\n")))
-      (should-not (string-match-p "current-page-only"
-                                  (clutch--export-update-content '((1 "a"))))))))
+    (should (equal (clutch--export-update-content '((1 "a") (2 "b")))
+                   (concat
+                    "UPDATE \"users\" SET \"name\" = 'a' WHERE \"id\" = 1\n"
+                    "UPDATE \"users\" SET \"name\" = 'b' WHERE \"id\" = 2\n")))
+    (should-not (string-match-p "current-page-only"
+                                (clutch--export-update-content '((1 "a")))))))
 
 (ert-deftest clutch-test-result-export-formats-follow-result-surface ()
   "Export choices should match SQL, document, and key/value result surfaces."
@@ -6815,7 +6774,10 @@ a word that ends a whole rollback, such as CHAIN."
       (ert-info ((format "copy UPDATE selection: %s" label))
         (with-temp-buffer
           (let (kill-ring kill-ring-yank-pointer)
-            (setq-local clutch-connection 'fake-conn
+            (setq-local clutch-connection (make-clutch-test-conn :table "users"
+                                                                 :columns '((:name "id")
+                                                                            (:name "name")
+                                                                            (:name "status")))
                         clutch--result-source-table "users"
                         clutch--result-columns '("id" "name" "status")
                         clutch--result-column-defs
@@ -6829,52 +6791,38 @@ a word that ends a whole rollback, such as CHAIN."
                                               "users" '("id") '(0))
                         clutch--result-rows '((1 "a" "new")
                                               (2 "b" "done")))
-            (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                      ((symbol-function 'use-region-p) (lambda () region-p))
+            (cl-letf (((symbol-function 'use-region-p) (lambda () region-p))
                       ((symbol-function 'clutch-result--region-rectangle-indices)
                        (lambda () rectangle))
                       ((symbol-function 'clutch--cell-at-point)
-                       (lambda () cell))
-                      ((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table &optional _strict)
-                         (list (list :name "id")
-                               (list :name "name")
-                               (list :name "status"))))
-                      ((symbol-function 'clutch-db-escape-identifier)
-                       (lambda (_conn s) (format "\"%s\"" s)))
-                      ((symbol-function 'clutch-db-escape-literal)
-                       (lambda (_conn s) (format "'%s'" s))))
+                       (lambda () cell)))
               (clutch-result--copy-rows 'update)
               (should (equal (current-kill 0) expected)))))))))
 
 (ert-deftest clutch-test-copy-builders-use-filtered-visible-row ()
   "Copy builders should resolve visible indices through filtered display rows."
   (clutch-test--with-result-state
-      (:columns '("id" "name")
+      (:connection (make-clutch-test-conn :table "users"
+                                          :columns '((:name "id") (:name "name")))
+       :source-table "users"
+       :columns '("id" "name")
+       :row-identity (clutch-test--primary-row-identity "users" '("id") '(0))
        :rows '((1 "alpha") (2 "beta"))
        :filter-pattern "beta"
        :filtered-rows '((2 "beta")))
-    (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn s) s))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn s) (format "'%s'" s)))
-              ((symbol-function 'use-region-p) (lambda () nil))
+    (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
               ((symbol-function 'clutch--cell-at-point)
-               (lambda () (list 0 1 "beta")))
-              ((symbol-function 'clutch-result--build-update-statements-for-rows)
-               (lambda (rows col-indices op)
-                 (should (equal rows '((2 "beta"))))
-                 (should (equal col-indices '(1)))
-                 (should (equal op "copy UPDATE SQL"))
-                 '("UPDATE users SET name = 'beta' WHERE id = 2"))))
+               (lambda () (list 0 1 "beta"))))
       (clutch-result--copy-rows 'update)
+      (should (equal (current-kill 0)
+                     "UPDATE \"users\" SET \"name\" = 'beta' WHERE \"id\" = 2"))
       (should (equal (clutch--delimited-lines-for-rows
                       (clutch-result--rows-for-display-indices '(0)) '(1) ?,)
                      '("name" "beta")))
       (should (equal (clutch-result--build-insert-statements-for-rows
                       (clutch-result--rows-for-display-indices '(0))
                       '(1) "users")
-                     '("INSERT INTO users (name) VALUES ('beta');"))))))
+                     '("INSERT INTO \"users\" (\"name\") VALUES ('beta');"))))))
 
 (ert-deftest clutch-test-copy-update-rejects-non-writable-selections ()
   "UPDATE copy should reject selections that cannot produce writable SET columns."
@@ -6906,32 +6854,22 @@ a word that ends a whole rollback, such as CHAIN."
                   :details '((:name "id") (:name "generated_name" :generated t))
                   :message "Cannot copy UPDATE SQL: selected columns are not writable source columns: generated_name")))
     (ert-info ((format "copy UPDATE rejection: %s" (plist-get case :label)))
-      (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn
-                    clutch--result-columns (plist-get case :columns)
-                    clutch--result-column-defs
-                    (cl-mapcar
-                     (lambda (name definition)
-                       (plist-put (copy-sequence definition)
-                                  :source-column name))
-                     (plist-get case :columns)
-                     (plist-get case :defs))
-                    clutch--result-source-table "users"
-                    clutch--row-identity (clutch-test--primary-row-identity
-                                          "users" '("id") '(0)))
-        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                  ((symbol-function 'clutch--ensure-column-details)
-                   (lambda (_conn _table &optional _strict)
-                     (plist-get case :details))))
-          (let ((err (should-error
-                      (clutch-result--build-update-statements-for-rows
-                       (list (plist-get case :row))
-                       (plist-get case :indices)
-                       "copy UPDATE SQL")
-                      :type 'user-error)))
-            (should (string-match-p
-                     (regexp-quote (plist-get case :message))
-                     (error-message-string err)))))))))
+      (clutch-test--with-result-state
+          (:connection (make-clutch-test-conn :table "users"
+                                              :columns (plist-get case :details))
+           :columns (plist-get case :columns)
+           :column-defs (plist-get case :defs)
+           :source-table "users"
+           :row-identity (clutch-test--primary-row-identity "users" '("id") '(0)))
+        (let ((err (should-error
+                    (clutch-result--build-update-statements-for-rows
+                     (list (plist-get case :row))
+                     (plist-get case :indices)
+                     "copy UPDATE SQL")
+                    :type 'user-error)))
+          (should (string-match-p
+                   (regexp-quote (plist-get case :message))
+                   (error-message-string err))))))))
 
 (ert-deftest clutch-test-staged-update-rejects-non-writable-source-columns ()
   "A staged edit should not build an UPDATE of a column no longer writable.
@@ -6941,7 +6879,8 @@ after the edit is staged."
                   ("missing" ((:name "id")))))
     (ert-info ((car case))
       (with-temp-buffer
-        (setq-local clutch-connection 'fake-conn
+        (setq-local clutch-connection (make-clutch-test-conn :table "users"
+                                                             :columns (cadr case))
                     clutch--result-columns '("id" "name")
                     clutch--result-column-defs
                     '((:name "id" :backend-type "int4" :source-column "id")
@@ -6950,15 +6889,10 @@ after the edit is staged."
                     clutch--row-identity (clutch-test--primary-row-identity
                                           "users" '("id") '(0))
                     clutch--pending-edits '((([1] . 1) . "alice")))
-        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                  ((symbol-function 'clutch--ensure-column-details)
-                   (lambda (_conn _table &optional _strict) (cadr case)))
-                  ((symbol-function 'clutch-db-escape-identifier)
-                   (lambda (_conn name) name)))
-          (should (equal (error-message-string
-                          (should-error (clutch-result--build-update-statements)
-                                        :type 'user-error))
-                         "Cannot build UPDATE: selected columns are not writable source columns: name")))))))
+        (should (equal (error-message-string
+                        (should-error (clutch-result--build-update-statements)
+                                      :type 'user-error))
+                       "Cannot build UPDATE: selected columns are not writable source columns: name"))))))
 
 (ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
   "Staged SQL copy should mirror the staged submit batch."
@@ -11853,53 +11787,49 @@ SQLite finds main.parents first for the bare name, with a row of the same key."
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-insert-result-buffer result-buf
         (:columns '("payload")
-                  :column-defs '((:name "payload" :type-category text))
-                  :connection 'fake-conn :source-table "audit")
-      (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                 (lambda (&rest _)
-                   '((:name "payload" :type "text" :nullable t :default "fallback")))))
-        (clutch-result-insert--open-buffer "audit" result-buf)
-        (dolist (case '((clutch-result-insert-set-null (("payload")))
-                        (clutch-result-insert-set-empty (("payload" . "")))
-                        (clutch-result-insert-set-default nil)))
-          (with-current-buffer insert-buf
-            (clutch-test--goto-insert-field-value "payload")
-            (funcall (car case))
-            (clutch-result-insert--run-idle-validation insert-buf)
-            (should (equal (clutch-result-insert--parse-fields) (cadr case))))
-          (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
-          (with-current-buffer insert-buf
-            (should (equal (clutch-result-insert--parse-fields) (cadr case)))
-            (clutch-result-insert-import-delimited "payload\nimported\n")
-            (should (equal (clutch-result-insert--parse-fields)
-                           '(("payload" . "imported"))))
-            (should-not (plist-get (clutch-result-insert--field-state "payload")
-                                   :special-value))))
+         :column-defs '((:name "payload" :type-category text))
+         :connection (make-clutch-test-conn :table "audit"
+                                            :columns '((:name "payload" :type "text" :nullable t :default "fallback"))) :source-table "audit")
+      (clutch-result-insert--open-buffer "audit" result-buf)
+      (dolist (case '((clutch-result-insert-set-null (("payload")))
+                      (clutch-result-insert-set-empty (("payload" . "")))
+                      (clutch-result-insert-set-default nil)))
         (with-current-buffer insert-buf
           (clutch-test--goto-insert-field-value "payload")
-          (clutch-result-insert-set-null)
-          (insert "NULL")
+          (funcall (car case))
+          (clutch-result-insert--run-idle-validation insert-buf)
+          (should (equal (clutch-result-insert--parse-fields) (cadr case))))
+        (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
+        (with-current-buffer insert-buf
+          (should (equal (clutch-result-insert--parse-fields) (cadr case)))
+          (clutch-result-insert-import-delimited "payload\nimported\n")
           (should (equal (clutch-result-insert--parse-fields)
-                         '(("payload" . "NULL")))))))))
+                         '(("payload" . "imported"))))
+          (should-not (plist-get (clutch-result-insert--field-state "payload")
+                                 :special-value))))
+      (with-current-buffer insert-buf
+        (clutch-test--goto-insert-field-value "payload")
+        (clutch-result-insert-set-null)
+        (insert "NULL")
+        (should (equal (clutch-result-insert--parse-fields)
+                       '(("payload" . "NULL"))))))))
 
 (ert-deftest clutch-test-clone-skips-generated-previews-before-conversion ()
   "Omitted generated columns do not prevent cloning the writable fields."
-  (let ((clutch-connection 'fake-conn)
+  (let ((clutch-connection (make-clutch-test-conn :table "audit"
+                                                  :columns '((:name "id" :primary-key t)
+                                                             (:name "generated_body" :generated t)
+                                                             (:name "name" :type "text"))))
         (clutch--result-columns '("id" "generated_body" "name"))
         (clutch--result-column-defs
          '((:name "id") (:name "generated_body") (:name "name")))
         (clutch--row-identity
          (clutch-test--primary-row-identity "audit" '("id") '(0))))
-    (cl-letf (((symbol-function 'clutch--ensure-column-details)
-               (lambda (&rest _)
-                 '((:name "id" :primary-key t)
-                   (:name "generated_body" :generated t)
-                   (:name "name" :type "text")))))
-      (should (equal (clutch-result-insert--clone-fields-from-row-values
-                      "audit" (list 1 (make-clutch-db-value-preview
-                                       :type 'clob :length 1000 :text "preview")
-                                    "kept"))
-                     '(("name" . "kept")))))))
+    (should (equal (clutch-result-insert--clone-fields-from-row-values
+                    "audit" (list 1 (make-clutch-db-value-preview
+                                     :type 'clob :length 1000 :text "preview")
+                                  "kept"))
+                   '(("name" . "kept"))))))
 
 (provide 'clutch-test)
 
