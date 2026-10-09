@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A batch or export stops after its current statement returns even if the backend refuses cancellation or its cancel request fails. It used to forget the request and run subsequent statements or pages. Successful work is still accounted for, and a stopped file export preserves its destination.
 - JDBC BLOB results carrying only length metadata become incomplete previews, so copy/export and mutation refuse them and the viewer shows their actual length instead of treating the metadata as content. Complete decoded text BLOBs remain usable.
 
 ## 0.5.6 - 2026-10-09
