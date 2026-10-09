@@ -11524,6 +11524,68 @@ there, and the result keeps its rows and its unknown total."
           (ert-run-idle-timers)
           (should (equal (marker-line) "UPDATE b SET n = 2;")))))))
 
+(ert-deftest clutch-test-execute-flashes-a-statement-before-it-runs ()
+  "A statement sent from a SQL buffer should flash before it runs.
+SQLite runs it synchronously, which blocks pulse's timers and redisplay,
+so the flash is drawn first.  Point stays and no region becomes active.
+SQL run without a source region, as from the REPL, does not flash."
+  (require 'clutch-db-sqlite)
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (query (symbol-function 'clutch-db-query))
+        events)
+    (unwind-protect
+        (with-temp-buffer
+          (clutch-mode)
+          (setq-local clutch-connection conn)
+          (insert "SELECT 1 AS a;\nSELECT 2 AS b;\n")
+          (goto-char (point-min))
+          (search-forward "SELECT 2")
+          (cl-letf (((symbol-function 'pulse-momentary-highlight-region)
+                     (lambda (beg end &rest _)
+                       (push (cons 'pulse (buffer-substring-no-properties beg end))
+                             events)))
+                    ((symbol-function 'redisplay)
+                     (lambda (&rest _) (push 'redisplay events)))
+                    ((symbol-function 'clutch-db-query)
+                     (lambda (conn sql)
+                       (push (cons 'query sql) events)
+                       (funcall query conn sql)))
+                    ((symbol-function 'clutch-result--display) #'ignore))
+            (let ((point (point)))
+              (call-interactively #'clutch-execute-dwim)
+              (should (= (point) point))
+              (should-not (region-active-p)))
+            (let ((sent (seq-drop-while (lambda (event)
+                                          (not (eq (car-safe event) 'pulse)))
+                                        (reverse events))))
+              (should (equal (seq-take sent 2) '((pulse . "SELECT 2 AS b") redisplay)))
+              (should (string-prefix-p "SELECT 2 AS b" (cdr (nth 2 sent)))))
+            (setq events nil)
+            (clutch--execute "SELECT 3")
+            (should-not (assq 'pulse events))))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-execute-flashes-each-statement-of-a-batch ()
+  "Each statement of a batch should flash when it is sent, in turn."
+  (with-temp-buffer
+    (insert "SELECT 1 AS a;\nSELECT 2 AS b;\n")
+    (setq-local clutch-connection 'async-conn)
+    (let (flashes)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'pulse-momentary-highlight-region)
+                   (lambda (beg end &rest _)
+                     (push (buffer-substring-no-properties beg end) flashes)))
+                  ((symbol-function 'clutch-result--display) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (clutch-execute-buffer)
+          (should (equal flashes '("SELECT 1 AS a")))
+          (funcall (cdar finishes)
+                   (make-clutch-db-result :columns '((:name "a")) :rows '((1)))
+                   nil)
+          (ert-run-idle-timers)
+          (should (equal (reverse flashes) '("SELECT 1 AS a" "SELECT 2 AS b"))))))))
+
 (ert-deftest clutch-test-async-statements-run-one-after-another ()
   "A batch should send each statement after the previous one finishes."
   (with-temp-buffer

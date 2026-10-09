@@ -1315,11 +1315,17 @@ and signal `clutch-query-interrupted'."
          &optional result-context no-idle-retry-p)
   "Execute one SQL statement on CONNECTION and call K with its outcome plist.
 When PRESENT-RESULT-P is non-nil, prepare result queries for pagination and
-row identity.  REGION is the statement's source region, or nil.
+row identity.  REGION is the statement's source region, which briefly
+flashes as the statement is sent, or nil.
 RESULT-CONTEXT carries verified metadata for generated SQL.
 NO-IDLE-RETRY-P prevents reconnecting after a proven pre-execution failure,
 as required after a preceding statement in the same batch.  The caller has
 already confirmed SQL."
+  (when region
+    (pulse-momentary-highlight-region (car region) (cdr region))
+    ;; Pulse fades on timers, and a backend that runs SQL synchronously
+    ;; blocks them and redisplay, so draw the flash before it starts.
+    (redisplay))
   ;; A result kept on failure keeps its query; a new result records its own.
   (unless (plist-get result-context :keep-result-on-error)
     (setq clutch--last-query sql))
