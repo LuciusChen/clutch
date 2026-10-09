@@ -8945,7 +8945,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 
 (ert-deftest clutch-test-query-export-async-lifecycle ()
   "Direct export stays atomic on failure, cancel, kill, move and handler quit."
-  (dolist (outcome '(success page-error cancelled killed moved quit incomplete))
+  (dolist (outcome '(success page-error cancelled cancel-refused cancel-error
+                             killed moved quit incomplete))
     (ert-info ((symbol-name outcome))
       (let* ((dir (make-temp-file "clutch-query-export-async-" t))
              (path (expand-file-name "out.tsv" dir))
@@ -8975,8 +8976,13 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                     (should (equal (with-temp-buffer (insert-file-contents path)
                                                      (buffer-string)) "original"))
                     (pcase outcome
-                      ('cancelled
-                       (cl-letf (((symbol-function 'clutch-db-interrupt-query) (lambda (_) t)))
+                      ((or 'cancelled 'cancel-refused 'cancel-error)
+                       (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                                  (lambda (_)
+                                    (pcase outcome
+                                      ('cancelled t)
+                                      ('cancel-error
+                                       (signal 'clutch-db-error '("Cancel refused")))))))
                          (clutch-cancel-query-or-quit)))
                       ('killed (kill-buffer source))
                       ('moved (setq-local clutch-connection 'another-conn)))
@@ -8996,8 +9002,11 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                               (list (list (make-clutch-db-value-preview
                                                            :type 'clob :length 100
                                                            :text "preview")))
-                                            '((3 99)))) nil))
+                                            (if (memq outcome '(cancelled cancel-refused cancel-error))
+                                                '((3 99) (4 100))
+                                              '((3 99))))) nil))
                         (ert-run-idle-timers))))))
+              (should (= (length finishes) 2))
               (should-not (clutch-db--foreground-busy-p 'async-conn))
               (should-not (gethash 'async-conn clutch--running-queries))
               (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
@@ -9095,7 +9104,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 The file changes only once every page has arrived.  A failed page, a
 cancel that meets a page as it arrives, a quit while a page is written,
 or a killed result buffer, leaves it and no temporary file behind."
-  (dolist (outcome '(success page-error cancelled quit killed))
+  (dolist (outcome '(success page-error cancelled cancel-refused cancel-error quit killed))
     (ert-info ((symbol-name outcome))
       (let* ((dir (make-temp-file "clutch-export-async-" t))
              (path (expand-file-name "out.csv" dir))
@@ -9134,11 +9143,15 @@ or a killed result buffer, leaves it and no temporary file behind."
                      (funcall (cdar finishes) (make-clutch-db-result :rows '((3))) nil))
                     ('page-error
                      (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
-                    ('cancelled
+                    ((or 'cancelled 'cancel-refused 'cancel-error)
                      (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                                (lambda (_conn) t)))
+                                (lambda (_conn)
+                                  (pcase outcome
+                                    ('cancelled t)
+                                    ('cancel-error
+                                     (signal 'clutch-db-error '("Cancel refused")))))))
                        (clutch-cancel-query-or-quit))
-                     (funcall (cdar finishes) (make-clutch-db-result :rows '((3))) nil))
+                     (funcall (cdar finishes) (make-clutch-db-result :rows '((3) (4))) nil))
                     ('quit
                      (let ((write-region (symbol-function 'write-region)))
                        (cl-letf (((symbol-function 'write-region)
@@ -9158,6 +9171,7 @@ or a killed result buffer, leaves it and no temporary file behind."
                        (kill-buffer result-buffer)
                        (funcall finish (make-clutch-db-result :rows '((3))) nil))))
                   (ert-run-idle-timers)))
+              (should (= (length finishes) 2))
               (should-not (gethash 'async-conn clutch--running-queries))
               (should-not (clutch-db--foreground-busy-p 'async-conn))
               (should (equal exported (and (eq outcome 'success) 3)))
@@ -11534,26 +11548,35 @@ there, and the result keeps its rows and its unknown total."
 (ert-deftest clutch-test-async-batch-stops-when-cancel-meets-a-finished-statement ()
   "C-g should stop a batch even when its statement finishes first.
 A statement's result can arrive before the cancel; that statement keeps
-its outcome and the next one does not run."
-  (with-temp-buffer
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (let (messages)
-        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                   (lambda (_conn) t))
-                  ((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format format-string args) messages))))
-          (clutch--execute-statements
-           '("UPDATE t SET n = 1 WHERE id = 1"
-             "DELETE FROM t WHERE id = 2"))
-          (clutch-cancel-query-or-quit)
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (ert-run-idle-timers)
-          (should (equal (mapcar #'car finishes)
-                         '("UPDATE t SET n = 1 WHERE id = 1")))
-          (should (member "1 statement executed, then cancelled" messages))
-          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+its outcome and the next one does not run, even if cancellation fails."
+  (dolist (cancel-result '(t nil error))
+    (ert-info ((format "Cancel result: %S" cancel-result))
+      (with-temp-buffer
+        (clutch-mode)
+        (setq-local clutch-connection 'async-conn)
+        (insert "UPDATE t SET n = 1 WHERE id = 1; DELETE FROM t WHERE id = 2;")
+        (clutch-test--with-async-statements finishes
+          (let (messages recorded)
+            (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                       (lambda (_conn)
+                         (if (eq cancel-result 'error)
+                             (signal 'clutch-db-error '("Cancel refused"))
+                           cancel-result)))
+                      ((symbol-function 'clutch--record-tx-state-after-query)
+                       (lambda (_conn sql) (push sql recorded)))
+                      ((symbol-function 'message)
+                       (lambda (format-string &rest args)
+                         (push (apply #'format format-string args) messages))))
+              (call-interactively #'clutch-execute-buffer)
+              (call-interactively #'clutch-cancel-query-or-quit)
+              (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+              (ert-run-idle-timers)
+              (should (equal (mapcar #'car finishes)
+                             '("UPDATE t SET n = 1 WHERE id = 1")))
+              (should (equal recorded '("UPDATE t SET n = 1 WHERE id = 1")))
+              (should (member "1 statement executed, then cancelled" messages))
+              (should-not (gethash 'async-conn clutch--running-queries))
+              (should-not (clutch-db--foreground-busy-p 'async-conn)))))))))
 
 (ert-deftest clutch-test-async-batch-releases-its-connection-on-a-quit ()
   "A quit while a batch starts its next statement should end the batch.
@@ -11597,33 +11620,28 @@ Otherwise the connection stays reserved and the mode line keeps counting."
 
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()
   "C-g should ask once to cancel the running query and otherwise quit."
-  (with-temp-buffer
-    (setq-local clutch-connection 'async-conn)
-    (let ((clutch--running-queries (make-hash-table :test 'eq))
-          (accepted t)
-          interrupts)
-      (cl-letf (((symbol-function 'clutch--update-mode-line) #'ignore)
-                ((symbol-function 'message) #'ignore)
-                ((symbol-function 'clutch-db-interrupt-query)
-                 (lambda (conn) (push conn interrupts) accepted)))
-        (cl-flet ((press ()
-                    (condition-case nil
-                        (progn (clutch-cancel-query-or-quit) 'cancelled)
-                      (quit 'quit))))
-          (should (eq (press) 'quit))
-          (puthash 'async-conn
-                   (list :buffer (current-buffer) :region nil :cancelling nil)
-                   clutch--running-queries)
-          (setq accepted nil)
-          (should (eq (press) 'cancelled))
-          (should-not (plist-get (gethash 'async-conn clutch--running-queries)
-                                 :cancelling))
-          (setq accepted t)
-          (should (eq (press) 'cancelled))
-          (should (plist-get (gethash 'async-conn clutch--running-queries)
-                             :cancelling))
-          (should (eq (press) 'quit))
-          (should (equal interrupts '(async-conn async-conn))))))))
+  (dolist (accepted '(nil t))
+    (with-temp-buffer
+      (setq-local clutch-connection 'async-conn)
+      (let ((clutch--running-queries (make-hash-table :test 'eq))
+            interrupts)
+        (cl-letf (((symbol-function 'clutch--update-mode-line) #'ignore)
+                  ((symbol-function 'message) #'ignore)
+                  ((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (conn) (push conn interrupts) accepted)))
+          (cl-flet ((press ()
+                      (condition-case nil
+                          (progn (clutch-cancel-query-or-quit) 'cancelled)
+                        (quit 'quit))))
+            (should (eq (press) 'quit))
+            (puthash 'async-conn
+                     (list :buffer (current-buffer) :region nil :cancelling nil)
+                     clutch--running-queries)
+            (should (eq (press) 'cancelled))
+            (should (plist-get (gethash 'async-conn clutch--running-queries)
+                               :cancelling))
+            (should (eq (press) 'quit))
+            (should (equal interrupts '(async-conn)))))))))
 
 (ert-deftest clutch-test-present-outcome-uses-executing-connection ()
   "Presentation should use the connection that produced the outcome."

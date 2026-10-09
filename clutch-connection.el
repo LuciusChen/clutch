@@ -688,7 +688,8 @@ CALLBACK also gets whether cancelling SQL was asked for."
 (defun clutch-cancel-query-or-quit ()
   "Cancel the query running on this buffer's connection, or quit.
 With no query to cancel, or one already being cancelled, run
-`keyboard-quit'.  The query then finishes with the server's verdict."
+`keyboard-quit'.  The query then finishes with the server's verdict.
+Even if the backend cannot cancel it, stop subsequent workflow steps."
   (interactive)
   (let ((entry (and clutch-connection
                     (gethash clutch-connection clutch--running-queries))))
@@ -701,9 +702,9 @@ With no query to cancel, or one already being cancelled, run
                 (clutch-db-error
                  (message "Cancel failed: %s" (error-message-string err))
                  nil))
-        (plist-put entry :cancelling nil)
-        (clutch--show-statement-status clutch-connection 'running)
-        (message "The query could not be cancelled and is still running")))))
+        ;; This flag records the user's request, not the backend's success.
+        ;; Keep it so the reply stops a batch or export from running more SQL.
+        (message "The query could not be cancelled; waiting for its result, then stopping")))))
 
 (defun clutch--discard-lost-transaction (conn)
   "Record that CONN died before its open transaction was committed."
