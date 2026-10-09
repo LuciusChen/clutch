@@ -36,7 +36,7 @@
 (require 'seq)
 (require 'subr-x)
 
-(declare-function clutch--execute-and-mark "clutch-query" (sql beg end))
+(declare-function clutch--execute-and-mark "clutch-query" (sql beg end &optional at-point))
 (declare-function clutch--install-query-keybindings "clutch-query" (map))
 (declare-function clutch--query-mode-common-setup "clutch-query" (&optional mode-line-name))
 (declare-function redis-command "redis" (conn command &rest arguments))
@@ -157,7 +157,7 @@ lists.  Stop before those lists can grow without bound."
                          (buffer-substring-no-properties beg end))))
     (when (string-empty-p command)
       (user-error "No Redis command at point"))
-    (clutch--execute-and-mark command beg end)))
+    (clutch--execute-and-mark command beg end t)))
 
 (defvar clutch-redis-mode-map
   (make-sparse-keymap)

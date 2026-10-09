@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - Unreleased
+
+### Changed
+
+- Only the statement `C-c C-c` picks at point, with no active region, and the Redis command at point flash before they run; `clutch-pulse-statement-at-point` set to nil turns this off. A region or the whole buffer, including each statement of a batch, no longer flashes, since its text was chosen; a batch thus skips the face change and extra redisplay that each statement's flash cost.
+
 ## 0.6.0 - 2026-10-09
 
 ### Added

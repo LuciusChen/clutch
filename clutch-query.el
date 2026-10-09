@@ -67,6 +67,15 @@ for these queries.  Other destructive SQL keeps its ordinary confirmation."
                  (const :tag "Do not confirm" nil))
   :group 'clutch)
 
+(defcustom clutch-pulse-statement-at-point t
+  "Non-nil means flash the statement picked around point before it runs.
+This applies to `clutch-execute-dwim' without an active region and to
+the Redis command at point, whose extent Clutch picks.  A region or the
+whole buffer was chosen by the user and does not flash.  The flash uses
+`pulse', so `pulse-flag' and `pulse-highlight-start-face' apply."
+  :type 'boolean
+  :group 'clutch)
+
 ;; Direct workflow loads must not reverse-load the composition root.
 (defvar clutch-result-max-rows 500
   "Direct-load fallback for the shared result row budget defined in clutch.el.")
@@ -1315,17 +1324,11 @@ and signal `clutch-query-interrupted'."
          &optional result-context no-idle-retry-p)
   "Execute one SQL statement on CONNECTION and call K with its outcome plist.
 When PRESENT-RESULT-P is non-nil, prepare result queries for pagination and
-row identity.  REGION is the statement's source region, which is
-highlighted as the statement is sent, or nil.
+row identity.  REGION is the statement's source region, or nil.
 RESULT-CONTEXT carries verified metadata for generated SQL.
 NO-IDLE-RETRY-P prevents reconnecting after a proven pre-execution failure,
 as required after a preceding statement in the same batch.  The caller has
 already confirmed SQL."
-  (when region
-    (pulse-momentary-highlight-region (car region) (cdr region))
-    ;; Pulse fades on timers, and a backend that runs SQL synchronously
-    ;; blocks them and redisplay, so draw the highlight before it starts.
-    (redisplay))
   ;; A result kept on failure keeps its query; a new result records its own.
   (unless (plist-get result-context :keep-result-on-error)
     (setq clutch--last-query sql))
@@ -1619,12 +1622,16 @@ Return the failure summary."
           (setq-local clutch--last-result-buffer buf))))
     summary))
 
-(defun clutch--execute-and-mark (sql beg end)
-  "Execute SQL on the current buffer connection and mark BEG..END with its status."
+(defun clutch--execute-and-mark (sql beg end &optional at-point)
+  "Execute SQL on the current buffer connection and mark BEG..END with its status.
+AT-POINT non-nil means BEG..END was picked around point, so it flashes
+when `clutch-pulse-statement-at-point' is non-nil."
   (pcase-let* ((`(,trim-beg . ,trim-end)
                  (or (clutch--trim-sql-bounds beg end)
                      (cons beg end))))
     (clutch--clear-executed-sql-overlay)
+    (when (and at-point clutch-pulse-statement-at-point)
+      (pulse-momentary-highlight-region trim-beg trim-end))
     (redisplay t)
     (clutch--execute sql nil (cons trim-beg trim-end))))
 
@@ -1933,7 +1940,7 @@ are executed sequentially."
                  (sql (string-trim (buffer-substring-no-properties qb qe))))
       (when (string-empty-p sql)
         (user-error "No SQL at point"))
-      (clutch--execute-and-mark sql qb qe))))
+      (clutch--execute-and-mark sql qb qe t))))
 
 (defun clutch--execute-sql-range (beg end scope)
   "Execute trimmed SQL between BEG and END for SCOPE.
