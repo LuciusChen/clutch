@@ -68,11 +68,13 @@ for these queries.  Other destructive SQL keeps its ordinary confirmation."
   :group 'clutch)
 
 (defcustom clutch-pulse-statement-at-point t
-  "Non-nil means flash the statement picked around point before it runs.
+  "Non-nil means flash the range Clutch picks around point to execute.
 This applies to `clutch-execute-dwim' without an active region and to
-the Redis command at point, whose extent Clutch picks.  A region or the
-whole buffer was chosen by the user and does not flash.  The flash uses
-`pulse', so `pulse-flag' and `pulse-highlight-start-face' apply."
+the Redis command at point.  The flash marks what Clutch picked and
+comes before any confirmation, so a statement that is declined still
+flashes.  A region or the whole buffer was chosen by the user and does
+not flash.  The flash uses `pulse', so `pulse-flag' and
+`pulse-highlight-start-face' apply."
   :type 'boolean
   :group 'clutch)
 
