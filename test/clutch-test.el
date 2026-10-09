@@ -8843,9 +8843,16 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                '("real.csv")))))
           (delete-directory dir t))))))
 
+(ert-deftest clutch-test-view-metadata-only-binary-as-preview ()
+  "View a length-only JDBC BLOB as unavailable content with its actual size."
+  (let ((value (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3))))))
+    (should (equal (string-trim-right
+                    (plist-get (clutch--view-spec value '(:type-category blob)) :content))
+                   "<BLOB preview; 3 total>"))))
+
 (ert-deftest clutch-test-export-rejects-metadata-only-binary-values ()
   "Binary length metadata is not complete data; decoded text remains usable."
-  (let ((metadata '(:__type "blob" :length 3)))
+  (let ((metadata (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3))))))
     (clutch-test--with-result-state (:columns '("body") :column-defs '((:name "body")))
       (should-error (clutch--export-csv-content (list (list metadata))) :type 'user-error)
       (let ((value (car (clutch-jdbc--normalize-row
@@ -8853,7 +8860,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
         (should (equal (clutch--export-csv-content (list (list value))) "body\n<r/>\n"))))))
 
 (ert-deftest clutch-test-query-export-content-and-bounds ()
-  "Prefix execution exports CSV/TSV without a grid, respecting SQL bounds."
+  "Direct export writes CSV/TSV without a grid, respecting SQL bounds."
   (require 'clutch-db-sqlite)
   (skip-unless (sqlite-available-p))
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
@@ -8874,8 +8881,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                 (setq-local clutch-connection conn)
                 (insert "SELECT 'outside';\n" sql "; -- trailing comment\n")
                 (goto-char (+ (point-min) (length "SELECT 'outside';\n") 1))
-                (let ((current-prefix-arg '(4))
-                      (clutch-result-max-rows 2)
+                (let ((clutch-result-max-rows 2)
                       (query (symbol-function 'clutch-db-query))
                       executed)
                   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
@@ -8889,7 +8895,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                             ((symbol-function 'clutch-result--check-pending-changes)
                              (lambda () (ert-fail "Export would discard staged edits"))))
                     (clutch-test--with-minibuffer-answers (list format encoding)
-                      (call-interactively #'clutch-execute-dwim)))
+                      (call-interactively #'clutch-export-query)))
                   (should (= (length executed) query-count))
                   (should-not clutch--last-result-buffer)
                   (should-not (clutch-db--foreground-busy-p conn))

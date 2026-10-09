@@ -3279,6 +3279,15 @@ When OMIT-HEADER is non-nil, omit the column header."
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
+(defun clutch-result--emit-export-batches (rows size function)
+  "Call FUNCTION with ROWS in batches of SIZE, or once with nil for none.
+Each batch has its own list spine."
+  (if rows
+      (cl-loop for tail on rows
+               by (lambda (rest) (nthcdr size rest))
+               do (funcall function (seq-take tail size)))
+    (funcall function nil)))
+
 (defun clutch-result--map-export-batches (function done)
   "Call FUNCTION with each bounded export batch, then DONE.
 Call FUNCTION once with nil for an empty result.  Each batch has its own
@@ -3291,11 +3300,7 @@ may run after this function returns."
          (effective-sql (plist-get plan :sql))
          (page-size clutch-result-max-rows))
     (cl-labels ((emit (rows &optional _columns)
-                  (if rows
-                      (cl-loop for tail on rows
-                               by (lambda (rest) (nthcdr page-size rest))
-                               do (funcall function (seq-take tail page-size)))
-                    (funcall function nil))))
+                  (clutch-result--emit-export-batches rows page-size function)))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))
           (progn
@@ -3397,7 +3402,7 @@ buffer, or changing its connection, stops the export."
                     nil
                     (lambda (result error &optional cancelled)
                       (if dispatching
-                          (setq inline (list result error cancelled))
+                          (setq inline (list result error))
                         (setq waiting t)
                         (reply
                          (lambda ()
@@ -3591,14 +3596,12 @@ stops it.  Replace the destination only after the whole export succeeds."
             (lambda (rows columns)
               ;; Keep the first page's layout: Oracle appends RN on later pages.
               (unless export-columns (setq export-columns columns))
+              ;; Shared CSV/TSV formatters read these buffer-local variables;
+              ;; bind the export's columns while writing from a SQL buffer.
               (let ((clutch--result-columns
                      (mapcar (lambda (c) (plist-get c :name)) export-columns))
                     (clutch--result-column-defs export-columns))
-                (if rows
-                    (cl-loop for tail on rows
-                             by (lambda (rest) (nthcdr page-size rest))
-                             do (funcall emit (seq-take tail page-size)))
-                  (funcall emit nil))))
+                (clutch-result--emit-export-batches rows page-size emit)))
             done)))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
