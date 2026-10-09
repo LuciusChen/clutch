@@ -2437,50 +2437,44 @@ Point left behind made the next cell command scroll back to it."
       (should-error (clutch-record--render) :type 'user-error))))
 
 (ert-deftest clutch-test-record-field-line-edits-through-result-buffer ()
-  "Record fields should edit through their parent result buffer."
-  (clutch-test--with-pop-to-buffer-capture edit-buf
+  "Staging a Record field keeps point there after the editor window closes."
+  (save-window-excursion
     (clutch-test--with-result-state-buffer result-buf
         (:connection 'fake-conn
          :connection-params '(:backend mysql)
          :source-table "users"
-         :columns '("id" "name")
+         :columns '("id" "name" "note")
          :column-defs '((:name "id" :type-category numeric)
-                        (:name "name" :type-category text))
-         :rows '((1 "alice"))
-         :row-identity (clutch-test--primary-row-identity
-                        "users" '("id") '(0)))
-      (with-temp-buffer
-        (let ((record-buf (current-buffer)))
-          (with-current-buffer record-buf
-            (clutch-record-mode)
-            (should (eq revert-buffer-function #'clutch-record--render))
-            (setq-local clutch-record--result-buffer result-buf
-                        clutch-record--row-idx 0
-                        clutch-record--expanded-fields nil)
-            (clutch-record--render)
-            (goto-char (point-min))
-            (search-forward "name")
-            (goto-char (match-beginning 0))
-            (should (equal (clutch--cell-at-point) '(0 1 "alice"))))
-          (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                    ((symbol-function 'clutch--ensure-column-details)
-                     (lambda (_conn _table &optional _strict)
-                       (list (list :name "name" :type "text")))))
-            (with-current-buffer record-buf
-              (should (eq (clutch-result-edit-cell) edit-buf))))
-          (with-current-buffer edit-buf
-            (should (eq clutch-result--edit-result-buffer result-buf))
-            (should (eq clutch-result-edit--return-buffer record-buf))
-            (erase-buffer)
-            (insert "ann")
-            (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
-                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                      ((symbol-function 'quit-window) #'ignore)
-                      ((symbol-function 'message) #'ignore))
-              (clutch-result-edit-finish)))
-          (with-current-buffer record-buf
-            (should (string-match-p "name\\s-*:\\s-*ann" (buffer-string)))
-            (should (eq (get-text-property (point) 'clutch-col-idx) 1))))))))
+                        (:name "name" :type-category text)
+                        (:name "note" :type-category text))
+         :rows '((1 "alice" "before"))
+         :row-identity (clutch-test--primary-row-identity "users" '("id") '(0))
+         :render t)
+      (let (record-buf edit-buf)
+        (unwind-protect
+            (progn
+              (switch-to-buffer result-buf)
+              (clutch--goto-cell 0 2)
+              (call-interactively #'clutch-result-open-record)
+              (setq record-buf (current-buffer))
+              (goto-char (point-min))
+              (search-forward "note")
+              (beginning-of-line)
+              (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                        ((symbol-function 'clutch--ensure-column-details)
+                         (lambda (&rest _) '((:name "note" :type "text")))))
+                (call-interactively #'clutch-result-edit-cell))
+              (setq edit-buf (current-buffer))
+              (erase-buffer)
+              (insert "after")
+              (call-interactively #'clutch-result-edit-finish)
+              (should (eq (current-buffer) record-buf))
+              (should (eq (get-text-property (point) 'clutch-col-idx) 2))
+              (should (string-match-p "note\\s-*:\\s-*after" (buffer-string)))
+              (with-current-buffer result-buf
+                (should (equal clutch--pending-edits '((([1] . 2) . "after"))))))
+          (when (buffer-live-p edit-buf) (kill-buffer edit-buf))
+          (when (buffer-live-p record-buf) (kill-buffer record-buf)))))))
 
 (ert-deftest clutch-test-record-edit-unchanged-numeric-does-not-stage ()
   "Submitting an unchanged numeric Record field should not stage an edit."
