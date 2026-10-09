@@ -2006,6 +2006,314 @@ throughout."
 	                       '(("3" "c") ("2" "b"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-query-export-to-file ()
+  "Export a selected SELECT or CTE directly without displaying a result grid."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "This direct-export fixture uses native MySQL/PostgreSQL SQL"))
+  (clutch-test--with-conn conn
+    (let ((table (format "clutch_query_export_%d" (emacs-pid)))
+          (path (make-temp-file "clutch-query-export-live-")))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, body VARCHAR(64))" table))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, '中文,a'), (2, 'b'), (3, '')" table))
+            (dolist (sql (append (list (format "SELECT id, body FROM %s ORDER BY id" table))
+                                 (when (clutch-test--live-supports-with-p conn)
+                                   (list (format "WITH c AS (SELECT * FROM %s) SELECT * FROM c ORDER BY id" table)))))
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (insert "SELECT 'outside';\n")
+                (let ((beg (point))
+                      (clutch-result-max-rows 2))
+                  (insert sql)
+                  (set-mark beg)
+                  (setq mark-active t transient-mark-mode t)
+                  (write-region "original" nil path nil 'silent)
+                  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                            ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                            ((symbol-function 'clutch-result--display-select)
+                             (lambda (&rest _) (ert-fail "Export displayed a grid"))))
+                    (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                      (let ((current-prefix-arg '(4)))
+                        (call-interactively #'clutch-execute-dwim)))
+                    (should (gethash conn clutch--running-queries))
+                    (should (equal (with-temp-buffer (insert-file-contents path)
+                                                     (buffer-string)) "original"))
+                    (clutch-test--await-queries))
+                  (should-not clutch--last-result-buffer)
+                  (should-not clutch--execution-start-time)
+                  (should-not (clutch-db--foreground-busy-p conn))
+                  (should (equal (with-temp-buffer (insert-file-contents path)
+                                                   (buffer-string))
+                                 "id,body\n1,\"中文,a\"\n2,b\n3,\n"))))))
+        (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))
+        (delete-file path)))))
+
+(defun clutch-test--query-export-type-cases ()
+  "Return (NAME TYPE SQL CSV TSV) cases for a wide live export fixture.
+Expected cells are literal export text, independent of the formatter."
+  (let* ((oracle (eq clutch-test-backend 'oracle))
+         (mssql (eq clutch-test-backend 'sqlserver))
+         (mysql (eq clutch-test-backend 'mysql))
+         (pg (eq clutch-test-backend 'pg))
+         (varchar (cond (oracle "VARCHAR2(128)") (mssql "NVARCHAR(128)")
+                        (t "VARCHAR(128)")))
+         ;; Oracle LOBs create storage indexes; keep the heap fixture index-free.
+         (text (cond (oracle "VARCHAR2(1024)") (mssql "NVARCHAR(MAX)") (t "TEXT")))
+         (prefix (if mssql "N" "")))
+    `((small ,(if oracle "NUMBER(5)" "SMALLINT") "-123" "-123" "-123")
+      (integer ,(if oracle "NUMBER(10)" "INT") "123456" "123456" "123456")
+      (big ,(if oracle "NUMBER(19)" "BIGINT") "9007199254740993"
+           "9007199254740993" "9007199254740993")
+      (decimal "DECIMAL(20,6)" "12345678901234.125000"
+               ,(if oracle "12345678901234.125" "12345678901234.125000")
+               ,(if oracle "12345678901234.125" "12345678901234.125000"))
+      (floating ,(cond (oracle "BINARY_DOUBLE") (mssql "FLOAT")
+                       (pg "DOUBLE PRECISION") (t "DOUBLE")) "1.25" "1.25" "1.25")
+      (truth ,(cond (oracle "NUMBER(1)") (mssql "BIT") (t "BOOLEAN"))
+             ,(if (or pg (eq clutch-test-backend 'jdbc)) "TRUE" "1")
+             ,(if (or mysql oracle) "1" "true")
+             ,(if (or mysql oracle) "1" "true"))
+      (falsity ,(cond (oracle "NUMBER(1)") (mssql "BIT") (t "BOOLEAN"))
+               ,(if (or pg (eq clutch-test-backend 'jdbc)) "FALSE" "0")
+               ,(if (or mysql oracle) "0" "false")
+               ,(if (or mysql oracle) "0" "false"))
+      (day "DATE" ,(if oracle "DATE '2024-02-29'" "'2024-02-29'")
+           ,(if oracle "2024-02-29 00:00:00" "2024-02-29")
+           ,(if oracle "2024-02-29 00:00:00" "2024-02-29"))
+      (clock ,(if oracle "VARCHAR2(8)" "TIME") "'12:34:56'" "12:34:56" "12:34:56")
+      (stamp ,(cond (mysql "DATETIME") (mssql "DATETIME2(0)") (t "TIMESTAMP"))
+             ,(if oracle "TIMESTAMP '2024-02-29 12:34:56'" "'2024-02-29 12:34:56'")
+             "2024-02-29 12:34:56" "2024-02-29 12:34:56")
+      (fixed "CHAR(3)" "'abc'" "abc" "abc")
+      (unicode ,varchar ,(concat prefix "'中文🙂'") "中文🙂" "中文🙂")
+      (quoted ,varchar ,(concat prefix "'a,b\"c'") "\"a,b\"\"c\"" "\"a,b\"\"c\"")
+      (lines ,text ,(concat prefix "'line1\nline2'") "\"line1\nline2\"" "\"line1\nline2\"")
+      (binary ,(cond (pg "BYTEA") (oracle "RAW(16)")
+                     (mssql "VARBINARY(16)") (t "BLOB"))
+              ,(cond (pg "decode('616263', 'hex')")
+                     (oracle "HEXTORAW('616263')")
+                     (mysql "0x616263") (mssql "0x616263")
+                     (t "from_hex('616263')")) "616263" "616263")
+      (json ,(cond (pg "JSONB") (mysql "JSON") (t text)) "'{\"ok\":true}'"
+            "\"{\"\"ok\"\":true}\"" "\"{\"\"ok\"\":true}\"")
+      (uuid ,(cond (pg "UUID") (mssql "UNIQUEIDENTIFIER") (t varchar))
+            "'00000000-0000-0000-0000-000000000123'"
+            "00000000-0000-0000-0000-000000000123"
+            "00000000-0000-0000-0000-000000000123")
+      (unsigned "DECIMAL(20,0)" "18446744073709551615"
+                "18446744073709551615" "18446744073709551615")
+      (null ,varchar "NULL" "NULL" "NULL")
+      (empty ,varchar "''" ,(if oracle "NULL" "") ,(if oracle "NULL" "")))))
+
+(ert-deftest clutch-test-live-query-export-wide-table-without-identity ()
+  "Export 101 columns and 602 rows of varied types without a key or index."
+  :tags '(:clutch-live)
+  (unless (or (memq clutch-test-backend '(mysql pg oracle sqlserver))
+              (and (eq clutch-test-backend 'jdbc) clutch-test-url
+                   (string-prefix-p "jdbc:duckdb:" clutch-test-url)))
+    (ert-skip "The wide fixture targets MySQL, PostgreSQL, Oracle, SQL Server and DuckDB"))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_export_wide_%d" (emacs-pid)))
+           (path (make-temp-file "clutch-export-wide-"))
+           (cases (clutch-test--query-export-type-cases))
+           (fields (cl-loop for group below 5 append
+                            (cl-loop for case in cases collect
+                                     (cons (format "c_%s_%d" (car case) group)
+                                           (cdr case)))))
+           (literals (mapconcat (lambda (field) (nth 2 field)) fields ", "))
+           (select
+            (format "SELECT seq_id, %s FROM %s ORDER BY seq_id"
+                    (mapconcat
+                     (lambda (field)
+                       (let ((name (car field)))
+                         (if (string-prefix-p "c_binary_" name)
+                             (format "%s AS %s"
+                                     (pcase clutch-test-backend
+                                       ('pg (format "encode(%s, 'hex')" name))
+                                       ('oracle (format "RAWTOHEX(%s)" name))
+                                       ('sqlserver (format "CONVERT(VARCHAR(32), %s, 2)" name))
+                                       (_ (format "HEX(%s)" name)))
+                                     name)
+                           name))) fields ", ")
+                    table))
+           (insert-sql
+            (if (eq clutch-test-backend 'sqlserver)
+                (format "WITH r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n < 601) INSERT INTO %s SELECT n, %s FROM r OPTION (MAXRECURSION 0)" table literals)
+              (let ((row-source
+                     (pcase clutch-test-backend
+                       ('oracle "SELECT LEVEL n FROM dual CONNECT BY LEVEL <= 601")
+                       ('mysql
+                        (let ((digits (mapconcat (lambda (n) (format "SELECT %d n" n))
+                                                 (number-sequence 0 9) " UNION ALL ")))
+                          (format "SELECT 1+a.n+10*b.n+100*c.n n FROM (%s) a CROSS JOIN (%s) b CROSS JOIN (%s) c WHERE a.n+10*b.n+100*c.n < 601"
+                                  digits digits digits)))
+                       (_ "SELECT generate_series n FROM generate_series(1,601)"))))
+                (format "INSERT INTO %s SELECT n, %s FROM (%s) r" table literals row-source))))
+           created)
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             conn (format "CREATE TABLE %s (seq_id INT, %s)" table
+                          (mapconcat (lambda (field) (format "%s %s" (car field) (nth 1 field)))
+                                     fields ", ")))
+            (setq created t)
+            (clutch-db-query conn insert-sql)
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (602, %s)" table
+                                          (mapconcat (lambda (_) "NULL") fields ", ")))
+            (should-not (clutch-db-primary-key-columns conn table))
+            (let* ((index-sql
+                    (pcase clutch-test-backend
+                      ('pg (format "SELECT COUNT(*) FROM pg_indexes WHERE schemaname=current_schema() AND tablename='%s'" table))
+                      ('mysql (format "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='%s'" table))
+                      ('oracle (format "SELECT COUNT(*) FROM user_indexes WHERE table_name=UPPER('%s')" table))
+                      ('sqlserver (format "SELECT COUNT(*) FROM sys.indexes WHERE object_id=OBJECT_ID('%s') AND index_id>0" table))
+                      (_ (format "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name='%s'" table))))
+                   (count (caar (clutch-db-result-rows (clutch-db-query conn index-sql)))))
+              (should (= (string-to-number (format "%s" count)) 0)))
+            (dolist (kind '(csv tsv))
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (insert select)
+                (let ((clutch-result-max-rows 200)
+                      (clutch-jdbc-fetch-size 50))
+                  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                            ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                            ((symbol-function 'clutch-db-primary-key-columns)
+                             (lambda (&rest _) (ert-fail "Export loaded row identity")))
+                            ((symbol-function 'clutch-result--display-select)
+                             (lambda (&rest _) (ert-fail "Export displayed a grid"))))
+                    (clutch-test--with-minibuffer-answers (list (symbol-name kind) "utf-8-bom")
+                      (call-interactively #'clutch-export-query))
+                    (clutch-test--await-queries))
+                  (let* ((delimiter (if (eq kind 'csv) "," "\t"))
+                         (cells (mapconcat (lambda (field) (nth (if (eq kind 'csv) 3 4) field))
+                                           fields delimiter))
+                         (header (mapconcat #'clutch-test--live-column-name
+                                            (cons "seq_id" (mapcar #'car fields)) delimiter))
+                         (expected (concat header "\n"
+                                           (mapconcat (lambda (id) (format "%d%s%s\n" id delimiter cells))
+                                                      (number-sequence 1 601) "")
+                                           "602" delimiter
+                                           (mapconcat (lambda (_) "NULL") fields delimiter) "\n")))
+                    (let* ((actual (with-temp-buffer (insert-file-contents path) (buffer-string)))
+                           (comparison (compare-strings expected nil nil actual nil nil)))
+                      (unless (eq comparison t)
+                        (let ((offset (1- (abs comparison))))
+                          (ert-fail
+                           (format "%s mismatch at %d: expected %S, got %S"
+                                   kind offset
+                                   (substring expected offset (min (length expected) (+ offset 100)))
+                                   (substring actual offset (min (length actual) (+ offset 100)))))))))
+                  (should-not clutch--last-result-buffer)
+                  (should-not (clutch-db--foreground-busy-p conn)))))
+            (message "Wide export verified on %s: 101 columns, 602 rows, no primary key, no indexes, CSV and TSV"
+                     clutch-test-backend))
+        (when created
+          (clutch-db-query conn (format "DROP TABLE %s" table)))
+        (delete-file path)))))
+
+(ert-deftest clutch-test-live-query-export-refuses-unavailable-binary ()
+  "Reject JDBC binary metadata, while exporting a complete XML BLOB value."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(oracle sqlserver))
+    (ert-skip "This fixture tests JDBC's metadata-only binary values"))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_export_blob_%d" (emacs-pid)))
+           (oracle (eq clutch-test-backend 'oracle))
+           (dir (make-temp-file "clutch-export-blob-" t))
+           (path (expand-file-name "out.csv" dir))
+           created)
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE TABLE %s (id INT, body %s)" table
+                                          (if oracle "RAW(16)" "VARBINARY(16)")))
+            (setq created t)
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, %s)" table
+                                          (if oracle "HEXTORAW('3c723e6f6b3c2f723e')"
+                                            "0x3c723e6f6b3c2f723e")))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (2, %s)" table
+                                          (if oracle "HEXTORAW('616263')" "0x616263")))
+            (clutch-db-commit conn)
+            (with-temp-buffer
+              (clutch-mode)
+              (setq-local clutch-connection conn)
+              (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                        ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                (insert (format "SELECT id, body FROM %s WHERE id=1" table))
+                (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                  (call-interactively #'clutch-export-query))
+                (clutch-test--await-queries)
+                (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                               (if oracle "ID,BODY\n1,<r>ok</r>\n" "id,body\n1,<r>ok</r>\n")))
+                (write-region "original" nil path nil 'silent)
+                (erase-buffer)
+                (insert (format "SELECT id, body FROM %s WHERE id=2" table))
+                (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                  (call-interactively #'clutch-export-query))
+                (clutch-test--await-queries)))
+            (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string)) "original"))
+            (should (equal (directory-files dir nil "\\`[^.]") '("out.csv")))
+            (should-not (clutch-db--foreground-busy-p conn)))
+        (when created
+          (clutch-db-query conn (format "DROP TABLE %s" table))
+          (clutch-db-commit conn))
+        (delete-directory dir t)))))
+
+(ert-deftest clutch-test-live-query-export-refuses-incomplete-clob ()
+  "Export a complete Oracle CLOB, but never replace it with a partial one."
+  :tags '(:clutch-live)
+  (unless (eq clutch-test-backend 'oracle)
+    (ert-skip "This fixture tests Oracle JDBC CLOB previews"))
+  (clutch-test--with-conn conn
+    (let* ((table (format "clutch_export_clob_%d" (emacs-pid)))
+           (dir (make-temp-file "clutch-export-clob-" t))
+           (path (expand-file-name "out.csv" dir))
+           (sql (format "SELECT id, body FROM %s ORDER BY id" table))
+           created messages)
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE TABLE %s (id INT, body CLOB)" table))
+            (setq created t)
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, '中文短CLOB')" table))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (2, RPAD('x', 1024, 'x'))" table))
+            (clutch-db-commit conn)
+            (should (clutch-db-value-preview-p
+                     (cadr (cadr (clutch-db-result-rows (clutch-db-query conn sql))))))
+            (write-region "original" nil path nil 'silent)
+            (with-temp-buffer
+              (clutch-mode)
+              (setq-local clutch-connection conn)
+              (insert (format "SELECT id, body FROM %s WHERE id=1" table))
+              (let ((clutch-result-max-rows 1))
+                (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                          ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                          ((symbol-function 'message)
+                           (lambda (fmt &rest args)
+                             (when fmt (push (apply #'format-message fmt args) messages)))))
+                  (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                    (call-interactively #'clutch-export-query))
+                  (clutch-test--await-queries)
+                  (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                                 "ID,BODY\n1,中文短CLOB\n"))
+                  (write-region "original" nil path nil 'silent)
+                  (erase-buffer)
+                  (insert sql)
+                  (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                    (call-interactively #'clutch-export-query))
+                  (clutch-test--await-queries))))
+            (should (cl-some (lambda (msg) (string-match-p "only a preview" msg)) messages))
+            (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string)) "original"))
+            (should (equal (directory-files dir nil "\\`[^.]") '("out.csv")))
+            (should-not (clutch-db--foreground-busy-p conn)))
+        (when created
+          (clutch-db-query conn (format "DROP TABLE %s" table))
+          (clutch-db-commit conn))
+        (delete-directory dir t)))))
+
 (ert-deftest clutch-test-live-result-filter-sort-page-count-export-workflow ()
   "Result buffer workflows should run real backend queries end-to-end."
   :tags '(:clutch-live)

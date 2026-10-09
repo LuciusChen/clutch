@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - Unreleased
+
+### Added
+
+- `C-u C-c C-c`, `clutch-export-query` and Execute → Export query to file export one SELECT or SELECT-only CTE directly to CSV/TSV, prompting for encoding and destination without opening a result grid. Query row limits, existing results and staged edits are preserved; cancellation or failure leaves an existing file unchanged.
+
+### Fixed
+
+- Copying, exporting or mutating a JDBC binary value whose content is unavailable refuses it instead of treating its BLOB length metadata as complete data. Convert such a column to hex or text explicitly in SQL to export its content; complete decoded text BLOBs remain usable.
+
 ## 0.5.6 - 2026-10-09
 
 ### Fixed
