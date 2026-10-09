@@ -1507,44 +1507,33 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                    "GB18030"))))
 
 (ert-deftest clutch-test-update-canonicalizes-source-column-case ()
-  "Mutation SQL should quote the backend's canonical column spelling."
-  (let ((clutch-connection
-         (make-clutch-jdbc-conn :params '(:driver oracle)))
-        (clutch--result-columns '("name"))
-        (clutch--result-column-defs
-         '((:name "name" :source-column "name")))
-        (identity '(:kind primary-key :name "PRIMARY"
-                    :table "USERS" :columns ("ID") :indices (1))))
-    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-              ((symbol-function 'clutch--ensure-column-details)
-               (lambda (_conn _table &optional _strict)
-                 '((:name "NAME" :backend-type "VARCHAR2")))))
-      (pcase-let ((`(,sql . ,_)
-                   (clutch-result--build-update-stmt
-                    "USERS" [7] '((0 . "Ada")) identity
-                    (clutch-result--update-source-columns "USERS" '(0) "test"))))
-        (should (string-search "SET \"NAME\" = ?" sql))))))
-
-(ert-deftest clutch-test-update-uses-canonical-source-behind-alias ()
-  "Mutation SQL should not quote a display alias or raw identifier casing."
-  (let ((clutch-connection
-         (make-clutch-jdbc-conn :params '(:driver jdbc)))
-        (clutch--result-columns '("display_name"))
-        (clutch--result-column-defs
-         '((:name "display_name" :source-column "NAME")))
-        (identity '(:kind primary-key :name "PRIMARY"
-                    :table "users" :columns ("id") :indices (1))))
-    (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-              ((symbol-function 'clutch--ensure-column-details)
-               (lambda (_conn _table &optional _strict)
-                 '((:name "name" :backend-type "text")))))
-      (pcase-let ((`(,sql . ,_)
-                   (clutch-result--build-update-stmt
-                    "users" [7] '((0 . "Ada")) identity
-                    (clutch-result--update-source-columns "users" '(0) "test"))))
-        (should (string-search "SET \"name\" = ?" sql))
-        (should-not (string-search "display_name" sql))
-        (should-not (string-search "\"NAME\"" sql))))))
+  "Mutation SQL should use canonical source names, including behind aliases."
+  (pcase-dolist (`(,driver ,table ,key ,column ,canonical ,absent)
+                 '((oracle "USERS" "ID"
+                    (:name "name" :source-column "name")
+                    (:name "NAME" :backend-type "VARCHAR2") nil)
+                   (jdbc "users" "id"
+                    (:name "display_name" :source-column "NAME")
+                    (:name "name" :backend-type "text")
+                    ("display_name" "\"NAME\""))))
+    (ert-info ((symbol-name driver))
+      (let ((clutch-connection
+             (make-clutch-jdbc-conn :params (list :driver driver)))
+            (clutch--result-columns (list (plist-get column :name)))
+            (clutch--result-column-defs (list column))
+            (identity (list :kind 'primary-key :name "PRIMARY"
+                            :table table :columns (list key) :indices '(1))))
+        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
+                  ((symbol-function 'clutch--ensure-column-details)
+                   (lambda (_conn _table &optional _strict) (list canonical))))
+          (pcase-let ((`(,sql . ,_)
+                       (clutch-result--build-update-stmt
+                        table [7] '((0 . "Ada")) identity
+                        (clutch-result--update-source-columns table '(0) "test"))))
+            (should (string-search
+                     (format "SET \"%s\" = ?" (plist-get canonical :name)) sql))
+            (dolist (name absent)
+              (should-not (string-search name sql)))))))))
 
 (ert-deftest clutch-test-source-column-metadata-match-is-safe ()
   "Canonical source lookup should prefer exact names and reject ambiguity."

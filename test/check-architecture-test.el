@@ -28,9 +28,7 @@
           (should (equal (mapcar (lambda (edge) (nth 1 edge))
                                  (clutch--architecture-dependencies "source" forms))
                          expected))
-        (should (cl-every (lambda (symbol)
-                            (memq symbol (clutch--architecture-calls (car forms))))
-                          expected)))))
+        (should (equal (clutch--architecture-calls (car forms)) expected)))))
   (should (equal (clutch--architecture-target-name 'clutch) "clutch"))
   (should (equal (mapcar (lambda (edge) (nth 1 edge))
                          (clutch--architecture-dependencies
