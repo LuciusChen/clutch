@@ -262,14 +262,6 @@ connection as live and not busy."
               (lambda (_conn) t)))
      ,@body))
 
-(defmacro clutch-db-test--with-temp-dir (var prefix &rest body)
-  "Bind VAR to a temporary directory named with PREFIX while running BODY."
-  (declare (indent 2))
-  `(let ((,var (make-temp-file ,prefix t)))
-     (unwind-protect
-         (progn ,@body)
-       (delete-directory ,var t))))
-
 (defun clutch-db-test--write-authinfo-profile (path profile fields)
   "Write a temporary authinfo PATH for PROFILE with alternating FIELDS."
   (with-temp-file path
@@ -313,10 +305,12 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (defmacro clutch-db-test--with-jdbc-temp-dir (var prefix &rest body)
   "Bind VAR and `clutch-jdbc-agent-dir' to a temporary directory."
-  (declare (indent 2))
-  `(clutch-db-test--with-temp-dir ,var ,prefix
-     (let ((clutch-jdbc-agent-dir ,var))
-       ,@body)))
+  (declare (indent 2) (debug (symbolp form body)))
+  `(let* ((,var (make-temp-file ,prefix t))
+          (clutch-jdbc-agent-dir ,var))
+     (unwind-protect
+         (progn ,@body)
+       (delete-directory ,var t))))
 
 (defmacro clutch-db-test--with-temp-sqlite (conn-var prefix &rest body)
   "Bind CONN-VAR to a temporary SQLite database named with PREFIX."
@@ -537,30 +531,20 @@ and a `?' inside a dollar-quoted function body is part of the body."
       (should (string-match-p "stopped after 2 SCAN batches" notice)))))
 
 (ert-deftest clutch-db-test-redis-find-exact-key-without-scan ()
-  "Exact Redis key lookup should not depend on bounded SCAN coverage."
-  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
-        calls)
-    (cl-letf (((symbol-function 'redis-command)
-               (lambda (_client command &rest args)
-                 (push (cons command args) calls)
-                 (pcase command
-                   ("EXISTS" 1)
-                   (_ (ert-fail "Exact lookup unexpectedly scanned keys"))))))
-      (should
-       (equal (clutch-db-find-table-entry conn "remote:key")
-              '(:name "remote:key" :schema "0" :type "KEY")))
-      (should (equal calls '(("EXISTS" "remote:key")))))))
-
-(ert-deftest clutch-db-test-redis-find-missing-key-uses-one-command ()
-  "Missing exact Redis keys should return nil after one EXISTS command."
-  (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
-        calls)
-    (cl-letf (((symbol-function 'redis-command)
-               (lambda (_client command &rest args)
-                 (push (cons command args) calls)
-                 0)))
-      (should-not (clutch-db-find-table-entry conn "missing:key"))
-      (should (equal calls '(("EXISTS" "missing:key")))))))
+  "Present and missing exact keys should need only one EXISTS command."
+  (pcase-dolist (`(,key ,exists ,expected)
+                 '(("remote:key" 1 (:name "remote:key" :schema "0" :type "KEY"))
+                   ("missing:key" 0 nil)))
+    (ert-info ((format "key: %s" key))
+      (let ((conn (make-clutch-redis-conn :client (make-redis-conn)))
+            calls)
+        (cl-letf (((symbol-function 'redis-command)
+                   (lambda (_client command &rest args)
+                     (push (cons command args) calls)
+                     (if (equal command "EXISTS") exists
+                       (ert-fail "Exact lookup unexpectedly scanned keys")))))
+          (should (equal (clutch-db-find-table-entry conn key) expected))
+          (should (equal calls (list (list "EXISTS" key)))))))))
 
 (ert-deftest clutch-db-test-redis-prefix-search-keeps-sibling-keys ()
   "Redis prefix search should not collapse to an existing exact key."
@@ -6238,24 +6222,24 @@ Skips if `clutch-db-test-mysql-password' is nil."
   "Define shared live tests for PREFIX using WITH-MACRO, TAGS, and DISPLAY-NAME."
   `(progn
      (ert-deftest ,(intern (format "%s-live-connect" prefix)) ()
-       :tags ',tags
        ,(format "Test %s connection via clutch-db-connect." display-name)
+       :tags ',tags
        (,with-macro conn
          (should (clutch-db-live-p conn))
          (should (equal (clutch-db-display-name conn) ,display-name))))
      (ert-deftest ,(intern (format "%s-live-query" prefix)) ()
-       :tags ',tags
        ,(format "Test %s query via clutch-db-query." display-name)
+       :tags ',tags
        (,with-macro conn
          (clutch-db-test--assert-live-basic-query conn)))
      (ert-deftest ,(intern (format "%s-live-dml" prefix)) ()
-       :tags ',tags
        ,(format "Test %s DML operations." display-name)
+       :tags ',tags
        (,with-macro conn
          (clutch-db-test--assert-live-basic-dml conn)))
      (ert-deftest ,(intern (format "%s-live-error" prefix)) ()
-       :tags ',tags
        ,(format "Test %s error handling." display-name)
+       :tags ',tags
        (,with-macro conn
          (should-error (clutch-db-query conn "SELEC BAD")
                        :type 'clutch-db-error)))))
