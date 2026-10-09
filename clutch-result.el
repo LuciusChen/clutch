@@ -74,6 +74,15 @@ fraction.  Values must be greater than zero and no greater than one."
   :type 'natnum
   :group 'clutch)
 
+(defcustom clutch-export-page-size 2000
+  "Positive number of rows per SQL export page and formatting batch.
+Used by query export and all-row result export, independently of
+`clutch-result-max-rows'.  Larger pages reduce repeated query work but
+use more memory and can prolong synchronous JDBC remaining-row fetches.
+Explicit SQL row limits are preserved."
+  :type 'natnum
+  :group 'clutch)
+
 (defcustom clutch-csv-export-default-coding-system 'utf-8-with-signature
   "Default coding system when exporting CSV or TSV files."
   :type '(choice (const :tag "UTF-8 (with BOM)" utf-8-with-signature)
@@ -3279,6 +3288,13 @@ When OMIT-HEADER is non-nil, omit the column header."
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
+(defun clutch-result--export-page-size ()
+  "Return the configured positive export page size."
+  (unless (and (integerp clutch-export-page-size)
+               (> clutch-export-page-size 0))
+    (user-error "Export page size must be a positive integer"))
+  clutch-export-page-size)
+
 (defun clutch-result--emit-export-batches (rows size function)
   "Call FUNCTION with ROWS in batches of SIZE, or once with nil for none.
 Each batch has its own list spine."
@@ -3298,7 +3314,7 @@ may run after this function returns."
   (clutch--ensure-connection)
   (let* ((plan (clutch-result--current-query-plan))
          (effective-sql (plist-get plan :sql))
-         (page-size clutch-result-max-rows))
+         (page-size (clutch-result--export-page-size)))
     (cl-labels ((emit (rows &optional _columns)
                   (clutch-result--emit-export-batches rows page-size function)))
       (if (or (null effective-sql)
@@ -3575,7 +3591,7 @@ stops it.  Replace the destination only after the whole export succeeds."
            (coding (clutch--read-delimited-export-coding-system kind))
            (path (read-file-name (plist-get spec :file-prompt)
                                  nil nil nil (plist-get spec :default-file)))
-           (page-size clutch-result-max-rows))
+           (page-size (clutch-result--export-page-size)))
       (when (and (file-exists-p path)
                  (not (yes-or-no-p (format "Overwrite %s? " path))))
         (user-error "Export cancelled"))
