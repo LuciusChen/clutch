@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A batch, an export, and a result's page load, server-side sort or count stop once the current statement returns even if the backend refuses cancellation or its cancel request fails: a batch runs no further statements, an export fetches no further pages and preserves its destination, and a result keeps what it showed. They used to forget the request and run on. Successful work is still accounted for.
 - JDBC BLOB results carrying only length metadata become incomplete previews, so copy/export and mutation refuse them and the viewer shows their actual length instead of treating the metadata as content. Complete decoded text BLOBs remain usable.
 
 ## 0.5.6 - 2026-10-09
