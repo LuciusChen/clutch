@@ -11524,11 +11524,12 @@ there, and the result keeps its rows and its unknown total."
           (ert-run-idle-timers)
           (should (equal (marker-line) "UPDATE b SET n = 2;")))))))
 
-(ert-deftest clutch-test-execute-flashes-a-statement-before-it-runs ()
-  "A statement sent from a SQL buffer should flash before it runs.
+(ert-deftest clutch-test-execute-at-point-flashes-the-statement ()
+  "The statement picked at point should flash before it runs.
 SQLite runs it synchronously, which blocks pulse's timers and redisplay,
 so the flash is drawn first.  Point stays and no region becomes active.
-SQL run without a source region, as from the REPL, does not flash."
+SQL run without a source region, as from the REPL, does not flash, and
+`clutch-pulse-statement-at-point' set to nil turns the flash off."
   (require 'clutch-db-sqlite)
   (skip-unless (sqlite-available-p))
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
@@ -11560,31 +11561,47 @@ SQL run without a source region, as from the REPL, does not flash."
                                           (not (eq (car-safe event) 'pulse)))
                                         (reverse events))))
               (should (equal (seq-take sent 2) '((pulse . "SELECT 2 AS b") redisplay)))
-              (should (string-prefix-p "SELECT 2 AS b" (cdr (nth 2 sent)))))
+              (should (string-prefix-p "SELECT 2 AS b" (cdr (assq 'query sent)))))
             (setq events nil)
             (clutch--execute "SELECT 3")
+            (should-not (assq 'pulse events))
+            (setq events nil)
+            (let ((clutch-pulse-statement-at-point nil))
+              (call-interactively #'clutch-execute-dwim))
+            (should (string-prefix-p "SELECT 2 AS b" (cdr (assq 'query events))))
             (should-not (assq 'pulse events))))
       (clutch-db-disconnect conn))))
 
-(ert-deftest clutch-test-execute-flashes-each-statement-of-a-batch ()
-  "Each statement of a batch should flash when it is sent, in turn."
+(ert-deftest clutch-test-execute-chosen-text-does-not-flash ()
+  "A region, the buffer and each statement of a batch should not flash.
+The user chose that text, so it needs no flash to show what runs."
   (with-temp-buffer
-    (insert "SELECT 1 AS a;\nSELECT 2 AS b;\n")
+    (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
     (setq-local clutch-connection 'async-conn)
-    (let (flashes)
+    (let ((transient-mark-mode t)
+          flashes)
       (clutch-test--with-async-statements finishes
         (cl-letf (((symbol-function 'pulse-momentary-highlight-region)
                    (lambda (beg end &rest _)
                      (push (buffer-substring-no-properties beg end) flashes)))
                   ((symbol-function 'clutch-result--display) #'ignore)
                   ((symbol-function 'message) #'ignore))
-          (clutch-execute-buffer)
-          (should (equal flashes '("SELECT 1 AS a")))
-          (funcall (cdar finishes)
-                   (make-clutch-db-result :columns '((:name "a")) :rows '((1)))
-                   nil)
-          (ert-run-idle-timers)
-          (should (equal (reverse flashes) '("SELECT 1 AS a" "SELECT 2 AS b"))))))))
+          (cl-flet ((finish ()
+                      (funcall (cdar finishes)
+                               (make-clutch-db-result :affected-rows 1) nil)
+                      (ert-run-idle-timers)))
+            (clutch-execute-buffer)
+            (finish)
+            (finish)
+            (should (equal (mapcar #'car finishes)
+                           '("UPDATE b SET n = 2" "UPDATE a SET n = 1")))
+            (goto-char (point-min))
+            (set-mark (line-end-position))
+            (call-interactively #'clutch-execute-dwim)
+            (finish)
+            (should (equal (caar finishes) "UPDATE a SET n = 1"))
+            (should (= (length finishes) 3))
+            (should-not flashes)))))))
 
 (ert-deftest clutch-test-async-statements-run-one-after-another ()
   "A batch should send each statement after the previous one finishes."
