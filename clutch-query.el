@@ -95,7 +95,6 @@ that window.")
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
-(declare-function clutch-copy-context-for-agent "clutch-result" ())
 
 ;;;; Query console
 
