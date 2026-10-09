@@ -6,6 +6,10 @@
 
 - `M-x clutch-export-query` and Execute → Export query to file (`C-c ?`, then `e`) export one SELECT or SELECT-only CTE directly to CSV/TSV, prompting for encoding and destination without opening a result grid. Query row limits, existing results and staged edits are preserved; cancellation or failure leaves an existing file unchanged.
 
+### Changed
+
+- Exporting all rows of a result fetches pages of `clutch-export-page-size` rows, 2000 by default, instead of the 500-row display page size `clutch-result-max-rows`, so a large export repeats far fewer pagination queries; query export uses the same setting. Explicit SQL row limits remain unchanged.
+
 ### Fixed
 
 - JDBC BLOB results carrying only length metadata become incomplete previews, so copy/export and mutation refuse them and the viewer shows their actual length instead of treating the metadata as content. Complete decoded text BLOBs remain usable.
