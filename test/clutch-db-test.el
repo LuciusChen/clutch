@@ -7842,155 +7842,90 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
       (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
         (should (equal (caar (clutch-db-result-rows result)) "42"))))))
 
-(ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-diagnostics ()
-  "Wire-level Oracle JDBC errors should return structured diagnostics."
+(ert-deftest clutch-db-test-jdbc-oracle-live-wire-error-diagnostics ()
+  "Oracle wire errors carry request identity, diagnostics and opt-in debug data."
   :tags '(:db-live :jdbc-live :oracle-live)
-  (clutch-db-test--with-oracle conn
-    (let* ((token (clutch-db-test--live-name "definitely_missing"))
-           (request-id
-            (clutch-jdbc--send
-             "execute"
-             `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-               (sql . ,(format "SELECT %s FROM DUAL" token))
-               (fetch-size . ,clutch-jdbc-fetch-size))))
-           (response (clutch-jdbc--recv-response
-                      request-id
-                      (clutch-jdbc--conn-rpc-timeout conn)
-                      "execute")))
-      (should-not (eq t (plist-get response :ok)))
-      (let ((diag (plist-get response :diag)))
-        (should (equal (plist-get diag :op) "execute"))
-        (should (= (plist-get diag :request-id) request-id))
-        (should (= (plist-get diag :conn-id) (clutch-jdbc-conn-conn-id conn)))
-        (should (equal (plist-get diag :category) "query"))
-        (should (string-match-p
-                 (upcase token)
-                 (upcase (plist-get diag :raw-message)))))
-      (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "42"))))))
+  (pcase-dolist (`(,op ,debug-mode)
+                 '(("execute" nil) ("execute" t) ("set-current-schema" nil)))
+    (ert-info ((format "%s debug=%s" op debug-mode))
+      (let ((clutch-debug-mode debug-mode))
+        (clutch-db-test--with-oracle conn
+          (let* ((schema-p (equal op "set-current-schema"))
+                 (token (clutch-db-test--live-name
+                         (if schema-p "MISSING_SCHEMA" "definitely_missing")))
+                 (request-id
+                  (clutch-jdbc--send
+                   op `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                        ,@(if schema-p
+                              `((schema . ,token))
+                            `((sql . ,(format "SELECT %s FROM DUAL" token))
+                              (fetch-size . ,clutch-jdbc-fetch-size))))))
+                 (response (clutch-jdbc--recv-response
+                            request-id (clutch-jdbc--conn-rpc-timeout conn) op))
+                 (diag (plist-get response :diag)))
+            (should-not (eq t (plist-get response :ok)))
+            (should (equal (plist-get diag :op) op))
+            (should (= (plist-get diag :request-id) request-id))
+            (should (= (plist-get diag :conn-id) (clutch-jdbc-conn-conn-id conn)))
+            (should (equal (plist-get diag :category)
+                           (if schema-p "metadata" "query")))
+            (if schema-p
+                (let* ((context (plist-get diag :context))
+                       (generated-sql (plist-get context :generated-sql)))
+                  (should (equal (plist-get context :schema) token))
+                  (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" generated-sql))
+                  (should (string-match-p token generated-sql)))
+              (should (string-match-p
+                       (upcase token) (upcase (plist-get diag :raw-message)))))
+            (when debug-mode
+              (let ((debug (plist-get response :debug)))
+                (should (stringp (plist-get debug :stack-trace)))
+                (should (string-match-p "java\\.sql\\." (plist-get debug :stack-trace)))
+                (should (= (plist-get (plist-get debug :request-context) :fetch-size)
+                           clutch-jdbc-fetch-size))))
+            (should (equal (clutch-db-result-rows
+                            (clutch-db-query conn "SELECT 42 AS answer FROM DUAL"))
+                           '(("42"))))))))))
 
-(ert-deftest clutch-db-test-jdbc-oracle-live-wire-query-error-carries-debug-payload ()
-  "Wire-level Oracle JDBC errors should carry opt-in backend debug payloads."
+(ert-deftest clutch-db-test-jdbc-oracle-live-error-details ()
+  "Oracle query and schema errors stay on their connection, which remains usable."
   :tags '(:db-live :jdbc-live :oracle-live)
-  (let ((clutch-debug-mode t))
-    (clutch-db-test--with-oracle conn
-      (let* ((token (clutch-db-test--live-name "definitely_missing"))
-             (request-id
-              (clutch-jdbc--send
-               "execute"
-               `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                 (sql . ,(format "SELECT %s FROM DUAL" token))
-                 (fetch-size . ,clutch-jdbc-fetch-size))))
-             (response (clutch-jdbc--recv-response
-                        request-id
-                        (clutch-jdbc--conn-rpc-timeout conn)
-                        "execute")))
-        (should-not (eq t (plist-get response :ok)))
-        (let ((debug (plist-get response :debug)))
-          (should (stringp (plist-get debug :stack-trace)))
-          (should (string-match-p "java\\.sql\\."
-                                  (plist-get debug :stack-trace)))
-          (should (= (plist-get (plist-get debug :request-context) :fetch-size)
-                     clutch-jdbc-fetch-size)))
-        (let ((result (clutch-db-query conn "SELECT 44 AS answer FROM DUAL")))
-          (should (equal (caar (clutch-db-result-rows result)) "44")))))))
-
-(ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-diagnostics ()
-  "High-level Oracle JDBC query errors should stay on the current connection."
-  :tags '(:db-live :jdbc-live :oracle-live)
-  (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
-    (clutch-db-test--with-oracle conn
-      (let ((token (clutch-db-test--live-name "definitely_missing")))
-        (condition-case err
-            (progn
-              (clutch-db-query conn (format "SELECT %s FROM DUAL" token))
-              (should nil))
-          (clutch-db-error
-           (should (stringp (cadr err)))
-           (let ((details (clutch-db-error-details conn)))
-             (should (equal (plist-get (plist-get details :diag) :op) "execute"))
-             (should (= (plist-get (plist-get details :diag) :conn-id)
-                        (clutch-jdbc-conn-conn-id conn)))
-             (should (equal (plist-get (plist-get details :diag) :category) "query"))
-             (should (string-match-p
-                      (upcase token)
-                      (upcase (plist-get (plist-get details :diag) :raw-message))))))))
-      (let ((result (clutch-db-query conn "SELECT 43 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "43"))))))
-
-(ert-deftest clutch-db-test-jdbc-oracle-live-query-error-caches-debug-payload ()
-  "High-level Oracle JDBC query errors should cache opt-in debug payloads."
-  :tags '(:db-live :jdbc-live :oracle-live)
-  (let ((clutch-debug-mode t)
-        (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
-    (clutch-db-test--with-oracle conn
-      (let ((token (clutch-db-test--live-name "definitely_missing")))
-        (condition-case err
-            (progn
-              (clutch-db-query conn (format "SELECT %s FROM DUAL" token))
-              (should nil))
-          (clutch-db-error
-           (should (stringp (cadr err)))
-           (let ((debug (plist-get (clutch-db-error-details conn) :debug)))
-             (should (stringp (plist-get debug :stack-trace)))
-             (should (string-match-p "java\\.sql\\."
-                                     (plist-get debug :stack-trace)))))))
-      (let ((result (clutch-db-query conn "SELECT 45 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "45"))))))
-
-(ert-deftest clutch-db-test-jdbc-oracle-live-wire-schema-switch-error-carries-generated-sql ()
-  "Wire-level Oracle schema-switch failures should expose generated SQL."
-  :tags '(:db-live :jdbc-live :oracle-live)
-  (clutch-db-test--with-oracle conn
-    (let* ((token (clutch-db-test--live-name "MISSING_SCHEMA"))
-           (request-id
-            (clutch-jdbc--send
-             "set-current-schema"
-             `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-               (schema . ,token))))
-           (response (clutch-jdbc--recv-response
-                      request-id
-                      (clutch-jdbc--conn-rpc-timeout conn)
-                      "set-current-schema")))
-      (should-not (eq t (plist-get response :ok)))
-      (let* ((diag (plist-get response :diag))
-             (context (plist-get diag :context))
-             (generated-sql (plist-get context :generated-sql)))
-        (should (equal (plist-get diag :op) "set-current-schema"))
-        (should (= (plist-get diag :request-id) request-id))
-        (should (= (plist-get diag :conn-id) (clutch-jdbc-conn-conn-id conn)))
-        (should (equal (plist-get diag :category) "metadata"))
-        (should (equal (plist-get context :schema) token))
-        (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" generated-sql))
-        (should (string-match-p token generated-sql)))
-      (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "42"))))))
-
-(ert-deftest clutch-db-test-jdbc-oracle-live-schema-switch-error-caches-generated-sql ()
-  "High-level Oracle schema-switch failures should stay on the current connection."
-  :tags '(:db-live :jdbc-live :oracle-live)
-  (let ((clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
-    (clutch-db-test--with-oracle conn
-      (let ((token (clutch-db-test--live-name "MISSING_SCHEMA")))
-        (condition-case err
-            (progn
-              (clutch-db-set-current-schema conn token)
-              (should nil))
-          (clutch-db-error
-           (should (stringp (cadr err)))
-           (let* ((details (clutch-db-error-details conn))
-                  (diag (plist-get details :diag))
-                  (context (plist-get diag :context))
-                  (generated-sql (plist-get context :generated-sql)))
-             (should (equal (plist-get diag :op) "set-current-schema"))
-             (should (= (plist-get diag :conn-id)
-                        (clutch-jdbc-conn-conn-id conn)))
-             (should (equal (plist-get diag :category) "metadata"))
-             (should (equal (plist-get context :schema) token))
-             (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" generated-sql))
-             (should (string-match-p token generated-sql))))))
-      (let ((result (clutch-db-query conn "SELECT 43 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "43"))))))
+  (pcase-dolist (`(,op ,debug-mode)
+                 '(("execute" nil) ("execute" t) ("set-current-schema" nil)))
+    (ert-info ((format "%s debug=%s" op debug-mode))
+      (let ((clutch-debug-mode debug-mode)
+            (clutch-jdbc--error-details-by-conn (make-hash-table :test 'eq)))
+        (clutch-db-test--with-oracle conn
+          (let* ((schema-p (equal op "set-current-schema"))
+                 (token (clutch-db-test--live-name
+                         (if schema-p "MISSING_SCHEMA" "definitely_missing")))
+                 (err (should-error
+                       (if schema-p
+                           (clutch-db-set-current-schema conn token)
+                         (clutch-db-query conn (format "SELECT %s FROM DUAL" token)))
+                       :type 'clutch-db-error))
+                 (details (clutch-db-error-details conn))
+                 (diag (plist-get details :diag)))
+            (should (stringp (cadr err)))
+            (should (equal (plist-get diag :op) op))
+            (should (= (plist-get diag :conn-id) (clutch-jdbc-conn-conn-id conn)))
+            (should (equal (plist-get diag :category)
+                           (if schema-p "metadata" "query")))
+            (if schema-p
+                (let* ((context (plist-get diag :context))
+                       (generated-sql (plist-get context :generated-sql)))
+                  (should (equal (plist-get context :schema) token))
+                  (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" generated-sql))
+                  (should (string-match-p token generated-sql)))
+              (should (string-match-p
+                       (upcase token) (upcase (plist-get diag :raw-message)))))
+            (when debug-mode
+              (let ((debug (plist-get details :debug)))
+                (should (stringp (plist-get debug :stack-trace)))
+                (should (string-match-p "java\\.sql\\." (plist-get debug :stack-trace)))))
+            (should (equal (clutch-db-result-rows
+                            (clutch-db-query conn "SELECT 43 AS answer FROM DUAL"))
+                           '(("43"))))))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-low-priv-completion ()
   "Oracle JDBC low-privilege users should still get table completion and discovery."
