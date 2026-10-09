@@ -11534,9 +11534,12 @@ region, as from the REPL, does not flash, and
 `clutch-pulse-statement-at-point' set to nil turns the flash off."
   (require 'clutch-db-sqlite)
   (skip-unless (sqlite-available-p))
-  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
-        (query (symbol-function 'clutch-db-query))
-        events)
+  (let* ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+         events
+         (record-query (lambda (_conn sql) (push (cons 'query sql) events))))
+    ;; Emacs 32 replaces a generic's lazy dispatcher on its first call,
+    ;; which drops a `cl-letf' wrapper but keeps advice.
+    (advice-add 'clutch-db-query :before record-query)
     (unwind-protect
         (with-temp-buffer
           (clutch-mode)
@@ -11550,10 +11553,6 @@ region, as from the REPL, does not flash, and
                              events)))
                     ((symbol-function 'redisplay)
                      (lambda (&rest _) (push 'redisplay events)))
-                    ((symbol-function 'clutch-db-query)
-                     (lambda (conn sql)
-                       (push (cons 'query sql) events)
-                       (funcall query conn sql)))
                     ((symbol-function 'clutch-result--display) #'ignore))
             (let ((point (point)))
               (call-interactively #'clutch-execute-dwim)
@@ -11581,6 +11580,7 @@ region, as from the REPL, does not flash, and
             (should (equal (assq 'pulse events)
                            '(pulse . "DELETE FROM t WHERE id = 1")))
             (should-not (assq 'query events))))
+      (advice-remove 'clutch-db-query record-query)
       (clutch-db-disconnect conn))))
 
 (ert-deftest clutch-test-execute-chosen-text-does-not-flash ()
