@@ -250,10 +250,6 @@ This value may be displayed, but must not be used as complete database data."
     (user-error "%s value is only a preview (%s total); complete content is unavailable"
                 (upcase (symbol-name (clutch-db-value-preview-type value)))
                 (clutch-db-value-preview-length value)))
-  (when (and (listp value)
-             (equal (plist-get value :__type) "blob")
-             (not (stringp (plist-get value :text))))
-    (user-error "BLOB content is unavailable; use a hex or text conversion in SQL"))
   value)
 
 (cl-defstruct clutch-db-result

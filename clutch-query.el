@@ -96,7 +96,6 @@ that window.")
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
 (declare-function clutch-copy-context-for-agent "clutch-result" ())
-(declare-function clutch-export-query "clutch-result" (beg end))
 
 ;;;; Query console
 
@@ -1911,28 +1910,25 @@ Stops and reports on the first error."
       (clutch--dispatch-query-activity activity #'run))))
 
 ;;;###autoload (autoload 'clutch-execute-dwim "clutch" nil t)
-(defun clutch-execute-dwim (beg end &optional export)
+(defun clutch-execute-dwim (beg end)
   "Execute SQL from BEG to END using the most useful local boundary.
 With an active region, execute that region.  Otherwise, prefer the
 semicolon-delimited statement at point when the current buffer contains
 top-level semicolons; fall back to the current query-at-point when it does
 not.  When the region contains multiple semicolon-separated statements, they
-are executed sequentially.  With prefix argument EXPORT, export one SELECT
-to a CSV or TSV file instead of displaying its result."
+are executed sequentially."
   (interactive
    (if (use-region-p)
-       (list (region-beginning) (region-end) current-prefix-arg)
-     (list (point) (point) current-prefix-arg)))
-  (if export
-      (clutch-export-query beg end)
-    (clutch--ensure-connection)
-    (if (use-region-p)
-        (clutch--execute-sql-range beg end "region")
-      (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
-                   (sql (string-trim (buffer-substring-no-properties qb qe))))
-        (when (string-empty-p sql)
-          (user-error "No SQL at point"))
-        (clutch--execute-and-mark sql qb qe)))))
+       (list (region-beginning) (region-end))
+     (list (point) (point))))
+  (clutch--ensure-connection)
+  (if (use-region-p)
+      (clutch--execute-sql-range beg end "region")
+    (pcase-let* ((`(,qb . ,qe) (clutch--dwim-bounds-at-point))
+                 (sql (string-trim (buffer-substring-no-properties qb qe))))
+      (when (string-empty-p sql)
+        (user-error "No SQL at point"))
+      (clutch--execute-and-mark sql qb qe))))
 
 (defun clutch--execute-sql-range (beg end scope)
   "Execute trimmed SQL between BEG and END for SCOPE.

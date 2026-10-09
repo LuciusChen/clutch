@@ -1491,7 +1491,8 @@ Recurses into lists and vectors so nested JSON cell values are normalized."
 
 (defun clutch-jdbc--normalize-row (row)
   "Convert JDBC-specific value representations in ROW to generic forms.
-Blob plists with :text content become plain strings.
+Blob plists with :text content become plain strings, and those with only
+their length become explicit previews.
 Complete Clob plists become strings; incomplete ones stay explicit previews.
 JDBC JSON false sentinels become `:false'."
   (mapcar (lambda (val)
@@ -1506,6 +1507,10 @@ JDBC JSON false sentinels become `:false'."
                    (put-text-property 0 (length text)
                                       'clutch-jdbc-blob-encoding encoding text))
                  text))
+              ((and (listp val)
+                    (equal (plist-get val :__type) "blob"))
+               (make-clutch-db-value-preview
+                :type 'blob :length (plist-get val :length) :text ""))
               ((and (listp val)
                     (equal (plist-get val :__type) "clob"))
                (let ((preview (or (plist-get val :preview) ""))
