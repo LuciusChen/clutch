@@ -3279,6 +3279,15 @@ When OMIT-HEADER is non-nil, omit the column header."
                  (mapcar #'car choices) nil t nil nil default-label)))
     (or (cdr (assoc label choices)) default)))
 
+(defun clutch-result--emit-export-batches (rows size function)
+  "Call FUNCTION with ROWS in batches of SIZE, or once with nil for none.
+Each batch has its own list spine."
+  (if rows
+      (cl-loop for tail on rows
+               by (lambda (rest) (nthcdr size rest))
+               do (funcall function (seq-take tail size)))
+    (funcall function nil)))
+
 (defun clutch-result--map-export-batches (function done)
   "Call FUNCTION with each bounded export batch, then DONE.
 Call FUNCTION once with nil for an empty result.  Each batch has its own
@@ -3290,12 +3299,8 @@ may run after this function returns."
   (let* ((plan (clutch-result--current-query-plan))
          (effective-sql (plist-get plan :sql))
          (page-size clutch-result-max-rows))
-    (cl-labels ((emit (rows)
-                  (if rows
-                      (cl-loop for tail on rows
-                               by (lambda (rest) (nthcdr page-size rest))
-                               do (funcall function (seq-take tail page-size)))
-                    (funcall function nil))))
+    (cl-labels ((emit (rows &optional _columns)
+                  (clutch-result--emit-export-batches rows page-size function)))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))
           (progn
@@ -3312,15 +3317,15 @@ may run after this function returns."
          #'emit done)))))
 
 (defun clutch-result--export-pages (sql query page-size emit done)
-  "Fetch QUERY for an export of SQL and call EMIT with its rows, then DONE.
+  "Fetch QUERY for an export of SQL, calling EMIT with rows and columns.
 PAGE-SIZE pages QUERY, or nil fetches it whole.  DONE gets nil after the
 last page, or the error that stopped the export.  The pages run as one
 query activity, so \\[clutch-cancel-query-or-quit] cancels the export, also
 when the page it cancels arrives first.  A page that the backend runs
 synchronously continues the loop instead of nesting the next one, so many
 pages need no deeper stack.  An error or a quit is signaled while the
-command runs and only reported once it has returned.  A result buffer that
-is killed, or loses its connection, stops the export."
+command runs and only reported once it has returned.  Killing the owning
+buffer, or changing its connection, stops the export."
   (let ((conn clutch-connection)
         (buffer (current-buffer))
         (order-by clutch--order-by)
@@ -3360,7 +3365,7 @@ is killed, or loses its connection, stops the export."
                (condition-case emit-error
                    (progn
                      (with-current-buffer buffer
-                       (funcall emit rows))
+                       (funcall emit rows (clutch-db-result-columns result)))
                      (if (and page-size (= (length rows) page-size))
                          (cl-incf page-num)
                        (settle nil)))
@@ -3376,10 +3381,10 @@ is killed, or loses its connection, stops the export."
             activity conn handler
             :moved
             (lambda ()
-              (stop "Export stopped: the result's connection changed"))
+              (stop "Export stopped: its buffer's connection changed"))
             :killed
             (lambda ()
-              (stop "Export stopped: its result buffer was killed"))))
+              (stop "Export stopped: its buffer was killed"))))
          (run ()
            ;; Fetch pages until one finishes asynchronously or the export ends.
            (catch 'wait
@@ -3459,13 +3464,16 @@ returns, and it does not run when the export fails."
       "")))
 
 (cl-defun clutch-result--write-export-file
-    (kind spec path done &key coding omit-header)
+    (kind spec path done &key coding omit-header
+          (map-batches #'clutch-result--map-export-batches))
   "Write KIND using SPEC to PATH with CODING and OMIT-HEADER, then call DONE.
 Format one batch at a time, following symbolic links in PATH.
 PATH's filename-specific handlers receive the complete encoded output once.
 Replace the destination only after successful completion, then call DONE
 with the exported row count.  Pages are fetched without blocking, so DONE
-may run after this function returns; a failure leaves PATH as it was."
+may run after this function returns; a failure leaves PATH as it was.
+MAP-BATCHES calls a batch consumer and a completion callback, defaulting
+to the current result's export batches."
   (let* ((path (expand-file-name path))
          (target (file-truename path))
          transformed
@@ -3527,7 +3535,7 @@ may run after this function returns; a failure leaves PATH as it was."
       ;; afterwards FINISH does.
       (unwind-protect
           (progn
-            (clutch-result--map-export-batches
+            (funcall map-batches
              (if (eq kind 'document-insert-many)
                  (lambda (rows) (push rows documents))
                #'write-batch)
@@ -3535,6 +3543,66 @@ may run after this function returns; a failure leaves PATH as it was."
             (setq returned t))
         (unless returned
           (cleanup))))))
+
+;;;###autoload (autoload 'clutch-export-query "clutch" nil t)
+(defun clutch-export-query (beg end)
+  "Export one SELECT between BEG and END to a CSV or TSV file.
+When BEG equals END, use the statement at point, as
+`clutch-execute-dwim' does.  Prompt for format, encoding and destination.
+Fetch pages without a result grid, preserving explicit SQL row limits.
+On an asynchronous backend, return while the export runs; \\[clutch-cancel-query-or-quit]
+stops it.  Replace the destination only after the whole export succeeds."
+  (interactive
+   (if (use-region-p)
+       (list (region-beginning) (region-end))
+     (list (point) (point))))
+  (pcase-let* ((`(,qb . ,qe) (if (= beg end)
+                                 (clutch--dwim-bounds-at-point)
+                               (cons beg end)))
+               (statements (clutch--split-statement-specs
+                            (buffer-substring-no-properties qb qe) qb))
+               (sql (caar statements)))
+    (unless (and sql (null (cdr statements))
+                 (clutch-db-sql-pageable-query-p sql))
+      (user-error "Export requires one SELECT without a data-changing clause"))
+    (clutch--ensure-connection)
+    (unless (clutch-db-sql-surface-p clutch-connection clutch--connection-params)
+      (user-error "Query export requires a SQL connection"))
+    (clutch--refuse-while-running clutch-connection)
+    (let* ((kind (intern (completing-read "Export format: " '("csv" "tsv")
+                                          nil t nil nil "csv")))
+           (spec (cdr (assq kind clutch--result-export-kinds)))
+           (coding (clutch--read-delimited-export-coding-system kind))
+           (path (read-file-name (plist-get spec :file-prompt)
+                                 nil nil nil (plist-get spec :default-file)))
+           (page-size clutch-result-max-rows))
+      (when (and (file-exists-p path)
+                 (not (yes-or-no-p (format "Overwrite %s? " path))))
+        (user-error "Export cancelled"))
+      (clutch--forget-problem-record (current-buffer) clutch-connection)
+      (clutch-result--write-export-file
+       kind spec path
+       (lambda (count)
+         (message (plist-get spec :file-message)
+                  count (if (= count 1) "" "s") path
+                  coding))
+       :coding coding
+       :map-batches
+       (lambda (emit done)
+         (let (export-columns)
+           (clutch-result--export-pages
+            sql sql
+            (unless (clutch-db-sql-has-top-level-row-limit-p sql) page-size)
+            (lambda (rows columns)
+              ;; Keep the first page's layout: Oracle appends RN on later pages.
+              (unless export-columns (setq export-columns columns))
+              ;; Shared CSV/TSV formatters read these buffer-local variables;
+              ;; bind the export's columns while writing from a SQL buffer.
+              (let ((clutch--result-columns
+                     (mapcar (lambda (c) (plist-get c :name)) export-columns))
+                    (clutch--result-column-defs export-columns))
+                (clutch-result--emit-export-batches rows page-size emit)))
+            done)))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
   "Export result rows as KIND to DESTINATION.
