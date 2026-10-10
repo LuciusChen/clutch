@@ -6384,11 +6384,12 @@ a word that ends a whole rollback, such as CHAIN."
                   ("i" ("--file") file
                    "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
                    nil)
+                  ;; UPDATE names the table as the query did.
                   ("u" nil clipboard
-                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
+                   "UPDATE users SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
                    nil)
                   ("u" ("--file") file
-                   "UPDATE \"users\" SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
+                   "UPDATE users SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
                    nil)))
     (pcase-let ((`(,key ,args ,target ,expected ,expected-coding-label) case))
       (ert-info ((format "export key: %s, args: %S" key args))
@@ -6399,22 +6400,15 @@ a word that ends a whole rollback, such as CHAIN."
               coding-label
               written-coding)
           (unwind-protect
-              (clutch-test--with-result-state
-                  (:columns '("id" "name")
-                   :column-defs '((:name "id" :type-category numeric)
-                                  (:name "name" :type-category text))
-                   :connection-params '(:backend mysql)
-                   :source-table "users"
-                   :last-query "SELECT id, name FROM users"
-                   :row-identity
-                   (clutch-test--primary-row-identity
-                    "users" '("id") '(0)))
+              (clutch-test--with-sqlite-result (_conn _result)
+                  '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
+                    "INSERT INTO users VALUES (1, 'a,b')")
+                  "SELECT id, name FROM users"
                 (let ((suffix
                        (clutch-test--transient-suffix-for-key
                         'clutch-result-export key)))
                   (should suffix)
-                  (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                            ((symbol-function 'transient-args)
+                  (cl-letf (((symbol-function 'transient-args)
                              (lambda (_prefix) args))
                             ((symbol-function 'completing-read)
                              (lambda (prompt choices &rest _args)
@@ -6432,21 +6426,7 @@ a word that ends a whole rollback, such as CHAIN."
                             ((symbol-function 'write-region)
                              (lambda (&rest write-args)
                                (setq written-coding coding-system-for-write)
-                               (apply write-region-function write-args)))
-                            ((symbol-function 'clutch-result--collect-all-export-rows)
-                             (lambda (on-rows) (funcall on-rows '((1 "a,b")))))
-                            ((symbol-function 'clutch-result--map-export-batches)
-                             (lambda (function done)
-                               (funcall function '((1 "a,b")))
-                               (funcall done nil)))
-                            ((symbol-function 'clutch--ensure-column-details)
-                             (lambda (_conn _table &optional _strict)
-                               (list (list :name "id")
-                                     (list :name "name"))))
-                            ((symbol-function 'clutch-db-escape-identifier)
-                             (lambda (_conn s) (format "\"%s\"" s)))
-                            ((symbol-function 'clutch-db-escape-literal)
-                             (lambda (_conn s) (format "'%s'" s))))
+                               (apply write-region-function write-args))))
                     (funcall (oref suffix command))
                     (should (equal coding-label expected-coding-label))
                     (when expected-coding-label
@@ -6645,26 +6625,26 @@ PragmataPro does, shifting the rest of that row."
           captured
           kill-ring
           kill-ring-yank-pointer)
-      (setq-local clutch--result-source-table "users"
-                  clutch--result-columns '("_id" "name" "clutch__document")
-                  clutch--result-column-defs
-                  '((:name "_id" :type-category numeric)
-                    (:name "name" :type-category text)
-                    (:name "clutch__document"
-                     :type-category json
-                     :hidden t
-                     :document-source t))
-                  clutch--result-rows (list (list 7 "Ann" doc)))
+      (clutch-test--init-result-state
+       (list :connection 'document-conn
+             :source-table "users"
+             :columns '("_id" "name" "clutch__document")
+             :column-defs '((:name "_id" :type-category numeric)
+                            (:name "name" :type-category text)
+                            (:name "clutch__document"
+                             :type-category json
+                             :hidden t
+                             :document-source t))
+             :rows (list (list 7 "Ann" doc))
+             :render t))
+      (clutch-test--select-cells '(0 1))
       (cl-letf (((symbol-function 'clutch-db-document-mutation-supported-p)
                  (lambda (_conn action) (eq action 'update-one-set)))
                 ((symbol-function 'clutch-db-document-mutation-snippets)
                  (lambda (conn action collection documents &optional fields)
                    (setq captured
                          (list conn action collection documents fields))
-                   '("doc.update.snippet();")))
-                ((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch--cell-at-point)
-                 (lambda () '(0 1 "Ann"))))
+                   '("doc.update.snippet();"))))
         (clutch-result-copy 'document-update-one-set)
         (should (equal captured
                        (list 'document-conn
@@ -6786,42 +6766,31 @@ PragmataPro does, shifting the rest of that row."
 (ert-deftest clutch-test-copy-update-uses-selection ()
   "UPDATE copy should generate SQL from the active row/column selection."
   (dolist (case
-           `(("region rectangle"
-              t ((0 1) . (1 2)) nil
+           `(("region rectangle" ((0 1) (1 2))
               ,(concat
                 "UPDATE \"users\" SET \"name\" = 'a', \"status\" = 'new' WHERE \"id\" = 1\n"
                 "UPDATE \"users\" SET \"name\" = 'b', \"status\" = 'done' WHERE \"id\" = 2"))
-             ("current cell"
-              nil nil (0 1 "a")
+             ("current cell" ((0 1))
               "UPDATE \"users\" SET \"name\" = 'a' WHERE \"id\" = 1")))
-    (pcase-let ((`(,label ,region-p ,rectangle ,cell ,expected) case))
+    (pcase-let ((`(,label ,cells ,expected) case))
       (ert-info ((format "copy UPDATE selection: %s" label))
-        (with-temp-buffer
+        (clutch-test--with-result-state
+            (:connection (make-clutch-test-conn :table "users"
+                                                :columns '((:name "id")
+                                                           (:name "name")
+                                                           (:name "status")))
+             :source-table "users"
+             :columns '("id" "name" "status")
+             :column-defs '((:name "id" :type-category numeric)
+                            (:name "name" :type-category text)
+                            (:name "status" :type-category text))
+             :row-identity (clutch-test--primary-row-identity "users" '("id") '(0))
+             :rows '((1 "a" "new") (2 "b" "done"))
+             :render t)
           (let (kill-ring kill-ring-yank-pointer)
-            (setq-local clutch-connection (make-clutch-test-conn :table "users"
-                                                                 :columns '((:name "id")
-                                                                            (:name "name")
-                                                                            (:name "status")))
-                        clutch--result-source-table "users"
-                        clutch--result-columns '("id" "name" "status")
-                        clutch--result-column-defs
-                        '((:name "id" :type-category numeric
-                           :source-column "id")
-                          (:name "name" :type-category text
-                           :source-column "name")
-                          (:name "status" :type-category text
-                           :source-column "status"))
-                        clutch--row-identity (clutch-test--primary-row-identity
-                                              "users" '("id") '(0))
-                        clutch--result-rows '((1 "a" "new")
-                                              (2 "b" "done")))
-            (cl-letf (((symbol-function 'use-region-p) (lambda () region-p))
-                      ((symbol-function 'clutch-result--region-rectangle-indices)
-                       (lambda () rectangle))
-                      ((symbol-function 'clutch--cell-at-point)
-                       (lambda () cell)))
-              (clutch-result--copy-rows 'update)
-              (should (equal (current-kill 0) expected)))))))))
+            (apply #'clutch-test--select-cells cells)
+            (clutch-result--copy-rows 'update)
+            (should (equal (current-kill 0) expected))))))))
 
 (ert-deftest clutch-test-copy-builders-use-filtered-visible-row ()
   "Copy builders should resolve visible indices through filtered display rows."
@@ -6833,10 +6802,10 @@ PragmataPro does, shifting the rest of that row."
        :row-identity (clutch-test--primary-row-identity "users" '("id") '(0))
        :rows '((1 "alpha") (2 "beta"))
        :filter-pattern "beta"
-       :filtered-rows '((2 "beta")))
-    (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-              ((symbol-function 'clutch--cell-at-point)
-               (lambda () (list 0 1 "beta"))))
+       :filtered-rows '((2 "beta"))
+       :render t)
+    (let (kill-ring kill-ring-yank-pointer)
+      (clutch-test--select-cells '(0 1))
       (clutch-result--copy-rows 'update)
       (should (equal (current-kill 0)
                      "UPDATE \"users\" SET \"name\" = 'beta' WHERE \"id\" = 2"))
@@ -7278,26 +7247,20 @@ Only the family is remapped, so text scaling still applies once."
 
 (ert-deftest clutch-test-tsv-copy-selection-contract ()
   "TSV copy should use the selected columns with optional headers."
-  (dolist (case `((t ((0 1) . (0 2)) nil nil
-                     "id\tstate\n1\t<default>\n2\tactive")
-                  (nil nil (0 1 "alice") nil "name\nalice")
-                  (nil nil (0 2 ,clutch--cell-default-placeholder) t
-                       "<default>")))
-    (pcase-let ((`(,region-active ,rect ,cell ,omit-header ,expected) case))
-      (ert-info ((format "region: %s" region-active))
+  (dolist (case '((((0 0) (1 2)) nil "id\tname\tstate\n1\talice\t<default>\n2\tbob\tactive")
+                  (((0 1)) nil "name\nalice")
+                  (((0 2)) t "<default>")))
+    (pcase-let ((`(,cells ,omit-header ,expected) case))
+      (ert-info ((format "cells: %S" cells))
         (clutch-test--with-result-state
             (:columns '("id" "name" "state")
              :rows `((1 "alice" ,clutch--cell-default-placeholder)
-                     (2 "bob" "active")))
+                     (2 "bob" "active"))
+             :render t)
           (let (kill-ring kill-ring-yank-pointer)
-            (cl-letf (((symbol-function 'use-region-p)
-                       (lambda () region-active))
-                      ((symbol-function 'clutch-result--region-rectangle-indices)
-                       (lambda () rect))
-                      ((symbol-function 'clutch--cell-at-point)
-                       (lambda () cell)))
-              (clutch-result-copy 'tsv nil omit-header)
-              (should (equal (current-kill 0) expected)))))))))
+            (apply #'clutch-test--select-cells cells)
+            (clutch-result-copy 'tsv nil omit-header)
+            (should (equal (current-kill 0) expected))))))))
 
 (ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
   "Public CSV and TSV copy commands should copy through the real entry point."
@@ -7308,16 +7271,14 @@ Only the family is remapped, so text scaling still applies once."
       (ert-info ((symbol-name command))
         (clutch-test--with-result-state
             (:columns '("id" "name")
-             :rows '((1 "alice")))
+             :rows '((1 "alice"))
+             :render t)
           (let (kill-ring kill-ring-yank-pointer)
+            (clutch-test--select-cells '(0 1))
             (cl-letf (((symbol-function 'transient-args)
                        (lambda (_prefix) nil))
                       ((symbol-function 'transient-arg-value)
-                       (lambda (_flag _args) nil))
-                      ((symbol-function 'use-region-p)
-                       (lambda () nil))
-                      ((symbol-function 'clutch--cell-at-point)
-                       (lambda () '(0 1 "alice"))))
+                       (lambda (_flag _args) nil)))
               (funcall command)
               (should (equal (current-kill 0) expected-text)))))))))
 
@@ -7329,15 +7290,14 @@ Only the family is remapped, so text scaling still applies once."
     (pcase-let ((`(,command ,expected) case))
       (clutch-test--with-result-state
           (:columns '("name")
-           :rows '(("alice")))
+           :rows '(("alice"))
+           :render t)
         (let (kill-ring kill-ring-yank-pointer)
+          (clutch-test--select-cells '(0 0))
           (cl-letf (((symbol-function 'transient-args)
                      (lambda (_prefix) '("--no-header")))
                     ((symbol-function 'transient-arg-value)
-                     (lambda (flag args) (member flag args)))
-                    ((symbol-function 'use-region-p) (lambda () nil))
-                    ((symbol-function 'clutch--cell-at-point)
-                     (lambda () '(0 0 "alice"))))
+                     (lambda (flag args) (member flag args))))
             (funcall command)
             (should (equal (current-kill 0) expected))))))))
 
@@ -7359,19 +7319,19 @@ Only the family is remapped, so text scaling still applies once."
       (:columns '("id" "name" "score")
        :rows '((1 "alice" 10)
                (2 "bob" 20)
-               (3 "cam" 30)))
+               (3 "cam" 30))
+       :render t)
     (let (kill-ring kill-ring-yank-pointer)
-      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-                ((symbol-function 'transient-args)
+      (clutch-test--select-cells '(0 1) '(2 2))
+      (cl-letf (((symbol-function 'transient-args)
                  (lambda (_prefix) '("--refine")))
                 ((symbol-function 'transient-arg-value)
                  (lambda (flag args)
                    (and (equal flag "--refine")
                         (member "--refine" args))))
-                ((symbol-function 'clutch-result--region-rectangle-indices)
-                 (lambda () '((0 1 2) . (1 2))))
                 ((symbol-function 'clutch-result--start-refine)
-                 (lambda (_rect callback)
+                 (lambda (rect callback)
+                   (should (equal rect '((0 1 2) . (1 2))))
                    (funcall callback '((0 2) . (2))))))
         (clutch-result--copy-fmt 'csv)
         (should (equal (current-kill 0) "score\n10\n30"))))))
@@ -7384,40 +7344,36 @@ Only the family is remapped, so text scaling still applies once."
                       (:name "amount" :type-category numeric)
                       (:name "note" :type-category text))
        :rows '(("sh" 1 "a|b")
-               ("Tokyo" 200 "x\ny")))
+               ("Tokyo" 200 "x\ny"))
+       :render t)
     (let (kill-ring kill-ring-yank-pointer)
-      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-                ((symbol-function 'clutch-result--region-rectangle-indices)
-                 (lambda () '((0 1) . (0 1 2)))))
-        (clutch-result-copy 'org-table)
-        (should (equal (current-kill 0)
-                       (concat "| city  | amount | note    |\n"
-                               "|-------+--------+---------|\n"
-                               "| sh    |      1 | a\\vertb |\n"
-                               "| Tokyo |    200 | x\\ny    |")))))))
+      (clutch-test--select-cells '(0 0) '(1 2))
+      (clutch-result-copy 'org-table)
+      (should (equal (current-kill 0)
+                     (concat "| city  | amount | note    |\n"
+                             "|-------+--------+---------|\n"
+                             "| sh    |      1 | a\\vertb |\n"
+                             "| Tokyo |    200 | x\\ny    |"))))))
 
 (ert-deftest clutch-test-copy-delimited-unified-entry-uses-selection ()
   "CSV/TSV copy uses the selection without validating each value twice."
-  (dolist (case '((t ((0 1) 1 2) nil "c1,c2\na1,a2\nb1,b2" 6)
-                  (nil nil (0 1 a1) "c1\na1" 2)))
-    (pcase-let ((`(,region-active ,rect ,cell ,expected ,max-checks) case))
+  (dolist (case '((((0 1) (1 2)) "c1,c2\na1,a2\nb1,b2" 6)
+                  (((0 1)) "c1\na1" 2)))
+    (pcase-let ((`(,cells ,expected ,max-checks) case))
       (clutch-test--with-result-state
           (:columns '("c0" "c1" "c2")
-                    :rows '((a0 a1 a2)
-                            (b0 b1 b2)
-                            (c0 c1 c2)))
+           :rows '((a0 a1 a2)
+                   (b0 b1 b2)
+                   (c0 c1 c2))
+           :render t)
         (dolist (kind '(csv tsv))
           (let ((checks 0)
                 (check (symbol-function 'clutch-db-require-complete-value))
                 kill-ring kill-ring-yank-pointer)
+            ;; Copying deactivates the region, as it does for a user.
+            (apply #'clutch-test--select-cells cells)
             (cl-letf (((symbol-function 'clutch-db-require-complete-value)
-                       (lambda (value) (cl-incf checks) (funcall check value)))
-                      ((symbol-function 'use-region-p)
-                       (lambda () region-active))
-                      ((symbol-function 'clutch-result--region-rectangle-indices)
-                       (lambda () rect))
-                      ((symbol-function 'clutch--cell-at-point)
-                       (lambda () cell)))
+                       (lambda (value) (cl-incf checks) (funcall check value))))
               (clutch-result-copy kind)
               (should (equal (current-kill 0)
                              (if (eq kind 'tsv)
@@ -7428,31 +7384,27 @@ Only the family is remapped, so text scaling still applies once."
 (ert-deftest clutch-test-copy-insert-unified-entry-uses-selection ()
   "Unified INSERT copy should use either the active region or current cell."
   (dolist (case
-           '((t ((0 1) 0 1) nil
+           '((((0 0) (1 1))
               ("INSERT INTO \"t\" (\"id\", \"name\") VALUES ('1', 'a');"
                "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('2', 'b');"))
-	     (nil nil (0 1 "a")
+	     (((0 1))
 	      ("INSERT INTO \"t\" (\"name\") VALUES ('a');"))))
-    (pcase-let ((`(,region-active ,rect ,cell ,expected-lines) case))
+    (pcase-let ((`(,cells ,expected-lines) case))
       (clutch-test--with-result-state
           (:connection-params '(:backend mysql)
            :columns '("id" "name" "age")
            :rows '((1 "a" 10) (2 "b" 20))
-           :last-query "SELECT id, name, age FROM t")
+           :last-query "SELECT id, name, age FROM t"
+           :render t)
         (let (kill-ring kill-ring-yank-pointer)
-          (cl-letf (((symbol-function 'use-region-p)
-                     (lambda () region-active))
-                    ((symbol-function 'clutch-result--region-rectangle-indices)
-                     (lambda () rect))
-                    ((symbol-function 'clutch--cell-at-point)
-                     (lambda () cell))
-                    ((symbol-function 'clutch-db-escape-identifier)
+          (apply #'clutch-test--select-cells cells)
+          (cl-letf (((symbol-function 'clutch-db-escape-identifier)
                      (lambda (_conn s) (format "\"%s\"" s)))
                     ((symbol-function 'clutch-db-value-to-literal)
                      (lambda (_conn v &optional _formatter)
                        (format "'%s'" v))))
             (clutch-result-copy 'insert)
-            (if region-active
+            (if (cdr cells)
                 (dolist (expected expected-lines)
                   (should (string-match-p (regexp-quote expected)
                                           (current-kill 0))))

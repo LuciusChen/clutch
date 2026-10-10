@@ -392,6 +392,18 @@ ROWS defaults to a small three-row sample."
                  (point-max))))
     (buffer-substring start end)))
 
+(defun clutch-test--select-cells (from &optional to)
+  "Select the rendered cells from FROM to TO, each a (ROW COLUMN) list.
+Set the mark on FROM's cell and leave point inside TO's, as dragging over
+them does.  Without TO, only move point to FROM's cell."
+  (apply #'clutch--goto-cell from)
+  (when to
+    ;; Batch Emacs starts with Transient Mark mode off.
+    (setq-local transient-mark-mode t)
+    (push-mark (point) t t)
+    (apply #'clutch--goto-cell to)
+    (forward-char 1)))
+
 (provide 'clutch-test-common)
 
 ;;; clutch-test-common.el ends here
