@@ -462,47 +462,38 @@ answer can change has to invalidate or extend it correctly."
         (should (member "name" (clutch-test--completion-candidates
                                 (clutch-completion-at-point))))))))
 
-(ert-deftest clutch-test-execute-dwim-prefers-semicolon-statement-bounds ()
-  "DWIM execution should prefer semicolon-delimited statement bounds."
+(ert-deftest clutch-test-execute-dwim-statement-bounds ()
+  "DWIM execution should preserve statement bounds and leading SQL comments."
   :tags '(:smoke)
-  (with-temp-buffer
-    (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")
-    (goto-char (point-min))
-    (search-forward "third")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (sql beg end &optional _conn)
-                   (setq captured
-                         (list sql
-                               (string-trim
-                                (buffer-substring-no-properties beg end)))))))
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured
-                       '("INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"
-                         "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')")))))))
-
-(ert-deftest clutch-test-execute-dwim-drops-comment-only-prefix-paragraphs ()
-  "DWIM execution should not send detached comment dividers before SQL at point."
-  (with-temp-buffer
-    (insert (concat
-             "INSERT INTO audit_log VALUES (1);\n\n"
-             "-------------------------------------------------\n\n"
-             "-- update the subject name\n"
-             "UPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4;"))
-    (search-backward "UPDATE cap_sale_subject")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (sql beg end &optional _conn)
-                   (setq captured
-                         (list sql
-                               (string-trim
-                                (buffer-substring-no-properties beg end)))))))
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured
-                       '("-- update the subject name\nUPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4"
-                         "-- update the subject name\nUPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4")))))))
+  (pcase-dolist (`(,label ,sql ,marker ,expected)
+                 `((multiline-literal
+                    "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2"
+                    "third"
+                    "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')")
+                   (comment-only-prefix
+                    ,(concat "INSERT INTO audit_log VALUES (1);\n\n"
+                             "-------------------------------------------------\n\n"
+                             "-- update the subject name\n"
+                             "UPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4;")
+                    "-- update the subject name\n"
+                    "-- update the subject name\nUPDATE cap_sale_subject SET subject_name = 'new' WHERE subject_id = 4")
+                   (paragraph-without-semicolon
+                    "SELECT 1\n\nSELECT 2" "SELECT 2" "SELECT 2")))
+    (ert-info ((symbol-name label))
+      (with-temp-buffer
+        (insert sql)
+        (goto-char (point-min))
+        (search-forward marker)
+        (let (captured)
+          (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                    ((symbol-function 'clutch--execute-and-mark)
+                     (lambda (text beg end &optional _conn)
+                       (setq captured
+                             (list text
+                                   (string-trim
+                                    (buffer-substring-no-properties beg end)))))))
+            (clutch-execute-dwim (point) (point))
+            (should (equal captured (list expected expected)))))))))
 
 (ert-deftest clutch-test-execute-dwim-at-semicolon-edge ()
   "DWIM execution should handle semicolon-edge cursor positions."
@@ -528,22 +519,6 @@ answer can change has to invalidate or extend it correctly."
                       :type 'user-error)
         (search-forward "SELECT 2")
         (goto-char (match-beginning 0))
-        (clutch-execute-dwim (point) (point))
-        (should (equal captured '("SELECT 2" "SELECT 2")))))))
-
-(ert-deftest clutch-test-execute-dwim-falls-back-to-query-bounds-without-semicolons ()
-  "DWIM execution should keep blank-line query parsing when no top-level semicolon exists."
-  (with-temp-buffer
-    (insert "SELECT 1\n\nSELECT 2")
-    (goto-char (point-max))
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-and-mark)
-                 (lambda (sql beg end &optional _conn)
-                   (setq captured
-                         (list sql
-                               (string-trim
-                                (buffer-substring-no-properties beg end)))))))
         (clutch-execute-dwim (point) (point))
         (should (equal captured '("SELECT 2" "SELECT 2")))))))
 
@@ -859,23 +834,6 @@ ORDER BY id"
 
 ;;;; SQL parsing — string and comment awareness
 
-(ert-deftest clutch-test-skip-literal-or-comment ()
-  "Skip SQL literals and comments while leaving quoted identifiers alone."
-  (dolist (case '(("single quote" "'hello'" 0 7)
-                  ("escaped quote" "'it''s'" 0 7)
-                  ("unterminated quote" "'hello" 0 6)
-                  ("plain sql" "SELECT" 0 nil)
-                  ("line comment" "-- comment\ncode" 0 11)
-                  ("line comment at eof" "-- comment" 0 10)
-                  ("block comment" "/* block */" 0 11)
-                  ("unterminated block" "/* open" 0 7)
-                  ("double-quoted identifier" "\"User Table\"" 0 nil)
-                  ("backtick identifier" "`user_table`" 0 nil)))
-    (pcase-let ((`(,label ,sql ,pos ,expected) case))
-      (ert-info ((format "case: %s" label))
-        (should (equal (clutch-db-sql-skip-literal-or-comment sql pos)
-                       expected))))))
-
 (ert-deftest clutch-test-substitute-params-skips-quoted-identifiers ()
   "Parameter substitution should only consume executable placeholders."
   (should
@@ -1148,7 +1106,17 @@ Keywords inside a function body are literal text, not clauses."
 (ert-deftest clutch-test-skip-literal-or-comment-contract ()
   "Skipping must end exactly after each literal or comment, or at the end."
   (let ((mysql (clutch-db-sql-dialect 'mysql)))
-    (dolist (case `(("doubled quote" "'a''b' x" nil nil 6)
+    (dolist (case `(("single quote" "'hello'" nil nil 7)
+                    ("escaped quote" "'it''s'" nil nil 7)
+                    ("unterminated quote" "'hello" nil nil 6)
+                    ("plain sql" "SELECT" nil nil nil)
+                    ("line comment before code" "-- comment\ncode" nil nil 11)
+                    ("line comment at eof" "-- comment" nil nil 10)
+                    ("closed block comment" "/* block */" nil nil 11)
+                    ("unterminated block comment" "/* open" nil nil 7)
+                    ("double-quoted identifier" "\"User Table\"" nil nil nil)
+                    ("backtick identifier" "`user_table`" nil nil nil)
+                    ("doubled quote" "'a''b' x" nil nil 6)
                     ("unterminated literal" "'abc" nil nil 4)
                     ("line comment" "-- x\nSELECT" nil nil 5)
                     ("line comment at end" "-- x" nil nil 4)
@@ -1386,61 +1354,59 @@ Structure is not interpreted here; callers confirm depth and literals through
                          "select * from users GROUP BY ")))))))
 
 (ert-deftest clutch-test-native-sql-capf-defers-uncached-column-metadata ()
-  "Native SQL CAPF should defer uncached column metadata for PG and MySQL."
-  (dolist (backend '(pg mysql))
-    (ert-info ((format "backend: %s" backend))
-      (clutch-test--with-isolated-metadata-caches
-        (let ((schema (make-hash-table :test 'equal))
-              (clutch-connection nil)
-              (deferred-requests 0))
-          (puthash "users" nil schema)
+  "CAPF should defer uncached columns when the adapter supports it."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((schema (make-hash-table :test 'equal))
+          (clutch-connection nil)
+          (deferred-requests 0))
+      (puthash "users" nil schema)
+      (with-temp-buffer
+        (clutch-mode)
+        (setq-local clutch-connection 'fake-conn)
+        (insert "select nam from users")
+        (goto-char (point-min))
+        (search-forward "nam")
+        (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                   (lambda (&optional _conn) schema))
+                  ((symbol-function 'clutch-db-completion-deferred-columns-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch-db-busy-p)
+                   (lambda (_conn) nil))
+                  ((symbol-function 'clutch-db-live-p)
+                   (lambda (_conn) t))
+                  ((symbol-function 'clutch--ensure-columns)
+                   (lambda (&rest _args)
+                     (ert-fail
+                      "uncached native completion called synchronous column metadata")))
+                  ((symbol-function 'clutch-db-list-columns)
+                   (lambda (&rest _args)
+                     (ert-fail
+                      "uncached native completion called synchronous column listing")))
+                  ((symbol-function 'clutch-db-list-columns-async)
+                   (lambda (_conn table _callback &optional _errback)
+                     (should (equal table "users"))
+                     (cl-incf deferred-requests)
+                     t)))
+          (should-not (completion-at-point))
+          (should (= deferred-requests 1))
+          (puthash "users" '("name" "id") schema)
           (with-temp-buffer
             (clutch-mode)
             (setq-local clutch-connection 'fake-conn)
             (insert "select nam from users")
             (goto-char (point-min))
             (search-forward "nam")
-            (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                       (lambda (&optional _conn) schema))
-                      ((symbol-function 'clutch-db-completion-deferred-columns-p)
-                       (lambda (_conn) backend))
-                      ((symbol-function 'clutch-db-busy-p)
-                       (lambda (_conn) nil))
-                      ((symbol-function 'clutch-db-live-p)
-                       (lambda (_conn) t))
-                      ((symbol-function 'clutch--ensure-columns)
-                       (lambda (&rest _args)
-                         (ert-fail
-                          "uncached native completion called synchronous column metadata")))
-                      ((symbol-function 'clutch-db-list-columns)
-                       (lambda (&rest _args)
-                         (ert-fail
-                          "uncached native completion called synchronous column listing")))
-                      ((symbol-function 'clutch-db-list-columns-async)
-                       (lambda (_conn table _callback &optional _errback)
-                         (should (equal table "users"))
-                         (cl-incf deferred-requests)
-                         t)))
-              (should-not (completion-at-point))
-              (should (= deferred-requests 1))
-              (puthash "users" '("name" "id") schema)
-              (with-temp-buffer
-                (clutch-mode)
-                (setq-local clutch-connection 'fake-conn)
-                (insert "select nam from users")
-                (goto-char (point-min))
-                (search-forward "nam")
-                (let (captured)
-                  (cl-letf ((completion-in-region-function
-                             (lambda (start end collection &optional predicate)
-                               (setq captured
-                                     (all-completions
-                                      (buffer-substring-no-properties start end)
-                                      collection predicate))
-                               t)))
-                    (should (completion-at-point)))
-                  (should (equal captured '("name")))
-                  (should (= deferred-requests 1)))))))))))
+            (let (captured)
+              (cl-letf ((completion-in-region-function
+                         (lambda (start end collection &optional predicate)
+                           (setq captured
+                                 (all-completions
+                                  (buffer-substring-no-properties start end)
+                                  collection predicate))
+                           t)))
+                (should (completion-at-point)))
+              (should (equal captured '("name")))
+              (should (= deferred-requests 1)))))))))
 
 (ert-deftest clutch-test-native-sql-capf-does-not-cache-unknown-table ()
   "Native SQL CAPF should not turn a parsed typo into a cached table."

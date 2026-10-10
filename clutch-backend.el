@@ -1661,6 +1661,23 @@ blocking.")
   "Return nil because this backend cannot run SQL without blocking."
   nil)
 
+(cl-defgeneric clutch-db-delimited-export-async
+    (conn sql delimiter header null-text function callback)
+  "Start streaming the result of SQL on CONN as text and return non-nil.
+Fields are separated by DELIMITER, a character, and quoted when they
+contain it, a double quote or a line break, or equal NULL-TEXT, with
+double quotes doubled; SQL NULL is NULL-TEXT, unquoted.  HEADER non-nil
+starts the text with the column names.  FUNCTION is called in order,
+from timers, with the next part of the text and the number of rows it
+holds; it may wait, as writing a remote file does, and is not called
+again until it returns.  CALLBACK is later called once, as for
+`clutch-db-query-async', after FUNCTION's last call has returned.
+Return nil, calling neither, when CONN cannot stream SQL.")
+
+(cl-defmethod clutch-db-delimited-export-async ((_conn t) &rest _)
+  "Return nil because this backend cannot stream delimited text."
+  nil)
+
 (cl-defgeneric clutch-db-result-query-p (conn sql)
   "Return non-nil when SQL should render as a tabular result for CONN.")
 
