@@ -29,7 +29,7 @@ SQL execution status marks the statement's starting line with a colored dot: a f
 
 =M-x clutch-export-query= and Execute → Export query to file (=C-c ?=, then =e=) export the selected region, or the statement at point, directly to a file. The minibuffer asks for CSV/TSV, encoding and destination, and asks before overwriting an existing file. Export accepts one SELECT, including a SELECT-only WITH query, and refuses multiple statements, SELECT INTO and data-changing CTEs. It uses the query's columns without adding editing identity columns, leaves the existing result and its staged edits intact, and does not open a result grid. Files include a header even for an empty result. The encoding, incomplete-value checks and atomic file replacement follow the result exporter described below.
 
-Query export offers =clutch-export-default-format= (=csv= by default) and the existing =clutch-csv-export-default-coding-system=. File exports, including the result menu, offer =clutch-export-default-directory= and =clutch-export-default-file-name= when set. Otherwise they use the current buffer's directory and the format's file name, such as =export.csv= or =export.tsv=. These are prompt defaults, so each export can choose something else; a configured file name keeps its extension even when another format is chosen. Choose an existing directory. For example:
+Query export offers =clutch-export-default-format= (=csv= by default) and the existing =clutch-csv-export-default-coding-system=. File exports, including the result menu, offer =clutch-export-default-directory= when set, and CSV and TSV file exports also offer =clutch-export-default-file-name=. Otherwise they use the current buffer's directory and the format's file name, such as =export.csv= or =export.tsv=. These are prompt defaults, so each export can choose something else; a configured file name keeps its extension even when the other of CSV and TSV is chosen. Choose an existing directory. For example:
 
 #+begin_src emacs-lisp
 (setq clutch-export-default-format 'tsv
@@ -87,11 +87,10 @@ The =e= exporter uses the same Transient interaction model as =c=. Copy identifi
 
 By default, CSV/TSV copy and export write SQL NULL as an unquoted empty field, an empty string as =""=, and literal =NULL= text as =NULL=. This keeps the three values distinct in the output; importers must recognize this convention rather than treating every empty field as empty text. It is independent of encoding and applies to both query and result export. Oracle already treats empty character strings as SQL NULL, so they use the NULL representation there.
 
-=clutch-export-null-value-text= changes the unquoted NULL marker, and =clutch-export-quote-values= chooses =when-needed= (the default), =always= or =never=. Double quotes are doubled inside quoted fields. With =when-needed=, ordinary text matching the NULL marker is quoted too; with =always=, every non-NULL value, including column headers, is quoted. =never= disables quoting and escaping, so separators or line breaks can split values, and text matching the marker becomes indistinguishable from SQL NULL. Choose a NULL marker without separators, double quotes or line breaks, and configure the importer to match. These settings affect CSV/TSV copying as well as both file exporters; they do not change result display or insert-form import. For example:
+=clutch-export-null-value-text= changes the unquoted NULL marker. Values containing the separator, a double quote or a line break are quoted, with double quotes doubled inside, and so is ordinary text matching the NULL marker. Choose a NULL marker without separators, double quotes or line breaks, and configure the importer to match. These settings affect CSV/TSV copying as well as both file exporters; they do not change result display or insert-form import. For example:
 
 #+begin_src emacs-lisp
-(setq clutch-export-null-value-text "NULL"
-      clutch-export-quote-values 'when-needed)
+(setq clutch-export-null-value-text "NULL")
 #+end_src
 
 This writes SQL NULL as =NULL=, empty text as an unquoted empty field, and literal =NULL= text as ="NULL"=.
@@ -543,9 +542,8 @@ Customize these through =M-x customize-group RET clutch RET=:
 - =clutch-csv-export-default-coding-system= sets the default CSV and TSV encoding (UTF-8 with BOM by default for Excel compatibility).
 - =clutch-export-default-format= sets the format offered by query export (=csv= or =tsv=).
 - =clutch-export-default-directory= sets the offered file export directory; =nil= uses the current buffer's directory.
-- =clutch-export-default-file-name= sets the offered file name; =nil= uses the format's default.
+- =clutch-export-default-file-name= sets the offered CSV and TSV file name; =nil= uses the format's default.
 - =clutch-export-null-value-text= sets the unquoted CSV/TSV NULL marker (an empty field by default).
-- =clutch-export-quote-values= chooses =when-needed=, =always= or =never= for CSV/TSV values and headers.
 - =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through 10,000 rows (default 500).
 - =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.
 - =clutch-sql-completion-case-style= controls whether SQL completion preserves, lowercases, or uppercases inserted identifiers/keywords.

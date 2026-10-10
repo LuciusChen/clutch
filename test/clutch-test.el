@@ -6553,18 +6553,10 @@ a word that ends a whole rollback, such as CHAIN."
     (should (equal (clutch--export-csv-content '((1 "a,b")) t)
                    "1,\"a,b\"\n"))
     (setq-local clutch--result-columns '("null" "empty" "marker" "comma" "quote"))
-    (dolist (case '((when-needed "" ",\"\",NULL,\"a,b\",\"a\"\"b\"")
-                    (when-needed "NULL" "NULL,,\"NULL\",\"a,b\",\"a\"\"b\"")
-                    (always "NULL" "NULL,\"\",\"NULL\",\"a,b\",\"a\"\"b\"")
-                    (never "NULL" "NULL,,NULL,a,b,a\"b")))
-      (pcase-let ((`(,clutch-export-quote-values
-                    ,clutch-export-null-value-text ,expected) case))
-        (ert-info ((format "%s with NULL text %S"
-                           clutch-export-quote-values
-                           clutch-export-null-value-text))
-          (should (equal (clutch--export-csv-content
-                          '((nil "" "NULL" "a,b" "a\"b")) t)
-                         (concat expected "\n"))))))))
+    (let ((clutch-export-null-value-text "NULL"))
+      (should (equal (clutch--export-csv-content
+                      '((nil "" "NULL" "a,b" "a\"b")) t)
+                     "NULL,,\"NULL\",\"a,b\",\"a\"\"b\"\n")))))
 
 (ert-deftest clutch-test-tsv-content-includes-header-and-escapes-fields ()
   "TSV content should preserve its tabular shape around special characters."
@@ -8947,7 +8939,6 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                 (insert "SELECT 7 AS id, '中文' AS name, NULL AS missing, '' AS empty, 'NULL' AS marker")
                 (let* ((clutch-export-default-format (if custom 'tsv 'csv))
                        (clutch-export-null-value-text (if custom "NULL" ""))
-                       (clutch-export-quote-values (if custom 'always 'when-needed))
                        (clutch-csv-export-default-coding-system
                         (if custom 'utf-8 'utf-8-with-signature))
                        (clutch-export-default-directory (and custom export-dir))
@@ -8956,7 +8947,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                                (if custom export-dir source-dir)))
                        (expected
                         (if custom
-                            "\"id\"\t\"name\"\t\"missing\"\t\"empty\"\t\"marker\"\n\"7\"\t\"中文\"\tNULL\t\"\"\t\"NULL\"\n"
+                            "id\tname\tmissing\tempty\tmarker\n7\t中文\tNULL\t\t\"NULL\"\n"
                           "id,name,missing,empty,marker\n7,中文,,\"\",NULL\n")))
                   (cl-letf (((symbol-function 'read-file-name)
                              (lambda (_prompt directory _default _mustmatch initial)
@@ -8976,7 +8967,19 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                        (buffer-string))
                                      (encode-coding-string
                                       expected clutch-csv-export-default-coding-system)))
-                      (delete-file path))))))))
+                      (delete-file path)))
+                  ;; The configured name is for CSV and TSV; SQL keeps its own.
+                  (let (offered)
+                    (cl-letf (((symbol-function 'read-file-name)
+                               (lambda (_prompt directory _default _mustmatch initial)
+                                 (setq offered (list directory initial))
+                                 (expand-file-name initial directory)))
+                              ((symbol-function 'clutch-result--write-export-file)
+                               #'ignore)
+                              ((symbol-function 'message) #'ignore))
+                      (clutch--export-result 'insert 'file))
+                    (should (equal offered
+                                   (list (and custom export-dir) "export.sql")))))))))
       (clutch-db-disconnect conn)
       (delete-directory dir t))))
 
