@@ -10715,6 +10715,37 @@ without a running query changes nothing."
           (funcall command-error-function '(quit) "" nil)
           (should (equal interrupts '(async-conn))))))))
 
+(ert-deftest clutch-test-quit-cancel-request-gives-up-in-time ()
+  "A quit's cancel request that does not finish in time counts as refused.
+The error handler runs with quitting inhibited, and a backend may wait
+for the request without a deadline, as pgsql.el does for a zero connect
+timeout.  The query stays marked as cancelled, so its workflow stops."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements _finishes
+      (let ((clutch--quit-cancel-seconds 0.2)
+            messages start)
+        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (_conn)
+                     ;; Wait as a stalled connection does, running timers.
+                     (let ((end (+ (float-time) 5)))
+                       (while (< (float-time) end)
+                         (accept-process-output nil 0.05)))
+                     t))
+                  ((symbol-function 'command-error-default-function) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (format &rest args)
+                     (push (apply #'format-message format args) messages))))
+          (clutch--run-db-query-async 'async-conn "SELECT 1" nil #'ignore)
+          (setq start (float-time))
+          (let ((inhibit-quit t))
+            (funcall command-error-function '(quit) "" nil))
+          (should (< (- (float-time) start) 2))
+          (should (plist-get (gethash 'async-conn clutch--running-queries)
+                             :cancelling))
+          (should (member "The query could not be cancelled; waiting for its result, then stopping"
+                          messages)))))))
+
 (ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
   "SQL from an indirect edit should run in a buffer that holds its connection.
 Closing the edit shows a buffer of another kind, such as source code, which
