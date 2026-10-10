@@ -2136,7 +2136,9 @@ PostgreSQL's own text applies where the export streams with COPY."
       (empty ,varchar "''" ,(if oracle "" "\"\"") ,(if oracle "" "\"\"")))))
 
 (ert-deftest clutch-test-live-query-export-wide-table-without-identity ()
-  "Export 101 columns and 602 rows of varied types without a key or index."
+  "Export 101 columns and 602 rows of varied types without a key or index.
+The CSV is exported again through a file handler that waits for process
+output, as a remote file does, and keeps every row in order."
   :tags '(:clutch-live)
   (unless (or (memq clutch-test-backend '(mysql pg oracle sqlserver))
               (and (eq clutch-test-backend 'jdbc) clutch-test-url
@@ -2145,6 +2147,27 @@ PostgreSQL's own text applies where the export streams with COPY."
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_export_wide_%d" (emacs-pid)))
            (path (make-temp-file "clutch-export-wide-"))
+           (wait-dir (make-temp-file "clutch-export-wait-" t))
+           waited
+           (wait-handler
+            (letrec ((handler
+                      (lambda (operation &rest args)
+                        ;; Creating the temporary file writes nothing; wait
+                        ;; on the first part, letting the rest arrive meanwhile.
+                        (when (and (eq operation 'write-region)
+                                   (not (equal (car args) ""))
+                                   (not waited))
+                          (setq waited t)
+                          (let ((end (+ (float-time) 0.5)))
+                            (while (< (float-time) end)
+                              (accept-process-output nil 0.05))))
+                        (let ((inhibit-file-name-handlers
+                               (cons handler
+                                     (and (eq inhibit-file-name-operation operation)
+                                          inhibit-file-name-handlers)))
+                              (inhibit-file-name-operation operation))
+                          (apply operation args)))))
+              handler))
            (cases (clutch-test--query-export-type-cases))
            (fields (cl-loop for group below 5 append
                             (cl-loop for case in cases collect
@@ -2200,14 +2223,21 @@ PostgreSQL's own text applies where the export streams with COPY."
                       (_ (format "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name='%s'" table))))
                    (count (caar (clutch-db-result-rows (clutch-db-query conn index-sql)))))
               (should (= (string-to-number (format "%s" count)) 0)))
-            (dolist (kind '(csv tsv))
+            (pcase-dolist (`(,kind . ,wait) '((csv) (tsv) (csv . t)))
               (with-temp-buffer
                 (clutch-mode)
                 (setq-local clutch-connection conn)
                 (insert select)
                 (let ((clutch-result-max-rows 500)
                       (clutch-export-page-size 200)
-                      (clutch-jdbc-fetch-size 50))
+                      (clutch-jdbc-fetch-size 50)
+                      (path (if wait (expand-file-name "out.csv" wait-dir) path))
+                      (file-name-handler-alist
+                       (if wait
+                           (cons (cons (regexp-quote (file-name-as-directory wait-dir))
+                                       wait-handler)
+                                 file-name-handler-alist)
+                         file-name-handler-alist)))
                   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
                             ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
                             ((symbol-function 'clutch-db-primary-key-columns)
@@ -2238,11 +2268,13 @@ PostgreSQL's own text applies where the export streams with COPY."
                                    (substring actual offset (min (length actual) (+ offset 100)))))))))
                   (should-not clutch--last-result-buffer)
                   (should-not (clutch-db--foreground-busy-p conn)))))
-            (message "Wide export verified on %s: 101 columns, 602 rows, no primary key, no indexes, CSV and TSV"
+            (should waited)
+            (message "Wide export verified on %s: 101 columns, 602 rows, no primary key, no indexes, CSV and TSV, and CSV through a waiting file handler"
                      clutch-test-backend))
         (when created
           (clutch-db-query conn (format "DROP TABLE %s" table)))
-        (delete-file path)))))
+        (delete-file path)
+        (delete-directory wait-dir t)))))
 
 (ert-deftest clutch-test-live-query-export-refuses-unavailable-binary ()
   "Reject JDBC binary metadata, while exporting a complete XML BLOB value."
