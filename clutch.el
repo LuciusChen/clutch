@@ -194,12 +194,12 @@ Underlined to indicate clickable (RET to follow)."
   :group 'clutch)
 
 (defface clutch-running-sql-face
-  '((t :inherit secondary-selection :extend t))
+  '((t :inherit secondary-selection :extend nil))
   "Face for the background of SQL that is still running."
   :group 'clutch)
 
 (defface clutch-cancelling-sql-face
-  '((t :inherit isearch-fail :extend t))
+  '((t :inherit isearch-fail :extend nil))
   "Face for the background of SQL that is being cancelled."
   :group 'clutch)
 
