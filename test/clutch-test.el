@@ -11031,6 +11031,10 @@ Its marker shows that it ran even when presenting its result fails."
           (should (string-prefix-p
                    "Running"
                    (overlay-get clutch--executed-sql-overlay 'help-echo)))
+          (should (eq (overlay-get clutch--executed-sql-overlay 'face)
+                      'clutch-running-sql-face))
+          (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
+          (should (= (overlay-end clutch--executed-sql-overlay) (point-max)))
           (should-error (clutch--execute "SELECT 2") :type 'user-error)
           (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
           (should-not displayed)
@@ -11041,7 +11045,10 @@ Its marker shows that it ran even when presenting its result fails."
           (should-not clutch--execution-start-time)
           (should (string-prefix-p
                    "Last executed"
-                   (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
+                   (overlay-get clutch--executed-sql-overlay 'help-echo)))
+          (should-not (overlay-get clutch--executed-sql-overlay 'face))
+          (should (= (overlay-start clutch--executed-sql-overlay)
+                     (overlay-end clutch--executed-sql-overlay)))))))
   (with-temp-buffer
     (insert "UPDATE t SET n = 1 WHERE id = 1")
     (setq-local clutch-connection 'async-conn)
@@ -11312,12 +11319,17 @@ there, and the result keeps its rows and its unknown total."
 
 (ert-deftest clutch-test-async-markers-follow-edits-while-running ()
   "Status markers should stay on their statement while the buffer is edited.
+While it runs or is being cancelled, its background covers just its text.
 A statement deleted while it runs leaves no marker behind."
   (cl-flet ((marker-line ()
               (save-excursion
                 (goto-char (overlay-start clutch--executed-sql-overlay))
                 (buffer-substring-no-properties
-                 (line-beginning-position) (line-end-position)))))
+                 (line-beginning-position) (line-end-position))))
+            (marked-text ()
+              (buffer-substring-no-properties
+               (overlay-start clutch--executed-sql-overlay)
+               (overlay-end clutch--executed-sql-overlay))))
     (with-temp-buffer
       (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
       (setq-local clutch-connection 'async-conn)
@@ -11327,8 +11339,15 @@ A statement deleted while it runs leaves no marker behind."
           (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
           (goto-char (point-min))
           (insert "-- typed while it runs\n")
+          (save-excursion
+            (goto-char (overlay-start clutch--executed-sql-overlay))
+            (insert "-- typed at its start\n"))
+          (should (equal (marked-text) "UPDATE t SET n = 1;"))
           (clutch-cancel-query-or-quit)
           (should (equal (marker-line) "UPDATE t SET n = 1;"))
+          (should (equal (marked-text) "UPDATE t SET n = 1;"))
+          (should (eq (overlay-get clutch--executed-sql-overlay 'face)
+                      'clutch-cancelling-sql-face))
           (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
           (ert-run-idle-timers)
           (should (equal (marker-line) "UPDATE t SET n = 1;")))))
