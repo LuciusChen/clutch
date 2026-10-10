@@ -2742,10 +2742,12 @@ drawn."
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-test-live-pg-qualified-table-changes-itself ()
-  "A result of a table in another schema should be edited by its own key.
+  "A result of a table in another schema should be changed by its own key.
 public has a table of the same name keyed by another column, and the
 schema is not on the search path.  Unquoted names fold to lower case and
-quoted ones keep their case, as PostgreSQL reads them."
+quoted ones keep their case, as PostgreSQL reads them, so a row inserted
+through a query that writes the whole name in upper case still goes to
+the schema's table."
   :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "Live backend is not PostgreSQL"))
@@ -2785,9 +2787,12 @@ quoted ones keep their case, as PostgreSQL reads them."
                 (clutch-db-query conn sql))
               (clutch-test--with-live-result-buffer result-name
                 (clutch-test--execute-live-select
-                 conn (format "SELECT * FROM %s.%s ORDER BY pk" (upcase schema) table))
+                 conn (format "SELECT * FROM %s.%s ORDER BY pk"
+                              (upcase schema) (upcase table)))
                 (with-current-buffer result-name
                   (should (equal (plist-get clutch--row-identity :columns) '("pk")))
+                  (setq-local clutch--pending-inserts
+                              '((("pk" . "3") ("id" . "new") ("nick" . "c"))))
                   (edit-first-row "nick" "A"))
                 (clutch-test--execute-live-select
                  conn (format "SELECT * FROM %s.\"People\"" quoted))
@@ -2796,7 +2801,7 @@ quoted ones keep their case, as PostgreSQL reads them."
                   (edit-first-row "name" "Cz")))
               (should (equal (rows (format "SELECT pk, nick FROM %s.%s ORDER BY pk"
                                            schema table))
-                             '((1 "A") (2 "b"))))
+                             '((1 "A") (2 "b") (3 "c"))))
               (should (equal (rows (format "SELECT name FROM %s.\"People\"" quoted))
                              '(("Cz"))))
               (should-not (rows (format "SELECT * FROM public.%s" table))))

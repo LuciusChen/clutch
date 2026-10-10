@@ -1415,10 +1415,15 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
         (should (equal (plist-get prep :sql)
                        "SELECT id FROM APP.reports"))))))
 
-(ert-deftest clutch-test-qualified-update-preserves-target-and-default-syntax ()
-  "Qualified UPDATE targets and DEFAULT assignments should remain SQL syntax."
+(ert-deftest clutch-test-qualified-changes-preserve-target-and-default-syntax ()
+  "Qualified targets and DEFAULT assignments should remain SQL syntax.
+UPDATE, DELETE and INSERT all name APP.reports as the query wrote it,
+although Oracle stores the table as REPORTS.  Without a row identity, an
+INSERT after a server-side filter wrapped the query names the stored
+table with its schema."
   (let ((clutch-connection
          (make-clutch-jdbc-conn :params '(:driver oracle)))
+        (clutch--last-query "SELECT * FROM APP.reports")
         (clutch--result-columns '("ID" "STATUS" "NOTE"))
         (clutch--result-column-defs
          '((:name "ID" :backend-type "NUMBER" :source-column "ID")
@@ -1449,7 +1454,17 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
                        (concat "UPDATE APP.reports SET \"STATUS\" = DEFAULT, "
                                "\"NOTE\" = ? WHERE \"ID\" = ?")))
         (should (equal (clutch-db-param-values update-params) '("ready" 7)))
-        (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql))))))
+        (should (string-prefix-p "DELETE FROM APP.reports WHERE" delete-sql))
+        (should (equal (car (clutch-result-insert--build-sql
+                             clutch-connection (clutch--table-key "REPORTS" "APP")
+                             '(("ID" . "7") ("STATUS" . "new"))))
+                       "INSERT INTO APP.reports (\"ID\", \"STATUS\") VALUES (?, ?)"))
+        (let ((clutch--last-query
+               "SELECT * FROM (SELECT * FROM APP.reports) _clutch_filter WHERE ID = 7"))
+          (should (equal (car (clutch-result-insert--build-sql
+                               clutch-connection (clutch--table-key "REPORTS" "APP")
+                               '(("ID" . "7"))))
+                         "INSERT INTO \"APP\".\"REPORTS\" (\"ID\") VALUES (?)")))))))
 
 (ert-deftest clutch-test-jdbc-update-uses-schema-type-for-blob-parameter ()
   "JDBC staged updates should retain BLOB type from column metadata."
@@ -5446,7 +5461,7 @@ The page that statement brings would replace the staged rows."
       (kill-buffer buf))))
 
 (defconst clutch-test--each-kind-sql
-  (concat "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('3', 'c');\n"
+  (concat "INSERT INTO t (\"id\", \"name\") VALUES ('3', 'c');\n"
           "UPDATE t SET \"name\" = 'a2' WHERE \"id\" = 1;\n"
           "DELETE FROM t WHERE \"id\" = 2;\n")
   "The SQL that `clutch-test--with-each-kind-staged' stages, as copied.")
@@ -6382,10 +6397,10 @@ a word that ends a whole rollback, such as CHAIN."
                   ("t" ("--no-header") clipboard "1\ta,b\n" nil)
                   ("t" ("--file") file "id\tname\n1\ta,b\n" "TSV")
                   ("i" nil clipboard
-                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
+                   "INSERT INTO users (\"id\", \"name\") VALUES (1, 'a,b');\n"
                    nil)
                   ("i" ("--file") file
-                   "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a,b');\n"
+                   "INSERT INTO users (\"id\", \"name\") VALUES (1, 'a,b');\n"
                    nil)
                   ;; UPDATE names the table as the query did.
                   ("u" nil clipboard
@@ -6510,11 +6525,12 @@ a word that ends a whole rollback, such as CHAIN."
     (setq-local clutch-connection (make-clutch-test-conn)
                 clutch--result-columns '("id" "name")
                 clutch--result-rows '((999 "current-page-only"))
+                clutch--result-source-table "users"
                 clutch--last-query "SELECT id, name FROM users")
     (should (equal (clutch--export-insert-content '((1 "a") (2 "b")))
                    (concat
-                    "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'a');\n"
-                    "INSERT INTO \"users\" (\"id\", \"name\") VALUES (2, 'b');\n")))
+                    "INSERT INTO users (\"id\", \"name\") VALUES (1, 'a');\n"
+                    "INSERT INTO users (\"id\", \"name\") VALUES (2, 'b');\n")))
     (should-not (string-match-p "current-page-only"
                                 (clutch--export-insert-content '((1 "a")))))))
 
@@ -6763,7 +6779,7 @@ PragmataPro does, shifting the rest of that row."
                  '("INSERT INTO \"models\" (\"precision\") VALUES ('{0,1,2}')")))
         (should (equal
                  (clutch-result--build-insert-statements-for-rows
-                  '((1 [0 1 2])) '(1) "models")
+                  '((1 [0 1 2])) '(1))
                  '("INSERT INTO \"models\" (\"precision\") VALUES ('{0,1,2}');")))))))
 
 (ert-deftest clutch-test-copy-update-uses-selection ()
@@ -6817,7 +6833,7 @@ PragmataPro does, shifting the rest of that row."
                      '("name" "beta")))
       (should (equal (clutch-result--build-insert-statements-for-rows
                       (clutch-result--rows-for-display-indices '(0))
-                      '(1) "users")
+                      '(1))
                      '("INSERT INTO \"users\" (\"name\") VALUES ('beta');"))))))
 
 (ert-deftest clutch-test-copy-update-rejects-non-writable-selections ()
@@ -7369,15 +7385,16 @@ Only the family is remapped, so text scaling still applies once."
   "Unified INSERT copy should use either the active region or current cell."
   (dolist (case
            '((((0 0) (1 1))
-              ("INSERT INTO \"t\" (\"id\", \"name\") VALUES ('1', 'a');"
-               "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('2', 'b');"))
+              ("INSERT INTO t (\"id\", \"name\") VALUES ('1', 'a');"
+               "INSERT INTO t (\"id\", \"name\") VALUES ('2', 'b');"))
 	     (((0 1))
-	      ("INSERT INTO \"t\" (\"name\") VALUES ('a');"))))
+	      ("INSERT INTO t (\"name\") VALUES ('a');"))))
     (pcase-let ((`(,cells ,expected-lines) case))
       (clutch-test--with-result-state
           (:connection-params '(:backend mysql)
            :columns '("id" "name" "age")
            :rows '((1 "a" 10) (2 "b" 20))
+           :source-table "t"
            :last-query "SELECT id, name, age FROM t"
            :render t)
         (let (kill-ring kill-ring-yank-pointer)
@@ -8304,9 +8321,8 @@ table sits in another schema, or the column is generated."
                   (setq result clutch--last-result-buffer))
                 (with-current-buffer result
                   (should (equal (clutch-result--build-insert-statements-for-rows
-                                  clutch--result-rows (clutch--visible-columns)
-                                  (clutch--insert-target-table))
-                                 '("INSERT INTO \"people\" (\"id\", \"name\") VALUES (1, 'alpha');")))
+                                  clutch--result-rows (clutch--visible-columns))
+                                 '("INSERT INTO people (\"id\", \"name\") VALUES (1, 'alpha');")))
                   (kill-buffer result))))))
       (clutch--execution-refresh-stop)
       (when (buffer-live-p source)
@@ -11772,7 +11788,8 @@ Otherwise the connection stays reserved and the mode line keeps counting."
 (ert-deftest clutch-test-qualified-sqlite-result-changes-its-own-table ()
   "Every change staged on a result of aux.people should go to aux.people.
 Its key and columns come from aux.people, not from main.people, which
-SQLite finds first for the bare name, has another key and lacks a column."
+SQLite finds first for the bare name, has another key and lacks a column.
+A server-side filter, which wraps the query, keeps that table."
   (require 'clutch-db-sqlite)
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
         result-buf)
@@ -11793,6 +11810,9 @@ SQLite finds first for the bare name, has another key and lacks a column."
                     (buffer-local-value 'clutch--last-result-buffer source))))
           (with-current-buffer result-buf
             (should (equal (plist-get clutch--row-identity :columns) '("pk")))
+            (clutch-test--with-minibuffer-answers '("id" "= 'same'")
+              (clutch-result-apply-filter))
+            (clutch-test--await-queries)
             (let ((rows clutch--result-rows))
               (clutch-result--apply-edit
                0 (cl-position "nick" clutch--result-columns :test #'string=) "A"
@@ -11820,6 +11840,52 @@ SQLite finds first for the bare name, has another key and lacks a column."
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf))
       (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-changes-name-the-table-as-the-query-did ()
+  "Staged and exported changes should name the table as the query did.
+A staged INSERT, UPDATE and DELETE and an exported INSERT of one result
+name its table alike, whether the query wrote it in another case, with an
+alias, quoted, qualified or through a CTE."
+  (cl-flet ((target (sql)
+              (and (string-match (concat "\\`\\(?:INSERT INTO\\|UPDATE\\|DELETE FROM\\) "
+                                         "\\(.+?\\) \\(?:(\\|SET \\|WHERE \\)")
+                                 sql)
+                   (match-string 1 sql))))
+    (pcase-dolist (`(,query ,table)
+                   '(("SELECT * FROM people" "people")
+                     ("SELECT p.id, p.name FROM People p" "People")
+                     ("SELECT * FROM \"my people\"" "\"my people\"")
+                     ("SELECT * FROM aux.people" "aux.people")
+                     ("WITH c AS (SELECT * FROM aux.people) SELECT * FROM c"
+                      "aux.people")))
+      (clutch-test--with-sqlite-result (conn result)
+          '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
+            "CREATE TABLE \"my people\" (id INTEGER PRIMARY KEY, name TEXT)"
+            "ATTACH DATABASE ':memory:' AS aux"
+            "CREATE TABLE aux.people (id INTEGER PRIMARY KEY, name TEXT)"
+            "INSERT INTO people VALUES (1, 'a'), (2, 'b')"
+            "INSERT INTO \"my people\" VALUES (1, 'a'), (2, 'b')"
+            "INSERT INTO aux.people VALUES (1, 'a'), (2, 'b')")
+          query
+        (let ((rows clutch--result-rows))
+          (clutch-result--apply-edit
+           0 (cl-position "name" clutch--result-columns :test #'string=) "a2"
+           (list :identity (clutch-db-row-identity-values
+                            (nth 0 rows) clutch--row-identity)
+                 :original "a"
+                 :original-state (cons nil "a")))
+          (setq-local clutch--pending-deletes
+                      (list (clutch-db-row-identity-values
+                             (nth 1 rows) clutch--row-identity))
+                      clutch--pending-inserts '((("id" . "3") ("name" . "c"))))
+          (should (equal (cons query
+                               (mapcar #'target
+                                       (append
+                                        (clutch-result--pending-sql-statements)
+                                        (clutch-result--copy-lines
+                                         'insert (list (car rows))
+                                         (clutch--visible-columns)))))
+                         (cons query (make-list 4 table)))))))))
 
 (ert-deftest clutch-test-qualified-sqlite-result-follows-keys-in-its-schema ()
   "Following a foreign key of aux.children should open aux.parents.
