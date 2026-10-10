@@ -2,9 +2,18 @@
 
 ## 0.6.1 - Unreleased
 
+### Added
+
+- Query export offers `clutch-export-default-format` (CSV or TSV). File exports use `clutch-export-default-directory`, and CSV/TSV file exports `clutch-export-default-file-name`, when set; encoding keeps the existing `clutch-csv-export-default-coding-system` option. Prompts remain editable, and unset destination options keep the current buffer directory and format-specific file name.
+- CSV/TSV copy and export share `clutch-export-null-value-text` (empty by default). NULL markers stay unquoted, and ordinary text matching the marker is quoted to preserve the distinction.
+
 ### Changed
 
 - The flash marks the range Clutch picks, so only the statement `C-c C-c` picks at point, with no active region, and the Redis command at point flash; `clutch-pulse-statement-at-point` set to nil turns this off. The flash now comes before any confirmation, so a declined statement still flashes. A region or the whole buffer, including each statement of a batch, no longer flashes, since its text was chosen; a batch thus skips the face change and extra redisplay that each statement's flash cost.
+
+### Fixed
+
+- CSV/TSV copy and export distinguish SQL NULL (an unquoted empty field), empty text (`""`) and literal `NULL` text under the default settings. SQL NULL previously became the text `NULL`, indistinguishable from that literal string. This changes the exported NULL representation; importers must use the same convention.
 
 ## 0.6.0 - 2026-10-09
 

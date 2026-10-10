@@ -6487,13 +6487,20 @@ a word that ends a whole rollback, such as CHAIN."
   (with-temp-buffer
     (setq-local clutch--result-columns '("id" "display,name"))
     (let ((csv (clutch--export-csv-content
-                '((1 "a,b") (2 "x\"y") (3 "x\ry")))))
+                '((1 "a,b") (2 "x\"y") (3 "x\ry")
+                  (4 nil) (5 "") (6 "NULL")))))
       (should (string-match-p "^id,\"display,name\"\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
       (should (string-match-p "2,\"x\"\"y\"" csv))
-      (should (string-match-p "3,\"x\ry\"" csv)))
+      (should (string-match-p "3,\"x\ry\"" csv))
+      (should (string-suffix-p "4,\n5,\"\"\n6,NULL\n" csv)))
     (should (equal (clutch--export-csv-content '((1 "a,b")) t)
-                   "1,\"a,b\"\n"))))
+                   "1,\"a,b\"\n"))
+    (setq-local clutch--result-columns '("null" "empty" "marker" "comma" "quote"))
+    (let ((clutch-export-null-value-text "NULL"))
+      (should (equal (clutch--export-csv-content
+                      '((nil "" "NULL" "a,b" "a\"b")) t)
+                     "NULL,,\"NULL\",\"a,b\",\"a\"\"b\"\n")))))
 
 (ert-deftest clutch-test-tsv-content-includes-header-and-escapes-fields ()
   "TSV content should preserve its tabular shape around special characters."
@@ -6501,13 +6508,15 @@ a word that ends a whole rollback, such as CHAIN."
     (setq-local clutch--result-columns '("id" "display\tname"))
     (should
      (equal (clutch--export-tsv-content
-             '((1 "a,b") (2 "x\ty") (3 "x\"y") (4 "x\ny")))
+             '((1 "a,b") (2 "x\ty") (3 "x\"y") (4 "x\ny")
+               (5 nil) (6 "") (7 "NULL")))
             (concat
              "id\t\"display\tname\"\n"
              "1\ta,b\n"
              "2\t\"x\ty\"\n"
              "3\t\"x\"\"y\"\n"
-             "4\t\"x\ny\"\n")))
+             "4\t\"x\ny\"\n"
+             "5\t\n6\t\"\"\n7\tNULL\n")))
     (should (equal (clutch--export-tsv-content '((1 "a,b")) t)
                    "1\ta,b\n"))))
 
@@ -8638,7 +8647,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
           (clutch-db-query conn "CREATE TABLE items(id INTEGER PRIMARY KEY, body TEXT)")
           (clutch-db-query conn "INSERT INTO items VALUES (1, '中文,a'), (2, 'a\"b'), (3, NULL), (4, ''), (5, 'last')")
           (dolist (case '(("SELECT id, body FROM items ORDER BY id" "csv" "utf-8-bom"
-                           "id,body\n1,\"中文,a\"\n2,\"a\"\"b\"\n3,NULL\n4,\n5,last\n" 3)
+                           "id,body\n1,\"中文,a\"\n2,\"a\"\"b\"\n3,\n4,\"\"\n5,last\n" 3)
                           ("SELECT id, body FROM items ORDER BY id LIMIT 1 OFFSET 1" "tsv" "utf-8"
                            "id\tbody\n2\t\"a\"\"b\"\n" 1)
                           ("WITH c AS (SELECT * FROM items) SELECT id, body FROM c WHERE 0" "csv" "utf-8"
@@ -8683,6 +8692,70 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                                   (substring bytes 3))))))))))
       (delete-file path)
       (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-export-default-settings ()
+  "Accept configured defaults in query and result file exports."
+  (skip-unless (sqlite-available-p))
+  (let* ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+         (dir (make-temp-file "clutch-export-defaults-" t))
+         (source-dir (expand-file-name "source/" dir))
+         (export-dir (expand-file-name "exports/" dir)))
+    (unwind-protect
+        (progn
+          (make-directory source-dir)
+          (make-directory export-dir)
+          (dolist (custom '(nil t))
+            (ert-info ((if custom "configured defaults" "original defaults"))
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn
+                            default-directory source-dir)
+                (insert "SELECT 7 AS id, '中文' AS name, NULL AS missing, '' AS empty, 'NULL' AS marker")
+                (let* ((clutch-export-default-format (if custom 'tsv 'csv))
+                       (clutch-export-null-value-text (if custom "NULL" ""))
+                       (clutch-csv-export-default-coding-system
+                        (if custom 'utf-8 'utf-8-with-signature))
+                       (clutch-export-default-directory (and custom export-dir))
+                       (clutch-export-default-file-name (and custom "report.data"))
+                       (path (expand-file-name (if custom "report.data" "export.csv")
+                                               (if custom export-dir source-dir)))
+                       (expected
+                        (if custom
+                            "id\tname\tmissing\tempty\tmarker\n7\t中文\tNULL\t\t\"NULL\"\n"
+                          "id,name,missing,empty,marker\n7,中文,,\"\",NULL\n")))
+                  (cl-letf (((symbol-function 'read-file-name)
+                             (lambda (_prompt directory _default _mustmatch initial)
+                               (expand-file-name initial (or directory default-directory)))))
+                    (dolist (surface '(query result))
+                      (if (eq surface 'query)
+                          (clutch-test--with-minibuffer-answers '("" "")
+                            (call-interactively #'clutch-export-query))
+                        (setq-local clutch--result-columns
+                                    '("id" "name" "missing" "empty" "marker")
+                                    clutch--result-rows '((7 "中文" nil "" "NULL")))
+                        (clutch-test--with-minibuffer-answers '("")
+                          (clutch--export-result clutch-export-default-format 'file)))
+                      (should (equal (with-temp-buffer
+                                       (set-buffer-multibyte nil)
+                                       (insert-file-contents-literally path)
+                                       (buffer-string))
+                                     (encode-coding-string
+                                      expected clutch-csv-export-default-coding-system)))
+                      (delete-file path)))
+                  ;; The configured name is for CSV and TSV; SQL keeps its own.
+                  (let (offered)
+                    (cl-letf (((symbol-function 'read-file-name)
+                               (lambda (_prompt directory _default _mustmatch initial)
+                                 (setq offered (list directory initial))
+                                 (expand-file-name initial directory)))
+                              ((symbol-function 'clutch-result--write-export-file)
+                               #'ignore)
+                              ((symbol-function 'message) #'ignore))
+                      (clutch--export-result 'insert 'file))
+                    (should (equal offered
+                                   (list (and custom export-dir) "export.sql")))))))))
+      (clutch-db-disconnect conn)
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-query-export-rejects-unsupported-statements ()
   "Invalid exports and declined overwrites start no query or file writes."
