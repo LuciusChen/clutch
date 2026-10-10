@@ -8867,6 +8867,73 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
           (when (buffer-live-p source) (kill-buffer source))
           (delete-directory dir t))))))
 
+(ert-deftest clutch-test-query-export-streams-when-the-backend-can ()
+  "Direct export streams formatted text when the backend offers it.
+It sends no paged query, writes each part in the chosen encoding and
+reports the rows the backend counted, and a failed or cancelled stream
+leaves the destination and no temporary file behind."
+  (dolist (outcome '(success error cancelled))
+    (ert-info ((symbol-name outcome))
+      (let* ((dir (make-temp-file "clutch-query-export-stream-" t))
+             (path (expand-file-name "out.tsv" dir))
+             (source (generate-new-buffer " *clutch-query-export*"))
+             stream interrupted messages)
+        (unwind-protect
+            (clutch-test--with-async-statements finishes
+              (write-region "original" nil path nil 'silent)
+              (with-current-buffer source
+                (insert "SELECT id, name FROM t")
+                (setq-local clutch-connection 'async-conn)
+                (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
+                          ((symbol-function 'clutch-db-sql-surface-p)
+                           (lambda (_conn _params) t))
+                          ((symbol-function 'read-file-name) (lambda (&rest _) path))
+                          ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                          ((symbol-function 'clutch-db-delimited-export-async)
+                           (lambda (&rest arguments) (setq stream arguments) t))
+                          ((symbol-function 'clutch-db-interrupt-query)
+                           (lambda (_conn) (setq interrupted t)))
+                          ((symbol-function 'message)
+                           (lambda (format &rest arguments)
+                             (push (apply #'format format arguments) messages))))
+                  (clutch-test--with-minibuffer-answers '("tsv" "utf-8-bom")
+                    (clutch-export-query (point-min) (point-max)))
+                  (pcase-let ((`(,conn ,sql ,delimiter ,header ,null-text
+                                       ,function ,callback)
+                               stream))
+                    (should (equal (list conn sql delimiter header null-text)
+                                   (list 'async-conn "SELECT id, name FROM t" ?\t t
+                                         clutch-export-null-value-text)))
+                    (funcall function "id\tname\n1\ta\n" 1)
+                    (funcall function "2\t中文\n" 1)
+                    (pcase outcome
+                      ('success
+                       (funcall callback (make-clutch-db-result :affected-rows 2) nil))
+                      ('error
+                       (funcall callback nil '(clutch-db-error "disk full")))
+                      ('cancelled
+                       (clutch-cancel-query-or-quit)
+                       (should interrupted)
+                       (funcall callback nil
+                                '(clutch-db-error "canceling statement"))))
+                    (ert-run-idle-timers))))
+              (should-not finishes)
+              (should-not (clutch-db--foreground-busy-p 'async-conn))
+              (should-not (gethash 'async-conn clutch--running-queries))
+              (should (equal (with-temp-buffer
+                               (set-buffer-multibyte nil)
+                               (insert-file-contents-literally path)
+                               (buffer-string))
+                             (if (eq outcome 'success)
+                                 (encode-coding-string "id\tname\n1\ta\n2\t中文\n"
+                                                       'utf-8-with-signature)
+                               "original")))
+              (should (equal (directory-files dir nil "\\`[^.]") '("out.tsv")))
+              (when (eq outcome 'success)
+                (should (string-prefix-p "Exported 2 rows to" (car messages)))))
+          (when (buffer-live-p source) (kill-buffer source))
+          (delete-directory dir t))))))
+
 (ert-deftest clutch-test-file-export-pages-through-sqlite ()
   "Paged file output should equal complete formatting for every SQL format."
   (require 'clutch-db-sqlite)

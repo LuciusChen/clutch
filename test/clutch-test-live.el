@@ -2033,16 +2033,37 @@ throughout."
                       (set-mark beg)
                       (setq mark-active t transient-mark-mode t)
                       (write-region "original" nil path nil 'silent)
-                      (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
-                                ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                                ((symbol-function 'clutch-result--display-select)
-                                 (lambda (&rest _) (ert-fail "Export displayed a grid"))))
-                        (clutch-test--with-minibuffer-answers '("csv" "utf-8")
-                          (call-interactively #'clutch-export-query))
-                        (should (gethash conn clutch--running-queries))
-                        (should (equal (with-temp-buffer (insert-file-contents path)
-                                                         (buffer-string)) "original"))
-                        (clutch-test--await-queries))
+                      (let* ((pages 0)
+                             exported
+                             (count-page (lambda (&rest _) (setq pages (1+ pages))))
+                             (note (lambda (format &rest arguments)
+                                     (when (and (stringp format)
+                                                (string-prefix-p "Exported" format))
+                                       (setq exported
+                                             (apply #'format-message format
+                                                    arguments))))))
+                        (advice-add 'clutch-db-build-paged-sql :before count-page)
+                        (advice-add 'message :before note)
+                        (unwind-protect
+                            (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                                      ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                                      ((symbol-function 'clutch-result--display-select)
+                                       (lambda (&rest _) (ert-fail "Export displayed a grid"))))
+                              (clutch-test--with-minibuffer-answers '("csv" "utf-8")
+                                (call-interactively #'clutch-export-query))
+                              (should (gethash conn clutch--running-queries))
+                              (should (equal (with-temp-buffer (insert-file-contents path)
+                                                               (buffer-string)) "original"))
+                              (clutch-test--await-queries))
+                          (advice-remove 'clutch-db-build-paged-sql count-page)
+                          (advice-remove 'message note))
+                        ;; PostgreSQL streams the result with COPY where
+                        ;; pgsql.el can, so it needs no pages.
+                        (if (and (eq clutch-test-backend 'pg)
+                                 (fboundp 'pgsql-copy-out-async))
+                            (should (zerop pages))
+                          (should (> pages 0)))
+                        (should (string-prefix-p "Exported 5 rows" exported)))
                       (should-not clutch--last-result-buffer)
                       (should-not clutch--execution-start-time)
                       (should-not (clutch-db--foreground-busy-p conn))
@@ -2056,11 +2077,13 @@ throughout."
 
 (defun clutch-test--query-export-type-cases ()
   "Return (NAME TYPE SQL CSV TSV) cases for a wide live export fixture.
-Expected cells are literal export text, independent of the formatter."
+Expected cells are literal export text, independent of the formatter.
+PostgreSQL's own text applies where the export streams with COPY."
   (let* ((oracle (eq clutch-test-backend 'oracle))
          (mssql (eq clutch-test-backend 'sqlserver))
          (mysql (eq clutch-test-backend 'mysql))
          (pg (eq clutch-test-backend 'pg))
+         (copy (and pg (fboundp 'pgsql-copy-out-async)))
          (varchar (cond (oracle "VARCHAR2(128)") (mssql "NVARCHAR(128)")
                         (t "VARCHAR(128)")))
          ;; Oracle LOBs create storage indexes; keep the heap fixture index-free.
@@ -2077,12 +2100,12 @@ Expected cells are literal export text, independent of the formatter."
                        (pg "DOUBLE PRECISION") (t "DOUBLE")) "1.25" "1.25" "1.25")
       (truth ,(cond (oracle "NUMBER(1)") (mssql "BIT") (t "BOOLEAN"))
              ,(if (or pg (eq clutch-test-backend 'jdbc)) "TRUE" "1")
-             ,(if (or mysql oracle) "1" "true")
-             ,(if (or mysql oracle) "1" "true"))
+             ,(cond ((or mysql oracle) "1") (copy "t") (t "true"))
+             ,(cond ((or mysql oracle) "1") (copy "t") (t "true")))
       (falsity ,(cond (oracle "NUMBER(1)") (mssql "BIT") (t "BOOLEAN"))
                ,(if (or pg (eq clutch-test-backend 'jdbc)) "FALSE" "0")
-               ,(if (or mysql oracle) "0" "false")
-               ,(if (or mysql oracle) "0" "false"))
+               ,(cond ((or mysql oracle) "0") (copy "f") (t "false"))
+               ,(cond ((or mysql oracle) "0") (copy "f") (t "false")))
       (day "DATE" ,(if oracle "DATE '2024-02-29'" "'2024-02-29'")
            ,(if oracle "2024-02-29 00:00:00" "2024-02-29")
            ,(if oracle "2024-02-29 00:00:00" "2024-02-29"))
@@ -2101,7 +2124,8 @@ Expected cells are literal export text, independent of the formatter."
                      (mysql "0x616263") (mssql "0x616263")
                      (t "from_hex('616263')")) "616263" "616263")
       (json ,(cond (pg "JSONB") (mysql "JSON") (t text)) "'{\"ok\":true}'"
-            "\"{\"\"ok\"\":true}\"" "\"{\"\"ok\"\":true}\"")
+            ,(if copy "\"{\"\"ok\"\": true}\"" "\"{\"\"ok\"\":true}\"")
+            ,(if copy "\"{\"\"ok\"\": true}\"" "\"{\"\"ok\"\":true}\""))
       (uuid ,(cond (pg "UUID") (mssql "UNIQUEIDENTIFIER") (t varchar))
             "'00000000-0000-0000-0000-000000000123'"
             "00000000-0000-0000-0000-000000000123"
@@ -2112,7 +2136,9 @@ Expected cells are literal export text, independent of the formatter."
       (empty ,varchar "''" ,(if oracle "" "\"\"") ,(if oracle "" "\"\"")))))
 
 (ert-deftest clutch-test-live-query-export-wide-table-without-identity ()
-  "Export 101 columns and 602 rows of varied types without a key or index."
+  "Export 101 columns and 602 rows of varied types without a key or index.
+The CSV is exported again through a file handler that waits for process
+output, as a remote file does, and keeps every row in order."
   :tags '(:clutch-live)
   (unless (or (memq clutch-test-backend '(mysql pg oracle sqlserver))
               (and (eq clutch-test-backend 'jdbc) clutch-test-url
@@ -2121,6 +2147,27 @@ Expected cells are literal export text, independent of the formatter."
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_export_wide_%d" (emacs-pid)))
            (path (make-temp-file "clutch-export-wide-"))
+           (wait-dir (make-temp-file "clutch-export-wait-" t))
+           waited
+           (wait-handler
+            (letrec ((handler
+                      (lambda (operation &rest args)
+                        ;; Creating the temporary file writes nothing; wait
+                        ;; on the first part, letting the rest arrive meanwhile.
+                        (when (and (eq operation 'write-region)
+                                   (not (equal (car args) ""))
+                                   (not waited))
+                          (setq waited t)
+                          (let ((end (+ (float-time) 0.5)))
+                            (while (< (float-time) end)
+                              (accept-process-output nil 0.05))))
+                        (let ((inhibit-file-name-handlers
+                               (cons handler
+                                     (and (eq inhibit-file-name-operation operation)
+                                          inhibit-file-name-handlers)))
+                              (inhibit-file-name-operation operation))
+                          (apply operation args)))))
+              handler))
            (cases (clutch-test--query-export-type-cases))
            (fields (cl-loop for group below 5 append
                             (cl-loop for case in cases collect
@@ -2176,14 +2223,21 @@ Expected cells are literal export text, independent of the formatter."
                       (_ (format "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name='%s'" table))))
                    (count (caar (clutch-db-result-rows (clutch-db-query conn index-sql)))))
               (should (= (string-to-number (format "%s" count)) 0)))
-            (dolist (kind '(csv tsv))
+            (pcase-dolist (`(,kind . ,wait) '((csv) (tsv) (csv . t)))
               (with-temp-buffer
                 (clutch-mode)
                 (setq-local clutch-connection conn)
                 (insert select)
                 (let ((clutch-result-max-rows 500)
                       (clutch-export-page-size 200)
-                      (clutch-jdbc-fetch-size 50))
+                      (clutch-jdbc-fetch-size 50)
+                      (path (if wait (expand-file-name "out.csv" wait-dir) path))
+                      (file-name-handler-alist
+                       (if wait
+                           (cons (cons (regexp-quote (file-name-as-directory wait-dir))
+                                       wait-handler)
+                                 file-name-handler-alist)
+                         file-name-handler-alist)))
                   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
                             ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
                             ((symbol-function 'clutch-db-primary-key-columns)
@@ -2214,11 +2268,13 @@ Expected cells are literal export text, independent of the formatter."
                                    (substring actual offset (min (length actual) (+ offset 100)))))))))
                   (should-not clutch--last-result-buffer)
                   (should-not (clutch-db--foreground-busy-p conn)))))
-            (message "Wide export verified on %s: 101 columns, 602 rows, no primary key, no indexes, CSV and TSV"
+            (should waited)
+            (message "Wide export verified on %s: 101 columns, 602 rows, no primary key, no indexes, CSV and TSV, and CSV through a waiting file handler"
                      clutch-test-backend))
         (when created
           (clutch-db-query conn (format "DROP TABLE %s" table)))
-        (delete-file path)))))
+        (delete-file path)
+        (delete-directory wait-dir t)))))
 
 (ert-deftest clutch-test-live-query-export-refuses-unavailable-binary ()
   "Reject JDBC binary metadata, while exporting a complete XML BLOB value."
@@ -2548,9 +2604,12 @@ has no active request to cancel.  No cancellation result is mocked."
                                    (call-interactively #'clutch-cancel-query-or-quit)))
                                (funcall finish reply-conn sql callback result error)))
                             ((symbol-function 'clutch--run-db-query-async)
-                             (lambda (query-conn sql region callback)
-                               (push sql dispatched)
-                               (funcall query query-conn sql region callback)))
+                             (lambda (query-conn sql region callback &optional start)
+                               ;; A stream the backend declines runs nothing.
+                               (let ((ran (funcall query query-conn sql region
+                                                   callback start)))
+                                 (when ran (push sql dispatched))
+                                 ran)))
                             ((symbol-function 'clutch-db-interrupt-query)
                              (lambda (cancel-conn)
                                (setq cancel-result (funcall interrupt cancel-conn))))
