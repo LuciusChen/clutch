@@ -3626,7 +3626,6 @@ stops it.  Replace the destination only after the whole export succeeds."
     (clutch--ensure-connection)
     (unless (clutch-db-sql-surface-p clutch-connection clutch--connection-params)
       (user-error "Query export requires a SQL connection"))
-    (clutch--refuse-while-running clutch-connection)
     (let* ((kind (intern (completing-read
                          (format-prompt "Export format"
                                         clutch-export-default-format)

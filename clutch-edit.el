@@ -1191,7 +1191,6 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
   (interactive)
   (unless (or clutch--pending-edits clutch--pending-deletes clutch--pending-inserts)
     (user-error "No staged changes"))
-  (clutch--refuse-while-running clutch-connection)
   (when (clutch--tx-uncertain-p clutch-connection)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before submitting"))
