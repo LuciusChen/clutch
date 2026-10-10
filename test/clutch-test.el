@@ -10708,6 +10708,33 @@ and foreground reservation behind instead of presenting the result."
             (should (zerop (hash-table-count clutch-db--foreground-connections)))
             (should (zerop (hash-table-count clutch--running-queries)))))))))
 
+(ert-deftest clutch-test-quit-in-the-command-loop-cancels-the-running-query ()
+  "A quit that reaches the command loop cancels the buffer's running query.
+On MS-Windows a \\`C-g' typed while Emacs is busy quits whatever runs
+next, such as redisplay, instead of running `clutch-cancel-query-or-quit'.
+The query is cancelled once; another error, a second quit or a buffer
+without a running query changes nothing."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements _finishes
+      (let (interrupts)
+        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (conn) (push conn interrupts) t))
+                  ;; In batch mode the default handler kills Emacs.
+                  ((symbol-function 'command-error-default-function) #'ignore))
+          (clutch--run-db-query-async 'async-conn "SELECT 1" nil #'ignore)
+          (funcall command-error-function '(error "Other") "" nil)
+          (with-temp-buffer
+            (funcall command-error-function '(quit) "" nil))
+          (should-not interrupts)
+          (funcall command-error-function '(quit) "" nil)
+          (should (equal interrupts '(async-conn)))
+          (should (plist-get (gethash 'async-conn clutch--running-queries)
+                             :cancelling))
+          ;; Neither cancel again nor quit inside the error handler.
+          (funcall command-error-function '(quit) "" nil)
+          (should (equal interrupts '(async-conn))))))))
+
 (ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
   "SQL from an indirect edit should run in a buffer that holds its connection.
 Closing the edit shows a buffer of another kind, such as source code, which
