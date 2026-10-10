@@ -695,18 +695,28 @@ CALLBACK also gets whether cancelling SQL was asked for."
           (clutch--mark-sql-status-region (car region) (cdr region) status))
         (clutch--update-mode-line t)))))
 
-(defun clutch--cancel-running-query ()
+(defvar clutch--quit-cancel-seconds 10
+  "Seconds a quit that reaches the command loop waits to cancel a query.
+The command loop's error handler runs with quitting inhibited, and a
+backend may wait for the cancel without a deadline, as pgsql.el does for
+a zero connect timeout.  MySQL and JDBC give up earlier on their own.")
+
+(defun clutch--cancel-running-query (&optional seconds)
   "Cancel the query running on this buffer's connection.
 Return nil when there is none, or it is already being cancelled.  The
 query then finishes with the server's verdict.  Even if the backend
-cannot cancel it, stop subsequent workflow steps."
+cannot cancel it, or does not finish the request within SECONDS when
+that is non-nil, stop subsequent workflow steps."
   (let ((entry (and clutch-connection
                     (gethash clutch-connection clutch--running-queries))))
     (when (and entry (not (plist-get entry :cancelling)))
       (plist-put entry :cancelling t)
       (clutch--show-statement-status clutch-connection 'cancelling)
       (unless (condition-case err
-                  (clutch-db-interrupt-query clutch-connection)
+                  (if seconds
+                      (with-timeout (seconds nil)
+                        (clutch-db-interrupt-query clutch-connection))
+                    (clutch-db-interrupt-query clutch-connection))
                 (clutch-db-error
                  (message "Cancel failed: %s" (error-message-string err))
                  nil))
@@ -731,7 +741,7 @@ A quit that reaches the command loop cancels the query as
 Emacs is busy is not read as a key but quits whatever runs next, such as
 redisplay."
   (when (eq (car-safe data) 'quit)
-    (clutch--cancel-running-query)))
+    (clutch--cancel-running-query clutch--quit-cancel-seconds)))
 
 (add-function :after command-error-function
               #'clutch--cancel-running-query-on-quit)
