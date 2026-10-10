@@ -12,6 +12,7 @@ Build a maintainable Emacs database client. Functional correctness and passing t
 - Add recovery, retries or compatibility handling only for a supported contract or demonstrated failure, with explicit success/failure semantics. Preserve required Emacs and backend compatibility; remove unused internal APIs and speculative shims.
 - Keep state with its workflow owner. Avoid wrapper ladders, generic helper modules and file splits that add declarations or cross-file navigation without simplifying ownership.
 - Keep tests within the same complexity budget as production code: assert public behavior and meaningful invariants, not helper structure or cosmetic details. Deterministic expected values are normal; choose representative inputs and boundaries rather than adding random cases by default.
+- Prefer the shared backend in [test/clutch-test-common.el](test/clutch-test-common.el) for result-workflow connection and metadata setup over stubbing Clutch internals. Extend it only for a demonstrated shared need; unexpected backend requests must fail. Keep real adapters in adapter tests, and use focused stubs for faults, timing and UI input.
 
 ## Scope and completion
 
