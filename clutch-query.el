@@ -1339,12 +1339,13 @@ already confirmed SQL."
     (clutch--execute-statement-attempt
      sql connection present-result-p result-context region
      (lambda (outcome)
-       (let (answered)
+       (let (answered (failed connection))
          (cl-flet ((answer (outcome)
                      (setq answered t)
                      (funcall k outcome)))
            ;; A reply runs this outside any command, so the reconnect or
-           ;; the retry failing before it answers ends the statement.
+           ;; the retry failing before it answers ends the statement on
+           ;; the connection that failed.
            (condition-case err
                (if (and (not no-idle-retry-p)
                         (not unresolved)
@@ -1355,8 +1356,14 @@ already confirmed SQL."
                           (and (eq connection clutch-connection)
                                (not (clutch--connection-alive-p connection))
                                (not (clutch-db-unreachable-namespace connection))
-                               (clutch--try-reconnect))))
+                               (clutch--try-reconnect)))
+                        ;; The reconnect's wait can kill the buffer, or
+                        ;; start a statement of it that then keeps it.
+                        (buffer-live-p source-buffer)
+                        (not (with-current-buffer source-buffer
+                               (clutch--statement-running-here-p))))
                    (with-current-buffer source-buffer
+                     (setq failed clutch-connection)
                      (let ((retry-context (copy-sequence result-context)))
                        (when retry-context
                          (cl-remf retry-context :row-identity-prep))
@@ -1369,8 +1376,7 @@ already confirmed SQL."
                   (signal (car err) (cdr err))
                 (answer (plist-put
                          (plist-put (copy-sequence outcome) :error err)
-                         :connection (buffer-local-value 'clutch-connection
-                                                         source-buffer))))))))))))
+                         :connection failed)))))))))))
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
