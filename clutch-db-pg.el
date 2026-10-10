@@ -798,6 +798,41 @@ Decline when the installed pgsql.el cannot execute asynchronously."
                               (error-message-string error))))))))
     t))
 
+(cl-defmethod clutch-db-delimited-export-async
+    ((conn clutch-db-pg--connection) sql delimiter header null-text
+     function callback)
+  "Stream SQL on PostgreSQL CONN as CSV text with COPY TO STDOUT.
+DELIMITER, HEADER, NULL-TEXT, FUNCTION and CALLBACK are as for the
+generic function.  Decline when the installed pgsql.el cannot stream
+COPY."
+  (when (fboundp 'pgsql-copy-out-async)
+    (let ((copy (format "COPY (%s\n) TO STDOUT (FORMAT csv, HEADER %s, DELIMITER %s, NULL %s)"
+                        sql (if header "true" "false")
+                        (clutch-db-escape-literal conn (char-to-string delimiter))
+                        (clutch-db-escape-literal conn null-text)))
+          (header-pending header))
+      (clutch-db-pg--run-query-with-transaction-state
+       conn copy
+       (lambda ()
+         (pgsql-copy-out-async
+          (clutch-db-pg--connection-client conn) copy
+          ;; PostgreSQL sends each row, and the header, as its own message.
+          (lambda (rows)
+            (funcall function
+                     (decode-coding-string (mapconcat #'identity rows "")
+                                           'utf-8-unix)
+                     (if header-pending
+                         (progn (setq header-pending nil)
+                                (1- (length rows)))
+                       (length rows))))
+          (lambda (result error)
+            (funcall callback
+                     (and result (clutch-db-pg--wrap-result conn result))
+                     (and error
+                          (list 'clutch-db-error
+                                (error-message-string error))))))))
+      t)))
+
 (cl-defmethod clutch-db-execute-params
     ((conn clutch-db-pg--connection) sql params)
   "Execute parameterized SQL on PostgreSQL CONN with PARAMS."
@@ -1405,6 +1440,11 @@ the first catalog query would otherwise make it read-only."
 (cl-defmethod clutch-db-namespace-switch-p
     ((_conn clutch-db-pg--xtdb-connection) _sql)
   "Return nil, since XTDB has no search_path to switch."
+  nil)
+
+(cl-defmethod clutch-db-delimited-export-async
+    ((_conn clutch-db-pg--xtdb-connection) &rest _)
+  "Return nil, since XTDB does not run COPY."
   nil)
 
 (cl-defmethod clutch-db-resolution-context ((conn clutch-db-pg--xtdb-connection))

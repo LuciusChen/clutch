@@ -3362,9 +3362,12 @@ may run after this function returns."
               page-size)
          #'emit done)))))
 
-(defun clutch-result--export-pages (sql query page-size emit done)
+(defun clutch-result--export-pages (sql query page-size emit done &optional stream)
   "Fetch QUERY for an export of SQL, calling EMIT with rows and columns.
-PAGE-SIZE pages QUERY, or nil fetches it whole.  DONE gets nil after the
+PAGE-SIZE pages QUERY, or nil fetches it whole.  STREAM, when non-nil, is
+tried first, in place of the pages: it is called with the function that
+takes the outcome, streams QUERY whole and returns non-nil once it runs,
+and EMIT then gets no rows when it ends.  DONE gets nil after the
 last page, or the error that stopped the export.  The pages run as one
 query activity, so \\[clutch-cancel-query-or-quit] cancels the export, also
 when the page it cancels arrives first.  A page that the backend runs
@@ -3439,25 +3442,29 @@ buffer, or changing its connection, stops the export."
                      inline
                      next)
                  (with-current-buffer buffer
-                   (clutch--run-db-query-async
-                    conn
-                    (if page-size
-                        (clutch-db-build-paged-sql
-                         conn query page-num page-size order-by)
-                      query)
-                    nil
-                    (lambda (result error &optional cancelled)
-                      (if dispatching
-                          (setq inline (list result error))
-                        (setq waiting t)
-                        (reply
-                         (lambda ()
-                           (condition-case run-error
-                               (when (handle result error cancelled)
-                                 (run))
-                             ((error quit)
-                              (settle run-error)
-                              (report run-error)))))))))
+                   (let ((outcome
+                          (lambda (result error &optional cancelled)
+                            (if dispatching
+                                (setq inline (list result error))
+                              (setq waiting t)
+                              (reply
+                               (lambda ()
+                                 (condition-case run-error
+                                     (when (handle result error cancelled)
+                                       (run))
+                                   ((error quit)
+                                    (settle run-error)
+                                    (report run-error)))))))))
+                     (unless (and stream (zerop page-num)
+                                  (clutch--run-db-query-async
+                                   conn query nil outcome stream))
+                       (clutch--run-db-query-async
+                        conn
+                        (if page-size
+                            (clutch-db-build-paged-sql
+                             conn query page-num page-size order-by)
+                          query)
+                        nil outcome))))
                  (setq dispatching nil)
                  (when inline
                    (reply (lambda () (setq next (apply #'handle inline)))))
@@ -3519,7 +3526,8 @@ Replace the destination only after successful completion, then call DONE
 with the exported row count.  Pages are fetched without blocking, so DONE
 may run after this function returns; a failure leaves PATH as it was.
 MAP-BATCHES calls a batch consumer and a completion callback, defaulting
-to the current result's export batches."
+to the current result's export batches.  The consumer takes rows, or
+text already formatted and the number of rows it holds."
   (let* ((path (expand-file-name path))
          (target (file-truename path))
          transformed
@@ -3545,15 +3553,17 @@ to the current result's export batches."
              (delete-file temporary))
            (when (and transformed (file-exists-p transformed))
              (delete-file transformed)))
-         (write-batch (rows)
-           (let ((text (if (memq kind '(csv tsv))
-                           (funcall (plist-get spec :content)
-                                    rows (or omit-header (not first)))
-                         (funcall (plist-get spec :content) rows)))
+         (write-batch (rows &optional count)
+           ;; ROWS may be text a backend already formatted, holding COUNT rows.
+           (let ((text (cond ((stringp rows) rows)
+                             ((memq kind '(csv tsv))
+                              (funcall (plist-get spec :content)
+                                       rows (or omit-header (not first))))
+                             (t (funcall (plist-get spec :content) rows))))
                  (coding-system-for-write
                   (if first coding append-coding)))
              (write-region text nil temporary (not first) 'silent)
-             (cl-incf row-count (length rows))
+             (cl-incf row-count (or count (length rows)))
              (setq first nil)))
          (finish (err)
            (unwind-protect
@@ -3595,7 +3605,9 @@ to the current result's export batches."
   "Export one SELECT between BEG and END to a CSV or TSV file.
 When BEG equals END, use the statement at point, as
 `clutch-execute-dwim' does.  Prompt for format, encoding and destination.
-Fetch pages without a result grid, preserving explicit SQL row limits.
+Stream the result as one statement where the backend can, as PostgreSQL
+does with COPY, or else fetch it in pages; either way open no result
+grid and keep explicit SQL row limits.
 On an asynchronous backend, return while the export runs; \\[clutch-cancel-query-or-quit]
 stops it.  Replace the destination only after the whole export succeeds."
   (interactive
@@ -3653,7 +3665,13 @@ stops it.  Replace the destination only after the whole export succeeds."
                      (mapcar (lambda (c) (plist-get c :name)) export-columns))
                     (clutch--result-column-defs export-columns))
                 (clutch-result--emit-export-batches rows page-size emit)))
-            done)))))))
+            done
+            ;; A stream writes formatted text itself; the rows it ends with
+            ;; add nothing.
+            (lambda (outcome)
+              (clutch-db-delimited-export-async
+               clutch-connection sql (if (eq kind 'tsv) ?\t ?,) t
+               clutch-export-null-value-text emit outcome)))))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
   "Export result rows as KIND to DESTINATION.
