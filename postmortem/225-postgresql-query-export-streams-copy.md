@@ -1,0 +1,30 @@
+# PostgreSQL query export streams COPY
+
+## Context
+
+Issue #121's wide-export report was measured on PostgreSQL 16 with 150,000 rows of 200 columns and no index. Query export with 2000-row pages took 32 to 39 seconds, while psql's `COPY ... TO STDOUT` wrote the same table in 1.1 seconds. The same probe showed that the pages did not partition the table. Without `ORDER BY`, each `LIMIT/OFFSET` page is a separate sequential scan, and on a table larger than a quarter of `shared_buffers` PostgreSQL starts a scan where a recent one stopped (`synchronize_seqscans`). Replaying the export's 75 page queries in psql returned 81,760 and 81,344 distinct ids with the setting on and all 150,000 with it off; four Clutch exports held between 80,736 and 100,448. Larger pages (PM 221) reduce the scans but cannot make them agree.
+
+## Decision
+
+Query export runs the query once when the backend can stream its text. The generic `clutch-db-delimited-export-async` declines by default. PostgreSQL wraps the SELECT in `COPY (...) TO STDOUT (FORMAT csv, HEADER, DELIMITER, NULL)` and streams it through pgsql.el's `pgsql-copy-out-async`, decoding each batch as UTF-8, the client encoding pgsql.el sets at startup. Clutch does not require pgsql.el, so the method declines when the installed version lacks the function, and XTDB declines because it does not run COPY.
+
+The stream goes through the existing page loop and `clutch--run-db-query-async`, whose optional start function replaces the query for the first page. The export therefore keeps its query activity, its cancellation through `pgsql-cancel`, transaction-state accounting and atomic file replacement. A declined stream runs nothing and the same loop fetches pages as before. The file writer accepts formatted text with its row count beside rows, and the PostgreSQL method subtracts the header from the first batch's count. No second export workflow or backend-specific writer was added.
+
+PostgreSQL formats the values. Its CSV rules match the shared escaping function from PM 224: NULL is the unquoted marker, text equal to the marker is quoted, and values containing the separator, a double quote or a line break are quoted with doubled quotes. The values themselves are PostgreSQL's text output rather than Clutch's display formatting: booleans are `t` and `f`, `bytea` is `\x` hex, arrays use braces, `json` and `jsonb` appear as the server prints them, and `timestamptz` carries the session time zone's offset instead of Emacs local time without one. Rebuilding Clutch's display text would mean parsing every type's output in Emacs and giving back much of the gain; exported files are read by other tools, which accept PostgreSQL's format.
+
+## Scope
+
+MySQL keeps `LIMIT/OFFSET` pages, since mysql.el offers no row streaming. JDBC remaining-row fetches are unchanged. All-row result export still pages. It exports the result's visible columns from the result's own query, which can include identity columns Clutch added, so streaming it needs its own column selection and is left for separate work. The documentation now asks paged exports for an `ORDER BY` on a unique key and names the PostgreSQL scan behavior.
+
+## Verification
+
+A new unit regression streams formatted text through a direct export and checks the stream's arguments, the encoded output, the reported row count, and that a failed or cancelled stream leaves the destination and no temporary file. It failed on the preceding commit and passes on Emacs 29.4, 30.2 and 32.0.50. The unit suite caught each of three mutations: not offering the stream, running SQL when the stream declines, and counting a text batch's rows from its length. The live direct-export test records paged SQL construction through advice and finds none on PostgreSQL with COPY and some on the other backends; the cross-backend type fixture expects PostgreSQL's boolean and `jsonb` text when COPY is available. The JDBC refused-cancel regression now counts only dispatches that ran SQL, as a declined stream runs none.
+
+Compiled-code probes on the fixture above, against a disposable PostgreSQL 16 container, compared the pages with the stream. Export time excludes reading the file for verification. The COPY output was byte-identical to psql's after the BOM. These are single local measurements, not performance guarantees.
+
+| Fixture | 2000-row pages | COPY stream |
+| --- | --- | --- |
+| 150,000 rows, 200 columns | 32.4 to 39.4 s; 80,736 to 100,448 distinct ids | 4.1 s; 150,000 distinct ids |
+| 1,000,000 rows of `generate_series` | 31.4 s | 3.5 s |
+
+The full non-live gate passed on Emacs 29.4, 30.2 and 32.0.50: each ran 709 main tests, 284 backend tests and 13 architecture tests, with zero compilation, package-lint or checkdoc warnings. The complete native/JDBC runner passed 15 suites with 249 passes and 223 capability skips twice, once with the released pgsql.el 0.2.0, which keeps PostgreSQL on pages, and once with the pgsql.el COPY branch at 473225f. It used disposable databases, ClickHouse 24.8 and the pinned agent 0.2.26 in an isolated runtime. A disposable PostgreSQL 16 table holding Chinese text, a `jsonb` object and a text array exported the expected bytes under UTF-8 with BOM, UTF-8 and GBK through both COPY and pages. All test containers were removed and the Docker volume set did not change.
