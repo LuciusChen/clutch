@@ -11016,7 +11016,8 @@ the REPL's new connection names, bound to the old connection."
           (should (string-match-p "not shown" (car output))))))))
 
 (ert-deftest clutch-test-async-execute-presents-after-completion ()
-  "An asynchronous statement should hold its connection until it finishes."
+  "An asynchronous statement should hold its connection until it finishes.
+Its marker shows that it ran even when presenting its result fails."
   (with-temp-buffer
     (insert "UPDATE t SET n = 1 WHERE id = 1")
     (setq-local clutch-connection 'async-conn)
@@ -11040,7 +11041,21 @@ the REPL's new connection names, bound to the old connection."
           (should-not clutch--execution-start-time)
           (should (string-prefix-p
                    "Last executed"
-                   (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
+                   (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
+  (with-temp-buffer
+    (insert "UPDATE t SET n = 1 WHERE id = 1")
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch-result--display)
+                 (lambda (&rest _) (error "Presenting failed"))))
+        (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+        ;; The error then ends the timer, as it would outside a test.
+        (let ((debug-on-error nil))
+          (ert-run-idle-timers))
+        (should (string-prefix-p
+                 "Last executed"
+                 (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
 
 (ert-deftest clutch-test-page-load-keeps-result-until-it-succeeds ()
   "A page load should leave the page, its sort and staging until it succeeds.
